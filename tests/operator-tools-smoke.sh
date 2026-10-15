@@ -2896,13 +2896,13 @@ first_message_box, _ = room_view.tab_box(new_message_report, 127, 14, new_messag
 new_message_report["room"]["messages"].append(msg_log[1])
 next_message_box, _ = room_view.tab_box(new_message_report, 127, 14, new_message_nav, height=60)
 assert len(first_message_box) == len(next_message_box) == 5 and "line 1" in "\n".join(next_message_box), next_message_box
-# Empty logs give their rows back to the calls tree instead of leaving a blank band.
+# Empty logs leave plain blank rows before the dock and never create a log box.
 empty_log_report = deepcopy(msg_report)
 empty_log_report["room"]["messages"] = []
 for surface in ("graph", "tree"):
     empty_nav = {"tab": "plan"}
     empty_text = render(empty_log_report, "codex", 127, 60, view=surface, navigation=empty_nav, main_attempt="a2")
-    assert not empty_nav.get("log_box") and empty_text.splitlines()[empty_nav["box"]["y1"] - 2].strip(), (surface, empty_text)
+    assert not empty_nav.get("log_box") and not empty_text.splitlines()[empty_nav["box"]["y1"] - 2].strip(), (surface, empty_text)
 # Opt-in captures use the same canonical report as the layout assertions.
 if os.environ.get("OMS_OPERATOR_CAPTURE_DIR"):
     capture_dir = Path(os.environ["OMS_OPERATOR_CAPTURE_DIR"])
@@ -3852,6 +3852,28 @@ clamped = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2"
 visible_events = log_nav["log_box"]["y2"] - log_nav["log_box"]["y1"] - 1
 assert log_nav["log_offset"] == len(log_board["room"]["messages"]) - visible_events, log_nav
 assert "Session event %02d" % (visible_events - 1) in clamped and "Session event 40" not in clamped, clamped
+# Tall layouts size the dock and log to their content, leaving spare rows between the tree and log.
+fit_board = deepcopy(board_fixture)
+fit_board["room"]["messages"] = [dict(board_fixture["room"]["messages"][-1], id="fit-%02d" % index,
+    text="Fit event %02d" % index, ts="2026-10-13T12:00:%02dZ" % index) for index in range(11)]
+for fit_height in (74, 40):
+    fit_nav = {"tab": "detail"}
+    fit_screen = render_graph(fit_board, 157, fit_height, navigation=fit_nav, main_attempt="a2")
+    fit_lines = fit_screen.splitlines()
+    assert fit_nav.get("log_box"), (fit_height, fit_nav, fit_screen)
+    fit_log_rows = fit_nav["log_box"]["y2"] - fit_nav["log_box"]["y1"] + 1
+    fit_detail_rows = fit_nav["box"]["y2"] - fit_nav["box"]["y1"] - 1
+    expected_log_rows = 13 if fit_height == 74 else 7
+    assert fit_detail_rows == 5 and fit_log_rows == expected_log_rows, (fit_height, fit_nav, fit_screen)
+    visible_start = 0 if fit_height == 74 else 6
+    assert all("Fit event %02d" % index in fit_screen for index in range(visible_start, 11)), fit_screen
+    log_top = fit_nav["log_box"]["y1"]
+    assert all(not line.strip() for line in fit_lines[fit_nav["box"]["y2"]:log_top - 1]), fit_screen
+    assert not any(not line.strip() for line in fit_lines[log_top - 1:fit_nav["log_box"]["y2"]]), fit_screen
+# A 28-row tree keeps its activity rows; the log reserve only takes what is left after them.
+for tight_height in (28, 30):
+    tight_screen = render(fit_board, "codex", 157, tight_height, view="tree", navigation={"tab": "detail"}, main_attempt="a2")
+    assert "MAIN" in tight_screen, (tight_height, tight_screen)
 # Only recorded result evidence drives verify/review/acceptance; partial previews warn before all judgments.
 summary_member = {"participant": "summary-worker", "role": "worker", "model": "gpt-6.1-sol", "state": "done", "exit": 0,
                   "title": "Bounded fix", "task_id": "summary-task", "joined_at": "2026-10-13T12:00:00Z"}

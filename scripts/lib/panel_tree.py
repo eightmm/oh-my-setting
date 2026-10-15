@@ -350,13 +350,25 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                                    height=height, **dock_args) if height >= 28 and width >= 20 else ([], [])
     if dock_lines:
         desired_dock = len(dock_lines)
-    dock_rows = (desired_dock if budget - len(head) >= desired_dock + activity_floor else int(budget > len(head))) if width >= 20 else 0
+    if width < 20:
+        dock_rows = 0
+    elif budget - len(head) >= desired_dock + activity_floor:
+        dock_rows = desired_dock
+    elif height >= 28:
+        dock_rows = min(desired_dock, max(1, budget - len(head) - activity_floor))
+    else:
+        dock_rows = int(budget > len(head))
     if dock_rows == 1 and reading and budget - len(head) - activity_floor >= 3:
         dock_rows = min(desired_dock, budget - len(head) - activity_floor)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     activity_head = boxed and budget - len(head) - dock_rows >= 2
     boxed = boxed and budget - len(head) - dock_rows >= 5
-    room_budget = max(0, budget - len(head) - dock_rows - (2 if boxed else int(activity_head)))
+    event_count = len(listing(mapping(report.get("room")).get("messages")))
+    log_reserve = min(7, event_count + 2) if height >= 28 and event_count >= 5 else 0
+    # The log reserve never takes the activity tree's minimum rows.
+    log_reserve = min(log_reserve, max(0, budget - len(head) - dock_rows - activity_floor))
+    log_reserve = log_reserve if log_reserve >= 3 else 0
+    room_budget = max(0, budget - len(head) - dock_rows - (2 if boxed else int(activity_head)) - log_reserve)
     body = rows
     unique = list(dict.fromkeys([row["action"] for row in head if row.get("action") and row["action"][0] != "tab"] + items))
     # Keep the repository task tail reachable while the longer room tree scrolls.
@@ -448,18 +460,17 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         output.pop()
     spare = max(0, budget - dock_rows - len(output))
     navigation.pop("log_box", None)
-    log_lines = session_log(report, width, spare, unicode, navigation if interactive else None) if height >= 28 else []
+    log_rows = min(spare, max(3, event_count + 2))
+    log_lines = session_log(report, width, log_rows, unicode, navigation if interactive else None) if height >= 28 else []
     if log_lines:
-        log_lines[-1:-1] = [(box_row("", width, unicode), None, "border")] * (spare - len(log_lines))
+        output += [""] * (spare - len(log_lines))
         if interactive:
             navigation["log_box"] = {"y1": len(output) + 1, "y2": len(output) + len(log_lines)}
         for text, actor, style_key in log_lines:
             styled = paint(actor or text, style_key, color=color, colors=color_count(), light=light_theme())
             output.append(text.replace(actor, styled) if actor else styled)
-    elif height >= 28 and boxed and spare:
-        output[-1:-1] = [box_row("", width, unicode)] * spare
     else:
-        output += [("│" if unicode else "|") if height >= 28 else ""] * spare
+        output += [""] * spare
     dock_top = len(output)
     # A hidden dock still runs tab_box so it clears its box, preview and key ownership.
     if len(dock_lines) != dock_rows or not dock_rows:

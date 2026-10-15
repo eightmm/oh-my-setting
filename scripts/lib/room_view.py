@@ -1236,6 +1236,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         dock_rows = len(dock_lines)
     main_rows = 5 if height >= 28 else 4 if height >= 20 else 3
     minimum_tree = min(2, len(gates)) + min(2, len(counsel)) + min(2, len(workers)) or int(bool(folded_calls))
+    event_count = len(listing(room.get("messages")))
+    log_reserve = 0
     goal_rows = goal_box(report, width, unicode)
     goal_reserve = dock_rows if height >= 28 else min(dock_rows, 4)
     if height >= 28:
@@ -1262,11 +1264,15 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     strip = "! State unavailable" + (" / " + clean(room.get("error"), 120) if room.get("error") else "") + " / u Refresh" if unavailable else attention_header(ranked, width, unicode)
     add(strip, "bad" if unavailable else "alert" if ranked else "metadata")
     hits.append({"y": len(lines), "x1": 1, "x2": width, "action": ("tab", "needs")})
-    if total_rows - len(lines) - dock_rows - main_rows < minimum_tree:
-        dock_rows = max(1, total_rows - len(lines) - main_rows - minimum_tree)
+    if height >= 28 and event_count >= 5:
+        tree_space = max(0, total_rows - len(lines) - dock_rows - main_rows - minimum_tree)
+        if tree_space >= 7:
+            log_reserve = min(7, event_count + 2)
+    if total_rows - len(lines) - dock_rows - main_rows - log_reserve < minimum_tree:
+        dock_rows = max(1, total_rows - len(lines) - main_rows - minimum_tree - log_reserve)
         if dock_rows == 2:
             dock_rows = 1
-    remaining = max(0, total_rows - len(lines) - dock_rows - main_rows)
+    remaining = max(0, total_rows - len(lines) - dock_rows - main_rows - log_reserve)
     expansion = 3 if selected_member and selected_member in children and remaining >= minimum_tree + 3 else 0
     remaining -= expansion
     groups = (("gate", gates), ("counsel", counsel), ("calls", workers))
@@ -1425,9 +1431,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         spare -= 1
     log_top = len(lines)
     navigation.pop("log_box", None)
-    log_lines = session_log(report, width, spare, unicode, navigation if interactive else None)
+    log_rows = min(spare, max(3, event_count + 2)) if height >= 28 else spare
+    log_lines = session_log(report, width, log_rows, unicode, navigation if interactive else None)
     if log_lines and height >= 28:
-        log_lines[-1:-1] = [(box_row("", width, unicode), None, "border")] * (spare - len(log_lines))
+        lines += [""] * (spare - len(log_lines))
+        log_top = len(lines)
     if log_lines and interactive:
         navigation["log_box"] = {"y1": log_top + 1, "y2": log_top + len(log_lines)}
     for text, actor, style_key in log_lines:
@@ -1435,7 +1443,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     navigation["band_offsets"] = offsets
     dock_rows = min(dock_rows, max(0, total_rows - len(lines)))
     # With no recorded events, the calls tree keeps the rest of the viewport.
-    filler = " " * stem + ("│" if unicode else "|") if height >= 28 else ""
+    filler = ""
     lines += [filler] * max(0, total_rows - len(lines) - dock_rows)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     if dock_rows:
