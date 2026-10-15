@@ -680,6 +680,8 @@ def run_native(provider, repo, resume=None, model=None, task=None):
                     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
                         raise ValueError("another main is live or unverified; finish it before restarting here")
                     resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
+                    if resume and not session_stored(provider, resume):
+                        resume = None
                 check_legacy_main(repo)
                 original_room = os.environ.get("OMS_ROOM_ID")
                 try:
@@ -3584,6 +3586,7 @@ def watch_shell(repo, provider=None, session=None):
 def panel_environment():
     return ["env"] + [name + "=" + os.environ[name] for name in
                       ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_COLOR", "NO_COLOR", "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
+                       "CLAUDE_CONFIG_DIR",
                        "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW",
                        "OMS_PANEL_THEME", "COLORFGBG", EXECUTION_ENV) if name in os.environ]
 

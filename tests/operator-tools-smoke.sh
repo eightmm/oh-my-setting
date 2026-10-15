@@ -7199,8 +7199,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                     tmux_wait(["display-message", "-p", "-t", listing[0], "#{@oms_panel_native_pane}"], listing[0])
                     next_main = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                                  "show", "--attempt", next_attempt, "--json"], env))
-                    assert next_main["refs"]["native_session"] == native_id
-                    assert next_main["refs"]["panel_room_participant"] == first_attempt
+                    assert next_main["refs"]["native_session"] != native_id
+                    assert next_main["refs"].get("panel_room_participant", next_main["attempt_id"]) == next_attempt
                     assert subprocess.check_output(tmux + ["list-windows", "-t", session, "-F", "#{window_id}"],
                                                    env=env, text=True) == before_windows, "restart added a window"
                     assert subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[0], "#{pane_pid}"],
@@ -7208,11 +7208,38 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                     deadline = time.monotonic() + 15
                     while True:
                         next_launch = json.loads(log.read_text().splitlines()[-1])
-                        if "--resume" in next_launch["argv"]:
+                        if next_launch != first_launch and "--session-id" in next_launch["argv"]:
                             break
-                        assert time.monotonic() < deadline, "restart did not resume the native session"
+                        assert time.monotonic() < deadline, "restart did not start a fresh native session"
                         time.sleep(.1)
-                    assert next_launch["argv"][next_launch["argv"].index("--resume") + 1] == native_id
+                    assert "--resume" not in next_launch["argv"], next_launch
+                    assert next_launch["argv"][next_launch["argv"].index("--session-id") + 1] == \
+                        next_main["refs"]["native_session"]
+                    # Once that session is stored on disk, the next restart resumes it instead.
+                    stored = (Path(env["CLAUDE_CONFIG_DIR"]) / "projects" / "fixture" /
+                              (next_main["refs"]["native_session"] + ".jsonl"))
+                    stored.parent.mkdir(parents=True, exist_ok=True)
+                    stored.write_text("{}\n")
+                    subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
+                    # The screen still shows the previous exit prompt; wait for one after the latest session start.
+                    deadline = time.monotonic() + 15
+                    while True:
+                        screen = subprocess.run(tmux + ["capture-pane", "-p", "-t", listing[0]], env=env,
+                                                capture_output=True, text=True).stdout
+                        if "r resume/restart here" in screen.rsplit("NATIVE_FIXTURE_READY", 1)[-1]:
+                            break
+                        assert time.monotonic() < deadline, ("fresh session did not exit", screen[-800:])
+                        time.sleep(.1)
+                    subprocess.run(tmux + ["send-keys", "-t", listing[0], "-l", "r"], env=env, check=True)
+                    deadline = time.monotonic() + 15
+                    while True:
+                        resumed_launch = json.loads(log.read_text().splitlines()[-1])
+                        if "--resume" in resumed_launch["argv"]:
+                            break
+                        assert time.monotonic() < deadline, ("restart did not resume the stored native session", subprocess.run(tmux + ["capture-pane", "-p", "-t", listing[0]], env=env, capture_output=True, text=True).stdout[-1500:])
+                        time.sleep(.1)
+                    assert resumed_launch["argv"][resumed_launch["argv"].index("--resume") + 1] == \
+                        next_main["refs"]["native_session"], resumed_launch
                     subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
                     tmux_wait(["display-message", "-p", "-t", listing[0], "[#{@oms_panel_native_pane}]"], "[]")
                 # The control menu refuses replacements until it reads the terminal owner state.
@@ -7279,8 +7306,9 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "codex")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Codex --")
             records = [json.loads(line) for line in log.read_text().splitlines()]
-            assert [r["agent"] for r in records[-3:]] == ["codex", "claude", "claude"]
-            assert all(r["cwd"] == str(project.resolve()) for r in records[-3:])
+            # Claude launched first, restarted fresh, then resumed its stored session.
+            assert [r["agent"] for r in records[-4:]] == ["codex", "claude", "claude", "claude"]
+            assert all(r["cwd"] == str(project.resolve()) for r in records[-4:])
             # Select the destination with a real attached client on another session.
             # Provenance rejection is covered by the catalog fixtures below.
             other = subprocess.check_output(tmux + ["new-session", "-d", "-s", "fixture-navigation",
