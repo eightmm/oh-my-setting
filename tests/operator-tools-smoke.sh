@@ -1584,7 +1584,13 @@ def measure(reader, repo=project, expected='cache-task', detailed=False):
         for tick in range(3):
             tick_start, tick_calls = time.perf_counter(), len(calls)
             with patch.object(cache.time, 'time', return_value=now + tick * 5):
-                state, status = panel.snapshot(repo, 'board-%d' % tick)
+                # A timed-out plan read is deliberately reported as unavailable;
+                # the next snapshot retries it. Under load, wait for that
+                # completion signal rather than indexing a partial room state.
+                for attempt in range(3):
+                    state, status = panel.snapshot(repo, 'board-%d' % tick)
+                    if not state.get('room', {}).get('repo_tasks_unavailable'):
+                        break
                 assert status == 0 and state['room']['repo_tasks'][0]['id'] == expected, state
             ticks.append(round((time.perf_counter() - tick_start) * 1000, 1))
             counts.append(len(calls) - tick_calls)
