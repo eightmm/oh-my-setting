@@ -1422,10 +1422,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     stranded = [c for m in mains if m is not primary and m["state"] in TERMINAL_STATES for c in everyone[m["participant"]] if classify(c) != "past"]
     if stranded:
         warnings.append("%s call%s of an ended main / t shows them" % (len(stranded), "s" if len(stranded) != 1 else ""))
-    others = listing(room.get("other_rooms"))
-    if others or room.get("other_rooms_incomplete"):
-        warnings.append("OTHER ROOMS / " + " / ".join(clean(r.get("id"), 24) for r in others[:3]) +
-                        (" / scan incomplete" if room.get("other_rooms_incomplete") else ""))
     spare = max(0, total_rows - dock_rows - len(lines))
     if warnings and spare:
         add(" / ".join(warnings), "alert")
@@ -1469,8 +1465,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     condition = "State unavailable" if unavailable else " / ".join(health) if health else ""
     if land.get("active"):
         condition += " / LANDING %s %s" % (clean(land.get("sha"), 80)[:7], clean(land.get("step"), 30) or "land")
-    if room.get("other_rooms_incomplete"):
-        condition += " / other rooms scan incomplete"
     essential = footer + (" / " + condition.strip(" / ") if condition else "")
     quotas = []
     for provider, reading in mapping(report.get("provider_status")).items():

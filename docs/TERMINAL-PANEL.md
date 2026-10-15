@@ -992,12 +992,8 @@ card opens its proven original conversation. Calls with no known main are counte
 warning row (`t` lists them in the tree). Within advisors and within workers, attention states sort
 first. A panel permits one live main across all its rooms; `--launch` and `--spawn-main`
 refuse another while it is active. The control window's board shows the room's live main. PageUp/PageDown scroll the detail
-when one is shown, otherwise every call band by one page. When the board shows a different room
-from the sole live main's room, an `OTHER ROOMS` line names that room with its
-live-main (resumed mains count by their participant) and
-pending counts, and an incomplete room scan says so; graphs of different rooms
-are never merged, and `o Rooms` in the control window switches. Room scans for
-that line are cached for 30 seconds; liveness comes from the current snapshot.
+when one is shown, otherwise every call band by one page. Graphs of different
+rooms are never merged, and `o Rooms` in the control window switches rooms.
 The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is ignored, and a target that does not name a participant in the current room is not applied. Changes reach every board on refresh, and entering a window does not reset the selection. At heights of 28 rows or more, the dock gets the rows its selected tab needs up to the height-band cap, and the session log uses only rows needed for retained events, leaving spare rows blank between the activity tree and log; it scrolls with the wheel or `[` / `]` when no dock tab has focus. The dock keeps its height until its content changes by at least two rows. A finished goal header reads `Goal finished N/N — retire + init next goal`.
 Terminals attached to the same panel session share its current window, so
 navigating from one client also moves the other. The wheel scrolls only the band or detail under the

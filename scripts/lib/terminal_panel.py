@@ -6020,26 +6020,6 @@ class BackgroundRead:
         return True, result
 
 
-ROOM_SUMMARY = {}
-
-
-def other_rooms(repo, current, live):
-    """Other open rooms with a live main; room scans are cached for 30 seconds, liveness is current."""
-    cached = ROOM_SUMMARY.get(str(repo))
-    if not cached or time.monotonic() - cached[0] > 30:
-        try:
-            states, incomplete = room.discover(repo)
-        except (OSError, ValueError):
-            states, incomplete = [], True
-        rows = [{"id": state["id"], "title": state.get("title"),
-                 "pending": sum(len(m.get("pending_for", [])) for m in state.get("messages", [])),
-                 "mains": [p["participant"] for p in state["participants"] if p["joined"] and p["role"] == "main"]}
-                for state in states if not state.get("closed") and not state.get("sealed")]
-        cached = ROOM_SUMMARY[str(repo)] = (time.monotonic(), rows, incomplete)
-    rows = [dict(r, mains=int(any(ident in live for ident in r["mains"]))) for r in cached[1] if r["id"] != current]
-    return [r for r in rows if r["mains"]], cached[2]
-
-
 def read_panel(repo, provider, view, attention_only):
     from panel_metrics import collect
     from panel_cache import TickReads
@@ -6070,15 +6050,6 @@ def read_panel(repo, provider, view, attention_only):
         status = 1
     if state.get("room", {}).get("participants"):
         state = dict(state, provider_status=collect(state, main_attempt, repo=repo, _tick=tick))
-        from panel_view import LIVE_STATES
-        attempts = state.get("attempts", {})
-        # A resumed main keeps its first participant id while running as a new attempt.
-        live = {ident for row in attempts.get("active_recent", []) + attempts.get("recent", [])
-                if (row.get("panel") or {}).get("role") == "main" and
-                row.get("state") in LIVE_STATES | {"review", "waiting_input", "waiting_approval"}
-                for ident in (row.get("attempt_id"), (row.get("panel") or {}).get("room_participant")) if ident}
-        others, incomplete = other_rooms(repo, state["room"].get("id"), live)
-        state["room"] = dict(state["room"], other_rooms=others, other_rooms_incomplete=incomplete)
     state["private_capacity"] = private_capacity(repo)
     import panel_release
     state["dead_mains"] = panel_release.dead_mains(repo, _tick=tick)

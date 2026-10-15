@@ -2252,7 +2252,6 @@ def tick_result(repo, row):
 with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick_state), 0)), \
         patch.object(panel.room, 'status', side_effect=lambda *a: deepcopy(tick_room)), \
         patch.object(panel, 'managed_session', return_value=False), \
-        patch.object(panel, 'other_rooms', return_value=([], False)), \
         patch.object(panel.subprocess, 'run', side_effect=tick_run), \
         patch.object(panel_chats.shutil, 'which', return_value='/fixture/tmux'), \
         patch.object(panel_chats, 'current_models', return_value={}), \
@@ -14429,33 +14428,6 @@ assert render(dict(flow, provider_status={"claude": {"participant": "someone-els
 # The board shows only its own main's calls, expanded or not.
 for board_nav in ({}, {"expanded": True}):
     assert "ONLY OTHER OWNER" not in render(flow, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation=board_nav)
-# Mains live in another bounded room of the same panel are named, never merged into this graph.
-elsewhere = deepcopy(flow)
-elsewhere["room"]["other_rooms"] = [{"id": "room-next", "mains": 1, "pending": 2}]
-picture = render(elsewhere, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation={})
-assert "OTHER ROOMS / room-next" in picture, picture
-with patch.object(panel.room, "discover", return_value=([
-        {"id": "room-a", "closed": False, "pending_count": 0, "participants": [
-            {"participant": "att-live", "joined": True, "role": "main"},
-            {"participant": "att-gone", "joined": True, "role": "main"}]},
-        {"id": "room-b", "closed": False, "pending_count": 0, "participants": [
-            {"participant": "att-gone-too", "joined": True, "role": "main"}]}], False)):
-    panel.ROOM_SUMMARY.clear()
-    assert panel.other_rooms(Path("/tmp/rooms"), "room-current", {"att-live", "att-gone"})[0] == [
-        {"id": "room-a", "title": None, "pending": 0, "mains": 1}]
-with patch.object(panel.room, "discover", return_value=([{"id": "room-p", "closed": False, "messages": [
-        {"pending_for": ["att-live", "x"]}], "participants": [{"participant": "att-live", "joined": True, "role": "main"}]}], True)):
-    panel.ROOM_SUMMARY.clear()
-    others, incomplete = panel.other_rooms(Path("/tmp/rooms"), "room-current", {"att-live"})
-    assert others[0]["pending"] == 2 and incomplete is True
-panel.ROOM_SUMMARY.clear()
-partial = deepcopy(flow)
-partial["room"]["other_rooms_incomplete"] = True
-assert "scan incomplete" in render(partial, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation={})
-partial["room"]["other_rooms"] = [{"id": "room-next", "mains": 1, "pending": 0}]
-partial["room"]["other_rooms"] = [{"id": "room-%s-long-identifier" % n, "mains": 1, "pending": 3} for n in range(4)]
-partial_screen = render(partial, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation={})
-assert "OTHER ROOMS" in partial_screen and "scan incomplete" in partial_screen, partial_screen
 # Page keys move graph bands (or the shown detail) rather than an offset the bands ignore.
 page_nav = {}
 render(crowded, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation=page_nav)
@@ -14661,14 +14633,12 @@ four["room"]["messages"] = [
     {"id": "p%d" % i, "sender": "m1", "recipient": "m2", "targets": ["m2"], "message_kind": "note",
      "ts": "2026-10-07T10:%02d:00Z" % i, "text": "pair %d" % i} for i in range(6)]
 four["room"]["pairs"] = [{"sender": "m1", "recipient": "m2", "sent": 6, "pending": 0}]
-for variant in ("plain", "other", "unlinked"):
+for variant in ("plain", "unlinked"):
     for rows_high in (32, 60, 90):
         kept = set()
         for advisors in (0, 1, 3):
             for workers in (0, 1, 3):
                 report = crowd(four, advisors, workers, parent="a1", prefix=variant)
-                if variant == "other":
-                    report["room"]["other_rooms"] = [{"id": "room-next", "mains": 1, "pending": 2}]
                 if variant == "unlinked":
                     report["room"]["participants"].append({"participant": "orphan", "role": "worker", "joined": True, "parent": "gone",
                                                            "model": "gpt-6-luna", "label": "orphan"})
@@ -14681,7 +14651,7 @@ for variant in ("plain", "other", "unlinked"):
                     nav = {"selected": ("chat", "m1"), "dismissed": True}
                     text = render(report, "codex", 157, rows_high, view="graph", navigation=nav, main_attempt="a1")
                     assert len(text.splitlines()) == rows_high, text
-                    assert ("OTHER ROOMS" in text) == (variant == "other") and ("no known main" in text) == (variant == "unlinked"), text
+                    assert ("no known main" in text) == (variant == "unlinked"), text
                     assert nav["box"]["y2"] - nav["box"]["y1"] - 1 == min(dock_body_rows(rows_high), max(3, nav["dock_content_rows"])), nav
                     kept.add((nav["box"]["y1"], nav["box"]["y2"]))
         assert all(y2 == rows_high - 2 and y2 - y1 + 1 >= 5 for y1, y2 in kept), (variant, rows_high, kept)
@@ -15782,7 +15752,6 @@ for pending_tasks in ({"admission-task"}, set()):
             patch.object(panel_results, "pending_admissions", return_value=pending_tasks) as pending, \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "[]", "")), \
             patch("panel_metrics.collect", return_value={}), \
-            patch.object(panel, "other_rooms", return_value=([], False)), \
             patch.dict(os.environ, {"OMS_ROOM_ID": "admission-room"}):
         watched = panel.read_panel(Path("."), "codex", "graph", False)[0]
         collected, _ = panel.snapshot(Path("."), "admission-room")
@@ -18929,6 +18898,15 @@ with patch.object(panel, "session_owner", return_value=str(project)), patch.obje
             assert str(error).startswith("this panel already has a live main")
             assert "capacity screen k" in str(error) and "unverifiable" in str(error)
             assert "--release-main" not in str(error)
+    cross_room_main = {"tool": "panel-main", "terminal": False,
+                       "refs": {"panel_room_id": "room-a"}}
+    with patch.object(panel, "events", return_value=json.dumps([cross_room_main])), \
+            patch.dict(os.environ, {"OMS_ROOM_ID": "room-b"}):
+        try:
+            panel.check_legacy_main(project)
+            raise AssertionError("a main in another room allowed replacement")
+        except ValueError as error:
+            assert str(error).startswith("this panel already has a live main"), error
 # The cap counts the whole panel, not the selected room; a close needs exactly one proven window and records the leave only after the kill.
 def fake_status(repo, ident):
     return {"participants": [{"participant": "%s-m%s" % (ident, n), "joined": True, "role": "main"} for n in range(4)]}
