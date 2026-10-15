@@ -19752,6 +19752,29 @@ for sender, recipient, pending, visible in (("adv-worker", "adv-main", [], False
     assert json.dumps(handed_off, sort_keys=True) == frozen_handoff
 for mark in ("completed", "accepted"):
     handled = dict(grouped_board, finalized={"adv-task": mark})
+    # A joined judge can have a call-result without a projected lifecycle attempt.
+    attemptless = deepcopy(handled)
+    attemptless["room"]["participants"].append({"participant": "attemptless-reviewer", "role": "reviewer",
+        "joined": True, "parent": "adv-main", "model": "gpt-6.1-sol"})
+    attemptless["room"].setdefault("call_results", {})["attemptless-reviewer"] = {"exit": 2, "ts": stamp,
+        "task_id": "adv-task", "read": False}
+    attemptless_call = next(m for m in graph_view.nodes(attemptless) if m["participant"] == "attemptless-reviewer")
+    assert attemptless_call["state"] == "failed" and graph_view.call_classifier(attemptless)(attemptless_call) == "past"
+    for mode in ("tree", "graph"):
+        live_nav = {"dismissed": True}
+        live_picture = render(attemptless, "codex", 120, 80, view=mode, navigation=live_nav)
+        assert ("result", "attemptless-reviewer") not in live_nav["items"], (mode, live_picture)
+        past_nav = {"dismissed": True, "tab": "past"}
+        past_picture = render(attemptless, "codex", 120, 80, view=mode, navigation=past_nav)
+        assert ("result", "attemptless-reviewer") in past_nav["past_ids"] and "REVIEWER Sol 6.1" in past_picture, (mode, past_picture)
+    undecided = deepcopy(attemptless)
+    undecided["finalized"] = {}
+    undecided_call = next(m for m in graph_view.nodes(undecided) if m["participant"] == "attemptless-reviewer")
+    assert graph_view.call_classifier(undecided)(undecided_call) == "live"
+    for mode in ("tree", "graph"):
+        live_nav = {"dismissed": True}
+        live_picture = render(undecided, "codex", 120, 80, view=mode, navigation=live_nav)
+        assert ("result", "attemptless-reviewer") in live_nav["items"], (mode, live_picture)
     # A review call whose task its main decided reads "decided" in its Detail, the main's Detail and Past alike.
     decided_board = deepcopy(handled)
     next(a for a in decided_board["attempts"]["recent"] if a["attempt_id"] == "review-call")["task_id"] = "adv-task"
