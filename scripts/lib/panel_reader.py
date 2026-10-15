@@ -118,10 +118,13 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                       for i, name in enumerate(labels))
     row = next(iter(report.get("rows", [])), {})
     model = row.get("model") or call.get("served_model") or call.get("selected_model") or call.get("requested_model")
-    identity = heading or call_identity(row.get("role") or "worker", model,
-                                        row.get("title") or row.get("task_id"), alias=call.get("alias"))
+    purpose = row.get("purpose") or call.get("purpose")
+    identity = (call_identity(row.get("role") or call.get("role") or "worker", model,
+                              row.get("title") or row.get("task_id"), alias=call.get("alias"), purpose=purpose)
+                if purpose else heading or call_identity(row.get("role") or call.get("role") or "worker", model,
+                                                         row.get("title") or row.get("task_id"), alias=call.get("alias")))
     title = ink(clipped(identity, width), role_style(row.get("role"), row.get("purpose")), bold=True)
-    state = status_tag(row.get("process_state") or "unknown")
+    state = status_tag(row.get("process_state") or call.get("process_state") or call.get("state") or "unknown")
     tone = ("running" if any(word in state for word in ("running", "starting", "verifying")) else
             "bad" if any(word in state for word in ("failed", "timed out", "lost process")) else
             "alert" if any(word in state for word in ("blocked", "needs approval", "awaiting decision")) else
@@ -471,7 +474,7 @@ def page(render, board, on_refresh=None):
                                     "Events" in plain(content[0]) and "Diff" in plain(content[0])):
                                 tabs = content[0]
                                 title = content[1] if len(content) > 1 else "Call result"
-                                state = content[2] if len(content) > 2 else "[? status unknown]"
+                                state = content[2] if len(content) > 2 else "[⟳ starting]"
                                 content = content[3:]
                             lines, notice, updated, full_lines = content or ["No result recorded yet"], "", time.monotonic(), None
                             if next_artifact != artifact and artifact is not None:

@@ -199,8 +199,12 @@ def call_tone(call):
     return tone(call_ending(call) or call.get("state"))
 
 
-def call_identity(role, model, label=None, short_id=None, alias=None) -> str:
-    identity = (clean(role) or "unknown").upper() + " " + (MODEL_NAMES.get(model, clean(model)) or "model unknown")
+def call_identity(role, model, label=None, short_id=None, alias=None, purpose=None) -> str:
+    # Routing stores a broad board kind in role and the requested judge/worker
+    # role in purpose when that distinction is available.
+    display_role = purpose if purpose in JUDGE_ROLES | WORKER_ROLES else role
+    identity = ((clean(display_role) or "unknown").replace("-", " ").upper() + " " +
+                (MODEL_NAMES.get(model, clean(model)) or "model unknown"))
     if alias:
         identity = clean(alias, 8) + " " + identity
     if short_id:

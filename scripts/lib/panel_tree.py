@@ -90,7 +90,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         age = main_words(call, unicode) if call.get("role") == "main" else age_label(call.get("joined_at")) or "unknown"
         tail = tag + "  " + age
         label = call.get("title") or (None if call.get("role") == "main" else call["participant"])
-        identity = call_identity(visual_role(call), call.get("model"), label, alias=call.get("alias"))
+        identity = call_identity(call.get("role"), call.get("model"), label, alias=call.get("alias"),
+                                 purpose=purpose(call))
         if extra:
             identity += sep + extra
         if call.get("role") == "main":
@@ -123,7 +124,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             lead = "" if content_width < 60 else "  " + " " * display_width(connector)
             card_width = max(4, content_width - display_width(lead))
             rows.pop()
-            add(lead + box_edge(call_identity(visual_role(call), call.get("model"), alias=call.get("alias")), card_width, unicode, dashed=True), style, action, fold)
+            add(lead + box_edge(call_identity(call.get("role"), call.get("model"), alias=call.get("alias"),
+                                              purpose=purpose(call)), card_width, unicode, dashed=True), style, action, fold)
             add(lead + box_row(tag + "  " + age, card_width, unicode, dashed=True), None, action)
             rows[-1]["tag_span"] = (tag, tag_tone)
             rows[-1]["card_role"] = style
@@ -174,7 +176,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children), band_style(role))
             indent = root_stem
             for child_index, child in enumerate(children):
-                branch = end if child_index == len(children) - 1 else prefix
+                branch = end if child_index == len(children) - 1 and last_group else prefix
                 child_action = child.get("_action") or ("result", child["participant"])
                 if child.get("_native"):
                     child_action = None
