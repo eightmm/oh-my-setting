@@ -820,6 +820,16 @@ check_optional_cmd() {
   fi
 }
 
+check_unprivileged_userns() {
+  local setting_path="${OMS_DOCTOR_USERNS_SYSCTL_PATH:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+
+  [ "$OMS_PLATFORM_KERNEL" = Linux ] || return 0
+  [ -r "$setting_path" ] || return 0
+  if [ "$(tr -d ' \r\n' < "$setting_path")" = 1 ]; then
+    echo "warn: AppArmor restricts unprivileged user namespaces; Codex sandboxed runs may fail (bwrap). Allow userns for bwrap in an AppArmor profile, or set kernel.apparmor_restrict_unprivileged_userns=0 via sysctl."
+  fi
+}
+
 # Antigravity's headless mode cannot prompt for a tool permission, so it
 # auto-denies anything outside permissions.allow and exits 0 having printed
 # only its refusal. Read-only consults ask peers to read the repository, so a
@@ -1949,6 +1959,7 @@ check_cmd ntn
 # provider CLIs: REQUIRE_TOOLS=1 fails on it. Standalone diagnostics may still
 # set REQUIRE_TOOLS=0 to inventory an incomplete or damaged installation.
 check_cmd gh
+check_unprivileged_userns
 # Presence is installable; authentication is an interactive browser flow, so it
 # can only ever be reported. An unauthenticated gh is the state in which
 # ci-status fails on its first call, which is worth knowing

@@ -86,6 +86,11 @@ With no `python3` 3.9+ and no uv, the installer fetches the pinned uv
 managed `python3` shim at it. musl-based Linux such as Alpine is not
 supported: the pinned builds need glibc.
 
+On Ubuntu 24.04+ with AppArmor unprivileged user namespaces restricted,
+`oms doctor` warns that Codex sandboxed runs may fail; allow user namespaces
+for `bwrap` in an AppArmor profile or set
+`kernel.apparmor_restrict_unprivileged_userns=0` with sysctl.
+
 The awkward cases — Windows copy mode, Antigravity's headless permissions,
 Notion data-source selection — live in
 [COMPONENTS.md](COMPONENTS.md) and

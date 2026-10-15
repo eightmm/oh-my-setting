@@ -727,6 +727,50 @@ test_receiptless_home_keeps_legacy_wording() {
   esac
 }
 
+test_apparmor_userns_restriction_warns_only_on_linux() {
+  local home="$TMP/userns"
+  local setting="$TMP/apparmor_restrict_unprivileged_userns"
+  local out
+
+  make_fixture "$home" rows 1
+  printf '1\n' > "$setting"
+  out="$(env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
+    OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
+    OMS_DOCTOR_PROJECT_DIR="$home/repo" OH_MY_SETTING_MODEL_DOCTOR=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OMS_DOCTOR_USERNS_SYSCTL_PATH="$setting" OMS_PLATFORM_KERNEL=Linux \
+    PATH="/usr/bin:/bin" bash "$ROOT/scripts/doctor.sh" 2>&1 || true)"
+  case "$out" in
+    *"warn: AppArmor restricts unprivileged user namespaces; Codex sandboxed runs may fail (bwrap)."*) ;;
+    *) printf '%s\n' "$out"; fail "restricted user namespaces should warn about Codex sandboxed runs" ;;
+  esac
+  case "$out" in
+    *"Allow userns for bwrap in an AppArmor profile"*"kernel.apparmor_restrict_unprivileged_userns=0"*) ;;
+    *) printf '%s\n' "$out"; fail "warning should name both standard remedies" ;;
+  esac
+
+  printf '0\n' > "$setting"
+  out="$(env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
+    OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
+    OMS_DOCTOR_PROJECT_DIR="$home/repo" OH_MY_SETTING_MODEL_DOCTOR=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OMS_DOCTOR_USERNS_SYSCTL_PATH="$setting" OMS_PLATFORM_KERNEL=Linux \
+    PATH="/usr/bin:/bin" bash "$ROOT/scripts/doctor.sh" 2>&1 || true)"
+  case "$out" in *"AppArmor restricts unprivileged user namespaces"*) fail "setting 0 must not warn" ;; esac
+
+  printf '1\n' > "$setting"
+  out="$(env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
+    OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
+    OMS_DOCTOR_PROJECT_DIR="$home/repo" OH_MY_SETTING_MODEL_DOCTOR=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OMS_DOCTOR_USERNS_SYSCTL_PATH="$setting" OMS_PLATFORM_KERNEL=Darwin \
+    PATH="/usr/bin:/bin" bash "$ROOT/scripts/doctor.sh" 2>&1 || true)"
+  case "$out" in *"AppArmor restricts unprivileged user namespaces"*) fail "non-Linux systems must not report this Linux restriction" ;; esac
+}
+
 test_expected_surface_list_is_bump_gated() {
   local computed
   local source_schema
@@ -785,5 +829,6 @@ test_clean_home_reports_no_displaced_config
 test_expected_surface_list_is_bump_gated
 test_capability_receipt_names_tool_absences
 test_receiptless_home_keeps_legacy_wording
+test_apparmor_userns_restriction_warns_only_on_linux
 
 echo "doctor-surfaces-smoke: ok"

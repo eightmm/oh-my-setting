@@ -24,6 +24,11 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 그것을 가리키게 한다. Alpine 같은 musl 기반 Linux는 지원하지 않는다. 고정된
 빌드가 glibc를 요구하기 때문이다.
 
+Ubuntu 24.04+에서 AppArmor가 비특권 user namespace를 제한하면 `oms doctor`가
+Codex sandbox 실행 실패 가능성을 경고한다. AppArmor 프로필에서 `bwrap`의
+user namespace를 허용하거나 sysctl로
+`kernel.apparmor_restrict_unprivileged_userns=0`을 설정한다.
+
 Windows에서 기본 Codex 설치나 Node 기반 도구를 고른 프로필은 먼저 네이티브
 **Node.js와 npm**이 필요하다. 설치기가 알려 주는 정확한 버전을
 [공식 Node.js 아카이브](https://nodejs.org/dist/)에서 설치하고, PATH 옵션을
