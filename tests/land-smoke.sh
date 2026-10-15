@@ -611,6 +611,13 @@ status = json.loads(run(land, 'status', '--repo', source, '--json'))
 reverified = Path(status['log']).with_suffix('.json')
 assert reverified.name < receipt.name
 assert 'base' not in json.loads(reverified.read_bytes())['push']
+assert json.loads(reverified.read_bytes())['push']['moved'] == 0
+# Even without its landing receipt beside it, a reverify is never handed off as a landing.
+alone = tmp / 'reverify-alone'
+alone.mkdir()
+(alone / reverified.name).write_bytes(reverified.read_bytes())
+refused = run('python3', helper, source, target, alone / reverified.name, directory, ok=False)
+assert 'hand off its landing receipt instead' in refused, refused
 # A reverify has no range of its own; handing it off is refused in favour of the landing receipt.
 refused = run('python3', helper, source, target, reverified, directory, ok=False)
 assert 'hand off its landing receipt instead' in refused, refused

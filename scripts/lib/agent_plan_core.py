@@ -236,7 +236,7 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
             base = recorded_base(receipt)
         except ValueError:
             continue
-        if base == sha:
+        if base == sha or push.get("moved") == 0:
             continue
         ref = "refs/remotes/%s/%s" % (remote, target)
         # An ancestry read in a partial clone must not lazily fetch objects.

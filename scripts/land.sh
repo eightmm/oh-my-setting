@@ -477,7 +477,8 @@ run_job() {
     if [ "$remote_sha" != "$SHA" ]; then
       rset push.rc=0 push.base="$remote_sha"
     else
-      rset push.rc=0
+      # A reverify moved nothing: it proves the gate, never a landed range.
+      rset push.rc=0 push.moved=0
     fi
   fi
   local conclusion=skipped run_id="" deadline remaining query_result

@@ -28,7 +28,7 @@ def pushed_receipts(directory, sha, read):
             continue
         push = receipt.get("push") if isinstance(receipt, dict) else None
         if (isinstance(push, dict) and receipt.get("sha") == prior and
-                type(push.get("rc")) is int and push["rc"] == 0):
+                type(push.get("rc")) is int and push["rc"] == 0 and push.get("moved") != 0):
             yield prior, name, raw
 
 
@@ -145,6 +145,8 @@ def handoff(source, target, receipt_path, directory):
         "--no-recurse-submodules", remote, "+refs/heads/%s:%s" % (branch, ref))
     git(target, "merge-base", "--is-ancestor", sha, ref, local=True)
     predecessors = list(pushed_receipts(os.path.dirname(receipt_path), sha, read_receipt))
+    if receipt["push"].get("moved") == 0:
+        raise ValueError("this receipt reverified an already-landed SHA; hand off its landing receipt instead")
     base = recorded_base(receipt)
     if base is not None:
         git(target, "merge-base", "--is-ancestor", base, sha, local=True)
