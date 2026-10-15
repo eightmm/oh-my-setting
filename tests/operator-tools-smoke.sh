@@ -12932,7 +12932,7 @@ blocked_prompt = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", st
                                  "--purpose", "investigate", "--prompt", sensitive_prompt, "--dry-run"],
                                 env=dry_env, capture_output=True, text=True, timeout=60)
 assert blocked_prompt.returncode != 0 and not blocked_prompt.stdout, blocked_prompt
-assert "secret-tier match in your prompt at line 2" in blocked_prompt.stderr, blocked_prompt.stderr
+assert re.search(r"secret-tier match in (prompt|brief file) at line 2:token-assignment", blocked_prompt.stderr), blocked_prompt.stderr
 assert "fixture-value" not in blocked_prompt.stderr and room.status(project, shared)["participants"] == room_before_scan
 sensitive_brief = temporary / "sensitive-brief.md"
 sensitive_brief.write_text("Inspect source.\npass" + "word=fixture-value")
@@ -12942,7 +12942,7 @@ blocked_brief = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str
                                 "--verify", "test -f value.txt", "--dry-run"],
                                env=dry_env, capture_output=True, text=True, timeout=60)
 assert blocked_brief.returncode != 0 and not blocked_brief.stdout, blocked_brief
-assert "secret-tier match in your prompt at line 2" in blocked_brief.stderr, blocked_brief.stderr
+assert re.search(r"secret-tier match in (prompt|brief file) at line 2:token-assignment", blocked_brief.stderr), blocked_brief.stderr
 assert "fixture-value" not in blocked_brief.stderr and room.status(project, shared)["participants"] == room_before_scan
 blocked_scoped = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                                  "--dispatch", "worker", "--owner", "claude", "--access", "write",
@@ -12950,7 +12950,7 @@ blocked_scoped = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", st
                                  "--verify", "test -f value.txt", "--scope", "docs", "--dry-run"],
                                 env=dry_env, capture_output=True, text=True, timeout=60)
 assert blocked_scoped.returncode != 0 and not blocked_scoped.stdout, blocked_scoped
-assert "secret-tier match in your prompt at line 2" in blocked_scoped.stderr, blocked_scoped.stderr
+assert re.search(r"secret-tier match in (prompt|brief file) at line 2:token-assignment", blocked_scoped.stderr), blocked_scoped.stderr
 assert "fixture-value" not in blocked_scoped.stderr and room.status(project, shared)["participants"] == room_before_scan
 for name, prepare in (
         ("symlink", lambda path: path.symlink_to(sensitive_brief)),
