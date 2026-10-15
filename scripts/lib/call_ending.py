@@ -17,6 +17,8 @@ def call_ending(call):
     if state == "timed_out" or code == 124:
         return "timed_out"
     verify = call.get("verify_exit")
+    if verify == 124 and (reason == "verification_failed" or code == 0):
+        return "verify_timed_out"
     if reason == "verification_failed" or code == 0 and (
             type(verify) is int and verify != 0 or call.get("verify_status") == "failed"):
         return "verify_failed"

@@ -220,9 +220,9 @@ def status_tag(state, *, exit_code=None, unicode=True) -> str:
             state = "cancelled"
         elif state == "timed_out" or exit_code == 124:
             state = "timed_out"
-    if state in {"cancelled", "guard_stop", "timed_out", "verify_failed", "provider_error"}:
-        mark = "failed" if state in {"verify_failed", "provider_error"} else state
-        words = state.replace("_", " ")
+    if state in {"cancelled", "guard_stop", "timed_out", "verify_failed", "verify_timed_out", "provider_error"}:
+        mark = "failed" if state in {"verify_failed", "verify_timed_out", "provider_error"} else state
+        words = {"verify_timed_out": "verify timed out"}.get(state, state.replace("_", " "))
         if state == "provider_error" and type(exit_code) is int:
             words += " " + glyph("separator", unicode) + " exit %s" % exit_code
         return "[%s %s]" % (glyph(mark, unicode), words)
@@ -398,7 +398,7 @@ def tone(state):
         return "dim"
     if state == "guard_stop":
         return "alert"
-    if state in {"timed_out", "verify_failed", "provider_error"}:
+    if state in {"timed_out", "verify_failed", "verify_timed_out", "provider_error"}:
         return "bad"
     tag = status_tag(state, unicode=False)
     if tag.startswith(("[! failed", "[! timed out", "[! abandoned", "[! lost process", "[! unavailable", "[test failed")):
@@ -710,7 +710,7 @@ def inbox_items(report, unicode=True):
         ending = call_ending(member)
         if ending == "cancelled":
             continue
-        if ending in {"guard_stop", "timed_out", "verify_failed", "provider_error"} and not failure_handled(report, member, read_results, closed):
+        if ending in {"guard_stop", "timed_out", "verify_failed", "verify_timed_out", "provider_error"} and not failure_handled(report, member, read_results, closed):
             what, shown, style, kind = ending.replace("_", " "), ending, call_tone(member), ending
         elif state in FAILED_WORDS and not failure_handled(report, member, read_results, closed):
             what, shown, style, kind = FAILED_WORDS[state], state, "bad", "failed"
@@ -790,6 +790,7 @@ ATTENTION_CLASSES = (("needs", "needs you", "you", "Needs you"), ("failed", "fai
                      ("guard_stop", "guard stop", "guard", "Guard stops"),
                      ("timed_out", "timed out", "timeout", "Timed out"),
                      ("verify_failed", "verify failed", "verify", "Verify failed"),
+                     ("verify_timed_out", "verify timed out", "verify timeout", "Verify timed out"),
                      ("provider_error", "provider error", "provider", "Provider errors"),
                      ("decide", "decide", "dec", "Awaiting decision"), ("stale", "stale", "stale", "Stale holds"),
                      ("mail", "mail", "mail", "Mail"), ("info", "info", "info", "Other"))
@@ -802,7 +803,7 @@ def attention_items(report, unicode=True):
     from room_view import held_split
     items = inbox_items(report, unicode)
     failing = {item["task"] for item in items if item["cls"] in
-               {"failed", "guard_stop", "timed_out", "verify_failed", "provider_error"} and item.get("task")}
+               {"failed", "guard_stop", "timed_out", "verify_failed", "verify_timed_out", "provider_error"} and item.get("task")}
     tasks = {t.get("id"): t for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))}
     for ident in sorted(held_split(report)[1] - failing):
         title = clean(tasks.get(ident, {}).get("title"), 80)

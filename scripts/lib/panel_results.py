@@ -816,6 +816,9 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         elif ending == 'verify_failed':
             representative, action = 'verify failed', 'retry verify'
             stages[failed_stage]['state'] = 'verify failed'
+        elif ending == 'verify_timed_out':
+            representative, action = 'verify timed out', 'retry verify'
+            stages[failed_stage]['state'] = 'verify timed out'
         elif ending == 'provider_error':
             representative, action = failed_stage + ' provider error', 'retry ' + failed_stage
             stages[failed_stage]['state'] = 'provider error'

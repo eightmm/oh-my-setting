@@ -2763,6 +2763,7 @@ ending_cases = (
     ("cancel-record", "cancelled", 1, None, "cancelled_by_owner", ".oms/artifacts/cancel.md", "cancelled", "[⊘ cancelled]", "dim"),
     ("guard-record", "failed", 125, None, "worker_authority_violation", ".oms/artifacts/guard.md", "guard_stop", "[⛔ guard stop]", "alert"),
     ("timeout-exit", "failed", 124, None, None, None, "timed_out", "[⏱ timed out]", "bad"),
+    ("verify-timeout", "failed", 0, 124, "verification_failed", ".oms/artifacts/verify.md", "verify_timed_out", "[✗ verify timed out]", "bad"),
     ("verify-result", "failed", 0, 2, None, ".oms/artifacts/verify.md", "verify_failed", "[✗ verify failed]", "bad"),
     ("provider-empty", "failed", 3, None, None, None, "provider_error", "[✗ provider error · exit 3]", "bad"),
     ("failure-output", "failed", 1, None, None, ".oms/artifacts/failure.md", "failed", "[✗ failed: exit 1]", "bad"),
@@ -2800,11 +2801,12 @@ for code in (129, 130, 143):
     assert status_tag("failed", exit_code=code) == "[⊘ cancelled]"
 assert call_ending(dict(ending_members["verify-result"], state="done")) == "verify_failed"
 assert call_ending(dict(ending_members["verify-result"], verify_exit=None, reason_code="verification_failed")) == "verify_failed"
+assert call_ending(dict(ending_members["verify-result"], verify_exit=124, reason_code="verification_failed")) == "verify_timed_out"
 assert call_ending(dict(ending_members["provider-empty"], artifact=".oms/artifacts/output.md", provider_error_exit=3)) == "provider_error"
 assert call_ending(dict(ending_members["cancel-exit"], state="working")) is None
 ending_queue = attention_items(ending_fixture)
-assert {item["cls"] for item in ending_queue} == {"failed", "guard_stop", "timed_out", "verify_failed", "provider_error", "decide"}, ending_queue
-assert len(ending_queue) == 6 and not any("cancel" in str(item["row_id"]) for item in ending_queue), ending_queue
+assert {item["cls"] for item in ending_queue} == {"failed", "guard_stop", "timed_out", "verify_failed", "verify_timed_out", "provider_error", "decide"}, ending_queue
+assert len(ending_queue) == 7 and not any("cancel" in str(item["row_id"]) for item in ending_queue), ending_queue
 assert all(item["cls"] != "stale" for item in ending_queue)
 assert call_classifier(ending_fixture)(ending_members["cancel-exit"]) == "past"
 compact_decided = deepcopy(ending_fixture)

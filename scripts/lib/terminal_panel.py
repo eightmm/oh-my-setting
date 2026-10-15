@@ -5590,7 +5590,8 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
             reason = attempt.get("reason_code")
             state = attempt.get("state")
             ending = ("guard_stop" if reason == "worker_authority_violation" else
-                      "verify_failed" if reason in {"verification_failed", "verify_failed"} else
+                      ("verify_timed_out" if attempt.get("verify_exit") == 124 else "verify_failed")
+                      if reason in {"verification_failed", "verify_failed"} else
                       "provider_error" if refs.get("provider_error_exit") else state)
             location = refs.get("panel_location")
             row = {"task_id": attempt.get("task_id"), "title": refs.get("panel_label"),

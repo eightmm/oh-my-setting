@@ -287,7 +287,7 @@ def failure_handled(report, call, read_results=None, closed=None):
     if call_ending(call) == "guard_stop":
         return bool(call.get("task_id") and (call.get("task_id") in closed or
                     mapping(report.get("finalized")).get(call["task_id"]) in DECIDED | {"failed"}))
-    return ((call_ending(call) in {"failed", "timed_out", "verify_failed", "provider_error"} or
+    return ((call_ending(call) in {"failed", "timed_out", "verify_failed", "verify_timed_out", "provider_error"} or
              call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"})
             and ("result-" + str(call.get("participant")) in read_results or call.get("superseded") is True
                  or bool(call.get("task_id")) and call.get("task_id") in closed))
@@ -325,7 +325,7 @@ def settler(report):
         ending = call_ending(call)
         if ending == "cancelled":
             return True
-        if ending in {"guard_stop", "verify_failed", "timed_out", "provider_error"}:
+        if ending in {"guard_stop", "verify_failed", "verify_timed_out", "timed_out", "provider_error"}:
             return failure_handled(report, call, read_results, closed) or decided
         task_id = call.get("task_id")
         review = call["state"] == "review" or call["state"] == "done" and call.get("participant") in listing(report.get("awaiting_admission"))
@@ -1915,7 +1915,7 @@ def attention_body(ranked, width, capacity, navigation, unicode):
     sep = " · " if unicode else " / "
     names = {"needs": "answer needed", "decide": "awaiting decision", "stale": "held, workers ended",
              "provider_error": "failed", "mail": "unread mail", "info": "delivery failed"}
-    next_steps = {"guard_stop": "review guard stop", "verify_failed": "retry verify", "failed": "inspect failure",
+    next_steps = {"guard_stop": "review guard stop", "verify_failed": "retry verify", "verify_timed_out": "retry verify", "failed": "inspect failure",
                   "provider_error": "inspect failure", "timed_out": "continue or cancel", "decide": "record main decision",
                   "needs": "answer request", "stale": "release or continue task", "mail": "read message", "info": "check delivery"}
     lines = []
