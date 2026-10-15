@@ -713,8 +713,9 @@ The owning main records a result through `--finalize`. Native process exit and
 worker completion never create accepted results by themselves. `completed`
 records an owner summary; `accepted` additionally requires a passing explicit
 `--verify`, at least one `--evidence` reference, and matching landed patch
-evidence for every recorded write worker of that task or of the finalizing native
-main, including subtasks with distinct task IDs. A plan-bound patch retains its
+evidence for every recorded write worker of that task and every write worker
+without a task ID under the finalizing native main; workers assigned to other
+tasks are checked when their own task is accepted. A plan-bound patch retains its
 exact plan lineage; a standalone patch matches its successful landing by digest.
 Verifier output stays local. Evidence references bind repository-relative files
 of at most 1 MiB each to SHA-256. The summary is

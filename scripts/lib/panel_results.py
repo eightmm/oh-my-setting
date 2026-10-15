@@ -492,11 +492,14 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
             raise ValueError('finalizing main identity is unavailable or does not match the owner')
     related = [a for a in attempts if a.get('task_id') == task_id
                or (main_id and a.get('parent_attempt_id') == main_id)]
-    workers = sorted([a for a in related if a.get('refs', {}).get('panel_access') == 'write'
+    # Other tasks are accepted independently; unassigned children still belong to this main.
+    workers = sorted([a for a in related if (a.get('task_id') == task_id or not a.get('task_id'))
+                      and a.get('refs', {}).get('panel_access') == 'write'
                       and a.get('refs', {}).get('panel_role') == 'worker'], key=lambda a: a.get('created_at', ''))
     admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
-    # Only this task's records are compared across verification; the main's other calls keep moving meanwhile.
-    task_attempts = [a for a in related if a.get('task_id') == task_id]
+    # Fence this task and its unassigned write workers while other tasks keep moving.
+    worker_ids = {a.get('attempt_id') for a in workers}
+    task_attempts = [a for a in related if a.get('task_id') == task_id or a.get('attempt_id') in worker_ids]
     attempt_ids = {a.get('attempt_id') for a in task_attempts}
     related_rows = [r for r in rows if r.get('task_id') == task_id or r.get('attempt_id') in attempt_ids]
     finalized = [{'row': r, 'record': _load_result(repo, r)} for r in rows

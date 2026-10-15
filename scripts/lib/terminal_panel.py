@@ -473,7 +473,7 @@ def bootstrap(provider, repo):
         "Record an owner decision with oms panel --finalize --owner OWNER "
         "--task-id ID --summary-file PATH --outcome completed|accepted|failed|rejected; "
         "accepted requires --verify, --evidence and matching landed patches "
-        "for all task or current-main write workers. "
+        "for the task's write workers and current-main write workers without a task ID. "
         "Use --evidence with relative proof references, and --notify for each "
         "actual finalized product unless OMS_CODEX_NOTIFY=0. Do not announce "
         "acceptance from a native exit or a worker exit. Delivery failures "

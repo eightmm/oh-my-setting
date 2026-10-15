@@ -6303,8 +6303,8 @@ whole_finalize = list(final_args)
 whole_finalize[whole_finalize.index("--task-id") + 1] = "whole-main-result"
 whole_finalize[whole_finalize.index("--owner") + 1] = "claude"
 owner_env = dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["claude"])
-failure = subprocess.run(whole_finalize, cwd=project, env=owner_env, capture_output=True, text=True)
-assert failure.returncode != 0 and "matching landed patch" in failure.stderr, failure
+whole_unlanded = json.loads(call(whole_finalize, owner_env))
+assert whole_unlanded["outcome"] == "accepted" and not whole_unlanded["admission_event_ids"]
 call(["bash", str(panel.ENTRY), "patch-land", "--repo", str(project), "--patch", write_patch,
       "--verify", "test \"$(tail -1 value.txt)\" = new"])
 write_finalize[write_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
@@ -6386,9 +6386,13 @@ with patch.dict(os.environ, environment, clear=True), \
     with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(extra_patch))):
         changes = saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]
         assert changes["out_of_scope"] == {"count": 1, "paths": ["other.txt"]}, changes
-        for task, main in (("scope-result", None), ("whole-scope-main", "scope-main")):
-            attempts = [scope_worker] + ([{"attempt_id": main, "tool": "panel-main", "provider": "codex"}] if main else [])
-            with patch.object(saved, "_records", return_value=(attempts, scope_evidence(extra_patch))), \
+        for task, main, worker_task in (("scope-result", None, "scope-result"),
+                                        ("scope-result", "scope-main", "scope-result"),
+                                        ("whole-scope-main", "scope-main", None)):
+            worker = dict(scope_worker, task_id=worker_task)
+            attempts = [worker] + ([{"attempt_id": main, "tool": "panel-main", "provider": "codex"}] if main else [])
+            rows = [dict(row, task_id=worker_task) for row in scope_evidence(extra_patch)]
+            with patch.object(saved, "_records", return_value=(attempts, rows)), \
                     patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": main} if main else {}):
                 try:
                     saved.finalize(project, "codex", task, str(summary), "accepted", "true", ["value.txt"])
@@ -6396,6 +6400,33 @@ with patch.dict(os.environ, environment, clear=True), \
                 except ValueError as error:
                     assert "1 path(s) outside its declared scope" in str(error) and "other.txt" in str(error), error
                 assert saved.finalize(project, "codex", task, str(summary), "completed")["outcome"] == "completed"
+        # Another task's drift and missing landing cannot veto this task under the same main.
+        attempts = [scope_worker, {"attempt_id": "scope-main", "tool": "panel-main", "provider": "codex"}]
+        with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": "scope-main"}):
+            rows = scope_evidence(extra_patch)
+            for evidence_rows in (rows, rows[:1]):
+                with patch.object(saved, "_records", return_value=(attempts, evidence_rows)):
+                    result = saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])
+                    assert result["outcome"] == "accepted" and not result["admission_event_ids"], result
+            # An unassigned worker must still supply matching landed evidence.
+            attempts[0] = dict(scope_worker, task_id=None)
+            rows = [dict(row, task_id=None) for row in scope_evidence(extra_patch.split(b"diff --git a/other.txt")[0])]
+            with patch.object(saved, "_records", return_value=(attempts, rows[:1])):
+                try:
+                    saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])
+                    raise AssertionError("unassigned write worker accepted without landing")
+                except ValueError as error:
+                    assert "matching landed patch" in str(error), error
+            with patch.object(saved, "_records", return_value=(attempts, rows)):
+                assert saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])["outcome"] == "accepted"
+            changed = [dict(attempts[0], refs=dict(scope_worker["refs"], panel_room_participant="changed")), attempts[1]]
+            with patch.object(saved, "_records", side_effect=[(attempts, rows), (changed, rows)]):
+                try:
+                    saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])
+                    raise AssertionError("unassigned worker changed during verification")
+                except ValueError as error:
+                    assert "related attempts changed" in str(error), error
+        scope_evidence(extra_patch)
         for owns in ([], None):
             scope_member["participants"][0]["owns"] = owns
             assert saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]["out_of_scope"]["count"] == 0
@@ -6447,7 +6478,7 @@ with patch.dict(os.environ, environment, clear=True), \
 # END patch-scope finalize regression.
 
 whole = json.loads(call(whole_finalize, owner_env))
-assert whole["main_attempt_id"] == main_attempts["claude"] and whole["admission_event_ids"]
+assert whole["main_attempt_id"] == main_attempts["claude"] and not whole["admission_event_ids"]
 joined = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
                          "--task-id", "whole-main-result", "--json"]))["rows"][0]
 assert any(c.get("kind") == "delegate" for c in joined["calls"]), joined
