@@ -222,7 +222,7 @@ def status_tag(state, *, exit_code=None, unicode=True) -> str:
         if state == "provider_error" and type(exit_code) is int:
             words += " " + glyph("separator", unicode) + " exit %s" % exit_code
         return "[%s %s]" % (glyph(mark, unicode), words)
-    state = {"working": "running", "live marker": "running", "waiting_input": "needs input",
+    state = {"working": "running", "live marker": "running", "manual": "running", "waiting_input": "needs input",
              "waiting_approval": "needs approval", "review": "awaiting decision", "timed_out": "timed out",
              "orphaned": "lost process", "lost_process": "lost process", "unresolved": "status unknown",
              "unknown": "status unknown", "presence unknown": "status unknown", "exited": "finished",

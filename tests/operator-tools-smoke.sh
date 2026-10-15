@@ -2460,7 +2460,7 @@ use_unicode(True)
 assert call_identity("worker", "gpt-6.1-sol", "Routing") == "WORKER Sol 6.1 · Routing"
 assert call_identity("worker", "gpt-6.1-sol", "Routing", alias="B7") == "B7 WORKER Sol 6.1 · Routing"
 assert call_identity(None, None, short_id="abcd") == "UNKNOWN model unknown #abcd"
-tags = {"starting": "[⟳ starting]", "working": "[⟳ running]", "verifying": "[⟳ verifying]",
+tags = {"starting": "[⟳ starting]", "working": "[⟳ running]", "manual": "[⟳ running]", "verifying": "[⟳ verifying]",
         "idle": "[○ idle]", "blocked": "[! blocked]", "waiting_input": "[? needs input]",
         "waiting_approval": "[! needs approval]", "review": "[! awaiting decision]",
         "unknown": "[? status unknown]", "done": "[✓ finished: exit 0]", "failed": "[✗ failed: exit 1]",
@@ -18420,6 +18420,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
     interrupted_report = dict(activity_report, main_activity=interrupted_activity)
     interrupted_main = next(m for m in graph_view.nodes(interrupted_report) if m["role"] == "main")
     assert graph_view.main_state(interrupted_main) == "manual"
+    assert graph_view.execution_tag(interrupted_main) == status_tag("working")
     with patch.dict(os.environ, activity_env):
         with patch.object(hook_state.time, "time", return_value=302):
             hook_state.record_panel_activity({"hook_event_name": "UserPromptSubmit",
@@ -18510,6 +18511,8 @@ for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=
                           else "manual" if word == "manual" else "working" if word.startswith("working") else "live marker")
         assert graph_view.main_state(projected_main) == expected_state
         assert graph_view.main_words(projected_main) == word
+        if word == "manual":
+            assert graph_view.execution_tag(projected_main) == status_tag("working")
         for ascii_only in (False, True):
             expected = word.replace(" · ", " / ") if ascii_only else word
             for activity_view, menu in (("graph", False), ("tree", False), ("graph", True)):
@@ -18517,6 +18520,8 @@ for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=
                 screen = render(report, "claude", 120, 44, view=activity_view, menu=menu,
                                 frame=2, unicode=not ascii_only, navigation=navigation)
                 assert expected in screen and "running" in screen, (activity_view, screen)
+                if word == "manual":
+                    assert status_tag("working", unicode=not ascii_only) in screen and "status unknown" not in screen, screen
                 if ascii_only:
                     screen.encode("ascii")
                 if word.startswith("idle") and activity_view == "graph":
@@ -18525,6 +18530,8 @@ for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=
             legacy = render(report, "claude", 120, 44, view="compact", main_attempt="activity-attempt",
                             frame=2, unicode=not ascii_only)
             assert (word.replace(" · ", " / ") if ascii_only else word) in legacy, legacy
+            if word == "manual":
+                assert status_tag("working", unicode=not ascii_only) in legacy and "status unknown" not in legacy, legacy
             if ascii_only:
                 legacy.encode("ascii")
         from panel_view import inbox_items
