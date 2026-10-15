@@ -249,7 +249,29 @@ gate_tree_left && fail "a red gate must remove its gate worktree and marker dire
 grep -Fq 'in affected:tests/demo-smoke.sh scripts-smoke.test_demo' "$repo/.oms/failures.jsonl" ||
   fail "a red gate must be recorded in the fail ledger with its failing stages"
 
+# A same-request retry keeps both log attempts while summarizing only the pass.
+retry_count="$TMP/retry-count"
+gate "if [ -f '$retry_count' ]; then echo 'check: ok'; else touch '$retry_count'; echo 'check: affected:tests/old-smoke.sh FAILED (1s)'; exit 3; fi"
+if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/retry-first.out" 2>&1; then
+  fail "the first retry probe must fail"
+fi
+"$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/retry-second.out" 2>&1 ||
+  fail "the same landing request must pass on retry: $(cat "$TMP/retry-second.out")"
+retry_sha="$(git -C "$repo" rev-parse HEAD)"
+retry_receipt="$(find "$receipt_dir" -type f -name "$retry_sha-*.json" -print)"
+[ -n "$retry_receipt" ] || fail "retry must leave a passed receipt"
+retry_log="$(log_of "$retry_receipt")"
+[ "$(grep -c '^land attempt: ' "$retry_log")" = 2 ] || fail "both attempts must be marked in the appended log"
+python3 - "$retry_receipt" <<'PY' || fail "retry receipt must summarize the successful attempt only"
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["state"] == "passed" and "pushed " in r["summary"] and "old-smoke" not in r["summary"], r
+PY
+grep -q 'land attempt: 1 started_at=.* sha=' "$retry_log" || fail "attempt one marker is missing"
+grep -q 'land attempt: 2 started_at=.* sha=' "$retry_log" || fail "attempt two marker is missing"
+
 # --- 5. HEAD moves during the gate: nothing pushed -----------------------------
+before="$(remote_tip)"
 gate 'sleep 3; echo slow ok'
 ( sleep 1; echo two > "$repo/two"; git -C "$repo" add two; git -C "$repo" commit -q -m two ) &
 if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/moved.out" 2>&1; then

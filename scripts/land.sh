@@ -370,7 +370,7 @@ run_job() {
   clean_tree || {
     note "error: tracked tree changed before job started"; return 1;
   }
-  local resume=0 remote_sha failed_stages
+  local resume=0 remote_sha failed_stages attempt marker
   if can_resume; then
     remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
     remote_sha="${remote_sha%%[[:space:]]*}"
@@ -385,6 +385,9 @@ run_job() {
   rset growth="$(oms_test_growth "$REMOTE/$TARGET" "$SHA")"
   rset pid="$$" state=running started_at="$(now)" sha="$SHA" gate.command="$GATE" \
     remote="$REMOTE" target="$TARGET" log="$LOG" request="$STAMP" resumed="$resume"
+  attempt="$(($(grep -c '^land attempt: ' "$LOG" 2>/dev/null || true) + 1))"
+  marker="land attempt: $attempt started_at=$(now) sha=$SHA"
+  echo "$marker" >> "$LOG"
   # Detached startup is confirmed only after lock acquisition and the exact
   # SHA/tracked-tree admission checks above have written a running receipt.
   [ -z "$READY_FILE" ] || printf '0\n' > "$READY_FILE"
@@ -404,7 +407,8 @@ run_job() {
       # Name the failing stages and smoke tests: which tests ever catch
       # anything is the input for retiring the ones that never do, and the
       # ledger is queryable where scattered gate logs are not.
-      failed_stages="$(sed -n 's/^check: \([^ ]*\) FAILED.*/\1/p' "$LOG" | sort -u | tr '\n' ' ')"
+      failed_stages="$(awk -v marker="$marker" 'index($0, marker) { current=1; next } current { print }' "$LOG" |
+        sed -n 's/^check: \([^ ]*\) FAILED.*/\1/p' | sort -u | tr '\n' ' ')"
       "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" record --kind verify --cmd "$GATE" \
         --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }} (see $LOG)" >/dev/null 2>&1 || true
       finish failed "gate exit $rc"; return 1
