@@ -582,6 +582,10 @@ def plan_summary(report):
             stale_claims + stale_reviews + len(ended))
 
 
+RETIRE_CHOICES = ("retire: superseded (instant) or completed-external (re-runs acceptance ~9 min);"
+                  " oms agent-plan retire --check")
+
+
 def goal_banner(report, width, unicode, compact=False):
     """Full goal on the board; bounded summaries retain the compact fallback."""
     summary = plan_summary(report)
@@ -589,9 +593,7 @@ def goal_banner(report, width, unicode, compact=False):
         if width >= 46:
             available = max(1, width - 6)
             # One extra line: the cost of each retire disposition; retire --check prints the exact command.
-            lines = [_finished_goal_text(report, summary, width),
-                     "retire: superseded (instant) or completed-external (re-runs acceptance ~9 min);"
-                     " oms agent-plan retire --check"]
+            lines = [_finished_goal_text(report, summary, width), RETIRE_CHOICES]
             return [(box_row(part, width, unicode), "metadata")
                     for line in lines
                     for part in wrapped(line, available, max(1, (len(line) + available - 1) // available))]
@@ -639,9 +641,12 @@ def _finished_goal_text(report, summary, width):
 def goal_box(report, width, unicode, compact=False):
     summary = plan_summary(report)
     if summary and _plan_finished(report):
-        return [(box_edge("Goal", width, unicode), "border"),
-                (box_row(_finished_goal_text(report, summary, width), width, unicode), "metadata"),
-                (box_edge("", width, unicode, "bottom"), "border")]
+        rows = [(box_row(_finished_goal_text(report, summary, width), width, unicode), "metadata")]
+        if width >= 46:
+            available = max(1, width - 6)
+            rows += [(box_row(part, width, unicode), "dim") for part in
+                     wrapped(RETIRE_CHOICES, available, max(1, (len(RETIRE_CHOICES) + available - 1) // available))]
+        return [(box_edge("Goal", width, unicode), "border")] + rows + [(box_edge("", width, unicode, "bottom"), "border")]
     goal = summary[0] if summary else "No goal recorded"
     counts = "%s/%s verified" % summary[1:3] if summary else ""
     locally_done = sum(1 for task in listing(mapping(report.get("room")).get("repo_tasks"))

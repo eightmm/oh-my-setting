@@ -16156,11 +16156,15 @@ assert "oms agent-plan retire --check" in wide_finished_text, wide_finished_text
 assert len(graph_text.goal_banner(finished_goal, 120, True)) <= 4, "a finished goal banner must stay compact"
 assert "Goal finished 6/6" in narrow_finished and "—" not in narrow_finished and "Ship the shared plan board" not in narrow_finished, narrow_finished
 finished_box = graph_text.goal_box(finished_goal, 80, True)
-assert len(finished_box) == 3 and finished_box[1][1] == "metadata" and "Goal finished" in finished_box[1][0], finished_box
+# The board's goal box names the retire choices too; narrow boxes keep the single line.
+assert finished_box[1][1] == "metadata" and "Goal finished" in finished_box[1][0], finished_box
+box_text = " ".join(text for text, _ in finished_box)
+assert "superseded (instant)" in box_text and "completed-external" in box_text and "retire --check" in box_text, finished_box
 for columns in (28, 42, 80, 120):
     for glyphs in (True, False):
         finished_rows = graph_text.goal_box(finished_goal, columns, glyphs)
-        assert len(finished_rows) == 3 and all(display_width(text) == columns for text, _ in finished_rows), finished_rows
+        assert (len(finished_rows) == 3) == (columns < 46) and len(finished_rows) <= 5, finished_rows
+        assert all(display_width(text) == columns for text, _ in finished_rows), finished_rows
         if columns == 28:
             assert "Finished 6/6" in finished_rows[1][0] and "..." not in finished_rows[1][0], finished_rows
 # Cancelled tasks are closed, never verified: they leave the total. A running task whose calls all ended is stale,
