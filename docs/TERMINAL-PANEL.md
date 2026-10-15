@@ -1,19 +1,28 @@
 # OMS terminal control panel
 
+This guide is the full reference for using the OMS terminal panel and its recorded work rooms.
+It covers startup, navigation, role routing, results, recovery and the contracts behind them.
+
+## In this guide
+
+- [Quick start](#quick-start) and [starting the sole main](#starting-the-sole-main)
+- [Layout and activity](#layout-and-activity), including [keys](#keys)
+- [Roles and automatic allocation](#roles-and-automatic-allocation)
+- [Discussion and results](#discussion-and-results)
+- [Reference](#shared-work-rooms-and-the-graph), [contract and verification](#contract-and-verification), and [recovery](#salvaging-a-stopped-worker)
+
 Run `oms` in a terminal to open the control panel. Native Claude Code, Pi or Codex
 keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
 worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
 Without `--repo`, the panel resolves the current Git top-level and refuses a non-repository with exit 2; `--providers`, `--routes` and `--help` remain available anywhere, and explicit `--repo PATH` also accepts a non-repository directory.
-Boards of one repository share atomic dashboard and result-query caches in `.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry, while room selection and terminal reads stay per window. A read that races a state change collects directly instead of failing, and a board or control window whose refresh still fails keeps its last good state with a `State refresh failed; showing data from Ns ago` notice rather than the no-room fallback.
-
-When the first read fails, or a window switches to a room it has not successfully read, the panel says that room state is unavailable and that its work and messages are unknown. It does not show empty-work counts. The control menu remains available for retry and navigation; a later successful read restores the normal board.
+The sidebar reads OMS state; it does not replace the providers' native conversation or authentication.
 
 ## Quick start
 
 1. Run `oms` in a terminal. The control window is the inbox; the panel starts at most one live main, using Claude by default. Pi is the explicit alternative (`OMS_PANEL_MAIN=pi` or the Pi start key).
-2. The main window keeps the board fixed on the left; the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
-3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The pinned **Needs you** strip stays above activity. The bottom box contains Detail, Plan, Debate and Messages tabs, plus Needs you only while the inbox has items, when its height permits; if only one row fits, the tab strip remains visible without a body.
+2. The main window keeps the board on the left whenever the window is wide enough (above the CLI only when it is too narrow); the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
+3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The bottom box contains Detail, Plan, Messages, Past and Attention tabs (Past and Attention stay even when empty), plus Debate while a debate exists. The pinned **Needs you** attention strip stays above activity when the inbox has items.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
 5. `Tab` cycles visible tabs; arrows move within the current surface; Enter opens or expands. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
 6. At a main's exit prompt, `r` resumes or restarts in that pane and Enter closes the window. `F9` switches between chat and board; `F5` opens the control window, and from that window returns to the previous one; `F12` shows panel-wide keys.
@@ -51,28 +60,6 @@ next alias using the role letter and number. Aliases are unique across a room li
 accepts an alias in `--task-id` when it resolves to one task. The default alias
 prefix is selected by role (for example, `B` for builder and `W` for worker).
 
-## Salvaging a stopped worker
-
-Run `oms panel --repo . --salvage TASK_ID [--json]` to capture the latest stopped
-delegate's recorded, kept execution worktree, including a separate clone or
-scratch worktree. It preserves that checkout and index,
-and reports changed paths, before/after byte sizes, the patch path and its
-`.patch.json` metadata under `.oms/artifacts/delegate/`. Metadata and the patch
-header carry `salvaged_from` (task, attempt, kept path and stop reason), base and
-payload hashes, file sizes and `encoding_warnings` for display. Admission uses
-controller records in `.oms/salvage-provenance/`, keyed by the diff payload hash;
-editing headers, sidecars or warning lists cannot change those records.
-The flags guard the salvaged artifact as captured; an edited or reformatted
-patch is a different patch that ordinary admission checks. `patch-admit`
-examines every textual patch hunk for encoding loss, independent of salvage
-identity; `--accept-encoding-loss` records owner acceptance for detected hunks.
-Warnings flag hunks whose
-replacement has the same ASCII skeleton after Unicode decomposition but fewer
-non-ASCII characters, and files losing more than half their non-ASCII bytes.
-These are review hints; they can include intentional edits or deletions.
-Review the patch before using `oms patch-land --patch PATH --accept-salvaged`.
-Flagged encoding loss also requires `--accept-encoding-loss`; normal admission
-checks still run. Salvage captures evidence and never admits or applies it.
 
 ## Starting the sole main
 
@@ -174,7 +161,626 @@ to preserve its base instructions and pass the OMS room and sole-main contract.
 Only the person ends a main, from its native chat; the native CLI keeps its history where it
 already stores it.
 
+
+## Layout and activity
+
+When the window has room, the board stays on the left, with the native
+conversation beside it and a right-side reader for selected calls and results.
+The board's bottom dock has Detail, Plan, Messages, Past and Attention tabs,
+plus Debate while a debate exists. Needs you is an attention strip above activity. The
+session log sits below the activity tree when the layout has enough height.
+
+### Keys
+
+Keys apply to the focused surface. The board and reader bindings are contextual; `?` shows live board hints for the current surface and width.
+
+| Key | Graph/tree board | Result reader |
+| --- | --- | --- |
+| Arrow keys | Move through calls or the selected tab's items | Move through result lines |
+| `Home` / `End` | First / last item | Start / end of result |
+| `PageUp` / `PageDown`, wheel | Page through calls or selected Detail/Plan content; wheel over a graph band (including Goal) scrolls that band | Scroll result |
+| `Tab` | Next visible tab | Next reader view |
+| `Enter` | Preview a graph call; open a tree call; expand a message/group | Finish search input |
+| `Space` | Expand/collapse a selected group or fold a main in the tree | Page down |
+| `f` | Open the selected full result; open the recorded Debate result | — |
+| `r` / `e` / `d` | — | Raw / Events / Diff view |
+| `i` | Toggle pane context headers in a managed panel | Run info view |
+| `g` / `t` | Graph / tree view | — |
+| `b` / `v` | Toggle attention-only / expand or collapse the board | — |
+| `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
+| `N` | — | Previous search match |
+| `s`, then `1` / `2` / `0` | Swap main to Claude / Pi / Codex in a managed panel | — |
+| `a` / `w` / `c` | Ask advisor / open selected worker worktree / request selected call cancellation | — |
+| `k` / `u` | Capacity / refresh | — |
+| `m` | Cycle Work / Overview / Focus in a managed panel | — |
+| `[` / `]` / `o` | `[` / `]` scroll the session log older / newer when no dock tab has focus; wheel scrolls over the log | Previous / next section / outline |
+| `/` | — | Search result text |
+| `z` | — | Zoom the tmux reader pane when width is under 120 columns or it is already zoomed |
+| `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader |
+| `?` | Show/hide board key help | — |
+| `Ctrl+L` | Repaint the board | Repaint the reader |
+| `F5` / `F8` / `F9` / `F12` | Control window (when present) / cycle layout / swap chat-board focus / panel-wide key list in tmux | — |
+| Shift-drag | Copy terminal selection in a managed panel | — |
+| Mouse click | Select a row/tab; graph calls and the main preview their cards | — |
+
+At the native main's exit prompt, `r` resumes/restarts there and Enter closes the window. The terminal/job workspace has its own controls; this table covers only the board and result reader.
+
+A dispatched call settles only after its supervisor proves the whole process tree exited. On macOS and Windows, where that supervisor is unsupported, the call stays pending and the panel prints a manual-clear hint; independently stop every provider descendant before clearing its retained scope.
+
+
+`--host auto|inline|tmux|herdr` selects the terminal host independently of
+the activity view. Auto reuses an existing local POSIX Herdr pane; otherwise
+the existing layout selection applies. `--host inline` disables host automation;
+`--host tmux` explicitly selects split. Herdr requires the running pane's
+`HERDR_ENV`, `HERDR_PANE_ID` and owned `HERDR_SOCKET_PATH`. It is optional,
+never installed or started by OMS, and its Windows named-pipe transport is not
+implemented here. Ordinary Windows/inline OMS remains available.
+
+In a Herdr repository pane, the menu opens a fresh tab containing the native
+OMS launch wrapper and a task panel. It does not type into an existing
+agent. The API uses bounded local JSON requests and never retries a mutation
+whose outcome is uncertain. Original-chat navigation reconciles active OMS
+main ownership and exact pane/terminal/socket identity; reused panes and
+unproven sessions are rejected. Numeric footer readings retain their reported
+scope and unknown values. A socket error does not stop the native sibling.
+
+The board stays on the left whenever the window is wide enough; it moves above the
+CLI only when the window is too narrow, and returns left when it widens again (28
+percent of the width or 45 percent of the height the first time, sized from the
+terminal that is attaching; optional integer `OMS_PANEL_BOARD_PERCENT` overrides the
+landscape default, clamped to 25–35 percent, with invalid values ignored). In Work
+mode, a landscape default or scaled record is capped at the smaller of 38 percent
+of the window and the width that leaves 120 columns for the CLI; the existing minimum
+split rules apply on narrower windows. A new landscape board stays unsplit when
+20 board columns, the divider and 40 CLI columns cannot fit; a portrait split needs
+20 rows on each side of the divider. A deliberate border drag remains in effect
+for that Work window and is recorded there. A call opened from the board shows in a
+reader pane above the CLI.
+Herdr uses the same left board, starting at the same 28 percent share and honoring
+`OMS_PANEL_BOARD_PERCENT`. Later Herdr resizing is not recorded or shared;
+`SplitSync` synchronizes the board width or portrait height only in tmux.
+In tmux, each window records its board edge and size in its window option
+`@oms_panel_split` (`left:<cells>c` or `top:<rows>r`; the older percent form is
+converted on first sight). Resizing recomputes the portrait/landscape edge with a
+small hysteresis band and scales the recorded size with the window, clamped to keep
+at least 20 cells for the board and chat. A flip moves the
+existing board pane without moving focus, preserving pane ids; dragging the border sets the size followed
+by later resizes. Press `m` on the board or `F8` in tmux to cycle Work, Overview and
+Focus. Overview gives the graph about 62 percent of the landscape width without
+changing the Work record. Focus zooms the CLI pane; leaving it unzooms and returning
+to Work restores its recorded width. SplitSync stays idle while Focus is zoomed and
+does not apply the Work record in Overview. Graph rendering falls back to the tree
+when the board is too narrow for the graph. The control window and other zoomed
+windows are left alone.
+A watcher whose OMS sources change re-executes itself once they compile, so
+updated boards need no manual restart; an open reader stays. Select `v` in the
+task panel to expand its graph; `Esc` or watcher shutdown collapses it. Native input and permission
+prompts stay in the original CLI. The room's detailed tree and graph remain
+available. A successfully exited native main is labelled `exited`, independently
+of a worker result, verifier or owner acceptance.
+
+The graph fits from 76 columns by 16 rows. Advisors/reviewers sit above their
+exact main, and its workers sit below, with activity moving on verified parent
+connections. The live main, or a selected one, controls this view; arrow/Tab navigation reaches
+its calls. Unlinked calls stay unlinked and are available in
+the tree (`t`). Model-call usage stays at the top, while taller views show
+provider readings, recorded messages or repository tasks. Missing router,
+progress, locks or billing data is never invented. Smaller interactive panes
+retain tree navigation; passive output shows the list.
+Clicking a main requests navigation to its original chat; workers show their
+content in the right-side reader (or the board detail area). The remaining chat pane retains the provider's native interactive terminal,
+including editing, pasted input and permission prompts. `--launch` opens this
+layout in the checkout's panel when tmux is available, while `--host inline
+--launch` runs the CLI alone.
+
+The room's default tree uses closed usage, activity and action cards. Wide
+usage cards list the retained model-call totals (the quota/context readings are
+the pinned usage line); call totals appear once and are not account quotas. A narrow
+usage line uses `W` for weekly quota left and `C` for main context used. Activity keeps
+main/role branches, wraps task titles, separates repository tasks, and closes
+the viewport border even while scrolling. Empty declared scopes are omitted.
+The control menu is an inbox. **Needs you** lists up to 12 items, newest first,
+each as glyph, who (`Sol 6.1 worker for Opus 5.5`), what and age: failed or
+timed-out calls with their title, calls or mains waiting for approval or input,
+unanswered room messages that a main sent to `all`, and finished write workers
+whose patch has no admission or landing record. Arrow keys or a click select a
+row; the wheel moves by lines and page keys by the visible item count, stopping
+at either end. Enter (or a click) opens that main's chat or shows the call's result,
+and Esc returns. An empty list says `Nothing needs you right now`; a room with no
+main shows `Press 1 (Claude) or 2 (Pi) to start the sole main`. The menu keeps
+start (`1` Claude, `2` Pi, `0` Codex, `3` Resume, `t` Task), `o` rooms, `9` refresh and
+quit/detach; board keys are not repeated. Enter `?` for all other actions in
+ordinary scrollable help (chats, results, views, advisor, review, council,
+finalize); existing shortcuts still work.
+Menu keys act at once, without Enter, on a POSIX terminal with raw input; the
+board's key handling is reused. Text prompts (a task title, a provider) stay
+line-based inside that prompt only. Elsewhere, such as Windows Git Bash or
+redirected input, the menu reads `oms> ` and needs key + Enter. The inbox
+refreshes every five seconds. The watcher retains its arrow, mouse and page-key
+navigation.
+In a managed tmux control pane the quit key is labelled `Detach`; it preserves
+the native sessions. In a coupled tmux board, `F9` swaps focus between the
+chat and the board and keeps both alive; `q` does nothing there, and Esc or `v`
+un-zoom the board only while it is zoomed.
+Standalone watchers retain `q` to exit. If a board was explicitly removed,
+`oms panel --reopen` restores it without restarting the native CLI. Repeating
+the operation preserves an existing board. Inside an OMS window, bare
+`oms panel` does the same; the control menu also provides `z` for this action.
+Restore accepts only this checkout's front door with a matching repository,
+refuses ambiguous/replaced input panes, and does not restart a terminated CLI.
+
+Client detach retains the host's live processes. A Herdr server restart is
+different: bare vendor auto-restore is not an OMS resume and cannot prove
+fresh OMS ownership. Continue through the OMS wrapper's existing exact-resume
+checks after its previous execution is confirmed terminal. An unknown shutdown
+remains blocked; pane IDs or a Herdr `done` badge cannot authorize takeover.
+This adapter does not change Herdr's global configuration or restore policy.
+
+Outside Herdr, `auto` chooses split on POSIX when tmux is installed, including
+`--launch` and runs started inside another tmux session (the client switches to
+the panel instead of nesting); otherwise it uses inline. `--host inline` or
+`--layout inline` keeps a run in the current terminal. Each checkout has one OMS panel
+session, `oms-<project>`: the checkout's directory name lowercased, runs of other
+characters turned into `-`, at most 32 characters (`project` when nothing is left). When that
+name is held by another checkout or by a session OMS did not create, the panel uses
+`oms-<project>-` plus the first 6 hex digits of the SHA-256 of the resolved path, and neither
+session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the checkout stays in use
+under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
+checkout on the session. A new panel opened without `--launch` also opens one
+installed main (Claude, then Pi, then Codex) in its own window with a new room;
+`OMS_PANEL_MAIN=pi` selects Pi; an empty value opens no main, and an unknown value opens none with a stderr warning.
+Inline and Herdr without `--launch` instead open the control menu, preselecting nonempty
+`OMS_PANEL_HARNESS`, otherwise the new-panel main (the selected `OMS_PANEL_MAIN` name
+or first installed Claude/Pi/Codex), falling back to Claude. Press the selected harness's
+key (`1` Claude, `2` Pi, `0` Codex) to start it.
+Reattaching never opens mains again; later launches attach to it (or switch the current
+tmux client), and `--launch` adds a native window there instead of opening a
+second session. A session with that name recorded for another checkout is
+refused. A launch that loses a creation race, or arrives before a just-created
+session has recorded its checkout, waits up to two seconds and joins it; the
+owner marker is written after the session's room, so a joining launch follows
+that room. New mains default to the panel's recorded room while it is open and
+has participant/message headroom; otherwise, or when `--room` is given, the
+existing room rules apply. Rooms stay bounded and task-scoped; the panel
+outlives them. Separate tmux servers are separate scopes. Each native conversation gets
+its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
+are preserved, with one addition: `F9` selects the other pane
+of the window, `F8` cycles layout modes, `F5` opens the control window and `F12` shows
+the key list, all without the prefix (F10/F11 belong to terminal menus). tmux key
+bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
+passes the key through unchanged in every other session, and is not installed when the key is
+already bound by the user (a binding OMS installed earlier under the old session-name test is replaced). With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
+detaches while work continues. Quit in the control pane also detaches. Failed
+construction rolls back only the new OMS session or added window. Inline returns to the menu
+when the native CLI exits and refreshes then; it has no permanent sidebar.
+
+The board has one MAIN card for its live main, with its team grouped into
+ADVISORS, REVIEWERS and WORKERS. Team counts and elapsed time appear with the
+main summary; call rows show state, model and task title. Calls remain attached
+to their recorded parent, and each row opens its reader. The repository control view shows `NEXT MAIN` as a one-line preset;
+that preset never fills missing model/effort fields in a recorded main.
+The native main card shows provider, requested model/effort and recorded task
+when supplied at launch. Missing fields remain unrecorded.
+Tasks entered later inside the native conversation are not intercepted:
+its main title stays unrecorded unless supplied at launch, while dispatched child
+titles are recorded. The palette uses warm Claude, blue Codex, teal workers and
+lavender advisors and reviewers. Role cards show lifecycle state,
+model, task title/ID, read/write authority, effort and location. Worktree locations
+use a relative unique suffix; repository calls show `repository`. Detached
+worker worktrees can be cleaned after completion; their locations remain history.
+Task titles have their own bright lines, wrapping to two lines in wide views
+and up to three in narrow sidebars. Main task titles wrap too. Internal task IDs
+stay in wide metadata rows or Details. Details gives bounded titles separate
+wrapped lines, so long titles need not compete with location and purpose.
+No absolute home paths or transcripts are added to panel metadata.
+
+Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS /
+WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context used. When room history contains earlier mains, they fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
+remain unlinked; a generic attempt parent is never promoted into a native-main
+relationship. A linked owner whose metadata is unavailable is labelled so.
+
+Press `v` to toggle board expansion between the current overview and an expanded graph; `Esc` or closing the watcher collapses any expansion. In compact layouts, calls retain their model, state and task title. At 80 columns or wider, these share one row with metadata on the
+right; narrow views place metadata below the title. Detail expands wrapped
+titles and location/effort metadata. The view prioritizes attention calls and reports overflow when calls do not fit. Small panes use compact summaries. Press `b` to
+toggle attention-only: waiting input, waiting approval, blocked, review and
+orphaned calls, plus retained failed terminal outcomes. Filtered calls are
+counted rather than changing their states. Settled calls stay in the Past tab
+and are hidden from the board; attention-only empties the Past tab as well. Both controls affect presentation, not the main identity or
+dispatch authority. A native window inherits these
+settings when opened, and the control sidebar follows subsequent menu changes.
+CLI `--view` overrides a watch's window density; `--attention-only` keeps its
+filter enabled. These flags apply only to the menu or watch, not model operations.
+
+The usage line has one `Claude` reading and one `Codex` reading. For each provider, the selected window's exact main attempt wins; otherwise the live, then newest, matching main is used. Claude reads its session HUD cache first, then the proven pane footer when the cache is absent/stale and to fill missing fields; Codex uses its native reading or proven pane footer. Missing readings show `--`. Claude's existing session HUD cache supplies reported context and optional
+`seven_day` usage, with a ten-minute TTL and expired reset values suppressed.
+The consumer hash selects that session's cache; no newest-session guess is
+made. A proven existing tmux pane can supply numeric fields from its last
+eight visible native footer lines. `TUI` or `HUD/TUI` labels those mirrored
+readings; native output may lag while idle and changed footer formats become
+unknown. The watcher performs no native transcript/registry scan or account
+request for these readings. Header collection runs once per five-second
+snapshot, never per animation frame. Ended mains have unknown current context.
+
+The separate `USAGE` area groups reported tokens by model using only the existing
+recent eight repository artifact records. It stays repository-wide when the
+activity view is scoped or filtered. A short wide pane uses a single usage
+strip; taller panes use a small card, with reported USD cost when height is at
+least 40 rows. `x` counts retained call records, not retries or native turns.
+`(sel)` identifies a selected model whose served identity was not reported;
+served identities and selected identities are separate groups. Mixed/fallback
+operations stay in `Mixed models`, and unknown models stay unknown. `?` means
+unreported; `+?` means a known subtotal plus unreported records, while a reported
+zero stays zero. Overflow reports omitted model groups. Owner results, review
+gate summaries and council syntheses are excluded, and lifecycle usage is not
+added again. These are provider-reported partial observations, not account
+totals or remaining quota; they do not supply the provider header. Provider token definitions can
+differ, particularly for cache input; no cross-model total is shown. The window
+can change or shrink as new artifact records arrive.
+
+On a capable terminal the sidebar animates live-state indicators
+at four frames per second using the cached snapshot. Borders and role dividers
+stay still. Only changed
+rows are redrawn; resizing triggers a complete repaint. Starting, working,
+verifying and live-marker records can move; blocked/waiting/review and terminal
+states stay still. The motion means recorded activity, not token streaming,
+progress percentage or a new dispatch event. The native main's explicit child
+links determine the call tree. Rendering frames makes no state writes or model
+calls; state collection remains every five seconds, plus collection time.
+Interactive watch collects state and quota readings in one background read
+at a time. It keeps the last frame available for input while a read is pending,
+and applies completed reads within a 50 ms polling interval. Redirected or
+noninteractive watch retains synchronous snapshots and `--count` semantics.
+Snapshots that change the hit map discard stale coordinate clicks; navigation still validates
+the current room, participant and terminal before focusing it. A proven terminal
+destination does not require scanning unrelated native chat histories; app
+navigation and the full chat catalog keep their bounded identity lookup.
+`--count` counts collected snapshots rather than animation frames.
+
+Use `oms panel --watch --no-animation` for a motion-free view, or set
+`OMS_PANEL_NO_ANIMATION=1` in the launching environment to cover automatically
+opened sidebars. Redirected output and `TERM=dumb` are static plain snapshots.
+`NO_COLOR` controls color independently. `OMS_PANEL_COLOR=always` enables color
+only in the OMS panel even when its environment inherits `NO_COLOR`;
+`OMS_PANEL_COLOR=never` disables it, and `auto` preserves the default.
+`OMS_PANEL_THEME=light` (or a light `COLORFGBG` background) uses darker shades for light
+terminal themes; `dark` forces the default shades. Redirected
+output and `TERM=dumb` stay plain in every mode. The watch restores the terminal cursor
+on exit or interruption. The control menu redraws in place on keys and every five
+seconds rather than animating.
+
+A native window binds children by its recorded main attempt ID. Earlier mains'
+calls stay in the room's tree. The control view shows
+repository-wide records. Control option `4 Main` chooses the main harness for
+subsequent manual dispatch; Pi uses the Codex dispatch owner. Main/child links come from explicit
+lifecycle metadata, never matching a provider name. Legacy unlinked records stay
+repository-wide. A marker and its attempt are coalesced only by their exact
+execution location. Selected/served attribution uses exact attempt IDs; a model
+name alone is not proof the provider served it.
+
+Active attempts have a separate bounded window so newer outcomes cannot hide
+them. Overflow is reported; Details retains the bounded active and recent
+records. `REPO ACCEPT` and repo attention belong to shared repository state,
+including earlier work. Recent outcomes and successful native process exit do
+not establish acceptance of a task. Native subagents that do not write OMS
+records remain unobserved.
+
+| Menu action | Behavior |
+| --- | --- |
+| 1 Claude / 2 Pi / 0 Codex | Start the sole main: native Opus / Pi with Codex inference / native Sol |
+| 3 Resume | Select Claude or Codex and an exact verified native session ID |
+| 4 Main | Choose the main harness; Pi uses the Codex dispatch owner |
+| t Auto task | Enter a task and open the owning native main |
+| 5 Explain | Read-only worker; optional tier, else routine |
+| 6 Implement | Optional tier; scoped brief and verifier required |
+| a Advisor | Optional tier, else frontier; read-only |
+| 7 Review | Optional tier, else frontier; mandatory review verifier |
+| c Council | Sol, Opus, Astra and Fable discussion; four seats, two provider families |
+| r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
+| f Finalize | Record owner outcome, summary and evidence; request app delivery |
+| n Retry delivery | Explicitly retry a saved result; an uncertain earlier send may duplicate |
+| 8 Dashboard / 9 Refresh | Read shared dashboard; no model call |
+| v Detail / b Attention | Cycle auto / compact / detail; toggle action-needed calls |
+| h Chats / o Rooms | Browse the room's chats; list rooms and switch or create one |
+| p CLIs / z Panel | Show provider CLIs and pick a target; reopen the panel session |
+| q Quit | Exit inline or detach the owned split session |
+
+`NO_COLOR` disables color unless the panel explicitly selects
+`OMS_PANEL_COLOR=always`; `TERM=dumb` uses ASCII without screen clearing. The
+view fits the current pane width/height. Redirected watch output appends plain
+snapshots; `--count N` bounds it. Native launch needs an installed, authenticated
+provider. `installed` means executable found on PATH, not verified login or model
+availability. Shared OMS references carry evidence across providers; native
+conversations remain separate. Use isolated workers for implementation.
+
+
+## Roles and automatic allocation
+
+The native main owns the task, architecture, workload judgment, final synthesis
+and acceptance. It receives instructions to inspect source and dispatch bounded
+subtasks through `oms panel --dispatch`. There is no additional classifier call
+or prompt keyword router. Selecting Auto task (`t`) supplies the task as a
+native user turn; when entering work in the native conversation, the same
+instructions apply. Model selection for each bounded call is part of that task.
+The launcher does not autonomously fan out before the main has a task.
+
+| Main harness | Exact model | Effort |
+| --- | --- | --- |
+| Claude main (default) | `claude-opus-5-5` | high |
+| Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
+
+Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. A tie follows configured tier order. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the main's when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
+
+| Tier | Configured model candidates (effort) |
+| --- | --- |
+| light | `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
+| routine | `claude-sonnet-5-5` (medium), `gpt-6-luna` (medium) |
+| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
+| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
+
+| Role | Default tier | Access | Front door |
+| --- | --- | --- | --- |
+| `researcher` | light | read | `oms panel --dispatch researcher` |
+| `worker` | routine | read or scoped write | `oms panel --dispatch worker` |
+| `builder` | routine | read or scoped write | `oms panel --dispatch builder` |
+| `refactorer` | routine | read or scoped write | `oms panel --dispatch refactorer` |
+| `documenter` | routine | read or scoped write | `oms panel --dispatch documenter` |
+| `release-engineer` | routine | read | `oms panel --dispatch release-engineer` |
+| `integrator` | deep | read or scoped write | `oms panel --dispatch integrator` |
+| `performance-engineer` | deep | read or scoped write | `oms panel --dispatch performance-engineer` |
+| `reviewer` | frontier | read | `oms panel --dispatch reviewer` |
+| `verifier` | frontier | read | `oms panel --dispatch verifier` |
+| `security-auditor` | frontier | read | `oms panel --dispatch security-auditor` |
+| `advisor` | frontier | read | `oms panel --dispatch advisor` |
+| `architect` | frontier | read | `oms panel --dispatch architect` |
+| `critic` | frontier | read | `oms panel --dispatch critic` |
+
+The plain `worker` role uses the `analysis-worker` strategy for reads and
+`implementation-worker` for writes. Other roles use their role name as the
+strategy. Write access requires `--access write`, a scoped brief and a verifier;
+read access is the default. The same role routes are available without opening
+the panel; see [Without the panel](#without-the-panel).
+
+`--workload light|routine|deep|frontier` overrides the tier for one dispatch and
+`--reasoning-effort` overrides one dispatch's effort. Any panel dispatch with `--verify` gets `OMS_PEER_VERIFY_TIMEOUT=20m` when unset; peer commands elsewhere default to 10m. Set the variable in the environment to override it. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher`,
+`advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
+security-auditor) in `panel_role`; the strategy itself is the recorded purpose
+(plain workers record explain/investigate/implement). `oms panel --routes`
+prints each role's tier, optional preferred provider and chosen candidate, plus
+these kinds and the write-capable roles. Dispatch and council owner defaults use
+`OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
+Codex's `CODEX_SANDBOX` marker, otherwise Codex; `--owner` overrides detection.
+
+[The panel policy](../config/panel-routing.json) is separate from generic OMS
+provider defaults. An explicit native `--model` override preserves native effort
+settings. Advisor (which direction?), architect (how to structure?) and critic
+(when does it fail?) are separate judgments; the bootstrap does not ask the main
+to call them together. A missing provider or unsupported model fails that route
+without silently selecting another model.
+
+A panel main acts as the control tower: its bootstrap delegates implementation,
+investigation and test repair to bounded workers by default and keeps scope,
+briefs, integration, review, patch admission and coordination.
+It works directly only when a brief would cost more than the edit or the step
+needs the main itself. Outside the panel, the global rule still requires an
+explicit request before spawning subagents.
+
+The sole panel main also lands its own work. `oms scratch-worktree add` starts a detached
+worktree; create a local, nontracking task branch there with
+`git checkout --no-track -b oms/<task>`, then admit worker patches and rebase on
+the remote target. No upstream is needed. After verification, commit and run
+`oms land` from that worktree only when commit and publication are authorized;
+`oms land` pushes the verified SHA to its target. Nobody commits in the shared
+checkout. Mains in sessions outside this panel may land independently:
+a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
+Worker guard stop diagnostics identify the snapshot, path and kind that caused
+the stop. The worker guard treats `oms/*` branches and harness worktrees belonging to
+mains in other sessions as soft, and `oms room scope` warns about overlapping files before the work
+starts.
+
+Task complexity and write authority are independent. A write role needs a
+scoped brief file and mechanical verifier. Read workers
+use isolated worktrees too. Write workers return a patch for parent inspection
+and admission; the panel does not apply it. Reviewers require a verifier and
+record a review gate. Workers cannot recursively dispatch or open owner sessions.
+An empty write patch from a panel dispatch or plan task exits 6 (`no changes`).
+Normal native permissions, harness policy and account consent remain in effect.
+
+```bash
+oms panel --repo . --dispatch worker --owner claude \
+  --purpose explain --task-id parser-notes --label 'Explain parser' \
+  --prompt 'Explain the parser using source evidence.' --dry-run
+oms panel --repo . --dispatch worker --owner claude --workload light \
+  --purpose investigate --prompt 'Identify the relevant configuration entries.'
+oms panel --repo . --dispatch builder --owner claude --access write \
+  --brief-file scoped-task.md --verify 'bash scripts/check.sh --affected'
+oms panel --repo . --dispatch architect --owner claude \
+  --label 'Structure the parser' --prompt 'Compare these bounded design options.'
+oms panel --repo . --dispatch security-auditor --owner claude \
+  --prompt 'Audit the install script change for privilege and secret handling.'
+oms panel --repo . --dispatch reviewer --owner claude --workload deep \
+  --prompt 'Review the changed parser.' --verify 'bash scripts/check.sh --affected'
+oms panel --repo . --room team --dispatch advisor --owner claude --main opus-main \
+  --prompt 'Advise on the parser plan.'
+```
+
+From the control window, a dispatch belongs to the room's active main of that
+provider. `--main PARTICIPANT` asserts that caller's identity (the board's `a` uses it); a room with multiple live mains refuses every dispatch until the others are released with `oms panel --release-main` or the swap is finished. A native main always dispatches as itself.
+
+A `--task-id` that names a shared-plan task moves it for the calling main: a
+ready task is claimed and started, a claimed one is started, and later workers
+of the same main reuse the running lease. A task another provider or main holds,
+or one already in review or done, is left unchanged with a warning; `--dry-run`
+never moves it. Stderr names the next verbs, `oms agent-plan review` after
+acceptance and `finish --landed-commit SHA` after `oms land`. The panel never
+passes `--plan-task`, whose per-worker transitions assume one worker per task.
+
+Continue a timed-out or reviewed worker with `--continue TASK_ID` instead of
+re-dispatching from scratch: `oms panel --repo . --dispatch refactorer --owner claude
+--continue TASK_ID --access write --brief-file next.md --verify COMMAND` takes the same role,
+workload and access checks; any write-capable role may continue (a builder session can
+become a refactorer), while reviewer, verifier, security-auditor, critic and the other
+read-only roles never resume. It finds the latest worker of that task owned by this
+main, and starts a new run in a new worktree at the current HEAD that resumes
+the worker's native session (recorded as `refs.native_session` in the attempt,
+never in room text). The brief is prefixed with "Your earlier work was on OLD;
+the repository is now at NEW. Your previous patch is at PATH (apply what still
+fits). New instructions follow." A session that is missing, or from a provider
+without resume, falls back to a fresh worker given the previous patch and
+summary, and says so on stderr. A worker that ended by timeout (exit 124) shows
+"timed out · continue with --continue" on its card; there is no `c` key for it, and
+a continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N". Unless the
+environment sets them, write calls get a 40m wall (60m at high effort) and any
+call with `--verify` gets a 20m verify wall, enough for the repository smoke suites.
+
+Give each dispatched subtask a descriptive task ID and short `--label`; reuse
+the exact reviewed plan task ID where one exists. Labels are optional for direct
+calls: an omitted label displays the typed purpose. Prompts and briefs are at
+most 64 KiB. Labels are bounded and checked for sensitive-looking content before
+recording; use a descriptive title. A native task that cannot provide a safe
+display title still reaches the native main, with an unrecorded title in status.
+The `t Auto task` menu follows the same rule. Participant labels are bounded to
+120 characters while the original native task text is preserved.
+`--dry-run` prints the selected route and
+arguments, starts no process and writes no state. Its arguments can contain the
+supplied task, so keep the launch plan private when that task is private.
+
+### Without the panel
+
+The same role and tier routing works from any Claude Code, Codex or Pi session
+without a panel: `oms panel --repo . --dispatch ROLE --prompt TEXT` (or
+`--access write --brief-file PATH --verify COMMAND` for a write role). The caller
+is detected from `OMS_AGENT`, else Claude Code's or Codex's own environment, so
+reviewer independence still prefers the other provider. Without a room the call
+is recorded as a standalone result: read it with `oms panel --results --task-id
+ID`. `--dry-run` prints the chosen route and argv without running a model.
+
+
+## Discussion and results
+
+The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
+front doors. One rebuttal round means eight primary seat calls; two means twelve.
+Format repair can add one call per primary call. `--dry-run` exposes both counts
+without executing a model. Four seats must complete to report council success;
+failed seats remain visible and the owner still decides the outcome. All seats
+are read-only. There is no model fallback or additional synthesis-model call.
+
+The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
+Debate, Messages and, while settled calls exist, Past. The selected tab is bracketed; a `•` after Debate marks a
+debate running or finished since the tab was last opened, a number after
+Messages counts the unread mail for live participants and one after Past counts its calls. A click on a tab name or
+Tab (Detail, Plan, Debate, Messages, Past, then around) switches; a tab never changes
+by itself, and the box stays after Esc. The box is reserved before the upper
+layout is drawn, with spare padding above it. It persists when empty or dismissed.
+On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
+as calls come and go. Physically short terminals adapt the readable body, strip,
+or tree fallback to available space. The tabs stay clickable when only the strip fits.
+
+Messages shows up to 200 retained messages, with sender, recipient, unread state and message kind. Left/Right cycles the filters in this order: needs you, by call, all, then this call when a call is selected. To/from me is offered only when the room has multiple recorded mains. Up/Down selects; Enter expands a message, and a second Enter on an expanded row or `f` opens its associated call in the right reader. Reading does not acknowledge messages. The unread badge and message tags count pending messages for live readers; complete projections are exact and truncated projections show a lower bound with `+`.
+
+Detail is the selected call's persistent, reserved reader; it remains present
+when dismissed or when there is no selection. Past lists every settled call of the room's mains
+and of calls with no known main, newest first, one row each (role and model, task, how it ended,
+end time). Up/Down pick a row; Enter or a click shows it in Detail exactly as a board card would,
+and `f` opens its full result on the right. Plan shows the shared repository plan:
+the goal, then one row per task (state glyph, id, title, claimant by the board's
+main name or provider, verify command) ordered verified, review, running or
+claimed, ready, blocked. Debate shows the shown main's debates, newest first
+(Left/Right cycles when there are several): title with the opener's board name
+and local time, seats answered and round, the question (at most three lines),
+one line per seat with its VERDICT or first Answer sentence (sentences end only
+at `.`, `!` or `?` followed by a space, never inside backticks or quotes; the
+line is cut at about 140 columns), `(changed in round 2: (c) -> (a))` only when
+the seat's choice token such as (a), A, yes/no or proceed/revise differs between
+rounds, Agreement/Disagreement only when the synthesis has such headings, and
+the owner's recorded decision. Up/Down moves the seat cursor, Enter shows that
+seat's retained answer in the tab. If only part of that round's source answer
+was retained, the tab shows a truncation notice and the recorded source artifact
+path. Esc returns, and `f` opens the full recorded result reader. Evidence is
+read in the background.
+
+Messages lists the room's last 200 messages, oldest first, one row each with
+local time (date when from another day), sender and recipient by the board's
+main names, an `unread` mark while a recipient has not consumed it, and the
+question/answer/handoff/status kind. Left/Right cycles the filter (all,
+to/from the selected main, to/from this window's main), Up/Down selects, Enter
+or a click expands the message in place to its full wrapped text and again
+collapses it. Reading never acknowledges a message; the full log is read in the
+background and re-read only when the room's message counts change.
+
+The owning main records a result through `--finalize`. Native process exit and
+worker completion never create accepted results by themselves. `completed`
+records an owner summary; `accepted` additionally requires a passing explicit
+`--verify`, at least one `--evidence` reference, and matching landed patch
+evidence for every recorded write worker of that task or of the finalizing native
+main, including subtasks with distinct task IDs. A plan-bound patch retains its
+exact plan lineage; a standalone patch matches its successful landing by digest.
+Verifier output stays local. Evidence references bind repository-relative files
+of at most 1 MiB each to SHA-256. The summary is
+bounded to 8 KiB, rejects sensitive-looking text and private absolute paths,
+and is cleaned of terminal controls. New result revisions are immutable artifacts
+registered in the existing artifact index, rather than a second task database.
+Finalization checks the full lifecycle projection, independently of the display
+window. Missing retained patch or landing evidence refuses acceptance. A failed,
+abandoned or rejected write worker under the same main also refuses `accepted`;
+the owner can record `completed` or `failed` with its actual summary instead.
+
+```bash
+oms panel --finalize --owner codex --task-id ID \
+  --summary-file SUMMARY.txt --outcome accepted \
+  --verify 'test -f RESULT.txt' --evidence RESULT.txt --notify
+oms panel --results --task-id ID
+oms panel --retry-delivery --task-id ID
+```
+
+Results lists the latest twenty retained tasks from at most 300 lifecycle
+attempts and 1000 artifact events. Selecting a task shows up to eight recent
+call records. Participant browsing selects that participant's tasks before
+applying the recent-20-task limit. An explicit query outside retained evidence
+reports an incomplete window. Bounded normalized answer sections retain up to
+32 KiB per answer; raw prompts, provider
+logs and native conversation histories are not exported. Missing, changed or
+linked evidence is reported as unavailable. Oversized answers show a preview
+notice and their source artifact reference. The reader retains answer lines
+and reflows them when resized; Up/Down moves one line and Home/End goes to the
+first/last page. Page keys and the wheel expose the complete retained preview.
+The registered result and source artifacts retain their full bounded content.
+The menu's numbered list shows titles, outcome, verifier and app status before
+loading any normalized answers. Select a number to open that task's detail and
+return to the list afterward. Browsing performs read-only queries; it does not
+dispatch, accept a patch or retry app delivery. CLI `--results --task-id ID`
+continues to expose the same detail directly.
+
+`--notify` sends a cleaned summary to the existing fixed Codex app receiver.
+The local app must be available and that receiver must exist, be unarchived and
+idle. Delivery never creates or replaces it. A persisted receipt requires the
+matching thread, turn, command item, successful command completion and stored
+output. It proves stored app output; OS popup visibility remains unobserved.
+Missing, busy or archived receivers, timeouts and protocol failures are recorded
+separately from the work outcome. `OMS_CODEX_NOTIFY=0` disables delivery.
+
+Delivery intent and final receipt are separately indexed immutable artifacts.
+Repeated finalization of the same revision does not resend. An interrupted
+send remains pending or uncertain until the owner inspects it and explicitly
+retries. Retry uses the saved result even if the original summary file is gone;
+a persisted revision is never resent. Native sessions launched by the panel
+receive `OMS_PANEL_RESULTS=1`, so the older Claude Stop notification does not
+duplicate a finalized product notification. A resumed older session retains
+its prior bootstrap; use the current front doors explicitly for new features.
+
+
 ## Shared work rooms and the graph
+
+Boards for one repository share atomic dashboard and result-query caches in
+`.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry;
+room selection and terminal reads stay per window. A read that races a state
+change collects directly instead of failing. When refresh still fails, the
+board or control window keeps its last good state and shows
+`State refresh failed; showing data from Ns ago`.
+
+If the first read fails, or a window switches to a room it has not successfully
+read, the panel reports that room state is unavailable and its work and messages
+are unknown. It does not show empty-work counts. The control menu remains
+available for retry and navigation; a later successful read restores the board.
 
 A bound live Codex main shows its current model and effort from its exact native
 session's read-only state, matched to this repository. A missing or unreadable
@@ -361,8 +967,8 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-The bottom box has four tabs, Detail, Plan, Debate and Messages, plus Past while any call is settled
-and Attention while anything needs the person; the Messages tab is a
+The bottom box has Detail, Plan, Messages, Past and Attention tabs, which stay even when empty,
+plus Debate while a debate exists; the Messages tab is a
 filtered room log. A main without an advisor or reviewer shows one dim
 `◇ Advisors: none active · a asks one` row above its card. The pinned usage line
 (`Claude week 66% · ctx 73% │ Codex week 2% · ctx 84%`) holds the readings; the model-call totals
@@ -733,6 +1339,7 @@ explicitly through room publishing.
 Sources: [Desktop shared configuration](https://code.claude.com/docs/en/desktop#shared-configuration),
 [native inbox and inbound controls](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
+
 ## Additional CLIs and adapters
 
 The `p CLI peers` menu reads the same provider registry as `oms models`. Grok,
@@ -799,153 +1406,6 @@ This opt-in grants no write/publication authority. The actual Grok/Muse interact
 interfaces have not been verified; the contract is covered by protocol fixtures.
 Owner finalization/council retains Codex/Claude's existing policy. No additional daemon, dependency or terminal injection is added.
 
-## Roles and automatic allocation
-
-The native main owns the task, architecture, workload judgment, final synthesis
-and acceptance. It receives instructions to inspect source and dispatch bounded
-subtasks through `oms panel --dispatch`. There is no additional classifier call
-or prompt keyword router. Selecting Auto task (`t`) supplies the task as a
-native user turn; when entering work in the native conversation, the same
-instructions apply. Model selection for each bounded call is part of that task.
-The launcher does not autonomously fan out before the main has a task.
-
-| Main harness | Exact model | Effort |
-| --- | --- | --- |
-| Claude main (default) | `claude-opus-5-5` | high |
-| Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
-
-Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. A tie follows configured tier order. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the main's when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
-
-| Tier | Configured model candidates (effort) |
-| --- | --- |
-| light | `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
-| routine | `claude-sonnet-5-5` (medium), `gpt-6-luna` (medium) |
-| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
-| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
-
-| Role | Default tier | Provider order | Access | Front door |
-| --- | --- | --- | --- | --- |
-| `researcher` | light, low effort | quota left | read | `peer-delegate --role researcher` |
-| `worker`, `builder`, `refactorer`, `documenter` | routine | quota left | read or write | `peer-delegate --role` |
-| `integrator`, `performance-engineer` | deep | quota left | read or write | `peer-delegate --role` |
-| `release-engineer` | routine | quota left | read | `peer-delegate --role release-engineer` |
-| `reviewer`, `advisor`, `architect`, `critic`, `verifier`, `security-auditor` | frontier | quota left, then away from the owner for reviewer, verifier, security-auditor and critic | read | `peer-review`, `advise` or `peer-delegate --role --read-only` |
-
-For the plain `worker` role, the read front door is `analysis-worker` and the write front door is `implementation-worker`; other roles keep their role names.
-
-`--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` overrides one dispatch's effort. Any panel dispatch with `--verify` gets `OMS_PEER_VERIFY_TIMEOUT=20m` when unset; peer commands elsewhere default to 10m. Set the variable in the environment to override it. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher`,
-`advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
-security-auditor) in `panel_role`; the strategy itself is the recorded purpose
-(plain workers record explain/investigate/implement). `oms panel --routes`
-prints each role's tier, optional preferred provider and chosen candidate, plus
-these kinds and the write-capable roles. Dispatch and council owner defaults use
-`OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
-Codex's `CODEX_SANDBOX` marker, otherwise Codex; `--owner` overrides detection.
-
-[The panel policy](../config/panel-routing.json) is separate from generic OMS
-provider defaults. An explicit native `--model` override preserves native effort
-settings. Advisor (which direction?), architect (how to structure?) and critic
-(when does it fail?) are separate judgments; the bootstrap does not ask the main
-to call them together. A missing provider or unsupported model fails that route
-without silently selecting another model.
-
-A panel main acts as the control tower: its bootstrap delegates implementation,
-investigation and test repair to bounded workers by default and keeps scope,
-briefs, integration, review, patch admission and coordination.
-It works directly only when a brief would cost more than the edit or the step
-needs the main itself. Outside the panel, the global rule still requires an
-explicit request before spawning subagents.
-
-The sole panel main also lands its own work. `oms scratch-worktree add` starts a detached
-worktree; create a local, nontracking task branch there with
-`git checkout --no-track -b oms/<task>`, then admit worker patches and rebase on
-the remote target. No upstream is needed. After verification, commit and run
-`oms land` from that worktree only when commit and publication are authorized;
-`oms land` pushes the verified SHA to its target. Nobody commits in the shared
-checkout. Mains in sessions outside this panel may land independently:
-a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
-Worker guard stop diagnostics identify the snapshot, path and kind that caused
-the stop. The worker guard treats `oms/*` branches and harness worktrees belonging to
-mains in other sessions as soft, and `oms room scope` warns about overlapping files before the work
-starts.
-
-Task complexity and write authority are independent. A write role needs a
-scoped brief file and mechanical verifier. Read workers
-use isolated worktrees too. Write workers return a patch for parent inspection
-and admission; the panel does not apply it. Reviewers require a verifier and
-record a review gate. Workers cannot recursively dispatch or open owner sessions.
-An empty write patch from a panel dispatch or plan task exits 6 (`no changes`).
-Normal native permissions, harness policy and account consent remain in effect.
-
-```bash
-oms panel --repo . --dispatch worker --owner claude \
-  --purpose explain --task-id parser-notes --label 'Explain parser' \
-  --prompt 'Explain the parser using source evidence.' --dry-run
-oms panel --repo . --dispatch worker --owner claude --workload light \
-  --purpose investigate --prompt 'Identify the relevant configuration entries.'
-oms panel --repo . --dispatch builder --owner claude --access write \
-  --brief-file scoped-task.md --verify 'bash scripts/check.sh --affected'
-oms panel --repo . --dispatch architect --owner claude \
-  --label 'Structure the parser' --prompt 'Compare these bounded design options.'
-oms panel --repo . --dispatch security-auditor --owner claude \
-  --prompt 'Audit the install script change for privilege and secret handling.'
-oms panel --repo . --dispatch reviewer --owner claude --workload deep \
-  --prompt 'Review the changed parser.' --verify 'bash scripts/check.sh --affected'
-oms panel --repo . --room team --dispatch advisor --owner claude --main opus-main \
-  --prompt 'Advise on the parser plan.'
-```
-
-From the control window, a dispatch belongs to the room's active main of that
-provider. `--main PARTICIPANT` asserts that caller's identity (the board's `a` uses it); a room with multiple live mains refuses every dispatch until the others are released with `oms panel --release-main` or the swap is finished. A native main always dispatches as itself.
-
-A `--task-id` that names a shared-plan task moves it for the calling main: a
-ready task is claimed and started, a claimed one is started, and later workers
-of the same main reuse the running lease. A task another provider or main holds,
-or one already in review or done, is left unchanged with a warning; `--dry-run`
-never moves it. Stderr names the next verbs, `oms agent-plan review` after
-acceptance and `finish --landed-commit SHA` after `oms land`. The panel never
-passes `--plan-task`, whose per-worker transitions assume one worker per task.
-
-Continue a timed-out or reviewed worker with `--continue TASK_ID` instead of
-re-dispatching from scratch: `oms panel --repo . --dispatch refactorer --owner claude
---continue TASK_ID --access write --brief-file next.md --verify COMMAND` takes the same role,
-workload and access checks; any write-capable role may continue (a builder session can
-become a refactorer), while reviewer, verifier, security-auditor, critic and the other
-read-only roles never resume. It finds the latest worker of that task owned by this
-main, and starts a new run in a new worktree at the current HEAD that resumes
-the worker's native session (recorded as `refs.native_session` in the attempt,
-never in room text). The brief is prefixed with "Your earlier work was on OLD;
-the repository is now at NEW. Your previous patch is at PATH (apply what still
-fits). New instructions follow." A session that is missing, or from a provider
-without resume, falls back to a fresh worker given the previous patch and
-summary, and says so on stderr. A worker that ended by timeout (exit 124) shows
-"timed out · continue with --continue" on its card; there is no `c` key for it, and
-a continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N". Unless the
-environment sets them, write calls get a 40m wall (60m at high effort) and any
-call with `--verify` gets a 20m verify wall, enough for the repository smoke suites.
-
-Give each dispatched subtask a descriptive task ID and short `--label`; reuse
-the exact reviewed plan task ID where one exists. Labels are optional for direct
-calls: an omitted label displays the typed purpose. Prompts and briefs are at
-most 64 KiB. Labels are bounded and checked for sensitive-looking content before
-recording; use a descriptive title. A native task that cannot provide a safe
-display title still reaches the native main, with an unrecorded title in status.
-The `t Auto task` menu follows the same rule. Participant labels are bounded to
-120 characters while the original native task text is preserved.
-`--dry-run` prints the selected route and
-arguments, starts no process and writes no state. Its arguments can contain the
-supplied task, so keep the launch plan private when that task is private.
-
-### Without the panel
-
-The same role and tier routing works from any Claude Code, Codex or Pi session
-without a panel: `oms panel --repo . --dispatch ROLE --prompt TEXT` (or
-`--access write --brief-file PATH --verify COMMAND` for a write role). The caller
-is detected from `OMS_AGENT`, else Claude Code's or Codex's own environment, so
-reviewer independence still prefers the other provider. Without a room the call
-is recorded as a standalone result: read it with `oms panel --results --task-id
-ID`. `--dry-run` prints the chosen route and argv without running a model.
 
 ## Context limits for mains
 
@@ -961,441 +1421,6 @@ room, plan task, open questions, running workers and declared status (ids,
 counts and names only). The board shows `ctx N%` on the main's card
 when known, with `compact soon` at 15% or less.
 
-## Layout and activity
-
-### Keys
-
-Keys apply to the focused surface. The board and reader bindings are contextual; `?` shows live board hints for the current surface and width.
-
-| Key | Graph/tree board | Result reader |
-| --- | --- | --- |
-| Arrow keys | Move through calls or the selected tab's items | Move through result lines |
-| `Home` / `End` | First / last item | Start / end of result |
-| `PageUp` / `PageDown`, wheel | Page through calls or selected Detail/Plan content; wheel over a graph band (including Goal) scrolls that band | Scroll result |
-| `Tab` | Next visible tab | Next reader view |
-| `Enter` | Preview a graph call; open a tree call; expand a message/group | Finish search input |
-| `Space` | Expand/collapse a selected group or fold a main in the tree | Page down |
-| `f` | Open the selected full result; open the recorded Debate result | — |
-| `r` / `e` / `d` | — | Raw / Events / Diff view |
-| `i` | Toggle pane context headers in a managed panel | Run info view |
-| `g` / `t` | Graph / tree view | — |
-| `b` / `v` | Toggle attention-only / expand or collapse the board | — |
-| `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
-| `N` | — | Previous search match |
-| `s`, then `1` / `2` / `0` | Swap main to Claude / Pi / Codex in a managed panel | — |
-| `a` / `w` / `c` | Ask advisor / open selected worker worktree / request selected call cancellation | — |
-| `k` / `u` | Capacity / refresh | — |
-| `m` | Cycle Work / Overview / Focus in a managed panel | — |
-| `[` / `]` / `o` | `[` / `]` scroll the session log older / newer when no dock tab has focus; wheel scrolls over the log | Previous / next section / outline |
-| `/` | — | Search result text |
-| `z` | — | Zoom the tmux reader pane when width is under 120 columns or it is already zoomed |
-| `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader |
-| `?` | Show/hide board key help | — |
-| `Ctrl+L` | Repaint the board | Repaint the reader |
-| `F5` / `F8` / `F9` / `F12` | Control window (when present) / cycle layout / swap chat-board focus / panel-wide key list in tmux | — |
-| Shift-drag | Copy terminal selection in a managed panel | — |
-| Mouse click | Select a row/tab; graph calls and the main preview their cards | — |
-
-At the native main's exit prompt, `r` resumes/restarts there and Enter closes the window. The terminal/job workspace has its own controls; this table covers only the board and result reader.
-
-A dispatched call settles only after its supervisor proves the whole process tree exited. On macOS and Windows, where that supervisor is unsupported, the call stays pending and the panel prints a manual-clear hint; independently stop every provider descendant before clearing its retained scope.
-
-
-`--host auto|inline|tmux|herdr` selects the terminal host independently of
-the activity view. Auto reuses an existing local POSIX Herdr pane; otherwise
-the existing layout selection applies. `--host inline` disables host automation;
-`--host tmux` explicitly selects split. Herdr requires the running pane's
-`HERDR_ENV`, `HERDR_PANE_ID` and owned `HERDR_SOCKET_PATH`. It is optional,
-never installed or started by OMS, and its Windows named-pipe transport is not
-implemented here. Ordinary Windows/inline OMS remains available.
-
-In a Herdr repository pane, the menu opens a fresh tab containing the native
-OMS launch wrapper and a task panel. It does not type into an existing
-agent. The API uses bounded local JSON requests and never retries a mutation
-whose outcome is uncertain. Original-chat navigation reconciles active OMS
-main ownership and exact pane/terminal/socket identity; reused panes and
-unproven sessions are rejected. Numeric footer readings retain their reported
-scope and unknown values. A socket error does not stop the native sibling.
-
-The board stays on the left whenever the window is wide enough; it moves above the
-CLI only when the window is too narrow, and returns left when it widens again (28
-percent of the width or 45 percent of the height the first time, sized from the
-terminal that is attaching; optional integer `OMS_PANEL_BOARD_PERCENT` overrides the
-landscape default, clamped to 25–35 percent, with invalid values ignored). In Work
-mode, a landscape default or scaled record is capped at the smaller of 38 percent
-of the window and the width that leaves 120 columns for the CLI; the existing minimum
-split rules apply on narrower windows. A new landscape board stays unsplit when
-20 board columns, the divider and 40 CLI columns cannot fit; a portrait split needs
-20 rows on each side of the divider. A deliberate border drag remains in effect
-for that Work window and is recorded there. A call opened from the board shows in a
-reader pane above the CLI.
-Herdr uses the same left board, starting at the same 28 percent share and honoring
-`OMS_PANEL_BOARD_PERCENT`. Later Herdr resizing is not recorded or shared;
-`SplitSync` synchronizes the board width or portrait height only in tmux.
-In tmux, each window records its board edge and size in its window option
-`@oms_panel_split` (`left:<cells>c` or `top:<rows>r`; the older percent form is
-converted on first sight). Resizing recomputes the portrait/landscape edge with a
-small hysteresis band and scales the recorded size with the window, clamped to keep
-at least 20 cells for the board and chat. A flip moves the
-existing board pane without moving focus, preserving pane ids; dragging the border sets the size followed
-by later resizes. Press `m` on the board or `F8` in tmux to cycle Work, Overview and
-Focus. Overview gives the graph about 62 percent of the landscape width without
-changing the Work record. Focus zooms the CLI pane; leaving it unzooms and returning
-to Work restores its recorded width. SplitSync stays idle while Focus is zoomed and
-does not apply the Work record in Overview. Graph rendering falls back to the tree
-when the board is too narrow for the graph. The control window and other zoomed
-windows are left alone.
-A watcher whose OMS sources change re-executes itself once they compile, so
-updated boards need no manual restart; an open reader stays. Select `v` in the
-task panel to expand its graph; `Esc` or watcher shutdown collapses it. Native input and permission
-prompts stay in the original CLI. The room's detailed tree and graph remain
-available. A successfully exited native main is labelled `exited`, independently
-of a worker result, verifier or owner acceptance.
-
-The graph fits from 76 columns by 16 rows. Advisors/reviewers sit above their
-exact main, and its workers sit below, with activity moving on verified parent
-connections. The live main, or a selected one, controls this view; arrow/Tab navigation reaches
-its calls. Unlinked calls stay unlinked and are available in
-the tree (`t`). Model-call usage stays at the top, while taller views show
-provider readings, recorded messages or repository tasks. Missing router,
-progress, locks or billing data is never invented. Smaller interactive panes
-retain tree navigation; passive output shows the list.
-Clicking a main requests navigation to its original chat; workers show their
-content in the right-side reader (or the board detail area). The remaining chat pane retains the provider's native interactive terminal,
-including editing, pasted input and permission prompts. `--launch` opens this
-layout in the checkout's panel when tmux is available, while `--host inline
---launch` runs the CLI alone.
-
-The room's default tree uses closed usage, activity and action cards. Wide
-usage cards list the retained model-call totals (the quota/context readings are
-the pinned usage line); call totals appear once and are not account quotas. A narrow
-usage line uses `W` for weekly quota left and `C` for main context used. Activity keeps
-main/role branches, wraps task titles, separates repository tasks, and closes
-the viewport border even while scrolling. Empty declared scopes are omitted.
-The control menu is an inbox. **Needs you** lists up to 12 items, newest first,
-each as glyph, who (`Sol 6.1 worker for Opus 5.5`), what and age: failed or
-timed-out calls with their title, calls or mains waiting for approval or input,
-unanswered room messages that a main sent to `all`, and finished write workers
-whose patch has no admission or landing record. Arrow keys or a click select a
-row; the wheel moves by lines and page keys by the visible item count, stopping
-at either end. Enter (or a click) opens that main's chat or shows the call's result,
-and Esc returns. An empty list says `Nothing needs you right now`; a room with no
-main shows `Press 1 (Claude) or 2 (Pi) to start the sole main`. The menu keeps
-start (`1` Claude, `2` Pi, `0` Codex, `3` Resume, `t` Task), `o` rooms, `9` refresh and
-quit/detach; board keys are not repeated. Enter `?` for all other actions in
-ordinary scrollable help (chats, results, views, advisor, review, council,
-finalize); existing shortcuts still work.
-Menu keys act at once, without Enter, on a POSIX terminal with raw input; the
-board's key handling is reused. Text prompts (a task title, a provider) stay
-line-based inside that prompt only. Elsewhere, such as Windows Git Bash or
-redirected input, the menu reads `oms> ` and needs key + Enter. The inbox
-refreshes every five seconds. The watcher retains its arrow, mouse and page-key
-navigation.
-In a managed tmux control pane the quit key is labelled `Detach`; it preserves
-the native sessions. In a coupled tmux board, `F9` swaps focus between the
-chat and the board and keeps both alive; `q` does nothing there, and Esc or `v`
-un-zoom the board only while it is zoomed.
-Standalone watchers retain `q` to exit. If a board was explicitly removed,
-`oms panel --reopen` restores it without restarting the native CLI. Repeating
-the operation preserves an existing board. Inside an OMS window, bare
-`oms panel` does the same; the control menu also provides `z` for this action.
-Restore accepts only this checkout's front door with a matching repository,
-refuses ambiguous/replaced input panes, and does not restart a terminated CLI.
-
-Client detach retains the host's live processes. A Herdr server restart is
-different: bare vendor auto-restore is not an OMS resume and cannot prove
-fresh OMS ownership. Continue through the OMS wrapper's existing exact-resume
-checks after its previous execution is confirmed terminal. An unknown shutdown
-remains blocked; pane IDs or a Herdr `done` badge cannot authorize takeover.
-This adapter does not change Herdr's global configuration or restore policy.
-
-Outside Herdr, `auto` chooses split on POSIX when tmux is installed, including
-`--launch` and runs started inside another tmux session (the client switches to
-the panel instead of nesting); otherwise it uses inline. `--host inline` or
-`--layout inline` keeps a run in the current terminal. Each checkout has one OMS panel
-session, `oms-<project>`: the checkout's directory name lowercased, runs of other
-characters turned into `-`, at most 32 characters (`project` when nothing is left). When that
-name is held by another checkout or by a session OMS did not create, the panel uses
-`oms-<project>-` plus the first 6 hex digits of the SHA-256 of the resolved path, and neither
-session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the checkout stays in use
-under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
-checkout on the session. A new panel opened without `--launch` also opens one
-installed main (Claude, then Pi, then Codex) in its own window with a new room;
-`OMS_PANEL_MAIN=pi` selects Pi; an empty value opens no main, and an unknown value opens none with a stderr warning.
-Inline and Herdr without `--launch` instead open the control menu, preselecting nonempty
-`OMS_PANEL_HARNESS`, otherwise the new-panel main (the selected `OMS_PANEL_MAIN` name
-or first installed Claude/Pi/Codex), falling back to Claude. Press the selected harness's
-key (`1` Claude, `2` Pi, `0` Codex) to start it.
-Reattaching never opens mains again; later launches attach to it (or switch the current
-tmux client), and `--launch` adds a native window there instead of opening a
-second session. A session with that name recorded for another checkout is
-refused. A launch that loses a creation race, or arrives before a just-created
-session has recorded its checkout, waits up to two seconds and joins it; the
-owner marker is written after the session's room, so a joining launch follows
-that room. New mains default to the panel's recorded room while it is open and
-has participant/message headroom; otherwise, or when `--room` is given, the
-existing room rules apply. Rooms stay bounded and task-scoped; the panel
-outlives them. Separate tmux servers are separate scopes. Each native conversation gets
-its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
-are preserved, with one addition: `F9` selects the other pane
-of the window, `F8` cycles layout modes, `F5` opens the control window and `F12` shows
-the key list, all without the prefix (F10/F11 belong to terminal menus). tmux key
-bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
-passes the key through unchanged in every other session, and is not installed when the key is
-already bound by the user (a binding OMS installed earlier under the old session-name test is replaced). With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
-detaches while work continues. Quit in the control pane also detaches. Failed
-construction rolls back only the new OMS session or added window. Inline returns to the menu
-when the native CLI exits and refreshes then; it has no permanent sidebar.
-
-The board has one MAIN card for its live main, with its team grouped into
-ADVISORS, REVIEWERS and WORKERS. Team counts and elapsed time appear with the
-main summary; call rows show state, model and task title. Calls remain attached
-to their recorded parent, and each row opens its reader. The repository control view shows `NEXT MAIN` as a one-line preset;
-that preset never fills missing model/effort fields in a recorded main.
-The native main card shows provider, requested model/effort and recorded task
-when supplied at launch. Missing fields remain unrecorded.
-Tasks entered later inside the native conversation are not intercepted:
-its main title stays unrecorded unless supplied at launch, while dispatched child
-titles are recorded. The palette uses warm Claude, blue Codex, teal workers and
-lavender advisors and reviewers. Role cards show lifecycle state,
-model, task title/ID, read/write authority, effort and location. Worktree locations
-use a relative unique suffix; repository calls show `repository`. Detached
-worker worktrees can be cleaned after completion; their locations remain history.
-Task titles have their own bright lines, wrapping to two lines in wide views
-and up to three in narrow sidebars. Main task titles wrap too. Internal task IDs
-stay in wide metadata rows or Details. Details gives bounded titles separate
-wrapped lines, so long titles need not compete with location and purpose.
-No absolute home paths or transcripts are added to panel metadata.
-
-Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS /
-WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context used. When room history contains earlier mains, they fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
-remain unlinked; a generic attempt parent is never promoted into a native-main
-relationship. A linked owner whose metadata is unavailable is labelled so.
-
-Press `v` to toggle board expansion between the current overview and an expanded graph; `Esc` or closing the watcher collapses any expansion. In compact layouts, calls retain their model, state and task title. At 80 columns or wider, these share one row with metadata on the
-right; narrow views place metadata below the title. Detail expands wrapped
-titles and location/effort metadata. The view prioritizes attention calls and reports overflow when calls do not fit. Small panes use compact summaries. Press `b` to
-toggle attention-only: waiting input, waiting approval, blocked, review and
-orphaned calls, plus retained failed terminal outcomes. Filtered calls are
-counted rather than changing their states. Settled calls stay in the Past tab
-and are hidden from the board; attention-only empties the Past tab as well. Both controls affect presentation, not the main identity or
-dispatch authority. A native window inherits these
-settings when opened, and the control sidebar follows subsequent menu changes.
-CLI `--view` overrides a watch's window density; `--attention-only` keeps its
-filter enabled. These flags apply only to the menu or watch, not model operations.
-
-The usage line has one `Claude` reading and one `Codex` reading. For each provider, the selected window's exact main attempt wins; otherwise the live, then newest, matching main is used. Claude reads its session HUD cache first, then the proven pane footer when the cache is absent/stale and to fill missing fields; Codex uses its native reading or proven pane footer. Missing readings show `--`. Claude's existing session HUD cache supplies reported context and optional
-`seven_day` usage, with a ten-minute TTL and expired reset values suppressed.
-The consumer hash selects that session's cache; no newest-session guess is
-made. A proven existing tmux pane can supply numeric fields from its last
-eight visible native footer lines. `TUI` or `HUD/TUI` labels those mirrored
-readings; native output may lag while idle and changed footer formats become
-unknown. The watcher performs no native transcript/registry scan or account
-request for these readings. Header collection runs once per five-second
-snapshot, never per animation frame. Ended mains have unknown current context.
-
-The separate `USAGE` area groups reported tokens by model using only the existing
-recent eight repository artifact records. It stays repository-wide when the
-activity view is scoped or filtered. A short wide pane uses a single usage
-strip; taller panes use a small card, with reported USD cost when height is at
-least 40 rows. `x` counts retained call records, not retries or native turns.
-`(sel)` identifies a selected model whose served identity was not reported;
-served identities and selected identities are separate groups. Mixed/fallback
-operations stay in `Mixed models`, and unknown models stay unknown. `?` means
-unreported; `+?` means a known subtotal plus unreported records, while a reported
-zero stays zero. Overflow reports omitted model groups. Owner results, review
-gate summaries and council syntheses are excluded, and lifecycle usage is not
-added again. These are provider-reported partial observations, not account
-totals or remaining quota; they do not supply the provider header. Provider token definitions can
-differ, particularly for cache input; no cross-model total is shown. The window
-can change or shrink as new artifact records arrive.
-
-On a capable terminal the sidebar animates live-state indicators
-at four frames per second using the cached snapshot. Borders and role dividers
-stay still. Only changed
-rows are redrawn; resizing triggers a complete repaint. Starting, working,
-verifying and live-marker records can move; blocked/waiting/review and terminal
-states stay still. The motion means recorded activity, not token streaming,
-progress percentage or a new dispatch event. The native main's explicit child
-links determine the call tree. Rendering frames makes no state writes or model
-calls; state collection remains every five seconds, plus collection time.
-Interactive watch collects state and quota readings in one background read
-at a time. It keeps the last frame available for input while a read is pending,
-and applies completed reads within a 50 ms polling interval. Redirected or
-noninteractive watch retains synchronous snapshots and `--count` semantics.
-Snapshots that change the hit map discard stale coordinate clicks; navigation still validates
-the current room, participant and terminal before focusing it. A proven terminal
-destination does not require scanning unrelated native chat histories; app
-navigation and the full chat catalog keep their bounded identity lookup.
-`--count` counts collected snapshots rather than animation frames.
-
-Use `oms panel --watch --no-animation` for a motion-free view, or set
-`OMS_PANEL_NO_ANIMATION=1` in the launching environment to cover automatically
-opened sidebars. Redirected output and `TERM=dumb` are static plain snapshots.
-`NO_COLOR` controls color independently. `OMS_PANEL_COLOR=always` enables color
-only in the OMS panel even when its environment inherits `NO_COLOR`;
-`OMS_PANEL_COLOR=never` disables it, and `auto` preserves the default.
-`OMS_PANEL_THEME=light` (or a light `COLORFGBG` background) uses darker shades for light
-terminal themes; `dark` forces the default shades. Redirected
-output and `TERM=dumb` stay plain in every mode. The watch restores the terminal cursor
-on exit or interruption. The control menu redraws in place on keys and every five
-seconds rather than animating.
-
-A native window binds children by its recorded main attempt ID. Earlier mains'
-calls stay in the room's tree. The control view shows
-repository-wide records. Control option `4 Main` chooses the main harness for
-subsequent manual dispatch; Pi uses the Codex dispatch owner. Main/child links come from explicit
-lifecycle metadata, never matching a provider name. Legacy unlinked records stay
-repository-wide. A marker and its attempt are coalesced only by their exact
-execution location. Selected/served attribution uses exact attempt IDs; a model
-name alone is not proof the provider served it.
-
-Active attempts have a separate bounded window so newer outcomes cannot hide
-them. Overflow is reported; Details retains the bounded active and recent
-records. `REPO ACCEPT` and repo attention belong to shared repository state,
-including earlier work. Recent outcomes and successful native process exit do
-not establish acceptance of a task. Native subagents that do not write OMS
-records remain unobserved.
-
-| Menu action | Behavior |
-| --- | --- |
-| 1 Claude / 2 Pi / 0 Codex | Start the sole main: native Opus / Pi with Codex inference / native Sol |
-| 3 Resume | Select Claude or Codex and an exact verified native session ID |
-| 4 Main | Choose the main harness; Pi uses the Codex dispatch owner |
-| t Auto task | Enter a task and open the owning native main |
-| 5 Explain | Read-only worker; optional tier, else routine |
-| 6 Implement | Optional tier; scoped brief and verifier required |
-| a Advisor | Optional tier, else frontier; read-only |
-| 7 Review | Optional tier, else frontier; mandatory review verifier |
-| c Council | Sol, Opus, Astra and Fable discussion; four seats, two provider families |
-| r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
-| f Finalize | Record owner outcome, summary and evidence; request app delivery |
-| n Retry delivery | Explicitly retry a saved result; an uncertain earlier send may duplicate |
-| 8 Dashboard / 9 Refresh | Read shared dashboard; no model call |
-| v Detail / b Attention | Cycle auto / compact / detail; toggle action-needed calls |
-| h Chats / o Rooms | Browse the room's chats; list rooms and switch or create one |
-| p CLIs / z Panel | Show provider CLIs and pick a target; reopen the panel session |
-| q Quit | Exit inline or detach the owned split session |
-
-`NO_COLOR` disables color unless the panel explicitly selects
-`OMS_PANEL_COLOR=always`; `TERM=dumb` uses ASCII without screen clearing. The
-view fits the current pane width/height. Redirected watch output appends plain
-snapshots; `--count N` bounds it. Native launch needs an installed, authenticated
-provider. `installed` means executable found on PATH, not verified login or model
-availability. Shared OMS references carry evidence across providers; native
-conversations remain separate. Use isolated workers for implementation.
-
-## Discussion and results
-
-The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
-front doors. One rebuttal round means eight primary seat calls; two means twelve.
-Format repair can add one call per primary call. `--dry-run` exposes both counts
-without executing a model. Four seats must complete to report council success;
-failed seats remain visible and the owner still decides the outcome. All seats
-are read-only. There is no model fallback or additional synthesis-model call.
-
-The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
-Debate, Messages and, while settled calls exist, Past. The selected tab is bracketed; a `•` after Debate marks a
-debate running or finished since the tab was last opened, a number after
-Messages counts the unread mail for live participants and one after Past counts its calls. A click on a tab name or
-Tab (Detail, Plan, Debate, Messages, Past, then around) switches; a tab never changes
-by itself, and the box stays after Esc. The box is reserved before the upper
-layout is drawn, with spare padding above it. It persists when empty or dismissed.
-On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
-as calls come and go. Physically short terminals adapt the readable body, strip,
-or tree fallback to available space. The tabs stay clickable when only the strip fits.
-
-Messages shows up to 200 retained messages, with sender, recipient, unread state and message kind. Left/Right cycles the filters in this order: needs you, by call, all, then this call when a call is selected. To/from me is offered only when the room has multiple recorded mains. Up/Down selects; Enter expands a message, and a second Enter on an expanded row or `f` opens its associated call in the right reader. Reading does not acknowledge messages. The unread badge and message tags count pending messages for live readers; complete projections are exact and truncated projections show a lower bound with `+`.
-
-Detail is the selected call's persistent, reserved reader; it remains present
-when dismissed or when there is no selection. Past lists every settled call of the room's mains
-and of calls with no known main, newest first, one row each (role and model, task, how it ended,
-end time). Up/Down pick a row; Enter or a click shows it in Detail exactly as a board card would,
-and `f` opens its full result on the right. Plan shows the shared repository plan:
-the goal, then one row per task (state glyph, id, title, claimant by the board's
-main name or provider, verify command) ordered verified, review, running or
-claimed, ready, blocked. Debate shows the shown main's debates, newest first
-(Left/Right cycles when there are several): title with the opener's board name
-and local time, seats answered and round, the question (at most three lines),
-one line per seat with its VERDICT or first Answer sentence (sentences end only
-at `.`, `!` or `?` followed by a space, never inside backticks or quotes; the
-line is cut at about 140 columns), `(changed in round 2: (c) -> (a))` only when
-the seat's choice token such as (a), A, yes/no or proceed/revise differs between
-rounds, Agreement/Disagreement only when the synthesis has such headings, and
-the owner's recorded decision. Up/Down moves the seat cursor, Enter shows that
-seat's retained answer in the tab. If only part of that round's source answer
-was retained, the tab shows a truncation notice and the recorded source artifact
-path. Esc returns, and `f` opens the full recorded result reader. Evidence is
-read in the background.
-
-Messages lists the room's last 200 messages, oldest first, one row each with
-local time (date when from another day), sender and recipient by the board's
-main names, an `unread` mark while a recipient has not consumed it, and the
-question/answer/handoff/status kind. Left/Right cycles the filter (all,
-to/from the selected main, to/from this window's main), Up/Down selects, Enter
-or a click expands the message in place to its full wrapped text and again
-collapses it. Reading never acknowledges a message; the full log is read in the
-background and re-read only when the room's message counts change.
-
-The owning main records a result through `--finalize`. Native process exit and
-worker completion never create accepted results by themselves. `completed`
-records an owner summary; `accepted` additionally requires a passing explicit
-`--verify`, at least one `--evidence` reference, and matching landed patch
-evidence for every recorded write worker of that task or of the finalizing native
-main, including subtasks with distinct task IDs. A plan-bound patch retains its
-exact plan lineage; a standalone patch matches its successful landing by digest.
-Verifier output stays local. Evidence references bind repository-relative files
-of at most 1 MiB each to SHA-256. The summary is
-bounded to 8 KiB, rejects sensitive-looking text and private absolute paths,
-and is cleaned of terminal controls. New result revisions are immutable artifacts
-registered in the existing artifact index, rather than a second task database.
-Finalization checks the full lifecycle projection, independently of the display
-window. Missing retained patch or landing evidence refuses acceptance. A failed,
-abandoned or rejected write worker under the same main also refuses `accepted`;
-the owner can record `completed` or `failed` with its actual summary instead.
-
-```bash
-oms panel --finalize --owner codex --task-id ID \
-  --summary-file SUMMARY.txt --outcome accepted \
-  --verify 'test -f RESULT.txt' --evidence RESULT.txt --notify
-oms panel --results --task-id ID
-oms panel --retry-delivery --task-id ID
-```
-
-Results lists the latest twenty retained tasks from at most 300 lifecycle
-attempts and 1000 artifact events. Selecting a task shows up to eight recent
-call records. Participant browsing selects that participant's tasks before
-applying the recent-20-task limit. An explicit query outside retained evidence
-reports an incomplete window. Bounded normalized answer sections retain up to
-32 KiB per answer; raw prompts, provider
-logs and native conversation histories are not exported. Missing, changed or
-linked evidence is reported as unavailable. Oversized answers show a preview
-notice and their source artifact reference. The reader retains answer lines
-and reflows them when resized; Up/Down moves one line and Home/End goes to the
-first/last page. Page keys and the wheel expose the complete retained preview.
-The registered result and source artifacts retain their full bounded content.
-The menu's numbered list shows titles, outcome, verifier and app status before
-loading any normalized answers. Select a number to open that task's detail and
-return to the list afterward. Browsing performs read-only queries; it does not
-dispatch, accept a patch or retry app delivery. CLI `--results --task-id ID`
-continues to expose the same detail directly.
-
-`--notify` sends a cleaned summary to the existing fixed Codex app receiver.
-The local app must be available and that receiver must exist, be unarchived and
-idle. Delivery never creates or replaces it. A persisted receipt requires the
-matching thread, turn, command item, successful command completion and stored
-output. It proves stored app output; OS popup visibility remains unobserved.
-Missing, busy or archived receivers, timeouts and protocol failures are recorded
-separately from the work outcome. `OMS_CODEX_NOTIFY=0` disables delivery.
-
-Delivery intent and final receipt are separately indexed immutable artifacts.
-Repeated finalization of the same revision does not resend. An interrupted
-send remains pending or uncertain until the owner inspects it and explicitly
-retries. Retry uses the saved result even if the original summary file is gone;
-a persisted revision is never resent. Native sessions launched by the panel
-receive `OMS_PANEL_RESULTS=1`, so the older Claude Stop notification does not
-duplicate a finalized product notification. A resumed older session retains
-its prior bootstrap; use the current front doors explicitly for new features.
 
 ## Contract and verification
 
@@ -1431,6 +1456,7 @@ also verifies the main hierarchy with earlier mains on record, legacy ownership,
 separate review groups, compact/detail budgets, attention filtering, numbered
 result selection, menu cycling and view inheritance in an existing tmux server.
 
+
 ## Researcher and supporting strategies
 
 Use `oms panel --dispatch researcher --owner claude --prompt 'Find and cite the relevant contract.'`
@@ -1460,6 +1486,7 @@ The other strategies dispatch as roles of their own (see the role table above);
 `test-designer`, `patch-reviewer` and `repo-auditor` stay `peer-delegate --role`
 profiles. A deterministic check should run directly rather than paying another
 model to repeat a command.
+
 
 ## Owned terminals, jobs and history
 
@@ -1508,6 +1535,7 @@ Archived job logs use the usual `logs ID --generation N` command. Terminal histo
 uses `archive`, `list --archived`, and `restore ID`; workspace history uses
 `workspace-archive`, `workspaces --archived`, and `workspace-restore ID`.
 
+
 ## Capacity and display recovery
 
 On the focused board, `k` opens the capacity/recovery screen and `k` or `Esc`
@@ -1528,3 +1556,26 @@ Use native compaction or an explicit handoff for context, and the native quota
 reset for exhausted usage. Room acknowledgement keeps message evidence; new
 mains already use a fresh bounded room near capacity. Existing sessions and
 their room evidence stay intact.
+
+## Salvaging a stopped worker
+
+Run `oms panel --repo . --salvage TASK_ID [--json]` to capture the latest stopped
+delegate's recorded, kept execution worktree, including a separate clone or
+scratch worktree. It preserves that checkout and index,
+and reports changed paths, before/after byte sizes, the patch path and its
+`.patch.json` metadata under `.oms/artifacts/delegate/`. Metadata and the patch
+header carry `salvaged_from` (task, attempt, kept path and stop reason), base and
+payload hashes, file sizes and `encoding_warnings` for display. Admission uses
+controller records in `.oms/salvage-provenance/`, keyed by the diff payload hash;
+editing headers, sidecars or warning lists cannot change those records.
+The flags guard the salvaged artifact as captured; an edited or reformatted
+patch is a different patch that ordinary admission checks. `patch-admit`
+examines every textual patch hunk for encoding loss, independent of salvage
+identity; `--accept-encoding-loss` records owner acceptance for detected hunks.
+Warnings flag hunks whose
+replacement has the same ASCII skeleton after Unicode decomposition but fewer
+non-ASCII characters, and files losing more than half their non-ASCII bytes.
+These are review hints; they can include intentional edits or deletions.
+Review the patch before using `oms patch-land --patch PATH --accept-salvaged`.
+Flagged encoding loss also requires `--accept-encoding-loss`; normal admission
+checks still run. Salvage captures evidence and never admits or applies it.
