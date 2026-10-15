@@ -36,6 +36,16 @@ def range_base(chain, pushed):
     return next((c for c in chain[1:] if c in pushed), chain[1] if len(chain) > 1 else "")
 
 
+def recorded_base(receipt):
+    push = receipt.get("push", {})
+    if "base" not in push:
+        return None
+    base = push["base"]
+    if not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base):
+        raise ValueError("invalid receipt push.base")
+    return base
+
+
 def read_receipt(path):
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
@@ -134,15 +144,24 @@ def handoff(source, target, receipt_path, directory):
     git(target, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
         "--no-recurse-submodules", remote, "+refs/heads/%s:%s" % (branch, ref))
     git(target, "merge-base", "--is-ancestor", sha, ref, local=True)
-    chain = git(source, "rev-list", "--first-parent", "--max-count=1000", sha, local=True).split()
-    if git(target, "rev-list", "--first-parent", "--max-count=1000", sha, local=True).split() != chain:
-        raise ValueError("handoff requires the same local first-parent history")
     predecessors = list(pushed_receipts(os.path.dirname(receipt_path), sha, read_receipt))
-    base = range_base(chain, {row[0] for row in predecessors})
+    base = recorded_base(receipt)
+    if base is not None:
+        git(target, "merge-base", "--is-ancestor", base, sha, local=True)
+    elif any(recorded_base(json.loads(read_receipt(os.path.join(os.path.dirname(receipt_path), other)))) not in (None, sha)
+             for other in sorted(os.listdir(os.path.dirname(receipt_path)))
+             if other != name and other.startswith(sha + "-") and other.endswith(".json")):
+        # A reverify carries no range; only the landing receipt that recorded push.base defines it.
+        raise ValueError("this receipt reverified an already-landed SHA; hand off its landing receipt instead")
+    else:
+        chain = git(source, "rev-list", "--first-parent", "--max-count=1000", sha, local=True).split()
+        if git(target, "rev-list", "--first-parent", "--max-count=1000", sha, local=True).split() != chain:
+            raise ValueError("handoff requires the same local first-parent history")
+        base = range_base(chain, {row[0] for row in predecessors})
+        existing = list(pushed_receipts(directory, sha, read_receipt))
+        if range_base(chain, {row[0] for row in existing} | {prior for prior, _, _ in predecessors if prior == base}) != base:
+            raise ValueError("target receipts would change the producer's landed range")
     transfers = {n: data for prior, n, data in predecessors if prior == base}
-    existing = list(pushed_receipts(directory, sha, read_receipt))
-    if range_base(chain, {row[0] for row in existing} | {prior for prior, _, _ in predecessors if prior == base}) != base:
-        raise ValueError("target receipts would change the producer's landed range")
     # Publish the primary receipt last, after its range boundary exists.
     transfers[name] = raw
     safe_directory(directory)

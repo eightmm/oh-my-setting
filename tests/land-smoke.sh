@@ -528,6 +528,151 @@ if OMS_TEST_CI_RESULT=skipped "$LAND" --repo "$repo" --wait --no-update --ci-wai
   fail "a skipped GitHub run passed as CI: $(cat "$TMP/run-skipped.out")"
 fi
 grep -q 'ci run-skipped' "$TMP/run-skipped.out" || fail "skipped run reason missing: $(cat "$TMP/run-skipped.out")"
+# Each clone has a different receipt history. A recorded push.base fixes the
+# third landing's whole range even when the first clone has an older receipt.
+python3 - "$ROOT" "$TMP" <<'PYRANGE' || fail "cross-clone receipt range regression"
+import ast
+import hashlib
+import importlib.util as _importlib_util
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+
+root, tmp = map(Path, sys.argv[1:])
+land = str(root / 'scripts/land.sh')
+helper = str(root / 'scripts/lib/land_receipts.py')
+remote = tmp / 'range-remote.git'
+
+def run(*args, ok=True):
+    result = subprocess.run(list(map(str, args)), capture_output=True, text=True,
+                            env=dict(os.environ, OMS_TEST_CI_RESULT='success'))
+    if ok:
+        assert result.returncode == 0, (args, result.stdout, result.stderr)
+    else:
+        assert result.returncode != 0, (args, result.stdout, result.stderr)
+    return result.stdout.strip() if ok else result.stderr
+
+run('git', 'clone', '--quiet', '--bare', tmp / 'remote.git', remote)
+clones, records = [], []
+for number in range(1, 4):
+    clone = tmp / ('range-clone-%d' % number)
+    run('git', 'clone', '--quiet', remote, clone)
+    base = run('git', '-C', clone, 'rev-parse', 'HEAD')
+    push_url = run('git', '-C', clone, 'remote', 'get-url', '--push', 'origin')
+    def request_digest(command):
+        return hashlib.sha256(json.dumps(
+            [push_url, 'origin', 'main', command], ensure_ascii=True).encode()).hexdigest()[:24]
+    reverify_gate, landing_gate = sorted(('true', 'true # reverify'), key=request_digest)
+    for part in ('a', 'b'):
+        name = '%d-%s.txt' % (number, part)
+        (clone / name).write_text(name + '\n')
+        run('git', '-C', clone, 'add', name)
+        run('git', '-C', clone, 'commit', '-qm', name)
+    sha = run('git', '-C', clone, 'rev-parse', 'HEAD')
+    run(land, '--repo', clone, '--gate', landing_gate, '--wait', '--no-update', '--ci-wait', '1')
+    status = json.loads(run(land, 'status', '--repo', clone, '--json'))
+    receipt = Path(status['log']).with_suffix('.json')
+    assert json.loads(receipt.read_bytes())['push']['base'] == base
+    clones.append(clone)
+    records.append((receipt, sha, base))
+
+source, target = clones[2], clones[0]
+receipt, sha, base = records[2]
+directory = records[0][0].parent
+original = receipt.read_bytes()
+run(land, '--repo', source, '--gate', landing_gate, '--wait', '--no-update',
+    '--ci-wait', '1', '--handoff-receipt-to', target)
+imported = directory / receipt.name
+assert imported.read_bytes() == original
+
+# Exercise the actual plan range consumer without running its CLI dispatcher.
+core = root / 'scripts/lib/agent_plan_core.py'
+tree = ast.parse(core.read_text())
+functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and
+             node.name in {'_load', 'read_regular_bytes', 'landed_range_paths'}]
+settings = {'OMS_REPO': str(target), 'OMS_LAND_RECEIPTS_DIR': str(directory)}
+def die(message):
+    raise ValueError(message)
+namespace = dict(globals(), __file__=str(core), env=lambda key: settings.get(key, ''), die=die)
+exec(compile(ast.Module(body=functions, type_ignores=[]), str(core), 'exec'), namespace)
+def paths(raw):
+    return namespace['landed_range_paths'](sha, hashlib.sha256(raw).hexdigest())
+span, changed = paths(original)
+assert span == base + '..' + sha, span
+assert set(changed) == {'3-a.txt', '3-b.txt'}, changed
+
+# A new gate on the same SHA must not shadow the real landing, even when its
+# request filename sorts first. Completion retains the original receipt proof.
+run(land, '--repo', source, '--gate', reverify_gate, '--wait', '--no-update', '--ci-wait', '1')
+status = json.loads(run(land, 'status', '--repo', source, '--json'))
+reverified = Path(status['log']).with_suffix('.json')
+assert reverified.name < receipt.name
+assert 'base' not in json.loads(reverified.read_bytes())['push']
+# A reverify has no range of its own; handing it off is refused in favour of the landing receipt.
+refused = run('python3', helper, source, target, reverified, directory, ok=False)
+assert 'hand off its landing receipt instead' in refused, refused
+assert not (directory / reverified.name).exists()
+plan = root / 'scripts/agent-plan.sh'
+run(plan, '--repo', source, 'init', '--goal', 'reverify preserves landing range')
+def finish_task(task):
+    run(plan, '--repo', source, 'add', '--id', task, '--title', task, '--allowed', '3-a.txt')
+    run(plan, '--repo', source, 'claim', '--id', task, '--provider', 'codex')
+    run(plan, '--repo', source, 'review', '--id', task, '--artifact', 'result.md', '--patch', 'result.patch')
+    run(plan, '--repo', source, 'finish', '--id', task, '--landed-commit', sha)
+    row = json.loads(run(plan, '--repo', source, 'show', '--id', task))
+    assert row['state'] == 'done'
+    assert row['landing']['receipt_sha256'] == hashlib.sha256(original).hexdigest(), row
+finish_task('after-reverify')
+
+# Also tolerate an earlier receipt made by the old bug, without selecting its
+# explicit SHA..SHA range or allowing the range consumer to evaluate it.
+buggy = json.loads(reverified.read_bytes())
+buggy['push']['base'] = sha
+reverified.write_text(json.dumps(buggy) + '\n')
+finish_task('after-empty-receipt')
+settings.update(OMS_REPO=str(source), OMS_LAND_RECEIPTS_DIR=str(receipt.parent))
+try:
+    paths(reverified.read_bytes())
+except ValueError as error:
+    assert 'nonempty landed range' in str(error), error
+else:
+    raise AssertionError('range consumer accepted SHA..SHA')
+reverified.unlink()
+
+# Legacy bytes retain the old fallback and its target-history refusal.
+legacy = json.loads(original)
+del legacy['push']['base']
+receipt.write_text(json.dumps(legacy) + '\n')
+imported.unlink()
+error = run('python3', helper, source, target, receipt, directory, ok=False)
+assert "target receipts would change the producer's landed range" in error, error
+assert not imported.exists()
+settings.update(OMS_REPO=str(source), OMS_LAND_RECEIPTS_DIR=str(receipt.parent))
+span, changed = paths(receipt.read_bytes())
+assert span == run('git', '-C', source, 'rev-parse', sha + '^') + '..' + sha, span
+assert changed == ['3-b.txt'], changed
+
+# Even a locally available commit cannot serve as a non-ancestor base.
+tree_sha = run('git', '-C', source, 'rev-parse', sha + '^{tree}')
+unrelated = run('git', '-C', source, 'commit-tree', tree_sha, '-m', 'unrelated base')
+run('git', '-C', target, 'fetch', '--quiet', '--no-write-fetch-head', source, unrelated)
+forged = json.loads(original)
+for forged_base in (unrelated, 'HEAD', None):
+    forged['push']['base'] = forged_base
+    receipt.write_text(json.dumps(forged) + '\n')
+    run('python3', helper, source, target, receipt, directory, ok=False)
+    assert not imported.exists()
+    try:
+        paths(receipt.read_bytes())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('range consumer accepted forged push.base')
+receipt.write_bytes(original)
+PYRANGE
 # Explicit handoff preserves clone isolation until gate, push and CI pass.
 # The target can remain dirty and behind: only its destination ref is fetched.
 handoff="$TMP/handoff clone"
@@ -1002,7 +1147,7 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   # run_job is extracted from land.sh below, so load its real test-growth
   # helper and initialize the same optional readiness setting as land.sh.
   . "$ROOT/scripts/lib/test-growth.sh"
-  probe_head=verified
+  probe_head=verified probe_base_valid=1
   now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
   rset() { :; }
   receipt_value() { :; }
@@ -1018,6 +1163,9 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
     if [ "${1:-}" = -C ] && [ "${3:-}" = diff ]; then return 0; fi
     case "$1" in
       rev-parse) printf '%s\n' "$probe_head" ;;
+      remote) printf '%s\n' origin ;;
+      ls-remote) printf '%s\n' base ;;
+      merge-base) [ "$probe_base_valid" -eq 1 ] ;;
       push) printf '%s\n' "$*" > "$TMP/race-push" ;;
       *) return 99 ;;
     esac
@@ -1030,6 +1178,12 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   run_job || fail "stable HEAD failed to land"
   [ "$(cat "$READY_FILE")" = 0 ] || fail "admitted job did not report startup readiness"
   grep -Fq 'verified:refs/heads/main' "$TMP/race-push" || fail "push uses mutable HEAD instead of verified SHA"
+  grep -Fq -- '--force-with-lease=refs/heads/main:base' "$TMP/race-push" ||
+    fail "push does not bind the observed destination base"
+  rm "$TMP/race-push"
+  probe_base_valid=0
+  if run_job; then fail "non-ancestor destination base was accepted"; fi
+  [ ! -e "$TMP/race-push" ] || fail "non-ancestor destination was pushed over"
 ) || exit 1
 
 # A one-second CI wait still owes one query when the clock ticks between

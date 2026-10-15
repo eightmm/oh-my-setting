@@ -58,11 +58,14 @@ does. Text status prints the lock observation explicitly. With --active-exit,
 status exits 3 when active is confirmed, 0 when free is confirmed, and 4 when
 the lock state is unknown.
 With --handoff-receipt-to PATH, a passed gate/push/CI-success receipt and its
-nearest pushed first-parent predecessor are imported byte-for-byte into PATH's
-clone-local receipt namespace. PATH must have the same remote name and URL as
+pushed range-boundary predecessor, when recorded, are imported byte-for-byte
+into PATH's clone-local receipt namespace. PATH must have the same remote name and URL as
 the pushed destination. Only its destination ref/objects are fetched; its
 checkout is untouched. Skipped CI transfers nothing and the handoff fails.
-Conflicting receipt bytes or a different landed-range boundary are refused;
+When a push moves the destination, push.base records the observed pre-push tip
+and fixes the landed range to push.base..SHA. Receipts without it infer the
+boundary from predecessors.
+Conflicting receipt bytes or a different inferred range boundary are refused;
 identical bytes are idempotent. A failed handoff exits nonzero, preserving the
 passed producer receipt for retry. Without this flag, clones remain isolated.
 To retry only the handoff of an already-passed receipt, also pass --no-update.
@@ -453,10 +456,29 @@ run_job() {
       rset push.rc=-1
       finish failed "HEAD, destination or tree changed before push; nothing pushed"; return 1
     fi
+    remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || {
+      rset push.rc=-1
+      finish failed "cannot read destination tip before push; nothing pushed"; return 1
+    }
+    remote_sha="${remote_sha%%[[:space:]]*}"
+    if ! git merge-base --is-ancestor "$remote_sha" "$SHA"; then
+      rset push.rc=-1
+      finish failed "destination tip is not an ancestor of the verified commit; rebase first; nothing pushed"; return 1
+    fi
     rc=0
-    git push --no-verify "$REMOTE" "$SHA:refs/heads/$TARGET" >> "$LOG" 2>&1 || rc=$?
-    rset push.rc="$rc"
-    [ "$rc" -eq 0 ] || { finish failed "push exit $rc"; return 1; }
+    # The ancestry check keeps this fast-forward-only; the lease binds the
+    # recorded base even if another clone pushes after the destination read.
+    git push --no-verify --force-with-lease="refs/heads/$TARGET:$remote_sha" \
+      "$REMOTE" "$SHA:refs/heads/$TARGET" >> "$LOG" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      rset push.rc="$rc"
+      finish failed "push exit $rc"; return 1
+    fi
+    if [ "$remote_sha" != "$SHA" ]; then
+      rset push.rc=0 push.base="$remote_sha"
+    else
+      rset push.rc=0
+    fi
   fi
   local conclusion=skipped run_id="" deadline remaining query_result
   if [ "$resume" -eq 1 ] && [ "$(receipt_value ci.conclusion)" = success ]; then

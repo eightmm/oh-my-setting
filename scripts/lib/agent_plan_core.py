@@ -205,6 +205,8 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
     except OSError as exc:
         die("cannot read oms land receipts: %s" % exc)
     passed = False
+    legacy = None
+    recorded_base = _load(os.path.join(os.path.dirname(__file__), "land_receipts.py"))["recorded_base"]
     for name in candidates:
         if not name.startswith(sha + "-") or not name.endswith(".json"):
             continue
@@ -230,6 +232,12 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
         remote, target = receipt.get("remote"), receipt.get("target")
         if not isinstance(remote, str) or not remote or not isinstance(target, str) or not target:
             continue
+        try:
+            base = recorded_base(receipt)
+        except ValueError:
+            continue
+        if base == sha:
+            continue
         ref = "refs/remotes/%s/%s" % (remote, target)
         # An ancestry read in a partial clone must not lazily fetch objects.
         git_env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
@@ -240,24 +248,34 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
                 ["git", "-C", env("OMS_REPO"), "merge-base", "--is-ancestor", sha, ref],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=git_env, timeout=10).returncode == 0
+            if reachable and base is not None:
+                reachable = subprocess.run(
+                    ["git", "-C", env("OMS_REPO"), "merge-base", "--is-ancestor", base, sha],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=git_env, timeout=10).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             reachable = False
         if reachable:
-            return {"kind": "commit", "sha": sha,
-                    "receipt_sha256": hashlib.sha256(raw).hexdigest()}
+            proof = {"kind": "commit", "sha": sha,
+                     "receipt_sha256": hashlib.sha256(raw).hexdigest()}
+            if base is not None:
+                return proof
+            # A reverify omits push.base; prefer the actual landing regardless
+            # of request filename order, while retaining legacy-only proofs.
+            if legacy is None:
+                legacy = proof
+    if legacy is not None:
+        return legacy
     if passed:
         die("landed commit %s is not reachable from a passed receipt's local pushed target ref" % sha)
     die("no passed oms land receipt for %s with gate/push ok and CI success" % sha)
 
-def landed_range_paths(sha):
-    """Files the landing of sha changed. The range starts at the nearest
-    first-parent ancestor with its own pushed land receipt (the tip that land
-    pushed onto); with none, it is sha's own commit against its first parent."""
+def landed_range_paths(sha, receipt_sha256):
+    """Files changed since the receipt's push.base, or the inferred legacy base."""
     directory = env("OMS_LAND_RECEIPTS_DIR")
     receipts = _load(os.path.join(os.path.dirname(__file__), "land_receipts.py"))
     def read(filename):
         return read_regular_bytes(filename, "oms land receipt", 1024 * 1024)
-    pushed = {prior for prior, _, _ in receipts["pushed_receipts"](directory, sha, read)}
     git_env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
     def git(*args):
         try:
@@ -269,8 +287,28 @@ def landed_range_paths(sha):
         if not isinstance(run, subprocess.CompletedProcess) or run.returncode != 0:
             die("cannot list files changed by landed commit %s; retry where its history is local" % sha)
         return run.stdout.decode("utf-8", "surrogateescape")
-    chain = git("rev-list", "--first-parent", "--max-count=1000", sha).split()
-    base = receipts["range_base"](chain, pushed)
+    receipt = None
+    for name in sorted(os.listdir(directory)):
+        if not name.startswith(sha + "-") or not name.endswith(".json"):
+            continue
+        raw = read(os.path.join(directory, name))
+        if hashlib.sha256(raw).hexdigest() == receipt_sha256:
+            receipt = json.loads(raw)
+            break
+    if receipt is None:
+        die("landed commit receipt changed before range selection")
+    try:
+        base = receipts["recorded_base"](receipt)
+    except ValueError as exc:
+        die(str(exc))
+    if base is not None:
+        if base == sha:
+            die("receipt push.base does not describe a nonempty landed range")
+        git("merge-base", "--is-ancestor", base, sha)
+    else:
+        pushed = {prior for prior, _, _ in receipts["pushed_receipts"](directory, sha, read)}
+        chain = git("rev-list", "--first-parent", "--max-count=1000", sha).split()
+        base = receipts["range_base"](chain, pushed)
     diff = ["diff-tree", "-r", "-z", "--name-only", "--no-commit-id"]
     paths = git(*(diff + ([base, sha] if base else ["--root", sha]))).split("\0")
     return ("%s..%s" % (base, sha) if base else "root commit %s" % sha), [x for x in paths if x]
@@ -1297,7 +1335,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                     path_scope["normalize"](a, "allowed path") for a in allowed)
             except ValueError as exc:
                 die("task %s allowed_paths are invalid: %s" % (i, exc))
-            span, changed = landed_range_paths(landing["sha"])
+            span, changed = landed_range_paths(landing["sha"], landing["receipt_sha256"])
             if not any(path_scope["matches"](p, a) for p in changed for a in scope):
                 die("landed commit %s does not land task %s: %s changed none of its allowed_paths (%s); "
                     "changed: %s. Finish against the SHA whose land pushed this task's work"
