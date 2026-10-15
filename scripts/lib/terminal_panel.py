@@ -3703,7 +3703,7 @@ def terminal_window():
 
 
 def board_split(pane, repo, command, main_watch=False):
-    """Open this window's board on the portrait or landscape edge at its own recorded size.
+    """Open this window's board on the left when possible, otherwise above the CLI.
     Leave narrow windows unsplit so both the board and native CLI remain usable."""
     try:
         result = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
@@ -3730,15 +3730,23 @@ def board_split(pane, repo, command, main_watch=False):
         except ValueError:
             pass
     available = sized or window
-    portrait = bool(available and available[1] * 2 > available[0])
-    orientation = stored[0] if stored else ("top" if portrait else "left")
+    left_fits = bool(available and board_split_cells(("left", BOARD_SHARE, True), available[0]) is not None)
+    top_fits = bool(available and board_split_cells(("top", BOARD_HEIGHT_SHARE, True), available[1]) is not None)
+    if not available:
+        # Unknown geometry keeps the recorded edge, else the left default.
+        orientation = stored[0] if stored else "left"
+    else:
+        orientation = ("left" if left_fits else "top") if stored is None or (stored[0] == "top" and left_fits) \
+            else stored[0]
+        if orientation == "left" and not left_fits:
+            orientation = "top" if top_fits else "left"
     if mode == "overview" and orientation == "left":
         share = OVERVIEW_SHARE
     width = "%d%%" % share
     if available:
         axis = available[1] if orientation == "top" else available[0]
         default = BOARD_HEIGHT_SHARE if orientation == "top" else (BOARD_SHARE if mode == "overview" else share)
-        geometry = stored or (orientation, default, True)
+        geometry = stored if stored and stored[0] == orientation else (orientation, default, True)
         drag = parse_work_drag(parts[4])
         deliberate = bool(drag and stored and drag[0] == stored[0] and drag[1] == stored[1]
                           and drag[2] == axis)
@@ -3869,12 +3877,11 @@ class SplitSync:
             "left" if pane[1] == window[1] and pane[0] < window[0] else None
         if current is None:
             return None
-        doubled_height = window[1] * 2
-        margin = 4
+        left_threshold = MIN_BOARD + 1 + NATIVE_MIN
         if current == "left":
-            orientation = "top" if doubled_height > window[0] + margin else "left"
+            orientation = "top" if window[0] < left_threshold else "left"
         else:
-            orientation = "left" if doubled_height < window[0] - margin else "top"
+            orientation = "left" if window[0] >= left_threshold + 4 else "top"
         if self.manual is not None and (self.manual[0] != window or self.manual[1] != orientation):
             self.manual = None
         old_axis = window[1] if current == "top" else window[0]

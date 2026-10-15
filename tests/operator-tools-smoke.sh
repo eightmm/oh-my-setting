@@ -13137,9 +13137,9 @@ assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcodex\tleft:40") == [
     ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"], left_split("76")]
 assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("56")], "an older top record was kept"
+# A portrait window wide enough for a left board keeps the board on the left.
 assert board_calls("80 90 1 $1\tcodex\t") == [
-    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:41r"],
-    ["split-window", "-f", "-v", "-b", "-l", "41", "-t", "%1", "-c", "/repo", "board"]]
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:22c"], left_split("22")]
 assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 assert board_calls("") == [left_split("28%")]
@@ -13177,8 +13177,8 @@ assert board_calls("200 50 1 $1\tclaude\t", main_watch=True) == [
     ["split-window", "-P", "-F", "#{pane_id}", "-f", "-h", "-b", "-l", "56", "-t", "%1", "-c", "/repo", "board"],
     ["set-option", "-p", "-t", "%2", "@oms_panel_main_watch", "1"]]
 assert board_calls("80 90 1 $1\tclaude\t", main_watch=True) == [
-    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:41r"],
-    ["split-window", "-P", "-F", "#{pane_id}", "-f", "-v", "-b", "-l", "41", "-t", "%1", "-c", "/repo", "board"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:22c"],
+    ["split-window", "-P", "-F", "#{pane_id}", "-f", "-h", "-b", "-l", "22", "-t", "%1", "-c", "/repo", "board"],
     ["set-option", "-p", "-t", "%2", "@oms_panel_main_watch", "1"]]
 control_input = {"pane": "%10", "window": "@1", "session": "oms-fixture", "watch": False}
 for identity, expected_watch in (({}, False),
@@ -13197,14 +13197,13 @@ assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
 assert board_calls("80 24 0 $1\tcodex\t") == [left_split("28%")]
 for window, cells in split_widths:
     for height in (24, 40):
-        # Portrait creation uses rows; the same minimum-pane budget still decides whether to split.
-        portrait = height * 2 > window
-        extent = panel.board_split_cells(("top", panel.BOARD_HEIGHT_SHARE, True), height) if portrait else cells
-        axis = height if portrait else window
-        value = (panel.top_text(extent) if portrait else panel.split_text(extent)) if extent is not None else ""
+        orientation = "left" if cells is not None else "top"
+        extent = cells if cells is not None else panel.board_split_cells(("top", panel.BOARD_HEIGHT_SHARE, True), height)
+        axis = window if orientation == "left" else height
+        value = (panel.split_text(extent) if orientation == "left" else panel.top_text(extent)) if extent is not None else ""
         record = [] if extent is None else [["set-option", "-w", "-t", "%1", "@oms_panel_split", value]]
         def expected_split(size):
-            return ["split-window", "-f", "-v" if portrait else "-h", "-b", "-l", size,
+            return ["split-window", "-f", "-h" if orientation == "left" else "-v", "-b", "-l", size,
                     "-t", "%1", "-c", "/repo", "board"]
         attached_split = [] if extent is None else [expected_split(str(extent))]
         detached_split = [] if extent is None else [expected_split("%d%%" % ((200 * extent + axis) // (2 * axis)))]
@@ -13375,7 +13374,7 @@ def mode_flip_run(reads, listing):
             done.append((modes.tick(read), split))
     return done, [call.args[0][1:] for call in tmux_run.call_args_list]
 done, calls = mode_flip_run([
-    reading(False, (80, 90), (80, 40), "top:40r"),
+    reading(False, (60, 90), (60, 40), "top:40r"),
     reading(False, (200, 50), (200, 25), "top:40r", mode="overview"),
     reading(False, (200, 50), (89, 50), "top:40r", mode="overview")],
     "%1 200 25\n%2 80 25\n")
@@ -13386,7 +13385,7 @@ assert calls == [["list-panes", "-t", "%1", "-F", "#{pane_id} #{pane_width} #{pa
 assert not any(call[0] == "set-option" for call in calls), calls
 # Returning after Overview changed the edge restores the Work fraction on the new axis.
 done, calls = mode_flip_run([
-    reading(False, (80, 90), (80, 40), "top:40r"),
+    reading(False, (60, 90), (60, 40), "top:40r"),
     reading(False, (200, 50), (200, 25), "top:40r", mode="overview"),
     reading(False, (200, 50), (124, 50), "top:40r", mode="overview"),
     reading(False, (200, 50), (124, 50), "top:40r")],
@@ -13397,7 +13396,7 @@ assert done[-1][1] == "follow" and calls[-2:] == [
 # Entering Focus during an edge flip moves the board before zooming the CLI.
 done, calls = mode_flip_run([
     reading(False, (200, 50), (56, 50), "left:56c"),
-    reading(False, (80, 90), (30, 90), "left:56c", mode="focus")],
+    reading(False, (60, 90), (30, 90), "left:56c", mode="focus")],
     "%1 30 90\n%2 49 90\n")
 assert done[-1] == ("focus", "follow") and calls[-2:] == [
     ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "25"],
@@ -13406,7 +13405,7 @@ assert done[-1] == ("focus", "follow") and calls[-2:] == [
 for mode in ("overview", "focus"):
     done, calls = mode_flip_run([
         reading(False, (200, 50), (124, 50), "left:124c", mode=mode),
-        reading(False, (80, 90), (40, 90), "left:124c", mode=mode)],
+        reading(False, (60, 90), (40, 90), "left:124c", mode=mode)],
         "%1 40 90\n%2 40 45\n")
     assert [split for unused, split in done] == [None, "follow"], (mode, done, calls)
     assert [call for call in calls if call[0] == "join-pane"] == [
@@ -13418,6 +13417,12 @@ assert done == ["follow", None] and calls == [["resize-pane", "-t", "%1", "-x", 
 # A same-orientation window resize scales the recorded board share proportionally.
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50), "left:25c"), reading(True, (120, 50), (30, 50), "left:25c"))
 assert done == [None, "record"] and calls == [["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:30c"]], (done, calls)
+# Portrait geometry keeps a left board when width permits, shifts above the CLI below 61 columns,
+# and returns left at 65 columns to provide four columns of hysteresis.
+done, calls = sync_run(panel.SplitSync(), reading(False, (80, 90), (22, 90), "left:22c"),
+                       reading(False, (60, 90), (60, 40), "left:22c"),
+                       reading(False, (65, 90), (65, 40), "top:40r"))
+assert done == [None, "follow", "follow"], (done, calls)
 # Cap after scaling the original record, so repeated window shrinks preserve its fraction.
 done, calls = sync_run(panel.SplitSync(), reading(True, (400, 50), (112, 50), "left:112c"),
                        reading(True, (200, 50), (56, 50), "left:112c"),
@@ -13489,7 +13494,7 @@ done, calls = flip_run(reading(False, (200, 50), (60, 50), "left:30"),
                        "%1 80 30\n%2 40 45\n")
 assert done[-1] == "follow" and [call for call in calls if call[0] == "join-pane"] == [
     ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "27"]], (done, calls)
-done, calls = flip_run(reading(False, (80, 90), (80, 40), "top:40r"),
+done, calls = flip_run(reading(False, (60, 90), (60, 40), "top:40r"),
                        reading(False, (120, 50), (120, 40), "top:40r"),
                        "%1 120 40\n%2 60 50\n")
 assert done[-1] == "follow" and [call for call in calls if call[0] == "join-pane"] == [

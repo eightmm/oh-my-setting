@@ -1017,8 +1017,9 @@ main ownership and exact pane/terminal/socket identity; reused panes and
 unproven sessions are rejected. Numeric footer readings retain their reported
 scope and unknown values. A socket error does not stop the native sibling.
 
-The board is on the left in landscape windows and above the CLI in portrait windows
-(28 percent of the width or 45 percent of the height the first time, sized from the
+The board stays on the left whenever the window is wide enough; it moves above the
+CLI only when the window is too narrow, and returns left when it widens again (28
+percent of the width or 45 percent of the height the first time, sized from the
 terminal that is attaching; optional integer `OMS_PANEL_BOARD_PERCENT` overrides the
 landscape default, clamped to 25–35 percent, with invalid values ignored). In Work
 mode, a landscape default or scaled record is capped at the smaller of 38 percent
