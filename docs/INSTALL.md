@@ -1,5 +1,8 @@
 # Installing oh-my-setting
 
+This guide is for people installing or maintaining OMS on Linux, macOS or Windows Git Bash.
+Start with the command below, then use the host and profile details as needed.
+
 The one-line install and what it changes are in the [README](../README.md).
 This page holds the details: host requirements, capability profiles and
 updates. [한국어](INSTALL.ko.md)

@@ -4,6 +4,15 @@ Work Journal is the harness's automatic project memory: a local, derived view
 of outcomes that the existing control plane already knows. It is not another
 run tracker.
 
+## In this guide
+
+- [Ownership and storage](#ownership-and-storage)
+- [Capture and identity](#capture-and-identity)
+- [Summaries](#summaries)
+- [Reading the journal](#reading-the-journal)
+- [Data safety and fallback](#data-safety-and-fallback)
+- [Notion mirror](#notion-mirror)
+
 ## Ownership and storage
 
 The existing run ledger remains authoritative for commands, gates, tests, and

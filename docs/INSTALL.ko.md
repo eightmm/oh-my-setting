@@ -1,5 +1,8 @@
 # oh-my-setting 설치
 
+이 안내는 Linux, macOS, Windows Git Bash에서 OMS를 설치하고 관리하는 사용자를 위한 문서다.
+아래 명령으로 시작한 뒤 호스트와 프로필별 세부 내용을 확인한다.
+
 한 줄 설치 명령과 설치하면 바뀌는 것은 [README](../README.ko.md)에 있다. 이
 문서는 호스트 요구 사항, capability 프로필, 업데이트의 세부 내용을 다룬다.
 [English](INSTALL.md)

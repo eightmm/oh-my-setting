@@ -1,5 +1,10 @@
 # Historical Autopilot Gap Audit
 
+Historical analysis (2026-08-12; see [Components](COMPONENTS.md) and the [autonomy loop contract](../custom-skills/oms-agent-harness/references/autonomy-loop.md) for current behavior).
+
+This is a dated audit of autopilot safety and reliability findings at the recorded source revision.
+It is for maintainers reviewing the evidence and later resolutions.
+
 Audit snapshot: product source at `7573a01`, 2026-08-12. This was a real local
 `propose -> parent review -> run -> recovery` exercise in a dedicated worktree.
 Provider calls were made through the harness; no remote branch, PR, merge, tag,
@@ -18,6 +23,15 @@ to challenge the findings independently of the document-producing worker.
 > Current behavior and the agent-owned operating contract live in
 > `docs/COMPONENTS.md` and
 > `custom-skills/oms-agent-harness/references/autonomy-loop.md`.
+
+## In this guide
+
+- [Executive summary](#executive-summary)
+- [Actual flow and observed run](#actual-flow-and-observed-run)
+- [Historical confirmed gaps (resolved)](#historical-confirmed-gaps-resolved)
+- [Protections confirmed, not gaps](#protections-confirmed-not-gaps)
+- [Historical evaluation coverage](#historical-evaluation-coverage)
+- [Historical recommended order](#historical-recommended-order)
 
 Severity is relative to the documented trusted-local agent boundary. High can
 cross an OMS authority or repository boundary. Medium can falsely weaken a

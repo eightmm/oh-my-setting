@@ -1,5 +1,14 @@
 # Codex subscription inference in other harnesses
 
+This guide is for operators running Codex inference through Pi or Claude Code.
+It covers routing, credential boundaries, compatibility and verified evidence.
+
+## In this guide
+
+- [Data and authority](#data-and-authority)
+- [Claude auto permission checks](#claude-auto-permission-checks)
+- [Compatibility and evidence](#compatibility-and-evidence)
+
 `oms harness` selects the agent UI and tool loop separately from the inference
 model. It is shipped with OMS; invoking it starts the selected, already
 installed CLI. It does not install a CLI, alter its saved settings, or start a

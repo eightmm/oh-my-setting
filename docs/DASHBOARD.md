@@ -1,5 +1,8 @@
 # Collaboration dashboard
 
+This guide is for operators who need a quick read of recorded OMS collaboration.
+It documents the read-only terminal view and its JSON contract.
+
 `oms dashboard` is a read-only terminal view of what OMS knows about a
 repository's collaboration: goal and scope, task/plan and attempt states, which
 provider and model ran each recorded operation, acceptance evidence, and the
