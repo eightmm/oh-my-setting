@@ -40,7 +40,7 @@ is released with `oms panel --release-main ATTEMPT` or the swap is finished.
 | Attention | Items needing you: answer needed, failed, awaiting decision, held/workers ended, unread mail and delivery failed |
 | Activity tree | Main and its calls, including endings such as cancelled, guard stop, timed out and verify failed |
 | Session log | Scrollable activity log |
-| Bottom tabs | Detail, Plan, Debate, Messages, Past and Attention; Past appears when calls have settled |
+| Bottom tabs | Detail, Plan, Messages, Past and Attention (kept even when empty), plus Debate while a debate exists |
 
 | Key | Action |
 |---|---|

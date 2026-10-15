@@ -40,7 +40,7 @@ dispatch를 거부한다. 추가 main을 `oms panel --release-main ATTEMPT`로 �
 | Attention | 답변 필요, 실패, 결정 대기, 보류/worker 종료, 읽지 않은 메일, 전달 실패 등 사용자 조치가 필요한 항목 |
 | Activity tree | main과 하위 호출, 취소·guard 중단·시간 초과·검증 실패 같은 실제 종료 상태 |
 | Session log | 스크롤할 수 있는 활동 로그 |
-| 하단 탭 | Detail, Plan, Debate, Messages, Past, Attention. 종료된 호출이 있을 때 Past 표시 |
+| 하단 탭 | Detail, Plan, Messages, Past, Attention(비어 있어도 유지). 토론이 있을 때 Debate 추가 |
 
 | 키 | 동작 |
 |---|---|
