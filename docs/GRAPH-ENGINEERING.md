@@ -1,12 +1,37 @@
 # OMS Graph Engineering
 
-Two graphs, one harness. The **Project Graph** answers "how is this code
-connected?" and the **Execution Graph** answers "what is legal to run next?".
-Both sit *above* the existing control plane; neither replaces `agent-plan`,
-`plan-run`, `patch-admit`, `patch-land`, `goal-drive`, or `autopilot`, and
-neither owns authority. This document is the implementation contract: the
-schemas, module boundaries, and function signatures below are what every
-implementer codes against.
+This guide is for OMS users inspecting repository relationships and execution
+routes, and implementers maintaining both graph engines.
+The Project Graph describes code relationships; the Execution Graph describes
+legal next actions. Both sit above the control plane and do not own authority;
+neither replaces `agent-plan`, `plan-run`, `patch-admit`, `patch-land`,
+`goal-drive` or `autopilot`. The schemas, module boundaries and function
+signatures below are the implementation contract.
+
+## In this guide
+
+- [Quick start](#quick-start)
+- [Ownership boundaries](#ownership-boundaries)
+- [Execution lifecycle and GraphSpec](#execution-lifecycle-vs-semantic-outcome)
+- [Project Graph](#project-graph)
+- [CLI reference](#cli)
+- [MCP and tests](#mcp)
+- [Non-goals](#non-goals-v1)
+
+## Quick start
+
+Common commands build or check the Project Graph, inspect a bounded map, and
+validate or inspect an Execution Graph:
+
+```bash
+bash scripts/graph.sh project ensure
+bash scripts/graph.sh project map --limit 40 --depth 1
+bash scripts/graph.sh project context --task "TASK_DESCRIPTION"
+bash scripts/graph.sh exec validate config/graphs/coding-change.json
+bash scripts/graph.sh exec status
+```
+
+The full command syntax and output options are in the [CLI reference](#cli).
 
 ```text
                              OMS

@@ -1,15 +1,36 @@
 # OMS Typed Runtime Core
 
-This change adds a typed, standard-library-only semantic core **above** the
-existing hardened OMS execution plane. It deliberately does not rewrite
-`peer-delegate`, `patch-admit`, `patch-land`, plan leases,
-approval consumption, commit intents, or Draft PR intents.
+This guide is for OMS operators and implementers who need to inspect runtime
+task state, evidence, context, capabilities, or recovery behavior.
+The runtime core projects existing sources into typed read models and small
+front doors; existing transaction writers remain authoritative. The core is
+standard-library only and does not rewrite `peer-delegate`, `patch-admit`,
+`patch-land`, plan leases, approval consumption, commit intents or Draft PR intents.
 
-The core solves a different problem: OMS already has strong primitives, but the
-meaning of a task, its evidence, its context, its optional capabilities, and its
-recovery state is distributed across several files and commands. The new core
-projects those sources into typed read models and small front doors while the
-existing transaction writers remain authoritative.
+## In this guide
+
+- [Quick start](#quick-start)
+- [Boundary](#boundary) and [stable entrypoint](#stable-entrypoint)
+- [Task and evidence projections](#effective-taskenvelope)
+- [Context and capabilities](#contextmanifest)
+- [Backends, capsules, and failures](#execution-backends)
+- [Updates, experiments, and telemetry](#stable-and-edge-update-channels)
+- [Adapters, migration, and verification](#optional-interoperability-adapters)
+
+## Quick start
+
+Use the read surfaces to inspect the current task and next action, then inspect
+criterion evidence or build a bounded context pack:
+
+```bash
+oms runtime envelope show
+oms runtime next
+oms runtime evidence show
+oms runtime context --task "TASK_DESCRIPTION"
+```
+
+For capability profiles, backend details, capsules, failures, releases, and
+experiments, use the commands at the start of their respective sections.
 
 ## Boundary
 
