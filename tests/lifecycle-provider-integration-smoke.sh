@@ -167,6 +167,20 @@ assert states[-2:] == ["verifying", "failed"], states
 assert "review" not in states, states
 PY
 
+# The worker's model, panel task and room are routing for its provider call
+# only. The declared verifier starts as clean as a top-level verify, so suites
+# it runs cannot record fixture attempts into the live room under this task.
+env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+  OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+  OMS_ROOM_REPO="$TMP/repo" OMS_PANEL_LABEL=fixture-label \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/repo" --to codex \
+  --prompt 'write lifecycle verify environment' --model fixture-model \
+  --verify 'v="${OMS_MODEL_EXPLICIT-unset}${OMS_ROOM_REPO-unset}${OMS_PANEL_LABEL-unset}"; [ "$v" = unsetunsetunset ] && echo unset' \
+  >/dev/null || fail "delegation verify inherited the worker model"
+verify_artifact="$(ls -t "$TMP/repo"/.oms/artifacts/delegate/*.md 2>/dev/null | head -1)"
+[ -n "$verify_artifact" ] && grep -Fqx 'unset' "$verify_artifact" ||
+  fail "verify output did not report an unset explicit model"
+
 env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
   "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/repo" --to codex \
@@ -179,7 +193,7 @@ import json, sys
 
 attempts = json.load(open(sys.argv[1], encoding="utf-8"))
 writes = [row for row in attempts if row.get("tool") == "peer-delegate"]
-assert len(writes) == 2, writes
+assert len(writes) == 3, writes
 attempt = writes[-1]
 assert attempt["state"] == "review", attempt
 events = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]

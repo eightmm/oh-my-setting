@@ -1831,6 +1831,22 @@ EOF
 
 # Runs VERIFY_CMD in the worktree; output goes to the artifact and is kept in
 # $verify_out for repair prompts. Sets verify_status.
+# The verify command is a check, not a worker: it must reach the verdict a
+# top-level run would. Drop the worker's routing, panel, room, index and
+# state pointers (nested fixtures otherwise record into the live room ledger
+# under this task); keep OMS_HARNESS_* so the recursion guard still holds.
+# Call only inside the verify subshell.
+verify_clean_env() {
+  local name
+  for name in $(compgen -e); do
+    case "$name" in
+      OMS_PANEL_*|OMS_ROOM_*|OMS_MODEL_*|OMS_REASONING_*|OMS_INDEX_*|OMS_STATE_REPO|\
+      OMS_ATTEMPT_ID|OMS_PLAN_LEASE_ID|OMS_EXECUTOR_ID|OMS_TASK_ID|OMS_SOUL_SHA256|\
+      OMS_WORKER_AUTHORITY_EXCLUSIVE|OMS_OPERATION_ID|OMS_DELEGATION_ID) unset "$name" ;;
+    esac
+  done
+}
+
 run_verify() {
   local verify_pid verify_child_status heartbeat_interval
 
@@ -1856,7 +1872,7 @@ run_verify() {
     fi
   fi
   set +e
-  (cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
+  (cd "$worktree" && verify_clean_env && run_verify_with_timeout bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
   verify_pid="$!"
   if [ "$worker_attempt_owned" = 1 ] && [ "$WORKER_ACCESS" = write ]; then
     heartbeat_interval="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
