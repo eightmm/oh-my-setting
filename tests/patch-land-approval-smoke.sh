@@ -29,6 +29,41 @@ printf 'other change\n' > "$repo/file.txt"
 git -C "$repo" diff --binary > "$other_patch"
 git -C "$repo" restore file.txt
 
+# An admission usage error has no producer rejection witness. Keep its
+# capture reserved for diagnosis and report the original setup error once.
+usage_repo="$TMP/usage-repo"
+mkdir -p "$usage_repo"
+git -C "$usage_repo" init -q
+git -C "$usage_repo" config user.email test@example.com
+git -C "$usage_repo" config user.name test
+printf 'base\n' > "$usage_repo/file.txt"
+git -C "$usage_repo" add file.txt
+git -C "$usage_repo" commit -qm base
+printf 'changed\n' > "$usage_repo/file.txt"
+git -C "$usage_repo" diff --binary > "$TMP/usage.patch"
+git -C "$usage_repo" restore file.txt
+mkdir -p "$usage_repo/scripts"
+printf '#!/bin/sh\nexit 0\n' > "$usage_repo/scripts/check.sh"
+chmod +x "$usage_repo/scripts/check.sh"
+git -C "$usage_repo" add scripts/check.sh
+git -C "$usage_repo" commit -qm 'add check script without fast mode'
+usage_status=0
+"$ROOT/scripts/patch-land.sh" --repo "$usage_repo" --patch "$TMP/usage.patch" \
+  >"$TMP/usage.out" 2>&1 || usage_status=$?
+[ "$usage_status" -eq 2 ] || fail "missing explicit verifier returned $usage_status, expected 2"
+grep -Fq 'has no bounded fast mode' "$TMP/usage.out" || { cat "$TMP/usage.out" >&2; fail "original verifier usage error was hidden"; }
+grep -Fq 'patch-land: admission did not run (usage error); not applied' "$TMP/usage.out" ||
+  fail "usage error was not classified by patch-land"
+if grep -Fq 'REJECTED' "$TMP/usage.out" || grep -Fq 'witness missing' "$TMP/usage.out"; then
+  fail "usage error was mislabeled as an authenticated rejection"
+fi
+if "$ROOT/scripts/patch-land.sh" --repo "$usage_repo" --patch "$TMP/usage.patch" --verify false \
+  >"$TMP/reject.out" 2>&1; then
+  fail "failed verifier unexpectedly passed admission"
+fi
+grep -Fq 'patch-land: REJECTED by admission gate; not applied' "$TMP/reject.out" ||
+  fail "authenticated admission rejection was not reported"
+
 LAND="$ROOT/scripts/patch-land.sh"
 APPROVAL="$ROOT/scripts/approval-inbox.sh"
 

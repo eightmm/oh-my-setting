@@ -1258,6 +1258,19 @@ if ! "${admit_cmd[@]}" >/dev/null; then
   # witness refuses it. Diagnose those bytes without sealing or deleting them.
   frozen_patch_matches ||
     fail "frozen patch changed during admission; verified bytes were not applied"
+  # A nonzero admission command is a rejection only when the native producer
+  # proof authenticates its REJECT. Usage/setup failures have no such proof and
+  # must leave the reserved capture available for diagnosis.
+  if ! python3 -c '
+import runpy, sys
+capture = runpy.run_path(sys.argv[1])
+item = capture["find"](sys.argv[2], landing=sys.argv[3])
+value = capture["certificate"](item)
+capture["admission_proof"](sys.argv[2], item, value, 1)
+' "$CAPTURE_HELPER" "$STATE_REPO" "$LANDING_ID" >/dev/null 2>&1; then
+    echo "patch-land: admission did not run (usage error); not applied" >&2
+    exit 2
+  fi
   # The outer landings lock is still held here. Acquire only the remaining
   # existing reader fences; no public skip-lock or force-cleanup capability.
   python3 -c 'import runpy,sys; runpy.run_path(sys.argv[1])["cleanup_rejected"](sys.argv[2],sys.argv[3])' \
