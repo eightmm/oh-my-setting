@@ -896,7 +896,7 @@ oms panel --repo . --room team --dispatch advisor --owner claude --main opus-mai
 ```
 
 From the control window, a dispatch belongs to the room's active main of that
-provider. `--main PARTICIPANT` asserts that caller's identity (the board's `a` uses it); legacy rooms with multiple live mains require the caller's own attempt or participant binding, and an unbound or mismatched assertion is refused. A native main always dispatches as itself.
+provider. `--main PARTICIPANT` asserts that caller's identity (the board's `a` uses it); a room with multiple live mains refuses every dispatch until the others are released with `oms panel --release-main` or the swap is finished. A native main always dispatches as itself.
 
 A `--task-id` that names a shared-plan task moves it for the calling main: a
 ready task is claimed and started, a claimed one is started, and later workers

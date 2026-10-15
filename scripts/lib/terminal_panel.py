@@ -1048,7 +1048,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
 
 
 def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
-    """One live main, or the caller's own main in a legacy room with concurrent mains."""
+    """Return the sole live main for this owner, refusing legacy concurrent mains."""
     history = [row for row in main_history(repo, room_id) if row.get("tool") == "panel-main"
                and row.get("refs", {}).get("panel_role") == "main"]
     candidates = {}
@@ -1064,6 +1064,9 @@ def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
                 and current.get("refs", {}).get("panel_role") == "main"
                 and current.get("state") in {"starting", "working", "verifying", "review", "waiting_input", "waiting_approval"}):
             candidates[enrolled["participant"]] = current
+    if len(candidates) > 1:
+        raise ValueError("this room has %d live mains; the panel supports one - release the others with "
+                         "oms panel --release-main or finish the swap" % len(candidates))
     caller = caller or os.environ.get("OMS_ROOM_PARTICIPANT")
     attempt = attempt or os.environ.get("OMS_PANEL_MAIN_ATTEMPT")
     if attempt:
@@ -1073,9 +1076,6 @@ def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
         caller = bound[0]
     if caller:
         candidates = {caller: candidates[caller]} if caller in candidates else {}
-    elif len(candidates) > 1:
-        raise ValueError("select a unique active main: legacy room has multiple live mains; "
-                         "dispatch from the main's own session")
     return {who: row for who, row in candidates.items() if row.get("provider") == owner}
 
 
@@ -1162,11 +1162,15 @@ def owning_attempt(repo, owner, main, env):
         repo = repository(env["OMS_ROOM_REPO"])
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     if parent:
+        current = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
         if main:
-            current = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
             participant = env.get("OMS_ROOM_PARTICIPANT") or current.get("refs", {}).get("panel_room_participant", parent)
             if main != participant:
                 raise ValueError("--main names a different main than this caller")
+        room_id = room.resolve(repo, env.get("OMS_ROOM_ID") or current.get("refs", {}).get("panel_room_id"))
+        if room_id:
+            active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner,
+                         caller=env.get("OMS_ROOM_PARTICIPANT"), attempt=parent)
         return lineage_ids(repo, owner, env.get("OMS_ROOM_PARTICIPANT"), parent)
     room_id = env.get("OMS_ROOM_ID")
     if not room_id:
@@ -3377,12 +3381,15 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
     env = child_environment(owner, repo)
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     room_id = room.resolve(repo, env.get("OMS_ROOM_ID"))
-    if not parent and room_id and not env.get("OMS_ROOM_PARTICIPANT"):
-        # The control window has no inherited identity: bind the debate to a live main so Debate shows it.
-        found = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner)
+    if room_id:
+        found = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner,
+                             caller=env.get("OMS_ROOM_PARTICIPANT"), attempt=parent)
         if len(found) != 1:
             raise ValueError("select a unique active main in this room before starting a council")
-        parent = next(iter(found.values()))["attempt_id"]
+        selected = next(iter(found.values()))
+        if parent and selected["attempt_id"] != parent:
+            raise ValueError("panel main identity does not match an active owner")
+        parent = selected["attempt_id"]
     where = {}
     if parent:
         record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))

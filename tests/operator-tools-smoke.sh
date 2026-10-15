@@ -183,6 +183,9 @@ def _standalone(name, root, temporary):
             shared = room.create(project, "operator-room", "Shared parser task")
             for owner in panel.PROVIDERS:
                 legacy_main_join(project, shared, mains[owner], owner)
+                call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "transition",
+                      "--attempt", mains[owner], "--state", "cancelled"])
+                room.append(project, shared, {"kind": "leave", "participant": mains[owner]}, "Fixture main stopped")
             room_owner = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
                                "--ref", "panel_model=claude-opus-5-5", "--then", "starting", "--then", "working"]).strip()
@@ -10283,9 +10286,10 @@ def exercise_observed_worker_leases():
             assert notices[0][2] == "Assigned: Capacity call"
             assert errors.getvalue() == ("" if scenario == "normal" else "Room %s continues as %s; ids naming %s keep working.\n"
                                          % (argv_binding.room_id, rolled, argv_binding.room_id)), errors.getvalue()
-    test_room = room.create(project, "observed-worker-room", "Worker lease producer")
+    test_rooms = {}
     mains = {}
     for provider in panel.PROVIDERS:
+        test_room = room.create(project, "observed-worker-room-" + provider, "Worker lease producer")
         participant = "observed-main-" + provider
         attempt = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
                         "--provider", provider, "--tool", "panel-main", "--ref", "panel_role=main",
@@ -10293,6 +10297,7 @@ def exercise_observed_worker_leases():
                         "--then", "starting", "--then", "working"]).strip()
         legacy_main_join(project, test_room, participant, provider, "main")
         mains[provider] = participant, attempt
+        test_rooms[provider] = test_room
     source = Path(call(["bash", str(panel.ENTRY), "scratch-worktree", "add", "--repo", str(project),
                         "--owner-pid", str(os.getpid())]).strip())
     (source / "value.txt").write_text("lease fixture scratch source\n")
@@ -10309,6 +10314,7 @@ def exercise_observed_worker_leases():
                  ("codex", None, "codex", "gpt-6-luna", "low", "read", True, "researcher")]
     for number, scenario in enumerate(scenarios):
         owner, workload, worker, model, effort, access, reviewed = scenario[:7]
+        test_room = test_rooms[owner]
         role = scenario[7] if len(scenario) > 7 else "worker"
         purpose = "research" if role == "researcher" else "implement" if access == "write" else "investigate"
         task_id = "observed-worker-" + str(number)
@@ -10459,6 +10465,7 @@ def exercise_observed_worker_leases():
     read_prompt = temporary / "scratch-read-prompt"
     read_verify = temporary / "scratch-read-verify"
     read_verify_env = temporary / "scratch-read-verify-env"
+    test_room = test_rooms["claude"]
     main_member, main_attempt = mains["claude"]
     canonical_env = dict(environment, OMS_ROOM_ID=test_room, OMS_ROOM_REPO=str(project),
                          OMS_ROOM_PARTICIPANT=main_member, OMS_PANEL_MAIN_ATTEMPT=main_attempt,
@@ -10791,7 +10798,7 @@ assert "A fresh worker continues earlier work" in prompt_log.read_text(), prompt
 foreign = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"],
                          env=dict(room_env, OMS_PANEL_MAIN_ATTEMPT=main_attempts["claude"]),
                          capture_output=True, text=True)
-assert foreign.returncode != 0 and "no worker" in foreign.stderr, foreign
+assert foreign.returncode != 0 and "identities disagree" in foreign.stderr, foreign
 third = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
                        capture_output=True, text=True)
 assert third.returncode == 0, third
@@ -10919,7 +10926,13 @@ def exercise_main_lineage():
         else:
             raise AssertionError("foreign worker was continued")
     def ledger(repo, *args, output=False):
-        return "lineage-next" if args[0] == "start" else json.dumps(rows)
+        if args[0] == "start":
+            return "lineage-next"
+        if args[0] == "show":
+            # `show --attempt ID` returns that one attempt, like the real ledger.
+            wanted = args[args.index("--attempt") + 1]
+            return json.dumps(next((row for row in rows if row.get("attempt_id") == wanted), {}))
+        return json.dumps(rows)
     with patch.object(panel, "events", side_effect=ledger), patch.object(panel, "results", return_value={"rows": []}), \
             patch("panel_terminals.process_gone", return_value=True) as gone, \
             patch.object(panel, "_dispatch_group_gone", return_value=True) as group_gone:
@@ -11389,24 +11402,70 @@ with patch.dict(os.environ, control_env, clear=True), \
             assert "unique active main" in str(error)
         else:
             raise AssertionError("control dispatch chose an exited owner")
+    original_shared, original_room_owner = shared, room_owner
+    shared = room.create(project, "legacy-multiple-main", "Legacy concurrent main refusal")
+    room_owner = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main",
+                              "--ref", "panel_role=main", "--ref", "panel_room_id=" + shared,
+                              "--then", "starting", "--then", "working", output=True)
+    legacy_main_join(project, shared, room_owner, "claude")
+    os.environ["OMS_ROOM_ID"] = shared
+    control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
     second_owner = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
                                 "--ref", "panel_room_id=" + shared, "--then", "starting", "--then", "working", output=True)
     legacy_main_join(project, shared, second_owner, "claude")
+    live_main_refusal = ("this room has 2 live mains; the panel supports one - release the others with "
+                         "oms panel --release-main or finish the swap")
     try:
         panel.dispatch(project, "claude", "worker", "light", "read", "investigate", prompt="Inspect source")
     except ValueError as error:
-        assert "unique active main" in str(error)
+        assert str(error) == live_main_refusal, error
     else:
         raise AssertionError("control dispatch silently chose between two mains")
-    # --main asserts identity; it cannot resolve an unbound legacy caller.
+    # Neither --main nor a bound caller can select one of two live mains.
     for dry in (False, True):
         try:
             panel.dispatch(project, "claude", "advisor", None, "read", None,
                            prompt="Ambiguous advice", main=second_owner, dry_run=dry)
         except ValueError as error:
-            assert "multiple live mains" in str(error), error
+            assert str(error) == live_main_refusal, error
         else:
-            raise AssertionError("--main selected a main for an ambiguous caller")
+            raise AssertionError("--main selected a main while two mains were live")
+    for binding in ({"OMS_ROOM_PARTICIPANT": second_owner}, {"OMS_PANEL_MAIN_ATTEMPT": second_owner},
+                    {"OMS_ROOM_PARTICIPANT": second_owner, "OMS_PANEL_MAIN_ATTEMPT": second_owner}):
+        with patch.dict(os.environ, binding):
+            try:
+                panel.dispatch(project, "claude", "advisor", None, "read", None,
+                               prompt="Bound caller cannot select a main", main=second_owner)
+            except ValueError as error:
+                assert str(error) == live_main_refusal, error
+            else:
+                raise AssertionError("bound caller dispatched while two mains were live")
+            try:
+                panel.owning_attempt(project, "claude", None, os.environ)
+            except ValueError as error:
+                assert str(error) == live_main_refusal, error
+            else:
+                raise AssertionError("bound caller continued while two mains were live")
+    with patch.dict(os.environ, control_env, clear=True):
+        try:
+            panel.council(project, "claude", "legacy-council", "Legacy council", "Review the task")
+        except ValueError as error:
+            assert str(error) == live_main_refusal, error
+        else:
+            raise AssertionError("council started while two mains were live")
+    with patch.dict(os.environ, dict(control_env, OMS_ROOM_PARTICIPANT=second_owner,
+                                     OMS_PANEL_MAIN_ATTEMPT=second_owner), clear=True):
+        try:
+            panel.council(project, "claude", "legacy-bound-council", "Legacy council", "Review the task")
+        except ValueError as error:
+            assert str(error) == live_main_refusal, error
+        else:
+            raise AssertionError("bound council started while two mains were live")
+
+    # Retire the original owner and preserve all identity-binding coverage with
+    # the second main as the sole live owner.
+    panel.events(project, "transition", "--attempt", room_owner, "--state", "cancelled")
+    room.append(project, shared, {"kind": "leave", "participant": room_owner}, "Fixture owner stopped")
     for binding in ({"OMS_ROOM_PARTICIPANT": second_owner}, {"OMS_PANEL_MAIN_ATTEMPT": second_owner},
                     {"OMS_ROOM_PARTICIPANT": second_owner, "OMS_PANEL_MAIN_ATTEMPT": second_owner}):
         with patch.dict(os.environ, binding):
@@ -11430,14 +11489,14 @@ with patch.dict(os.environ, control_env, clear=True), \
         panel.dispatch(project, "claude", "advisor", None, "read", None,
                        prompt="Advise nobody", main="outside-main")
     except ValueError as error:
-        assert "unique active main" in str(error)
+        assert "different main than this caller" in str(error), error
     else:
         raise AssertionError("explicit main bypassed live-main proof")
     # An inherited caller cannot be redirected to another main by --main.
-    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner}):
+    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": second_owner}):
         try:
             panel.dispatch(project, "claude", "advisor", None, "read", None,
-                           prompt="Misattributed advice", main=second_owner)
+                           prompt="Misattributed advice", main=room_owner)
         except ValueError as error:
             assert "different main" in str(error)
         else:
@@ -11455,8 +11514,12 @@ with patch.dict(os.environ, control_env, clear=True), \
                                   prompt="Advise the moved main") == 0
         assert room.status(project, shared)["participants"][-1]["parent"] == second_owner
         assert control_launch["env"]["OMS_PANEL_MAIN_ATTEMPT"] == second_owner
-    for refused in ({"CLAUDE_CODE_SESSION_ID": "0d9e8f7a-6b5c-4d3e-2f1a-0b9c8d7e6f5a"},
-                    {"CLAUDE_CODE_SESSION_ID": moved_sid, "OMS_HARNESS_CHILD": "1"}):
+    worker_participant = next(p["participant"] for p in room.status(project, shared)["participants"]
+                              if p.get("parent") == second_owner)
+    for refused in ({"CLAUDE_CODE_SESSION_ID": "0d9e8f7a-6b5c-4d3e-2f1a-0b9c8d7e6f5a",
+                     "OMS_ROOM_PARTICIPANT": "unbound-session"},
+                    {"CLAUDE_CODE_SESSION_ID": moved_sid, "OMS_HARNESS_CHILD": "1",
+                     "OMS_ROOM_PARTICIPANT": worker_participant}):
         with patch.dict(os.environ, refused):
             try:
                 panel.dispatch(project, "claude", "advisor", None, "read", None, prompt="Advise nobody")
@@ -11488,6 +11551,9 @@ with patch.dict(os.environ, control_env, clear=True), \
             raise AssertionError("room call cap was not enforced")
     panel.events(project, "transition", "--attempt", second_owner, "--state", "cancelled")
     room.append(project, shared, {"kind": "leave", "participant": second_owner}, "Fixture owner stopped")
+    shared, room_owner = original_shared, original_room_owner
+    os.environ["OMS_ROOM_ID"] = shared
+    control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
 # OPERATOR_SECTION_BEGIN room_rollover
 # A room past its rollover marks continues as a derived successor: running ids keep working, history stays.
 import threading
