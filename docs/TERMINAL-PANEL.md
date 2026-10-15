@@ -485,7 +485,7 @@ records remain unobserved.
 | 6 Implement | Optional tier; scoped brief and verifier required |
 | a Advisor | Optional tier, else frontier; read-only |
 | 7 Review | Optional tier, else frontier; mandatory review verifier |
-| c Council | Sol, Opus, Astra and Fable discussion; four seats, two provider families |
+| c Council | Opus, Sol, Sonnet and Luna by default; `--workload frontier` swaps Sonnet and Luna for Fable and Astra |
 | r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
 | f Finalize | Record owner outcome, summary and evidence; request app delivery |
 | n Retry delivery | Explicitly retry a saved result; an uncertain earlier send may duplicate |
@@ -669,11 +669,14 @@ ID`. `--dry-run` prints the chosen route and argv without running a model.
 ## Discussion and results
 
 The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
-front doors. One rebuttal round means eight primary seat calls; two means twelve.
-Format repair can add one call per primary call. `--dry-run` exposes both counts
-without executing a model. Four seats must complete to report council success;
-failed seats remain visible and the owner still decides the outcome. All seats
-are read-only. There is no model fallback or additional synthesis-model call.
+front doors. Its four seats cover both families: the deep pair (Opus, Sol) plus the
+routine pair (Sonnet, Luna) by default, or plus the frontier pair (Fable, Astra) with
+`--workload frontier`. One rebuttal round means eight primary seat calls; two
+means twelve. Format repair can add one call per
+primary call. `--dry-run` exposes both counts without executing a model. Every
+selected seat must complete to report council success; failed seats remain
+visible and the owner still decides the outcome. All seats are read-only. There
+is no model fallback or additional synthesis-model call.
 
 The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
 Messages, Past and Attention, which stay even when empty, plus Debate while a debate exists. The selected tab is bracketed; a `•` after Debate marks a

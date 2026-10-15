@@ -5889,7 +5889,7 @@ for title in ("".join(("api", "_key", "=", "fixture-value")), "/private/absolute
         pass
 assert panel.safe_label("설명 \033[31m source") == "설명 ?[31m source"
 
-# The council reuses the peer front door: four exact seats, explicit rounds,
+# The council reuses the peer front door: four seats over two families, explicit rounds,
 # bounded repairs, and the owning main's child links rather than a new task DB.
 council_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
                 "--owner", "codex", "--task-id", "panel-council-test", "--label", "Decide readable results",
@@ -5900,24 +5900,29 @@ for rounds in (1, 2):
     assert planned["primary_calls"] == 4 * (rounds + 1) and planned["max_calls"] == 8 * (rounds + 1)
     assert planned["families"] == 2 and planned["executes"] is False
     assert planned["argv"][planned["argv"].index("--providers") + 1] == \
-        "codex:model=gpt-6.1-sol,claude:model=claude-opus-5-5,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
+        "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-sonnet-5-5,codex:model=gpt-6-luna"
     assert len(planned["argv"][planned["argv"].index("--providers") + 1].split(",")) == 4 == planned["seats"]
+frontier_plan = json.loads(call(council_args + ["--workload", "frontier", "--dry-run"]))
+assert frontier_plan["argv"][frontier_plan["argv"].index("--providers") + 1] == \
+    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
 assert (project / ".oms/artifacts/index.jsonl").read_bytes() == before_index
-# A one-route tier launches three seats, and the plan advertises three.
-import io
+# A council rejects a tier that no longer preserves two-family independence.
 one_route = deepcopy(panel.policy())
-one_route["tiers"]["frontier"] = one_route["tiers"]["frontier"][:1]
-with patch.object(panel, "policy", return_value=one_route), patch("sys.stdout", new=io.StringIO()) as plan_text:
-    panel.council(project, "codex", "council-one-route", "One route", "Compare options.", dry_run=True)
-one_plan = json.loads(plan_text.getvalue())
-assert one_plan["seats"] == 3 == len(one_plan["argv"][one_plan["argv"].index("--providers") + 1].split(","))
-assert one_plan["primary_calls"] == 6 and one_plan["max_calls"] == 12 and one_plan["families"] == 2, one_plan
+one_route["tiers"]["deep"] = one_route["tiers"]["deep"][:1]
+one_route["tiers"]["routine"] = one_route["tiers"]["routine"][:1]
+with patch.object(panel, "policy", return_value=one_route):
+    try:
+        panel.council(project, "codex", "council-one-route", "One route", "Compare options.", dry_run=True)
+    except ValueError as error:
+        assert "two independent provider families" in str(error)
+    else:
+        raise AssertionError("council started with one provider family")
 call(council_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
 council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]
 assert any(a["tool"] == "panel-council" and a["state"] == "done" for a in council_attempts)
 assert {a["refs"].get("panel_model") for a in council_attempts if a["tool"] != "panel-council"} == \
-    {"gpt-6.1-sol", "claude-opus-5-5", "gpt-6-astra", "claude-fable-5-1"}, council_attempts
+    {"gpt-6.1-sol", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-luna"}, council_attempts
 assert all(a.get("parent_attempt_id") == main_attempts["codex"] for a in council_attempts)
 # A control-menu council has no inherited main: it binds the room's one live main, or refuses, so Debate can show it.
 class CouncilBound(Exception):

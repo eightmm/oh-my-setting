@@ -3444,7 +3444,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     return status
 
 
-def council_command(repo, prompt, task_id, label, thread=None, rounds=1):
+def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workload="deep"):
     if not 1 <= rounds <= 2:
         raise ValueError("council rounds must be 1 or 2")
     if not task_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
@@ -3454,7 +3454,10 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1):
     if not safe_label(label):
         raise ValueError("council needs a task title")
     routes = policy()
-    seats = [routes["main"]["codex"], routes["main"]["claude"]] + routes["tiers"]["frontier"]
+    # Four seats, two per family: deep plus a cheaper routine pair by default; frontier on request.
+    seats = routes["tiers"]["deep"] + routes["tiers"]["frontier" if workload == "frontier" else "routine"]
+    if len({item["provider"] for item in seats}) < 2:
+        raise ValueError("council tier must include two independent provider families")
     targets = ",".join(item["provider"] + ":model=" + item["model"] for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),
             "--providers", targets, "--debate", str(rounds), "--deliberation",
@@ -3467,10 +3470,10 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1):
     return argv
 
 
-def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False):
+def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False, workload="deep"):
     if owner not in PROVIDERS:
         raise ValueError("choose a supported council owner")
-    argv = council_command(repo, prompt, task_id, label, thread, rounds)
+    argv = council_command(repo, prompt, task_id, label, thread, rounds, workload)
     # Advertise the seats actually launched: route tiers may hold fewer or more than two entries.
     seats = argv[argv.index("--providers") + 1].split(",")
     families = len({seat.split(":", 1)[0] for seat in seats})
@@ -3506,8 +3509,9 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
     env.update(OMS_TASK_ID=task_id, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="advisor",
                OMS_PANEL_PURPOSE="advise", OMS_PANEL_WORKLOAD="main",
                OMS_PANEL_LABEL=safe_label(label))
-    print("council: %s seats / %s families / %s primary calls + up to %s format repairs" %
-          (len(seats), families, primary_calls, primary_calls), flush=True)
+    print("council: %s seats / %s families / %s primary calls + up to %s format repairs / %s" %
+          (len(seats), families, primary_calls, primary_calls,
+           ", ".join(seat.split(":model=", 1)[1] for seat in seats)), flush=True)
     refs = ["start", "--provider", owner, "--tool", "panel-council", "--task-id", task_id,
             "--ref", "panel_role=advisor", "--ref", "panel_owner=" + owner,
             "--ref", "panel_label=" + safe_label(label), "--ref", "panel_purpose=advise",
@@ -7349,7 +7353,7 @@ def main(argv=None):
     parser.add_argument("--main", help="assert the dispatch caller's own main participant (never select another main)")
     parser.add_argument("--scope", action="append", metavar="PATH",
                         help="repeatable repo-relative scope a write worker declares; overlaps warn, never lock")
-    parser.add_argument("--council", action="store_true", help="run the four-seat, two-family debate")
+    parser.add_argument("--council", action="store_true", help="run the two-family debate (deep tier by default)")
     parser.add_argument("--rounds", type=int, default=1, help="council debate rounds, 1 or 2")
     parser.add_argument("--thread", help="council thread ID")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
@@ -7368,7 +7372,8 @@ def main(argv=None):
     parser.add_argument("--notify", action="store_true", help="deliver the recorded result to Codex app")
     parser.add_argument("--retry-delivery", action="store_true", help="retry delivery of a saved task result without its original summary file")
     parser.add_argument("--result-id", help="saved result revision for --retry-delivery")
-    parser.add_argument("--workload", choices=TIERS, help="capability tier instead of the role's default")
+    parser.add_argument("--workload", choices=TIERS,
+                        help="capability tier instead of the role's default; council accepts deep or frontier")
     parser.add_argument("--access", choices=("read", "write"), default="read")
     parser.add_argument("--purpose", choices=("explain", "investigate", "implement"), help="plain worker task kind")
     parser.add_argument("--prompt", help="bounded read task for --dispatch")
@@ -7437,7 +7442,8 @@ def main(argv=None):
             or args.dispatch or args.council or args.results or args.finalize or args.retry_delivery or args.providers
             or args.chats or args.open_chat or args.mail or args.metrics):
         parser.error("--view and --attention-only apply to the interactive menu or --watch")
-    if (args.brief_file or args.purpose or args.workload or args.access != "read") and not args.dispatch:
+    if (args.brief_file or args.purpose or args.access != "read" or
+            (args.workload and not (args.dispatch or args.council))) and not args.dispatch:
         parser.error("role task options require --dispatch")
     if args.prompt and not (args.dispatch or args.council):
         parser.error("--prompt requires --dispatch or --council")
@@ -7474,6 +7480,8 @@ def main(argv=None):
         parser.error("--council requires --task-id, --label and --prompt")
     if (args.to or args.reasoning_effort) and not args.dispatch:
         parser.error("--to and --reasoning-effort require --dispatch")
+    if args.council and args.workload and args.workload not in ("deep", "frontier"):
+        parser.error("council --workload must be deep or frontier")
     if args.task_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.task_id):
         parser.error("invalid task ID")
     if args.dispatch:
@@ -7616,7 +7624,7 @@ def main(argv=None):
             return 0
         if args.council:
             return council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
-                           args.thread, args.rounds, args.dry_run)
+                           args.thread, args.rounds, args.dry_run, args.workload or "deep")
         if args.mail:
             participant = room.identifier(args.mail, "participant")
 
