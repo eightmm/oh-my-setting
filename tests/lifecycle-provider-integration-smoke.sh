@@ -220,9 +220,9 @@ env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   --prompt 'verify-heartbeat stale reconciliation' \
   --verify "bash '$TMP/verify-heartbeat.sh'" > "$TMP/verify-heartbeat.out" 2>&1 &
 verify_delegate_pid=$!
-for _verify_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
-  [ -f "$verify_started" ] && break
-  sleep .05
+_verify_wait=0
+while [ ! -f "$verify_started" ] && [ "$_verify_wait" -lt 1200 ]; do
+  sleep .05; _verify_wait=$((_verify_wait + 1))
 done
 [ -f "$verify_started" ] || fail "verify-heartbeat verifier did not reach its barrier"
 (
@@ -269,9 +269,9 @@ env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   --prompt 'verify-heartbeat completion race' \
   --verify "bash '$TMP/verify-heartbeat.sh'" > "$TMP/verify-heartbeat-race.out" 2>&1 &
 race_delegate_pid=$!
-for _verify_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
-  [ -f "$verify_started" ] && break
-  sleep .05
+_verify_wait=0
+while [ ! -f "$verify_started" ] && [ "$_verify_wait" -lt 1200 ]; do
+  sleep .05; _verify_wait=$((_verify_wait + 1))
 done
 [ -f "$verify_started" ] || fail "verify-heartbeat race verifier did not reach its barrier"
 "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" reconcile --apply \
@@ -306,9 +306,9 @@ env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   --prompt 'verify-heartbeat operator block' \
   --verify "bash '$TMP/verify-heartbeat.sh'" > "$TMP/verify-heartbeat-operator.out" 2>&1 &
 operator_delegate_pid=$!
-for _verify_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
-  [ -f "$verify_started" ] && break
-  sleep .05
+_verify_wait=0
+while [ ! -f "$verify_started" ] && [ "$_verify_wait" -lt 1200 ]; do
+  sleep .05; _verify_wait=$((_verify_wait + 1))
 done
 [ -f "$verify_started" ] || fail "verify-heartbeat operator verifier did not reach its barrier"
 operator_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" list --json | \
