@@ -1548,10 +1548,11 @@ def _safe_patch_path(value):
 
 
 _AUTO_REVIEW_FRONTIER_PATHS = (
-    "hooks/*", "scripts/lib/hook_state.py", "scripts/install*", "scripts/uninstall*",
-    "scripts/land.sh", "scripts/lib/landing-capture.py", ".github/workflows/*",
-    "config/*permission*", "config/*settings*", "*permission*", "*settings*", "*policy*",
-    "rules/*",
+    "plugins/*", "hooks/*", "install.sh", "uninstall.sh", "scripts/install*", "scripts/uninstall*",
+    "scripts/*hook*", "scripts/lib/*hook*", "scripts/lib/pi-oms-extension.mjs", "scripts/land.sh",
+    "scripts/patch-land.sh", "scripts/patch-admit.sh", "scripts/lib/landing-capture.py",
+    "scripts/provider-permissions.sh", ".github/workflows/*", "rules/*",
+    "*permission*", "*settings*", "*policy*",
 )
 
 

@@ -8352,7 +8352,10 @@ auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
 assert panel._automatic_review_workload({"changed_files": ["docs/TERMINAL-PANEL.md", "scripts/fixture.py"]}) == "deep"
-assert panel._automatic_review_workload({"changed_files": ["hooks/pre-commit"]}) == "frontier"
+for boundary in ("hooks/pre-commit", "plugins/oh-my-setting/hooks.json", "install.sh", "scripts/patch-land.sh",
+                 "scripts/patch-admit.sh", "scripts/resume-hook.sh", "scripts/lib/pi-oms-extension.mjs",
+                 "scripts/lib/hook_state.py", "scripts/install-claude-hooks.sh"):
+    assert panel._automatic_review_workload({"changed_files": ["docs/x.md", boundary]}) == "frontier", boundary
 assert panel._automatic_review_workload({"changed_files": []}) == "frontier"
 assert panel._automatic_review_workload({"changed_files": ["../escape"]}) == "frontier"
 auto_artifact = ".oms/artifacts/fixture/result.json"
