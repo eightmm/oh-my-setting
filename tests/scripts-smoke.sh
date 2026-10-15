@@ -6298,6 +6298,67 @@ assert s["stale_review"] == [], s
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "out-of-scope proof changed plan"
   "$SH" --repo "$d" finish --id scoped --landed-commit "$inside" >/dev/null ||
     fail "commit finish must accept a landing that touches allowed_paths"
+  # A separate producer clone explicitly hands real land receipts back to the
+  # shared plan checkout. Two commits need the predecessor to cover src/.
+  local handoff_remote="$TMP/plan-handoff.git" producer="$TMP/plan-producer"
+  local handoff_bin="$TMP/plan-handoff-bin" baseline landed
+  git init -q --bare -b main "$handoff_remote"
+  git -C "$d" remote add origin "$handoff_remote"
+  git -C "$d" push -q origin HEAD:main
+  git clone -q "$handoff_remote" "$producer"
+  mkdir -p "$handoff_bin" "$producer/.github/workflows"
+  cat > "$handoff_bin/gh" <<'GH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --commit ]; then
+    printf '[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"success"}]\n' "$2"
+    exit 0
+  fi
+  shift
+done
+exit 1
+GH
+  chmod +x "$handoff_bin/gh"
+  local PATH="$handoff_bin:$PATH"
+  export PATH
+  printf 'on: push\n' > "$producer/.github/workflows/test.yml"
+  git -C "$producer" add .github/workflows/test.yml
+  git -C "$producer" commit -qm workflow
+  "$ROOT/scripts/land.sh" --repo "$producer" --wait --no-update --gate true --ci-wait 1 >"$d/land.out" 2>&1 ||
+    fail "producer baseline land failed: $(cat "$d/land.out")"
+  baseline="$(git -C "$producer" rev-parse HEAD)"
+  "$SH" --repo "$d" add --id handoff --title handoff --allowed src/handoff.txt >/dev/null
+  "$SH" --repo "$d" claim --id handoff --provider codex >/dev/null
+  "$SH" --repo "$d" review --id handoff --artifact artifact.md --patch change.patch >/dev/null
+  printf 'handed off\n' > "$producer/src/handoff.txt"
+  git -C "$producer" add src/handoff.txt
+  git -C "$producer" commit -qm handoff
+  printf 'unrelated\n' > "$producer/unrelated.txt"
+  git -C "$producer" add unrelated.txt
+  git -C "$producer" commit -qm unrelated
+  landed="$(git -C "$producer" rev-parse HEAD)"
+  if "$SH" --repo "$d" finish --id handoff --landed-commit "$landed" >"$d/err" 2>&1; then
+    fail "separate clone discovered a producer receipt implicitly"
+  fi
+  "$ROOT/scripts/land.sh" --repo "$producer" --wait --no-update --gate true --ci-wait 1 \
+    --handoff-receipt-to "$d" >"$d/land.out" 2>&1 || fail "producer handoff failed: $(cat "$d/land.out")"
+  [ "$(find "$receipt_dir" -name "$baseline-*.json" -print | wc -l | tr -d ' ')" = 1 ] ||
+    fail "handoff omitted the range predecessor"
+  "$SH" --repo "$d" finish --id handoff --landed-commit "$landed" >/dev/null ||
+    fail "shared plan could not finish after handoff"
+  "$SH" --repo "$d" show --id handoff | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["state"] == "done" and row["landing"]["kind"] == "commit", row
+' || fail "handoff completion evidence missing"
+  "$SH" --repo "$d" add --id old-scope --title old-scope --allowed src/a.txt >/dev/null
+  "$SH" --repo "$d" claim --id old-scope --provider codex >/dev/null
+  "$SH" --repo "$d" review --id old-scope --artifact artifact.md --patch change.patch >/dev/null
+  if "$SH" --repo "$d" finish --id old-scope --landed-commit "$landed" >"$d/err" 2>&1; then
+    fail "handoff widened its landed range to cover historical work"
+  fi
+  assert_file_contains "$d/err" "$baseline..$landed"
+
   # Local completion uses typed lifecycle/index producers and an actual
   # admitted landing. Self-reported exit/landing labels are not fixtures.
   local completion_repo="$TMP/completion-contract"

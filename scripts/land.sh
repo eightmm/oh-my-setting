@@ -16,12 +16,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/test-growth.sh"
 # shellcheck source=scripts/lib/harness-residue.sh
 . "$ROOT/scripts/lib/harness-residue.sh"
+# shellcheck source=scripts/lib/land-receipts.sh
+. "$ROOT/scripts/lib/land-receipts.sh"
 
 usage() {
   cat <<'EOF'
 Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
                [--wait] [--no-update] [--ci-wait SECONDS]
-               [--sibling-wait SECONDS] [--ignore-siblings]
+               [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH]
        land.sh status [--repo PATH] [--json] [--active-exit]
 
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
@@ -55,6 +57,18 @@ null (null: cannot tell). A receipt that says running proves nothing; active
 does. Text status prints the lock observation explicitly. With --active-exit,
 status exits 3 when active is confirmed, 0 when free is confirmed, and 4 when
 the lock state is unknown.
+With --handoff-receipt-to PATH, a passed gate/push/CI-success receipt and its
+nearest pushed first-parent predecessor are imported byte-for-byte into PATH's
+clone-local receipt namespace. PATH must have the same remote name and URL as
+the pushed destination. Only its destination ref/objects are fetched; its
+checkout is untouched. Skipped CI transfers nothing and the handoff fails.
+Conflicting receipt bytes or a different landed-range boundary are refused;
+identical bytes are idempotent. A failed handoff exits nonzero, preserving the
+passed producer receipt for retry. Without this flag, clones remain isolated.
+To retry only the handoff of an already-passed receipt, also pass --no-update.
+This preserves receipt bytes and accepts a landed SHA still reachable from the
+fetched target even if another main advanced it. Without --no-update, the normal
+CI/install steps and exact-tip safety checks run before handoff.
 Without --wait the job detaches (setsid) and this prints the receipt path.
 Retrying the same commit/destination/gate reuses successful push evidence and
 resumes CI/install only. Concurrent jobs wait up to OMS_LOCK_TIMEOUT (default
@@ -63,13 +77,18 @@ EOF
 }
 
 REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=1500
-SIBLING_WAIT=1800 IGNORE_SIBLINGS=0
+SIBLING_WAIT=1800 IGNORE_SIBLINGS=0 HANDOFF_TO=""
 MODE=start JSON=0 ACTIVE_EXIT=0 STAMP="" READY_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     status) MODE=status; shift ;;
     --run-job) MODE=job; STAMP="$2"; shift 2 ;;
     --ready-file) READY_FILE="$2"; shift 2 ;;
+    --handoff-receipt-to)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "error: --handoff-receipt-to requires PATH" >&2; exit 2
+      fi
+      HANDOFF_TO="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --remote) REMOTE="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
@@ -95,27 +114,14 @@ REPO="$(oms_strip_cr "$REPO")"
 REPO="$(cd "$REPO" 2>/dev/null && pwd -P)" ||
   { echo "error: cannot resolve --repo path" >&2; exit 2; }
 
-land_state_dir() {  # one durable, safe state directory for all linked worktrees
-  local common_dir common_root name digest
+if [ -n "$HANDOFF_TO" ]; then
+  if ! HANDOFF_TO="$(git -C "$HANDOFF_TO" rev-parse --show-toplevel 2>/dev/null | tr -d '\r')" ||
+      ! HANDOFF_TO="$(cd "$HANDOFF_TO" && pwd -P)"; then
+    echo "error: --handoff-receipt-to is not a git checkout" >&2; exit 2
+  fi
+fi
 
-  common_dir="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null)" || return 1
-  common_dir="$(oms_strip_cr "$common_dir")"
-  case "$common_dir" in
-    /*|[A-Za-z]:/*) ;;
-    *) common_dir="$REPO/$common_dir" ;;
-  esac
-  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || return 1
-  common_root="$(cd "$common_dir/.." 2>/dev/null && pwd -P)" || return 1
-  name="$(basename "$common_root")"
-  name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
-  name="${name//../_}"
-  case "$name" in ''|.|..) name=repo ;; esac
-  digest="$(printf '%s' "$common_root" | cksum | awk '{print $1 "-" $2}')"
-  case "$digest" in ''|*[!0-9-]*) return 1 ;; esac
-  printf '%s/%s-%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land" "$name" "$digest"
-}
-
-LAND_DIR="$(land_state_dir)" ||
+LAND_DIR="$(oms_land_state_dir "$REPO")" ||
   { echo "error: cannot resolve land state directory" >&2; exit 2; }
 # Gate output and receipts share an XDG state directory. A gate purity check
 # inventories .oms, so neither can live in the checkout.
@@ -285,6 +291,24 @@ finish() {  # finish STATE SUMMARY
     --event-type phase_outcome --outcome "land $SHORT: $2" \
     --outcome-status "$([ "$1" = passed ] && echo success || echo failure)"
   echo "land $SHORT: $1: $2" >> "$LOG"
+  if [ "$1" = passed ] && [ -n "$HANDOFF_TO" ]; then
+    handoff_receipt
+  fi
+}
+
+handoff_receipt() {
+  local handoff_dir rc=0
+  handoff_dir="$(oms_land_state_dir "$HANDOFF_TO")" || return 1
+  if [ "$handoff_dir" = "$LAND_DIR" ]; then
+    python3 "$ROOT/scripts/lib/land_receipts.py" "$REPO" "$HANDOFF_TO" "$RECEIPT" "$handoff_dir" >> "$LOG" 2>&1 || rc=$?
+  else
+    oms_with_file_lock "$handoff_dir/active" python3 "$ROOT/scripts/lib/land_receipts.py" \
+      "$REPO" "$HANDOFF_TO" "$RECEIPT" "$handoff_dir" >> "$LOG" 2>&1 || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    note "error: receipt handoff refused; passed producer receipt retained (see land log)"
+  fi
+  return "$rc"
 }
 
 receipt_value() {
@@ -306,6 +330,11 @@ can_resume() {
     [ "$(receipt_value request)" = "$STAMP" ] &&
     [ "$(receipt_value gate.rc)" = 0 ] &&
     [ "$(receipt_value push.rc)" = 0 ]
+}
+
+can_handoff_only() {
+  [ "$UPDATE" -eq 0 ] && [ -n "$HANDOFF_TO" ] && can_resume &&
+    [ "$(receipt_value state)" = passed ] && [ "$(receipt_value ci.conclusion)" = success ]
 }
 
 request_stamp() {
@@ -359,6 +388,12 @@ run_job() {
   }
   local resume=0 remote_sha failed_stages attempt marker
   if can_resume; then
+    if can_handoff_only; then
+      # The helper fetches the target ref and proves ancestry. Receipt-only
+      # retries neither reinstall an old SHA nor rewrite imported bytes.
+      handoff_receipt
+      return $?
+    fi
     remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
     remote_sha="${remote_sha%%[[:space:]]*}"
     if [ "$remote_sha" != "$SHA" ] || ! clean_tree; then
@@ -513,7 +548,7 @@ run_job() {
     if [ -z "$authority" ]; then
       rset update.reason=partial-gate
       finish passed "pushed $SHORT; ci $conclusion; install needs a full gate or a full-selection CI run: oms land --gate 'bash scripts/check.sh --parallel'"
-      return 0
+      return $?
     fi
   fi
   if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ]; then
@@ -526,7 +561,7 @@ run_job() {
         [ "$(git -C "$install" rev-parse HEAD 2>/dev/null)" = "$SHA" ] &&
         installed_tree="$(git -C "$install" status --porcelain)" && [ -z "$installed_tree" ]; then
       finish passed "already pushed and installed $SHORT; ci $conclusion"
-      return 0
+      return $?
     fi
     rc=0
     OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
@@ -671,14 +706,16 @@ fi
 # FETCH_HEAD lives in .git/worktrees/<id> for linked callers; only the remote
 # tracking refs are needed here, so leave that protected registry untouched.
 git -C "$REPO" fetch -q --no-write-fetch-head "$REMOTE" || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }
-if ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" HEAD; then
-  echo "error: $REMOTE/$TARGET is not an ancestor of HEAD; rebase first" >&2; exit 2
-fi
 SHA="$(git -C "$REPO" rev-parse HEAD)"
-echo "land: this push changes $(oms_test_growth "$REMOTE/$TARGET" "$SHA" "$REPO")"
 # Retries/worktrees share a receipt; different destinations/gates never share proof.
 STAMP="$(request_stamp "$SHA")"
 RECEIPT="$LAND_DIR/$STAMP.json"
+# Only a receipt-only retry can use an ancestor of the destination tip. Its
+# helper fetches and validates the target before importing any receipt bytes.
+if ! can_handoff_only && ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" "$SHA"; then
+  echo "error: $REMOTE/$TARGET is not an ancestor of HEAD; rebase first" >&2; exit 2
+fi
+echo "land: this push changes $(oms_test_growth "$REMOTE/$TARGET" "$SHA" "$REPO")"
 if [ "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse "$REMOTE/$TARGET")" ]; then
   # An explicit gate may still verify and install the already-pushed SHA.
   if ! can_resume && [ "$GATE_EXPLICIT" -eq 0 ]; then
@@ -688,6 +725,7 @@ fi
 mkdir -p "$LAND_DIR"
 job=("$ROOT/scripts/land.sh" --run-job "$STAMP" --repo "$REPO" --remote "$REMOTE" \
   --target "$TARGET" --gate "$GATE" --ci-wait "$CI_WAIT" --sibling-wait "$SIBLING_WAIT")
+[ -z "$HANDOFF_TO" ] || job+=(--handoff-receipt-to "$HANDOFF_TO")
 [ "$UPDATE" -eq 1 ] || job+=(--no-update)
 [ "$IGNORE_SIBLINGS" -eq 0 ] || job+=(--ignore-siblings)
 if [ "$WAIT" -eq 1 ]; then

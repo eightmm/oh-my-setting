@@ -811,6 +811,34 @@ file SHA-256 as landing proof and counts as done in plan status and the panel.
 The typed `patch-land` path with `--expected-landing-receipt-sha256` remains the
 default for single patches.
 
+Receipt discovery stays clone-local (linked worktrees share their canonical
+namespace). When an authorized main lands from a separate clone, it can use
+`oms land --handoff-receipt-to /path/to/shared-checkout` to import the producer's
+exact receipt bytes into that checkout's canonical namespace. The target must
+have the receipt's remote name configured to the same URL as the producer's
+push destination; equivalent network URL spellings are not inferred. Handoff
+fetches only that remote's destination branch and verifies the landed SHA is
+reachable; it leaves the target HEAD, index and worktree untouched. It requires
+a passed land with successful gate, push and CI; skipped or failed CI transfers
+nothing. Any required installation stage must also have finished successfully.
+
+The nearest pushed first-parent predecessor receipt is transferred too, so the
+landed range stays the same. Existing target receipts that would change that
+boundary cause refusal. Imports publish complete files atomically, with the
+primary receipt last, preserve SHA-256 digests and refuse different bytes at an
+existing filename. Identical bytes are idempotent. A failed handoff exits nonzero
+and leaves the producer receipt intact. To retry only the handoff, use the same
+commit, destination and gate with `--no-update --handoff-receipt-to PATH`. This
+reuses the completed receipt without changing its bytes or requesting an
+installation. The landed SHA must remain reachable from the fetched destination
+ref; another main may have pushed a descendant in the meantime. Invocations
+without `--no-update` run the normal CI/install steps and retain the ordinary
+exact-tip safety checks before handing off the resulting receipt. A changed
+receipt still cannot overwrite different bytes already imported at the same
+filename. After successful handoff,
+`oms agent-plan finish --repo /path/to/shared-checkout --id ID --landed-commit SHA`
+uses the existing completion checks without an additional import or fetch.
+
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
 compiles each bounded Bash-compatible glob once, and emits one deny-first

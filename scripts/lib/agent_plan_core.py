@@ -254,25 +254,10 @@ def landed_range_paths(sha):
     first-parent ancestor with its own pushed land receipt (the tip that land
     pushed onto); with none, it is sha's own commit against its first parent."""
     directory = env("OMS_LAND_RECEIPTS_DIR")
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        names = []
-    pushed = set()
-    for name in names:
-        prior = name.split("-", 1)[0]
-        if (prior == sha or not name.endswith(".json") or
-                not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", prior)):
-            continue
-        raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
-        try:
-            receipt = json.loads(raw)
-        except (ValueError, UnicodeError):
-            continue
-        push = receipt.get("push") if isinstance(receipt, dict) else None
-        if (isinstance(push, dict) and receipt.get("sha") == prior and
-                type(push.get("rc")) is int and push["rc"] == 0):
-            pushed.add(prior)
+    receipts = _load(os.path.join(os.path.dirname(__file__), "land_receipts.py"))
+    def read(filename):
+        return read_regular_bytes(filename, "oms land receipt", 1024 * 1024)
+    pushed = {prior for prior, _, _ in receipts["pushed_receipts"](directory, sha, read)}
     git_env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
     def git(*args):
         try:
@@ -285,7 +270,7 @@ def landed_range_paths(sha):
             die("cannot list files changed by landed commit %s; retry where its history is local" % sha)
         return run.stdout.decode("utf-8", "surrogateescape")
     chain = git("rev-list", "--first-parent", "--max-count=1000", sha).split()
-    base = next((c for c in chain[1:] if c in pushed), chain[1] if len(chain) > 1 else "")
+    base = receipts["range_base"](chain, pushed)
     diff = ["diff-tree", "-r", "-z", "--name-only", "--no-commit-id"]
     paths = git(*(diff + ([base, sha] if base else ["--root", sha]))).split("\0")
     return ("%s..%s" % (base, sha) if base else "root commit %s" % sha), [x for x in paths if x]

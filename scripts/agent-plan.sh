@@ -16,6 +16,8 @@ ROOT="$(cd "$ROOT" && pwd)"
 . "$ROOT/scripts/lib/file-lock.sh"
 # shellcheck source=scripts/lib/project-state.sh
 . "$ROOT/scripts/lib/project-state.sh"
+# shellcheck source=scripts/lib/land-receipts.sh
+. "$ROOT/scripts/lib/land-receipts.sh"
 
 # OMS_STATE_REPO: set by peer-delegate.sh for worktree workers so they
 # read the primary repo's shared state instead of the throwaway checkout's.
@@ -502,20 +504,7 @@ PY_STATE_REPO="$(python_path_for_host "$STATE_REPO")" || fail "cannot normalize 
 if [ -n "$LANDED_COMMIT" ] || [ "$ACTION" = satisfy ]; then
   # Match land.sh's shared-worktree state directory using shell path spelling;
   # native Windows Python paths must not change the cksum repository identity.
-  common_dir="$(git -C "$REPO" rev-parse --git-common-dir | tr -d '\r')" || fail "cannot resolve land state directory"
-  case "$common_dir" in
-    /*|[A-Za-z]:/*) ;;
-    *) common_dir="$REPO/$common_dir" ;;
-  esac
-  common_dir="$(cd "$common_dir" && pwd -P)" || fail "cannot resolve land common directory"
-  common_root="$(cd "$common_dir/.." && pwd -P)" || fail "cannot resolve land common root"
-  land_name="$(basename "$common_root")"
-  land_name="$(printf '%s' "$land_name" | tr -c 'A-Za-z0-9._-' '_')"
-  land_name="${land_name//../_}"
-  case "$land_name" in ''|.|..) land_name=repo ;; esac
-  land_digest="$(printf '%s' "$common_root" | cksum | awk '{print $1 "-" $2}')"
-  case "$land_digest" in ''|*[!0-9-]*) fail "cannot resolve land state digest" ;; esac
-  LAND_RECEIPTS_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land/$land_name-$land_digest"
+  LAND_RECEIPTS_DIR="$(oms_land_state_dir "$REPO")" || fail "cannot resolve land state directory"
   LAND_RECEIPTS_DIR="$(python_path_for_host "$LAND_RECEIPTS_DIR")" || fail "cannot normalize land state path for Python"
 fi
 PY_PLAN_FILE="$(python_path_for_host "$PLAN_FILE")" || fail "cannot normalize plan path for Python"

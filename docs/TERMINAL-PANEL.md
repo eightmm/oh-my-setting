@@ -102,7 +102,16 @@ Historical results without the binding remain available in Results.
 the board; `--outcome rejected` withdraws the work and moves them to Past. A review
 whose task continues in a later `--continue` round also moves to Past. After an
 authorized landing in another worktree, `agent-plan finish --landed-commit SHA`
-can complete the shared task using its exact landing evidence.
+can complete the shared task using its exact landing evidence. If the landing
+uses a separate clone, opt into `oms land --handoff-receipt-to PATH` with the
+shared checkout as PATH. This transfers the successful gate/push/CI receipt and
+its range predecessor into that checkout's canonical namespace after fetching
+and checking the same destination. For an already-passed receipt, retry with
+`--no-update --handoff-receipt-to PATH` to transfer only its existing bytes; the
+SHA may be an ancestor of a destination another main advanced. Omitting
+`--no-update` retains normal CI/install steps and exact-tip safety checks.
+Ordinary receipt lookup stays clone-local;
+see [receipt handoff](COMPONENTS.md#plans-and-bounded-autonomy).
 
 The board offers `[+ Claude main]`, `[+ Pi main]` and `[+ Codex main]` for installed harnesses
 when no main is active. A click, or `n` then `1` (Claude), `2` (Pi) or `0` (Codex), starts the

@@ -482,6 +482,9 @@ print(json.dumps({"headSha": "0" * 40 if scope == "wrong-sha" else sha, "status"
 fi
 echo ci >> "$OMS_TEST_LAND_EVENTS"
 [ "${OMS_TEST_CI_DELAY:-0}" = 0 ] || sleep "$OMS_TEST_CI_DELAY"
+if [ -n "${OMS_TEST_LAND_CHANGE_PUSH_URL:-}" ]; then
+  git -C "$OMS_TEST_LAND_REPO" remote set-url --push origin "$OMS_TEST_LAND_CHANGE_PUSH_URL"
+fi
 if [ "${OMS_TEST_CI_RC:-0}" != 0 ]; then echo 'authentication required' >&2; exit "$OMS_TEST_CI_RC"; fi
 sha=""
 while [ "$#" -gt 0 ]; do
@@ -525,6 +528,132 @@ if OMS_TEST_CI_RESULT=skipped "$LAND" --repo "$repo" --wait --no-update --ci-wai
   fail "a skipped GitHub run passed as CI: $(cat "$TMP/run-skipped.out")"
 fi
 grep -q 'ci run-skipped' "$TMP/run-skipped.out" || fail "skipped run reason missing: $(cat "$TMP/run-skipped.out")"
+# Explicit handoff preserves clone isolation until gate, push and CI pass.
+# The target can remain dirty and behind: only its destination ref is fetched.
+handoff="$TMP/handoff clone"
+git clone -q "$TMP/remote.git" "$handoff" 2>/dev/null
+handoff_head="$(git -C "$handoff" rev-parse HEAD)"
+printf 'target work\n' > "$handoff/local.txt"
+handoff_status="$(git -C "$handoff" status --porcelain)"
+handoff_registry="$(registry_snapshot "$handoff")"
+handoff_dir="$("$LAND" status --repo "$handoff" 2>/dev/null | sed -n 's/^no landing recorded under //p' || true)"
+[ -n "$handoff_dir" ] || fail "cannot resolve handoff namespace"
+for handoff_failure in gate ci skipped; do
+  if [ "$handoff_failure" = gate ]; then gate 'exit 3'; else gate "echo handoff $handoff_failure"; fi
+  handoff_wait=1
+  handoff_ci=failure
+  [ "$handoff_failure" != skipped ] || handoff_wait=0
+  if OMS_TEST_CI_RESULT="$handoff_ci" "$LAND" --repo "$repo" --wait --no-update \
+      --ci-wait "$handoff_wait" --handoff-receipt-to "$handoff" > "$TMP/handoff-failed.out" 2>&1; then
+    fail "handoff accepted $handoff_failure: $(cat "$TMP/handoff-failed.out")"
+  fi
+  [ ! -d "$handoff_dir" ] || [ -z "$(find "$handoff_dir" -name '*.json' -print)" ] ||
+    fail "failed/skipped-CI land imported receipts"
+done
+predecessor="$(git -C "$repo" rev-parse HEAD)"
+predecessor_receipt="$(find "$receipt_dir" -name "$predecessor-*.json" -print)"
+gate 'echo handoff success'
+OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+  --handoff-receipt-to "$handoff" > "$TMP/handoff.out" 2>&1 || fail "handoff failed: $(cat "$TMP/handoff.out")"
+handoff_sha="$(git -C "$repo" rev-parse HEAD)"
+handoff_receipt="$(find "$receipt_dir" -name "$handoff_sha-*.json" -print)"
+cmp "$handoff_receipt" "$handoff_dir/$(basename "$handoff_receipt")" || fail "receipt handoff changed bytes"
+cmp "$predecessor_receipt" "$handoff_dir/$(basename "$predecessor_receipt")" || fail "predecessor handoff changed bytes"
+[ "$(find "$handoff_dir" -name '*.json' -print | wc -l | tr -d ' ')" = 2 ] || fail "handoff imported unrelated receipts"
+[ "$(git -C "$handoff" rev-parse HEAD)" = "$handoff_head" ] || fail "handoff moved target HEAD"
+[ "$(git -C "$handoff" status --porcelain)" = "$handoff_status" ] || fail "handoff changed target work"
+[ "$(registry_snapshot "$handoff")" = "$handoff_registry" ] || fail "handoff changed target worktree registry"
+git -C "$handoff" merge-base --is-ancestor "$handoff_sha" origin/main || fail "target destination was not fetched"
+# Replaying a completed producer request reuses the exact immutable bytes.
+OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+  --handoff-receipt-to "$handoff" > "$TMP/handoff-repeat.out" 2>&1 || fail "identical handoff not idempotent"
+cmp "$handoff_receipt" "$handoff_dir/$(basename "$handoff_receipt")" || fail "handoff retry changed receipt"
+printf 'conflict\n' > "$handoff_dir/$(basename "$handoff_receipt")"
+if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 --handoff-receipt-to "$handoff" \
+    > "$TMP/handoff-conflict.out" 2>&1; then fail "handoff overwrote conflicting receipt"; fi
+[ "$(cat "$handoff_dir/$(basename "$handoff_receipt")")" = conflict ] || fail "conflicting receipt changed"
+rm "$handoff_dir/$(basename "$handoff_receipt")"
+# A matching history does not authorize a different remote destination.
+foreign="$TMP/foreign"
+git clone -q "$TMP/remote.git" "$foreign" 2>/dev/null
+git init -q --bare -b main "$TMP/foreign.git"
+git -C "$foreign" remote set-url origin "$TMP/foreign.git"
+if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 --handoff-receipt-to "$foreign" \
+    > "$TMP/handoff-foreign.out" 2>&1; then fail "handoff accepted foreign remote"; fi
+foreign_state="$("$LAND" status --repo "$foreign" 2>/dev/null | sed -n 's/^no landing recorded under //p' || true)"
+[ -n "$foreign_state" ] && [ -z "$(find "$foreign_state" -name '*.json' -print 2>/dev/null)" ] || fail "foreign target received receipts"
+# A prior --no-update receipt cannot suppress an installation requested now.
+: > "$TMP/events"
+OMS_TEST_CI_RC=4 OMS_TEST_CI_SCOPE=full OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 --handoff-receipt-to "$handoff" \
+  > "$TMP/handoff-install.out" 2>&1 || fail "installing handoff retry failed: $(cat "$TMP/handoff-install.out")"
+[ "$(cat "$TMP/events")" = "$(printf 'jobs\nupdate')" ] ||
+  fail "handoff retry skipped the requested installation"
+python3 - "$handoff_receipt" <<'PYINSTALL' || fail "handoff retry omitted install evidence"
+import json, sys
+receipt = json.load(open(sys.argv[1]))
+assert receipt['update']['rc'] == 0 and receipt['update']['reason'] == 'installed', receipt
+PYINSTALL
+cmp "$handoff_receipt" "$handoff_dir/$(basename "$handoff_receipt")" || fail "installed handoff changed receipt bytes"
+
+# Another main can advance the branch before an explicit receipt-only retry.
+advanced_main="$TMP/advancing-main"
+advanced_target="$TMP/handoff-after-advance"
+git clone -q "$TMP/remote.git" "$advanced_main" 2>/dev/null
+git clone -q "$TMP/remote.git" "$advanced_target" 2>/dev/null
+printf 'later main\n' > "$advanced_main/later-main.txt"
+git -C "$advanced_main" add later-main.txt
+git -C "$advanced_main" commit -qm 'later main'
+git -C "$advanced_main" push -q origin HEAD:main
+advanced_tip="$(git -C "$advanced_main" rev-parse HEAD)"
+advanced_dir="$("$LAND" status --repo "$advanced_target" 2>/dev/null | sed -n 's/^no landing recorded under //p' || true)"
+[ -n "$advanced_dir" ] || fail "cannot resolve advanced handoff namespace"
+: > "$TMP/events"
+OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+  --handoff-receipt-to "$advanced_target" > "$TMP/handoff-ancestor.out" 2>&1 ||
+  fail "reachable ancestor handoff refused: $(cat "$TMP/handoff-ancestor.out")"
+[ ! -s "$TMP/events" ] || fail "receipt-only ancestor retry repeated CI or install"
+cmp "$handoff_receipt" "$advanced_dir/$(basename "$handoff_receipt")" || fail "ancestor handoff changed receipt bytes"
+[ "$(git -C "$advanced_target" rev-parse origin/main)" = "$advanced_tip" ] || fail "ancestor handoff did not fetch the descendant"
+[ "$(git -C "$repo" rev-parse HEAD)" = "$handoff_sha" ] && [ "$(remote_tip)" = "$advanced_tip" ] ||
+  fail "receipt-only ancestor retry moved a local or remote branch"
+# The relaxed reachability rule grants no authority to push or install an old SHA.
+if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 > "$TMP/ancestor-push.out" 2>&1; then
+  fail "ordinary landing accepted an old ancestor"
+fi
+grep -q 'rebase first' "$TMP/ancestor-push.out" || fail "ordinary landing lost its intake ancestry guard"
+if "$LAND" --repo "$repo" --wait --ci-wait 1 --handoff-receipt-to "$advanced_target" \
+    > "$TMP/ancestor-install.out" 2>&1; then fail "installing retry accepted an old ancestor"; fi
+grep -q 'rebase first' "$TMP/ancestor-install.out" || fail "installing retry lost its intake ancestry guard"
+request="$(basename "$handoff_receipt" .json)"
+recorded_gate="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate"]["command"])' "$handoff_receipt")"
+if "$LAND" --run-job "$request" --repo "$repo" --gate "$recorded_gate" --no-update --ci-wait 1 \
+    > "$TMP/ancestor-job.out" 2>&1; then fail "ordinary job accepted a different remote tip"; fi
+grep -q 'cannot resume: remote tip' "$TMP/ancestor-job.out" || fail "ordinary job lost tip equality"
+cmp "$handoff_receipt" "$advanced_dir/$(basename "$handoff_receipt")" || fail "refused old-SHA work changed the receipt"
+# An old passed receipt is insufficient once its SHA is no longer reachable.
+git --git-dir="$TMP/remote.git" update-ref refs/heads/main "$predecessor"
+unreachable_target="$TMP/handoff-unreachable"
+git clone -q "$TMP/remote.git" "$unreachable_target" 2>/dev/null
+if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 --handoff-receipt-to "$unreachable_target" \
+    > "$TMP/handoff-unreachable.out" 2>&1; then fail "handoff accepted an unreachable landed SHA"; fi
+unreachable_dir="$("$LAND" status --repo "$unreachable_target" 2>/dev/null | sed -n 's/^no landing recorded under //p' || true)"
+[ -n "$unreachable_dir" ] && [ ! -e "$unreachable_dir/$(basename "$handoff_receipt")" ] ||
+  fail "unreachable target received a receipt"
+[ "$(remote_tip)" = "$predecessor" ] || fail "unreachable receipt retry attempted to push"
+git --git-dir="$TMP/remote.git" update-ref refs/heads/main "$advanced_tip"
+git -C "$repo" merge -q --ff-only "$advanced_tip"
+
+# Changing the producer push URL during CI cannot redirect an earlier receipt.
+gate 'echo handoff changed destination'
+if OMS_TEST_CI_RESULT=success OMS_TEST_LAND_CHANGE_PUSH_URL="$TMP/foreign.git" \
+    "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 --handoff-receipt-to "$foreign" \
+    > "$TMP/handoff-changed.out" 2>&1; then fail "handoff followed a changed push destination"; fi
+changed_receipt="$(find "$receipt_dir" -name "$(git -C "$repo" rev-parse HEAD)-*.json" -print)"
+grep -q 'producer receipt push destination changed' "$(log_of "$changed_receipt")" ||
+  fail "handoff did not bind the original push destination"
+git -C "$repo" remote set-url --delete --push origin '.*'
+
 # A leading-zero budget is decimal, not an octal error after the push.
 gate 'echo zero padded wait probe'
 OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 08 \
@@ -543,11 +672,13 @@ printf 'on: push\n' > "$repo/.github/workflows/test.yml"
 git -C "$repo" add .github/workflows/test.yml
 gate 'echo update failure probe; echo "check: ok"'
 if OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
-  > "$TMP/update-failed.out" 2>&1; then
+  --handoff-receipt-to "$handoff" > "$TMP/update-failed.out" 2>&1; then
   fail "installation failure was reported as a successful landing"
 fi
 [ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] || fail "update failure lost the successful push"
 grep -q 'install update exit 42' "$TMP/update-failed.out" || fail "update failure reason missing"
+[ -z "$(find "$handoff_dir" -name "$(git -C "$repo" rev-parse HEAD)-*.json" -print)" ] ||
+  fail "failed install transferred a receipt"
 python3 - "$receipt_dir" "$(git -C "$repo" rev-parse HEAD)" <<'PY' || fail "update failure receipt is wrong"
 import json, pathlib, sys
 rows = [json.loads(path.read_text()) for path in pathlib.Path(sys.argv[1]).glob("*.json")]
