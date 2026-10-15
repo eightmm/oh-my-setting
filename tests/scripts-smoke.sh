@@ -22281,7 +22281,18 @@ test_resume_hook_prints_bounded_resume_block() {
   ( cd "$repo" && "$ROOT/scripts/agent-task.sh" init --goal "Ship the resume surface" \
       --next "wire hooks.json" --verify "bash tests/x.sh" >/dev/null )
   ( cd "$repo" && "$ROOT/scripts/agent-plan.sh" init --goal "Unify the writer contract" \
-      --accept "bash tests/plan-accept.sh" >/dev/null )
+      --accept true >/dev/null )
+  ( cd "$repo" && "$ROOT/scripts/agent-plan.sh" accept >/dev/null ) ||
+    fail "plan acceptance should pass"
+  ( cd "$repo" && "$ROOT/scripts/agent-plan.sh" init --goal "New contract" \
+      --accept "true " >/dev/null )
+  plan_status="$("$ROOT/scripts/agent-plan.sh" --repo "$repo" status)" ||
+    fail "plan status should succeed after replacing acceptance command"
+  printf '%s\n' "$plan_status" | grep -Fq 'acceptance: not run for this command' ||
+    fail "plan status must not report acceptance from the previous command: $plan_status"
+  if printf '%s\n' "$plan_status" | grep -Fq 'acceptance: pass'; then
+    fail "plan status reported a pass from the previous acceptance command: $plan_status"
+  fi
   printf 'digest\n' > "$repo/.oms/handoffs/claude-abc.md"
   ( cd "$repo" && "$ROOT/scripts/fail-ledger.sh" record --cmd "pytest -k boom" --exit 1 \
       --summary "flaky assertion" --next "rerun standalone" >/dev/null 2>&1 )
@@ -22296,9 +22307,9 @@ test_resume_hook_prints_bounded_resume_block() {
   printf '%s\n' "$out" | grep >/dev/null 'verify: bash tests/x.sh' || fail "missing verify command"
   # The plan contract must survive a compaction the way the task packet does:
   # a live plan was previously completely silent at session start.
-  printf '%s\n' "$out" | grep >/dev/null 'plan: Unify the writer contract' ||
+  printf '%s\n' "$out" | grep >/dev/null 'plan: New contract' ||
     fail "missing plan goal: $out"
-  printf '%s\n' "$out" | grep >/dev/null 'accept: bash tests/plan-accept.sh' ||
+  printf '%s\n' "$out" | grep >/dev/null 'accept: true' ||
     fail "missing plan acceptance: $out"
   printf '%s\n' "$out" | grep >/dev/null 'session-handoff show claude-abc.md' ||
     fail "missing handoff pointer"
@@ -22363,7 +22374,7 @@ EOF
     PATH="$crlf_bin:/usr/bin:/bin" OMS_TEST_REAL_PYTHON="$real_python" \
       "$ROOT/scripts/resume-hook.sh")" ||
     fail "CRLF resume hook must exit 0"
-  printf '%s\n' "$out" | grep >/dev/null 'plan: Unify the writer contract' ||
+  printf '%s\n' "$out" | grep >/dev/null 'plan: New contract' ||
     fail "CRLF Python output hid the active plan: $out"
   case "$out" in
     *$'\r'*) fail "resume block retained a carriage return" ;;

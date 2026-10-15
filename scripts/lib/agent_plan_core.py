@@ -1712,20 +1712,26 @@ if act == "status":
     if d.get("accept"):
         print("accept: %s" % d["accept"])
         progress_path = os.path.join(os.path.dirname(path), "progress.jsonl")
+        accept_sha256 = hashlib.sha256(d["accept"].encode("utf-8")).hexdigest()
         last = None
         try:
             with open(progress_path, encoding="utf-8") as fh:
                 for line in fh:
                     try:
-                        last = json.loads(line)
+                        row = json.loads(line)
                     except Exception:
                         continue
+                    if (isinstance(row, dict) and row.get("kind") == "acceptance" and
+                            row.get("accept_sha256_full") == accept_sha256):
+                        last = row
         except OSError:
             pass
         if last:
             print("acceptance: %s at %s (base %s)" % (
                 last.get("status", "?"), last.get("ts", "?"),
                 str(last.get("base_sha", "?"))[:12]))
+        else:
+            print("acceptance: not run for this command")
     order = ["ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"]
     print("tasks: %d  [%s]" % (len(tasks),
         " ".join("%s=%d" % (s, by[s]) for s in order if by.get(s))))
