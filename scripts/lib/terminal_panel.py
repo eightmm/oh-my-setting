@@ -4627,8 +4627,6 @@ def swap_main(repo, harness, model=None):
                 or old.get("refs", {}).get("panel_host") != "tmux"
                 or old.get("refs", {}).get("panel_harness") == harness and old.get("refs", {}).get("panel_model") == model):
             raise ValueError("current main ownership or requested change is unverified")
-        if old["refs"].get("panel_harness") == "pi":
-            raise ValueError("Pi native session has no verified resume binding; swap refused")
         state = room.status(repo, ident)
         current = room.participant(state, member)
         if current["role"] != "main" or current["provider"] != old["provider"]:
@@ -4640,6 +4638,7 @@ def swap_main(repo, harness, model=None):
                    "--kind handoff --text 'SWAP_HANDOFF %s: <summary>'. Do not stop workers." % (ident, member, nonce))
         subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "waiting for handoff"),
                        check=True, timeout=3, stdin=subprocess.DEVNULL)
+        old_exited = False
         try:
             _swap_submit(pane, request)
             timeout = min(300, max(0, int(os.environ.get("OMS_PANEL_SWAP_HANDOFF_SECONDS", "90"))))
@@ -4660,7 +4659,7 @@ def swap_main(repo, harness, model=None):
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_attempt", attempt),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
-            _swap_submit(pane, "/exit")
+            _swap_submit(pane, "/quit" if old["refs"].get("panel_harness") == "pi" else "/exit")
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 prior = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)
@@ -4672,6 +4671,7 @@ def swap_main(repo, harness, model=None):
                                check=True, timeout=3, stdin=subprocess.DEVNULL)
                 handoff_file.unlink(missing_ok=True)  # the preserved main may be swapped again
                 raise ValueError("old main did not exit; native session and panel preserved")
+            old_exited = True
             room.swap_main(repo, ident, member, owner, model, attempt, harness)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_participant", member),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
@@ -4701,9 +4701,15 @@ def swap_main(repo, harness, model=None):
                         break
                 time.sleep(.25)
             else:
-                raise ValueError("new main startup unverified; old native session and room claims preserved")
+                raise ValueError("new main startup unverified; room claims and handoff preserved")
             return {"provider": harness, "model": model, "room": ident, "participant": member,
                     "window": window, "handoff": "main" if supplied else "automatic_digest"}
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            if old_exited and old["refs"].get("panel_harness") == "pi":
+                # A fresh takeover needs no Pi resume binding; rollback still cannot resume Pi safely.
+                raise ValueError("Pi main exited and will not be restored; no verified replacement main; "
+                                 "room claims and handoff preserved at %s: %s" % (handoff_file, error)) from error
+            raise
         finally:
             subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_state"),
                            capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)

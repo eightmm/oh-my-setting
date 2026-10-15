@@ -76,9 +76,11 @@ verified live main and an inactive landing operation. The current main is asked
 for a handoff of at most 3000 bytes (90 seconds by default via `OMS_PANEL_SWAP_HANDOFF_SECONDS`, capped at 300); if
 none arrives, OMS uses a recorded-state digest. OMS then exits the old main and
 relaunches the replacement in the same pane and room without stopping workers.
-If the old main does not exit or new ownership cannot be verified, the panel
-preserves the existing session and room claims. A current Pi main cannot be
-swapped because its native session has no verified resume binding. `--model`
+If the old main does not exit, the panel preserves it and the room claims.
+A current Pi main can be swapped without a resume binding: the replacement
+starts fresh. If replacement startup fails or ownership cannot be verified,
+OMS does not restore Pi; it reports no verified replacement main and retains
+the handoff file and room claims for recovery. `--model`
 selects an exact installed catalog model; swap has no dry-run and requires tmux.
 
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
