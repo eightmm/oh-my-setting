@@ -937,6 +937,14 @@ cleanup_delegated_worktree() {
   return 1
 }
 
+stop_verify_heartbeat() {
+  local pid="${verify_heartbeat_pid:-}"
+  [ -n "$pid" ] || return 0
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  verify_heartbeat_pid=""
+}
+
 cleanup() {
   local status="${1:-0}" verify_result="exit ${verify_status:-unknown}"
   if [ "$DRY_RUN" = 1 ] && [ -n "$VERIFY_CMD" ]; then
@@ -944,6 +952,7 @@ cleanup() {
   fi
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  stop_verify_heartbeat
   if [ "$INCLUDE_TASK" = 1 ]; then
     agent_task_record_outcome "$REPO" peer-delegate "$TO" "$status" "${artifact:-}" \
       "${patch_file:-}" "worker=$TO exit ${worker_status:-unknown}; verify=$verify_result" || true
@@ -1552,6 +1561,20 @@ delegate_attempt_transition() {  # STATE REASON KEY
   return 2
 }
 
+delegate_attempt_recover_verify_heartbeat() {
+  local events snapshot sequence
+
+  [ "$worker_attempt_owned" = 1 ] || return 1
+  [ "$WORKER_ACCESS" = write ] || return 1
+  [ -n "$worker_attempt_id" ] || return 1
+  events="$(ma_scripts_dir)/agent-events.sh"
+  snapshot="$("$events" --repo "$REPO" show --attempt "$worker_attempt_id" --json 2>/dev/null)" || return 1
+  sequence="$(printf '%s\n' "$snapshot" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sequence", ""))' 2>/dev/null)" || return 1
+  case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
+  "$events" --repo "$REPO" recover-verify-heartbeat \
+    --attempt "$worker_attempt_id" --expected-sequence "$sequence" >/dev/null
+}
+
 delegate_attempt_fail_if_live() {  # REASON KEY
   case "$worker_attempt_state" in
     working|verifying|review)
@@ -1802,7 +1825,7 @@ EOF
 # Runs VERIFY_CMD in the worktree; output goes to the artifact and is kept in
 # $verify_out for repair prompts. Sets verify_status.
 run_verify() {
-  local verify_pid verify_child_status
+  local verify_pid verify_child_status heartbeat_interval
 
   : > "$verify_out"
   if [ "$worker_status" = 126 ] || [ "$worker_status" = 127 ]; then
@@ -1828,9 +1851,16 @@ run_verify() {
   set +e
   (cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
   verify_pid="$!"
+  if [ "$worker_attempt_owned" = 1 ] && [ "$WORKER_ACCESS" = write ]; then
+    heartbeat_interval="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
+    ma_routed_heartbeat "$(ma_scripts_dir)/agent-events.sh" "$REPO" \
+      "$worker_attempt_id" "$verify_pid" "$heartbeat_interval" &
+    verify_heartbeat_pid="$!"
+  fi
   wait "$verify_pid"
   verify_status=$?
   set -e
+  stop_verify_heartbeat
   verify_child_status="$verify_status"
   if [ -n "$worker_guard_dir" ] && ! worker_execution_boundary_check; then
     worker_boundary_failed=1
@@ -1848,9 +1878,13 @@ run_verify() {
   if [ "$worker_status" -eq 0 ]; then
     if [ "$verify_status" -eq 0 ]; then
       if ! delegate_attempt_transition review "" delegate-review; then
-        worker_status=2
-        delegate_attempt_fail_if_live lifecycle_transition_failed \
-          delegate-review-failed || true
+        if delegate_attempt_recover_verify_heartbeat; then
+          worker_attempt_state=review
+        else
+          worker_status=2
+          delegate_attempt_fail_if_live lifecycle_transition_failed \
+            delegate-review-failed || true
+        fi
       fi
     elif ! delegate_attempt_fail_if_live verification_failed \
         delegate-verification-failed; then

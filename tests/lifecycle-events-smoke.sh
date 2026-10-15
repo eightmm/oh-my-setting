@@ -480,6 +480,50 @@ then
   fail "reconcile idempotency did not distinguish stale generations"
 fi
 
+# A caller may recover only the exact heartbeat-expired generation, and the
+# existing blocked -> working -> verifying -> review edges remain sufficient.
+expired_sequence="$($EVENTS --repo "$RECON_REPO" show --attempt "$recon_verifying" --json | \
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["sequence"])')"
+if $EVENTS --repo "$RECON_REPO" recover-verify-heartbeat --attempt "$recon_verifying" \
+  --expected-sequence "$((expired_sequence - 1))" >/dev/null 2>&1; then
+  fail "recovery accepted a mismatched sequence"
+fi
+$EVENTS --repo "$RECON_REPO" recover-verify-heartbeat --attempt "$recon_verifying" \
+  --expected-sequence "$expired_sequence" >/dev/null ||
+  fail "verified heartbeat-expired attempt did not recover"
+if $EVENTS --repo "$RECON_REPO" recover-verify-heartbeat --attempt "$recon_verifying" \
+  --expected-sequence "$expired_sequence" >/dev/null 2>&1; then
+  fail "recovery accepted a stale sequence"
+fi
+operator_expired="$($EVENTS --repo "$RECON_REPO" start --provider codex --tool peer-delegate \
+  --task-id recon-operator-block --run-id recon-run)"
+$EVENTS --repo "$RECON_REPO" transition --attempt "$operator_expired" --state starting >/dev/null
+$EVENTS --repo "$RECON_REPO" transition --attempt "$operator_expired" --state working >/dev/null
+$EVENTS --repo "$RECON_REPO" transition --attempt "$operator_expired" --state verifying >/dev/null
+$EVENTS --repo "$RECON_REPO" transition --attempt "$operator_expired" --state blocked \
+  --actor operator --reason-code operator_hold >/dev/null
+operator_sequence="$($EVENTS --repo "$RECON_REPO" show --attempt "$operator_expired" --json | \
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["sequence"])')"
+if $EVENTS --repo "$RECON_REPO" recover-verify-heartbeat --attempt "$operator_expired" \
+  --expected-sequence "$operator_sequence" >/dev/null 2>&1; then
+  fail "recovery overrode an operator block"
+fi
+if ! python3 - "$EVENTS" "$RECON_REPO" "$recon_verifying" "$operator_expired" <<'PY'
+import json, subprocess, sys
+events, repo, recovered, blocked = sys.argv[1:]
+rows = [json.loads(line) for line in open(repo + "/.oms/lifecycle/events.jsonl", encoding="utf-8") if line.strip()]
+def states(attempt):
+    return [row.get("to_state") for row in rows
+            if row.get("attempt_id") == attempt and row["event_type"] == "attempt.state_changed"]
+assert states(recovered)[-3:] == ["working", "verifying", "review"], states(recovered)
+attempt = json.loads(subprocess.check_output([events, "--repo", repo, "show", "--attempt", blocked, "--json"]))
+assert attempt["state"] == "blocked" and attempt["reason_code"] == "operator_hold", attempt
+assert states(blocked)[-1] == "blocked", states(blocked)
+PY
+then
+  fail "conditional recovery did not preserve lifecycle state"
+fi
+
 # A heartbeat committed while reconcile waits for the event lock must be part
 # of the projection used for the apply decision.
 race_attempt="$($EVENTS --repo "$RECON_REPO" start --provider codex --tool agent-call \

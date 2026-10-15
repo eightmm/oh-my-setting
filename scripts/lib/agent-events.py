@@ -1115,6 +1115,46 @@ def event_transition(args: argparse.Namespace) -> int:
     return 0
 
 
+def event_recover_verify_heartbeat(args: argparse.Namespace) -> int:
+    """Recover only this exact expired-heartbeat generation after verify passed."""
+    repo = repo_root(args.repo)
+    attempt = safe_id(args.attempt, "attempt")
+    if args.expected_sequence < 1:
+        raise OpsError("expected sequence must be positive")
+    path = event_path(repo)
+    with file_lock(path):
+        rows = read_rows(path)
+        current = project_attempts(rows).get(attempt)
+        if (current is None or current.get("attempt_id") != attempt
+                or current.get("sequence") != args.expected_sequence
+                or current.get("state") != "blocked"
+                or current.get("reason_code") != "heartbeat_expired"):
+            raise OpsError("attempt is no longer the expected heartbeat-expired generation")
+        for state, key in (
+            ("working", "verify-heartbeat-working"),
+            ("verifying", "verify-heartbeat-verifying"),
+            ("review", "verify-heartbeat-review"),
+        ):
+            candidate = new_event(
+                attempt,
+                current["sequence"] + 1,
+                "attempt.state_changed",
+                from_state=current["state"],
+                to_state=state,
+                reason_code="",
+                actor={"kind": "owner", "name": "peer-delegate"},
+                idempotency_key="%s-%d" % (key, args.expected_sequence),
+            )
+            if state not in TRANSITIONS.get(current["state"], set()):
+                raise OpsError("illegal lifecycle transition: %s -> %s" % (current["state"], state))
+            validate_event_row(candidate)
+            append_row(path, candidate)
+            rows.append(candidate)
+            current = project_attempts(rows)[attempt]
+    print(attempt)
+    return 0
+
+
 def event_heartbeat(args: argparse.Namespace) -> int:
     repo = repo_root(args.repo)
     attempt = safe_id(args.attempt, "attempt")
@@ -1970,6 +2010,14 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     transition.add_argument("--idempotency-key", default="")
     transition.add_argument("--then", action="append", default=[], metavar="STATE[:KEY]")
     transition.set_defaults(func=event_transition)
+
+    recover = subparsers.add_parser(
+        "recover-verify-heartbeat",
+        help="recover an exact heartbeat-expired generation after verification passed",
+    )
+    recover.add_argument("--attempt", required=True)
+    recover.add_argument("--expected-sequence", required=True, type=int)
+    recover.set_defaults(func=event_recover_verify_heartbeat)
 
     heartbeat = subparsers.add_parser("heartbeat", help="append runner liveness")
     heartbeat.add_argument("--attempt", required=True)

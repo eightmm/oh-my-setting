@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# A delegated verify runs this suite one delegate level deep; its fixtures
+# need a top-level delegate so each round opens its own attempt.
+unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-provider-lifecycle.XXXXXX")"
@@ -183,6 +186,129 @@ events = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if li
 states = [row.get("to_state") for row in events if row.get("attempt_id") == attempt["attempt_id"]]
 assert states[-1] == "review" and "verifying" not in states, states
 PY
+
+# verify-heartbeat keeps a write attempt fresh while reconciliation runs
+# concurrently beyond the tiny stale threshold.
+cat > "$TMP/verify-heartbeat.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+: > "$OMS_TEST_VERIFY_STARTED"
+while [ ! -f "$OMS_TEST_VERIFY_RELEASE" ]; do sleep .05; done
+EOF
+chmod +x "$TMP/verify-heartbeat.sh"
+verify_started="$TMP/verify-heartbeat.started"
+verify_release="$TMP/verify-heartbeat.release"
+env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+  OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+  OMS_ROUTED_HEARTBEAT_SECONDS=0.2 OMS_TEST_VERIFY_STARTED="$verify_started" \
+  OMS_TEST_VERIFY_RELEASE="$verify_release" \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/repo" --to codex \
+  --prompt 'verify-heartbeat stale reconciliation' \
+  --verify "bash '$TMP/verify-heartbeat.sh'" > "$TMP/verify-heartbeat.out" 2>&1 &
+verify_delegate_pid=$!
+for _verify_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+  [ -f "$verify_started" ] && break
+  sleep .05
+done
+[ -f "$verify_started" ] || fail "verify-heartbeat verifier did not reach its barrier"
+(
+  for _reconcile_round in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" reconcile --apply \
+      --stale-seconds 2 >/dev/null || exit 1
+    sleep .15
+  done
+  : > "$verify_release"
+) &
+reconcile_verify_pid=$!
+if ! wait "$reconcile_verify_pid"; then
+  kill "$verify_delegate_pid" 2>/dev/null || true
+  wait "$verify_delegate_pid" 2>/dev/null || true
+  fail "verify-heartbeat concurrent reconciliation failed"
+fi
+if ! wait "$verify_delegate_pid"; then
+  cat "$TMP/verify-heartbeat.out" >&2
+  fail "verify-heartbeat passing verification failed after reconciliation"
+fi
+"$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" list --json \
+  > "$TMP/verify-heartbeat-attempts.json"
+python3 - "$TMP/verify-heartbeat-attempts.json" "$TMP/repo/.oms/lifecycle/events.jsonl" <<'PY' || fail "verify-heartbeat did not end in review"
+import json, sys
+attempts = json.load(open(sys.argv[1], encoding="utf-8"))
+writes = [row for row in attempts if row.get("tool") == "peer-delegate"]
+attempt = writes[-1]
+assert attempt["state"] == "review", attempt
+events = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+own = [row for row in events if row["attempt_id"] == attempt["attempt_id"]]
+assert any(row["event_type"] == "attempt.heartbeat" for row in own), own
+assert not any(row.get("reason_code") == "heartbeat_expired" for row in own), own
+PY
+
+# If a stale decision wins exactly at verifier completion, the passing verify
+# may recover only that heartbeat-expired generation through existing edges.
+verify_started="$TMP/verify-heartbeat-race.started"
+verify_release="$TMP/verify-heartbeat-race.release"
+env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+  OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+  OMS_ROUTED_HEARTBEAT_SECONDS=0.2 OMS_TEST_VERIFY_STARTED="$verify_started" \
+  OMS_TEST_VERIFY_RELEASE="$verify_release" \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/repo" --to codex \
+  --prompt 'verify-heartbeat completion race' \
+  --verify "bash '$TMP/verify-heartbeat.sh'" > "$TMP/verify-heartbeat-race.out" 2>&1 &
+race_delegate_pid=$!
+for _verify_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+  [ -f "$verify_started" ] && break
+  sleep .05
+done
+[ -f "$verify_started" ] || fail "verify-heartbeat race verifier did not reach its barrier"
+"$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" reconcile --apply \
+  --stale-seconds 0 >/dev/null || fail "verify-heartbeat forced stale decision failed"
+: > "$verify_release"
+if ! wait "$race_delegate_pid"; then
+  cat "$TMP/verify-heartbeat-race.out" >&2
+  fail "verify-heartbeat completion race did not recover"
+fi
+"$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" list --json \
+  > "$TMP/verify-heartbeat-race-attempts.json"
+python3 - "$TMP/verify-heartbeat-race-attempts.json" "$TMP/repo/.oms/lifecycle/events.jsonl" <<'PY' || fail "verify-heartbeat completion race did not use the expected recovery"
+import json, sys
+attempts = json.load(open(sys.argv[1], encoding="utf-8"))
+attempt = [row for row in attempts if row.get("tool") == "peer-delegate"][-1]
+assert attempt["state"] == "review", attempt
+events = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+own = [row for row in events if row["attempt_id"] == attempt["attempt_id"]]
+states = [row.get("to_state") for row in own if row["event_type"] == "attempt.state_changed"]
+assert "heartbeat_expired" in [row.get("reason_code") for row in own], own
+assert states[-4:] == ["blocked", "working", "verifying", "review"], states
+PY
+
+# The heartbeat recovery path must leave a concurrent operator block intact.
+verify_started="$TMP/verify-heartbeat-operator.started"
+verify_release="$TMP/verify-heartbeat-operator.release"
+env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+  OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+  OMS_ROUTED_HEARTBEAT_SECONDS=0.2 OMS_TEST_VERIFY_STARTED="$verify_started" \
+  OMS_TEST_VERIFY_RELEASE="$verify_release" \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/repo" --to codex \
+  --prompt 'verify-heartbeat operator block' \
+  --verify "bash '$TMP/verify-heartbeat.sh'" > "$TMP/verify-heartbeat-operator.out" 2>&1 &
+operator_delegate_pid=$!
+for _verify_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+  [ -f "$verify_started" ] && break
+  sleep .05
+done
+[ -f "$verify_started" ] || fail "verify-heartbeat operator verifier did not reach its barrier"
+operator_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" list --json | \
+  python3 -c 'import json,sys; print([row["attempt_id"] for row in json.load(sys.stdin) if row.get("tool") == "peer-delegate"][-1])')"
+"$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" transition --attempt "$operator_attempt" \
+  --state blocked --actor operator --reason-code operator_hold >/dev/null ||
+  fail "operator block could not be recorded during verification"
+: > "$verify_release"
+if wait "$operator_delegate_pid"; then
+  fail "verify-heartbeat operator block was reported as successful"
+fi
+python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1]) if x.strip()]; own=[r for r in rows if r["attempt_id"]==sys.argv[2]]; states=[r.get("to_state") for r in own if r["event_type"]=="attempt.state_changed"]; assert any(r.get("reason_code")=="operator_hold" for r in own), own; assert states[-1] != "review", states' \
+  "$TMP/repo/.oms/lifecycle/events.jsonl" "$operator_attempt" ||
+  fail "verify-heartbeat recovery overrode operator block"
 
 # A successful provider response cannot revive an explicit operator block.
 if env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
