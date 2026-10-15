@@ -38,7 +38,7 @@ from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
                            TIERS, WRITERS, newest_route_model, route_family)
 from panel_results import (DURABLE, _read, _write, _lock, finalize, outcomes, results, results_snapshot,
-                           retry_delivery, verified_patch, _patch_paths, pending_admissions, write_summary_draft)
+                           retry_delivery, verified_patch, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
 from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
@@ -1555,20 +1555,15 @@ _AUTO_REVIEW_FRONTIER_PATHS = (
 )
 
 
-def _automatic_review_workload(repo, result_event):
-    """Choose a conservative tier from the verified patch paths, never worker claims."""
-    try:
-        if not isinstance(result_event, dict):
-            return "frontier"
-        paths = _patch_paths(verified_patch(repo, result_event))
-        if not paths or any(not _safe_patch_path(path) for path in paths):
-            return "frontier"
-        if any(fnmatch.fnmatchcase(path, pattern)
-               for path in paths for pattern in _AUTO_REVIEW_FRONTIER_PATHS):
-            return "frontier"
-        return "deep"
-    except Exception:
+def _automatic_review_workload(result_event):
+    """Deep unless the verified patch touches a trust boundary; changed_files come from the verified bytes."""
+    paths = result_event.get("changed_files") if isinstance(result_event, dict) else None
+    if (not isinstance(paths, list) or not paths
+            or any(not isinstance(path, str) or not _safe_patch_path(path) for path in paths)):
         return "frontier"
+    if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in _AUTO_REVIEW_FRONTIER_PATHS):
+        return "frontier"
+    return "deep"
 
 
 def _call_result_event(repo, room_id, member, task_id, status):
@@ -2144,7 +2139,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                     "review_call_id": review_member, "attempt": attempt}
                 if pending_claim or room.claim_review(repo, room_id, review_event):
                     try:
-                        review_workload = _automatic_review_workload(repo, result_event)
+                        review_workload = _automatic_review_workload(result_event)
                         with redirect_stdout(io.StringIO()):
                             dispatch(repo, owner, "reviewer", review_workload, "read", None, prompt=prompt, verify=verifier,
                                      task_id=task_id, dry_run=True, label="Automatic patch review")

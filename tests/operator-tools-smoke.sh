@@ -8351,17 +8351,10 @@ import panel_results as panel_result_store
 auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
-ordinary_review_patch = (b"diff --git a/docs/TERMINAL-PANEL.md b/docs/TERMINAL-PANEL.md\n"
-                         b"--- a/docs/TERMINAL-PANEL.md\n+++ b/docs/TERMINAL-PANEL.md\n@@ -1 +1 @@\n-old\n+new\n"
-                         b"diff --git a/scripts/fixture.py b/scripts/fixture.py\n"
-                         b"--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n")
-hooks_review_patch = (b"diff --git a/hooks/pre-commit b/hooks/pre-commit\n"
-                      b"--- a/hooks/pre-commit\n+++ b/hooks/pre-commit\n@@ -1 +1 @@\n-old\n+new\n")
-with patch.object(panel, "verified_patch", side_effect=[ordinary_review_patch, hooks_review_patch,
-                                                          b"not a patch"]):
-    assert panel._automatic_review_workload(project, {"patch": "fixture.patch", "patch_sha256": "a"}) == "deep"
-    assert panel._automatic_review_workload(project, {"patch": "fixture.patch", "patch_sha256": "b"}) == "frontier"
-    assert panel._automatic_review_workload(project, {"patch": "unknown.patch", "patch_sha256": "c"}) == "frontier"
+assert panel._automatic_review_workload({"changed_files": ["docs/TERMINAL-PANEL.md", "scripts/fixture.py"]}) == "deep"
+assert panel._automatic_review_workload({"changed_files": ["hooks/pre-commit"]}) == "frontier"
+assert panel._automatic_review_workload({"changed_files": []}) == "frontier"
+assert panel._automatic_review_workload({"changed_files": ["../escape"]}) == "frontier"
 auto_artifact = ".oms/artifacts/fixture/result.json"
 auto_patch_path = ".oms/artifacts/fixture/change.patch"
 auto_artifact_file = project / auto_artifact
@@ -14167,7 +14160,7 @@ output, unused = read_page(switching_reader, iter([[('tab',)], [('r',)], [('e',)
 assert selected_views[0] == "Summary" and "Events" in selected_views and "Diff" in selected_views, selected_views
 assert "No result recorded yet" in output and "No retained events" in output and "No patch recorded" in output, output
 output, unused = read_page(lambda width, view: "[Summary]  Events  Diff\nA dispatched call",
-                           iter([[('q',)]]))
+                           iter([[('q',)]]), size=(80, 10))
 assert "[⟳ starting]" in output and "status unknown" not in output, output
 long_report = {"rows": [{"role": "worker", "title": "Pinned reader", "process_state": "working",
                          "task_id": "reader-task"}]}
