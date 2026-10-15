@@ -19401,7 +19401,7 @@ for harness, owner, previous_terminal, succeeds in (("claude", None, True, False
                 "tool": "panel-main", "refs": {"panel_role": "main", "panel_room_id": shared,
                                                "native_session": "recorded-session"}}
     with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
-            patch.object(panel, "check_legacy_main"), patch.object(panel, "run_single_native", side_effect=exited_native) as restart_main, \
+            patch.object(panel, "check_legacy_main"), patch.object(panel, "session_stored", return_value=True), patch.object(panel, "run_single_native", side_effect=exited_native) as restart_main, \
             patch.object(panel, "managed_session", return_value=True), \
             patch.object(panel, "_main_window", return_value=["@42", "exit-attempt", "", str(project.resolve()), "exit-attempt"]), \
             patch.object(panel, "session_owner", return_value=owner), patch.object(panel, "live_mains", return_value=0), \
