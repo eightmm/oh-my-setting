@@ -309,22 +309,30 @@ PY
 # A sandbox may deny AF_UNIX even when tmux and PTY support are installed.
 # Probe the exact capability in TMP so workers can report partial coverage.
 OPERATOR_SOCKET_DENIED=0
-if python3 - "${TMPDIR:-/tmp}" <<'PY'
+if python3 - <<'PY'
+import errno
 import os
+import shutil
 import socket
 import sys
-path = os.path.join(sys.argv[1], "socket-probe")
-probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+import tempfile
+# A unique short directory: parallel shards must not collide on one name, and a
+# long TMPDIR must not exceed the AF_UNIX path limit. Only a permission refusal
+# means the sandbox denies sockets.
+base = "/tmp" if os.path.isdir("/tmp") else None
+directory = tempfile.mkdtemp(prefix="oms-sock-", dir=base)
+probe = None
 try:
-    probe.bind(path)
-except (OSError, AttributeError):
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.bind(os.path.join(directory, "p"))
+except AttributeError:
     sys.exit(1)
+except OSError as error:
+    sys.exit(1 if error.errno in (errno.EPERM, errno.EACCES) else 0)
 finally:
-    probe.close()
-try:
-    os.unlink(path)
-except OSError:
-    pass
+    if probe is not None:
+        probe.close()
+    shutil.rmtree(directory, ignore_errors=True)
 PY
 then
   :
