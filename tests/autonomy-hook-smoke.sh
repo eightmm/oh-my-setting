@@ -808,6 +808,41 @@ assert after["initial_consumer"] == before["initial_consumer"], after
 assert not hook_state.rebind_cleared_session(cleared("after-clear")), "a repeated clear event rebound twice"
 assert "during-clear" in hook_state.live_thread_hint(payload("after-clear"))
 assert not hook_state.live_thread_hint(payload("native-first-session")), "the cleared session kept reading the main's mail"
+# /resume of another conversation moves the binding only when the hook's nearest Claude is the
+# native process the panel launched for this main (recorded pid plus start identity).
+import terminal_panel
+native = {"panel_native_pid": "20", "panel_native_identity": "a" * 64}
+owner = {"attempt_id": "fresh-main", "terminal": False, "tool": "panel-main", "provider": "claude",
+         "refs": dict(native, panel_role="main", panel_room_id="binding-room", panel_room_participant="fresh-main")}
+assert not hook_state.rebind_cleared_session(cleared("no-attempt-resume", "resume")), "resume without a launch record rebound"
+with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": "fresh-main"}), \
+        patch.object(terminal_panel, "main_history", return_value=[owner]), patch.object(terminal_panel, "events"):
+    with patch.object(hook_state, "claude_resume_process_witness", return_value=False):
+        assert not hook_state.rebind_cleared_session(cleared("separate-resume", "resume"))
+    assert room.participant(room.status(repo, "binding-room"), "fresh-main") == after
+    with patch.object(hook_state, "claude_resume_process_witness", return_value=True) as witness:
+        assert hook_state.rebind_cleared_session(cleared("after-resume", "resume"))
+        assert witness.call_args[0][0]["panel_native_pid"] == "20"
+assert room.participant(room.status(repo, "binding-room"), "fresh-main")["consumer"] == hook_state.session_hash(payload("after-resume"))
+assert "during-clear" in hook_state.live_thread_hint(payload("after-resume"))
+# Names come from ps comm, never argv: a Claude or Node at 40 is the nearest CLI and must be the recorded
+# process; any other process is skipped up to claude 20. Identity guards pid reuse.
+import panel_terminals
+for command, parent in (("claude", 20), ("/usr/local/bin/node", 20), ("python3", 20), ("claude", 35)):
+    for recorded in ("40", "20"):
+        processes = {50: "40 bash\r\n", 40: "%d %s\r\n" % (parent, command), 35: "20 sh\n", 20: "30 claude\n"}
+        def process_output(args, **kwargs):
+            assert args[:3] == ["ps", "-o", "ppid=,comm="] and args[3] == "-p", args
+            return subprocess.CompletedProcess(args, 0, processes[int(args[4])])
+        nearest = "20" if command == "python3" else "40"
+        for identity, expected in (("a" * 64, recorded == nearest), ("b" * 64, False)):
+            with patch.object(hook_state.os, "getppid", return_value=50), \
+                    patch.object(hook_state.subprocess, "run", side_effect=process_output), \
+                    patch.object(panel_terminals._process_helpers(), "process_identity", return_value=identity):
+                result = hook_state.claude_resume_process_witness(dict(native, panel_native_pid=recorded))
+                assert result == expected, (command, parent, recorded, identity)
+with patch.object(hook_state.subprocess, "run", side_effect=OSError("unavailable")):
+    assert not hook_state.claude_resume_process_witness(native)
 # A panel main is reminded on each prompt that it delegates; other events and sessions are not.
 os.environ.update(OMS_PANEL_MAIN_ATTEMPT="fresh-main", OMS_PANEL_SESSION="oms-fixture")
 # A launch attempt cannot prove a saved digest, and skipped captures remain retryable.
@@ -1090,13 +1125,13 @@ for source in ("clear", "resume", "fork"):
     last = nxt
 assert "during-codex-switch" in hook_state.live_thread_hint(payload(last, "codex"))
 try:
-    hook_state.rebind_cleared_session(codex_start("after-clear", "resume"))
+    hook_state.rebind_cleared_session(codex_start("after-resume", "resume"))
 except ValueError:
     pass  # cmd_relay_hint suppresses this at SessionStart
 else:
     raise AssertionError("resume took a thread another participant holds")
 assert codex_bound()["consumer"] == hook_state.session_hash(payload(last))
-assert room.participant(room.status(repo, "binding-room"), "fresh-main")["consumer"] == hook_state.session_hash(payload("after-clear"))
+assert room.participant(room.status(repo, "binding-room"), "fresh-main")["consumer"] == hook_state.session_hash(payload("after-resume"))
 os.environ["OMS_ROOM_PARTICIPANT"] = "fresh-main"
 assert not hook_state.rebind_cleared_session(codex_start("claude-as-codex", "clear")), "a Codex payload rebound a Claude main"
 os.environ["OMS_HOOK_AGENT"] = "codex"

@@ -2401,14 +2401,43 @@ def relay_hint(payload: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
-# SessionStart sources that start another native session in the same process.
-# Codex also starts a new thread for /resume and /fork; "startup" is a fresh
-# process and "compact" keeps the id, so neither may move a binding.
-REBIND_SOURCES = {"claude": ("clear",), "codex": ("clear", "resume", "fork")}
+# SessionStart sources that start another native session in the same process:
+# /clear, and /resume of another conversation (Codex also /fork); "startup" is
+# a fresh process and "compact" keeps the id, so neither may move a binding.
+REBIND_SOURCES = {"claude": ("clear", "resume"), "codex": ("clear", "resume", "fork")}
+
+
+def claude_resume_process_witness(refs: dict[str, Any]) -> bool:
+    """The hook's nearest Claude/Node ancestor is the native process the panel launched for this main.
+
+    Environment is inherited by any child CLI; the recorded native pid and its start identity are not.
+    Names come from ps comm (Claude Code titles itself "claude"), never argv, and every failure is a refusal."""
+    try:
+        pid = os.getppid()
+        for _ in range(12):
+            if pid <= 1:
+                return False
+            process = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                                     capture_output=True, text=True, check=False, timeout=2,
+                                     stdin=subprocess.DEVNULL)
+            if process.returncode:
+                return False
+            parent, command = process.stdout.replace("\r", "").strip().split(None, 1)
+            if Path(command.strip()).name in ("claude", "node", "nodejs"):
+                import panel_terminals
+
+                identity = refs.get("panel_native_identity")
+                return (refs.get("panel_native_pid") == str(pid) and isinstance(identity, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", identity) is not None
+                        and panel_terminals._process_helpers().process_identity(pid) == identity)
+            pid = int(parent)
+    except Exception:
+        return False
+    return False
 
 
 def rebind_cleared_session(payload: dict[str, Any]) -> bool:
-    """Move a panel main's room binding to the session its /clear started.
+    """Move a panel main's room binding to the session its /clear or /resume started.
 
     The enrolled environment alone never transfers a binding: the provider's own
     SessionStart event in that main's process must name the new session, and the
@@ -2436,6 +2465,9 @@ def rebind_cleared_session(payload: dict[str, Any]) -> bool:
     if payload_agent(payload) != provider:
         return False
     attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT")
+    resumed = provider == "claude" and payload.get("source") == "resume"
+    if resumed and not attempt:
+        return False
     if attempt:
         from terminal_panel import events, main_history
 
@@ -2445,7 +2477,8 @@ def rebind_cleared_session(payload: dict[str, Any]) -> bool:
                 or owner.get("provider") != provider or owner.get("refs", {}).get("panel_role") != "main"
                 or owner["refs"].get("panel_room_id") != ident
                 or owner["refs"].get("panel_room_participant", attempt) != member_id
-                or owner["refs"].get("panel_session_digest", member["consumer"]) != member["consumer"]):
+                or owner["refs"].get("panel_session_digest", member["consumer"]) != member["consumer"]
+                or resumed and not claude_resume_process_witness(owner["refs"])):
             return False
     room.bind(repo.resolve(), ident, member_id, session, replaces=member["consumer"])
     if attempt:
