@@ -325,11 +325,14 @@ print(sys.argv[1] + "-" + hashlib.sha256(json.dumps(
 run_gate() (
   local rc=0 parent tree
   parent="$(mktemp -d "$(oms_harness_tmp_base)/oh-my-setting-land.XXXXXX")" || return 1
+  # Freeze the physical path so a TMPDIR symlink swapped mid-gate cannot
+  # redirect cleanup to another directory.
+  parent="$(cd "$parent" && pwd -P)" || return 1
   trap 'rm -rf "$parent"' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  tree="$(cd "$parent" && pwd -P)/wt" || return 1
+  tree="$parent/wt"
   # Local upload-pack copies objects without hardlinks or alternates. Fetch the
   # pinned SHA even if HEAD moved, and retain source remote-tracking refs used
   # by the default affected gate (clone's origin points at the local source).
