@@ -1608,7 +1608,9 @@ def _call_result_event(repo, room_id, member, task_id, status):
                "changed_files": changed, "needs_review": bool(valid_patch and patch_path
                                                             and refs.get("panel_access") == "write")}
     room.append(repo, room_id, payload, "Structured call result")
-    return payload, record
+    result_record = dict(record)
+    result_record["dispatched_role"] = refs.get("panel_purpose") or refs.get("panel_role")
+    return payload, result_record
 
 
 def _judgment_mail(repo, room_id, member, caller, task_id, message):
@@ -2035,7 +2037,9 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
     verify_failed = (result_event or {}).get("verify_status") == "failed"
     guard_stop = "worker guard stopped this run" in str(summary).lower()
     review_delivered = False
-    if role == "reviewer":
+    dispatched_role = result_record.get("dispatched_role")
+    if role == "reviewer" or dispatched_role in {"verifier", "security-auditor", "critic", "architect"}:
+        gate_required = bool(review_context) or dispatched_role == "review"
         verdict = _review_verdict(summary)
         outcome = result_record.get("review", {})
         seats = outcome.get("seats", []) if isinstance(outcome, dict) else []
@@ -2048,20 +2052,28 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                                and isinstance(seats[0], dict) and seats[0].get("verdict") == "fail")
         if completed_gate_fail:
             verdict = "fail"
-        if (status != 0 and not completed_gate_fail) or verify_failed or guard_stop or not verdict:
+        inconclusive = gate_required and not verdict
+        if (status != 0 and not completed_gate_fail) or verify_failed or guard_stop or inconclusive:
             reason = ("verification failed" if verify_failed else
                       "guard stopped the review" if guard_stop else
                       "review exited with status %s" % status if status != 0 else
                       "review ended without a final GATE verdict")
             _judgment_mail(repo, room_id, member, caller, task_id,
                            "Task %s review failed or is inconclusive: %s." % (task_id, reason))
+        elif not gate_required:
+            _judgment_mail(repo, room_id, member, caller, task_id,
+                           "Task %s findings are ready for owner judgment; no automatic gate was requested."
+                           % task_id)
         else:
             if verdict == "pass":
-                notice = "Review passed for task %s; patch %s is awaiting admission by the main." % (
-                    task_id, (result_event or {}).get("patch_sha256") or "digest unavailable")
+                patch_digest = (result_event or {}).get("patch_sha256")
+                notice = ("Review passed for task %s; patch %s is awaiting admission by the main." %
+                          (task_id, patch_digest or "digest unavailable") if patch_digest else
+                          "Review gate passed for task %s; the row still awaits owner finalization." % task_id)
             else:
-                notice = "Review verdict FAIL for task %s; patch %s." % (
-                    task_id, (result_event or {}).get("patch_sha256") or "digest unavailable")
+                patch_digest = (result_event or {}).get("patch_sha256")
+                notice = ("Review verdict FAIL for task %s; patch %s." % (task_id, patch_digest)
+                          if patch_digest else "Review gate failed for task %s; owner judgment is required." % task_id)
                 if review_context:
                     try:
                         notice = (_review_fix_notice(repo, room_id, member, caller, task_id,

@@ -8938,21 +8938,22 @@ retry_events = [row["room_event"] for row in room.records(project, shared)
                 and row["room_event"].get("patch_sha256") == retry_digest]
 assert [event["kind"] for event in retry_events] == ["review-dispatch", "review-dispatch-failed", "review-dispatch"]
 for reviewer_call, answer, exit_status, expected in (
-        ("call-review-gate-fail", "Findings: checked.\nGATE: fail", 0, "Review verdict FAIL"),
-        ("call-review-gate-pass", "Findings: checked.\nGATE: pass", 0, "awaiting admission"),
+        ("call-review-gate-fail", "Findings: checked.\nGATE: fail", 0, "Review gate failed"),
+        ("call-review-gate-pass", "Findings: checked.\nGATE: pass", 0, "owner finalization"),
         ("call-review-gate-nonzero", "Findings: checked.\nGATE: pass", 1, "failed or is inconclusive"),
         ("call-review-gate-timeout", "Findings: checked.\nGATE: pass", 124, "failed or is inconclusive"),
         ("call-review-gate-last-fail", "GATE: pass\nFindings: blocking issue.\nGATE: fail", 0,
-         "Review verdict FAIL"),
+         "Review gate failed"),
         ("call-review-gate-fenced-suffix", "GATE: fail\n```\n```example\nGATE: pass\n```", 0,
-         "Review verdict FAIL"),
+         "Review gate failed"),
         ("call-review-gate-guard-stop", "The worker guard stopped this run.\nGATE: pass", 0,
          "failed or is inconclusive"),
         ("call-review-gate-missing", "Findings: review ended early.", 0, "failed or is inconclusive")):
     reviewer_attempt = dict(auto_attempt, attempt_id="attempt-" + reviewer_call,
         refs=dict(auto_attempt["refs"], panel_room_participant=reviewer_call,
-                  panel_role="reviewer", panel_access="read"))
-    with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], [])), \
+                  panel_role="reviewer", panel_purpose="review", panel_access="read"))
+    with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], [
+            {"attempt_id": reviewer_attempt["attempt_id"], "task_id": auto_task, "verify_exit": 0}])), \
             patch.object(panel, "_dispatch_verifier", return_value=None), \
             patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": answer}]}]}), \
             patch.dict(os.environ, room_env, clear=True):
@@ -8960,6 +8961,25 @@ for reviewer_call, answer, exit_status, expected in (
     verdict_mail = next(m for m in room.status(project, shared)["messages"]
                         if m["id"] == "judgment-" + reviewer_call)
     assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"]
+for dispatched_role in ("verifier", "security-auditor", "critic", "architect"):
+    judge_call = "call-judge-no-gate-" + dispatched_role
+    judge_attempt = dict(auto_attempt, attempt_id="attempt-" + judge_call,
+        refs=dict(auto_attempt["refs"], panel_room_participant=judge_call,
+                  panel_role="reviewer" if dispatched_role in {"verifier", "security-auditor"} else "advisor",
+                  panel_purpose=dispatched_role, panel_access="read"))
+    room.join(project, shared, judge_call, "codex",
+              "reviewer" if dispatched_role in {"verifier", "security-auditor"} else "advisor",
+              parent=room_owner)
+    with patch.object(panel_result_store, "_records", return_value=([judge_attempt], [])), \
+            patch.object(panel, "_dispatch_verifier", return_value=None), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Findings checked."}]}]}), \
+            patch.dict(os.environ, room_env, clear=True):
+        panel.deliver_result(project, shared, judge_call, room_owner, auto_task, 0)
+    judge_mail = next(m for m in room.status(project, shared)["messages"]
+                      if m["id"] == "judgment-" + judge_call)
+    assert "findings are ready for owner judgment" in judge_mail["text"]
+    assert "review failed or is inconclusive" not in judge_mail["text"]
+    assert "awaiting admission" not in judge_mail["text"] and room_owner in judge_mail["targets"]
 # Completed negative automatic gates draft fixes for the main without dispatching another worker.
 draft_main = {"attempt_id": "attempt-fix-draft-main", "tool": "panel-main", "provider": "claude",
               "state": "working", "terminal": False, "created_at": "2026-10-14T00:00:00Z",
