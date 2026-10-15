@@ -73,7 +73,7 @@ The `s` board key lists installed main targets and their weekly quota readings, 
 requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER
 [--model MODEL]` is the command form. It requires an existing tmux panel, one
 verified live main and an inactive landing operation. The current main is asked
-for a handoff of at most 3000 bytes (20 seconds by default, capped at 60); if
+for a handoff of at most 3000 bytes (90 seconds by default via `OMS_PANEL_SWAP_HANDOFF_SECONDS`, capped at 300); if
 none arrives, OMS uses a recorded-state digest. OMS then exits the old main and
 relaunches the replacement in the same pane and room without stopping workers.
 If the old main does not exit or new ownership cannot be verified, the panel
