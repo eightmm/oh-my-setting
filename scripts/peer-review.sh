@@ -763,8 +763,10 @@ trap cleanup EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
-if [ "$REPO" != "$MA_READ_SOURCE_REPO" ]; then
-  # Sync of the shared checkout waits for this review's snapshot window to close.
+# Sync of the shared checkout waits until this review ends, including same-repository
+# reviews whose read guard is off: their source must not move under the reviewer. Only a
+# checkout that already ignores .oms can be synced, and only there is a lock entry invisible.
+if git -C "$REPO" check-ignore -q .oms/locks/canonical-sync.d 2>/dev/null; then
   oms_canonical_call_acquire "$REPO" "${OMS_HARNESS_CALL_ID:-review-$$}" ||
     fail "canonical checkout sync is busy or review registration failed; retry after sync"
 fi
