@@ -11439,6 +11439,20 @@ with patch.dict(os.environ, control_env, clear=True), \
             assert str(error) == live_main_refusal, error
         else:
             raise AssertionError("an unconfirmed-shutdown main was ignored by the one-main guard")
+    # A joined main with no lifecycle record at all is not proven gone either.
+    unrecorded_room = room.create(project, "legacy-unrecorded-main", "A joined main without lifecycle history")
+    recorded_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                                 "--ref", "panel_room_id=" + unrecorded_room, "--then", "starting", "--then", "working", output=True)
+    legacy_main_join(project, unrecorded_room, recorded_main, "claude")
+    legacy_main_join(project, unrecorded_room, "att_" + "0" * 32, "claude")
+    with patch.dict(os.environ, {"OMS_ROOM_ID": unrecorded_room, "OMS_ROOM_PARTICIPANT": recorded_main,
+                                 "OMS_PANEL_MAIN_ATTEMPT": recorded_main}):
+        try:
+            panel.dispatch(project, "claude", "advisor", None, "read", None, prompt="Unrecorded owner still joined")
+        except ValueError as error:
+            assert str(error) == live_main_refusal, error
+        else:
+            raise AssertionError("a joined main without lifecycle history was ignored by the one-main guard")
     # Neither --main nor a bound caller can select one of two live mains.
     for dry in (False, True):
         try:

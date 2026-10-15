@@ -1058,8 +1058,9 @@ def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
             continue
         related = [row for row in history if row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) == enrolled["participant"]]
         current = [row for row in related if row.get("terminal") is not True]
-        # Any non-terminal main attempt (blocked or unconfirmed shutdown included) still owns the room.
-        unreleased += bool(current)
+        # Any non-terminal main attempt (blocked or unconfirmed shutdown included) still owns the room, and
+        # so does a joined main with no recorded attempt: nothing proves it ended until it leaves.
+        unreleased += bool(current) or not related
         if len(current) != 1:
             continue
         current = current[0]
