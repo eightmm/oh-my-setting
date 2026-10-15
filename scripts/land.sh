@@ -33,7 +33,7 @@ changed shell files, and leaves the full lanes to CI).
 Stages, each recorded beside its gate log under
 $XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<sha>-<request-digest>.json,
 outside the repo:
-  gate    the gate command, run in a detached worktree of the verified
+  gate    the gate command, run in an independent clone of the verified
           commit (untracked files and checkout .oms stay out); a failure
           is recorded in the fail ledger
   push    git push --no-verify REMOTE VERIFIED_SHA:TARGET, only if HEAD and the tree
@@ -319,45 +319,29 @@ print(sys.argv[1] + "-" + hashlib.sha256(json.dumps(
 ).encode()).hexdigest()[:24])' "$1" "$REMOTE" "$TARGET" "$GATE" | tr -d '\r'
 }
 
-# The gate checks the committed SHA in its own detached worktree, as CI checks
-# a fresh clone. In the checkout, the session driving the landing keeps writing
-# its own .oms (handoffs, fail-ledger rows) through a 25-minute gate, and the
-# gate's purity check failed fc74aab on exactly those writes; untracked files
-# could also sway a verdict the push then attributes to the commit.
-# The job's EXIT trap belongs to the landing lock, so a tree a killed job left
-# behind is swept by the next job for this repository, which holds that lock.
-# The tree is harness residue (<tmp>/oh-my-setting-land.*/wt beside a marker
-# owned by this job) so write workers running meanwhile see a live sibling, not
-# an unattributable registration; dead-job residue cleanup removes it too.
-drop_gate_tree() {  # PATH
-  git -C "$REPO" worktree remove --force "$1" >/dev/null 2>&1 || rm -rf "$1"
-  case "$1" in */oh-my-setting-land.*/wt) rm -rf "${1%/wt}" ;; esac
-}
-run_gate() {
-  local rc=0 listing line parent tree
-  listing="$(git -C "$REPO" worktree list --porcelain 2>/dev/null)" || listing=""
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="$(oms_strip_cr "$line")"
-    case "$line" in
-      "worktree "*/oh-my-setting-land.*/wt|"worktree "*/oms-land-gate.*) drop_gate_tree "${line#worktree }" ;;
-    esac
-  done <<EOF
-$listing
-EOF
-  git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+# An independent clone keeps untracked state out of the exact-SHA gate without
+# changing the source worktree registry observed by concurrent worker guards.
+# A subshell owns cleanup traps without replacing the landing lock's traps.
+run_gate() (
+  local rc=0 parent tree
   parent="$(mktemp -d "$(oms_harness_tmp_base)/oh-my-setting-land.XXXXXX")" || return 1
-  parent="$(cd "$parent" && pwd -P)" || return 1
-  tree="$parent/wt"
-  # Marker first: a guard capture between it and the add sees a vouched entry.
-  oms_harness_mark_tmpdir "$parent" "$REPO" "$tree"
-  if ! git -C "$REPO" -c core.fsmonitor=false worktree add --quiet --detach \
-      "$tree" "$SHA" >> "$LOG" 2>&1; then
-    rm -rf "$parent"; return 1
-  fi
+  trap 'rm -rf "$parent"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  tree="$(cd "$parent" && pwd -P)/wt" || return 1
+  # Local upload-pack copies objects without hardlinks or alternates. Fetch the
+  # pinned SHA even if HEAD moved, and retain source remote-tracking refs used
+  # by the default affected gate (clone's origin points at the local source).
+  git -c core.fsmonitor=false clone --quiet --no-local --no-hardlinks --no-checkout \
+    -- "$REPO" "$tree" >> "$LOG" 2>&1 || return 1
+  git -C "$tree" fetch --quiet --no-tags -- "$REPO" "$SHA" \
+    '+refs/remotes/*:refs/remotes/*' >> "$LOG" 2>&1 || return 1
+  git -C "$tree" -c core.fsmonitor=false checkout --quiet --detach "$SHA" \
+    >> "$LOG" 2>&1 || return 1
   (cd "$tree" && bash -c "$GATE") >> "$LOG" 2>&1 || rc=$?
-  drop_gate_tree "$tree"
   return "$rc"
-}
+)
 
 run_job() {
   cd "$REPO"
@@ -681,7 +665,9 @@ if [ -z "$GATE" ]; then
     GATE="$GATE --affected --ci-parity --changed-from $gate_destination --changed-to HEAD"
   fi
 fi
-git -C "$REPO" fetch -q "$REMOTE" || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }
+# FETCH_HEAD lives in .git/worktrees/<id> for linked callers; only the remote
+# tracking refs are needed here, so leave that protected registry untouched.
+git -C "$REPO" fetch -q --no-write-fetch-head "$REMOTE" || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }
 if ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" HEAD; then
   echo "error: $REMOTE/$TARGET is not an ancestor of HEAD; rebase first" >&2; exit 2
 fi

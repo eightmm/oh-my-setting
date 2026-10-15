@@ -28699,6 +28699,7 @@ test_parallel_delegates_do_not_erase_each_others_authority_state() {
   local home_dir="$project-home"
   local pid_a pid_b rc_a=0 rc_b=0 ticks=0
   local artifact_a artifact_b patch_a patch_b index
+  local land_rc=0
 
   make_guard_repo "$project"
   mkdir -p "$barrier"
@@ -28757,6 +28758,19 @@ EOF
     fail "second parallel delegate did not overlap at the provider barrier: $(cat "$barrier/a.err" "$barrier/b.err")"
   fi
 
+  # A land gate must leave the canonical registry intact even while two
+  # workers hold snapshots. Exercise the real gate path without publishing.
+  cp -R "$project/.git/worktrees" "$barrier/registry-before"
+  (
+    . "$ROOT/scripts/lib/harness-residue.sh"
+    export REPO SHA LOG GATE
+    REPO="$project" SHA="$(git -C "$project" rev-parse HEAD)" LOG="$barrier/land.log"
+    printf -v GATE 'diff -r %q %q' "$project/.git/worktrees" "$barrier/registry-before"
+    eval "$(sed -n '/^run_gate() (/,/^)/p' "$ROOT/scripts/land.sh")"
+    run_gate
+  ) || land_rc=$?
+  diff -r "$project/.git/worktrees" "$barrier/registry-before" > "$barrier/registry.diff" || land_rc=1
+
   # FIFO completion is the harder case: B's outer guard began before A's
   # managed worktree existed, and ends while A is still live. That registration
   # and A's liveness state are owner-managed concurrency, not worker tampering.
@@ -28768,6 +28782,7 @@ EOF
   wait "$pid_a" || rc_a=$?
   artifact_a="$(sed -n 's/^artifact: //p' "$barrier/a.out" | sed -n '1p')"
   patch_a="$(sed -n 's/^patch: //p' "$barrier/a.out" | sed -n '1p')"
+  [ "$land_rc" = 0 ] || fail "land changed the workers' registry: $(cat "$barrier/land.log" "$barrier/registry.diff")"
   [ "$rc_a" = 0 ] && [ "$rc_b" = 0 ] ||
     fail "well-behaved parallel delegates should both pass (a=$rc_a b=$rc_b): $(cat "$barrier/a.err" "$barrier/b.err")"
   [ -s "$artifact_a" ] && [ -s "$artifact_b" ] && [ -s "$patch_a" ] && [ -s "$patch_b" ] ||

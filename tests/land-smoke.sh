@@ -23,6 +23,38 @@ state_land="$XDG_STATE_HOME/oh-my-setting/land"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+registry_snapshot() {
+  python3 - "$1" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+repo = pathlib.Path(sys.argv[1])
+common = pathlib.Path(subprocess.check_output(
+    ['git', '-C', str(repo), 'rev-parse', '--git-common-dir'], text=True).strip())
+root = (repo / common).resolve() / 'worktrees'
+rows = []
+if root.exists():
+    for path in [root, *sorted(root.rglob('*'))]:
+        st = path.lstat()
+        rows.append([str(path.relative_to(root)), st.st_mode, st.st_mtime_ns,
+                     hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None])
+print(json.dumps(rows))
+PY
+}
+check_gate_clone() {
+  [ "$(git rev-parse HEAD)" = "$OMS_LAND_SMOKE_SHA" ] || return 8
+  ! git symbolic-ref -q HEAD || return 8
+  [ -d .git ] && [ ! -e .git/objects/info/alternates ] || return 8
+  [ "$(git rev-parse origin/main)" = "$OMS_LAND_SMOKE_BASE" ] || return 8
+  registry_snapshot "$OMS_LAND_SMOKE_REPO" | cmp - "$OMS_LAND_SMOKE_REGISTRY" || return 8
+  python3 - <<'PY' || return 8
+from pathlib import Path
+assert all(p.stat().st_nlink == 1 for p in Path('.git/objects').rglob('*') if p.is_file())
+PY
+}
+export -f registry_snapshot check_gate_clone
+export OMS_LAND_SMOKE_REPO OMS_LAND_SMOKE_SHA OMS_LAND_SMOKE_BASE
+export OMS_LAND_SMOKE_REGISTRY="$TMP/registry.json"
+gate_tree_left() { ls -d "$TMPDIR"/oh-my-setting-land.* >/dev/null 2>&1; }
+
 git init -q --bare -b main "$TMP/remote.git"
 repo="$TMP/work.. tree"
 git clone -q "$TMP/remote.git" "$repo" 2>/dev/null
@@ -60,7 +92,7 @@ write_autopilot_receipt() {  # WORKTREE STAGE -> a real typed outer receipt
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
       fail "cannot write fixture autopilot receipt"
 }
-gate 'echo gate ok'
+gate 'check_gate_clone || exit $?; echo gate ok'
 git -C "$repo" push -q origin HEAD:main
 remote_tip() { git -C "$TMP/remote.git" rev-parse main; }
 
@@ -81,7 +113,12 @@ printf '*\n' > "$peer/.oms/.gitignore"
 peer_oms_before="$(find "$peer/.oms" -mindepth 1 -print | sort)"
 echo one > "$peer/one"; git -C "$peer" add one; git -C "$peer" commit -q -m one
 head="$(git -C "$peer" rev-parse HEAD)"
+OMS_LAND_SMOKE_REPO="$(cd "$repo" && pwd -P)"
+OMS_LAND_SMOKE_SHA="$head" OMS_LAND_SMOKE_BASE="$(remote_tip)"
+registry_snapshot "$repo" > "$OMS_LAND_SMOKE_REGISTRY"
 "$LAND" --repo "$peer" --wait --ci-wait 0 > "$TMP/pass.out" || fail "green gate must land: $(cat "$TMP/pass.out")"
+registry_snapshot "$repo" | cmp - "$OMS_LAND_SMOKE_REGISTRY" || fail "linked land changed the source worktree registry"
+gate_tree_left && fail "linked land left a gate clone"
 grep -Fq 'land: this push changes tests +0 / code +1 lines' "$TMP/pass.out" ||
   fail "land must show the push's test and code growth: $(cat "$TMP/pass.out")"
 grep -Fq '"growth": "tests +0 / code +1 lines"' "$(find "$state_land" -type f -name '*.json' -print | sort | tail -n 1)" ||
@@ -121,23 +158,60 @@ git -C "$repo" pull -q --ff-only origin main
 # A session driving the checkout writes its own .oms during the gate, and an
 # untracked file must not sway a verdict the push attributes to the commit.
 echo scratch > "$repo/untracked-scratch"
-# The gate tree is harness residue owned by the live job, so a write worker's
-# guard running meanwhile exempts its registration instead of failing.
-OMS_LAND_SMOKE_REPO="$(cd "$repo" && pwd -P)"
-export OMS_LAND_SMOKE_REPO
+# A stale registration must also survive: land must not sweep or prune the
+# canonical registry while workers may be snapshotting it.
+git -C "$repo" worktree add -q --detach "$TMP/oms-land-gate.stale" HEAD
+rm -rf "$TMP/oms-land-gate.stale"
 gate 'test ! -e untracked-scratch || exit 9; mkdir -p .oms; touch .oms/gate-wrote
-. "$OMS_LAND_SMOKE_ROOT/scripts/lib/harness-residue.sh"; . "$OMS_LAND_SMOKE_ROOT/scripts/lib/oms-common.sh"
-case "$(basename "$(dirname "$PWD")")" in oh-my-setting-land.*) ;; *) exit 8 ;; esac
-oms_worker_gitmeta_is_live_managed_worktree "$OMS_LAND_SMOKE_REPO" "$(git rev-parse --git-dir)/gitdir" "" || exit 8
+check_gate_clone || exit $?
 echo isolated gate ok'
+OMS_LAND_SMOKE_SHA="$(git -C "$repo" rev-parse HEAD)" OMS_LAND_SMOKE_BASE="$(remote_tip)"
+registry_snapshot "$repo" > "$OMS_LAND_SMOKE_REGISTRY"
 repo_oms_before="$(find "$repo/.oms" -print | sort)"
 "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/isolated.out" 2>&1 ||
   fail "the gate must run in a tree without untracked files: $(cat "$TMP/isolated.out")"
 [ "$repo_oms_before" = "$(find "$repo/.oms" -print | sort)" ] ||
   fail "a gate's .oms writes must not reach the landing checkout"
-gate_tree_left() { git -C "$repo" worktree list --porcelain | grep -q 'oh-my-setting-land\.' || ls -d "$TMPDIR"/oh-my-setting-land.* >/dev/null 2>&1; }
-gate_tree_left && fail "the gate worktree and its marker directory must be removed after the gate"
+registry_snapshot "$repo" | cmp - "$OMS_LAND_SMOKE_REGISTRY" || fail "standalone land changed the source worktree registry"
+gate_tree_left && fail "the gate clone must be removed after the gate"
 rm -f "$repo/untracked-scratch"
+
+# Setup failures and catchable termination use the same cleanup path as a red
+# gate. Extract only run_gate so these probes cannot push or change receipts.
+(
+  export REPO="$repo" SHA="$OMS_LAND_SMOKE_SHA" LOG="$TMP/setup.log" GATE=true
+  . "$ROOT/scripts/lib/harness-residue.sh"
+  eval "$(sed -n '/^run_gate() (/,/^)/p' "$LAND")"
+  for failed_step in clone fetch checkout; do
+    git() {
+      local arg
+      for arg in "$@"; do
+        if [ "$arg" = "$failed_step" ]; then
+          [ "$arg" != clone ] || mkdir -p "${!#}/.git/objects"
+          return 17
+        fi
+      done
+      command git "$@"
+    }
+    if run_gate; then fail "$failed_step failure was ignored"; fi
+    gate_tree_left && fail "$failed_step failure leaked the clone"
+  done
+  unset -f git
+  SHA="$(git -C "$repo" rev-parse HEAD^)"
+  OMS_LAND_SMOKE_SHA="$SHA" OMS_LAND_SMOKE_BASE="$(git -C "$repo" rev-parse origin/main)"
+  GATE=check_gate_clone
+  run_gate || fail "gate did not check the pinned SHA independently of source HEAD"
+  gate_tree_left && fail "pinned SHA gate leaked the clone"
+  for signal in HUP INT TERM; do
+    GATE="kill -$signal \"\$PPID\""
+    rc=0
+    run_gate || rc=$?
+    case "$signal:$rc" in HUP:129|INT:130|TERM:143) ;; *) fail "incorrect signal exit: $signal:$rc" ;; esac
+    gate_tree_left && fail "$signal leaked the clone"
+  done
+  :
+) || exit 1
+registry_snapshot "$repo" | cmp - "$OMS_LAND_SMOKE_REGISTRY" || fail "failed setup changed the source registry"
 
 # --- 3. live siblings are recorded, waited for, or explicitly ignored ---------
 sibling="$TMP/sibling.. worktree"
@@ -245,7 +319,7 @@ if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/fail.out" 2>&1; then
 fi
 [ "$(remote_tip)" = "$before" ] || fail "a red gate must not push"
 grep -q 'gate exit 3' "$TMP/fail.out" || fail "the failure reason must be shown: $(cat "$TMP/fail.out")"
-gate_tree_left && fail "a red gate must remove its gate worktree and marker directory"
+gate_tree_left && fail "a red gate must remove its gate clone"
 grep -Fq 'in affected:tests/demo-smoke.sh scripts-smoke.test_demo' "$repo/.oms/failures.jsonl" ||
   fail "a red gate must be recorded in the fail ledger with its failing stages"
 
