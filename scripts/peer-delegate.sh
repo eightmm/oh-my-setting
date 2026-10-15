@@ -1876,8 +1876,11 @@ run_verify() {
   verify_pid="$!"
   if [ "$worker_attempt_owned" = 1 ] && [ "$WORKER_ACCESS" = write ]; then
     heartbeat_interval="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
-    ma_routed_heartbeat "$(ma_scripts_dir)/agent-events.sh" "$REPO" \
-      "$worker_attempt_id" "$verify_pid" "$heartbeat_interval" &
+    # An explicit subshell drops the delegate's EXIT trap before argument
+    # expansion. A fast verifier can stop this child before the heartbeat
+    # installs its own traps; a bare background function then runs cleanup.
+    (ma_routed_heartbeat "$(ma_scripts_dir)/agent-events.sh" "$REPO" \
+      "$worker_attempt_id" "$verify_pid" "$heartbeat_interval") &
     verify_heartbeat_pid="$!"
   fi
   wait "$verify_pid"

@@ -5250,6 +5250,55 @@ print("PASS: native scratch-state resolver and execution directory boundaries")
 _operator_run("scratch-state")
 
 
+# Stop verification's heartbeat during argument expansion, before its own
+# traps exist. A bare background function inherits the delegate's EXIT cleanup
+# and used to delete the verifier output and frozen Git snapshot here.
+delegate_source = (root / "scripts/peer-delegate.sh").read_text()
+verify_functions = "\n".join(re.search(r"^" + name + r"\(\) \{\n.*?^\}",
+                                      delegate_source, re.M | re.S).group()
+                             for name in ("stop_verify_heartbeat", "run_verify"))
+heartbeat_probe = r'''
+set -eu
+. "$1/scripts/lib/peer-common.sh"
+eval "$3"
+worktree="$2"
+REPO="$2"
+verify_out="$2/verify-output"
+artifact="$2/artifact"
+worker_guard_dir="$2/guard"
+mkdir "$worker_guard_dir"
+touch "$worker_guard_dir/snapshot"
+heartbeat_entered="$2/heartbeat-entered"
+heartbeat_release="$2/heartbeat-release"
+trap 'touch "$heartbeat_release"; rm -f "$verify_out" "$worker_guard_dir/snapshot"' EXIT
+ma_scripts_dir() {
+  touch "$heartbeat_entered"
+  while [ ! -f "$heartbeat_release" ]; do sleep .01; done
+  printf '%s\n' "${MA_LIB_DIR%/*}"
+}
+verify_clean_env() { :; }
+run_verify_with_timeout() {
+  local tries=0
+  while [ ! -f "$heartbeat_entered" ] && [ "$tries" -lt 500 ]; do
+    sleep .01; tries=$((tries + 1))
+  done
+  test -f "$heartbeat_entered"
+}
+worker_worktree_require_identity() { return 0; }
+delegate_attempt_transition() { return 0; }
+worker_execution_boundary_check() { test -f "$worker_guard_dir/snapshot"; }
+worker_status=0 worker_attempt_owned=1 WORKER_ACCESS=write
+worker_attempt_id=fixture VERIFY_CMD=fixture
+run_verify
+test "$verify_status" = 0
+test -f "$verify_out"
+test -f "$worker_guard_dir/snapshot"
+'''
+heartbeat_temporary = temporary / "verify-heartbeat"
+heartbeat_temporary.mkdir()
+call(["bash", "-c", heartbeat_probe, "verify-heartbeat", str(root),
+      str(heartbeat_temporary), verify_functions])
+
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
     peer = "claude" if owner == "codex" else "codex"
