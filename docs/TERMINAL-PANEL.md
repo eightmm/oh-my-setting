@@ -328,13 +328,14 @@ board group, the goal box, the main card's `Team:` line, Detail, the Attention q
   runs the goal box adds `LANDING`.
 
 The Attention queue ranks what needs the person by urgency, not recency, and every board surface reads the
-same ranked list, computed once per frame. Its classes, in rank order and named by a short tag on each row:
-`needs you` (a call or main waiting for approval or input, a question escalated to the person or asked of
-`all` by a main), `failed` (a failed, timed-out, abandoned or lost call whose result handoff is unread, that no
-later round superseded and whose task is still open), `decide` (a finished call awaiting its main's decision
-or admission, oldest first, with its age), `stale` (a running plan task whose holder's calls all ended; its row
-opens the Plan tab), `mail` (other unanswered room mail from or to mains) and `info` (a failed main wake-up
-delivery). Failed items open a reader with the ending, errors, kept worktree and a salvage hint when applicable.
+same ranked list, computed once per frame. Its classes, in rank order, are `answer needed` (a call or main
+waiting for approval or input, a question escalated to the person or asked of `all` by a main), `failed` (a
+failed, timed-out, abandoned or lost call whose result handoff is unread, that no later round superseded and
+whose task is still open), `awaiting decision` (a finished call awaiting its main's decision, oldest first,
+with its age; a patch awaiting admission is labeled `pending admission`), `held, workers ended` (a running
+plan task whose holder's calls all ended; its row opens the Plan tab), `unread mail` (other unanswered room
+mail from or to mains), and `delivery failed` (a failed main wake-up delivery). Provider errors are labeled
+`failed`. Failed items open a reader with the ending, errors, kept worktree and a salvage hint when applicable.
 Within a class the newest comes first. Above the board a header such as
 `Attention 7 · 1 needs you · 2 failed · 3 decide · 1 stale` (zero classes dropped; narrower widths shorten
 the words to `1 you · 2 fail · 3 dec`, then `Attention 7`) opens the Attention tab and is followed by the top
@@ -833,7 +834,7 @@ Routing is provider-neutral within the configured light, routine, deep and front
 For the plain `worker` role, the read front door is `analysis-worker` and the write front door is `implementation-worker`; other roles keep their role names.
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` overrides one dispatch's effort. Any panel dispatch with `--verify` gets `OMS_PEER_VERIFY_TIMEOUT=20m` when unset; peer commands elsewhere default to 10m. Set the variable in the environment to override it. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher`,
+`--reasoning-effort` overrides one dispatch's effort. Any panel dispatch with `--verify` gets `OMS_PEER_VERIFY_TIMEOUT=20m` when unset; peer commands elsewhere default to 10m. Set the variable in the environment to override it. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher`,
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
 security-auditor) in `panel_role`; the strategy itself is the recorded purpose
 (plain workers record explain/investigate/implement). `oms panel --routes`
