@@ -11421,6 +11421,24 @@ with patch.dict(os.environ, control_env, clear=True), \
         assert str(error) == live_main_refusal, error
     else:
         raise AssertionError("control dispatch silently chose between two mains")
+    # A main whose shutdown is unconfirmed (blocked, not terminal) still owns its room.
+    blocked_room = room.create(project, "legacy-blocked-main", "Unconfirmed shutdown still owns the room")
+    working_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                                "--ref", "panel_room_id=" + blocked_room, "--then", "starting", "--then", "working", output=True)
+    legacy_main_join(project, blocked_room, working_main, "claude")
+    stuck_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                              "--ref", "panel_room_id=" + blocked_room, "--then", "starting", "--then", "working", output=True)
+    legacy_main_join(project, blocked_room, stuck_main, "claude")
+    panel.events(project, "transition", "--attempt", stuck_main, "--state", "blocked",
+                 "--reason-code", "native_shutdown_unconfirmed")
+    with patch.dict(os.environ, {"OMS_ROOM_ID": blocked_room, "OMS_ROOM_PARTICIPANT": working_main,
+                                 "OMS_PANEL_MAIN_ATTEMPT": working_main}):
+        try:
+            panel.dispatch(project, "claude", "advisor", None, "read", None, prompt="Blocked owner still live")
+        except ValueError as error:
+            assert str(error) == live_main_refusal, error
+        else:
+            raise AssertionError("an unconfirmed-shutdown main was ignored by the one-main guard")
     # Neither --main nor a bound caller can select one of two live mains.
     for dry in (False, True):
         try:

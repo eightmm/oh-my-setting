@@ -1052,11 +1052,14 @@ def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
     history = [row for row in main_history(repo, room_id) if row.get("tool") == "panel-main"
                and row.get("refs", {}).get("panel_role") == "main"]
     candidates = {}
+    unreleased = 0
     for enrolled in state["participants"]:
         if not enrolled["joined"] or enrolled["role"] != "main":
             continue
         related = [row for row in history if row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) == enrolled["participant"]]
         current = [row for row in related if row.get("terminal") is not True]
+        # Any non-terminal main attempt (blocked or unconfirmed shutdown included) still owns the room.
+        unreleased += bool(current)
         if len(current) != 1:
             continue
         current = current[0]
@@ -1064,9 +1067,9 @@ def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
                 and current.get("refs", {}).get("panel_role") == "main"
                 and current.get("state") in {"starting", "working", "verifying", "review", "waiting_input", "waiting_approval"}):
             candidates[enrolled["participant"]] = current
-    if len(candidates) > 1:
+    if max(unreleased, len(candidates)) > 1:
         raise ValueError("this room has %d live mains; the panel supports one - release the others with "
-                         "oms panel --release-main or finish the swap" % len(candidates))
+                         "oms panel --release-main or finish the swap" % max(unreleased, len(candidates)))
     caller = caller or os.environ.get("OMS_ROOM_PARTICIPANT")
     attempt = attempt or os.environ.get("OMS_PANEL_MAIN_ATTEMPT")
     if attempt:
