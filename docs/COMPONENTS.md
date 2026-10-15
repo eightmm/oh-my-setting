@@ -1,27 +1,132 @@
 # Components
 
-oh-my-setting is a local control plane for installed coding-agent CLIs. Codex,
-Claude Code, and Antigravity remain its managed core. Cursor, Grok Build,
-Gemini CLI, Qwen Code, OpenCode, DeepSeek Harness, Mistral Vibe, Pi, GitHub
-Copilot CLI, Factory Droid, Aider, and marker-prefixed custom adapters are
-detected as optional transports. It gives them shared rules, skills, state,
-peer calls, isolated write delegation, and one verification boundary for
-OMS-managed delegated patches.
-
-The bundled experimental [Codex harness launcher](CODEX-HARNESSES.md) separates
-the UI/tool loop from inference: `oms harness codex|pi|claude --model EXACT`
-uses an existing Codex ChatGPT subscription login. Pi/Claude use an
-invocation-scoped local gateway; the selected harness retains tool permissions.
-The default subsystem catalog is `oms list` (also `--frontdoor`); core
-primitives and intent variants remain in `oms list --all`. Use
-`oms <tool> --help` for flags and the
-[command-routing reference](../custom-skills/oms-agent-harness/references/command-routing.md)
-when two commands appear to overlap.
-
-Task-scoped [work rooms and the moving terminal graph](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) reuse the canonical thread log and existing MCP peer tools.
-Room snapshots also support an explicitly enrolled
+This catalog is for people using or maintaining the oh-my-setting (OMS) harness.
+It maps each command to its purpose and detailed guide; OMS shares rules, state,
+peer workflows and bounded patch handling across installed coding-agent CLIs,
+with one verification boundary for OMS-managed delegated patches. The
+[Codex harness launcher](CODEX-HARNESSES.md) runs Pi and Claude Code through an
+invocation-scoped local gateway; the selected harness keeps its tool permissions.
+Work rooms can also deliver to an explicitly enrolled
 [Claude Desktop Code or terminal inbox](TERMINAL-PANEL.md#claude-desktop-code-and-claude-code-terminal-delivery),
 with separate delivery receipts and an explicit opt-in to possible model wakeup.
+
+## In this guide
+
+- [Panel and collaboration](#panel-and-collaboration)
+- [Plans and landing](#plans-and-landing)
+- [State and memory](#state-and-memory)
+- [ML and HPC](#ml-and-hpc-components)
+- [Install, update and doctor](#install-update-and-doctor)
+- [Internals](#internals)
+- [Architecture and contracts](#how-it-fits-together)
+
+Use `oms list` for the front-door catalog, `oms list --all` for all commands,
+and `oms <command> --help` for flags. The
+[command-routing reference](../custom-skills/oms-agent-harness/references/command-routing.md)
+explains overlapping entrypoints.
+
+## Panel and collaboration
+
+| Component | Purpose | Invoke | Details |
+|---|---|---|---|
+| `panel` | Open the terminal control panel for live collaboration. | `oms panel` | [Terminal panel](TERMINAL-PANEL.md) |
+| `dashboard` | Read a terminal view of OMS collaboration state. | `oms dashboard` | [Panel and collaboration](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
+| `inbox` | Prioritize attention from shared state. | `oms inbox` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `room` | Share task-scoped messages and room snapshots. | `oms room` | [Work rooms](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
+| `thread` | Read and deliver shared conversation turns. | `oms thread` | [Asking other agents](#asking-other-agents) |
+| `consult` | Ask one peer or continue a peer thread. | `oms consult` | [Asking other agents](#asking-other-agents) |
+| `peer-ask` | Ask a provider council and save each answer. | `oms peer-ask` | [Asking other agents](#asking-other-agents) |
+| `peer-review` | Review a diff with an independent provider council. | `oms peer-review` | [Asking other agents](#asking-other-agents) |
+| `advise` | Request an adversarial pass at a decision point. | `oms advise` | [Asking other agents](#asking-other-agents) |
+| `agent-call` | Run one read-only local peer call. | `oms agent-call` | [Asking other agents](#asking-other-agents) |
+| `peer-delegate` | Send a bounded write task to an isolated worktree. | `oms peer-delegate` | [Delegating writes](#delegating-writes) |
+| `agent-supervisor` | Queue and supervise attempts without landing them. | `oms agent-supervisor` | [Delegating writes](#delegating-writes) |
+| `agent-events` | Record and project agent lifecycle events. | `oms agent-events` | [Delegating writes](#delegating-writes) |
+| `agent-plan` | Maintain a shared task graph. | `oms agent-plan` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `agent-role` | Manage reusable profiles for the three agent CLIs. | `oms agent-role` | [Models and reasoning effort](#models-and-reasoning-effort) |
+| `agent-task` | Maintain the active handoff packet. | `oms agent-task` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `approval-inbox` | Request and consume fenced durable approvals. | `oms approval-inbox` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+
+## Plans and landing
+
+| Component | Purpose | Invoke | Details |
+|---|---|---|---|
+| `autopilot` | Drive bounded coding under plan and landing contracts. | `oms autopilot` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `goal-drive` | Drive an existing approved plan to its acceptance command. | `oms goal-drive` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `plan-from-spec` | Propose plan tasks from `PROJECT.md`. | `oms plan-from-spec` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `plan-run` | Execute one pre-authorized plan task. | `oms plan-run` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `patch-admit` | Check delegated patch scope and evidence. | `oms patch-admit` | [Delegating writes](#delegating-writes) |
+| `patch-land` | Apply an admitted delegated patch. | `oms patch-land` | [Delegating writes](#delegating-writes) |
+| `land` | Gate, push and update a committed worktree. | `oms land` | [Verification and release](#verification-and-release) |
+| `draft-pr` | Publish a verified clean HEAD as a draft pull request. | `oms draft-pr` | [Verification and release](#verification-and-release) |
+| `ci-status` | Read the CI conclusion for a branch HEAD. | `oms ci-status` | [Verification and release](#verification-and-release) |
+| `change-guard` | Warn about concurrent agent edits. | `oms change-guard` | [Delegating writes](#delegating-writes) |
+| `checkpoint` | Save a reversible snapshot of tracked Git state. | `oms checkpoint` | [Delegating writes](#delegating-writes) |
+| `scratch-worktree` | Manage scratch worktrees around active workers. | `oms scratch-worktree` | [Delegating writes](#delegating-writes) |
+
+## State and memory
+
+| Component | Purpose | Invoke | Details |
+|---|---|---|---|
+| `state` | View active, stale, pending and changed harness state. | `oms state` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `state-verify` | Check consistency of repository harness state. | `oms state-verify` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `agent-memory` | Maintain shared harness memory. | `oms agent-memory` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `journal` | Read and manage the local-first Work Journal. | `oms journal` | [Work Journal](WORK-JOURNAL.md) |
+| `fail-ledger` | Record and inspect cross-session failures. | `oms fail-ledger` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `artifact-index` | Inspect and maintain indexed harness artifacts. | `oms artifact-index` | [Asking other agents](#asking-other-agents) |
+| `session-handoff` | Build a compact digest from an agent session. | `oms session-handoff` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `snapshot` | Record private local context for agents. | `oms snapshot` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `gc` | Apply retention to repository-local state. | `oms gc` | [State, memory, and handoff](#state-memory-and-handoff) |
+| `otel-export` | Export whitelisted metadata to stdout or a local file. | `oms otel-export` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
+| `support-bundle` | Prepare a redacted diagnostic bundle. | `oms support-bundle` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
+
+## ML and HPC components
+
+| Component | Purpose | Invoke | Details |
+|---|---|---|---|
+| `data-manifest` | Fingerprint dataset splits and detect drift or leakage. | `oms data-manifest` | [ML and HPC](#ml-and-hpc) |
+| `experiment-board` | Coordinate shared research studies. | `oms experiment-board` | [ML and HPC](#ml-and-hpc) |
+| `job-digest` | Summarize training or Slurm logs and jobs. | `oms job-digest` | [ML and HPC](#ml-and-hpc) |
+| `run-ledger` | Record a command and its execution metadata. | `oms run-ledger` | [ML and HPC](#ml-and-hpc) |
+| `run-reconcile` | Reconcile long-running Slurm jobs with saved run records. | `oms run-reconcile` | [ML and HPC](#ml-and-hpc) |
+| `run` | Tie experiment and execution records together. | `oms run` | [ML and HPC](#ml-and-hpc) |
+| `tsp-queue` | Queue local jobs through task-spooler. | `oms tsp-queue` | [ML and HPC](#ml-and-hpc) |
+| `runtime` | Inspect typed projections and optional execution services. | `oms runtime` | [Runtime guide](OMS-RUNTIME.md) |
+| `harness` | Run Codex, Pi or Claude Code harnesses with a Codex login. | `oms harness` | [Codex harnesses](CODEX-HARNESSES.md) |
+
+## Install, update and doctor
+
+| Component | Purpose | Invoke | Details |
+|---|---|---|---|
+| `install-profile` | Inspect or install tools for selected capabilities. | `oms install-profile` | [Install guide](INSTALL.md) |
+| `status` | Show install, task and update status. | `oms status` | [Install and ownership](#install-and-ownership) |
+| `doctor` | Check managed links, tools, skills and manifest sync. | `oms doctor` | [Install and ownership](#install-and-ownership) |
+| `project-doctor` | Check project agent-facing files for agreement. | `oms project-doctor` | [Project onboarding](#project-onboarding) |
+| `skill-doctor` | Diagnose and rightsize installed skills. | `oms skill-doctor` | [Local skills and optional bundle operations](#local-skills-and-optional-bundle-operations) |
+| `skill-forge` | Create, validate and manage project skills. | `oms skill-forge` | [Local skills and optional bundle operations](#local-skills-and-optional-bundle-operations) |
+| `model-doctor` | Probe provider binaries and cached capabilities. | `oms model-doctor` | [Models and reasoning effort](#models-and-reasoning-effort) |
+| `provider-permissions` | Check or grant provider CLI permissions. | `oms provider-permissions` | [Provider integrations](#provider-integrations) |
+| `init` | Initialize a repository harness. | `oms init` | [Project onboarding](#project-onboarding) |
+| `apply-project-template` | Apply managed project policy and scaffold files. | `oms apply-project-template` | [Project onboarding](#project-onboarding) |
+| `remove-project-template` | Remove managed project policy blocks. | `oms remove-project-template` | [Project onboarding](#project-onboarding) |
+| `project-private` | Keep project harness files out of Git commits. | `oms project-private` | [Project onboarding](#project-onboarding) |
+| `intent` | Turn a broad goal into a reviewed project specification. | `oms intent` | [Project onboarding](#project-onboarding) |
+| `update` | Update an installation transactionally. | `oms update` | [Install and ownership](#install-and-ownership) |
+| `auto-update` | Check or apply source updates. | `oms auto-update` | [Install and ownership](#install-and-ownership) |
+| `tick` | Run unattended maintenance for registered repositories. | `oms tick` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
+| `cleanup` | Remove safe install leftovers. | `oms cleanup` | [Install and ownership](#install-and-ownership) |
+| `uninstall` | Remove managed links and restore backups. | `oms uninstall` | [Install and ownership](#install-and-ownership) |
+
+## Internals
+
+| Component | Purpose | Invoke | Details |
+|---|---|---|---|
+| `models` | List cached provider model capabilities. | `oms models` | [Models and reasoning effort](#models-and-reasoning-effort) |
+| `open-in` | Open a file in an editor or resume a Codex task. | `oms open-in` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
+| `graph` | Query project and execution graphs. | `oms graph` | [Graph engineering](GRAPH-ENGINEERING.md) |
+
+The catalog names the command front doors. Their variants and authority remain
+separate; a shared index does not combine permissions.
 
 ### Consolidated paths
 
