@@ -4243,10 +4243,10 @@ def legacy_session(repo):
 
 
 def panel_mains():
-    """The main a new panel opens: the installed one of Claude, Pi, Codex, or the one OMS_PANEL_MAINS names; empty opens none."""
-    value = os.environ.get("OMS_PANEL_MAINS")
+    """The installed main selected by OMS_PANEL_MAIN, or the default installed main; empty opens none."""
+    value = os.environ.get("OMS_PANEL_MAIN")
     if value is not None and value.strip() and value.strip() not in MAIN_HARNESSES:
-        print("Warning: OMS_PANEL_MAINS accepts a single value: %s (or empty to open no main); no main opened."
+        print("Warning: OMS_PANEL_MAIN accepts one of %s (or empty to open no main); no main opened."
               % ", ".join(MAIN_HARNESSES), file=sys.stderr)
     names = MAIN_HARNESSES if value is None else [value.strip()]
     return next(([name] for name in names if name in MAIN_HARNESSES and main_installed(name)), [])

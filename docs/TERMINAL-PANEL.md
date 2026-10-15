@@ -11,7 +11,7 @@ When the first read fails, or a window switches to a room it has not successfull
 
 ## Quick start
 
-1. Run `oms` in a terminal. The control window is the inbox; the panel starts at most one live main, using Claude by default. Pi is the explicit alternative (`OMS_PANEL_MAINS=pi` or the Pi start key).
+1. Run `oms` in a terminal. The control window is the inbox; the panel starts at most one live main, using Claude by default. Pi is the explicit alternative (`OMS_PANEL_MAIN=pi` or the Pi start key).
 2. The main window keeps the board fixed on the left; the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
 3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The pinned **Needs you** strip stays above activity. The bottom box contains Detail, Plan, Debate and Messages tabs, plus Needs you only while the inbox has items, when its height permits; if only one row fits, the tab strip remains visible without a body.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
@@ -1119,10 +1119,9 @@ session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the
 under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
 checkout on the session. A new panel opened without `--launch` also opens one
 installed main (Claude, then Pi, then Codex) in its own window with a new room;
-`OMS_PANEL_MAINS=pi` selects Pi; an empty value opens no main.
-A legacy comma list such as `OMS_PANEL_MAINS=claude,pi` opens none and prints a stderr warning.
+`OMS_PANEL_MAIN=pi` selects Pi; an empty value opens no main, and an unknown value opens none with a stderr warning.
 Inline and Herdr without `--launch` instead open the control menu, preselecting nonempty
-`OMS_PANEL_HARNESS`, otherwise the new-panel main (the installed `OMS_PANEL_MAINS` name
+`OMS_PANEL_HARNESS`, otherwise the new-panel main (the selected `OMS_PANEL_MAIN` name
 or first installed Claude/Pi/Codex), falling back to Claude. Press the selected harness's
 key (`1` Claude, `2` Pi, `0` Codex) to start it.
 Reattaching never opens mains again; later launches attach to it (or switch the current

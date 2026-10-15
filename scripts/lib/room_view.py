@@ -1909,8 +1909,8 @@ def attention_body(ranked, width, capacity, navigation, unicode):
     """One row per owner action, retaining item-specific selection and wheel paging."""
     from panel_view import attention_header
     sep = " · " if unicode else " / "
-    names = {"needs": "awaiting decision", "decide": "awaiting decision", "stale": "awaiting decision",
-             "provider_error": "failed", "mail": "awaiting decision", "info": "awaiting decision"}
+    names = {"needs": "answer needed", "decide": "awaiting decision", "stale": "held, workers ended",
+             "provider_error": "failed", "mail": "unread mail", "info": "delivery failed"}
     next_steps = {"guard_stop": "review guard stop", "verify_failed": "retry verify", "failed": "inspect failure",
                   "provider_error": "inspect failure", "timed_out": "continue or cancel", "decide": "record main decision",
                   "needs": "answer request", "stale": "release or continue task", "mail": "read message", "info": "check delivery"}

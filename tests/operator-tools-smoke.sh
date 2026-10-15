@@ -6807,7 +6807,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                        env=dict(environment, TERM="xterm"), check=True)
         # Mains are opened one by one from the menu here; automatic opening is checked separately.
         env = dict(environment, TERM="xterm", OMS_PANEL_NO_ANIMATION="1", NO_COLOR="",
-                   OMS_PANEL_MAINS="")
+                   OMS_PANEL_MAIN="")
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(project)
@@ -13904,22 +13904,22 @@ with patch.object(panel, "session_owner", return_value=None), patch.object(panel
         patch.object(panel, "check_legacy_main"), \
         patch.object(panel.subprocess, "run") as tmux_calls, patch.dict(os.environ, {"OMS_ROOM_ID": ""}):
     os.environ.pop("OMS_ROOM_ID")
-    os.environ.pop("OMS_PANEL_MAINS", None)
+    os.environ.pop("OMS_PANEL_MAIN", None)
     assert panel.split_panel(race_repo) == 0
     windows = [c.args[0] for c in created_panes.call_args_list]
     assert windows[0][1] == "new-session" and [w[w.index("-n") + 1] for w in windows[1:]] == ["claude"], windows
     order = [c.args[0][1:5] for c in tmux_calls.call_args_list]
     assert ["set-environment", "-t", "=" + panel.panel_session(race_repo), "OMS_ROOM_ID"] in order
     assert any(c.args[0][1:3] == ["select-window", "-t"] and c.args[0][3] == "%2" for c in tmux_calls.call_args_list)
-with patch.dict(os.environ, {"OMS_PANEL_MAINS": ""}), patch.object(panel.sys, "stderr", new_callable=io.StringIO) as warnings:
+with patch.dict(os.environ, {"OMS_PANEL_MAIN": ""}), patch.object(panel.sys, "stderr", new_callable=io.StringIO) as warnings:
     assert panel.panel_mains() == []
     assert warnings.getvalue() == ""
 for invalid in ("claude,pi", "unknown"):
-    with patch.dict(os.environ, {"OMS_PANEL_MAINS": invalid}), patch.object(panel.shutil, "which", return_value="/x"), \
+    with patch.dict(os.environ, {"OMS_PANEL_MAIN": invalid}), patch.object(panel.shutil, "which", return_value="/x"), \
             patch.object(panel.sys, "stderr", new_callable=io.StringIO) as warnings:
         assert panel.panel_mains() == []
         assert warnings.getvalue().splitlines() == [
-            "Warning: OMS_PANEL_MAINS accepts a single value: claude, pi, codex (or empty to open no main); no main opened."]
+            "Warning: OMS_PANEL_MAIN accepts one of claude, pi, codex (or empty to open no main); no main opened."]
 for configured, available, expected in ((None, {"claude", "pi", "codex"}, ["claude"]),
                                       (None, {"pi", "codex"}, ["pi"]),
                                       (None, {"pi"}, []),
@@ -13929,9 +13929,9 @@ for configured, available, expected in ((None, {"claude", "pi", "codex"}, ["clau
     with patch.dict(os.environ, {}, clear=False), \
             patch.object(panel.shutil, "which", side_effect=lambda name: "/x/" + name if name in available else None):
         if configured is None:
-            os.environ.pop("OMS_PANEL_MAINS", None)
+            os.environ.pop("OMS_PANEL_MAIN", None)
         else:
-            os.environ["OMS_PANEL_MAINS"] = configured
+            os.environ["OMS_PANEL_MAIN"] = configured
         assert panel.panel_mains() == expected, (configured, available, panel.panel_mains())
 # A session whose owner marker is not written yet is waited for, not refused as foreign.
 with patch.object(panel, "session_owner", side_effect=["", str(race_repo), str(race_repo)]), patch.object(panel.time, "sleep"), \
@@ -15839,7 +15839,13 @@ group_nav = {}
 group_rows = graph_text.attention_body(ranked, 123, 30, group_nav, True)
 assert group_rows[0][0] == full_header + " · Enter finalize", group_rows[0]
 assert len(group_rows) == len(ranked) + 1, group_rows
-assert "awaiting decision" in group_rows[1][0] and "answer request" in group_rows[1][0], group_rows
+# attention-classes: each owner action is named by its real class.
+class_rows = {item["cls"]: group_rows[i + 1][0] for i, item in enumerate(ranked) if item["cls"] in {"needs", "decide", "stale", "mail", "info"}}
+assert "answer needed" in class_rows["needs"]
+assert "awaiting decision" in class_rows["decide"]
+assert "held, workers ended" in class_rows["stale"]
+assert "unread mail" in class_rows["mail"]
+assert "delivery failed" in class_rows["info"]
 assert [row[1] for row in group_rows if row[1]] == [item["action"] for item in ranked if item["action"]]
 selectable = [item for item in ranked if item["action"]]
 assert group_nav["needs_ids"] == [item["action"] for item in selectable] and \
@@ -15848,15 +15854,15 @@ assert group_nav["needs_ids"] == [item["action"] for item in selectable] and \
 def picked_rows():
     return [row[0].strip() for row in graph_text.attention_body(ranked, 123, 30, group_nav, True) if row[2]]
 group_nav["selected"] = ("chat", "flow-main")
-assert picked_rows() == ["awaiting decision · answer request · to all: Which way?"], picked_rows()
+assert picked_rows() == ["answer needed · answer request · to all: Which way?"], picked_rows()
 stops = []
 for unused in range(8):
     assert graph_text.past_event(("down",), group_nav, "needs")
     stops.append(group_nav["needs_pick"])
 assert stops == [item["row_id"] for item in selectable[3:]] + [selectable[-1]["row_id"]], stops
-assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["awaiting decision · read message · to all: Status for all"]
+assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["unread mail · read message · to all: Status for all"]
 assert graph_text.past_event(("up",), group_nav, "needs") and group_nav["selected"] == ("tab", "plan") and \
-    picked_rows() == ["awaiting decision · t-ended · release or continue task"], picked_rows()
+    picked_rows() == ["held, workers ended · t-ended · release or continue task"], picked_rows()
 for columns, rows_high in ((127, 40), (57, 40)):
     tab_nav = {"tab": "needs", "dismissed": True}
     tab_picture = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
