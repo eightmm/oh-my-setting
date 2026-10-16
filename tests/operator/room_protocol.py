@@ -1024,6 +1024,12 @@ _operator_block("cross-repository-dispatch")
 # whether the caller selects the room explicitly or inherits it.
 other_project = temporary / "dispatch work repo"
 subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(project), str(other_project)], check=True)
+# A distinct base exposes accidental candidate construction from the state repository.
+(other_project / "dispatch-source.txt").write_text("other project\n")
+subprocess.run(["git", "-C", str(other_project), "add", "dispatch-source.txt"], check=True)
+subprocess.run(["git", "-C", str(other_project), "-c", "user.name=test", "-c", "user.email=test@example.com",
+                "commit", "-qm", "other project"], check=True)
+other_head = subprocess.check_output(["git", "-C", str(other_project), "rev-parse", "HEAD"], text=True).strip()
 (other_project / "dispatch-brief.md").write_text("Task: append new to value.txt.\n")
 cross_brief = other_project / "dispatch-brief.md"
 verify_log = temporary / "cross-repo-verify"
@@ -1049,7 +1055,7 @@ for task_id, explicit_room, writing, continuing in (
                "--dispatch", "worker", "--owner", "claude", "--workload", "light"]
     if writing:
         request += ["--purpose", "implement", "--access", "write", "--brief-file", cross_brief.name,
-                    "--verify", 'git rev-parse --git-common-dir > "$PANEL_TEST_VERIFY_LOG"',
+                    "--verify", 'git rev-parse --git-common-dir HEAD > "$PANEL_TEST_VERIFY_LOG"',
                     "--continue" if continuing else "--task-id", task_id]
     else:
         request += ["--purpose", "investigate", "--prompt", "Inspect value.txt without edits.", "--task-id", task_id]
@@ -1057,19 +1063,31 @@ for task_id, explicit_room, writing, continuing in (
         request += ["--room", shared]
     # Write calls run without an explicit wall here so the panel's own default is observed.
     call_env = {key: value for key, value in room_env.items() if not (writing and key == "OMS_PEER_TIMEOUT")}
+    call_env["OMS_AGENT"] = "claude"  # Match the fixture main independently of the host provider.
+    before_calls = len(worker_log.read_text().splitlines())
     answer = call(request, dict(call_env, PANEL_TEST_MODE="write" if writing else "",
                                PANEL_TEST_VERIFY_LOG=str(verify_log)))
     assert "artifact:" in answer, answer
-    observed = json.loads(worker_log.read_text().splitlines()[-1])
+    calls = [json.loads(line) for line in worker_log.read_text().splitlines()[before_calls:]]
+    observed, = [row for row in calls if row["role"] == "worker"]
     assert observed["task_id"] == task_id and observed["parent"] == room_owner, observed
     assert observed["room"] == shared and observed["room_repo"] == str(project), observed
     assert Path(observed["cwd"]) != other_project and Path(observed["cwd"]) != project, observed
     assert observed["git_common"] == str(other_project / ".git"), observed
+    assert observed["head"] == other_head, observed
     assert not Path(observed["cwd"]).exists(), "cross-repository worker cleanup failed"
     assert observed["timeout"] == ("40m" if writing else room_env.get("OMS_PEER_TIMEOUT")), observed
     assert observed["verify_timeout"] == ("20m" if writing else room_env.get("OMS_PEER_VERIFY_TIMEOUT")), observed
     if writing:
-        assert verify_log.read_text().strip() == str(other_project / ".git"), "verification used the state repository"
+        reviewer, = [row for row in calls if row["role"] == "reviewer"]
+        assert reviewer["head"] == other_head and reviewer["git_common"] != observed["git_common"], reviewer
+        assert Path(reviewer["cwd"]) not in (other_project, project, Path(observed["cwd"])), reviewer
+        expected_value = "old\n" + "new\n" * (2 if continuing else 1)
+        expected_blob = subprocess.check_output(["git", "-C", str(other_project), "hash-object", "--stdin"],
+                                                input=expected_value, text=True).strip()
+        assert "100644 %s 0\tvalue.txt\n" % expected_blob in reviewer["index"], reviewer
+        assert verify_log.read_text().splitlines() == [reviewer["git_common"], other_head], "verifier missed the candidate"
+        assert not Path(reviewer["cwd"]).exists(), "cross-repository candidate cleanup failed"
         assert "applied: no (review patch, then: oms patch-land --repo %s --patch " % other_project in answer, answer
         assert "oms patch-land --repo %s --patch " % project not in answer, answer
     state = room.status(project, shared)
@@ -1080,7 +1098,8 @@ for task_id, explicit_room, writing, continuing in (
     assert any(m["sender"] == observed["participant"] and m["recipient"] == room_owner
                and "inspected the bounded repository task" in m["text"] for m in messages), messages
     attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
-    attempt = [a for a in attempts if a.get("task_id") == task_id][-1]
+    attempt = next(a for a in attempts if a.get("task_id") == task_id
+                   and a.get("refs", {}).get("panel_room_participant") == observed["participant"])
     assert attempt["parent_attempt_id"] == room_owner and attempt["refs"]["panel_room_id"] == shared, attempt
     assert attempt["refs"]["panel_room_participant"] == observed["participant"], attempt
     report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",

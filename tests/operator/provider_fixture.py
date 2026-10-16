@@ -39,6 +39,8 @@ import json, os, sys, subprocess
 with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
                         "git_common": subprocess.check_output(["git", "rev-parse", "--git-common-dir"], text=True).strip(),
+                        "head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                        "index": subprocess.check_output(["git", "ls-files", "--stage"], text=True),
                         "role": os.environ.get("OMS_PANEL_ROLE"),
                         "purpose": os.environ.get("OMS_PANEL_PURPOSE"),
                         "task_id": os.environ.get("OMS_TASK_ID"),
