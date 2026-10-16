@@ -1444,10 +1444,15 @@ if [ "\$1 \$2" = "plugin list" ]; then
     echo "could not read Antigravity plugin state" >&2
     exit 24
   fi
+  if [ -n "\${OMS_TEST_AGY_LIST_FILE:-}" ]; then
+    cat "\$OMS_TEST_AGY_LIST_FILE"
+    exit 0
+  fi
   if [ -f "$TMP/agy.registered" ]; then
-    printf '%s\n' '{"imports":[{"name":"oh-my-setting"}]}'
+    printf '%s\n' 'Installed plugins:' '- oh-my-setting (enabled, 0.7.0)' \
+      '      Source:     antigravity' '      Components: 1 MCP server'
   else
-    printf '%s\n' '{"imports":[]}'
+    printf '%s\n' 'No plugins installed.'
   fi
 fi
 if [ "\$1 \$2" = "plugin uninstall" ]; then
@@ -1522,6 +1527,19 @@ PY
   if grep -Fq "plugin uninstall" "$log"; then
     fail "Antigravity lookup failure still attempted uninstall"
   fi
+  printf '%s\n' 'Installed plugins:' '- oh-my-setting (enabled, 0.7.0)' 'unexpected output' > "$TMP/agy-list"
+  status=0
+  OMS_TEST_AGY_LIST_FILE="$TMP/agy-list" PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-format-fail" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "unknown Antigravity output permitted removal"
+  grep -Fq 'unrecognized Antigravity plugin list format' "$TMP/agy-format-fail" || fail "unknown format was not named"
+  [ -f "$TMP/agy.registered" ] || fail "unknown Antigravity format mutated the plugin"
+  if grep -Fq "plugin uninstall" "$log"; then fail "unknown Antigravity format attempted uninstall"; fi
+  printf '%s\n' 'Installed plugins:' '- oh-my-setting (disabled, 0.7.0)' > "$TMP/agy-list"
+  OMS_TEST_AGY_LIST_FILE="$TMP/agy-list" PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null || fail "disabled plugin could not be removed"
+  [ ! -f "$TMP/agy.registered" ] || fail "disabled plugin was not removed"
+  touch "$TMP/agy.registered"
   PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
     bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null ||
     fail "Antigravity removal could not recover after a lookup failure"

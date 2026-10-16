@@ -1958,7 +1958,7 @@ if [ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ]; then
   export OH_MY_SETTING_MCP OH_MY_SETTING_AGY_PLUGIN
   check_claude_hooks
   check_codex_plugin
-  OMS_DOCTOR_INSTALL_ROOT="$INSTALL_ROOT" python3 - "$INSTALL_ROOT" <<'PY_INTEGRATIONS' || FAILED=1
+  OMS_DOCTOR_INSTALL_ROOT="$INSTALL_ROOT" python3 - "$INSTALL_ROOT" "$ROOT/scripts/lib/install-contract.sh" <<'PY_INTEGRATIONS' || FAILED=1
 import json
 import os
 from pathlib import Path
@@ -1988,9 +1988,17 @@ try:
     if os.environ["OH_MY_SETTING_AGY_PLUGIN"] != "0":
         cli = os.environ.get("OMS_AGY_BIN", "agy")
         if available(cli):
-            plugins = json.loads(probe([cli, "plugin", "list"]))["imports"]
-            if not any(row.get("name") == "oh-my-setting" for row in plugins):
+            try:
+                state = probe(["bash", "-c", '. "$1"; oms_install_agy_plugin_state "$2"',
+                               "oms-agy-plugin-probe", sys.argv[2], cli]).strip()
+            except subprocess.CalledProcessError as exc:
+                raise ValueError(exc.output.strip() or "could not inspect Antigravity plugin state") from None
+            if state == "disabled":
+                raise ValueError("Antigravity plugin is disabled")
+            if state == "absent":
                 raise ValueError("Antigravity plugin is not installed")
+            if state != "enabled":
+                raise ValueError("unrecognized Antigravity plugin state")
             config = Path.home() / ".gemini/config/plugins/oh-my-setting/mcp_config.json"
             entry = json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["oh-my-setting"]
             args = entry.get("args")

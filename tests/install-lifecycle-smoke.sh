@@ -235,9 +235,10 @@ case "${1:-} ${2:-}" in
   "plugin install") touch "$state"; printf '%s\n' 'installed'; exit 0 ;;
   "plugin list")
     if [ -f "$state" ]; then
-      printf '%s\n' '{"imports":[{"name":"oh-my-setting"}]}'
+      printf '%s\n' 'Installed plugins:' '- oh-my-setting (enabled, 0.7.0)' \
+        '      Source:     antigravity' '      Components: 1 MCP server'
     else
-      printf '%s\n' '{"imports":[]}'
+      printf '%s\n' 'No plugins installed.'
     fi
     exit 0
     ;;

@@ -33,6 +33,8 @@ PROBE_SCHEMA=1
 
 # shellcheck source=scripts/lib/model-capability.sh
 . "$ROOT/scripts/lib/model-capability.sh"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
 
 usage() {
   cat <<'EOF'
@@ -366,19 +368,14 @@ fi
 if [ "$REMOVE" = "1" ]; then
   command -v python3 >/dev/null 2>&1 || fail "python3 is required"
   state=0
-  out="$("$AGY_BIN" plugin list 2>/dev/null)" || state=2
+  out="$(oms_install_agy_plugin_state "$AGY_BIN")" || state=2
   if [ "$state" -eq 0 ]; then
-    printf '%s\n' "$out" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    imports = data["imports"]
-    if not isinstance(imports, list):
-        raise TypeError("imports is not a list")
-except Exception:
-    sys.exit(2)
-sys.exit(0 if any(row.get("name") == "oh-my-setting" for row in imports if isinstance(row, dict)) else 1)
-' || state=$?
+    out="$(oms_strip_cr "$out")"
+    case "$out" in
+      enabled|disabled) state=0 ;;
+      absent) state=1 ;;
+      *) state=2 ;;
+    esac
   fi
   case "$state" in
     0)

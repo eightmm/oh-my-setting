@@ -11,6 +11,19 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYST
 export GIT_AUTHOR_NAME=oms-test GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME=oms-test GIT_COMMITTER_EMAIL=test@example.com
 
+make_agy_health_stub() {
+  mkdir -p "$1/bin"
+  cat > "$1/bin/agy" <<'EOF_AGY'
+#!/usr/bin/env bash
+[ "$*" = 'plugin list' ] || exit 73
+status=enabled
+[ "${OMS_TEST_HEALTH_FAIL:-0}" = 0 ] || status=disabled
+printf 'Installed plugins:\n- oh-my-setting (%s, 0.7.0)\n' "$status"
+printf '%s\n' '      Source:     antigravity' '      Components: 1 MCP server'
+EOF_AGY
+  chmod +x "$1/bin/agy"
+}
+
 test_harness_child_cannot_mutate_install() {
   local fixture="$TMP/child-update"
   local output rc label
@@ -376,11 +389,16 @@ EOF
 
   # Provider refresh is outside source rollback: prove a later health failure
   # keeps the successful core update and cannot print unconditional success.
+  make_agy_health_stub "$home"
   cat > "$source/scripts/doctor.sh" <<'EOF_HEALTH'
 #!/usr/bin/env bash
 if [ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ]; then
   [ -f "$HOME/provider-refreshed" ] || exit 42
-  exit "${OMS_TEST_HEALTH_FAIL:-0}"
+  root="$(cd "$(dirname "$0")/.." && pwd -P)"
+  . "$root/scripts/lib/install-contract.sh"
+  state="$(oms_install_agy_plugin_state "$HOME/bin/agy")" || exit 1
+  state="$(oms_strip_cr "$state")"
+  [ "$state" = enabled ] || exit 1
 fi
 EOF_HEALTH
   cat > "$source/scripts/install-tools.sh" <<'EOF_TOOLS'
@@ -579,6 +597,7 @@ test_detached_schema2_auto_update_check() {
   cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$repo/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$repo/scripts/lib/managed-target.py"
+  make_agy_health_stub "$home"
   cat > "$repo/scripts/update.sh" <<'EOF'
 #!/usr/bin/env bash
 commit="$(git -C "$(dirname "$0")/.." rev-parse HEAD)"
@@ -595,7 +614,11 @@ EOF
 #!/usr/bin/env bash
 [ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ] || exit 2
 [ -f "$HOME/provider-refresh.log" ] || exit 3
-exit "${OMS_TEST_HEALTH_FAIL:-0}"
+root="$(cd "$(dirname "$0")/.." && pwd -P)"
+. "$root/scripts/lib/install-contract.sh"
+state="$(oms_install_agy_plugin_state "$HOME/bin/agy")" || exit 1
+state="$(oms_strip_cr "$state")"
+[ "$state" = enabled ]
 EOF_HEALTH
   chmod +x "$repo/scripts/install-tools.sh"
   printf 'local/\n' > "$repo/.gitignore"

@@ -21,6 +21,44 @@ oms_strip_cr() {
   printf '%s\n' "${value//$'\r'/}"
 }
 
+# Share the human-readable `agy plugin list` contract with doctor and removal.
+# Unknown output cannot prove presence or absence and must never permit removal.
+oms_install_agy_plugin_state() {
+  local out
+  if ! out="$("$1" plugin list 2>/dev/null)"; then
+    echo "error: could not run Antigravity plugin list" >&2
+    return 2
+  fi
+  printf '%s\n' "$out" | python3 -c '
+import re
+import sys
+
+def unknown():
+    print("error: unrecognized Antigravity plugin list format; expected Installed plugins: text", file=sys.stderr)
+    raise SystemExit(2)
+
+lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+if lines == ["No plugins installed."]:
+    print("absent")
+    raise SystemExit(0)
+if not lines or lines[0] != "Installed plugins:":
+    unknown()
+plugins = {}
+for line in lines[1:]:
+    row = re.fullmatch(r"\s*- ([A-Za-z0-9][A-Za-z0-9._-]*) \((enabled|disabled), ([^()]+)\)", line)
+    if row:
+        name, status, version = row.groups()
+        if name in plugins or not version.strip():
+            unknown()
+        plugins[name] = status
+    elif not plugins or not re.fullmatch(r" {4,}(?:Source|Components):\s+\S.*", line):
+        unknown()
+if not plugins:
+    unknown()
+print(plugins.get("oh-my-setting", "absent"))
+'
+}
+
 # Provider binaries are outside the core rollback transaction. Bound the
 # post-refresh audit, including its subprocesses, before reporting health.
 oms_install_check_provider_health() {

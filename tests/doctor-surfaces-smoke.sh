@@ -806,7 +806,7 @@ test_apparmor_userns_restriction_warns_only_on_linux() {
 # The scheduled/manual refresh audit is a separate path from a full doctor:
 # it must exercise management interfaces, honor opt-outs and avoid inference.
 test_post_refresh_integration_audit() {
-  local home="$TMP/provider-health" bin="$TMP/provider-health/bin" out
+  local home="$TMP/provider-health" bin="$TMP/provider-health/bin" out listing expected indent
   make_fixture "$home" rows "$EXPECTED_HOOKS_SCHEMA"
   mkdir -p "$bin" "$home/.gemini/config/plugins/oh-my-setting"
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OH_MY_SETTING_CODEX_PLUGIN=0 \
@@ -820,8 +820,10 @@ EOF_CLI
   cat > "$bin/agy" <<'EOF_AGY'
 #!/usr/bin/env bash
 [ "$*" = 'plugin list' ] || exit 73
-printf '%s\n' '{"imports":[{"name":"oh-my-setting"}]}'
+cat "$HOME/agy-plugin-list.txt"
 EOF_AGY
+  printf '%s\n' 'Installed plugins:' '- oh-my-setting (enabled, 0.7.0)' \
+    '      Source:     antigravity' '      Components: 1 MCP server' > "$home/agy-plugin-list.txt"
   chmod +x "$bin/claude" "$bin/agy"
   run_health() {
     # NVM_BIN/NVM_DIR would put the host's provider CLIs back on PATH.
@@ -839,6 +841,36 @@ json.dump({"mcpServers": {"oh-my-setting": {"args": [sys.argv[2] + "/scripts/oms
 PY_CONFIG
   out="$(OH_MY_SETTING_MCP=1 OH_MY_SETTING_AGY_PLUGIN=auto OMS_TEST_MCP_ROOT="$ROOT" run_health)" ||
     { printf '%s\n' "$out"; fail "healthy provider interfaces failed integration audit"; }
+  for listing in disabled absent empty unknown truncated duplicate; do
+    case "$listing" in
+      disabled)
+        printf '%s\n' 'Installed plugins:' '- oh-my-setting (disabled, 0.7.0)' > "$home/agy-plugin-list.txt"
+        expected='Antigravity plugin is disabled' ;;
+      absent)
+        printf '%s\n' 'Installed plugins:' '- oh-my-setting-other (enabled, 0.7.0)' > "$home/agy-plugin-list.txt"
+        expected='Antigravity plugin is not installed' ;;
+      empty)
+        printf '%s\n' 'No plugins installed.' > "$home/agy-plugin-list.txt"
+        expected='Antigravity plugin is not installed' ;;
+      unknown)
+        printf '%s\n' 'Installed plugins:' '- oh-my-setting (enabled, 0.7.0)' 'unexpected output' > "$home/agy-plugin-list.txt"
+        expected='unrecognized Antigravity plugin list format' ;;
+      truncated)
+        printf '%s\n' 'Installed plugins:' > "$home/agy-plugin-list.txt"
+        expected='unrecognized Antigravity plugin list format' ;;
+      duplicate)
+        printf '%s\n' 'Installed plugins:' '- oh-my-setting (enabled, 0.7.0)' \
+          '- oh-my-setting (disabled, 0.7.0)' > "$home/agy-plugin-list.txt"
+        expected='unrecognized Antigravity plugin list format' ;;
+    esac
+    if out="$(OH_MY_SETTING_AGY_PLUGIN=auto run_health)"; then fail "$listing Antigravity state passed audit"; fi
+    case "$out" in *"$expected"*) ;; *) fail "$listing Antigravity failure was not named: $out" ;; esac
+  done
+  for indent in "" "  " $'\t'; do
+    printf 'Installed plugins:\r\n%s- oh-my-setting (enabled, 0.7.0)\r\n' "$indent" > "$home/agy-plugin-list.txt"
+    printf '%s\r\n' '      Source:     antigravity' '      Components: 1 MCP server' >> "$home/agy-plugin-list.txt"
+    out="$(OH_MY_SETTING_AGY_PLUGIN=auto run_health)" || fail "CRLF/indentation Antigravity list failed: $out"
+  done
   if out="$(OH_MY_SETTING_MCP=1 run_health)"; then fail "MCP drift passed the integration audit"; fi
   case "$out" in *"MCP registration does not point at this install"*) ;; *) fail "MCP drift was not named: $out" ;; esac
   printf '{}\n' > "$home/.gemini/config/plugins/oh-my-setting/mcp_config.json"
