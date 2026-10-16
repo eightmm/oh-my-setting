@@ -196,12 +196,18 @@ echo 'runtime-core-integration-smoke: patch-admit covers ok'
 
 # A task-linked admission receipt fails closed when its index write fails:
 # the projection trusts the latest row per criterion, so a dropped REJECT
-# would let a stale ADMIT keep reading as current verification. Without
-# task lineage the row binds nothing and stays best-effort.
+# would let a stale ADMIT keep reading as current verification. Default parent
+# admissions pin private captures in the canonical index, ignoring overrides.
+blocked_index="$TMP/not-directory/index.jsonl"
+printf 'blocked\n' > "$TMP/not-directory"
+mv "$REPO/.oms/artifacts/index.jsonl" "$TMP/index.saved"
+mkdir "$REPO/.oms/artifacts/index.jsonl"
 rc=0
-OMS_TASK_ID=t1 OMS_ARTIFACT_INDEX=/proc/version/cannot/index.jsonl \
+OMS_TASK_ID=t1 OMS_ARTIFACT_INDEX="$blocked_index" \
   "$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
   --verify true >/dev/null 2>"$TMP/admit-closed-err" || rc=$?
+rmdir "$REPO/.oms/artifacts/index.jsonl"
+mv "$TMP/index.saved" "$REPO/.oms/artifacts/index.jsonl"
 [ "$rc" != 0 ] || {
   echo "a task-linked admission with an unwritable index must fail closed" >&2
   exit 1
@@ -210,9 +216,21 @@ grep -q "failing closed" "$TMP/admit-closed-err" || {
   echo "the fail-closed refusal must be named: $(cat "$TMP/admit-closed-err")" >&2
   exit 1
 }
-OMS_ARTIFACT_INDEX=/proc/version/cannot/index.jsonl \
+# Explicit reports keep the caller-selected index contract: linked receipts
+# fail closed, while unlinked receipts remain best-effort.
+rc=0
+OMS_TASK_ID=t1 OMS_ARTIFACT_INDEX="$blocked_index" \
   "$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
-  --verify true > "$TMP/admit-besteffort" 2>/dev/null || {
+  --verify true --report "$TMP/admit-linked.md" \
+  >/dev/null 2>"$TMP/admit-linked-err" || rc=$?
+if [ "$rc" = 0 ] || ! grep -q "failing closed" "$TMP/admit-linked-err"; then
+  echo "a linked explicit-report admission must fail closed on index failure" >&2
+  exit 1
+fi
+OMS_ARTIFACT_INDEX="$blocked_index" \
+  "$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
+  --verify true --report "$TMP/admit-unlinked.md" \
+  > "$TMP/admit-besteffort" 2>/dev/null || {
   echo "an unlinked admission keeps best-effort indexing (must not fail)" >&2
   exit 1
 }

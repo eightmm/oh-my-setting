@@ -649,8 +649,9 @@ PY
 printf 'keep before explicit purge\n' > "$dest/user-local.txt"
 for git_layout in directory file; do
   if [ "$git_layout" = file ]; then
-    mv "$dest/.git" "$TMP/purge-git"
-    printf 'gitdir: %s\n' "$TMP/purge-git" > "$dest/.git"
+    # Git writes a native path; Git Bash does not translate gitfile contents.
+    git -C "$dest" init -q --separate-git-dir "$TMP/purge-git"
+    [ -f "$dest/.git" ] || fail "gitfile fixture did not create a file"
     git -C "$dest" rev-parse --is-inside-work-tree >/dev/null || fail "invalid gitfile fixture"
   fi
   purge_status=0

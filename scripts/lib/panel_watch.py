@@ -284,10 +284,11 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     inputs.wait(.05)
                     continue
 
-                def redraw():
+                def redraw(discard_stale_clicks=False):
                     from terminal_panel import _cancel_watch_authority, draw_frame, frame_view, main_occupied
                     from terminal_panel import managed_session
                     nonlocal last
+                    drawn_hits = navigation.get("hits")
                     owner = next((member for member in __import__("room_view").nodes(state)
                                   if member.get("role") == "main"
                                   and main_attempt in (member.get("participant"), member.get("attempt"))), None)
@@ -302,14 +303,13 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     drawn, size, terminal = frame_view(repo, provider, state, menu=False,
                         main_attempt=main_attempt, frame=frame if motion else None,
                         view=density, attention_only=filtered, navigation=navigation)
+                    if discard_stale_clicks and navigation.get("hits") != drawn_hits:
+                        # Clear old-map clicks before the new frame can receive fresh ones.
+                        inputs.discard_clicks()
                     last = draw_frame(drawn, size, terminal, last)
                     return size
 
-                drawn_hits = navigation.get("hits")
-                size = redraw()
-                if collected and navigation.get("hits") != drawn_hits:
-                    # Pending clicks target the previous map; keep them when it is unchanged.
-                    inputs.discard_clicks()
+                size = redraw(discard_stale_clicks=collected)
                 if count and n >= count:
                     return status
                 deadline = time.monotonic() + .05 if background and background.pending else next_read

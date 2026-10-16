@@ -6,6 +6,26 @@ def end_fixture_mains():
             panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "cancelled")
 end_fixture_mains()
 
+# A click can arrive as soon as a new frame is flushed, before drawing returns.
+# Clear clicks for the old layout without consuming that newly targeted click.
+pending_clicks = ["old layout"]
+watch_input = BatchInput([])
+def click_on_draw(*args, **kwargs):
+    pending_clicks.append("new layout")
+with patch.dict(os.environ), \
+        patch.object(panel, "BackgroundRead", ImmediateRead), \
+        patch.object(panel, "read_panel", return_value=(tree_room, 0, "codex", None, "tree", False, shared)), \
+        patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "main_installed", return_value=False), \
+        patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((110, 28))), \
+        patch.object(panel, "draw_frame", side_effect=click_on_draw), \
+        patch.object(watch_input, "discard_clicks", side_effect=pending_clicks.clear), \
+        patch("panel_input.TerminalInput", return_value=watch_input):
+    assert panel.watch(project, "codex", count=1, view="tree", no_animation=True) == 0
+assert pending_clicks == ["new layout"], pending_clicks
+
 # Exercise the real bounded JSON socket client without installing a host or
 # running agents; lifecycle and room admission use the canonical OMS tools.
 if os.name == "posix" and os.environ.get("OMS_OPERATOR_SOCKET_DENIED") != "1":

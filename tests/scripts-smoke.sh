@@ -16438,6 +16438,8 @@ private = c['allocate'](str(repo), str(source), 'land-direct-reference', hashlib
 c['publish'](str(repo), private, str(repo / '.oms/landing-patches/land-direct-reference.patch'))
 PY_REFERENCE
   local managed="$repo/.oms/landing-patches/land-direct-reference.patch"
+  # Unsafe managed inputs are refused before a local operation starts.
+  cp "$repo/.oms/lifecycle/events.jsonl" "$repo/before-refusal.jsonl"
   if ln -s "$managed" "$repo/redirected.patch" 2>/dev/null; then
     if "$SH" --repo "$repo" --patch "$repo/redirected.patch" --verify true >/dev/null 2>&1; then
       fail "redirected managed admission input bypassed ownership validation"
@@ -16447,16 +16449,8 @@ PY_REFERENCE
     fail "managed admission accepted an external report"
   fi
   [ ! -e "$repo/external.md" ] || fail "external managed report was written"
-  python3 - "$ROOT" "$repo" <<'PY_REFERENCE'
-import pathlib, runpy, sys
-root, repo = map(pathlib.Path, sys.argv[1:])
-e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
-rows = e['read_rows'](e['event_path'](repo))
-ids = [r['attempt_id'] for r in rows if r['event_type'] == 'attempt.created']
-_, attempts = e['load_projection'](repo)
-count = 2 if (repo / 'redirected.patch').is_symlink() else 1
-assert all(attempts[i]['state'] == 'failed' and attempts[i]['terminal'] is True for i in ids[-count:])
-PY_REFERENCE
+  cmp -s "$repo/before-refusal.jsonl" "$repo/.oms/lifecycle/events.jsonl" ||
+    fail "unsafe managed input started or changed a local operation"
   cat > "$repo/observe-reference.py" <<'PY_REFERENCE'
 import pathlib, runpy, sys
 root, repo = map(pathlib.Path, sys.argv[1:])
