@@ -867,11 +867,25 @@ write = {'attempt_id': 'tick-worker', 'task_id': 'tick-write', 'terminal': True,
 listed = [main] + [{'attempt_id': 'old-%s' % i, 'terminal': True} for i in range(300)] + [write]
 artifacts = [{'kind': 'delegate', 'task_id': 'tick-write', 'attempt_id': 'tick-worker', 'patch': 'change.patch'},
              {'kind': 'panel-result', 'task_id': 'tick-wait'}]
+(project / '.oms/artifacts/index.jsonl').write_text(
+    ''.join(json.dumps(row) + '\n' for row in artifacts), encoding='utf-8')
 tick_state = {'repo': {'name': 'fixture'}, 'plan': {'present': True}, 'attempts': {'recent': [
     dict(write, panel={'room_id': 'tick-room', 'room_participant': 'tick-worker', 'role': 'worker', 'access': 'write'}),
     {'task_id': 'tick-wait', 'state': 'failed'}]}}
 counts = {'events': 0, 'index': 0}
 failure = [False]
+run_path = runpy.run_path
+tick_store = run_path(str(panel_results.ROOT / 'scripts/lib/artifact-index-store.py'))
+def tick_index(repo, index, **kwargs):
+    counts['index'] += 1
+    body = tick_store['read_index'](repo, index, **kwargs)
+    plan.write_text(plan.read_text() + '\n')
+    return body
+def tick_module(path, *args, **kwargs):
+    # Observe the strict retained-index reader, including its real validation.
+    if Path(path).name == 'artifact-index-store.py':
+        return dict(tick_store, read_index=tick_index)
+    return run_path(path, *args, **kwargs)
 def tick_run(command, **kwargs):
     value = {}
     if 'agent-events' in command:
@@ -880,10 +894,6 @@ def tick_run(command, **kwargs):
         if failure[0]:
             raise subprocess.TimeoutExpired(command, 5)
         value = listed
-        plan.write_text(plan.read_text() + '\n')
-    elif 'artifact-index' in command:
-        counts['index'] += 1
-        value = {'rows': artifacts}
         plan.write_text(plan.read_text() + '\n')
     elif 'agent-plan' in command:
         value = {'tasks': [{'id': t} for t in task_ids]}
@@ -900,6 +910,7 @@ with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick
         patch.object(panel.room, 'status', side_effect=lambda *a: deepcopy(tick_room)), \
         patch.object(panel, 'managed_session', return_value=False), \
         patch.object(panel.subprocess, 'run', side_effect=tick_run), \
+        patch.object(panel_results.runpy, 'run_path', side_effect=tick_module), \
         patch.object(panel_chats.shutil, 'which', return_value='/fixture/tmux'), \
         patch.object(panel_chats, 'current_models', return_value={}), \
         patch.object(panel_results, '_load_result', side_effect=tick_result), \
