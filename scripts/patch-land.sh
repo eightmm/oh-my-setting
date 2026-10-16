@@ -1125,9 +1125,15 @@ LANDING_ID="land-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}"
 agent_memory_ensure_oms_ignore "$STATE_REPO" || fail "cannot initialize private landing state"
 FROZEN_DIR="$STATE_REPO/.oms/landing-patches"
 FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"
-CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" allocate "$STATE_REPO" "$SOURCE_PATCH" "$LANDING_ID" "$PATCH_SHA" "$REPO")" ||
+reuse_parameters=("$VERIFY" "$ML" "$PLAN_TASK" "$ALLOW_VERIFIER_CHANGE" "$ALLOW_TEST_REDUCTION"
+  "$ALLOW_FLOOR_CHANGE_REASON" "$ALLOW_RESTRUCTURE" "$ACCEPT_ENCODING_LOSS")
+oms_git_assert_safe_execution_config "$REPO" || fail "unsafe executable Git config before landing admission"
+oms_git_assert_plain_index "$REPO" || fail "Git index has hidden or unreadable entries before landing admission"
+CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" intake "$STATE_REPO" "$SOURCE_PATCH" "$LANDING_ID" "$PATCH_SHA" "$REPO" "${reuse_parameters[@]}")" ||
   fail "cannot reserve and capture patch bytes before admission"
 CAPTURE_PATCH="${CAPTURE_PATCH//$'\r'/}"
+LANDING_ID="$(basename "$CAPTURE_PATCH" .patch)"
+FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"
 PATCH="$CAPTURE_PATCH"
 
 # Salvage acceptance is evaluated on the native capture that admission and
@@ -1149,18 +1155,21 @@ frozen_patch_matches() {
   current_sha="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
   [ -n "$current_sha" ] && [ "$current_sha" = "$PATCH_SHA" ]
 }
+plan_done_receipt_hash() {
+  printf '%s' "$PLAN_JSON" | python3 -c '
+import json,runpy,sys
+d=json.load(sys.stdin)
+d["patch"]=sys.argv[2]
+print(runpy.run_path(sys.argv[1])["digest"](d))
+' "$ROOT/scripts/lib/plan-receipt.py" "$FROZEN_PATCH" | tr -d '\r'
+}
 if [ -n "$PLAN_TASK" ]; then
   PLAN_REVIEW_PATCH_SHA="$(oms_sha256_file "$PLAN_REVIEW_PATCH" 2>/dev/null || true)"
   [ -n "$PLAN_REVIEW_PATCH_SHA" ] ||
     fail "cannot rehash stored review patch for plan task $PLAN_TASK"
   [ "$PATCH_SHA" = "$PLAN_REVIEW_PATCH_SHA" ] ||
     fail "frozen patch bytes no longer match plan task $PLAN_TASK review"
-  PLAN_DONE_RECEIPT_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
-import json,runpy,sys
-d=json.load(sys.stdin)
-d["patch"]=sys.argv[2]
-print(runpy.run_path(sys.argv[1])["digest"](d))
-' "$ROOT/scripts/lib/plan-receipt.py" "$FROZEN_PATCH" | tr -d '\r')" ||
+  PLAN_DONE_RECEIPT_SHA="$(plan_done_receipt_hash)" ||
     fail "cannot hash expected done receipt for plan task $PLAN_TASK"
 fi
 LANDING_BASE="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')"
@@ -1257,6 +1266,23 @@ fi
 # immediately before handing it to the gate and again when the gate returns.
 frozen_patch_matches ||
   fail "frozen patch changed before admission; refusing to verify moved bytes"
+reuse_admission=0
+if python3 "$CAPTURE_HELPER" current-admission "$STATE_REPO" "$PATCH" "$REPO" "${reuse_parameters[@]}" >/dev/null 2>&1; then
+  reuse_admission=1
+else
+  # Inputs may have changed since intake selected a reusable generation. Keep
+  # that earlier witness intact and rerun on a fresh, digest-checked capture.
+  CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" refresh-admission "$STATE_REPO" "$PATCH" "$LANDING_ID-refresh" "$PATCH_SHA" "$REPO")" ||
+    fail "cannot refresh stale admission capture"
+  CAPTURE_PATCH="${CAPTURE_PATCH//$'\r'/}"
+  PATCH="$CAPTURE_PATCH"
+  LANDING_ID="$(basename "$CAPTURE_PATCH" .patch)"
+  FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"
+  if [ -n "$PLAN_TASK" ]; then
+    PLAN_DONE_RECEIPT_SHA="$(plan_done_receipt_hash)" ||
+      fail "cannot hash refreshed done receipt for plan task $PLAN_TASK"
+  fi
+fi
 admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ -n "$VERIFY" ] && admit_cmd+=(--verify "$VERIFY")
 [ "$ML" = 1 ] && admit_cmd+=(--ml)
@@ -1269,7 +1295,14 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 # Admission may persist a report even when it fails. Keep its actual input path
 # and bytes available; uncertain receipt writes are not permission to unlink.
 CAPTURE_PERSIST=1
-if ! "${admit_cmd[@]}" >/dev/null; then
+admission_passed=0
+if [ "$reuse_admission" = 1 ]; then
+  echo "patch-land: reusing unchanged native admission" >&2
+  admission_passed=1
+elif "${admit_cmd[@]}" >/dev/null; then
+  admission_passed=1
+fi
+if [ "$admission_passed" = 0 ]; then
   # A verifier can change its private input before the stricter producer
   # witness refuses it. Diagnose those bytes without sealing or deleting them.
   frozen_patch_matches ||

@@ -258,7 +258,9 @@ def usage(repo):
 def allocate(repo, source, landing, expected, execution_repo=None):
     if not re.fullmatch(r'land-[A-Za-z0-9._-]{1,150}', landing):
         raise ValueError('invalid native landing identity')
-    raw, _ = regular(source, MAX_OBJECT)
+    raw = indexed_bytes(repo, source)
+    if raw is None:
+        raw, _ = regular(source, MAX_OBJECT)
     if digest(raw) != expected:
         raise ValueError('source changed before quota reservation')
     if any(item['landing_id'] == landing for item in reservations(repo).values()):
@@ -316,6 +318,110 @@ def find(repo, capture=None, landing=None):
     if len(found) != 1:
         raise ValueError('unique native capture reservation unavailable')
     return found[0]
+
+
+def admission_binding(repo, execution_repo, *parameters):
+    """Bind reuse to the base, policy, local seeds, environment and live harness.
+
+    Verifiers still run as trusted local code; this does not make arbitrary
+    commands hermetic or attest external services they may consult.
+    """
+    execution_repo = os.path.realpath(execution_repo)
+    def git(*args):
+        return subprocess.check_output(['git', '-C', execution_repo, *args]).replace(b'\r', b'').strip()
+
+    def optional(path):
+        return digest(regular(path)[0]) if os.path.lexists(path) else None
+
+    harness = []
+    total = 0
+    roots = [HERE.parent.parent / name for name in ('scripts', 'config', 'rules', 'templates')]
+    def fail_walk(error):
+        raise error
+    for parent, dirs, files in (entry for root in roots
+                               for entry in os.walk(root, followlinks=False, onerror=fail_walk)):
+        dirs[:] = sorted(d for d in dirs if d != '__pycache__')
+        for name in sorted(files):
+            if name.endswith(('.pyc', '.pyo')):
+                continue
+            path = os.path.join(parent, name)
+            raw, info = regular(path)
+            total += len(raw)
+            if total > 64 * 1024 * 1024 or len(harness) >= 8192:
+                raise ValueError('admission harness exceeds binding limit')
+            harness.append([os.path.relpath(path, HERE.parent.parent), stat.S_IMODE(info.st_mode), digest(raw)])
+        if any(os.path.islink(os.path.join(parent, d)) for d in dirs):
+            raise ValueError('redirected admission harness')
+    # Hash values, never persist environment secrets or verifier text. Shell
+    # bookkeeping and tool-call identity differ between the two CLI processes.
+    environment = {k: v for k, v in os.environ.items()
+                   if k not in ('_', 'SHLVL', 'PWD', 'OLDPWD', 'CODEX_TOOL_CALL_ID')}
+    config = os.fsdecode(git('rev-parse', '--git-path', 'config'))
+    common = os.fsdecode(git('rev-parse', '--git-common-dir'))
+    if not os.path.isabs(config):
+        config = os.path.join(execution_repo, config)
+    if not os.path.isabs(common):
+        common = os.path.join(execution_repo, common)
+    return dict(version=1, execution_repo=execution_repo,
+                base=git('rev-parse', 'HEAD').decode(), tree=git('rev-parse', 'HEAD^{tree}').decode(),
+                parameters_sha256=digest(encoded(parameters)),
+                environment_sha256=digest(encoded(environment)),
+                harness_sha256=digest(encoded(harness)),
+                seeds={name: optional(os.path.join(execution_repo, name))
+                       for name in ('AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'PROJECT.md')},
+                plan_sha256=optional(os.path.join(repo, '.oms/plan/tasks.json')) if parameters[2] else None,
+                git_config_sha256=optional(config),
+                git_exclude_sha256=optional(os.path.join(common, 'info', 'exclude')))
+
+
+def bind_admission(repo, capture, before, verify, floor, surface):
+    item = find(repo, capture=capture)
+    value = certificate(item)
+    proof = admission_proof(repo, item, value, 0)
+    # The binding is written only after the actual publisher is terminal. It
+    # cannot substitute for its report, index row or capture-generation proof.
+    proof = dict(proof, binding=before, verify_sha256=digest(verify.encode()),
+                 floor_sha256=digest(floor.encode()), surface_sha256=digest(surface.encode()))
+    value['admission'] = proof
+    save(item, value)
+
+
+def admission_is_current(repo, item, binding):
+    value = certificate(item)
+    if value.get('terminal') or 'publication' in value['objects']:
+        return False
+    proof = admission_proof(repo, item, value, 0)
+    if (proof.get('binding') != binding or
+            any(not re.fullmatch(r'[0-9a-f]{64}', proof.get(k, ''))
+                for k in ('verify_sha256', 'floor_sha256', 'surface_sha256'))):
+        return False
+    _, raw, _ = admission_records(repo, os.path.join(repo, proof['report']))
+    fields = dict(admission_binding_sha256=digest(encoded(binding)), verify_sha256=proof['verify_sha256'],
+                  floor_verify_sha256=proof['floor_sha256'], verification_surface_sha256=proof['surface_sha256'])
+    lines = raw.decode('utf-8').split('\n\n## Ladder\n', 1)[0].splitlines()
+    if any([line for line in lines if line.startswith('- ' + k + ': ')] != ['- ' + k + ': ' + v]
+           for k, v in fields.items()):
+        return False
+    indexed_bytes(repo, value['objects']['capture']['path'])
+    return True
+
+
+def intake(repo, source, landing, expected, execution_repo, *parameters):
+    # The caller holds landings. Do not inspect a journal before its safe .oms
+    # parent exists (fresh repos and redirected state retain their old guards).
+    try:
+        binding = admission_binding(repo, execution_repo, *parameters)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        binding = None  # Binding is an optimization, never a new admission gate.
+    for item in reversed(list(reservations(repo).values())) if binding else ():
+        if item['sha256'] != expected:
+            continue
+        try:
+            if admission_is_current(repo, item, binding):
+                return os.path.join(item['directory'], item['landing_id'] + '.patch')
+        except (OSError, ValueError, KeyError, TypeError, SystemExit):
+            pass  # Missing/stale evidence confers no reusable admission.
+    return allocate(repo, source, landing, expected, execution_repo)
 
 
 def object_bytes(item, obj, links=2):
@@ -887,6 +993,31 @@ def main(args):
     repo = os.path.realpath(repo)
     if action == 'allocate':
         print(allocate(repo, *args))
+    elif action == 'intake':
+        print(intake(repo, *args))
+    elif action == 'binding':
+        print(json.dumps(admission_binding(repo, *args), sort_keys=True))
+    elif action == 'binding-digest':
+        print(digest(encoded(json.load(sys.stdin))))
+    elif action == 'bind-admission':
+        capture, execution_repo, before, verify, floor, surface, *parameters = args
+        before = json.loads(before)
+        if before != admission_binding(repo, execution_repo, *parameters):
+            raise ValueError('admission inputs changed during verification')
+        bind_admission(repo, capture, before, verify, floor, surface)
+    elif action == 'current-admission':
+        capture, execution_repo, *parameters = args
+        item = find(repo, capture=capture)
+        if not admission_is_current(repo, item, admission_binding(repo, execution_repo, *parameters)):
+            raise ValueError('admission inputs changed; verification required')
+    elif action == 'refresh-admission':
+        capture, landing, expected, execution_repo = args
+        item = find(repo, capture=capture)
+        value = certificate(item)
+        # A changed input needs a new producer/capture witness, not an
+        # overwrite of an earlier admission on the same generation.
+        print(allocate(repo, capture, landing, expected, execution_repo)
+              if value.get('admission') else capture)
     elif action == 'publish':
         publish(repo, *args)
     elif action == 'apply':

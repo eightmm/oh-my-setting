@@ -64,6 +64,8 @@ reference_monitor=""
 reference_state=""
 managed_input=0
 reference_possible_writes=0
+reuse_binding=""
+intake_owned=0
 
 usage() {
   cat <<'EOF'
@@ -189,9 +191,23 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REP
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
 reference_state="$(oms_state_root "$REPO")" || fail "cannot resolve reference state"
 reference_state="${reference_state//$'\r'/}"
-oms_reference_start "$reference_state" patch-admit "$PATCH" || fail "cannot start reference operation"
 managed_input="$(python3 "$ROOT_LIB/landing-reference.py" admit "$reference_state" "$PATCH" "${REPORT:-$reference_state/.oms/artifacts/admit/pending.md}")" || fail "unsafe managed admission input"
 managed_input="${managed_input//$'\r'/}"
+# Parent admissions with the default internal report retain the exact private
+# generation for a later landing. Explicit reports and child calls keep their
+# existing input/report contract and simply require fresh landing admission.
+if [ "$managed_input" = 0 ] && [ -z "$REPORT" ] &&
+  [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ]; then
+  agent_memory_ensure_oms_ignore "$reference_state" || fail "cannot initialize private admission state"
+  intake_sha="$(oms_sha256_file "$PATCH")" || fail "cannot hash admission input"
+  intake_id="land-admit-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}"
+  PATCH="$(oms_with_file_lock "$reference_state/.oms/landings.jsonl" python3 "$ROOT_LIB/landing-capture.py" \
+    allocate "$reference_state" "$PATCH" "$intake_id" "$intake_sha" "$REPO")" || fail "cannot capture admission input"
+  PATCH="${PATCH//$'\r'/}"
+  managed_input=1
+  intake_owned=1
+fi
+oms_reference_start "$reference_state" patch-admit "$PATCH" || fail "cannot start reference operation"
 if [ "$managed_input" = 1 ] && [ -z "$REPORT" ]; then
   REPORT="$reference_state/.oms/artifacts/admit/admit-$reference_operation.md"
 fi
@@ -258,6 +274,13 @@ base_full_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 base_sha="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo 'no-commit')"
 patch_sha="$(oms_sha256_stream < "$PATCH" 2>/dev/null | cut -c1-16)"
 [ -n "$patch_sha" ] || patch_sha="nohash"
+reuse_parameters=("$VERIFY" "$ML" "$PLAN_TASK" "$ALLOW_VERIFIER_CHANGE" "$ALLOW_TEST_REDUCTION"
+  "$ALLOW_FLOOR_CHANGE_REASON" "$ALLOW_RESTRUCTURE" "$ACCEPT_ENCODING_LOSS")
+if [ "$managed_input" = 1 ]; then
+  reuse_binding="$(python3 "$ROOT_LIB/landing-capture.py" binding "$reference_state" "$REPO" "${reuse_parameters[@]}")" ||
+    reuse_binding=""
+  reuse_binding="${reuse_binding//$'\r'/}"
+fi
 
 # Verdict accumulator.
 ladder=""
@@ -873,6 +896,11 @@ mkdir -p "$(dirname "$REPORT")"
   printf -- '- base: %s\n' "$base_sha"
   printf -- '- verification: %s\n' "$VERIFICATION"
   printf -- '- verify_sha256: %s\n' "$(printf "%s" "$VERIFY" | oms_sha256_stream)"
+  if [ -n "$reuse_binding" ]; then
+    printf -- '- admission_binding_sha256: %s\n' "$(printf "%s" "$reuse_binding" | python3 "$ROOT_LIB/landing-capture.py" binding-digest "$reference_state")"
+    printf -- '- floor_verify_sha256: %s\n' "$(printf "%s" "${floor_verify:-}" | oms_sha256_stream)"
+    printf -- '- verification_surface_sha256: %s\n' "$(printf "%s" "${verification_surface:-}" | oms_sha256_stream)"
+  fi
   if [ -n "$ALLOW_FLOOR_CHANGE_REASON" ]; then
     printf -- '- floor_change_reason: %s\n' "$ALLOW_FLOOR_CHANGE_REASON"
     printf -- '- floor_change_used: %s\n' "$FLOOR_CHANGE_USED"
@@ -953,6 +981,19 @@ python3 "$ROOT_LIB/landing-reference.py" finish "$reference_state" "$reference_o
 reference_operation=""
 oms_reference_stop "$reference_state" || fail "cannot stop reference monitor"
 reference_scope_digest=""
+if [ "$verdict" = ADMIT ] && [ -n "$reuse_binding" ]; then
+  # Failure to prove unchanged inputs only disables reuse; it never fabricates
+  # another ADMIT or changes the result of the checks that actually ran.
+  python3 "$ROOT_LIB/landing-capture.py" bind-admission "$reference_state" "$PATCH" "$REPO" \
+    "$reuse_binding" "$VERIFY" "${floor_verify:-}" "${verification_surface:-}" "${reuse_parameters[@]}" ||
+    echo "warning: admission inputs changed; landing will verify again" >&2
+fi
+if [ "$verdict" = REJECT ] && [ "$intake_owned" = 1 ]; then
+  OMS_LOCK_TIMEOUT=2 oms_with_file_lock "$reference_state/.oms/landings.jsonl" \
+    python3 -c 'import runpy,sys; runpy.run_path(sys.argv[1])["cleanup_rejected"](sys.argv[2],sys.argv[3])' \
+    "$ROOT_LIB/landing-capture.py" "$reference_state" "$intake_id" ||
+    echo "warning: private rejected admission capture remains reserved" >&2
+fi
 echo "patch-admit: $verdict ($REPORT)" >&2
 printf '%s\n' "$verdict"
 [ "$verdict" = "ADMIT" ]

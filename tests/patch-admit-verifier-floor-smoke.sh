@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADMIT="$ROOT/scripts/patch-admit.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-admit-verifier-floor.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+mkdir -p "$TMP/tmp"
+export TMPDIR="$TMP/tmp"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 contains() { grep -Fq -- "$2" "$1" || { cat "$1" >&2; fail "$1 missing: $2"; }; }
@@ -79,6 +81,124 @@ git -C "$repo" checkout -q -- tests/check-helper.sh
 contains "$TMP/benign.md" "Patch admission: ADMIT"
 contains "$TMP/benign.md" "verify: PASS"
 contains "$TMP/benign.md" "verify-floor: PASS"
+
+# Separate parent admission retains both verification runs for landing, but
+# only while every bound input and its native producer proof is unchanged.
+for reuse_case in same plan-same plan-change command ml policy base patch report index generation environment seed floor harness; do
+  reuse_repo="$TMP/reuse-$reuse_case"
+  git clone -q --no-hardlinks "$repo" "$reuse_repo"
+  cp "$TMP/benign.patch" "$TMP/reuse.patch"
+  printf 'AGENTS.md\n' >> "$reuse_repo/.git/info/exclude"
+  printf 'local rules\n' > "$reuse_repo/AGENTS.md"
+  export OMS_TEST_REUSE_INPUT=original
+  reuse_count="$TMP/reuse-count"
+  : > "$reuse_count"
+  reuse_verify="printf 'run\\n' >> '$reuse_count'; bash scripts/check.sh"
+  reuse_flags=(--allow-verifier-change --allow-test-reduction)
+  case "$reuse_case" in plan-*)
+    "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" init --goal reuse >/dev/null
+    "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" add --id reuse-task --title reuse \
+      --allowed tests --verify "$reuse_verify" >/dev/null
+    "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" claim --id reuse-task --provider codex >/dev/null
+    "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" review --id reuse-task \
+      --artifact "$TMP/benign.md" --patch "$TMP/reuse.patch" >/dev/null
+    reuse_flags+=(--plan-task reuse-task)
+    ;;
+  esac
+  "$ADMIT" --repo "$reuse_repo" --patch "$TMP/reuse.patch" --verify "$reuse_verify" \
+    "${reuse_flags[@]}" >"$TMP/reuse-admit.out" 2>&1 || { cat "$TMP/reuse-admit.out" >&2; fail "separate admission failed: $reuse_case"; }
+  [ "$(wc -l < "$reuse_count" | tr -d " ")" = 2 ] || fail "separate admission skipped a verification run"
+  case "$reuse_case" in
+    plan-change)
+      python3 - "$reuse_repo/.oms/plan/tasks.json" <<'PY_REUSE_PLAN'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+plan = json.loads(path.read_text())
+plan['tasks']['reuse-task']['forbidden_paths'] = ['unrelated']
+path.write_text(json.dumps(plan))
+PY_REUSE_PLAN
+      ;;
+    command) reuse_verify="$reuse_verify; :" ;;
+    ml) reuse_flags+=(--ml) ;;
+    policy) reuse_flags+=(--allow-restructure) ;;
+    base) git -C "$reuse_repo" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m moved ;;
+    patch) sed 's/Keep the product contract explicit/Keep this product contract explicit/' "$TMP/benign.patch" > "$TMP/reuse.patch" ;;
+    environment) export OMS_TEST_REUSE_INPUT=changed ;;
+    seed) printf 'changed local rules\n' > "$reuse_repo/AGENTS.md" ;;
+    report|index|generation|floor|harness)
+      python3 - "$reuse_repo" "$reuse_case" <<'PY_REUSE'
+import json, os, pathlib, sys
+repo, change = pathlib.Path(sys.argv[1]), sys.argv[2]
+row = next(json.loads(line) for line in (repo / '.oms/landings.jsonl').read_text().splitlines()
+           if json.loads(line)['event'] == 'capture-reserved')
+item = row['managed_capture']
+owner_path = pathlib.Path(item['directory']) / 'owner.json'
+owner = json.loads(owner_path.read_text())
+proof = owner['admission']
+if change == 'report':
+    with (repo / proof['report']).open('a') as handle:
+        handle.write('\nchanged report\n')
+elif change == 'index':
+    path = repo / '.oms/artifacts/index.jsonl'
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[-1]['verify_exit'] = 9
+    path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+elif change == 'generation':
+    capture = pathlib.Path(owner['objects']['capture']['path'])
+    replacement = capture.with_suffix('.replacement')
+    replacement.write_bytes(capture.read_bytes())
+    os.replace(replacement, capture)
+else:
+    if change == 'floor':
+        proof['floor_sha256'] = '0' * 64
+    else:
+        proof['binding']['harness_sha256'] = '0' * 64
+    owner_path.write_text(json.dumps(owner))
+PY_REUSE
+      ;;
+  esac
+  "$ROOT/scripts/patch-land.sh" --repo "$reuse_repo" --patch "$TMP/reuse.patch" \
+    --verify "$reuse_verify" "${reuse_flags[@]}" >"$TMP/reuse-land.out" 2>&1 ||
+    { cat "$TMP/reuse-land.out" >&2; fail "landing failed: $reuse_case"; }
+  expected_runs=4
+  case "$reuse_case" in same|plan-same) expected_runs=2 ;; esac
+  [ "$(wc -l < "$reuse_count" | tr -d " ")" = "$expected_runs" ] ||
+    fail "$reuse_case admission ran the verifier an unexpected number of times"
+  expected_captures=2
+  case "$reuse_case" in same|plan-same) expected_captures=1 ;; esac
+  [ "$(grep -c capture-reserved "$reuse_repo/.oms/landings.jsonl")" = "$expected_captures" ] ||
+    fail "$reuse_case landing borrowed a different capture generation"
+  grep -Fq 'Keep' "$reuse_repo/tests/check-helper.sh" || fail "reused admission did not apply the patch"
+done
+unset OMS_TEST_REUSE_INPUT
+python3 - "$ROOT/scripts/lib/landing-capture.py" "$TMP" "$repo" <<'PY_REUSE_HARNESS'
+import pathlib, runpy, sys
+module = runpy.run_path(sys.argv[1])
+root = pathlib.Path(sys.argv[2]) / 'binding-harness/scripts/lib'
+root.mkdir(parents=True)
+for name in ('config', 'rules', 'templates'):
+    (root.parent.parent / name).mkdir()
+binding = module['admission_binding']
+binding.__globals__['HERE'] = root
+args = (sys.argv[3], sys.argv[3], 'bash scripts/check.sh', '0', '', '1', '1', '', '0', '0')
+before = binding(*args)
+helper = root / 'floor.py'
+helper.write_text('original\n')
+after_add = binding(*args)
+helper.write_text('changed\n')
+after_edit = binding(*args)
+assert len({v['harness_sha256'] for v in (before, after_add, after_edit)}) == 3
+PY_REUSE_HARNESS
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/bypass.patch" --verify 'bash scripts/check.sh' \
+  --allow-verifier-change --allow-test-reduction >"$TMP/rejected-intake.out" 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "separate captured rejection did not preserve its verdict"
+python3 - "$repo/.oms/landings.jsonl" <<'PY_REUSE_REJECT'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert any(row.get('event') == 'capture-terminal' and row.get('reason') == 'admission-rejected' for row in rows)
+assert not any(row.get('event') == 'intent' for row in rows)
+PY_REUSE_REJECT
 
 # A common verifier config is in the floor even when VERIFY does not name it.
 printf 'bad\n' > "$repo/src/value.txt"
