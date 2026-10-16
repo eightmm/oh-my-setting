@@ -63,7 +63,7 @@ def checked_plan_parent(repo_root):
 
 
 def retirement_parent():
-    repo_root = os.path.realpath(env("OMS_REPO"))
+    repo_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
     expected_parent = checked_plan_parent(repo_root)
     expected_plan = os.path.join(expected_parent, "tasks.json")
     if not same_absolute_path(CONTEXT["path"], expected_plan):
@@ -526,6 +526,35 @@ def validate_receipt_authority(row, repo_root):
     """Validate one retirement receipt against its archive and proof ledger."""
     if not isinstance(row, dict):
         die("plan retirement receipt is not an object")
+    if row.get("kind") == "plan-replacement":
+        required = {"schema", "kind", "ts", "replacement_id", "plan_sha256",
+                    "plan_id", "disposition", "archive", "non_terminal_task_ids"}
+        plan_sha = row.get("plan_sha256")
+        plan_id = row.get("plan_id")
+        task_ids = row.get("non_terminal_task_ids")
+        if (set(row) != required or row.get("schema") != 1 or
+                not isinstance(row.get("ts"), str) or not row.get("ts") or
+                not isinstance(plan_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_sha) or
+                row.get("replacement_id") != "replace_" + plan_sha or
+                not isinstance(plan_id, str) or (plan_id and not PLAN_ID_RE.fullmatch(plan_id)) or
+                row.get("disposition") != "replaced" or
+                row.get("archive") != ".oms/plan/tasks.%s.archive.json" % plan_sha or
+                not isinstance(task_ids, list) or
+                any(not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id)
+                    for task_id in task_ids) or task_ids != sorted(set(task_ids))):
+            die("plan replacement receipt has invalid core fields")
+        parent = checked_plan_parent(repo_root)
+        archive = os.path.join(parent, "tasks.%s.archive.json" % plan_sha)
+        archived, _ = bounded_regular(archive, "replacement archive", 1024 * 1024,
+                                      absent_ok=True)
+        if archived is None or hashlib.sha256(archived).hexdigest() != plan_sha:
+            die("replacement receipt does not have its exact content-addressed archive")
+        plan, tasks = plan_from_payload(archived)
+        actual = sorted(task_id for task_id, task in tasks.items()
+                        if task.get("state", "ready") not in {"done", "cancelled"})
+        if plan.get("plan_id", "") != plan_id or actual != task_ids:
+            die("replacement receipt task ids or plan_id contradict its archive")
+        return row
     disposition = row.get("disposition")
     required = {
         "schema", "kind", "ts", "retirement_id", "plan_sha256", "plan_id",
@@ -610,7 +639,7 @@ def validate_retirement_ledger(repo_root, filename=None):
     for row in rows:
         validate_receipt_authority(row, repo_root)
         plan_sha = row["plan_sha256"]
-        proof_id = row["proof_id"]
+        proof_id = row.get("proof_id", row.get("replacement_id"))
         if plan_sha in seen_plans:
             die("plan %s has duplicate retirement receipts" % plan_sha[:12])
         if proof_id in seen_proofs:
@@ -686,9 +715,49 @@ def validate_active_retirement_lineage(repo_root, rows):
     active_id = plan.get("plan_id", "")
     active_sha = hashlib.sha256(payload).hexdigest()
     for row in rows:
-        if (active_sha == row.get("plan_sha256") or
-                active_id == row.get("plan_id")):
+        if ((active_sha == row.get("plan_sha256") and
+             row.get("kind") == "plan-retirement") or
+                (row.get("kind") == "plan-retirement" and
+                 active_id == row.get("plan_id"))):
             die("active plan lineage conflicts with a retirement receipt")
+
+
+def archive_replacement(context):
+    """Preserve the exact canonical plan bytes before init replaces them."""
+    global CONTEXT, STATES, ID_RE
+    CONTEXT = context
+    CONTEXT["repo_root"] = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+    STATES = context["states"]
+    ID_RE = context["id_re"]
+    repo_root, parent = retirement_parent()
+    payload, _ = bounded_regular(context["path"], "active plan", 1024 * 1024,
+                                 absent_ok=True)
+    if payload is None:
+        return ""
+    plan, tasks = plan_from_payload(payload)
+    plan_sha = hashlib.sha256(payload).hexdigest()
+    rows = validate_retirement_ledger(repo_root)
+    prior = next((row for row in rows if row.get("plan_sha256") == plan_sha), None)
+    if prior is not None and prior.get("kind") != "plan-replacement":
+        die("active plan bytes already have a retirement receipt")
+    archive = os.path.join(parent, "tasks.%s.archive.json" % plan_sha)
+    durable_archive(archive, payload, plan_sha, parent)
+    task_ids = sorted(task_id for task_id, task in tasks.items()
+                      if task.get("state", "ready") not in {"done", "cancelled"})
+    receipt = {
+        "schema": 1, "kind": "plan-replacement", "ts": context["ts"],
+        "replacement_id": "replace_" + plan_sha, "plan_sha256": plan_sha,
+        "plan_id": plan.get("plan_id", ""), "disposition": "replaced",
+        "archive": ".oms/plan/tasks.%s.archive.json" % plan_sha,
+        "non_terminal_task_ids": task_ids,
+    }
+    if prior is None:
+        append_receipt(os.path.join(parent, "retirements.jsonl"), receipt)
+    else:
+        comparable = dict(receipt, ts=prior.get("ts"))
+        if comparable != prior:
+            die("existing replacement receipt conflicts with this operation")
+    return receipt["archive"]
 
 
 def validate_retirement_state(repo_root, filename=None):
@@ -700,7 +769,7 @@ def validate_retirement_state(repo_root, filename=None):
 def run(context):
     global CONTEXT, STATES, ID_RE
     CONTEXT = context
-    CONTEXT["repo_root"] = os.path.realpath(env("OMS_REPO"))
+    CONTEXT["repo_root"] = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
     STATES = context["states"]
     ID_RE = context["id_re"]
     repo_root, parent = retirement_parent()
@@ -721,7 +790,26 @@ def run(context):
         if active_payload is None:
             die("no active plan to retire")
         _, tasks = plan_from_payload(active_payload)
-        validate_authority(tasks)
+        active = sorted(task_id for task_id, task in tasks.items()
+                        if task.get("state", "ready") in
+                        {"claimed", "running", "review", "landing"})
+        markers = CONTEXT["load_worker_markers"]()
+        for marker in markers:
+            if not CONTEXT["worker_marker_is_typed"](marker):
+                die("worker marker set is malformed or unproven; refusing retirement")
+            if (marker.get("task_id") in tasks and
+                    CONTEXT["marker_pid_alive"](marker) and
+                    marker.get("task_id") not in active):
+                active.append(marker.get("task_id"))
+        active = sorted(active)
+        if active:
+            print(json.dumps({
+                "schema": 1, "action": "plan-retire-check",
+                "plan_sha256": active_sha, "head": "", "git_ref": "",
+                "clean": False, "active_task_blockers": active,
+                "would_write": False,
+            }, sort_keys=True))
+            raise SystemExit(3)
         head, git_ref, clean = git_snapshot(repo_root)
         print(json.dumps({
             "schema": 1, "action": "plan-retire-check", "plan_sha256": active_sha,

@@ -8156,6 +8156,7 @@ test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
   local active_project="$TMP/agent-plan-retire-active"
   local marker_project="$TMP/agent-plan-retire-marker"
   local superseded_project="$TMP/agent-plan-retire-superseded"
+  local replacement_project="$TMP/agent-plan-replacement"
   local failed_accept_project="$TMP/agent-plan-retire-accept-fail"
   local mutate_accept_project="$TMP/agent-plan-retire-accept-mutate"
   local plan="$ROOT/scripts/agent-plan.sh"
@@ -8408,7 +8409,58 @@ PY
     fi
     [ -e "$active_project/.oms/plan/tasks.json" ] ||
       fail "retire removed an active $state plan"
+    if [ "$state" = review ]; then
+      rc=0
+      out="$("$plan" --repo "$active_project" retire 2>&1)" || rc=$?
+      [ "$rc" != 0 ] || fail "retire check accepted active task state $state"
+      printf '%s\n' "$out" | python3 -c '
+import json,sys
+row=json.load(sys.stdin)
+assert row["active_task_blockers"] == ["t1"], row
+' || fail "retire check omitted active-task blockers: $out"
+    fi
   done
+
+  make_committed_repo "$replacement_project"
+  "$plan" --repo "$replacement_project" init --goal previous >/dev/null
+  "$plan" --repo "$replacement_project" add --id review_task --title preserved >/dev/null
+  python3 - "$replacement_project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path=sys.argv[1]
+row=json.load(open(path, encoding="utf-8"))
+row["tasks"]["review_task"]["state"]="review"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, ensure_ascii=False, indent=2)
+PY
+  cp "$replacement_project/.oms/plan/tasks.json" "$TMP/agent-plan-replacement.original"
+  replaced_sha="$(python3 - "$TMP/agent-plan-replacement.original" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  out="$("$plan" --repo "$replacement_project" init --goal replacement)" ||
+    fail "init could not replace an active plan: $out"
+  archive="$replacement_project/.oms/plan/tasks.$replaced_sha.archive.json"
+  cmp -s "$TMP/agent-plan-replacement.original" "$archive" ||
+    fail "init did not preserve the exact replaced plan bytes"
+  printf '%s\n' "$out" | grep -Fq "tasks.$replaced_sha.archive.json" ||
+    fail "init did not name the replacement archive: $out"
+  python3 - "$replacement_project/.oms/plan/retirements.jsonl" "$replaced_sha" <<'PY' ||
+import json, sys
+rows=[json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert len(rows)==1, rows
+row=rows[0]
+assert row["kind"]=="plan-replacement" and row["disposition"]=="replaced", row
+assert row["plan_sha256"]==sys.argv[2] and row["non_terminal_task_ids"]==["review_task"], row
+PY
+    fail "init replacement receipt did not identify non-terminal task ids"
+  "$ROOT/scripts/state-verify.sh" --repo "$replacement_project" --json >/dev/null ||
+    fail "state-verify rejected the replacement archive/receipt"
+  cp "$archive" "$replacement_project/.oms/plan/tasks.json"
+  "$plan" --repo "$replacement_project" init --goal replacement-replay >/dev/null ||
+    fail "init could not replay an archived replacement generation"
+  [ "$(wc -l < "$replacement_project/.oms/plan/retirements.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "replacement replay duplicated its typed receipt"
 
   # A live worker marker coupled to a ready task is still authority. A stale
   # state label must not let retirement erase that worker's plan.

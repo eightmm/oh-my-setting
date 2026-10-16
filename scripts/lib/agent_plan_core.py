@@ -752,9 +752,22 @@ if act in {"accept-research", "approve-main-research", "accept-main-research", "
     sys.exit(0)
 
 if act == "init":
+    replacement_archive = ""
+    if same_absolute_path(path, canonical_plan) and os.path.exists(path):
+        retirement = _load(sys.argv[5])
+        replacement_archive = retirement["archive_replacement"]({
+            "path": path, "ts": ts, "states": STATES, "id_re": ID_RE,
+            "die": die, "load_worker_markers": load_worker_markers,
+            "worker_marker_is_typed": worker_marker_is_typed,
+            "marker_pid_alive": marker_pid_alive,
+            "durable_jsonl": os.path.join(os.path.dirname(sys.argv[5]), "durable-jsonl.py"),
+        })
     d = {"schema": SCHEMA, "plan_id": "plan_" + secrets.token_hex(16),
          "goal": env("OMS_GOAL"), "accept": env("OMS_ACCEPT"), "tasks": {}}
-    save(d); print("plan: initialized (%s)" % path); sys.exit(0)
+    save(d); print("plan: initialized (%s)" % path)
+    if replacement_archive:
+        print("plan: archived replaced plan (%s)" % replacement_archive)
+    sys.exit(0)
 
 if act == "ensure-lineage":
     if not os.path.exists(path):
