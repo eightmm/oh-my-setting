@@ -57,8 +57,9 @@ necessary; explain any additional worktree and its cleanup first.
 
 ## Release and record
 
-Only when commit/push is authorized, follow `oms-push-gate-discipline` and
-the installed hook. For deployment, `oms land` owns one full gate for the
+Only when commit/push is authorized, follow the repository's own hook and gate.
+When OMS is installed, use the `oms-agent-harness` skill's `review-gates`
+reference. For deployment, `oms land` owns one full gate for the
 committed tree, push of that SHA, successful CI, then installation update when applicable.
 Do not run `oms update` again after a successful
 landing update. A missing or failed update needs diagnosis, not an assumed pass.

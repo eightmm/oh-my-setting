@@ -17,13 +17,13 @@ Usage: project-doctor.sh [--strict] [project_dir]
 Verify that all agent-facing files in a project give every agent the same
 view. Checks:
 
-- AGENTS.md and CLAUDE.md contain the same oh-my-setting managed blocks
+- AGENTS.md, CLAUDE.md and an existing GEMINI.md contain the same managed blocks
 - managed blocks match the current oh-my-setting templates (not stale)
 - PROJECT.md exists and has a State field
 - git repos: the agent-facing files are hidden from git (project-private)
-- ml projects: docs/ scaffold and .gitignore entries present
+- ml projects: optional docs scaffold and .gitignore entries reported accurately
 - ml projects: structure drift warnings (stray root *.py, markdown outside
-  docs/, notebooks outside notebooks/, missing src/ layout, tracked files in
+  docs/, notebooks outside notebooks/, tracked files in
   gitignored dirs, tracked files over 10MB)
 
 Exit 0 when consistent (warnings allowed), 1 on drift/missing blocks. --strict
@@ -59,6 +59,10 @@ fail() {
 warn() {
   echo "warn: $*"
   WARNED=1
+}
+
+note() {
+  echo "note: $*"
 }
 
 ok() {
@@ -120,38 +124,39 @@ claude_file="$PROJECT_DIR/CLAUDE.md"
 styles_found=0
 
 for style in general ml slurm; do
-  in_agents=0
-  in_claude=0
-  has_block "$agents_file" "$style" && in_agents=1
-  has_block "$claude_file" "$style" && in_claude=1
-
-  [ "$in_agents" -eq 0 ] && [ "$in_claude" -eq 0 ] && continue
+  style_present=0
+  for name in AGENTS.md CLAUDE.md GEMINI.md; do
+    has_block "$PROJECT_DIR/$name" "$style" && { style_present=1; break; }
+  done
+  [ "$style_present" -eq 1 ] || continue
   styles_found=$((styles_found + 1))
 
-  if [ "$in_agents" -eq 1 ] && [ "$in_claude" -eq 0 ]; then
-    fail "$style block in AGENTS.md but missing in CLAUDE.md"
-    continue
-  fi
-  if [ "$in_agents" -eq 0 ] && [ "$in_claude" -eq 1 ]; then
-    fail "$style block in CLAUDE.md but missing in AGENTS.md"
-    continue
-  fi
+  for name in AGENTS.md CLAUDE.md GEMINI.md; do
+    # GEMINI.md is adopted only when it already exists; AGENTS.md is its
+    # fallback for new projects without a separate Antigravity loader.
+    [ "$name" != GEMINI.md ] || [ -f "$PROJECT_DIR/$name" ] || continue
+    if ! has_block "$PROJECT_DIR/$name" "$style"; then
+      fail "$style block missing in $name; re-run: apply-project-template.sh $style $PROJECT_DIR"
+      continue
+    fi
 
-  if diff -q \
-    <(extract_block "$agents_file" "$style") \
-    <(extract_block "$claude_file" "$style") >/dev/null; then
-    ok "$style block identical in AGENTS.md and CLAUDE.md"
-  else
-    fail "$style block differs between AGENTS.md and CLAUDE.md"
-  fi
-
-  if diff -q \
-    <(extract_block "$agents_file" "$style") \
-    <(reference_block "$style") >/dev/null; then
-    ok "$style block matches current template"
-  else
-    fail "$style block is stale; re-run: apply-project-template.sh $style $PROJECT_DIR"
-  fi
+    if [ "$name" != AGENTS.md ] && has_block "$agents_file" "$style"; then
+      if diff -q \
+        <(extract_block "$agents_file" "$style") \
+        <(extract_block "$PROJECT_DIR/$name" "$style") >/dev/null; then
+        ok "$style block identical in AGENTS.md and $name"
+      else
+        fail "$style block differs between AGENTS.md and $name"
+      fi
+    fi
+    if diff -q \
+      <(extract_block "$PROJECT_DIR/$name" "$style") \
+      <(reference_block "$style") >/dev/null; then
+      ok "$style block matches current template in $name"
+    else
+      fail "$style block is stale in $name; re-run: apply-project-template.sh $style $PROJECT_DIR"
+    fi
+  done
 done
 
 if [ "$styles_found" -eq 0 ]; then
@@ -179,9 +184,22 @@ while IFS= read -r sub_file; do
       has_block "$sub_dir/$name" "$style" && { style_present=1; break; }
     done
     [ "$style_present" -eq 1 ] || continue
-    for name in AGENTS.md CLAUDE.md; do
+    # An existing nested GEMINI.md is a loader too, so it needs every style.
+    for name in AGENTS.md CLAUDE.md GEMINI.md; do
+      [ "$name" != GEMINI.md ] || [ -f "$sub_dir/$name" ] || continue
       if ! has_block "$sub_dir/$name" "$style"; then
         fail "$sub_rel: $style block missing in $name; re-run: apply-project-template.sh $style $PROJECT_DIR $sub_rel/AGENTS.md $sub_rel/CLAUDE.md"
+      fi
+    done
+    for name in CLAUDE.md GEMINI.md; do
+      if has_block "$sub_dir/$name" "$style" && has_block "$sub_dir/AGENTS.md" "$style"; then
+        if diff -q \
+          <(extract_block "$sub_dir/AGENTS.md" "$style") \
+          <(extract_block "$sub_dir/$name" "$style") >/dev/null; then
+          ok "$sub_rel: $style block identical in AGENTS.md and $name"
+        else
+          fail "$sub_rel: $style block differs between AGENTS.md and $name"
+        fi
       fi
     done
     if has_block "$sub_dir/AGENTS.md" "$style"; then
@@ -193,6 +211,14 @@ while IFS= read -r sub_file; do
         fail "$sub_rel: $style block is stale; re-run: apply-project-template.sh $style $PROJECT_DIR $sub_rel/AGENTS.md $sub_rel/CLAUDE.md"
       fi
     fi
+    for name in CLAUDE.md GEMINI.md; do
+      if has_block "$sub_dir/$name" "$style" &&
+        ! diff -q \
+          <(extract_block "$sub_dir/$name" "$style") \
+          <(reference_block "$style") >/dev/null; then
+        fail "$sub_rel: $style block in $name is stale"
+      fi
+    done
   done
 done <<EOF
 $(find "$PROJECT_DIR" -mindepth 2 -maxdepth 6 \
@@ -291,7 +317,7 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
   if [ "$missing_docs" -eq 0 ]; then
     ok "core ml docs scaffold complete under docs/"
   else
-    warn "$missing_docs core ml doc(s) missing under docs/; re-run: apply-project-template.sh ml $PROJECT_DIR"
+    note "$missing_docs optional ML doc(s) absent under docs/; create them with: apply-project-template.sh ml $PROJECT_DIR --full-docs"
   fi
 
   # Keep in sync with ML_IGNORE_ENTRIES in apply-project-template.sh.
@@ -306,11 +332,11 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
   if [ -x "$PROJECT_DIR/scripts/check.sh" ]; then
     ok "verification contract present: scripts/check.sh"
   else
-    warn "scripts/check.sh missing or not executable; re-run: apply-project-template.sh ml $PROJECT_DIR"
+    warn "scripts/check.sh missing or not executable; restore execute permission if present, or re-run: apply-project-template.sh ml $PROJECT_DIR"
   fi
 
-  # Structure drift (warn-level): the layout the ml rules promise must still
-  # hold mid-project, not only at scaffold time. POSIX find/-print only —
+  # Structure drift (warn-level): keep the documented project organization
+  # checks active mid-project. POSIX find/-print only —
   # GNU-only primaries would silently skip the checks on BSD/macOS.
   rel_names() {
     while IFS= read -r p; do
@@ -349,10 +375,6 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
     warn "notebooks outside notebooks/ (move there): $stray_nb"
   else
     ok "notebooks live under notebooks/"
-  fi
-
-  if [ -f "$PROJECT_DIR/pyproject.toml" ] && [ ! -d "$PROJECT_DIR/src" ]; then
-    warn "pyproject.toml without src/ layout; ml rules expect src/<package>/"
   fi
 
   # Experiments are running (ledger has rows) but nothing is pre-registered.

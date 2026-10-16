@@ -806,6 +806,7 @@ EOF
 test_apply_ml_scaffolds_docs() {
   local project="$TMP/ml-docs"
   local full="$TMP/ml-docs-full"
+  local doctor_out
   mkdir -p "$project/docs"
   printf 'user content\n' > "$project/docs/DATA.md"
 
@@ -814,6 +815,11 @@ test_apply_ml_scaffolds_docs() {
   for doc in MODEL EVALUATION EXPERIMENTS REPRODUCIBILITY TRAINING; do
     [ ! -e "$project/docs/$doc.md" ] || fail "default ml scaffold should not generate optional docs: $doc"
   done
+  doctor_out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "minimal ML onboarding should pass project doctor: $doctor_out"
+  if contains "$doctor_out" 'core ml doc(s) missing'; then
+    fail "doctor must not warn about intentionally optional documentation: $doctor_out"
+  fi
   [ -f "$project/PROJECT.md" ] || fail "ml scaffold must retain the project contract"
   assert_file_contains "$project/docs/DATA.md" "user content"
   if grep -Fq '## Schema' "$project/docs/DATA.md"; then
@@ -929,18 +935,49 @@ test_apply_ml_scaffolds_check_contract() {
 
 test_project_doctor_warns_missing_check() {
   local project="$TMP/doctor-no-check"
+  local out drift
   mkdir -p "$project"
 
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should pass fresh ml apply"
   contains "$out" 'verification contract present' ||
-    fail "doctor should confirm check.sh presence"
+    fail "doctor should confirm the generated check.sh contract"
 
-  rm "$project/scripts/check.sh"
-  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
-    fail "missing check.sh should warn, not fail"
-  contains "$out" 'scripts/check.sh missing' ||
-    fail "doctor should warn about missing check.sh"
+  # Fill the scientific contract so strict failures isolate checker drift.
+  awk '
+    /^- State:/ { print "- State: confirmed"; next }
+    /^- .*:$/ { print $0 " fixture"; next }
+    { print }
+  ' "$project/PROJECT.md" > "$project/PROJECT.filled"
+  mv "$project/PROJECT.filled" "$project/PROJECT.md"
+  "$ROOT/scripts/project-doctor.sh" --strict "$project" >/dev/null ||
+    fail "confirmed minimal ML onboarding must pass strict doctor without optional docs"
+
+  for drift in missing nonexecutable; do
+    if [ "$drift" = missing ]; then
+      rm "$project/scripts/check.sh"
+    else
+      chmod -x "$project/scripts/check.sh"
+    fi
+    out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+      fail "checker drift should warn outside strict mode: $out"
+    contains "$out" 'warn: scripts/check.sh missing or not executable' ||
+      fail "doctor must warn about $drift checker: $out"
+    if out="$("$ROOT/scripts/project-doctor.sh" --strict "$project")"; then
+      fail "strict doctor accepted $drift checker: $out"
+    fi
+    if contains "$out" --python-ci; then
+      fail "checker repair must not opt into CI: $out"
+    fi
+    if [ "$drift" = missing ]; then
+      "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+    else
+      chmod +x "$project/scripts/check.sh"
+    fi
+    "$ROOT/scripts/project-doctor.sh" --strict "$project" >/dev/null ||
+      fail "restoring the $drift checker must clear strict failure"
+    [ ! -d "$project/.github/workflows" ] || fail "checker repair must not create CI"
+  done
 }
 
 test_project_doctor_warns_structure_drift() {
@@ -977,7 +1014,9 @@ test_project_doctor_warns_structure_drift() {
   contains "$out" 'train_root.py' || fail "missing stray-python warning"
   contains "$out" 'NOTES.md' || fail "missing markdown-outside-docs warning"
   case "$out" in *'exp.ipynb'*) ;; *) fail "missing notebook warning" ;; esac
-  case "$out" in *'src/ layout'*) ;; *) fail "missing src layout warning" ;; esac
+  if contains "$out" 'src/ layout'; then
+    fail "doctor must not require an ML src/ layout absent from the template"
+  fi
   case "$out" in *'gitignored dirs'*) ;; *) fail "missing tracked-in-ignored warning" ;; esac
   case "$out" in *'big model.ckpt'*) ;; *) fail "missing over-10MB warning (filename with space must survive)" ;; esac
 
@@ -2510,6 +2549,54 @@ test_project_doctor_checks_subdirectory_loaders() {
     fail "a paired subdirectory loader should pass: $out"
   contains "$out" 'sub: general block matches current template' ||
     fail "the doctor should confirm sub-tier freshness: $out"
+
+  printf 'Unmanaged agy notes.\n' > "$project/sub/GEMINI.md"
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "an existing nested GEMINI without the style must fail: $out"
+  fi
+  contains "$out" 'sub: general block missing in GEMINI.md' ||
+    fail "doctor must report a style missing from nested GEMINI: $out"
+
+  sed 's/Project rules override global defaults./Conflicting but marked rule./' \
+    "$project/sub/AGENTS.md" > "$project/sub/GEMINI.md"
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "matching markers must not hide a conflicting nested GEMINI body: $out"
+  fi
+  contains "$out" 'sub: general block differs between AGENTS.md and GEMINI.md' ||
+    fail "doctor must report nested GEMINI body conflicts: $out"
+}
+
+test_project_doctor_detects_gemini_body_drift() {
+  local project="$TMP/doctor-gemini-drift"
+  local out name
+  mkdir -p "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  cp "$project/AGENTS.md" "$project/GEMINI.md"
+  sed -i 's/Project rules override global defaults./Conflicting but marked rule./' \
+    "$project/GEMINI.md"
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "matching markers must not hide a conflicting root GEMINI body: $out"
+  fi
+  contains "$out" 'general block differs between AGENTS.md and GEMINI.md' ||
+    fail "doctor must report root GEMINI body conflicts: $out"
+
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" GEMINI.md >/dev/null
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "root GEMINI carrying a different style must fail parity: $out"
+  fi
+  for name in AGENTS.md CLAUDE.md; do
+    contains "$out" "ml block missing in $name" ||
+      fail "doctor must report the missing $name counterpart: $out"
+  done
+  contains "$out" 'general block missing in GEMINI.md' ||
+    fail "doctor must report the missing GEMINI style counterpart: $out"
+
+  rm "$project/AGENTS.md" "$project/CLAUDE.md"
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "a root GEMINI-only loader must fail parity: $out"
+  fi
+  contains "$out" 'ml block missing in AGENTS.md' ||
+    fail "GEMINI-only style must be discovered: $out"
 }
 
 test_project_doctor_detects_drift() {
@@ -24222,6 +24309,18 @@ $(cat "$project/.git/info/exclude" 2>&1)"
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
   if contains "$out" 'project-private remove'; then
     fail "with no exclusion left there is nothing to report"
+  fi
+}
+
+test_remove_project_template_defaults_include_gemini() {
+  local project="$TMP/remove-default-gemini"
+  mkdir -p "$project"
+  printf 'user note before\n' > "$project/GEMINI.md"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" --no-private >/dev/null
+  "$ROOT/scripts/remove-project-template.sh" all "$project" >/dev/null
+  assert_file_contains "$project/GEMINI.md" 'user note before'
+  if grep -Fq '<!-- oh-my-setting:' "$project/GEMINI.md"; then
+    fail "default removal must clear managed blocks from adopted GEMINI.md"
   fi
 }
 

@@ -56,9 +56,11 @@ trap 'rm -rf "$TMP"' EXIT
 # 1. Loader parity on a throwaway fixture.
 # ---------------------------------------------------------------------------
 
-marker_set() {
-  # The per-style managed block markers a loader file carries.
-  grep -o '<!-- oh-my-setting:[a-z]*:begin -->' "$1" 2>/dev/null | LC_ALL=C sort -u
+managed_blocks() {
+  # Compare complete managed block bodies, including their markers and order.
+  awk '/^<!-- oh-my-setting:[a-z]*:begin -->$/ { inside = 1 }
+       inside { print }
+       /^<!-- oh-my-setting:[a-z]*:end -->$/ { inside = 0 }' "$1" 2>/dev/null
 }
 
 loader_parity() {
@@ -73,16 +75,16 @@ loader_parity() {
     cat "$log" >&2
     return 0
   fi
-  agents="$(marker_set "$fixture/AGENTS.md")"
-  claude="$(marker_set "$fixture/CLAUDE.md")"
+  agents="$(managed_blocks "$fixture/AGENTS.md")"
+  claude="$(managed_blocks "$fixture/CLAUDE.md")"
   if [ -z "$agents" ]; then
     bad "loader parity (general): AGENTS.md carries no managed block"
   elif [ "$agents" != "$claude" ]; then
-    bad "loader parity (general): AGENTS.md and CLAUDE.md block sets differ"
+    bad "loader parity (general): AGENTS.md and CLAUDE.md managed blocks differ"
   elif [ -e "$fixture/GEMINI.md" ]; then
     bad "loader parity (general): GEMINI.md was created for a new project"
   else
-    ok "loader parity (general): one block set across loaders, no GEMINI.md invented"
+    ok "loader parity (general): identical managed blocks, no GEMINI.md invented"
   fi
 
   # A leftover GEMINI.md must be adopted on the next apply, and a base-style
@@ -97,17 +99,28 @@ loader_parity() {
     cat "$log" >&2
     return 0
   fi
-  agents="$(marker_set "$fixture/AGENTS.md")"
-  claude="$(marker_set "$fixture/CLAUDE.md")"
-  gemini="$(marker_set "$fixture/GEMINI.md")"
+  agents="$(managed_blocks "$fixture/AGENTS.md")"
+  claude="$(managed_blocks "$fixture/CLAUDE.md")"
+  gemini="$(managed_blocks "$fixture/GEMINI.md")"
   if [ "$agents" != "$claude" ] || [ "$agents" != "$gemini" ]; then
-    bad "loader parity (ml): block sets diverge across AGENTS.md/CLAUDE.md/GEMINI.md"
+    bad "loader parity (ml): managed blocks diverge across AGENTS.md/CLAUDE.md/GEMINI.md"
   elif printf '%s\n' "$agents" | grep -q ':general:'; then
     bad "loader parity (ml): stale general block survived the style switch"
   elif ! printf '%s\n' "$agents" | grep -q ':ml:'; then
     bad "loader parity (ml): ml block missing after apply"
   else
     ok "loader parity (ml): GEMINI.md adopted and stale style retired in sync"
+  fi
+
+  # Matching markers must not hide a modified managed body.
+  sed 's/Project rules override global defaults\./CONFLICTING provider rule./' \
+    "$fixture/GEMINI.md" > "$fixture/GEMINI.conflict"
+  mv "$fixture/GEMINI.conflict" "$fixture/GEMINI.md"
+  gemini="$(managed_blocks "$fixture/GEMINI.md")"
+  if [ "$agents" = "$gemini" ]; then
+    bad "loader parity (ml): conflicting body with matching markers was accepted"
+  else
+    ok "loader parity (ml): conflicting body with matching markers detected"
   fi
 }
 
