@@ -24,6 +24,7 @@ usage() {
 Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
                [--wait] [--no-update] [--ci-wait SECONDS]
                [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH]
+               [--sync-shared PATH]
        land.sh status [--repo PATH] [--json] [--active-exit]
 
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
@@ -72,6 +73,13 @@ To retry only the handoff of an already-passed receipt, also pass --no-update.
 This preserves receipt bytes and accepts a landed SHA still reachable from the
 fetched target even if another main advanced it. Without --no-update, the normal
 CI/install steps and exact-tip safety checks run before handoff.
+With --sync-shared PATH, refresh PATH with sync-shared only after land passes
+and any receipt handoff succeeds. PATH is required; it is independent of the
+handoff path. Live calls defer sync (75); dirty, detached, ahead or diverged
+checkouts refuse it. Sync never changes a passed land's exit status. Its result
+is logged and recorded as sync.state in a companion sync/<request>.json receipt,
+which status includes without changing the immutable landing/handoff bytes.
+Retry the same command after deferred/refused sync to try the refresh again.
 Without --wait the job detaches (setsid) and this prints the receipt path.
 Retrying the same commit/destination/gate reuses successful push evidence and
 resumes CI/install only. Concurrent jobs wait up to OMS_LOCK_TIMEOUT (default
@@ -80,7 +88,7 @@ EOF
 }
 
 REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=1500
-SIBLING_WAIT=1800 IGNORE_SIBLINGS=0 HANDOFF_TO=""
+SIBLING_WAIT=1800 IGNORE_SIBLINGS=0 HANDOFF_TO="" SYNC_TO=""
 MODE=start JSON=0 ACTIVE_EXIT=0 STAMP="" READY_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -92,6 +100,11 @@ while [ "$#" -gt 0 ]; do
         echo "error: --handoff-receipt-to requires PATH" >&2; exit 2
       fi
       HANDOFF_TO="$2"; shift 2 ;;
+    --sync-shared)
+      if [ "$#" -lt 2 ] || [ -z "$2" ] || [[ "$2" = --* ]]; then
+        echo "error: --sync-shared requires PATH" >&2; exit 2
+      fi
+      SYNC_TO="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --remote) REMOTE="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
@@ -121,6 +134,13 @@ if [ -n "$HANDOFF_TO" ]; then
   if ! HANDOFF_TO="$(git -C "$HANDOFF_TO" rev-parse --show-toplevel 2>/dev/null | tr -d '\r')" ||
       ! HANDOFF_TO="$(cd "$HANDOFF_TO" && pwd -P)"; then
     echo "error: --handoff-receipt-to is not a git checkout" >&2; exit 2
+  fi
+fi
+
+if [ -n "$SYNC_TO" ]; then
+  if ! SYNC_TO="$(git -C "$SYNC_TO" rev-parse --show-toplevel 2>/dev/null | tr -d '\r')" ||
+      ! SYNC_TO="$(cd "$SYNC_TO" && pwd -P)"; then
+    echo "error: --sync-shared is not a git checkout" >&2; exit 2
   fi
 fi
 
@@ -294,9 +314,41 @@ finish() {  # finish STATE SUMMARY
     --event-type phase_outcome --outcome "land $SHORT: $2" \
     --outcome-status "$([ "$1" = passed ] && echo success || echo failure)"
   echo "land $SHORT: $1: $2" >> "$LOG"
-  if [ "$1" = passed ] && [ -n "$HANDOFF_TO" ]; then
-    handoff_receipt
+  if [ "$1" = passed ]; then
+    after_land
   fi
+}
+
+after_land() {
+  if [ -n "$HANDOFF_TO" ]; then
+    handoff_receipt || return $?
+  fi
+  [ -z "$SYNC_TO" ] || sync_shared
+}
+
+sync_record() {
+  # Post-land operations must not invalidate handed-off receipt digests.
+  local RECEIPT="$LAND_DIR/sync/$STAMP.json"
+  mkdir -p "$LAND_DIR/sync"
+  rset "$@" sha="$SHA" request="$STAMP" sync.path="$SYNC_TO"
+}
+
+sync_shared() {
+  local rc=0 state=passed reason='shared checkout refreshed' sync_log="$LOG.sync"
+  sync_record --reset sync.state=running sync.started_at="$(now)"
+  bash "$ROOT/scripts/sync-shared.sh" --repo "$SYNC_TO" --remote "$REMOTE" \
+    --target "$TARGET" > "$sync_log" 2>&1 || rc=$?
+  cat "$sync_log" >> "$LOG"
+  if [ "$rc" -ne 0 ]; then
+    state=refused
+    [ "$rc" -ne 75 ] || state=deferred
+    reason="$(tail -n 1 "$sync_log" | tr -d '\r')"
+    reason="${reason#error: }"
+    reason="${reason#deferred: }"
+    [ -n "$reason" ] || reason="sync-shared exit $rc (see land log)"
+  fi
+  sync_record sync.state="$state" sync.reason="$reason" sync.rc="$rc" sync.finished_at="$(now)"
+  note "land $SHORT: sync $state: $reason"
 }
 
 handoff_receipt() {
@@ -394,7 +446,7 @@ run_job() {
     if can_handoff_only; then
       # The helper fetches the target ref and proves ancestry. Receipt-only
       # retries neither reinstall an old SHA nor rewrite imported bytes.
-      handoff_receipt
+      after_land
       return $?
     fi
     remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
@@ -634,14 +686,24 @@ show_status() {  # show_status [RECEIPT]; default: this HEAD's newest, else the 
   fi
   python3 - "$newest" "$active" "$JSON" "${head:-}" <<'PY' || return $?
 import calendar, json, sys, time
+from pathlib import Path
 r = json.load(open(sys.argv[1], encoding="utf-8"))
+sync_path = Path(sys.argv[1]).parent / "sync" / Path(sys.argv[1]).name
+try:
+    sync = json.loads(sync_path.read_text(encoding="utf-8"))
+    if (isinstance(sync, dict) and sync.get("sha") == r.get("sha") and
+            sync.get("request") == r.get("request") and isinstance(sync.get("sync"), dict)):
+        r["sync"] = sync["sync"]
+except (OSError, ValueError):
+    pass
 active = {"true": True, "false": False}.get(sys.argv[2])
 g, p, u, c = r.get("gate", {}), r.get("push", {}), r.get("update", {}), r.get("ci", {})
 if sys.argv[3] == "1":
     r["active"] = active
     if active:
         r["step"] = ("gate" if g.get("rc") == "pending" else "push" if p.get("rc") == "pending"
-                     else "ci" if c.get("conclusion") == "pending" else "update")
+                     else "ci" if c.get("conclusion") == "pending"
+                     else "sync" if r.get("sync", {}).get("state") == "running" else "update")
         try:
             r["minutes"] = max(0, int((time.time() - calendar.timegm(time.strptime(
                 r["started_at"], "%Y-%m-%dT%H:%M:%SZ"))) // 60))
@@ -671,6 +733,8 @@ if u.get("authority") or c.get("scope"):
     print("  install proof: %s  ci scope: %s" % (u.get("authority", "-"), c.get("scope", "-")))
 if r.get("summary"):
     print("  %s" % r["summary"])
+if r.get("sync"):
+    print("  sync %s: %s" % (r["sync"].get("state", "unknown"), r["sync"].get("reason", "in progress")))
 s = r.get("siblings", {})
 if s.get("ignored"):
     print("  siblings: ignored")
@@ -749,6 +813,7 @@ mkdir -p "$LAND_DIR"
 job=("$ROOT/scripts/land.sh" --run-job "$STAMP" --repo "$REPO" --remote "$REMOTE" \
   --target "$TARGET" --gate "$GATE" --ci-wait "$CI_WAIT" --sibling-wait "$SIBLING_WAIT")
 [ -z "$HANDOFF_TO" ] || job+=(--handoff-receipt-to "$HANDOFF_TO")
+[ -z "$SYNC_TO" ] || job+=(--sync-shared "$SYNC_TO")
 [ "$UPDATE" -eq 1 ] || job+=(--no-update)
 [ "$IGNORE_SIBLINGS" -eq 0 ] || job+=(--ignore-siblings)
 if [ "$WAIT" -eq 1 ]; then

@@ -112,6 +112,12 @@ SHA may be an ancestor of a destination another main advanced. Omitting
 `--no-update` retains normal CI/install steps and exact-tip safety checks.
 Ordinary receipt lookup stays clone-local;
 see [receipt handoff](COMPONENTS.md#plans-and-bounded-autonomy).
+To refresh the shared checkout's scripts after a passed land and handoff, add
+`--sync-shared PATH` with an explicit checkout path. The separate refresh respects
+live-call locks and refuses dirty or diverged trees; deferred/refused sync is
+reported in land status without failing the passed land. Its companion sync
+receipt preserves the original handed-off landing bytes. Without this flag,
+handoff leaves the checkout untouched.
 
 The board offers `[+ Claude main]`, `[+ Pi main]` and `[+ Codex main]` for installed harnesses
 when no main is active. A click, or `n` then `1` (Claude), `2` (Pi) or `0` (Codex), starts the

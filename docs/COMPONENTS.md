@@ -852,6 +852,23 @@ retry them after sync finishes. Dead PID/start identities are reclaimed,
 while incomplete or unprovable lock owners continue to block. This refresh
 does not push, install or supply landing evidence.
 
+To request this refresh as a separate step of landing, add
+`--sync-shared /path/to/shared-checkout` to `oms land`. PATH is required and
+independent of `--handoff-receipt-to PATH`; use both to transfer landing evidence
+and then refresh that checkout. Sync runs only after land passes and any handoff
+succeeds. Deferred (exit 75) or refused sync leaves land passed with exit zero;
+the land log and text status show `sync deferred: reason` or
+`sync refused: reason`. Retry the same command when the checkout is idle and
+clean. Omitting the flag preserves the target HEAD, index and worktree during
+handoff.
+
+The refresh outcome is stored in `sync/<request>.json` beside the producer's
+landing receipt, with `sync.state` (`running`, `passed`, `deferred` or `refused`),
+path, exit code and reason. `oms land status` includes this companion's `sync`
+fields in JSON and text output. Keeping this mutable operation separate preserves
+the original landing receipt bytes and handed-off digests, including on retries;
+the companion is not imported as landing evidence.
+
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
 compiles each bounded Bash-compatible glob once, and emits one deny-first

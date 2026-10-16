@@ -23,6 +23,11 @@ state_land="$XDG_STATE_HOME/oh-my-setting/land"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+if "$LAND" --sync-shared --wait > "$TMP/sync-path.out" 2>&1; then
+  fail "--sync-shared accepted a missing PATH"
+fi
+grep -q -- '--sync-shared requires PATH' "$TMP/sync-path.out" || fail "missing sync PATH was not diagnosed"
+
 registry_snapshot() {
   python3 - "$1" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
@@ -696,11 +701,12 @@ for handoff_failure in gate ci skipped; do
   handoff_ci=failure
   [ "$handoff_failure" != skipped ] || handoff_wait=0
   if OMS_TEST_CI_RESULT="$handoff_ci" "$LAND" --repo "$repo" --wait --no-update \
-      --ci-wait "$handoff_wait" --handoff-receipt-to "$handoff" > "$TMP/handoff-failed.out" 2>&1; then
+      --ci-wait "$handoff_wait" --handoff-receipt-to "$handoff" --sync-shared "$handoff" > "$TMP/handoff-failed.out" 2>&1; then
     fail "handoff accepted $handoff_failure: $(cat "$TMP/handoff-failed.out")"
   fi
   [ ! -d "$handoff_dir" ] || [ -z "$(find "$handoff_dir" -name '*.json' -print)" ] ||
     fail "failed/skipped-CI land imported receipts"
+  [ ! -d "$receipt_dir/sync" ] || fail "failed land/handoff attempted shared sync"
 done
 predecessor="$(git -C "$repo" rev-parse HEAD)"
 predecessor_receipt="$(find "$receipt_dir" -name "$predecessor-*.json" -print)"
@@ -713,6 +719,7 @@ cmp "$handoff_receipt" "$handoff_dir/$(basename "$handoff_receipt")" || fail "re
 cmp "$predecessor_receipt" "$handoff_dir/$(basename "$predecessor_receipt")" || fail "predecessor handoff changed bytes"
 [ "$(find "$handoff_dir" -name '*.json' -print | wc -l | tr -d ' ')" = 2 ] || fail "handoff imported unrelated receipts"
 [ "$(git -C "$handoff" rev-parse HEAD)" = "$handoff_head" ] || fail "handoff moved target HEAD"
+[ ! -d "$receipt_dir/sync" ] || fail "handoff without --sync-shared attempted sync"
 [ "$(git -C "$handoff" status --porcelain)" = "$handoff_status" ] || fail "handoff changed target work"
 [ "$(registry_snapshot "$handoff")" = "$handoff_registry" ] || fail "handoff changed target worktree registry"
 git -C "$handoff" merge-base --is-ancestor "$handoff_sha" origin/main || fail "target destination was not fetched"
@@ -1213,5 +1220,60 @@ if PATH="$TMP/tick-bin:$PATH" OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$T
 fi
 grep -q 'install update exit 42' "$TMP/tick.out" ||
   fail "a one-second CI wait skipped its query: $(cat "$TMP/tick.out")"
+
+# Refresh is a separate, opt-in step after successful land and handoff. Keep
+# its mutable result beside immutable landing evidence, never in its digest.
+for sync_mode in passed deferred refused; do
+  sync_target="$TMP/sync-$sync_mode"
+  git clone -q "$TMP/remote.git" "$sync_target" 2>/dev/null
+  sync_head="$(git -C "$sync_target" rev-parse HEAD)"
+  gate "echo sync $sync_mode"
+  sync_sha="$(git -C "$repo" rev-parse HEAD)"
+  if [ "$sync_mode" = refused ]; then
+    printf 'local dirty work\n' > "$sync_target/local.txt"
+  fi
+  (
+    . "$ROOT/scripts/lib/canonical-sync.sh"
+    if [ "$sync_mode" = deferred ]; then
+      oms_canonical_call_acquire "$sync_target" held-land-sync
+    fi
+    OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+      --handoff-receipt-to "$sync_target" --sync-shared "$sync_target" > "$TMP/sync-$sync_mode.out" 2>&1 ||
+      fail "sync $sync_mode changed land success: $(cat "$TMP/sync-$sync_mode.out")"
+    oms_canonical_call_release
+  ) || exit 1
+  "$LAND" status --repo "$repo" --json > "$TMP/sync-status.json"
+  sync_receipt="$(find "$receipt_dir" -maxdepth 1 -name "$sync_sha-*.json" -print)"
+  sync_dir="$("$LAND" status --repo "$sync_target" --json | python3 -c 'import json,sys,pathlib; print(pathlib.Path(json.load(sys.stdin)["log"]).parent)')"
+  cmp "$sync_receipt" "$sync_dir/$(basename "$sync_receipt")" || fail "sync changed handed-off receipt bytes"
+  python3 - "$TMP/sync-status.json" "$receipt_dir/sync/$(basename "$sync_receipt")" "$sync_mode" <<'PY' || fail "wrong sync receipt/status"
+import json, sys
+status, companion = [json.load(open(path)) for path in sys.argv[1:3]]
+assert status['state'] == 'passed', status
+assert status['sync'] == companion['sync'], (status, companion)
+assert status['sync']['state'] == sys.argv[3], status
+assert status['sync']['rc'] == {'passed': 0, 'deferred': 75, 'refused': 2}[sys.argv[3]], status
+assert status['sync']['reason'], status
+PY
+  grep -q "sync $sync_mode:" "$TMP/sync-$sync_mode.out" || fail "sync result missing from status line"
+  grep -q "sync $sync_mode:" "$(log_of "$sync_receipt")" || fail "sync result missing from land log"
+  if [ "$sync_mode" = passed ]; then
+    [ "$(git -C "$sync_target" rev-parse HEAD)" = "$sync_sha" ] || fail "sync did not fast-forward target"
+  else
+    [ "$(git -C "$sync_target" rev-parse HEAD)" = "$sync_head" ] || fail "sync $sync_mode moved target HEAD"
+    if [ "$sync_mode" = deferred ]; then
+      grep -q 'sync deferred: 1 calls running (held-land-sync)' "$TMP/sync-deferred.out" || fail "defer reason missing"
+      # Handoff retries keep the same landing bytes after a mutable sync result.
+      OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+        --handoff-receipt-to "$sync_target" --sync-shared "$sync_target" > "$TMP/sync-retry.out" 2>&1 ||
+        fail "deferred sync retry failed: $(cat "$TMP/sync-retry.out")"
+      [ "$(git -C "$sync_target" rev-parse HEAD)" = "$sync_sha" ] || fail "retry did not refresh idle target"
+      cmp "$sync_receipt" "$sync_dir/$(basename "$sync_receipt")" || fail "sync retry changed handoff bytes"
+    else
+      grep -q 'sync refused: dirty shared checkout' "$TMP/sync-refused.out" || fail "dirty refusal reason missing"
+      [ "$(cat "$sync_target/local.txt")" = 'local dirty work' ] || fail "refused sync changed dirty work"
+    fi
+  fi
+done
 
 echo "land-smoke: ok"
