@@ -443,8 +443,12 @@ write_prompt() {
   local question="$3"
   local diff_file="$4"
   local status_file="$5"
+  local reviewer_profile="$6"
 
   {
+    printf '## Reviewer role profile\n\n'
+    cat "$reviewer_profile"
+    printf '\n\n'
     printf 'You are one seat in a multi-provider review council.\n'
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Find bugs, regressions, unclear contracts, and unsafe operations.\n'
@@ -667,6 +671,10 @@ fi
 oms_require_peer_owner || exit $?
 REPO="$(cd "$REPO" && pwd)"
 ma_resolve_read_repositories review || fail "cannot resolve review source and state repositories"
+reviewer_profile="$(bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-role.sh" \
+  --repo "$MA_READ_SOURCE_REPO" --name reviewer resolve)" ||
+  fail "reviewer role profile not found"
+reviewer_profile="${reviewer_profile//$'\r'/}"
 git -C "$MA_READ_SOURCE_REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $MA_READ_SOURCE_REPO"
 if [ -n "$BASE_REF" ]; then
   git -C "$MA_READ_SOURCE_REPO" rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null ||
@@ -888,7 +896,7 @@ else
   : > "$raw_diff_file"
 fi
 
-write_prompt "$prompt_file" "$MA_READ_SOURCE_REPO" "$PROMPT" "$diff_file" "$status_file"
+write_prompt "$prompt_file" "$MA_READ_SOURCE_REPO" "$PROMPT" "$diff_file" "$status_file" "$reviewer_profile"
 # Freeze the reviewed-diff identity now: the typed outcome row must bind the
 # exact bytes the seats judged, not whatever the tree holds at exit.
 REVIEW_DIFF_SHA=""

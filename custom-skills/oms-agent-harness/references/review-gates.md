@@ -15,12 +15,14 @@ release matrix is not the default for projects using OMS. Do not expand their
 CI or required checks as a side effect of ordinary feature work.
 
 Other projects use their declared release check, not an inferred full suite.
-For an authorized OMS deployment, finish focused checks and local commits, then use
-`oms land` to run the full gate once, push the verified SHA, follow CI, and
-update the installation only after success. Skipped CI does not authorize an
-installation refresh. It owns that sequence; do not precede it with another full gate or
-add a separate verification-cache authority. A direct Git push retains the
-installed hook. `install-hooks.sh --quick` is only appropriate when required
+For an authorized OMS deployment, finish focused checks and local commits, then
+use `oms land` once. Its default affected gate can push the committed SHA and
+follow CI, but does not install. Installation requires successful CI for that
+SHA plus full proof: CI jobs that executed the full selection, or an explicit
+full local gate. Skipped CI or an affected-only gate does not authorize an
+installation refresh. `oms land` owns that sequence; do not precede it with
+another full gate or add a separate verification-cache authority. A direct Git
+push retains the installed hook. `install-hooks.sh --quick` is only appropriate when required
 branch-protection checks enforce the risk-based CI `gate`; mere workflow presence
 is not that guarantee. Hook installation resolves Git's hooks path, including
 linked worktrees and explicit `core.hooksPath` configuration.

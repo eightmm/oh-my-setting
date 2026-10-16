@@ -198,7 +198,7 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
     model = ([] if route["model"] == "provider-default" else ["--model", route["model"]]) + effort
     if route["role"] == "advisor":
         return prefix + ["advise", "--repo", str(repo), "--to", route["provider"],
-                         "--no-failures", "--no-task", "--no-memory"] + request + model
+                         "--strategy", "advisor", "--no-failures", "--no-task", "--no-memory"] + request + model
     if route["role"] == "reviewer":
         target = route["provider"] + (":model=" + route["model"] if route["model"] != "provider-default" else "")
         if brief:

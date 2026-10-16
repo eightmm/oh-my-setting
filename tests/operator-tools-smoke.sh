@@ -5875,6 +5875,8 @@ for role, target in (("advisor", "grok"), ("reviewer", "muse")):
         request += ["--verify", "test -f value.txt"]
     planned = json.loads(call(request + ["--dry-run"]))
     assert planned["argv"][2] == ("advise" if role == "advisor" else "peer-review")
+    if role == "advisor":
+        assert planned["argv"][planned["argv"].index("--strategy") + 1] == "advisor", planned["argv"]
     assert "--reasoning-effort" not in planned["argv"]
     call(request, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 opted_in = dict(environment, OMS_PROVIDER_WRITE_ADAPTERS="muse")

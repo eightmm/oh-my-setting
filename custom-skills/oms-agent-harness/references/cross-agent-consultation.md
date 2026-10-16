@@ -9,15 +9,20 @@ not independent viewpoints. Reuse a live thread when only a message is needed.
 ## One command
 
 ```bash
-oms consult "question"                 # peer that is not you, with context
+oms consult --to codex "question"      # one pinned peer, with context
 oms consult --all "question"           # every installed peer, in parallel
-oms consult --to codex "question"      # pin the peer
 ```
 
-It picks a provider other than the caller, attaches the active task, injects
-the running conversation, records question and answer, and prints the answer.
+An unpinned call picks a provider other than the caller, attaches the active
+task, injects the running conversation, and may retry another provider after a
+failed or unusable answer. Pin `--to PROVIDER` for a one-peer budget or when
+context must stay with one target; this disables automatic cross-provider
+retry. Consult records question and answer and prints the answer.
 Shared memory holds prior conclusions, so it is opt-in (`--memory`): a second
-opinion anchored on the first one is not a second opinion. Artifacts land
+opinion anchored on the first one is not a second opinion. A pinned provider
+still receives the current conversation by default. For an independent read,
+use `--new-thread` to avoid replaying prior turns; use `--thread ID` only to
+continue a discussion. Artifacts land
 under `.oms/artifacts/consult`.
 
 For independent answers to the same conceptual or planning question, use the
@@ -54,7 +59,7 @@ last answer still rides the synthesis, but it cannot rebut anyone):
 
 ```bash
 OMS_PEER_TIMEOUT=900 oms peer-ask --repo-context --debate 2 \
-  --providers codex,claude,antigravity --print-timeout 10m \
+  --providers codex,claude,antigravity \
   --thread topic-slug --prompt "..."
 ```
 

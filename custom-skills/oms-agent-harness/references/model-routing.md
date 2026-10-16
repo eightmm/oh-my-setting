@@ -36,13 +36,13 @@ background advisor or require another model call for routine completion.
 
 ## Existing router contract
 
-Panel dispatch uses each role's capability tier and optional provider preference:
-Codex for implementation/documentation/integration, Claude for judgment, and
-tier order for research. Installed candidates with recorded weekly usage at 90%
-or above are skipped when another is installed; unknown readings remain available,
+Panel dispatch uses each role's capability tier and the configured tier order;
+the current configuration sets no role-specific provider preferences. Installed
+candidates with recorded weekly usage at 90% or above are skipped when another
+is installed; unknown readings remain available,
 a sole installed candidate is retained, and all saturated alternatives fail.
-Reviewer/verifier/security-auditor/critic independence wins over preference when
-both available candidates include the main's preferred provider. `--to codex|claude`
+Reviewer/verifier/security-auditor/critic routes prefer a provider other than the
+main's when both providers are available. `--to codex|claude`
 without `--model` pins that provider's tier candidate and effort; explicit models
 remain exact, and other model-selecting transports still require `--model`.
 `--routes` shows tiers, preferences and chosen candidates; owner detection follows

@@ -18429,6 +18429,26 @@ test_agent_role_and_delegate_injection() {
     fail "delegate --role should succeed"
   assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'STRICT-API-REVIEWER'
 
+  # Panel reviewer prompt loading uses the same project/global/bundled resolver.
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" --repo "$project" \
+    --artifact-dir "$project/reviewer-panel-artifacts" --providers codex --prompt "Review current diff" >/dev/null ||
+    fail "panel reviewer dry-run should succeed"
+  assert_one_artifact_contains "$project/reviewer-panel-artifacts" 'codex-review-*.md' 'STRICT-API-REVIEWER'
+  printf 'PANEL-ADVISOR-PROFILE\n' > "$project/.oms/roles/advisor.md"
+  "$ROOT/scripts/advise.sh" --repo "$project" --to codex --strategy advisor \
+    --artifact-dir "$project/advisor-panel-artifacts" --prompt "Choose a direction" --dry-run >/dev/null ||
+    fail "panel advisor dry-run should succeed"
+  assert_one_artifact_contains "$project/advisor-panel-artifacts" 'codex-*.md' 'PANEL-ADVISOR-PROFILE'
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT" "$project" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "scripts/lib"))
+import panel_routing
+route = {"role": "advisor", "provider": "codex", "model": "gpt-6-astra", "effort": "high", "access": "read"}
+argv = panel_routing.command(Path(sys.argv[1]) / "oms", Path(sys.argv[2]), route, prompt="choose")
+assert argv[2] == "advise" and argv[argv.index("--strategy") + 1] == "advisor", argv
+PY
+
   # Unknown role fails fast.
   if ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --role nope --prompt x >/dev/null 2>&1 ); then

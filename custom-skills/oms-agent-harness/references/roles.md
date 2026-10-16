@@ -77,8 +77,20 @@ publication authority. Project and global overrides retain precedence.
 | `release-engineer` | Prepare packaging, deployment and rollback when releasing | Read-only preparation; execution needs separate authorization |
 
 In the terminal panel, `oms panel --dispatch ROLE` accepts `worker`, `researcher`
-and every role above; the model comes from the role's capability tier (light,
-routine, deep, frontier) across installed providers, not from a provider choice.
+and the built-in strategies below. Existing standard names remain valid for
+`peer-delegate --role`; use this panel mapping when dispatching from the panel:
+
+| Standard role | Panel front door |
+|---|---|
+| `repo-auditor` | `researcher` (bounded lookup) or `reviewer` (diff review) |
+| `implementation-worker` | `worker --access write` |
+| `test-designer` | `advisor` (test strategy) or `worker --access write` (test implementation) |
+| `patch-reviewer` | `reviewer` |
+| `decision-advisor` | `advisor` |
+
+Other built-in strategies are accepted directly. The model comes from the
+role's capability tier (light, routine, deep, frontier) across installed
+providers, not from a provider choice.
 Only `worker`, `builder`, `refactorer`, `documenter`, `integrator` and
 `performance-engineer` may take `--access write`.
 
@@ -93,3 +105,9 @@ authorized instance only when needed; the main retains final acceptance.
 
 Each profile returns source or patch evidence, actual checks, and unresolved
 limits. No profile permits recursive delegation or expands existing authority.
+
+Panel `advisor` and `reviewer` dispatches load `roles/advisor.md` and
+`roles/reviewer.md` through the same project override, global override, bundled
+default resolver used by `oms agent-role`. The standalone advisor defaults to
+`decision-advisor`; select `--strategy advisor` when the panel strategy is
+desired.
