@@ -30,7 +30,8 @@ injected into a delegated worker brief with peer-delegate.sh --role NAME.
 Options:
   --repo PATH   Repo for project-scoped roles (default: PWD, git-root anchored).
   --name NAME   Role name ([A-Za-z0-9._-]+). Required for show/path/resolve/init.
-  --global      Use the global role store instead of the repo.
+  --global      Use the global role store instead of the repo; resolve/show
+                fall back only to bundled roles.
   -h, --help    Show help.
 
 Commands:
@@ -113,7 +114,7 @@ case "$ACTION" in
     ;;
   resolve|show)
     resolved=""
-    [ -n "$proj_dir" ] && [ -f "$proj_dir/$NAME.md" ] && resolved="$proj_dir/$NAME.md"
+    [ "$SCOPE" != global ] && [ -n "$proj_dir" ] && [ -f "$proj_dir/$NAME.md" ] && resolved="$proj_dir/$NAME.md"
     [ -z "$resolved" ] && [ -f "$glob_dir/$NAME.md" ] && resolved="$glob_dir/$NAME.md"
     [ -z "$resolved" ] && [ -f "$bundled_dir/$NAME.md" ] && resolved="$bundled_dir/$NAME.md"
     [ -n "$resolved" ] || {

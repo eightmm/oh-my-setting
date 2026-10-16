@@ -671,8 +671,11 @@ fi
 oms_require_peer_owner || exit $?
 REPO="$(cd "$REPO" && pwd)"
 ma_resolve_read_repositories review || fail "cannot resolve review source and state repositories"
+reviewer_profile_scope=(--name reviewer)
+# A gate cannot take instructions from the tree whose patch it is judging.
+[ "$GATE" -eq 0 ] || reviewer_profile_scope=(--global --name reviewer)
 reviewer_profile="$(bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-role.sh" \
-  --repo "$MA_READ_SOURCE_REPO" --name reviewer resolve)" ||
+  --repo "$MA_READ_SOURCE_REPO" "${reviewer_profile_scope[@]}" resolve)" ||
   fail "reviewer role profile not found"
 reviewer_profile="${reviewer_profile//$'\r'/}"
 git -C "$MA_READ_SOURCE_REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $MA_READ_SOURCE_REPO"

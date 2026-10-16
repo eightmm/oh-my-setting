@@ -88,7 +88,7 @@ Options:
                  from structural admission, bound to the patch digest.
   --keep-worktree  Keep the worktree for inspection.
   --allow-verifier-change  Permit a patch that modifies the verify command's
-                 own files. Assertion-only test additions need no override.
+                 own files, including assertion-only test additions.
                  The base-owned verification floor still runs.
   --allow-test-reduction  Admit a patch that net-removes test assertions or
                  deletes a test file (normally rejected: passing by deleting
@@ -471,7 +471,6 @@ EOF
       scan_surface() {
         OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" OMS_WORKTREE="$worktree" \
           OMS_ACCEPTANCE_FILES="$ACCEPTANCE_FILES" python3 - <<'SURFACE_PY'
-import difflib
 import os
 import posixpath
 import re
@@ -484,9 +483,10 @@ def base(path):
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return result.stdout if result.returncode == 0 else None
 
-# Operand readers inspect files without running them; their operands are data.
-READERS = {"grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "sed", "awk", "wc", "diff", "cmp",
-           "test", "[", "jq", "ls", "stat", "file", "sha256sum", "shasum", "md5sum"}
+# Pure reader operands are data; tools that load programs need a broader surface.
+READERS = {"grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "sed", "awk", "gawk", "mawk", "nawk", "wc", "diff", "cmp",
+           "test", "[", "jq", "ls", "stat", "file", "shasum", "md5sum", "cksum", "sum",
+           "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "b2sum"}
 
 def resolve(token, cwd=""):
     if os.path.isabs(token):
@@ -496,8 +496,33 @@ def resolve(token, cwd=""):
     path = posixpath.normpath(token)
     return path if path != ".." and not path.startswith("../") else ""
 
-# Only executed paths confer verifier authority. Arguments to grep, hashes or
-# other content readers remain product inputs, even if their basename matches
+def system_command(token):
+    # Repository paths retain their identity even when named like a wrapper,
+    # interpreter or reader. Only bare commands and conventional system paths
+    # get the argument semantics of those tools.
+    return "/" not in token or (os.path.isabs(token) and
+        posixpath.dirname(posixpath.normpath(token)) in ("/bin", "/usr/bin", "/usr/local/bin")
+        and not resolve(token))
+
+def program_files(executable, args, cwd):
+    if executable not in ("awk", "gawk", "mawk", "nawk", "sed", "jq"):
+        return
+    # Option sets vary by tool/version. Every existing file operand is part
+    # of the verifier, including data operands, so grouped flags cannot hide
+    # a program. Retain the conventional attached file-option spellings.
+    for arg in args:
+        targets = [arg]
+        for prefix in ("--file=", "--from-file=", "-f"):
+            if arg.startswith(prefix):
+                targets.append(arg[len(prefix):])
+        for target in targets:
+            path = resolve(target, cwd)
+            if path and (os.path.isfile(os.path.join(wt, path)) or base(path) is not None):
+                named.add(path)
+
+# Executed paths and program-tool file operands confer verifier authority.
+# Arguments to grep, hashes or other content readers remain product inputs,
+# even if their basename matches
 # a script elsewhere. Do not evaluate shell expansions while classifying them.
 named = set()
 new_only = []
@@ -525,7 +550,7 @@ def commands(command, cwd="", candidate_eligible=True):
         # still name x.sh; a wrapped verifier must not escape consent or the floor.
         while parts:
             head = os.path.basename(parts[0])
-            if head in ("command", "env", "exec", "time", "nohup", "builtin", "stdbuf", "nice", "timeout"):
+            if system_command(parts[0]) and head in ("command", "env", "exec", "time", "nohup", "builtin", "stdbuf", "nice", "timeout"):
                 parts = parts[1:]
                 while parts and (parts[0] == "--" or parts[0].startswith("-")
                                  or re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", parts[0])):
@@ -540,7 +565,8 @@ def commands(command, cwd="", candidate_eligible=True):
             break
         if not parts:
             continue
-        executable = os.path.basename(parts[0])
+        executable = os.path.basename(parts[0]) if system_command(parts[0]) else ""
+        program_files(executable, parts[1:], cwd)
         if executable in (".", "source") and len(parts) > 1:
             path = resolve(parts[1], cwd)
             if path:
@@ -581,28 +607,6 @@ HELPER_PATH = re.compile(
 TEST_PATH = re.compile(
     r"(^|/)(tests?|spec)(/|$)|(^|/)test_[^/]+$|"
     r"[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$")
-# This exemption permits assertion additions, not an arbitrary insertion such
-# as `exit 0`, a skip decorator, or a replacement of an existing assertion.
-ASSERTION = re.compile(
-    r"^(?:assert\s+|self\.assert\w+\(|(?:contains|lacks|assert_\w+)\s+|"
-    r"\[.*\]\s*\|\|\s*fail\s+|test\s+.*\|\|\s*fail\s+)")
-def assertion_extension(path, old):
-    if old is None or not TEST_PATH.search(path):
-        return False
-    try:
-        new = open(os.path.join(wt, path), "rb").read()
-        before, after = old.decode("utf-8").splitlines(), new.decode("utf-8").splitlines()
-    except (OSError, UnicodeError):
-        return False
-    additions = []
-    for tag, a, b, c, d in difflib.SequenceMatcher(a=before, b=after, autojunk=False).get_opcodes():
-        if tag not in ("equal", "insert"):
-            return False
-        if tag == "insert":
-            additions.extend(line.strip() for line in after[c:d])
-    code = [line for line in additions if line and not line.startswith("#")]
-    return bool(code) and all(ASSERTION.match(line) and ";" not in line for line in code)
-
 for f in os.environ["OMS_CHANGED"].splitlines():
     if not f:
         continue
@@ -614,7 +618,7 @@ for f in os.environ["OMS_CHANGED"].splitlines():
         print("surface\t" + f)
         if old is not None:
             print("existing\t" + f)
-    if (direct or common or explicit) and old is not None and not assertion_extension(f, old):
+    if (direct or common or explicit) and old is not None:
         print("verifier\t" + f)
 if len(new_only) == 1:
     print("candidate-only\t" + new_only[0])

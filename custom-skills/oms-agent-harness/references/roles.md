@@ -108,6 +108,8 @@ limits. No profile permits recursive delegation or expands existing authority.
 
 Panel `advisor` and `reviewer` dispatches load `roles/advisor.md` and
 `roles/reviewer.md` through the same project override, global override, bundled
-default resolver used by `oms agent-role`. The standalone advisor defaults to
+default resolver used by `oms agent-role`, except review gates: `peer-review --gate`
+uses `agent-role --global` resolution (global override, then bundled default),
+excluding worker-mutable project reviewer profiles. The standalone advisor defaults to
 `decision-advisor`; select `--strategy advisor` when the panel strategy is
 desired.

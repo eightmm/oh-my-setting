@@ -18666,11 +18666,26 @@ test_agent_role_and_delegate_injection() {
     fail "delegate --role should succeed"
   assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'STRICT-API-REVIEWER'
 
-  # Panel reviewer prompt loading uses the same project/global/bundled resolver.
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" --repo "$project" \
-    --artifact-dir "$project/reviewer-panel-artifacts" --providers codex --prompt "Review current diff" >/dev/null ||
-    fail "panel reviewer dry-run should succeed"
-  assert_one_artifact_contains "$project/reviewer-panel-artifacts" 'codex-review-*.md' 'STRICT-API-REVIEWER'
+  # Review gates cannot promote worker-mutable project profiles to instructions.
+  printf 'GLOBAL-REVIEWER-PROFILE\n' > "$TMP/global-roles/reviewer.md"
+  local review_scope review_profile review_artifacts
+  for review_scope in project global bundled; do
+    review_artifacts="$TMP/reviewer-$review_scope-artifacts"
+    review_profile=STRICT-API-REVIEWER
+    [ "$review_scope" != global ] || review_profile=GLOBAL-REVIEWER-PROFILE
+    [ "$review_scope" != bundled ] || review_profile=REVIEWER-STRATEGY
+    local review_options=(--providers codex)
+    [ "$review_scope" = project ] || review_options+=(--gate --no-verify --no-diff --export-only)
+    [ "$review_scope" != bundled ] || rm "$TMP/global-roles/reviewer.md"
+    OH_MY_SETTING_ROLES_DIR="$TMP/global-roles" OH_MY_SETTING_REVIEW_DRY_RUN=1 \
+      "$ROOT/scripts/peer-review.sh" --repo "$project" "${review_options[@]}" \
+      --artifact-dir "$review_artifacts" --prompt "Review current diff" >/dev/null ||
+      fail "$review_scope reviewer dry-run should succeed"
+    assert_one_artifact_contains "$review_artifacts" 'codex-review-*.md' "$review_profile"
+    if [ "$review_scope" != project ] && grep -Fq STRICT-API-REVIEWER "$review_artifacts"/codex-review-*.md; then
+      fail "review gate loaded a worker-mutable project reviewer profile"
+    fi
+  done
   printf 'PANEL-ADVISOR-PROFILE\n' > "$project/.oms/roles/advisor.md"
   "$ROOT/scripts/advise.sh" --repo "$project" --to codex --strategy advisor \
     --artifact-dir "$project/advisor-panel-artifacts" --prompt "Choose a direction" --dry-run >/dev/null ||

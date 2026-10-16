@@ -11,7 +11,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-admit-verifier-floor.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-contains() { grep -Fq -- "$2" "$1" || fail "$1 missing: $2"; }
+contains() { grep -Fq -- "$2" "$1" || { cat "$1" >&2; fail "$1 missing: $2"; }; }
 
 repo="$TMP/repo"
 mkdir -p "$repo"
@@ -330,11 +330,18 @@ cat > "$repo/tests/feature.sh" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 fail() { echo "$*" >&2; exit 1; }
+contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+out='plain text'
 [ -s src/value.txt ] || fail "missing value"
 EOF
 printf '# product\n' > "$repo/src/feature.sh"
 printf 'value = 1\n' > "$repo/src/feature.py"
-git -C "$repo" add tests/feature.sh src/feature.sh src/feature.py
+printf 'assert True\n' > "$repo/tests/feature.py"
+printf '$0 != "good" { exit 1 }\n' > "$repo/quality/oracle.awk"
+printf 'select(. == "good") // error("bad value")\n' > "$repo/quality/oracle.jq"
+printf 'p\n' > "$repo/quality/oracle.sed"
+cp "$repo/quality/oracle.sh" "$repo/quality/env"
+git -C "$repo" add tests/feature.sh tests/feature.py src/feature.sh src/feature.py quality
 git -C "$repo" commit -qm exact-verifier-fixtures
 printf '# changed product\n' >> "$repo/src/feature.sh"
 git -C "$repo" diff > "$TMP/same-name.patch"
@@ -350,20 +357,160 @@ git -C "$repo" checkout -q -- src/feature.py
   --verify 'grep -qx "value = 2" src/feature.py' --report "$TMP/reader.md" >/dev/null 2>&1 ||
   fail "a content-reader argument was mistaken for its verifier"
 contains "$TMP/reader.md" 'verify: PASS'
+for reader in cat head tail wc ls stat file shasum md5sum cksum sum \
+  sha1sum sha224sum sha256sum sha384sum sha512sum b2sum diff cmp; do
+  command -v "$reader" >/dev/null 2>&1 || { echo "skip: $reader data-reader execution (not installed)"; continue; }
+  verify="$reader src/feature.py"
+  case "$reader" in diff|cmp) verify="$verify src/feature.py" ;; esac
+  "$ADMIT" --repo "$repo" --patch "$TMP/reader.patch" --verify "$verify" \
+    --report "$TMP/reader.md" >/dev/null 2>&1 || fail "$reader data operand was mistaken for a verifier"
+  contains "$TMP/reader.md" 'verify: PASS'
+done
 
-# Assertion-only extension of the invoked suite needs no verifier override.
+# Program tools treat every existing file operand as a verifier. Inline input
+# keeps the changed program as the only surface restored for these floor checks.
+for verify in 'awk -f quality/oracle.awk src/value.txt' \
+  'awk -fquality/oracle.awk src/value.txt' 'awk -f ./quality/oracle.awk src/value.txt' \
+  'sed -f quality/oracle.sed src/value.txt | grep -qx good' \
+  'sed -fquality/oracle.sed src/value.txt | grep -qx good' \
+  'sed -nf quality/oracle.sed src/value.txt | grep -qx good' \
+  'sed -bf quality/oracle.sed src/value.txt | grep -qx good' \
+  'jq -eR -f quality/oracle.jq src/value.txt' \
+  'jq -Rf -e quality/oracle.jq src/value.txt' \
+  'jq -eR --from-file quality/oracle.jq src/value.txt'; do
+  case "$verify" in
+    awk*) program=quality/oracle.awk; printf 'BEGIN { exit 0 }\n' > "$repo/$program" ;;
+    sed*) program=quality/oracle.sed; printf 's/^bad$/good/\np\n' > "$repo/$program" ;;
+    jq*) program=quality/oracle.jq; printf 'true\n' > "$repo/$program" ;;
+  esac
+  verify="printf 'bad\\n' | ${verify/ src\/value.txt/}"
+  git -C "$repo" diff > "$TMP/program.patch"
+  git -C "$repo" checkout -q -- "$program" src/value.txt
+  for consent in denied allowed; do
+    if [ "$consent" = allowed ]; then
+      case "$program" in *.jq)
+        command -v jq >/dev/null 2>&1 || { echo 'skip: jq floor execution (jq not installed)'; continue; } ;;
+        *.sed)
+        case "$verify" in *'sed -bf '*)
+          sed -b '' /dev/null >/dev/null 2>&1 || { echo 'skip: sed -b floor execution (not supported)'; continue; } ;;
+        esac ;;
+      esac
+    fi
+    rc=0
+    extra=(--report "$TMP/program.md")
+    [ "$consent" = denied ] || extra+=(--allow-verifier-change)
+    "$ADMIT" --repo "$repo" --patch "$TMP/program.patch" --verify "$verify" \
+      "${extra[@]}" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 1 ] || fail "program file bypassed $consent consent/floor: $verify"
+    if [ "$consent" = denied ]; then
+      contains "$TMP/program.md" 'verifier: FAIL'
+      contains "$TMP/program.md" 'verify: SKIP'
+    else
+      contains "$TMP/program.md" 'verify: PASS'
+      contains "$TMP/program.md" 'verify-floor: FAIL'
+    fi
+  done
+done
+
+# Even a data operand or a file following unfamiliar grouped flags is protected,
+# without depending on the program tool being installed or accepting those flags.
+for verify in 'awk -v ignored=1 src/feature.py' 'gawk -f src/feature.py' \
+  'mawk -f src/feature.py' 'nawk -f src/feature.py' \
+  'sed -bf src/feature.py' 'jq -Rf src/feature.py' \
+  'sed -n p src/feature.py' 'jq . src/feature.py' \
+  'cd src && sed -bf ./feature.py' 'command sed -bf src/feature.py'; do
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/reader.patch" --verify "$verify" \
+    --report "$TMP/program-operand.md" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "program operand bypassed consent: $verify"
+  contains "$TMP/program-operand.md" 'verifier: FAIL'
+  contains "$TMP/program-operand.md" 'verify: SKIP'
+done
+
+# Removing a named program cannot hide it from consent after it stops existing
+# in the candidate worktree.
+rm "$repo/quality/oracle.sed"
+git -C "$repo" diff > "$TMP/deleted-program.patch"
+git -C "$repo" checkout -q -- quality/oracle.sed
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/deleted-program.patch" \
+  --verify 'sed -bf quality/oracle.sed src/value.txt' \
+  --report "$TMP/deleted-program.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "deleted program bypassed verifier consent"
+contains "$TMP/deleted-program.md" 'verifier: FAIL'
+contains "$TMP/deleted-program.md" 'verify: SKIP'
+
+# A repository executable named like a wrapper is the verifier itself.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/quality/env"
+printf 'bad\n' > "$repo/src/value.txt"
+git -C "$repo" diff > "$TMP/repo-wrapper.patch"
+git -C "$repo" checkout -q -- quality/env src/value.txt
+for wrapper in quality/env ./quality/env; do
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/repo-wrapper.patch" \
+    --verify "$wrapper true" --report "$TMP/repo-wrapper.md" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "repository wrapper bypassed consent: $wrapper"
+  contains "$TMP/repo-wrapper.md" 'verifier: FAIL'
+  contains "$TMP/repo-wrapper.md" 'verify: SKIP'
+done
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/repo-wrapper.patch" \
+  --verify 'quality/env true' --allow-verifier-change \
+  --report "$TMP/repo-wrapper.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "repository wrapper bypassed the base floor"
+contains "$TMP/repo-wrapper.md" 'verify: PASS'
+contains "$TMP/repo-wrapper.md" 'verify-floor: FAIL'
+
+# Every change to an invoked suite needs consent, including pure assertions.
 printf '[ -f src/feature.py ] || fail "missing product"\n' >> "$repo/tests/feature.sh"
+printf '%s\n' 'contains "$out" text' >> "$repo/tests/feature.sh"
 git -C "$repo" diff > "$TMP/assertion-extension.patch"
 git -C "$repo" checkout -q -- tests/feature.sh
+rc=0
 "$ADMIT" --repo "$repo" --patch "$TMP/assertion-extension.patch" \
-  --verify 'bash tests/feature.sh' --report "$TMP/assertion-extension.md" >/dev/null 2>&1 ||
-  fail "assertion-only verifier extension required an override"
+  --verify 'bash tests/feature.sh' --report "$TMP/assertion-extension.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "assertion-only verifier extension bypassed consent"
+contains "$TMP/assertion-extension.md" 'verifier: FAIL'
+contains "$TMP/assertion-extension.md" 'verify: SKIP'
+"$ADMIT" --repo "$repo" --patch "$TMP/assertion-extension.patch" \
+  --verify 'bash tests/feature.sh' --allow-verifier-change \
+  --report "$TMP/assertion-extension.md" >/dev/null 2>&1 || fail "consented assertion extension rejected"
+contains "$TMP/assertion-extension.md" 'verify: PASS'
 contains "$TMP/assertion-extension.md" 'verify-floor: PASS'
+printf 'assert 1 == 1\nassert "x" in "text"\n' >> "$repo/tests/feature.py"
+git -C "$repo" diff > "$TMP/python-extension.patch"
+git -C "$repo" checkout -q -- tests/feature.py
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/python-extension.patch" \
+  --verify 'python3 tests/feature.py' --report "$TMP/python-extension.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "pure Python assertion append bypassed consent"
+contains "$TMP/python-extension.md" 'verifier: FAIL'
+contains "$TMP/python-extension.md" 'verify: SKIP'
+"$ADMIT" --repo "$repo" --patch "$TMP/python-extension.patch" \
+  --verify 'python3 tests/feature.py' --allow-verifier-change \
+  --report "$TMP/python-extension.md" >/dev/null 2>&1 || fail "consented Python extension rejected"
+contains "$TMP/python-extension.md" 'verify: PASS'
+contains "$TMP/python-extension.md" 'verify-floor: PASS'
 # Replacing an assertion with a weaker one is not an extension, even when the
 # assertion count is unchanged. Inserting an early exit is not one either.
-for edit in weaken early-exit; do
+for edit in weaken early-exit inserted-assert assertion-side-effect assertion-branch assertion-expansion; do
   if [ "$edit" = weaken ]; then
     sed 's/\[ -s src\/value.txt \]/[ -n src\/value.txt ]/' "$repo/tests/feature.sh" > "$TMP/feature.new"
+  elif [ "$edit" = inserted-assert ]; then
+    sed '/set -eu/a\
+[ -f src/feature.py ] || fail "missing product"' "$repo/tests/feature.sh" > "$TMP/feature.new"
+  elif [ "$edit" = assertion-side-effect ]; then
+    cat "$repo/tests/feature.sh" > "$TMP/feature.new"
+    printf '[ -n "$(touch "$OMS_TEST_SIDE_EFFECT")" ] || fail "side effect"\n' >> "$TMP/feature.new"
+  elif [ "$edit" = assertion-branch ]; then
+    cat "$repo/tests/feature.sh" > "$TMP/feature.new"
+    printf '%s\n' 'contains "$out" absent || touch "$OMS_TEST_SIDE_EFFECT"' >> "$TMP/feature.new"
+  elif [ "$edit" = assertion-expansion ]; then
+    cat "$repo/tests/feature.sh" > "$TMP/feature.new"
+    cat >> "$TMP/feature.new" <<'EOF_EXPANSION'
+contains text text ${probe:=$'\x24\x28touch "$OMS_TEST_SIDE_EFFECT"\x29'}
+contains text text ${probe@P}
+EOF_EXPANSION
   else
     sed '/set -eu/a\
 exit 0' "$repo/tests/feature.sh" > "$TMP/feature.new"
@@ -372,14 +519,40 @@ exit 0' "$repo/tests/feature.sh" > "$TMP/feature.new"
   git -C "$repo" diff > "$TMP/$edit.patch"
   git -C "$repo" checkout -q -- tests/feature.sh
   rc=0
-  "$ADMIT" --repo "$repo" --patch "$TMP/$edit.patch" \
+  OMS_TEST_SIDE_EFFECT="$TMP/assertion-ran" "$ADMIT" --repo "$repo" --patch "$TMP/$edit.patch" \
     --verify 'bash tests/feature.sh' --report "$TMP/$edit.md" >/dev/null 2>&1 || rc=$?
   [ "$rc" = 1 ] || fail "$edit unexpectedly bypassed verifier consent"
   contains "$TMP/$edit.md" 'verifier: FAIL'
   contains "$TMP/$edit.md" 'verify: SKIP'
+  [ ! -e "$TMP/assertion-ran" ] || fail "rejected assertion executed a side effect"
+done
+
+printf -v indirect_assertion 'assert [(open)("%s", "w")]' "$TMP/python-assertion-ran"
+for placement in inserted appended; do
+  for assertion in "$indirect_assertion" 'assert __import__("sys").exit(0)' 'assert exit(0)' \
+    'assert eval("True")' 'assert exec("pass")' 'assert os.path.exists("src/value.txt")' \
+    'assert sys.exit(0)' 'assert subprocess.call(["true"]) == 0' 'assert quit()' \
+    'assert 1 < 2' 'assert 2 > 1' 'assert True & True' 'assert True | False' \
+    'assert True; assert True' 'assert True # `call`' 'assert True # &&' \
+    'assert True # ('; do
+    : > "$repo/tests/feature.py"
+    [ "$placement" != appended ] || printf 'assert True\n' >> "$repo/tests/feature.py"
+    printf '%s\n' "$assertion" >> "$repo/tests/feature.py"
+    [ "$placement" != inserted ] || printf 'assert True\n' >> "$repo/tests/feature.py"
+    git -C "$repo" diff > "$TMP/python-assertion.patch"
+    git -C "$repo" checkout -q -- tests/feature.py
+    rc=0
+    "$ADMIT" --repo "$repo" --patch "$TMP/python-assertion.patch" \
+      --verify 'python3 tests/feature.py' --report "$TMP/python-assertion.md" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 1 ] || fail "$placement assertion bypassed consent: $assertion"
+    contains "$TMP/python-assertion.md" 'verifier: FAIL'
+    contains "$TMP/python-assertion.md" 'verify: SKIP'
+    [ ! -e "$TMP/python-assertion-ran" ] || fail "rejected Python assertion executed a host-side effect"
+  done
 done
 # Sourcing or wrapping the suite still names it as the verifier.
-for wrapped in '. tests/feature.sh' 'timeout 10 bash tests/feature.sh' 'nice -n 5 bash tests/feature.sh'; do
+for wrapped in '. tests/feature.sh' 'timeout 10 bash tests/feature.sh' \
+  'nice -n 5 bash tests/feature.sh' '/usr/bin/env bash tests/feature.sh'; do
   rc=0
   "$ADMIT" --repo "$repo" --patch "$TMP/early-exit.patch" \
     --verify "$wrapped" --report "$TMP/wrapped.md" >/dev/null 2>&1 || rc=$?
