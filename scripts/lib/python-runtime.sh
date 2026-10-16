@@ -300,10 +300,13 @@ oms_python_runtime_activate() {
   unset PYTHONHOME PYTHONPATH
   node_version="$(oms_lock_scalar "$repo_root/tools.lock.json" node.version)" || return
   node_bin="${NVM_DIR:-$HOME/.nvm}/versions/node/v$node_version/bin"
-  [ ! -x "$node_bin/node" ] || export PATH="$node_bin:$PATH"
+  if [ "${OMS_TEST_PROVIDER_PATH_ONLY:-0}" != 1 ]; then
+    [ ! -x "$node_bin/node" ] || export PATH="$node_bin:$PATH"
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
   export OMS_PYTHON="$python"
   export OMS_PYTHON_RUNTIME_ACTIVE=1
-  export PATH="$root/launchers/$version:$HOME/.local/bin:$PATH"
+  export PATH="$root/launchers/$version:$PATH"
   hash -r 2>/dev/null || true
 }
 

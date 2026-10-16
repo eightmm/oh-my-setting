@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# A delegated verify runs this suite one delegate level deep; its fixtures
-# need a top-level delegate so each round opens its own attempt.
-unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-provider-lifecycle.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 fail() { echo "lifecycle-provider-integration: $*" >&2; exit 1; }
 
 mkdir -p "$TMP/bin" "$TMP/home" "$TMP/state" "$TMP/locks" "$TMP/repo"
+export HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" OMS_LOCK_DIR="$TMP/locks"
+export XDG_CACHE_HOME="$TMP/home/.cache" XDG_CONFIG_HOME="$TMP/home/.config"
 git -C "$TMP/repo" init -q
 git -C "$TMP/repo" config user.email test@example.com
 git -C "$TMP/repo" config user.name test
@@ -270,7 +270,11 @@ cat > "$TMP/verify-heartbeat.sh" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 : > "$OMS_TEST_VERIFY_STARTED"
-while [ ! -f "$OMS_TEST_VERIFY_RELEASE" ]; do sleep .05; done
+deadline=$((SECONDS + 180))
+while [ ! -f "$OMS_TEST_VERIFY_RELEASE" ]; do
+  [ "$SECONDS" -lt "$deadline" ] || { echo 'verify release barrier timed out' >&2; exit 124; }
+  sleep .05
+done
 EOF
 chmod +x "$TMP/verify-heartbeat.sh"
 verify_started="$TMP/verify-heartbeat.started"

@@ -65,6 +65,20 @@ fi
 ) || fail "documentation checks depend on executable probes"
 
 workflow="$ROOT/.github/workflows/test.yml"
+# Keep the role identifiers and authority requirements in a bounded contract
+# probe; integration fixtures need not pin editorial wording or punctuation.
+python3 - "$ROOT" <<'PY' || fail "panel role contract lost identifiers or authority limits"
+import pathlib, re, runpy, sys
+hooks = runpy.run_path(str(pathlib.Path(sys.argv[1]) / 'scripts/lib/hook_state.py'))
+tower = hooks['panel_main_base']({'agent': 'codex'}, 'fixture-room')
+for role in ('security-auditor', 'verifier', 'integrator', 'performance-engineer',
+             'documenter', 'release-engineer', 'advisor', 'architect', 'critic'):
+    assert role in tower.lower(), role
+for requirement in (r'publication.*authorized', r'Never commit.*shared checkout',
+                    r'independent', r'patch admission', r'oms room scope',
+                    r'role.{0,60}instance', r'sole panel main'):
+    assert re.search(requirement, tower, re.I), requirement
+PY
 for host in ubuntu-latest macos-latest windows-latest; do
   grep -Fq "\"os\":\"$host\"" "$workflow" ||
     fail "install lifecycle matrix must cover $host"
@@ -90,6 +104,7 @@ printf '%s\n' "$full_stages" | grep >/dev/null -Fx install-lifecycle ||
   fail "Linux auto lifecycle must remain in the focused gate"
 # Exercise the local orchestrator without recursively running the full gate.
 (
+  unset OMS_CHECK_JOBS
   probe="$(mktemp -d "${TMPDIR:-/tmp}/oms-parallel-probe.XXXXXX")"
   trap 'rm -rf "$probe"' EXIT
   export OMS_PARALLEL_PROBE="$probe"
@@ -98,6 +113,17 @@ printf '%s\n' "$full_stages" | grep >/dev/null -Fx install-lifecycle ||
   cat > "$probe/check.sh" <<'EOF'
 #!/usr/bin/env bash
 set -eu
+if [ -n "${OMS_PARALLEL_BUDGET_PROBE:-}" ]; then
+  [ "$OMS_LINT_JOBS_MAX:$OMS_SMOKE_JOBS:$OMS_OPERATOR_JOBS" = 1:1:1 ] || exit 12
+  python3 - <<'PY'
+import os, time
+with open(os.environ['OMS_PARALLEL_BUDGET_PROBE'], 'a') as log:
+    log.write('%s start\n' % time.monotonic())
+time.sleep(.1)
+with open(os.environ['OMS_PARALLEL_BUDGET_PROBE'], 'a') as log:
+    log.write('%s end\n' % time.monotonic())
+PY
+fi
 python3 - <<'PY'
 import os, signal
 assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN
@@ -124,6 +150,25 @@ EOF
   oms_check_parallel "$probe/check.sh" "$probe/logs" 0 > "$probe/pass.log" 2>&1 ||
     fail "parallel gate failed or ignored signals: $(cat "$probe/pass.log")"
   [ "$(find "$probe" -name '*.ran' | wc -l | tr -d ' ')" = 10 ] || fail "parallel gate omitted a partition"
+  OMS_CHECK_JOBS=2 OMS_PARALLEL_BUDGET_PROBE="$probe/budget" \
+    oms_check_parallel "$probe/check.sh" "$probe/budget-logs" 0 > "$probe/budget.log" 2>&1 ||
+    fail "constrained gate failed: $(cat "$probe/budget.log")"
+  python3 - "$probe/budget" <<'PY' || fail "constrained gate exceeded or failed to use its shared budget"
+import pathlib, sys
+events = sorted((float(t), kind) for t, kind in
+                (line.split() for line in pathlib.Path(sys.argv[1]).read_text().splitlines()))
+active = peak = 0
+for _, kind in events:
+    active += 1 if kind == 'start' else -1
+    peak = max(peak, active)
+assert len(events) == 20 and active == 0 and 1 <= peak <= 2, (events, peak)
+print("parallel-budget: peak=%s, limit=2, partitions=10" % peak)
+PY
+  rm -f "$probe"/*.ran
+  OMS_CHECK_JOBS=1 oms_check_parallel "$probe/check.sh" "$probe/no-lint-logs" 1 > "$probe/no-lint.log" 2>&1 ||
+    fail "serial constrained gate failed without lint: $(cat "$probe/no-lint.log")"
+  [ "$(find "$probe" -name '*.ran' | wc -l | tr -d ' ')" = 9 ] && [ ! -e "$probe/lint-only.ran" ] ||
+    fail "constrained no-lint gate changed partition coverage"
   if OMS_PARALLEL_FAIL=1 oms_check_parallel "$probe/check.sh" "$probe/fail-logs" 0 > "$probe/fail.log" 2>&1; then
     fail "parallel gate swallowed a failing lane"
   fi
@@ -319,6 +364,14 @@ for line in lines[start + 1:]:
         continue
     if current == "gate":
         gate_body.append(line)
+
+# Every executable step has an explicit outer bound; the heavy lanes retain
+# headroom above the recorded 1,179s operator stage and 35m affected timeout.
+for step in workflow_text.split('      - name: ')[1:]:
+    step = step.split('      - ', 1)[0].split('\n  #', 1)[0]
+    if re.search(r'^        run:', step, re.M):
+        limit = re.search(r'^        timeout-minutes: ([0-9]+)$', step, re.M)
+        assert limit and int(limit.group(1)) > 0, step.splitlines()[0]
 
 if "gate" not in jobs:
     raise SystemExit("workflow has no gate job")
@@ -525,16 +578,12 @@ done
 python3 - "$ROOT/scripts/check.sh" "$workflow" "$ROOT/tests" <<'PY' || fail "standalone smoke registration is incomplete or duplicated"
 import pathlib
 import re
+import subprocess
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 workflow = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 tests = pathlib.Path(sys.argv[3])
-start = 'if [ "$RUN_FOCUSED" = 1 ]; then'
-end = 'if [ "$RUN_SMOKE" = 1 ]; then'
-if text.count(start) != 1 or text.count(end) != 1:
-    raise SystemExit("focused/smoke gate boundaries changed")
-focused = text.split(start, 1)[1].split(end, 1)[0]
 expected = {
     "autopilot": "autopilot-smoke.sh",
     "draft-pr": "draft-pr-smoke.sh",
@@ -556,16 +605,10 @@ expected = {
     "runtime-core-integration": "runtime-core-integration-smoke.sh",
     "install-profile": "install-profile-smoke.sh",
 }
-# CI parity's quick lane may also run operator-tools; --ci-parity never sets
-# RUN_FOCUSED, so one run still invokes it once.
-parity = '[ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"'
-for stage, suite in expected.items():
-    invocation = "stage %s bash tests/%s" % (stage, suite)
-    if focused.count(invocation) != 1:
-        raise SystemExit("focused gate must contain exactly once: %s" % invocation)
-    allowed = 1 + (suite == "operator-tools-smoke.sh" and text.count(parity) == 1 and parity not in focused)
-    if text.count("bash tests/%s" % suite) != allowed:
-        raise SystemExit("gate duplicates suite invocation: %s" % suite)
+stages = subprocess.check_output(['bash', sys.argv[1], '--focused-only', '--list-stages'], text=True).splitlines()
+for stage in expected:
+    assert stages.count(stage) == 1, (stage, stages)
+assert len(stages) == len(set(stages)), 'focused gate duplicates a registered stage'
 if "tests/*.sh" not in text:
     raise SystemExit("shellcheck lint no longer covers tests/*.sh")
 

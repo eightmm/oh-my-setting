@@ -13621,14 +13621,6 @@ import hook_state
 with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": room_owner, "OMS_PANEL_SESSION": "oms-fixture"}):
     tower = hook_state.panel_main_hint({"hook_event_name": "UserPromptSubmit"})
     assert "oms room scope" in tower
-    for trigger in ("security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, install)",
-                    "verifier before declaring completion (original request against final result)",
-                    "integrator when merging or resolving conflicts", "performance-engineer when performance needs measurement",
-                    "documenter at completion", "release-engineer when deploying",
-                    "Advisor (which direction?), architect (how to structure?) and critic (when does it fail?) are separate judgments; call one when needed, not all by default",
-                    "A role is a mandate, not an instance", "coordination yourself as the sole panel main",
-                    "Never commit in the shared checkout another session uses"):
-        assert trigger in tower, (trigger, tower)
 # Same task reuse cannot return another participant's artifact as the result.
 assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
 participant_results = panel.results(project, room_participant=child["participant"])

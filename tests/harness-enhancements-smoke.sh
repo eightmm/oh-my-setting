@@ -667,6 +667,22 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
   directory) mkdir "$root/.oms/empty-state" ;;
   mode) chmod 700 "$root/.oms/state" ;;
   failed-content) printf 'after\n' > "$root/.oms/state"; exit 29 ;;
+  timings)
+    python3 -c 'import signal; assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN'
+    for n in 1 2 3 4 5 6 7; do
+      echo "operator-section: ${n}s core/section-$n"
+      echo "operator-shard: $n/7 ${n}s"
+    done ;;
+  deadline)
+    python3 - <<'PY'
+import os, pathlib, signal, subprocess, sys
+child = subprocess.Popen([sys.executable, '-c',
+    'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
+    start_new_session=os.name == 'posix')
+pathlib.Path(os.environ['OMS_TEST_STAGE_CHILD']).write_text(str(child.pid))
+child.wait()
+PY
+    ;;
   hooks) mkdir -p "$root/.oms/hooks"; printf 'ambient\n' >> "$root/.oms/hooks/events.jsonl" ;;
   journal) mkdir -p "$root/.oms/work-journal"; printf 'ambient\n' >> "$root/.oms/work-journal/index.json" ;;
   ci) printf 'ambient\n' >> "$root/.oms/ci.jsonl"; printf '*\n' > "$root/.oms/.gitignore" ;;
@@ -730,6 +746,96 @@ EOF
     OMS_TEST_CHECK_MUTATION=hooks \
     bash scripts/check.sh --quick --changed-from "$base" --changed-to "$head" >/dev/null) ||
     fail "check gate treated ambient-only .oms creation as a suite leak"
+
+  (cd "$gate" && OMS_SHELLCHECK_BIN="$gate/fake-shellcheck" \
+    OMS_TEST_CHECK_MUTATION=timings GITHUB_STEP_SUMMARY="$TMP/operator-summary" \
+    bash scripts/check.sh --quick --changed-from "$base" --changed-to "$head" > "$TMP/timing-output") ||
+    fail "timing gate failed"
+  for kind in operator-section operator-shard; do
+    [ "$(grep -c "^slow-$kind:" "$TMP/timing-output")" = 5 ] || fail "unbounded or missing $kind timings"
+    grep -Fq "slow-$kind: 7s" "$TMP/operator-summary" || fail "CI summary discarded successful $kind timings"
+  done
+  python3 - "$gate" "$base" "$head" "$TMP" <<'PY' || fail "stage deadline missed a descendant or lost diagnostics"
+import os, pathlib, signal, subprocess, sys, time
+gate, base, head, tmp = sys.argv[1:]
+if os.name != 'posix':
+    print('SKIP: detached descendant deadline probe requires POSIX signals')
+    raise SystemExit(0)
+child_file = pathlib.Path(tmp) / 'stage-child'
+env = dict(os.environ, OMS_SHELLCHECK_BIN=gate+'/fake-shellcheck', OMS_TEST_CHECK_MUTATION='deadline',
+           OMS_CHECK_STAGE_TIMEOUT_SECONDS='2', OMS_TEST_STAGE_CHILD=str(child_file))
+command = ['bash', 'scripts/check.sh', '--quick', '--changed-from', base, '--changed-to', head]
+result = subprocess.run(command, cwd=gate, env=env, capture_output=True, text=True, timeout=25)
+assert result.returncode == 124, (result.stdout, result.stderr)
+assert child_file.exists(), (result.stdout, result.stderr)
+child = int(child_file.read_text())
+def alive(pid):
+    stat = pathlib.Path('/proc') / str(pid) / 'stat'
+    try:
+        if stat.read_text().split(') ', 1)[1].startswith('Z '):
+            return False
+    except FileNotFoundError:
+        pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+assert not alive(child), child
+prefix = 'check: deadline diagnostics retained: '
+log = pathlib.Path(next(line[len(prefix):] for line in result.stderr.splitlines() if line.startswith(prefix)))
+assert 'stage deadline exceeded' in log.read_text(), log
+log.unlink()
+# A caller cancellation uses the same cleanup path rather than waiting out the deadline.
+child_file.unlink()
+env['OMS_CHECK_STAGE_TIMEOUT_SECONDS'] = '60'
+process = subprocess.Popen(command, cwd=gate, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+try:
+    deadline = time.monotonic() + 15
+    while not child_file.exists() and time.monotonic() < deadline:
+        assert process.poll() is None
+        time.sleep(.02)
+    assert child_file.exists(), 'stage did not start'
+    process.send_signal(signal.SIGTERM)
+    output, error = process.communicate(timeout=15)
+    assert process.returncode == 143, (output, error)
+    assert not alive(int(child_file.read_text()))
+finally:
+    if process.poll() is None:
+        process.kill()
+        process.wait()
+# Cancel inside Popen, after the session exists but before its handle returns.
+# This deterministically covers the launch window without production test hooks.
+race = r'''
+import os, pathlib, signal, subprocess, sys
+source = pathlib.Path(sys.argv.pop(1)).read_text()
+source = source.split('run_stage_with_deadline() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+launch = subprocess.Popen
+def cancel_launch(*args, **kwargs):
+    child = launch(*args, **kwargs)
+    if kwargs.get('start_new_session'):
+        pathlib.Path(os.environ['OMS_TEST_STAGE_CHILD']).write_text(str(child.pid))
+        os.kill(os.getpid(), int(os.environ['OMS_TEST_STAGE_SIGNAL']))
+    return child
+subprocess.Popen = cancel_launch
+exec(compile(source, sys.argv[0], 'exec'))
+'''
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    child_file.unlink()
+    try:
+        result = subprocess.run([sys.executable, '-c', race, gate+'/scripts/check.sh', 'bash', '60',
+                                 sys.executable, '-c', 'import time; time.sleep(60)'],
+                                env=dict(env, OMS_TEST_STAGE_SIGNAL=str(int(sig))),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        child = int(child_file.read_text())
+        assert result.returncode == 128 + sig, (sig, result.returncode, result.stderr)
+        assert not alive(child), (sig, child)
+    finally:
+        child = int(child_file.read_text()) if child_file.exists() else None
+        if child is not None and alive(child):
+            os.killpg(child, signal.SIGKILL)
+print('stage-launch cancellation: TERM/INT/HUP cleaned up')
+PY
 }
 
 test_invariants_gate_checks_committed_staged_and_worktree_sources() {
@@ -829,11 +935,15 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
     ;;
   error) exit 23 ;;
   *)
-    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py","tests/operator-tools-smoke.sh"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
     ;;
 esac
 EOF
   chmod +x "$gate/scripts/graph.sh"
+  cat > "$gate/tests/operator-tools-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'operator-args:%s\n' "$*" >> "$OMS_TEST_AFFECTED_LOG"
+EOF
   cat > "$gate/tests/scripts-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 test_selected() {
@@ -915,6 +1025,8 @@ EOF
   grep -Fxq shell-file "$log" || fail "affected gate omitted the selected shell file"
   grep -Fxq 'syntax:lib/leaf.py' "$log" || fail "affected syntax check did not select only the changed Python"
   grep -Fxq 'distribution:--docs-only' "$log" || fail "leaf change ran unrelated CI orchestration probes"
+  [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$log")" = 1 ] ||
+    fail "affected selection did not run operator-tools once through its existing parallel runner"
   if grep -Fq unselected "$log"; then
     fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
   fi
@@ -938,6 +1050,7 @@ EOF
     fail "affected gate propagated a graph-reader failure"
   printf '%s\n' "$out" | grep >/dev/null -Fx autonomy-hook ||
     fail "graph-reader failure did not fail open to the focused gate: $out"
+
 
   boundary_base="$head"
   printf '# selector changed\n' >> "$gate/scripts/graph.sh"
@@ -1080,12 +1193,17 @@ EOF
   git -C "$gate" commit -qm panel-view
   head="$(git -C "$gate" rev-parse HEAD)"
   (cd "$gate" && OMS_TEST_GRAPH_MODE=affected GITHUB_STEP_SUMMARY="$TMP/panel-summary.md" \
+    OMS_TEST_AFFECTED_LOG="$TMP/panel-inline.log" \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
       --ci-output "$TMP/panel-ci-mode" >/dev/null) ||
     fail "CI selector rejected the panel view change"
-  grep -Fxq 'mode=full' "$TMP/panel-ci-mode" || fail "panel suite cost escaped the split full lanes"
-  grep -Fq 'cost-boundary:scripts/lib/room_view.py' "$TMP/panel-summary.md" ||
-    fail "panel CI summary omitted the cost boundary reason"
+  grep -Fxq 'mode=affected' "$TMP/panel-ci-mode" || fail "panel cost alone forced unrelated full lanes"
+  [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$TMP/panel-inline.log")" = 1 ] ||
+    fail "panel selection did not use the existing operator shards"
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full bash scripts/check.sh --affected \
+    --print-affected-mode --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||
+    fail "uncertain panel plan failed"
+  [ "$out" = full ] || fail "uncertain panel plan lost conservative full fallback"
   base="$head"
   git -C "$gate" mv lib/new.py docs/code.md
   git -C "$gate" commit -qm rename-code

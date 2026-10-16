@@ -22,13 +22,13 @@ oms_parallel_terminate_running() {
 oms_check_parallel() (
   set -euo pipefail
   local check="$1" logs="$2" skip_lint="${3:-0}"
-  local lane i rc=0
+  local lane i rc=0 next=0 total=0 budget="${OMS_CHECK_JOBS:-10}"
   local pids=() names=()
   mkdir -p "$logs"
   cleanup_parallel() {
     local pid
     oms_parallel_terminate_running ${pids[@]+"${pids[@]}"}
-    for pid in "${pids[@]}"; do
+    for pid in ${pids[@]+"${pids[@]}"}; do
       [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
     done
   }
@@ -39,20 +39,36 @@ oms_check_parallel() (
   # Plain background Bash jobs inherit ignored INT/QUIT. Job control gives
   # each lane a signal-capable process group, also used for cancellation.
   set -m
+  case "$budget" in ''|0|*[!0-9]*) echo 'error: OMS_CHECK_JOBS must be a positive integer' >&2; exit 2 ;; esac
+  [ "$budget" -gt 0 ] || { echo 'error: OMS_CHECK_JOBS must be a positive integer' >&2; exit 2; }
+  if [ -n "${OMS_CHECK_JOBS:-}" ]; then
+    # Each occupied outer slot owns one serial lane, including its linter,
+    # smoke runner and operator fixtures. Nested fans cannot multiply the cap.
+    export OMS_LINT_JOBS_MAX=1 OMS_SMOKE_JOBS=1 OMS_OPERATOR_JOBS=1
+  fi
+  reap_parallel_slot() {
+    wait "${pids[$next]}" || rc=1
+    pids[$next]=""
+    cat "$logs/${names[$next]}.log"
+    next=$((next + 1))
+  }
   if [ "$skip_lint" != 1 ]; then
     bash "$check" --lint-only > "$logs/lint.log" 2>&1 &
     pids+=("$!"); names+=(lint)
+    total=$((total + 1))
   fi
   for lane in 1 2 3 4 5 6 7 8; do
+    if [ $((total - next)) -ge "$budget" ]; then reap_parallel_slot; fi
     bash "$check" --focused-only --focused-lane "$lane/8" > "$logs/focused-$lane.log" 2>&1 &
     pids+=("$!"); names+=("focused-$lane")
+    total=$((total + 1))
   done
+  if [ $((total - next)) -ge "$budget" ]; then reap_parallel_slot; fi
   OMS_SMOKE_JOBS="${OMS_SMOKE_JOBS:-6}" bash "$check" --scripts-smoke-only > "$logs/smoke.log" 2>&1 &
   pids+=("$!"); names+=(smoke)
-  for ((i=0; i<${#pids[@]}; i++)); do
-    wait "${pids[$i]}" || rc=1
-    pids[$i]=""
-    cat "$logs/${names[$i]}.log"
+  total=$((total + 1))
+  for ((i=next; i<total; i++)); do
+    reap_parallel_slot
   done
   exit "$rc"
 )

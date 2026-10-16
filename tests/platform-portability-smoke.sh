@@ -144,6 +144,7 @@ out="$(PATH="$uv_stub_bin:$PATH" "$uv_shim" -c 'print("uv-shim-ok")')" ||
 
 # The timer's private runtime is version-scoped and never replaces user data.
 runtime_repo="$TMP/runtime-repo"
+runtime_source="$ROOT"
 runtime_root="$TMP/python-runtime"
 runtime_uv="$TMP/runtime-uv"
 runtime_uv_log="$TMP/runtime-uv.log"
@@ -202,6 +203,62 @@ chmod +x "$runtime_uv"
     fail "private runtime selected a different interpreter"
   case "$(command -v python3)" in "$runtime_root/launchers/$runtime_version/python3") ;; *)
     fail "private runtime did not shadow system Python" ;; esac
+  (
+    export HOME="$TMP/hidden-provider-home"
+    node_version="$(oms_lock_scalar "$ROOT/tools.lock.json" node.version | tr -d '\r')"
+    node_bin="$HOME/.nvm/versions/node/v$node_version/bin"
+    mkdir -p "$HOME/.local/bin" "$node_bin"
+    for provider in claude codex agy node; do
+      printf '#!/bin/sh\nexit 99\n' > "$node_bin/$provider"
+      chmod +x "$node_bin/$provider"
+    done
+    cp "$node_bin/agy" "$HOME/.local/bin/agy"
+    # Like the Windows python3 shim, this interpreter needs another PATH entry.
+    interpreter_bin="$TMP/hidden-interpreter-bin"
+    mkdir -p "$interpreter_bin"
+    printf '%s\n' '#!/usr/bin/env bash' 'exec oms_fixture_python "$@"' > "$interpreter_bin/python3"
+    printf '%s\n' '#!/usr/bin/env bash' "exec \"$real_python3\" \"\$@\"" > "$interpreter_bin/oms_fixture_python"
+    chmod +x "$interpreter_bin/python3" "$interpreter_bin/oms_fixture_python"
+    export PATH="$node_bin:$HOME/.local/bin:$interpreter_bin:$PATH"
+    printf 'nvm() { export PATH="$NVM_BIN:$PATH"; }\n' > "$HOME/.nvm/nvm.sh"
+    export NVM_BIN="$node_bin" NVM_DIR="$HOME/.nvm" OMS_PANEL_DISPATCH=1 OMS_ROOM_REPO="$TMP/live-room-decoy"
+    # shellcheck source=tests/lib/smoke-env.sh
+    . "$runtime_source/tests/lib/smoke-env.sh"
+    [ -z "${NVM_BIN:-}${NVM_DIR:-}${OMS_PANEL_DISPATCH:-}${OMS_ROOM_REPO:-}" ] ||
+      fail "fixture cleanup retained host tool or panel routing"
+    # Retain interpreter/tool directories, including setup-python on Windows.
+    filtered_path=""
+    remaining_path="$PATH:"
+    while [ -n "$remaining_path" ]; do
+      path_dir="${remaining_path%%:*}"
+      remaining_path="${remaining_path#*:}"
+      provider_dir=0
+      for provider in claude codex agy; do
+        for suffix in "" .exe .cmd; do
+          [ ! -e "${path_dir:-.}/$provider$suffix" ] || provider_dir=1
+        done
+      done
+      [ "$provider_dir" = 1 ] || filtered_path="${filtered_path:+$filtered_path:}$path_dir"
+    done
+    PATH="$filtered_path"
+    export PATH
+    hash -r
+    [ "$(command -v python3)" = "$interpreter_bin/python3" ] || fail "provider hiding lost the Python shim"
+    python3 -c 'import sys; assert sys.version_info.major == 3' || fail "provider hiding lost the shim interpreter"
+    # Reintroduce contaminated manager inputs: PATH-only fixtures still win.
+    export NVM_BIN="$node_bin" NVM_DIR="$HOME/.nvm"
+    # shellcheck source=scripts/lib/peer-common.sh
+    . "$runtime_source/scripts/lib/peer-common.sh"
+    load_user_tool_paths
+    for provider in claude codex agy; do
+      ! command -v "$provider" >/dev/null || fail "peer paths restored hidden $provider"
+    done
+    oms_python_runtime_activate "$runtime_repo" || fail "provider-hidden runtime activation failed"
+    for provider in claude codex agy; do
+      ! command -v "$provider" >/dev/null || fail "Python activation restored hidden $provider"
+    done
+    python3 -c 'import sys; assert sys.version_info.major == 3' || fail "provider hiding lost managed Python"
+  )
   mkdir -p "$TMP/runtime-module"
   printf 'value = 42\n' > "$TMP/runtime-module/oms_runtime_probe.py"
   PYTHONPATH="$TMP/runtime-module" python3 -c 'import oms_runtime_probe; assert oms_runtime_probe.value == 42' ||

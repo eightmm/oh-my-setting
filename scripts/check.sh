@@ -22,6 +22,10 @@ cd "$ROOT"
 # the invoking git context.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
   GIT_OBJECT_DIRECTORY GIT_QUARANTINE_PATH GIT_PREFIX
+unset NVM_BIN NVM_DIR
+# Suites supply fake providers explicitly through PATH. Neither peer discovery
+# nor managed Python activation may restore the invoking host's tool paths.
+export OMS_TEST_PROVIDER_PATH_ONLY=1
 
 # The same hermeticity applies to the harness's own session identity. A
 # harness child (council seat, delegated worker) inherits capability
@@ -68,7 +72,7 @@ except (OSError, ValueError):
     pass
 reason = ' '.join(reasons.split())[:800]
 lines = ['check-summary: mode=%s; exit=%s; reason=%s' % (mode, rc, reason)]
-for kind in ('stage', 'test'):
+for kind in ('stage', 'test', 'operator-section', 'operator-shard'):
     for seconds, _, name in sorted((row for row in rows if row[1] == kind), reverse=True)[:5]:
         lines.append('slow-%s: %ss %s' % (kind, seconds, name))
 print('\n'.join(lines))
@@ -82,10 +86,15 @@ PY
 }
 CHECK_STATE_GUARD_ACTIVE=0
 CHECK_ORIGINAL_LOCK_DIR="${OMS_LOCK_DIR:-}"
+CHECK_STAGE_PID=""
 cleanup_check_runtime() {
   local rc=$?
   trap - EXIT HUP INT TERM
   set +e
+  if [ -n "$CHECK_STAGE_PID" ]; then
+    kill -TERM "$CHECK_STAGE_PID" 2>/dev/null || true
+    wait "$CHECK_STAGE_PID" 2>/dev/null || true
+  fi
   if [ "$CHECK_STATE_GUARD_ACTIVE" = 1 ] && ! verify_oms_state; then
     rc=1
   fi
@@ -188,6 +197,11 @@ manifest) then the test suites. With no arguments it runs both.
                         neither is available).
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
+
+OMS_CHECK_JOBS=N enables the constrained-host profile: at most N parallel
+lanes, each with serial nested runners. Other modes cap their suite workers
+at N. The default partitions are unchanged. OMS_CHECK_STAGE_TIMEOUT_SECONDS
+overrides the generous 30-minute per-stage deadline (operator-tools: 60m).
 EOF
 }
 
@@ -240,6 +254,21 @@ while [ "$#" -gt 0 ]; do
     *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [ -n "${OMS_CHECK_JOBS:-}" ]; then
+  case "$OMS_CHECK_JOBS" in 0|*[!0-9]*) echo 'error: OMS_CHECK_JOBS must be a positive integer' >&2; exit 2 ;; esac
+  [ "$OMS_CHECK_JOBS" -gt 0 ] || exit 2
+  for check_jobs_var in OMS_LINT_JOBS_MAX OMS_SMOKE_JOBS OMS_OPERATOR_JOBS; do
+    case "$check_jobs_var" in
+      OMS_LINT_JOBS_MAX) check_jobs_value="${OMS_LINT_JOBS_MAX:-4}" ;;
+      OMS_SMOKE_JOBS) check_jobs_value="${OMS_SMOKE_JOBS:-4}" ;;
+      OMS_OPERATOR_JOBS) check_jobs_value="${OMS_OPERATOR_JOBS:-4}" ;;
+    esac
+    case "$check_jobs_value" in ''|0|*[!0-9]*) echo "error: invalid $check_jobs_var" >&2; exit 2 ;; esac
+    [ "$check_jobs_value" -le "$OMS_CHECK_JOBS" ] || check_jobs_value="$OMS_CHECK_JOBS"
+    export "$check_jobs_var=$check_jobs_value"
+  done
+fi
 
 if [ "$MODE" = lint ] && [ "$SKIP_LINT" = 1 ]; then
   echo "error: --no-lint and --lint-only leave nothing to run" >&2
@@ -358,6 +387,9 @@ lint_shell() {  # lint_shell FILE...
   ls -S -- "$@" | tr '\n' '\0' |
     xargs -0 -P "$jobs" -n 2 "$SHELLCHECK" -x -S warning
 }
+# Stages run in a supervised Bash child; only lint uses a shell function.
+export -f lint_shell
+export SHELLCHECK
 if [ "$RUN_LINT" = 1 ] && ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
   echo "FATAL: shellcheck is not installed — CI enforces it, so passing here" >&2
   echo "would be false confidence. Install one of:" >&2
@@ -399,13 +431,125 @@ verify_oms_state() {
 oms_state_fingerprint > "$STATE_BEFORE"
 CHECK_STATE_GUARD_ACTIVE=1
 
+# Own a stage's process tree independently of the caller's terminal. Parallel
+# suites create additional process groups, so a deadline must also follow PPIDs.
+run_stage_with_deadline() {  # SECONDS COMMAND...
+  exec python3 - "$BASH" "$@" <<'PY'
+import os, signal, subprocess, sys, time
+
+bash, wall, *command = sys.argv[1:]
+try:
+    seconds = int(wall)
+    if seconds <= 0:
+        raise ValueError()
+except ValueError:
+    raise SystemExit('error: OMS_CHECK_STAGE_TIMEOUT_SECONDS must be a positive integer')
+forwarded = tuple(getattr(signal, name) for name in ('SIGINT', 'SIGTERM', 'SIGHUP')
+                  if hasattr(signal, name))
+process = None
+pending_signal = None
+
+def records():
+    rows = subprocess.check_output(['ps', '-eo', 'pid=,ppid=,lstart='], text=True, timeout=5)
+    result = {}
+    for row in rows.splitlines():
+        pid, parent, stamp = row.strip().split(None, 2)
+        result[int(pid)] = (int(parent), stamp)
+    return result
+
+def tree(snapshot):
+    owned = {process.pid}
+    while True:
+        children = {pid for pid, (parent, _) in snapshot.items() if parent in owned}
+        if children <= owned:
+            break
+        owned.update(children)
+    return {pid: snapshot[pid] for pid in owned if pid in snapshot}
+
+def stop():
+    if os.name != 'posix':
+        # Windows Python sees native PIDs; taskkill /T covers Git Bash children.
+        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], check=False, timeout=10)
+        process.wait(timeout=10)
+        return
+    try:
+        owned = tree(records())
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print('warning: could not inventory stage descendants: %s' % exc, file=sys.stderr)
+        owned = {}
+    for pid in reversed(list(owned)):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    # Keep the leader unreaped until escalation so its group ID cannot be reused.
+    time.sleep(5)
+    try:
+        snapshot = records()
+        current = tree(snapshot)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        snapshot = current = {}
+    for pid, identity in owned.items():
+        # A reparented child retains its start time; a recycled PID does not.
+        try:
+            if snapshot.get(pid, (None, None))[1] == identity[1]:
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    for pid in current.keys() - owned.keys():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=10)
+
+def interrupted(signum, _frame):
+    global pending_signal
+    # Popen can receive a signal after spawning, before returning its handle.
+    if process is None:
+        if pending_signal is None:
+            pending_signal = signum
+        return
+    for sig in forwarded:
+        signal.signal(sig, signal.SIG_IGN)
+    stop()
+    raise SystemExit(128 + signum)
+
+for sig in forwarded:
+    signal.signal(sig, interrupted)
+# Handled signals become default on exec, undoing Bash's ignored INT for the
+# stage while keeping the supervisor protected throughout detached launch.
+process = subprocess.Popen([bash, '-c', '"$@"', 'oms-check-stage', *command],
+                           stdin=subprocess.DEVNULL, start_new_session=os.name == 'posix')
+if pending_signal is not None:
+    interrupted(pending_signal, None)
+try:
+    rc = process.wait(timeout=seconds)
+except subprocess.TimeoutExpired:
+    print('error: stage deadline exceeded after %ss: %s' % (wall, command[0]), file=sys.stderr)
+    for sig in forwarded:
+        signal.signal(sig, signal.SIG_IGN)
+    stop()
+    raise SystemExit(124)
+raise SystemExit(128 - rc if rc < 0 else rc)
+PY
+}
+
 # One line per stage on success, full output on failure: the gate is read by an
 # agent between edits, and a green run has nothing to say beyond "ok".
 stage() {  # stage NAME COMMAND...
   local name="$1"
   local log
   local rc=0
-  local started elapsed
+  local started elapsed deadline=1800
   shift
 
   # Lane partition is positional over the stage calls the selected mode
@@ -425,16 +569,24 @@ stage() {  # stage NAME COMMAND...
 
   log="$(mktemp "${TMPDIR:-/tmp}/oms-check.XXXXXX")"
   started="$(date +%s)"
-  "$@" > "$log" 2>&1 || rc=$?
+  # Recorded operator stage: 1,179s. Leave room for slower shared hosts; CI
+  # bounds the whole lane separately rather than tightening fixture assertions.
+  [ "$name" != operator-tools ] || deadline=3600
+  run_stage_with_deadline "${OMS_CHECK_STAGE_TIMEOUT_SECONDS:-$deadline}" "$@" > "$log" 2>&1 &
+  CHECK_STAGE_PID=$!
+  wait "$CHECK_STAGE_PID" || rc=$?
+  CHECK_STAGE_PID=""
   elapsed=$(( $(date +%s) - started ))
   printf '%s\tstage\t%s\n' "$elapsed" "$name" >> "$CHECK_RUNTIME/timings"
   # Reuse the runner's bounded per-test timings before its successful log is
   # discarded. No extra test run or persistent timing database.
-  awk '/^smoke-timing: [0-9]+s [A-Za-z0-9_]+$/ { sub(/s$/, "", $2); print $2 "\ttest\t" $3 }' \
+  awk '/^smoke-timing: [0-9]+s [A-Za-z0-9_]+$/ { sub(/s$/, "", $2); print $2 "\ttest\t" $3 }
+    /^operator-section: [0-9]+s [A-Za-z0-9_.\/-]+$/ { sub(/s$/, "", $2); print $2 "\toperator-section\t" $3 }
+    /^operator-shard: [0-9]+\/[0-9]+ [0-9]+s$/ { sub(/s$/, "", $3); print $3 "\toperator-shard\t" $2 }' \
     "$log" >> "$CHECK_RUNTIME/timings"
   if [ "${OMS_VERBOSE:-0}" = "1" ]; then
     cat "$log"
-    rm -f "$log"
+    [ "$rc" -eq 124 ] || rm -f "$log"
   elif [ "$rc" -ne 0 ]; then
     # Failure output is read by an agent between edits: bounded tail in the
     # session (the assertion that failed prints last), full log kept on disk
@@ -449,12 +601,13 @@ stage() {  # stage NAME COMMAND...
       tail -c "$log_cap" "$log"
     else
       cat "$log"
-      rm -f "$log"
+      [ "$rc" -eq 124 ] || rm -f "$log"
     fi
   else
     rm -f "$log"
   fi
   if [ "$rc" -ne 0 ]; then
+    [ "$rc" -ne 124 ] || echo "check: deadline diagnostics retained: $log" >&2
     echo "check: $name FAILED (${elapsed}s)" >&2
     exit "$rc"
   fi
@@ -704,13 +857,6 @@ prepare_affected_gate() {
         break
         ;;
       custom-skills/*.md|templates/*.md|config/models.json) ;;
-      # The panel suite alone takes ~20 minutes on a CI runner; inline after other affected suites it
-      # crosses the 35-minute step limit, so panel changes use the existing split full lanes.
-      scripts/lib/terminal_panel.py|scripts/lib/room_view.py|scripts/lib/panel_*.py|tests/operator-tools-smoke.sh)
-        AFFECTED_MODE=full
-        AFFECTED_REASONS="cost-boundary:$path"
-        break
-        ;;
       install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/doctor.sh|\
       scripts/python-runtime.sh|scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
       scripts/lib/oms-common.sh|\
@@ -1149,11 +1295,11 @@ if [ "$RUN_SMOKE" = 1 ]; then
   if [ -n "$SMOKE_SHARD" ]; then
     OMS_SMOKE_TIMINGS="$CHECK_SMOKE_TIMINGS" \
       OMS_SMOKE_TIMING_LIMIT="$CHECK_SMOKE_TIMING_LIMIT" \
-      bash tests/run-smoke-shard.sh --shard "$SMOKE_SHARD"
+      stage scripts-smoke bash tests/run-smoke-shard.sh --shard "$SMOKE_SHARD"
   else
     OMS_SMOKE_TIMINGS="$CHECK_SMOKE_TIMINGS" \
       OMS_SMOKE_TIMING_LIMIT="$CHECK_SMOKE_TIMING_LIMIT" \
-      bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
+      stage scripts-smoke bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
   fi
 fi
 

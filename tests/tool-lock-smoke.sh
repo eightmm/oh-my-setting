@@ -107,7 +107,7 @@ EOF
   mkdir -p "$NVM_DIR/alias"
   printf 'lts/*\n' > "$NVM_DIR/alias/default"
   peer_node() {
-    bash -c '. "$1/scripts/lib/peer-common.sh"; load_user_tool_paths; command -v node' _ "$ROOT"
+    env -u OMS_TEST_PROVIDER_PATH_ONLY bash -c '. "$1/scripts/lib/peer-common.sh"; load_user_tool_paths; command -v node' _ "$ROOT"
   }
   [ "$(peer_node)" = "$node_bin/node" ] || fail "peer tool paths missed the nvm default"
   [ "$(peer_node)" = "$node_bin/node" ] || fail "cached peer tool paths missed the nvm default"

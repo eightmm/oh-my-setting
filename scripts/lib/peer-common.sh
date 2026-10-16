@@ -204,6 +204,7 @@ ma_repo_label() {
 
 load_user_tool_paths() {
   local cache key file line cached_key="" cached_bin=""
+  [ "${OMS_TEST_PROVIDER_PATH_ONLY:-0}" != 1 ] || return 0
   export PATH="$HOME/.local/bin:$PATH"
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   [ -s "$NVM_DIR/nvm.sh" ] || return 0
