@@ -329,13 +329,20 @@ after_land() {
 sync_record() {
   # Post-land operations must not invalidate handed-off receipt digests.
   local RECEIPT="$LAND_DIR/sync/$STAMP.json"
+  # A linked sync namespace could alias the landing receipt; refuse rather than follow it.
+  if [ -L "$LAND_DIR/sync" ] || { [ -e "$LAND_DIR/sync" ] && [ ! -d "$LAND_DIR/sync" ]; } || [ -L "$RECEIPT" ]; then
+    echo "error: land sync receipt namespace is not a plain directory" >> "$LOG"; return 1
+  fi
   mkdir -p "$LAND_DIR/sync"
   rset "$@" sha="$SHA" request="$STAMP" sync.path="$SYNC_TO"
 }
 
 sync_shared() {
   local rc=0 state=passed reason='shared checkout refreshed' sync_log="$LOG.sync"
-  sync_record --reset sync.state=running sync.started_at="$(now)"
+  if ! sync_record --reset sync.state=running sync.started_at="$(now)"; then
+    note "land $SHORT: sync refused: sync receipt namespace is not a plain directory"
+    return 0
+  fi
   bash "$ROOT/scripts/sync-shared.sh" --repo "$SYNC_TO" --remote "$REMOTE" \
     --target "$TARGET" > "$sync_log" 2>&1 || rc=$?
   cat "$sync_log" >> "$LOG"

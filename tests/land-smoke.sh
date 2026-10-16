@@ -1275,5 +1275,19 @@ PY
     fi
   fi
 done
+# A linked sync namespace could alias the landing receipt: sync is refused, the land and its bytes stay intact.
+link_target="$TMP/sync-linked"
+git clone -q "$TMP/remote.git" "$link_target" 2>/dev/null
+gate "echo sync linked"
+link_sha="$(git -C "$repo" rev-parse HEAD)"
+rm -rf "$receipt_dir/sync"
+ln -s "$receipt_dir" "$receipt_dir/sync"
+OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+  --sync-shared "$link_target" > "$TMP/sync-linked.out" 2>&1 || fail "linked sync namespace failed the land: $(cat "$TMP/sync-linked.out")"
+grep -q 'sync refused: sync receipt namespace is not a plain directory' "$TMP/sync-linked.out" || fail "linked sync namespace not refused"
+link_receipt="$(find "$receipt_dir" -maxdepth 1 -name "$link_sha-*.json" -print)"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["state"] == "passed" and "sync" not in r, r' "$link_receipt" ||
+  fail "linked sync namespace altered the landing receipt"
+rm -f "$receipt_dir/sync"
 
 echo "land-smoke: ok"

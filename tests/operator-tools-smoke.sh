@@ -7492,7 +7492,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 "#{window_zoomed_flag}"], env=env, text=True).strip() == "1", \
                 "a zoomed board was resized after its split option changed"
             subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
-            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], str(panel.work_split_cells(("left", wider, False), window)), timeout=20)
+            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent],
+                      str(min(panel.work_split_cells(("left", wider, False), window), window - 1 - panel.NATIVE_MIN)), timeout=20)
             control_sidebar = next(row.split("\t")[0] for row in panes if "--watch" in row)
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "claude")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Claude --")
@@ -14871,6 +14872,8 @@ def stamp_ago(hours):
     return pair_clock.strftime("%Y-%m-%dT%H:%M:%SZ", pair_clock.gmtime(pair_clock.time() - hours * 3600))
 truth = deepcopy(flow)
 truth["room"]["participants"][0]["label"] = "Native task not recorded"
+# Stale means a main still working long after its declaration, not merely an old status.
+truth["main_activity"] = {"flow-main": {"state": "busy", "attempt": "flow-attempt"}}
 truth["room"]["statuses"] = {"flow-main": {"text": "Now: 방 범위 선언", "ts": stamp_ago(6), "seq": 1},
                              "flow-other": {"text": "fresh work", "ts": stamp_ago(0.1), "seq": 2}}
 truth["room"]["messages"] = [{"id": "result-builder", "sender": "builder", "recipient": "flow-attempt", "message_kind": "handoff",
@@ -15531,13 +15534,13 @@ landing["land"]["active"] = False
 assert "LANDING" not in render(landing, "codex", 157, 34, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
 declared_board = deepcopy(counted)
 declared_board["room"]["statuses"] = {"flow-main": {"text": "Fixing the parser", "ts": "2026-10-07T09:05:00Z", "seq": 3}}
-declared_board["main_activity"] = {"flow-main": {"state": "idle", "since": time.time() - 60}}
+declared_board["main_activity"] = {"flow-main": {"state": "idle", "attempt": "flow-attempt", "since": time.time() - 60}}
 declared_picture = render(declared_board, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                  navigation={"dismissed": True})
 assert "Now: Fixing the parser" in declared_picture and "(stale)" not in declared_picture and "Latest sent:" not in declared_picture, declared_picture
 assert "Task: none claimed" in declared_picture, declared_picture
 working_board = deepcopy(declared_board)
-working_board["main_activity"]["flow-main"] = {"state": "working", "since": time.time() - 60}
+working_board["main_activity"]["flow-main"] = {"state": "busy", "attempt": "flow-attempt", "since": time.time() - 60}
 working_picture = render(working_board, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                          navigation={"dismissed": True})
 assert "Now: Fixing the parser" in working_picture and "(stale)" in working_picture, working_picture
