@@ -20,8 +20,14 @@ oms_parallel_terminate_running() {
 }
 
 oms_check_parallel() (
+  oms_check_parallel_run "$@"
+)
+
+# Called inside the wrapper or as a supervised background job. A second
+# subshell would hide the cleanup owner behind an intermediate PID.
+oms_check_parallel_run() {
   set -euo pipefail
-  local check="$1" logs="$2" skip_lint="${3:-0}"
+  local check="$1" logs="$2" skip_lint="${3:-0}" queued="${4:-}"
   local lane i rc=0 next=0 total=0 budget="${OMS_CHECK_JOBS:-10}"
   local pids=() names=()
   mkdir -p "$logs"
@@ -52,26 +58,71 @@ oms_check_parallel() (
     cat "$logs/${names[$next]}.log"
     next=$((next + 1))
   }
-  if [ "$skip_lint" != 1 ]; then
+  if [ "$skip_lint" != 1 ] && [ -z "$queued" ]; then
     bash "$check" --lint-only > "$logs/lint.log" 2>&1 &
     pids+=("$!"); names+=(lint)
     total=$((total + 1))
   fi
   for lane in 1 2 3 4 5 6 7 8; do
     if [ $((total - next)) -ge "$budget" ]; then reap_parallel_slot; fi
-    bash "$check" --focused-only --focused-lane "$lane/8" > "$logs/focused-$lane.log" 2>&1 &
+    if [ -n "$queued" ]; then
+      oms_check_queued_lane "$queued" "$logs" "$lane" > "$logs/focused-$lane.log" 2>&1 &
+    else
+      bash "$check" --focused-only --focused-lane "$lane/8" > "$logs/focused-$lane.log" 2>&1 &
+    fi
     pids+=("$!"); names+=("focused-$lane")
     total=$((total + 1))
   done
   if [ $((total - next)) -ge "$budget" ]; then reap_parallel_slot; fi
-  OMS_SMOKE_JOBS="${OMS_SMOKE_JOBS:-6}" bash "$check" --scripts-smoke-only > "$logs/smoke.log" 2>&1 &
+  if [ -n "$queued" ]; then
+    oms_check_queued_lane "$queued" "$logs" smoke > "$logs/smoke.log" 2>&1 &
+  else
+    OMS_SMOKE_JOBS="${OMS_SMOKE_JOBS:-6}" bash "$check" --scripts-smoke-only > "$logs/smoke.log" 2>&1 &
+  fi
   pids+=("$!"); names+=(smoke)
   total=$((total + 1))
   for ((i=next; i<total; i++)); do
     reap_parallel_slot
   done
   exit "$rc"
-)
+}
+
+# Reuse stage() in a fork so the validated selection and provider-less PATH
+# stay owned by the parent. No graph replanning or public bypass flags.
+oms_check_queued_lane() {
+  local queued="$1" logs="$2" lane="$3" index count arg position=0
+  local args=()
+  CHECK_RUNTIME="$logs/runtime-$lane"
+  CHECK_STAGE_PID=""
+  mkdir -p "$CHECK_RUNTIME"
+  cleanup_queued_lane() {
+    if [ -n "$CHECK_STAGE_PID" ]; then
+      kill -TERM "$CHECK_STAGE_PID" 2>/dev/null || true
+      wait "$CHECK_STAGE_PID" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_queued_lane EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  export XDG_CACHE_HOME="${OMS_CHECK_CACHE_HOME:-$CHECK_RUNTIME/cache}"
+  export XDG_CONFIG_HOME="${OMS_CHECK_CONFIG_HOME:-$CHECK_RUNTIME/config}"
+  export OMS_LOCK_DIR="${OMS_CHECK_LOCK_DIR:-$CHECK_RUNTIME/locks}"
+  mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$OMS_LOCK_DIR"
+  count="$(cat "$queued/count")"
+  for ((index=1; index<=count; index++)); do
+    args=()
+    while IFS= read -r -d '' arg; do args+=("$arg"); done < "$queued/$index"
+    if [ "${args[0]}" = affected-scripts-smoke ]; then
+      [ "$lane" = smoke ] || continue
+    else
+      position=$((position + 1))
+      [ "$lane" != smoke ] || continue
+      [ $(( (position - 1) % 8 + 1 )) = "$lane" ] || continue
+    fi
+    stage "${args[@]}"
+  done
+}
 
 # The operator suite keeps dependent phases in one section and assigns the
 # independent fixtures to the remaining shards. Use the same process-group

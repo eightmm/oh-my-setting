@@ -58,6 +58,11 @@ unset GITHUB_STEP_SUMMARY
 report_check() {
   [ "${LIST_STAGES:-0}" != 1 ] || return 0
   [ "${PRINT_AFFECTED_MODE:-0}" != 1 ] || return 0
+  local timing_file
+  # Lanes are reaped before reporting, including cancellation cleanup.
+  for timing_file in "$CHECK_RUNTIME/parallel"/runtime-*/timings; do
+    [ ! -f "$timing_file" ] || cat "$timing_file" >> "$CHECK_RUNTIME/timings"
+  done
   [ -s "$CHECK_RUNTIME/timings" ] || [ "${RUN_AFFECTED:-0}" = 1 ] || return 0
   python3 - "$CHECK_RUNTIME/timings" "$CHECK_SUMMARY" "${AFFECTED_MODE:-${MODE:-full}}" \
     "${AFFECTED_REASONS:-explicit check mode}" "$1" <<'PY'
@@ -153,6 +158,8 @@ PRINT_AFFECTED_MODE=0
 CI_OUTPUT=""
 CI_PARITY=0
 AFFECTED_CAPPED=0
+CHECK_STAGE_QUEUE=""
+CHECK_QUEUED_STAGES=0
 usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
@@ -564,6 +571,12 @@ stage() {  # stage NAME COMMAND...
   fi
   if [ "$LIST_STAGES" = 1 ]; then
     echo "$name"
+    return 0
+  fi
+
+  if [ -n "${CHECK_STAGE_QUEUE:-}" ]; then
+    CHECK_QUEUED_STAGES=$((CHECK_QUEUED_STAGES + 1))
+    printf '%s\0' "$name" "$@" > "$CHECK_STAGE_QUEUE/$CHECK_QUEUED_STAGES"
     return 0
   fi
 
@@ -1048,6 +1061,20 @@ if [ "$MODE" = lint ]; then
   exit 0
 fi
 
+# Plan once in the owning process, then run the selected stages through the
+# same bounded lanes as the complete parallel gate. Include quick stages:
+# CI-parity can select operator-tools there before graph-selected suites.
+if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ] && [ "$LIST_STAGES" != 1 ]; then
+  # shellcheck source=scripts/lib/check-parallel.sh
+  . "$ROOT/scripts/lib/check-parallel.sh"
+  CHECK_STAGE_QUEUE="$CHECK_RUNTIME/selected-stages"
+  CHECK_QUEUED_STAGES=0
+  if [ -n "${OMS_CHECK_JOBS:-}" ]; then
+    export OMS_LINT_JOBS_MAX=1 OMS_SMOKE_JOBS=1 OMS_OPERATOR_JOBS=1
+  fi
+  mkdir -p "$CHECK_STAGE_QUEUE"
+fi
+
 if [ "$RUN_QUICK" = 1 ]; then
   changed_file="$CHECK_RUNTIME/changed-files"
   git -c core.quotePath=false diff -z --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$changed_file"
@@ -1197,6 +1224,19 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
       stage "affected:$affected_test" bash "$affected_test"
     fi
   done
+fi
+
+if [ -n "${CHECK_STAGE_QUEUE:-}" ]; then
+  printf '%s\n' "$CHECK_QUEUED_STAGES" > "$CHECK_STAGE_QUEUE/count"
+  selected_queue="$CHECK_STAGE_QUEUE"
+  unset CHECK_STAGE_QUEUE
+  selected_rc=0
+  # Keep the runner supervised so a signal to this parent reaches its lanes.
+  oms_check_parallel_run "$ROOT/scripts/check.sh" "$CHECK_RUNTIME/parallel" 1 "$selected_queue" &
+  CHECK_STAGE_PID=$!
+  wait "$CHECK_STAGE_PID" || selected_rc=$?
+  CHECK_STAGE_PID=""
+  [ "$selected_rc" = 0 ] || exit "$selected_rc"
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then

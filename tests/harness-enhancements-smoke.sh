@@ -642,7 +642,12 @@ test_gate_fingerprints_full_oms_state() {
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
   cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
   cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
-    "$ROOT/scripts/lib/poll.sh" "$gate/scripts/lib/"
+    "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/check-parallel.sh" "$gate/scripts/lib/"
+  printf '.oms/\n' > "$gate/.gitignore"
+  cat > "$gate/scripts/graph.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":1,"mode":"affected","tests":["tests/source-distribution-smoke.sh"]}'
+EOF
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-python.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-bash32.sh"
   cat > "$gate/fake-shellcheck" <<'EOF'
@@ -787,23 +792,26 @@ log = pathlib.Path(next(line[len(prefix):] for line in result.stderr.splitlines(
 assert 'stage deadline exceeded' in log.read_text(), log
 log.unlink()
 # A caller cancellation uses the same cleanup path rather than waiting out the deadline.
-child_file.unlink()
 env['OMS_CHECK_STAGE_TIMEOUT_SECONDS'] = '60'
-process = subprocess.Popen(command, cwd=gate, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-try:
-    deadline = time.monotonic() + 15
-    while not child_file.exists() and time.monotonic() < deadline:
-        assert process.poll() is None
-        time.sleep(.02)
-    assert child_file.exists(), 'stage did not start'
-    process.send_signal(signal.SIGTERM)
-    output, error = process.communicate(timeout=15)
-    assert process.returncode == 143, (output, error)
-    assert not alive(int(child_file.read_text()))
-finally:
-    if process.poll() is None:
-        process.kill()
-        process.wait()
+for mode in ('--quick', '--affected'):
+    child_file.unlink()
+    command[2] = mode
+    process = subprocess.Popen(command, cwd=gate, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 15
+        while not child_file.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(.02)
+        assert child_file.exists(), 'stage did not start'
+        process.send_signal(signal.SIGTERM)
+        output, error = process.communicate(timeout=15)
+        assert process.returncode == 143, (output, error)
+        assert not alive(int(child_file.read_text()))
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=15)
 # Cancel inside Popen, after the session exists but before its handle returns.
 # This deterministically covers the launch window without production test hooks.
 race = r'''
@@ -916,7 +924,8 @@ test_affected_gate_runs_positive_evidence_and_fails_open() {
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
   cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
   cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
-    "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/provider-registry.sh" "$gate/scripts/lib/"
+    "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/provider-registry.sh" \
+    "$ROOT/scripts/lib/check-parallel.sh" "$gate/scripts/lib/"
   cp "$ROOT/tests/run-smoke-shard.sh" "$gate/tests/run-smoke-shard.sh"
   for script in check-python.sh check-bash32.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/$script"
@@ -935,7 +944,7 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
     ;;
   error) exit 23 ;;
   *)
-    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py","tests/operator-tools-smoke.sh"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator-tools-smoke.sh","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
     ;;
 esac
 EOF
@@ -943,6 +952,8 @@ EOF
   cat > "$gate/tests/operator-tools-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'operator-args:%s\n' "$*" >> "$OMS_TEST_AFFECTED_LOG"
+. tests/parallel-probe.sh
+[ "${OMS_TEST_AFFECTED_FAIL:-0}" != 1 ] || exit 23
 EOF
   cat > "$gate/tests/scripts-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -961,6 +972,7 @@ EOF
   cat > "$gate/tests/leaf-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'shell-file\n' >> "$OMS_TEST_AFFECTED_LOG"
+. tests/parallel-probe.sh
 EOF
   cat > "$gate/tests/autonomy-plan-run-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -987,6 +999,14 @@ class LeafTest(unittest.TestCase):
     def test_unselected(self):
         with open(os.environ["OMS_TEST_AFFECTED_LOG"], "a", encoding="utf-8") as handle:
             handle.write("python-unselected\n")
+EOF
+  cat > "$gate/tests/parallel-probe.sh" <<'EOF'
+if [ -n "${OMS_TEST_AFFECTED_EVENTS:-}" ]; then
+  [ "$OMS_SMOKE_JOBS:$OMS_OPERATOR_JOBS:$OMS_LINT_JOBS_MAX" = 1:1:1 ] || exit 24
+  printf 'start %s\n' "$0" >> "$OMS_TEST_AFFECTED_EVENTS"
+  sleep 1
+  printf 'end %s\n' "$0" >> "$OMS_TEST_AFFECTED_EVENTS"
+fi
 EOF
   printf 'one\n' > "$gate/lib/leaf.py"
   printf '__pycache__/\n' > "$gate/.gitignore"
@@ -1030,6 +1050,31 @@ EOF
   if grep -Fq unselected "$log"; then
     fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
   fi
+  # The same real stage runner must overlap selected suites, cap nested
+  # workers, retain timings and propagate a selected lane's failure.
+  : > "$TMP/affected-events"
+  (cd "$gate" && OMS_CHECK_JOBS=2 OMS_TEST_AFFECTED_EVENTS="$TMP/affected-events" \
+    OMS_TEST_AFFECTED_LOG="$log" GITHUB_STEP_SUMMARY="$TMP/parallel-summary.md" \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
+      > "$TMP/parallel-output" 2>&1) || fail "parallel affected gate failed"
+  python3 - "$TMP/affected-events" <<'PYTEST' || fail "selected suites serialized or exceeded their budget"
+import pathlib, sys
+active = peak = 0
+rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+for row in rows:
+    active += 1 if row.startswith('start ') else -1
+    peak = max(peak, active)
+assert len(rows) == 4 and active == 0 and peak == 2, (rows, peak)
+PYTEST
+  grep -Fq 'operator-tools' "$TMP/parallel-summary.md" || fail "parallel operator timing lost"
+  grep -Fq 'affected:tests/leaf-smoke.sh' "$TMP/parallel-output" || fail "parallel stage renamed"
+  if (cd "$gate" && OMS_TEST_AFFECTED_FAIL=1 OMS_TEST_AFFECTED_LOG="$log" \
+      bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
+        > "$TMP/parallel-failure" 2>&1); then
+    fail "affected parallel runner swallowed a selected suite failure"
+  fi
+  grep -Fq 'check: operator-tools FAILED' "$TMP/parallel-failure" || fail "failing stage name lost"
+  grep -Fq 'slow-stage:' "$TMP/parallel-failure" || fail "failing run lost timing records"
   (cd "$gate" && OMS_TEST_GRAPH_MODE=full GITHUB_STEP_SUMMARY="$TMP/full-summary.md" bash scripts/check.sh --affected \
     --changed-from "$base" --changed-to "$head" --ci-output "$TMP/ci-full") ||
     fail "CI selector tried to execute full lanes inline"

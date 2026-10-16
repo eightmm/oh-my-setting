@@ -14955,7 +14955,8 @@ test_check_affected_selects_python_test_files() {
   mkdir -p "$repo/scripts/lib" "$repo/tests"
   printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
   cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
-  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/"
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+    "$ROOT/scripts/lib/check-parallel.sh" "$repo/scripts/lib/"
   cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
   cat > "$repo/scripts/graph.sh" <<'SH'
 #!/usr/bin/env bash
