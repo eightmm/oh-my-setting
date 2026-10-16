@@ -3282,6 +3282,17 @@ def _settle_dispatch(repo, room_id, member, status):
                           "launch_sha256": _dispatch_exit_record(call, 0)["launch_sha256"]})
 
 
+def _rollback_dispatch_enrollment(repo, room_id, member):
+    # Until Popen succeeds the controller owns this unstarted identity. Bind only
+    # the cleanup subprocess; ordinary leave/session and harness-child guards apply.
+    env = dict(os.environ, OMS_ROOM_ID=room_id, OMS_ROOM_REPO=str(repo), OMS_ROOM_PARTICIPANT=member)
+    result = subprocess.run(["bash", str(ENTRY), "room", "leave", "--repo", str(repo),
+                             "--id", room_id, "--participant", member], env=env,
+                            capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    if result.returncode:
+        raise ValueError(clean(result.stderr or result.stdout, 300))
+
+
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
                  allow_extra_round=None, candidate=None):
@@ -3449,7 +3460,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             room.send(repo, room_id, caller, member, "Assigned: " + (label or route["purpose"]), "handoff")
         except BaseException:
             try:
-                room.append(repo, room_id, {"kind": "leave", "participant": member}, "Call assignment failed")
+                _rollback_dispatch_enrollment(repo, room_id, member)
             except (OSError, ValueError, subprocess.SubprocessError):
                 print("OMS room assignment rollback unavailable.", file=sys.stderr)
             raise
@@ -3609,7 +3620,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 deliver_result(repo, room_id, member, caller, task_id, status)
             elif member and process is None and spawn_failed:
                 try:
-                    room.append(repo, room_id, {"kind": "leave", "participant": member}, "Call spawn failed")
+                    _rollback_dispatch_enrollment(repo, room_id, member)
                 except (OSError, ValueError, subprocess.SubprocessError):
                     print("OMS room assignment rollback unavailable.", file=sys.stderr)
             elif member:

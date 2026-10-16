@@ -10287,7 +10287,7 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
         for unused in range(3):
             panel._observe_dispatch_descendants(Mock(pid=2147483647), evidence)
         assert evidence["descendants"] == [] and evidence["observation_failed"]
-    # Refusal happens before Popen, with exactly the same enrollment rollback as spawn failure.
+    # Assignment/launch refusal and Popen failure all roll back the unstarted enrollment.
     real_launch = subprocess.Popen
     refused_launches = []
     def refuse_provider(argv, *args, **kwargs):
@@ -10295,13 +10295,39 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
             refused_launches.append(argv)
             raise AssertionError("provider started after refused launch")
         return real_launch(argv, *args, **kwargs)
-    for failure in (OSError("launch denied"), ValueError("launch substituted")):
+    for stage, failure in (("assignment", ValueError("assignment denied")),
+                           ("launch", OSError("launch denied")),
+                           ("launch", ValueError("launch substituted")),
+                           ("spawn", OSError("spawn denied"))):
+        real_send, real_prepare = room.send, panel._prepare_dispatch_call
+        failed_spawns = []
+        def send_assignment(*args, **kwargs):
+            if stage == "assignment" and args[4].startswith("Assigned:"):
+                try:
+                    room.append(project, shared, {"kind": "leave", "participant": args[3]}, "Foreign leave")
+                except ValueError as error:
+                    assert "leave must name this session's participant and room" in str(error), error
+                else:
+                    raise AssertionError("parent bypassed the ordinary leave guard")
+                raise failure
+            return real_send(*args, **kwargs)
+        def prepare_launch(*args, **kwargs):
+            if stage == "launch":
+                raise failure
+            return real_prepare(*args, **kwargs)
+        def launch_provider(argv, *args, **kwargs):
+            if stage == "spawn" and ("dispatch_supervisor.py" in " ".join(map(str, argv))
+                                     or argv[:3] == [sys.executable, "-c", "pass"]):
+                failed_spawns.append(argv)
+                raise failure
+            return refuse_provider(argv, *args, **kwargs)
         with patch.dict(os.environ, room_env, clear=True), \
                 patch.object(panel.shutil, "which", return_value=sys.executable), \
                 patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
                 patch.object(panel, "plan_link", return_value=None), \
-                patch.object(panel, "_prepare_dispatch_call", side_effect=failure), \
-                patch.object(panel.subprocess, "Popen", side_effect=refuse_provider):
+                patch.object(room, "send", side_effect=send_assignment), \
+                patch.object(panel, "_prepare_dispatch_call", side_effect=prepare_launch), \
+                patch.object(panel.subprocess, "Popen", side_effect=launch_provider):
             before = {p["participant"] for p in room.status(project, shared)["participants"]}
             try:
                 panel.run_dispatch(project, "claude", "worker", "read", "Inspect", None, None,
@@ -10311,12 +10337,27 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
             else:
                 raise AssertionError("launch record failure started a provider")
             assert not refused_launches
+            assert len(failed_spawns) == (1 if stage == "spawn" else 0)
+            assert os.environ["OMS_ROOM_PARTICIPANT"] == room_owner, "rollback changed the caller binding"
             added = [p for p in room.status(project, shared)["participants"] if p["participant"] not in before]
             assert len(added) == 1 and not added[0]["joined"]
             refused = added[0]["participant"]
             assert refused not in room.status(project, shared)["call_results"], "refused launch delivered a result"
             assert not panel._read(project, panel._dispatch_pending_path(refused), missing=True), "refused launch retained pending evidence"
-            assert not panel._dispatch_call_record(project, shared, added[0]), "refused launch left trusted call evidence"
+            if stage != "spawn":
+                assert not panel._dispatch_call_record(project, shared, added[0]), "refused launch left trusted call evidence"
+            else:
+                assert panel._dispatch_call_record(project, shared, added[0]), "spawn failure lost launch diagnostics"
+                assert not (panel.dispatch_store.store(project) / (refused + "-process.json")).exists(), "failed spawn bound a process"
+    # Binding cleanup to a child must not let a harness worker leave a room.
+    with patch.dict(os.environ, dict(room_env, OMS_HARNESS_CHILD="1"), clear=True):
+        try:
+            panel._rollback_dispatch_enrollment(project, shared, room_owner)
+        except ValueError as error:
+            assert "a worker can only message or acknowledge" in str(error), error
+        else:
+            raise AssertionError("worker used controller rollback to leave the room")
+    assert room.participant(room.status(project, shared), room_owner)["joined"]
     member = "call-" + "e" * 16
     precreated = project / panel._dispatch_call_path(member)
     precreated.write_text('{"pid":2147483647}')
@@ -11153,7 +11194,8 @@ def exercise_observed_worker_leases():
                        "refs": {"panel_role": "main", "panel_room_participant": argv_binding.owner_participant,
                                 "panel_room_id": "foreign-room" if scenario == "foreign-main" else argv_binding.room_id}}
         notices, children, leaves = [], [], []
-        def rollback(repo, room_id, event, text):
+        def rollback(repo, room_id, member):
+            event = {"kind": "leave", "participant": member}
             leaves.append(event)
             next((participant for participant in state["participants"]
                   if participant["participant"] == event.get("participant")), {}).update(joined=False)
@@ -11194,9 +11236,9 @@ def exercise_observed_worker_leases():
                              json.dumps(main_record if operation == "show" else live_rows)), \
                 patch.object(panel, "main_history", return_value=[main_record]), \
                 patch.object(panel, "plan_link", return_value=argv_binding) as observed_plan, \
+                patch.object(panel, "_rollback_dispatch_enrollment", side_effect=rollback), \
                 patch.multiple(room, records=Mock(return_value=[]), project=Mock(return_value=state),
-                               join=Mock(side_effect=enroll), rollover=rolling, send=Mock(side_effect=notice),
-                               append=Mock(side_effect=rollback)), \
+                               join=Mock(side_effect=enroll), rollover=rolling, send=Mock(side_effect=notice)), \
                 patch.object(panel, "results", return_value={"rows": []}), \
                 patch.object(panel.subprocess, "run", side_effect=lambda argv, **kwargs:
                              subprocess.CompletedProcess(argv, 0,
