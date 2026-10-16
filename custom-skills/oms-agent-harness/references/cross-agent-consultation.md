@@ -54,7 +54,7 @@ If policy forbids direct provider calls, use `--export-only` and import with
 `oms artifact-index import`.
 
 For a debate, raise the wall clock before launching — seats doing real
-verification die at the default 5m and their round is lost (a dropped seat's
+verification die at the default 15m wall and their round is lost (a dropped seat's
 last answer still rides the synthesis, but it cannot rebut anyone):
 
 ```bash
