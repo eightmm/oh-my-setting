@@ -916,6 +916,8 @@ with patch.dict(os.environ, OMS_HOOK_AGENT="codex"):
     tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 assert "control-tower main" in tower and "--owner codex --room binding-room" in tower, tower
 assert "trust boundaries" in tower, tower
+assert all(token in tower for token in ("one notification per call", "configured parallelism", "same turn",
+                                       "--continue", "rework limit")), tower
 for trigger in ("security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, install)",
                 "verifier before declaring completion (original request against final result)",
                 "integrator when merging or resolving conflicts", "performance-engineer when performance needs measurement",
@@ -935,7 +937,8 @@ assert "[oms plan]" not in tower, tower
 assert "set your status: oms room send" in tower and "--kind status" in tower, tower
 with patch.object(hook_state, "panel_status_hint", return_value=""):
     short = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
-assert len(short) <= 200 and "control-tower main" in short and "your system prompt" in short, short
+assert len(short) <= 450 and "control-tower main" in short and "your system prompt" in short, short
+assert all(token in short for token in ("per call", "same turn", "--continue", "rework limit")), short
 assert "Delegate implementation" not in short and "keep review/admission/finalize" in short, short
 assert "oms room scope" in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 plan_dir = repo / ".oms" / "plan"

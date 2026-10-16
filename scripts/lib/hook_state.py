@@ -1513,6 +1513,9 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
         return panel_main_base(payload, room) + panel_plan_hint(payload) + panel_status_hint(payload, room)
     agent = payload_agent(payload)
     base = ("[oms panel] control-tower main: delegate via oms panel --dispatch ROLE; "
+            "wait per call (one notification); review/admit/re-dispatch on completion; refill configured slots "
+            "in the same turn with next ready or --continue. Review fixes: --continue or fresh scoped task at "
+            "rework limit; edit only if shorter than a brief. "
             "keep review/admission/finalize; full rules in "
             + ("your system prompt." if agent == "claude" else "this context."))
     path = None
@@ -1544,6 +1547,18 @@ def plan_tasks(repo: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return read_plan(repo)
 
 
+def panel_next_ready_hint(tasks: list[dict[str, Any]], provider: str) -> str:
+    done = {t["id"] for t in tasks if t.get("state") == "done"}
+    ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
+                  if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
+    if not ready:
+        return ""
+    task_id = plain_line(ready["id"], 40)
+    return ("next ready: %s %s → oms agent-plan claim --id %s --provider %s; "
+            "oms panel --dispatch ROLE --owner %s --task-id %s" % (
+                task_id, plain_line(ready.get("title"), 40), task_id, provider, provider, task_id))
+
+
 def panel_plan_hint(payload: dict[str, Any]) -> str:
     """The shared plan as one bounded sentence: progress, the task this main holds, the next ready one."""
     repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
@@ -1568,8 +1583,7 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     if stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds:
         return ""
     done = {t["id"] for t in tasks if t.get("state") == "done"}
-    ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
-                  if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
+    ready_hint = panel_next_ready_hint(tasks, payload_agent(payload))
     cancelled = sum(1 for task in tasks if task.get("state") == "cancelled")
     # Cancelled tasks are closed, never verified: the panel goal banner leaves them out of the total too.
     progress = "%d of %d verified" % (len(done), len(tasks) - cancelled)
@@ -1610,10 +1624,8 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
         if (near_expiry and isinstance(lease, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", lease)
                 and re.fullmatch(r"[A-Za-z0-9._-]{1,40}", task_id)):
             parts.append("refresh: oms agent-plan touch --id %s --lease-id %s" % (task_id, lease))
-    if ready:
-        parts.append("next ready: %s %s → oms agent-plan claim --id %s --provider %s" % (
-            plain_line(ready["id"], 40), plain_line(ready.get("title"), 40), plain_line(ready["id"], 40),
-            payload_agent(payload)))
+    if ready_hint:
+        parts.append(ready_hint)
         if not mine:
             parts.append("claim the next ready task before starting new work")
     return " [oms plan] " + " · ".join(parts)
@@ -1660,7 +1672,10 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "Run independent workers in parallel. Keep scope, briefs, review, patch admission, integration and "
             "coordination yourself as the sole panel main; declare your scope with oms room scope --owns PATH before editing shared files "
             "and pass --scope PATH to write workers. Edit directly only when the brief would take longer than the edit "
-            "or the step needs the main itself. "
+            "or the step needs the main itself. Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch "
+            "it as soon as it finishes, never batch-wait for a wave. Keep configured parallelism full: start the "
+            "next ready plan task or follow-up round in the same turn. Send remaining review findings to a worker "
+            "via --continue, or a fresh scoped task at the rework limit; edit directly only when a brief would take longer. "
             "Land your own work only when publication is authorized: oms scratch-worktree add starts detached; create a "
             "local nontracking branch with git checkout --no-track -b oms/<task>, then commit, rebase on the remote target, "
             "and run oms land from that worktree. No upstream is needed; oms land pushes the verified SHA to its target. "

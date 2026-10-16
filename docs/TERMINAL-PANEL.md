@@ -582,6 +582,12 @@ without silently selecting another model.
 A panel main acts as the control tower: its bootstrap delegates implementation,
 investigation and test repair to bounded workers by default and keeps scope,
 briefs, integration, review, patch admission and coordination.
+Wait on each dispatched call separately, with one notification per call; review,
+admit or re-dispatch it as soon as it finishes, never batch-wait for a wave.
+Keep configured parallelism full: start the next ready plan task or follow-up
+round in the same turn. Send remaining review findings to a worker with
+`--continue`, or a fresh scoped task at the rework limit; edit directly only
+when writing the brief would take longer than the edit.
 It works directly only when a brief would cost more than the edit or the step
 needs the main itself. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
@@ -635,6 +641,10 @@ or one already in review or done, is left unchanged with a warning; `--dry-run`
 never moves it. Stderr names the next verbs, `oms agent-plan review` after
 acceptance and `finish --landed-commit SHA` after `oms land`. The panel never
 passes `--plan-task`, whose per-worker transitions assume one worker per task.
+After a call's exit is verified, dispatch prints the next dependency-ready plan
+task ID with `oms agent-plan claim --id ID --provider PROVIDER` and
+`oms panel --dispatch ROLE --owner PROVIDER --task-id ID` hints when one exists.
+These hints leave claiming and dispatch to the main.
 
 Continue reviewed work with `--continue TASK_ID`: `oms panel --repo . --dispatch refactorer --owner claude
 --continue TASK_ID --access write --brief-file next.md --verify COMMAND` takes the same role,

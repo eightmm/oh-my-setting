@@ -5228,6 +5228,8 @@ for owner in panel.PROVIDERS:
         "authentication, permissions, secrets, signals, install", "architect for structural decisions",
         "release-engineer when deploying", "never all concurrently by default"))
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
+    assert all(token in panel.bootstrap(owner, project) for token in (
+        "one notification per call", "configured parallelism", "same turn", "--continue", "rework limit"))
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project)
     assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
@@ -9790,6 +9792,22 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
             state = room.status(project, shared)
             member = next(p for p in state["participants"] if p["participant"] not in before)
             return status, member, notices.getvalue()
+
+    if sys.platform == "linux":
+        import hook_state
+        ready_tasks = [{"id": "waiting", "state": "ready", "depends": ["missing"], "created": "0"},
+                       {"id": "finished", "state": "done"},
+                       {"id": "next-task", "state": "ready", "depends": ["finished"], "created": "1"},
+                       {"id": "later-task", "state": "ready", "created": "2"}]
+        with patch.object(hook_state, "plan_tasks", return_value=({}, ready_tasks)) as read_plan:
+            ready_status, ready_member, ready_notice = dispatch_case("pass", "next-ready-hint")
+        read_plan.assert_called_once_with(project)
+        assert ready_status == 0, ready_notice
+        assert "next ready: next-task" in ready_notice and "waiting" not in ready_notice and "later-task" not in ready_notice, ready_notice
+        assert "oms agent-plan claim --id next-task --provider claude" in ready_notice, ready_notice
+        assert "oms panel --dispatch ROLE --owner claude --task-id next-task" in ready_notice, ready_notice
+        assert not hook_state.panel_next_ready_hint([], "claude")
+        assert not hook_state.panel_next_ready_hint(ready_tasks[:2], "claude")
 
     if sys.platform == "linux":
         from contextlib import contextmanager

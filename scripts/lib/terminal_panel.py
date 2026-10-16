@@ -444,6 +444,10 @@ def bootstrap(provider, repo):
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
         "separable files or steps into as many non-overlapping workers run in parallel as the work allows (there is no call cap), and keep scope, briefs, "
         "architecture, integration, review and patch admission in the sole main. "
+        "Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch it "
+        "as soon as it finishes, never batch-wait for a wave. Keep configured parallelism full: start the next "
+        "ready plan task or follow-up round in the same turn. Send remaining review findings to a worker via "
+        "--continue, or a fresh scoped task at the rework limit; edit directly only when a brief would take longer. "
         "Work directly only when writing the brief would take longer than the edit, or when the step needs the "
         "main itself, such as integrating into a shared tree another session has frozen. "
         "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it (--task-id moves it "
@@ -3646,7 +3650,20 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 signal.signal(number, previous)
     if shutdown is not None:
         raise shutdown
+    if exit_verified:
+        _print_dispatch_next_ready(repo, owner)
     return status
+
+
+def _print_dispatch_next_ready(repo, owner):
+    from hook_state import panel_next_ready_hint, plan_tasks
+
+    try:
+        hint = panel_next_ready_hint(plan_tasks(repo)[1], owner)
+        if hint:
+            print("[oms plan] " + hint, file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
 
 
 def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workload="deep"):
