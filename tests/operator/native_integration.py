@@ -2801,9 +2801,11 @@ sys.exit(panel.main(['--repo', sys.argv[2], '--watch', '--no-animation']))
             assert select.select([watcher.stderr], [], [], 5)[0], "blocked watcher did not become ready"
             assert watcher.stderr.readline().strip() == "READ_BLOCKED", "status read did not reach its held lock"
             watcher.send_signal(signal.SIGINT)
-            assert watcher.wait(timeout=2) == 130, "blocked status read delayed SIGINT"
+            # The held read would block for its 60 s busy timeout; 10 s still proves
+            # SIGINT did not wait for it while tolerating loaded CI runners.
+            assert watcher.wait(timeout=10) == 130, "blocked status read delayed SIGINT"
             assert not read_finished.exists(), "watcher waited for its blocked status read"
-            output, errors = watcher.communicate(timeout=2)
+            output, errors = watcher.communicate(timeout=10)
             assert not output and not errors, (output, errors)
         finally:
             if watcher.poll() is None:
