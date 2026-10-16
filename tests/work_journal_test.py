@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -402,6 +403,216 @@ class JournalTestCase(unittest.TestCase):
             "짧은 결정",
             wj._judgment_summary(noisy, "decision", wj._headings()),
         )
+
+    def test_cold_seal_rebuild_preserves_views_corrections_and_late_events(self):
+        old, _ = self.store.record_event(base_event("old", "2026-05-01T02:00:00Z"))
+        self.store.record_event(base_event("recent"))
+        # A late arrival must be sealed even when it follows a recent record.
+        self.store.record_event(base_event("late", "2026-06-01T02:00:00Z"))
+        self.store.record_event({**base_event("correction"), "event_type": "correction",
+                                 "supersedes_event_id": old["event_id"]})
+        before = self.store.rebuild()
+        events = self.read_events()
+        views = {p.relative_to(self.store.root): p.read_bytes()
+                 for directory in (self.store.daily_dir, self.store.weekly_dir)
+                 for p in directory.glob("*.md")}
+        self.assertEqual(2, self.store.seal(apply=True))
+        self.assertEqual(views[pathlib.Path("daily/2026-06-01.md")].decode().rstrip(),
+                         self.store.summary_text("daily", "2026-06-01"))
+        manifest = json.loads(self.store.cold_manifest_path.read_text())
+        self.assertEqual(["2026-05", "2026-06"], [s["month"] for s in manifest["segments"]])
+        self.assertEqual(2, len(self.store.events_path.read_bytes().splitlines()))
+        self.assertEqual(events, self.read_events())
+        self.assertEqual(before, self.store.rebuild())
+        self.assertEqual(views, {p.relative_to(self.store.root): p.read_bytes()
+                                for directory in (self.store.daily_dir, self.store.weekly_dir)
+                                for p in directory.glob("*.md")})
+        self.assertFalse(self.store.record_event(base_event("old", "2026-05-01T02:00:00Z"))[1])
+        sealed = {p: p.read_bytes() for p in self.store.cold_dir.glob("*.jsonl")}
+        self.store.record_event(base_event("later-arrival", "2026-05-02T02:00:00Z"))
+        self.assertEqual(1, self.store.seal(apply=True))
+        self.assertTrue(all(p.read_bytes() == content for p, content in sealed.items()))
+        self.assertEqual(5, self.store.rebuild()["event_count"])
+        self.assertEqual(0, self.store.seal(apply=True))
+        # Identity recovery also replays cold history when the pin is lost.
+        self.store.project_path.unlink()
+        self.store.events_path.write_bytes(b"")
+        self.assertEqual("proj_test", wj.JournalStore(self.repo).project_id)
+
+    def test_cold_seal_crashes_at_each_publication_boundary_are_replayable(self):
+        for boundary in ("segment", "manifest", "live", "finish"):
+            with self.subTest(boundary=boundary):
+                store = wj.JournalStore(self.tmp / boundary, clock=lambda: NOW,
+                                        timezone_name="UTC")
+                store.record_event(base_event("old", "2026-06-01T02:00:00Z"))
+                store.record_event(base_event("recent"))
+                store.materialize()
+                expected = store.load_events()
+                write = wj._cold_atomic_write
+                manifests = 0
+
+                def crash(path, content):
+                    nonlocal manifests
+                    if path == store.cold_manifest_path:
+                        manifests += 1
+                    # Empty manifest, committed transition, cleared transition.
+                    if ((boundary == "segment" and path.suffix == ".jsonl"
+                         and path.parent == store.cold_dir)
+                        or (boundary == "manifest" and manifests == 2)
+                        or (boundary == "live" and path == store.events_path)
+                        or (boundary == "finish" and manifests == 3)):
+                        raise OSError("simulated interruption")
+                    write(path, content)
+
+                with mock.patch.object(wj, "_cold_atomic_write", side_effect=crash):
+                    with self.assertRaises(OSError):
+                        store.seal(apply=True)
+                fresh = wj.JournalStore(store.repo, clock=lambda: NOW, timezone_name="UTC")
+                self.assertEqual(expected, fresh.load_events())
+                self.assertIn(expected[0]["event_id"], fresh.summary_text("daily", "2026-06-01"))
+                self.assertEqual(2, fresh.rebuild()["event_count"])
+                if wj._cold_manifest(fresh.root).get("pending"):
+                    with self.assertRaisesRegex(wj.JournalError, "seal --apply"):
+                        fresh.record_event(base_event("after-crash"))
+                    fresh.seal(apply=True)
+                fresh.record_event(base_event("after-crash"))
+                self.assertEqual(3, len(fresh.load_events()))
+                fresh.seal(apply=True)
+                self.assertEqual(3, fresh.rebuild()["event_count"])
+
+    def test_cold_damage_is_refused_even_with_a_current_index(self):
+        self.store.record_event(base_event("old", "2026-06-01T02:00:00Z"))
+        self.store.seal(apply=True)
+        self.store.materialize()
+        segment = next(self.store.cold_dir.glob("*.jsonl"))
+        original = segment.read_bytes()
+        for damaged in (original.replace(b"focused", b"altered"), b"", None):
+            with self.subTest(damaged=damaged):
+                if damaged is None:
+                    segment.unlink()
+                else:
+                    segment.write_bytes(damaged)
+                for reader in (self.store.load_events, self.store.rebuild,
+                               self.store.status, self.store.recent_events,
+                               self.store.materialize):
+                    with self.assertRaises(wj.JournalError):
+                        reader()
+                self.assertFalse(wj.journal_storage(self.repo)["healthy"])
+                segment.write_bytes(original)
+        manifest = json.loads(self.store.cold_manifest_path.read_text())
+        manifest["segments"][0]["count"] += 1
+        self.store.cold_manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaises(wj.JournalError):
+            self.store.load_events()
+
+    def test_cold_thresholds_only_recommend_explicit_sealing(self):
+        for threshold in ("event_lines", "events_bytes", "file_count"):
+            store = wj.JournalStore(self.tmp / threshold, clock=lambda: NOW, timezone_name="UTC")
+            store.record_event(base_event("old", "2026-06-01T02:00:00Z"))
+            store.record_event(base_event("current"))
+            before = store.events_path.read_bytes()
+            with self.subTest(threshold=threshold), mock.patch.object(wj, "journal_storage", return_value={
+                "healthy": True, "threshold_exceeded": [threshold]
+            }), mock.patch.object(store, "seal", side_effect=AssertionError("implicit seal")):
+                self.assertEqual(2, store.materialize()["event_count"])
+                self.assertEqual(2, store.rebuild()["event_count"])
+                store.record_event(base_event("observed"))
+            self.assertFalse(store.cold_manifest_path.exists())
+            self.assertTrue(store.events_path.read_bytes().startswith(before))
+            before = store.events_path.read_bytes()
+            self.assertEqual(1, store.seal())
+            self.assertEqual(before, store.events_path.read_bytes())
+            self.assertFalse(store.cold_manifest_path.exists())
+            self.assertEqual(1, store.seal(apply=True))
+            self.assertEqual(3, len(store.load_events()))
+            self.assertEqual(2, len(store.events_path.read_bytes().splitlines()))
+
+    def test_cold_dry_run_does_not_create_a_journal(self):
+        self.assertEqual(0, self.store.seal())
+        self.assertFalse(self.store.root.exists())
+
+    def test_cold_replay_retries_a_concurrent_seal_between_manifest_and_live(self):
+        for existing_cold in (False, True):
+            with self.subTest(existing_cold=existing_cold):
+                store = wj.JournalStore(self.tmp / str(existing_cold), clock=lambda: NOW,
+                                        timezone_name="UTC")
+                store.record_event(base_event("first", "2026-05-01T02:00:00Z"))
+                if existing_cold:
+                    store.seal(apply=True)
+                store.record_event(base_event("old", "2026-06-01T02:00:00Z"))
+                store.record_event(base_event("recent"))
+                expected = store.load_events()
+                entered, release = threading.Event(), threading.Event()
+                result, errors = [], []
+                read_live = wj._journal_live
+
+                def paused_read(root, manifest):
+                    if threading.current_thread() is reader and not entered.is_set():
+                        entered.set()
+                        if not release.wait(10):
+                            raise RuntimeError("reader barrier timed out")
+                    return read_live(root, manifest)
+
+                def replay():
+                    try:
+                        result.extend(store.load_events())
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                reader = threading.Thread(target=replay)
+                with mock.patch.object(wj, "_journal_live", side_effect=paused_read):
+                    reader.start()
+                    try:
+                        self.assertTrue(entered.wait(10))
+                        store.seal(apply=True)
+                    finally:
+                        release.set()
+                        reader.join(10)
+                self.assertFalse(reader.is_alive())
+                self.assertEqual([], errors)
+                self.assertEqual(expected, result)
+
+    def test_cold_seal_keeps_quarantinable_rows_live(self):
+        old, _ = self.store.record_event(base_event("old", "2026-06-01T02:00:00Z"))
+        recent, _ = self.store.record_event(base_event("recent"))
+        retained = (b"{malformed\n" + b'{"schema_version":99}\n' + b"\n" + b"{partial")
+        records = [wj._canonical_bytes(dict(old, event_id="wj_%032x" % n)) + b"\n"
+                   for n in range(999)]
+        self.store.events_path.write_bytes(b"".join(records)
+                                           + wj._canonical_bytes(recent) + b"\n" + retained)
+        self.assertEqual(1000, self.store.rebuild()["event_count"])
+        self.assertEqual(999, self.store.seal(apply=True))
+        self.assertEqual(wj._canonical_bytes(recent) + b"\n" + retained,
+                         self.store.events_path.read_bytes())
+        quarantine = json.loads(self.store.quarantine_path.read_text())["entries"]
+        self.assertEqual(["malformed", "unsupported_schema", "malformed"],
+                         [row["reason"] for row in quarantine])
+        self.assertEqual(1000, len(self.store.load_events()))
+        self.assertEqual(0, self.store.seal(apply=True))
+
+    def test_cold_pending_recovery_requires_explicit_apply(self):
+        self.store.record_event(base_event("old", "2026-06-01T02:00:00Z"))
+        write = wj._cold_atomic_write
+
+        def interrupt(path, content):
+            if path == self.store.events_path:
+                raise OSError("interrupted seal")
+            write(path, content)
+
+        with mock.patch.object(wj, "_cold_atomic_write", side_effect=interrupt):
+            with self.assertRaises(OSError):
+                self.store.seal(apply=True)
+        before = self.store.events_path.read_bytes()
+        with self.assertRaisesRegex(wj.JournalError, "seal --apply"):
+            self.store.record_event(base_event("after-crash"))
+        self.assertEqual(1, self.store.materialize()["event_count"])
+        self.assertEqual(1, self.store.rebuild()["event_count"])
+        self.assertEqual(0, self.store.seal())
+        self.assertIn("pending", wj._cold_manifest(self.store.root))
+        self.assertEqual(before, self.store.events_path.read_bytes())
+        self.store.seal(apply=True)
+        self.store.record_event(base_event("after-crash"))
+        self.assertEqual(2, len(self.store.load_events()))
 
     def test_incremental_index_avoids_full_log_scan_and_untouched_rewrite(self):
         self.store.record_event(base_event("old", "2026-07-01T02:00:00Z"))

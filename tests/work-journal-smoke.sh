@@ -102,6 +102,7 @@ assert large["healthy"] and large["event_lines"] == 1000 and large["file_count"]
 assert large["total_bytes"] == 3000 + 99 * 5, large
 assert set(large["threshold_exceeded"]) == {"event_lines", "file_count"}, large
 assert large["cold_partition"] is False and large["threshold_note"], large
+assert "oms journal seal" in large["threshold_note"], large
 result = subprocess.run([str(root / "scripts/state.sh"), "--repo", str(repo), "--json"],
                         capture_output=True, text=True, check=True)
 assert json.loads(result.stdout)["work_journal"] == large, result.stdout
@@ -118,6 +119,54 @@ if sys.platform != "win32":
     events.mkdir()
     assert journal_storage(repo)["healthy"] is False
 PY
+
+# Thresholds only recommend maintenance; implicit paths never partition.
+mkdir "$TMP/dry-seal-repo"
+"$ROOT/scripts/journal.sh" seal --repo "$TMP/dry-seal-repo" > "$TMP/seal-result"
+[ ! -e "$TMP/dry-seal-repo/.oms" ] || fail "seal dry-run seeded journal state"
+sealrepo="$TMP/seal-repo"
+python3 - "$ROOT" "$sealrepo" <<'PY' || fail "cold fixture setup failed"
+import datetime as dt, pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+from work_journal import JournalStore, _canonical_bytes
+store = JournalStore(sys.argv[2], timezone_name="UTC")
+old = (dt.datetime.now(dt.timezone.utc).replace(day=1) - dt.timedelta(days=1)).isoformat()
+event, _ = store.record_event({"event_type": "validation", "occurred_at": old,
+    "source": {"type": "test", "id": "cold"}, "verification_status": "passed"})
+# Distinct canonical IDs avoid paying for 1000 individual index transactions.
+store.events_path.write_bytes(b"".join(_canonical_bytes(dict(event, event_id="wj_%032x" % n)) + b"\n"
+                                      for n in range(1000)))
+PY
+"$ROOT/scripts/journal.sh" observe --repo "$sealrepo" --source-type run-ledger --source-file "$row"
+"$ROOT/scripts/journal.sh" rebuild --repo "$sealrepo" > "$TMP/seal-before"
+"$ROOT/scripts/journal.sh" materialize --repo "$sealrepo"
+"$ROOT/scripts/journal.sh" tick --repo "$sealrepo" --local-only
+cp "$sealrepo/.oms/work-journal/events.jsonl" "$TMP/seal-live"
+"$ROOT/scripts/journal.sh" seal --repo "$sealrepo" > "$TMP/seal-result"
+grep -q 'dry-run: 1001 events' "$TMP/seal-result" || fail "seal must default to dry-run"
+cmp "$TMP/seal-live" "$sealrepo/.oms/work-journal/events.jsonl" || fail "implicit seal changed live events"
+[ ! -d "$sealrepo/.oms/work-journal/cold" ] || fail "implicit path created cold storage"
+"$ROOT/scripts/journal.sh" seal --apply --repo "$sealrepo" > "$TMP/seal-result"
+[ "$(cat "$TMP/seal-result")" = "sealed: 1001 events" ] || fail "explicit seal omitted old events"
+[ ! -s "$sealrepo/.oms/work-journal/events.jsonl" ] || fail "explicit seal did not truncate live events"
+"$ROOT/scripts/journal.sh" seal --apply --repo "$sealrepo" > "$TMP/seal-result"
+[ "$(cat "$TMP/seal-result")" = "sealed: 0 events" ] || fail "seal CLI is not idempotent"
+"$ROOT/scripts/journal.sh" rebuild --repo "$sealrepo" > "$TMP/seal-after"
+cmp "$TMP/seal-before" "$TMP/seal-after" || fail "sealed replay changed rebuild output"
+"$ROOT/scripts/journal.sh" show --repo "$sealrepo" --recent 1 --json > "$TMP/seal-show"
+python3 - "$TMP/seal-show" <<'PY' || fail "indexed reader omitted sealed events"
+import json, sys
+assert len(json.load(open(sys.argv[1]))["events"]) == 1
+PY
+python3 - "$sealrepo" <<'PY'
+import pathlib, sys
+segment = next((pathlib.Path(sys.argv[1]) / ".oms/work-journal/cold").glob("*.jsonl"))
+segment.write_bytes(segment.read_bytes() + b"{}\n")
+PY
+if "$ROOT/scripts/journal.sh" show --repo "$sealrepo" --recent 1 --json > "$TMP/seal-show" 2> "$TMP/seal-error"; then
+  fail "indexed CLI reader accepted a damaged cold segment"
+fi
+grep -q 'cold journal segment digest mismatch' "$TMP/seal-error" || fail "cold refusal lost its diagnostic"
 
 # Prompt/Stop remain local even with a configured mirror. Periodic maintenance
 # and explicit sync own network work.
@@ -218,12 +267,80 @@ assert index["event_count"] == 13
 assert not list(root.rglob("*.tmp-*"))
 PY
 
+# Pause a real seal after its live snapshot, immediately before replacement.
+# Release it only after the public observe CLI proves writer-lock contention.
+barrier_journal="$TMP/barrier-journal.py"
+cat > "$barrier_journal" <<'PY'
+import os
+import pathlib
+import sys
+import time
+
+sys.path.insert(0, os.environ["OMS_TEST_JOURNAL_LIB"])
+import work_journal as journal
+
+write = journal._cold_atomic_write
+
+def paused_write(path, content):
+    if path.name == "events.jsonl":
+        pathlib.Path(os.environ["OMS_TEST_SEAL_READY"]).touch()
+        release = pathlib.Path(os.environ["OMS_TEST_SEAL_RELEASE"])
+        deadline = time.monotonic() + 15
+        while not release.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("seal barrier timed out")
+            time.sleep(0.02)
+    write(path, content)
+
+journal._cold_atomic_write = paused_write
+raise SystemExit(journal.main())
+PY
+OMS_TEST_JOURNAL_LIB="$ROOT/scripts/lib" OMS_TEST_SEAL_READY="$TMP/seal-ready" \
+  OMS_TEST_SEAL_RELEASE="$TMP/seal-release" OMS_WORK_JOURNAL_PYTHON="$barrier_journal" \
+  "$ROOT/scripts/journal.sh" seal --apply --repo "$repo" > "$TMP/barrier-seal" &
+barrier_seal_pid=$!
+i=0
+while [ ! -f "$TMP/seal-ready" ] && [ "$i" -lt 200 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+if [ ! -f "$TMP/seal-ready" ]; then
+  touch "$TMP/seal-release"
+  wait "$barrier_seal_pid" || true
+  fail "seal never reached live replacement barrier"
+fi
+make_row "$TMP/during-seal.json" "during-seal"
+OMS_POLL_VERBOSE=1 "$ROOT/scripts/journal.sh" observe --repo "$repo" \
+  --source-type run-ledger --source-file "$TMP/during-seal.json" 2> "$TMP/observe-wait" &
+barrier_observe_pid=$!
+i=0
+while ! grep -q 'poll: file-lock' "$TMP/observe-wait" && [ "$i" -lt 200 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+touch "$TMP/seal-release"
+wait "$barrier_seal_pid" "$barrier_observe_pid" || fail "concurrent seal or observe failed"
+grep -q 'poll: file-lock' "$TMP/observe-wait" || fail "public observe bypassed writer lock"
+python3 - "$ROOT" "$repo" <<'PY' || fail "seal lost a concurrent observation"
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+from work_journal import JournalStore
+store = JournalStore(sys.argv[2])
+events = store.load_events()
+assert len(events) == 14, len(events)
+assert sum(e["source"]["id"] == "during-seal" for e in events) == 1
+assert len(store.events_path.read_bytes().splitlines()) == 1
+assert store.rebuild()["event_count"] == 14
+PY
+
 # Explicit remote sync owns a separate, non-blocking lock. Local observation
 # remains independent of that network lock.
 fake_journal="$TMP/fake-work-journal.py"
 sync_started="$TMP/sync-started"
 sync_release="$TMP/sync-release"
 second_done="$TMP/second-done"
+seal_done="$TMP/seal-done"
+seal_waiting="$TMP/seal-waiting"
 cat > "$fake_journal" <<'PY'
 import os
 import pathlib
@@ -236,6 +353,11 @@ if sys.argv[1] == "sync":
     deadline = time.time() + 15
     while not release.exists() and time.time() < deadline:
         time.sleep(0.05)
+elif sys.argv[1] == "observe":
+    pathlib.Path(os.environ["OMS_TEST_LOCAL_OBSERVED"]).touch()
+elif sys.argv[1] == "seal":
+    assert pathlib.Path(os.environ["OMS_TEST_SYNC_RELEASE"]).exists(), "seal overlapped sync"
+    pathlib.Path(os.environ["OMS_TEST_SEAL_DONE"]).touch()
 PY
 access_name="OMS_WORK_JOURNAL_NOTION_"'TOKEN'
 export "$access_name=test-credential"
@@ -243,6 +365,8 @@ export OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID=fake-target
 export OMS_WORK_JOURNAL_PYTHON="$fake_journal"
 export OMS_TEST_SYNC_STARTED="$sync_started"
 export OMS_TEST_SYNC_RELEASE="$sync_release"
+export OMS_TEST_SEAL_DONE="$seal_done"
+export OMS_TEST_LOCAL_OBSERVED="$second_done"
 (work_journal_sync "$repo") &
 first_sync_pid=$!
 i=0
@@ -251,7 +375,20 @@ while [ ! -f "$sync_started" ] && [ "$i" -lt 100 ]; do
   i=$((i + 1))
 done
 [ -f "$sync_started" ] || fail "fake remote sync did not start"
-(work_journal_observe "$repo" run-ledger "$row"; touch "$second_done") &
+(
+  # Invoked by the lock helper after it observes contention.
+  # shellcheck disable=SC2317
+  oms_poll_sleep_labeled() { touch "$seal_waiting"; sleep 0.05; }
+  work_journal_call_local "$repo" seal --apply --repo "$repo"
+) &
+seal_pid=$!
+i=0
+while [ ! -f "$seal_waiting" ] && [ "$i" -lt 100 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -f "$seal_waiting" ] || fail "seal never contended with remote sync"
+(work_journal_observe "$repo" run-ledger "$row") &
 second_sync_pid=$!
 i=0
 while [ ! -f "$second_done" ] && [ "$i" -lt 40 ]; do
@@ -260,16 +397,20 @@ while [ ! -f "$second_done" ] && [ "$i" -lt 40 ]; do
 done
 if [ ! -f "$second_done" ]; then
   touch "$sync_release"
-  wait "$first_sync_pid" "$second_sync_pid"
+  wait "$first_sync_pid" "$second_sync_pid" "$seal_pid"
   fail "local journal observation queued behind remote sync"
 fi
+[ ! -e "$seal_done" ] || fail "seal ran during remote sync"
 touch "$sync_release"
-wait "$first_sync_pid" "$second_sync_pid"
+wait "$first_sync_pid" "$second_sync_pid" "$seal_pid"
+[ -f "$seal_done" ] || fail "seal did not resume after remote sync"
 unset "$access_name"
 unset OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID
 unset OMS_WORK_JOURNAL_PYTHON
 unset OMS_TEST_SYNC_STARTED
 unset OMS_TEST_SYNC_RELEASE
+unset OMS_TEST_SEAL_DONE
+unset OMS_TEST_LOCAL_OBSERVED
 
 # Disabled and reentrant observers are exact no-ops.
 before="$(wc -l < "$repo/.oms/work-journal/events.jsonl" | tr -d ' ')"

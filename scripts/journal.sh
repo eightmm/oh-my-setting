@@ -39,7 +39,7 @@ if [ "${1:-}" = disconnect ] && ! command -v python3 >/dev/null 2>&1; then
 fi
 
 case "${1:-}" in
-  status|show|rebuild|sync|distill|identity)
+  status|show|rebuild|seal|sync|distill|identity|materialize|tick|observe)
     command_name="$1"
     repo="."
     previous=""

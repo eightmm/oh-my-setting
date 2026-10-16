@@ -1673,15 +1673,186 @@ def optional_enrichment(
     return enriched if isinstance(enriched, str) and enriched.strip() else template
 
 
-def journal_storage(repo: Union[os.PathLike, str]) -> Dict[str, Any]:
+def _cold_read(path: pathlib.Path) -> bytes:
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise JournalError("cold journal requires regular files")
+        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                raise JournalError("cold journal changed during open")
+            return handle.read()
+    except OSError as exc:
+        raise JournalError("cold journal file unavailable") from exc
+
+
+def _cold_manifest(root: pathlib.Path) -> Dict[str, Any]:
+    directory = root / "cold"
+    if not directory.exists() and not directory.is_symlink():
+        return {"schema_version": 1, "segments": []}
+    if any(p.is_symlink() for p in (root.parent, root, directory)) or not directory.is_dir():
+        raise JournalError("cold journal requires a real directory")
+    path = directory / "manifest.json"
+    if not path.exists() and not path.is_symlink() and not any(directory.glob("*.jsonl")):
+        return {"schema_version": 1, "segments": []}
+    try:
+        manifest = json.loads(_cold_read(path))
+        if (not isinstance(manifest, dict) or manifest.get("schema_version") != 1
+                or not isinstance(manifest.get("segments"), list)
+                or set(manifest) - {"schema_version", "segments", "pending"}):
+            raise ValueError
+        names = set()
+        for entry in manifest["segments"]:
+            if (not isinstance(entry, dict)
+                    or set(entry) != {"file", "month", "count", "first_event_id", "last_event_id", "sha256"}
+                    or not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", entry["month"])
+                    or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+                    or entry["file"] != "%s-%s.jsonl" % (entry["month"], entry["sha256"])
+                    or type(entry["count"]) is not int or entry["count"] <= 0
+                    or entry["file"] in names):
+                raise ValueError
+            names.add(entry["file"])
+        pending = manifest.get("pending")
+        if pending is not None:
+            if (not isinstance(pending, dict)
+                    or set(pending) != {"before", "after", "cutoff"}
+                    or not re.fullmatch(r"[0-9a-f]{64}", pending["before"])
+                    or not re.fullmatch(r"[0-9a-f]{64}", pending["after"])
+                    or not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", pending["cutoff"])):
+                raise ValueError
+        return manifest
+    except (ValueError, TypeError, KeyError) as exc:
+        raise JournalError("invalid cold journal manifest") from exc
+
+
+def _cold_event(raw: bytes) -> Dict[str, Any]:
+    row = json.loads(raw)
+    if not isinstance(row, dict):
+        raise ValueError("invalid canonical object")
+    validate_canonical_event(row)
+    if dt.date.fromisoformat(row["local_date"]).isoformat() != row["local_date"]:
+        raise ValueError("invalid canonical date")
+    return row
+
+
+def _cold_segment(root: pathlib.Path, entry: Mapping[str, Any]) -> bytes:
+    content = _cold_read(root / "cold" / entry["file"])
+    if _sha256_bytes(content) != entry["sha256"] or not content.endswith(b"\n"):
+        raise JournalError("cold journal segment digest mismatch")
+    try:
+        rows = [_cold_event(raw) for raw in content.splitlines()]
+        for row in rows:
+            if row["local_date"][:7] != entry["month"]:
+                raise ValueError
+        if (len(rows) != entry["count"] or rows[0]["event_id"] != entry["first_event_id"]
+                or rows[-1]["event_id"] != entry["last_event_id"]):
+            raise ValueError
+    except (SchemaError, ValueError, TypeError, KeyError, IndexError) as exc:
+        raise JournalError("invalid cold journal segment") from exc
+    return content
+
+
+def _partition_live(content: bytes, cutoff: str) -> Tuple[Dict[str, bytes], bytes]:
+    months: Dict[str, bytes] = {}
+    recent = []
+    grouped: Dict[str, List[bytes]] = {}
+    for raw in content.splitlines(keepends=True):
+        try:
+            # Quarantine belongs to replay. Keep unsupported/malformed rows,
+            # including an incomplete tail, byte-for-byte in the live file.
+            if not raw.endswith(b"\n"):
+                raise ValueError
+            row = _cold_event(raw)
+            month = row["local_date"][:7]
+        except (SchemaError, ValueError, TypeError, KeyError):
+            recent.append(raw)
+            continue
+        if month < cutoff:
+            grouped.setdefault(month, []).append(raw)
+        else:
+            recent.append(raw)
+    for month, records in grouped.items():
+        months[month] = b"".join(records)
+    return months, b"".join(recent)
+
+
+def _journal_live(root: pathlib.Path, manifest: Mapping[str, Any]) -> bytes:
+    path = root / "events.jsonl"
+    content = _cold_read(path) if path.exists() or path.is_symlink() else b""
+    pending = manifest.get("pending")
+    if pending:
+        digest = _sha256_bytes(content)
+        if digest == pending["before"]:
+            months, content = _partition_live(content, pending["cutoff"])
+            entries = {entry["file"] for entry in manifest["segments"]}
+            if any("%s-%s.jsonl" % (month, _sha256_bytes(raw)) not in entries
+                   for month, raw in months.items()):
+                raise JournalError("incomplete cold journal transition")
+        elif digest != pending["after"]:
+            raise JournalError("cold journal transition live digest mismatch")
+        if _sha256_bytes(content) != pending["after"]:
+            raise JournalError("cold journal transition replay mismatch")
+    return content
+
+
+def _journal_snapshot(
+    root: pathlib.Path, read: Callable[[Mapping[str, Any]], Any]
+) -> Tuple[Dict[str, Any], Any]:
+    # Seals only add immutable segments. A manifest recheck makes its live
+    # snapshot safe for readers that do not own the canonical shell lock.
+    for _attempt in range(8):
+        manifest = _cold_manifest(root)
+        try:
+            result = read(manifest)
+        except (JournalError, OSError):
+            if manifest != _cold_manifest(root):
+                continue
+            raise
+        if manifest == _cold_manifest(root):
+            return manifest, result
+    raise JournalError("journal layout kept changing during read")
+
+
+def _cold_atomic_write(path: pathlib.Path, content: bytes) -> None:
+    """Persist each rename before publishing the next step of a seal."""
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".tmp-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _cold_sync_directory(path.parent)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _cold_sync_directory(path: pathlib.Path) -> None:
+    # Windows cannot open directory handles through os.open. File fsync and
+    # replace still provide process-crash recovery there.
+    if os.name != "nt":
+        descriptor = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def journal_storage(
+    repo: Union[os.PathLike, str], *, _allow_incomplete: bool = False
+) -> Dict[str, Any]:
     """Measure physical retention without opening the mutable derived index."""
     root = pathlib.Path(repo) / ".oms" / "work-journal"
     thresholds = {"event_lines": 1000, "events_bytes": 5 * 1024 * 1024, "file_count": 100}
     result = {"present": root.exists() or root.is_symlink(), "healthy": True,
               "event_lines": 0, "events_bytes": 0, "file_count": 0, "total_bytes": 0,
               "thresholds": thresholds, "threshold_exceeded": [], "cold_partition": False,
-              "threshold_note": "Review retention at >=1000 event lines, >=5 MiB event bytes or >=100 files; "
-                                "cold partition deferred; preserve canonical events for replay."}
+              "threshold_note": "Review prior-month sealing with `oms journal seal` (dry-run); "
+                                "run `oms journal seal --apply` to seal."}
     if not result["present"]:
         return result
     def failed(error):
@@ -1723,9 +1894,17 @@ def journal_storage(repo: Union[os.PathLike, str]) -> Dict[str, Any]:
                         result["event_lines"] += chunk.count(b"\n")
                         last = chunk[-1:]
                     after = os.fstat(handle.fileno())
-                    if after.st_size != info.st_size or after.st_mtime_ns != info.st_mtime_ns or last not in (b"", b"\n"):
+                    if (after.st_size != info.st_size or after.st_mtime_ns != info.st_mtime_ns
+                            or (not _allow_incomplete and last not in (b"", b"\n"))):
                         raise ValueError("canonical journal changed or has an incomplete event")
-    except (OSError, ValueError):
+        def inspect(manifest):
+            for entry in manifest["segments"]:
+                _cold_segment(root, entry)
+            if manifest.get("pending"):
+                _journal_live(root, manifest)
+            return bool(manifest["segments"])
+        _manifest, result["cold_partition"] = _journal_snapshot(root, inspect)
+    except (OSError, ValueError, JournalError):
         result["healthy"] = False
     result["threshold_exceeded"] = [key for key, threshold in thresholds.items() if result[key] >= threshold]
     return result
@@ -1744,6 +1923,8 @@ class JournalStore:
         self.repo = pathlib.Path(repo).resolve()
         self.root = self.repo / ".oms" / "work-journal"
         self.events_path = self.root / "events.jsonl"
+        self.cold_dir = self.root / "cold"
+        self.cold_manifest_path = self.cold_dir / "manifest.json"
         self.project_path = self.root / "project.json"
         self.daily_dir = self.root / "daily"
         self.weekly_dir = self.root / "weekly"
@@ -1773,24 +1954,84 @@ class JournalStore:
                     return row["project_id"], row["project_name"]
             except (OSError, ValueError, TypeError):
                 pass
-        if self.events_path.is_file():
+        for raw in self._replay_records():
+            if not raw.strip():
+                continue
             try:
-                records = self.events_path.read_bytes().splitlines()
-            except OSError:
-                records = []
-            for raw in records:
-                if not raw.strip():
-                    continue
-                try:
-                    row = json.loads(raw.decode("utf-8"))
-                    validate_canonical_event(row)
-                    if isinstance(row.get("project_id"), str) and isinstance(
-                        row.get("project_name"), str
-                    ):
-                        return row["project_id"], row["project_name"]
-                except (SchemaError, UnicodeError, ValueError, TypeError):
-                    continue
+                row = json.loads(raw.decode("utf-8"))
+                validate_canonical_event(row)
+                if isinstance(row.get("project_id"), str) and isinstance(
+                    row.get("project_name"), str
+                ):
+                    return row["project_id"], row["project_name"]
+            except (SchemaError, UnicodeError, ValueError, TypeError):
+                continue
         return None, None
+
+    def _replay_records(self) -> Iterable[bytes]:
+        manifest, live = _journal_snapshot(self.root, lambda m: _journal_live(self.root, m))
+        for entry in manifest["segments"]:
+            yield from _cold_segment(self.root, entry).splitlines()
+        yield from live.splitlines()
+
+    def _finish_seal(self, manifest: Dict[str, Any]) -> None:
+        if manifest.get("pending"):
+            # The published manifest is the commit point. Until the atomic live
+            # replacement, readers derive its retained rows from the old file.
+            content = _journal_live(self.root, manifest)
+            _cold_atomic_write(self.events_path, content)
+            del manifest["pending"]
+            _cold_atomic_write(self.cold_manifest_path, _canonical_bytes(manifest) + b"\n")
+
+    def seal(self, *, apply: bool = False) -> int:
+        """Preview prior local months; apply callers hold sync then writer locks."""
+        self._check_storage()
+        manifest = _cold_manifest(self.root)
+        for entry in manifest["segments"]:
+            _cold_segment(self.root, entry)
+        if apply:
+            self._ensure_layout()
+            self._finish_seal(manifest)
+        content = _journal_live(self.root, manifest)
+        cutoff = self._current_periods()[0][:7]
+        months, recent = _partition_live(content, cutoff)
+        if not apply:
+            return sum(len(raw.splitlines()) for raw in months.values())
+        if not months:
+            return 0
+        self.cold_dir.mkdir(exist_ok=True)
+        _cold_sync_directory(self.root)
+        # An initial empty manifest distinguishes an uncommitted orphan segment
+        # from a missing manifest after a completed seal.
+        if not self.cold_manifest_path.exists():
+            _cold_atomic_write(self.cold_manifest_path, _canonical_bytes(manifest) + b"\n")
+        count = 0
+        for month, raw in sorted(months.items()):
+            digest = _sha256_bytes(raw)
+            name = "%s-%s.jsonl" % (month, digest)
+            target = self.cold_dir / name
+            if target.exists() or target.is_symlink():
+                if _cold_read(target) != raw:
+                    raise JournalError("cold journal segment collision")
+            else:
+                _cold_atomic_write(target, raw)
+            rows = [json.loads(line) for line in raw.splitlines()]
+            manifest["segments"].append({
+                "file": name, "month": month, "sha256": digest, "count": len(rows),
+                "first_event_id": rows[0]["event_id"], "last_event_id": rows[-1]["event_id"],
+            })
+            count += len(rows)
+        manifest["pending"] = {
+            "before": _sha256_bytes(content), "after": _sha256_bytes(recent), "cutoff": cutoff,
+        }
+        _cold_atomic_write(self.cold_manifest_path, _canonical_bytes(manifest) + b"\n")
+        self._finish_seal(manifest)
+        self._ensure_index_database()
+        return count
+
+    def _check_storage(self) -> None:
+        if not journal_storage(self.repo, _allow_incomplete=True)["healthy"]:
+            raise JournalError("journal storage is unhealthy")
 
     def _ensure_layout(self) -> None:
         oms_dir = self.repo / ".oms"
@@ -1810,11 +2051,23 @@ class JournalStore:
             )
 
     def _events_fingerprint(self) -> Tuple[int, int]:
-        try:
-            stat = self.events_path.stat()
-        except OSError:
-            return 0, 0
-        return int(stat.st_size), int(stat.st_mtime_ns)
+        def fingerprint(manifest):
+            for entry in manifest["segments"]:
+                _cold_segment(self.root, entry)
+            if manifest.get("pending"):
+                _journal_live(self.root, manifest)
+            try:
+                stat = self.events_path.stat()
+            except FileNotFoundError:
+                size, modified = 0, 0
+            else:
+                size, modified = int(stat.st_size), int(stat.st_mtime_ns)
+            if manifest["segments"]:
+                modified = int.from_bytes(hashlib.sha256(
+                    _canonical_bytes(manifest) + ("%s:%s" % (size, modified)).encode("ascii")
+                ).digest()[:8], "big")
+            return size, modified
+        return _journal_snapshot(self.root, fingerprint)[1]
 
     @staticmethod
     def _create_index_schema(connection: sqlite3.Connection) -> None:
@@ -1965,6 +2218,11 @@ class JournalStore:
             with sqlite3.connect(str(self.index_db_path)) as connection:
                 self._rebuild_index_database(connection, events)
 
+        # A seal changes the physical fingerprint without changing any event.
+        # Reconstitute summary rows as well before an indexed reader returns.
+        if _cold_manifest(self.root)["segments"]:
+            self._render_all()
+
     @staticmethod
     def _decode_indexed_event(payload: str) -> Dict[str, Any]:
         event = json.loads(payload)
@@ -1983,6 +2241,9 @@ class JournalStore:
 
     def _write_event(self, event: Mapping[str, Any]) -> bool:
         self._ensure_layout()
+        manifest = _cold_manifest(self.root)
+        if manifest.get("pending"):
+            raise JournalError("pending journal seal requires oms journal seal --apply")
         self._ensure_index_database()
         with sqlite3.connect(str(self.index_db_path)) as connection:
             if connection.execute(
@@ -2119,14 +2380,9 @@ class JournalStore:
         return created
 
     def load_events(self) -> List[Dict[str, Any]]:
-        if not self.events_path.is_file():
-            return []
         events: List[Dict[str, Any]] = []
         quarantine = []
-        try:
-            records = self.events_path.read_bytes().splitlines()
-        except OSError:
-            records = []
+        records = self._replay_records()
         for line_number, raw in enumerate(records, 1):
             if not raw.strip():
                 continue
@@ -2373,9 +2629,11 @@ class JournalStore:
 
     def materialize(self) -> Dict[str, Any]:
         self._ensure_layout()
+        self._check_storage()
         return self._render_all()
 
     def rebuild(self) -> Dict[str, Any]:
+        self._check_storage()
         return self._render_all(self.load_events())
 
     def _distill_marker(self) -> Optional[Tuple[str, str]]:
@@ -3804,6 +4062,9 @@ def _build_parser() -> argparse.ArgumentParser:
     identity.add_argument("--adopt-detected", action="store_true")
     rebuild = sub.add_parser("rebuild")
     rebuild.add_argument("--repo", default=".")
+    seal = sub.add_parser("seal")
+    seal.add_argument("--repo", default=".")
+    seal.add_argument("--apply", action="store_true", help="seal prior months (default: dry-run)")
     materialize = sub.add_parser("materialize")
     materialize.add_argument("--repo", default=".")
     disconnect = sub.add_parser("disconnect")
@@ -4030,6 +4291,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     result["notion"]["failed"],
                 )
             )
+        return 0
+    if args.command == "seal":
+        count = store.seal(apply=args.apply)
+        if args.apply:
+            print("sealed: %s events" % count)
+        else:
+            print("dry-run: %s events would be sealed; run oms journal seal --apply" % count)
         return 0
     if args.command == "rebuild":
         result = store.rebuild()

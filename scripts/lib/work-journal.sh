@@ -35,7 +35,7 @@ work_journal_sync_configured() {
     [ -f "$(work_journal_config_path)" ]
 }
 
-work_journal_run_locked() {
+work_journal_run_python() {
   local repo="$1"
   shift
 
@@ -47,11 +47,18 @@ work_journal_call_local() {
   shift
   local state_root="$repo/.oms/work-journal"
 
-  agent_memory_ensure_oms_ignore "$repo" >/dev/null 2>&1 || return 1
-  mkdir -p "$state_root" || return 1
   # One lock serializes immutable event admission, materialized views, and sync
   # metadata. The lock itself remains in the harness's per-user lock directory.
-  oms_with_file_lock "$state_root/state" work_journal_run_locked "$repo" "$@"
+  if [ "${1:-}" = seal ]; then
+    # Wait for network work before owning state, so queued maintenance does
+    # not queue ordinary observations behind that network call.
+    oms_with_file_lock "$state_root/notion-sync" oms_with_file_lock \
+      "$state_root/state" work_journal_run_python "$repo" "$@"
+  else
+    agent_memory_ensure_oms_ignore "$repo" >/dev/null 2>&1 || return 1
+    mkdir -p "$state_root" || return 1
+    oms_with_file_lock "$state_root/state" work_journal_run_python "$repo" "$@"
+  fi
 }
 
 work_journal_sync() {
@@ -66,7 +73,7 @@ work_journal_sync() {
   # lifecycle is already syncing, leave the pending state for a later tick
   # instead of queueing a primary task behind network I/O.
   oms_try_file_lock "$state_root/notion-sync" \
-    work_journal_run_locked "$repo" sync --repo "$repo" "$@" || rc=$?
+    work_journal_run_python "$repo" sync --repo "$repo" "$@" || rc=$?
   [ "$rc" = 75 ] && return 0
   return "$rc"
 }
