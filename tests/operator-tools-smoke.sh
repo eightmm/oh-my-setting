@@ -13596,7 +13596,7 @@ legacy_left = ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"]
 assert board_calls("200 50 1 $1\tcodex\t") == [record_left, left_split("56")]
 assert board_calls("400 50 1 $1\tcodex\tleft:248c\t") == [left_split("152")]
 assert board_calls("200 50 1 $1\tcodex\tleft:190c\t") == [left_split("76")]
-assert board_calls("120 50 1 $1\tcodex\tleft:95c\t") == [left_split("95")]
+assert board_calls("120 50 1 $1\tcodex\tleft:95c\t") == [left_split("79")]
 assert board_calls("400 50 1 $1\tcodex\tleft:180c\twork\tleft:180c@400") == [left_split("180")]
 assert board_calls("200 50 1 $1\tcodex\tleft:190c\toverview") == [left_split("124")]
 assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
@@ -13678,8 +13678,10 @@ for window, cells in split_widths:
             assert board_calls("%d %d 1 $1\t%s\t" % (window, height, name)) == recorded + attached_split
             assert board_calls("80 24 0 $1\t%s\t" % name, terminal=(window, height)) == recorded + detached_split
 assert board_calls("60 24 0 $1\tclaude\t") == [], "unknown terminal size ignored a narrow tmux window"
-# A dragged (recorded) width is the person's choice; it is only bounded by the 20-cell chat floor.
-assert board_calls("80 24 1 $1\tclaude\tleft:70c") == [left_split("59")]
+# A saved width keeps its preference while the applied board leaves the native CLI's 40-cell floor.
+assert board_calls("80 24 1 $1\tclaude\tleft:70c") == [left_split("39")], \
+    "a saved width leaves 40 native CLI columns without rewriting the saved option"
+assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 for configured, cells in (("25", 50), ("35", 70), ("1", 50), ("99", 70), ("-1", 50),
                           ("garbage", 56), ("28.5", 56), ("2_8", 56)):
     assert board_calls("200 50 1 $1\tcodex\t", percent=configured) == [
@@ -13704,6 +13706,11 @@ def sync_run_panes(sync, reads, listing):
     return done, [call.args[0][1:] for call in tmux_run.call_args_list]
 def reading(active, window, pane, text="", zoomed=False, panes=2, mode="work", native="%2", drag=""):
     return (active, zoomed, panes, window, pane, text, mode, native, drag)
+# Applying a saved landscape width keeps the native CLI at 40 columns without rewriting the preference.
+done, calls = sync_run(panel.SplitSync(), reading(False, (80, 50), (59, 50), "left:70c"))
+assert done == ["follow"] and calls == [["resize-pane", "-t", "%1", "-x", "39"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (70, 50), "left:70c"))
+assert done == [None] and calls == [], (done, calls)
 # A border drag in the active window is recorded as cells (clamped) and an inactive window resizes to the record.
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50), "left:25c"), reading(True, (100, 50), (22, 50), "left:25c"))
 assert done == [None, "record"] and calls == [

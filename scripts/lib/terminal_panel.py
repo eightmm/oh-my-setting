@@ -3870,6 +3870,9 @@ def board_split(pane, repo, command, main_watch=False):
         cells = (board_split_cells((orientation, (OVERVIEW_SHARE * axis + 50) // 100, False), axis)
                  if mode == "overview" and orientation == "left" else
                  base_cells if mode == "overview" or deliberate else work_split_cells((orientation, base_cells, False), axis))
+        if orientation == "left":
+            # Saved widths remain preferences; constrain only the pane applied at this window size.
+            cells = min(cells, axis - 1 - NATIVE_MIN)
         record_cells = work_split_cells((orientation, base_cells, False), axis)
         percent = max(1, min(99, (200 * cells + axis) // (2 * axis)))
         width = str(cells) if sized and attached else "%d%%" % percent
@@ -4036,6 +4039,7 @@ class SplitSync:
         if legacy:
             # Resolve legacy percentages before orientation or size normalization.
             stored = (orientation, split_cells(stored, axis), False)
+        native_width_clamped = orientation == "left" and stored[1] > axis - 1 - NATIVE_MIN
         returned_record = False
         if returning_to_work and self.work_geometry is not None:
             work_window, work_orientation, work_stored = self.work_geometry
@@ -4115,7 +4119,7 @@ class SplitSync:
                                check=False, timeout=3, stdin=subprocess.DEVNULL)
         elif mode == "work":
             normalized = work_split_cells(stored, axis)
-            if legacy or (not marked_drag and normalized != stored[1]):
+            if legacy or (not native_width_clamped and not marked_drag and normalized != stored[1]):
                 stored = (orientation, normalized, False)
                 done = "record" if record(normalized) else None
         if mode == "work":
@@ -4124,6 +4128,9 @@ class SplitSync:
             done = "record"
         manual = self.manual is not None and self.manual[0] == window and self.manual[1] == orientation
         target = split_cells(stored, axis) if manual else work_split_cells(stored, axis)
+        if orientation == "left":
+            # A saved or synced width must leave enough room for the native CLI prompt.
+            target = min(target, axis - 1 - NATIVE_MIN)
         wide_reserve_restore = orientation == "left" and not manual \
             and axis >= MIN_BOARD + WORK_CHAT_RESERVE + 1 \
             and axis - current_extent - 1 < WORK_CHAT_RESERVE \
