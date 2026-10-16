@@ -108,6 +108,7 @@ rs_collect private "$ROOT/scripts/project-private.sh" --repo "$REPO" status --js
 # an agent resuming here most needs to distrust.
 rs_collect autoupdate "$ROOT/scripts/auto-update.sh" attention
 rs_collect lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json
+rs_collect lifecycle_events "$ROOT/scripts/agent-events.sh" --repo "$REPO" follow --timeout 0
 rs_collect approvals "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json
 if [ "$FAILURE_PHYSICAL" = 0 ] || [ -f "$REPO/.oms/failures.jsonl" ]; then
   rs_collect failures "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json
@@ -130,6 +131,7 @@ mv "$RS_TMP/lifecycle.out" "$RS_TMP/lifecycle.json"
   LIFECYCLE_HEALTHY=0
   printf '[]\n' > "$RS_TMP/lifecycle.json"
 }
+[ "$(rs_rc lifecycle_events)" = 0 ] || LIFECYCLE_HEALTHY=0
 APPROVAL_HEALTHY=1
 mv "$RS_TMP/approvals.out" "$RS_TMP/approvals.json"
 [ "$(rs_rc approvals)" = 0 ] || {
@@ -304,6 +306,7 @@ OMS_RS_REPO="$REPO" \
 OMS_RS_JSON="$AS_JSON" \
 OMS_RS_PRIVATE="$PRIVATE_JSON" \
 OMS_RS_LIFECYCLE_FILE="$RS_TMP/lifecycle.json" \
+OMS_RS_LIFECYCLE_EVENTS_FILE="$RS_TMP/lifecycle_events.out" \
 OMS_RS_LIFECYCLE_HEALTHY="$LIFECYCLE_HEALTHY" \
 OMS_RS_APPROVAL_FILE="$RS_TMP/approvals.json" \
 OMS_RS_APPROVAL_HEALTHY="$APPROVAL_HEALTHY" \
@@ -329,7 +332,7 @@ OMS_RS_UPSTREAM="$(git -C "$REPO" rev-parse --abbrev-ref '@{u}' 2>/dev/null || t
 OMS_RS_AHEAD="$(git -C "$REPO" rev-list --count '@{u}..HEAD' 2>/dev/null || true)" \
 OMS_RS_HAS_WORKFLOWS="$([ -d "$REPO/.github/workflows" ] && echo 1 || echo 0)" \
 python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
-import calendar, glob, json, os, runpy, sys, time
+import calendar, glob, json, math, os, runpy, sys, time
 
 process_liveness = runpy.run_path(sys.argv[1])
 process_pid_alive = process_liveness["pid_alive"]
@@ -402,6 +405,40 @@ attempt_by_state = {}
 for attempt in attempts:
     key = str(attempt.get("state") or "unknown")
     attempt_by_state[key] = attempt_by_state.get(key, 0) + 1
+executing_states = {"starting", "working", "verifying"}
+executing = sum(
+    not item.get("terminal") and
+    (item.get("state") in executing_states or
+     str(item.get("state", "")).startswith("waiting_"))
+    for item in attempts
+)
+review_days = 3.0
+try:
+    configured_review_days = float(os.environ.get("OMS_REVIEW_AGED_DAYS", "3"))
+    if math.isfinite(configured_review_days):
+        review_days = max(0.0, configured_review_days)
+except (TypeError, ValueError):
+    pass
+review_since = {}
+if os.environ["OMS_RS_LIFECYCLE_HEALTHY"] == "1":
+    review_events, _ = read_jsonl_checked(os.environ["OMS_RS_LIFECYCLE_EVENTS_FILE"])
+    for event in review_events:
+        attempt_id = event.get("attempt_id")
+        if (event.get("event_type") == "attempt.state_changed" and event.get("to_state") == "review"
+                and isinstance(attempt_id, str)):
+            review_since[attempt_id] = event.get("ts")
+now_epoch = time.time()
+aged_reviews = 0
+for item in attempts:
+    if item.get("state") != "review" or not isinstance(item.get("attempt_id"), str):
+        continue
+    since = review_since.get(item.get("attempt_id"))
+    try:
+        entered_epoch = calendar.timegm(time.strptime(since, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        continue
+    if now_epoch - entered_epoch > review_days * 86400:
+        aged_reviews += 1
 attention_states = {"waiting_input", "waiting_approval", "blocked"}
 
 def attempt_summary(item):
@@ -422,6 +459,9 @@ agent_operations = {
     "healthy": os.environ["OMS_RS_LIFECYCLE_HEALTHY"] == "1",
     "total": len(attempts),
     "active": sum(not bool(item.get("terminal")) for item in attempts),
+    "executing": executing,
+    "review": attempt_by_state.get("review", 0),
+    "review_aged": aged_reviews,
     "by_state": attempt_by_state,
     "needs_attention": [
         attempt_summary(item)
@@ -1143,7 +1183,10 @@ else:
 
     ops = state["agent_operations"]
     if ops["total"] or not ops["healthy"]:
-        line("\n## Agent operations (%d total, %d active)" % (ops["total"], ops["active"]))
+        review_days_label = str(int(review_days)) if review_days.is_integer() else str(review_days)
+        line("\n## Agent operations (%d total: %d executing, %d awaiting owner review (%d older than %sd), %d other active)" % (
+            ops["total"], ops["executing"], ops["review"], ops["review_aged"],
+            review_days_label, max(0, ops["active"] - ops["executing"] - ops["review"])))
         if not ops["healthy"]:
             line("  CORRUPT lifecycle stream (run: oms agent-events validate)")
         if ops["by_state"]:

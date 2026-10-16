@@ -38,12 +38,20 @@ def project_inbox(state, *, safe_actions=(), include_threads=True):
          "oms agent-events --repo . list --state waiting_approval", 13, "P1"),
         ("queued", "agent-queued", "queued agent attempt(s) not yet dispatched",
          "oms agent-supervisor --repo . dispatch", 14, "P2"),
-        ("review", "agent-review", "agent attempt(s) ready for review",
-         "oms agent-events --repo . list --state review", 15, "P2"),
     ):
         count = int(operation_states.get(state_name, 0) or 0)
         if count:
             add(order, priority, code, "%d %s" % (count, summary), command, count)
+
+    review_count = int(operations.get("review", operation_states.get("review", 0)) or 0)
+    aged_review_count = min(review_count, int(operations.get("review_aged", 0) or 0))
+    fresh_review_count = review_count - aged_review_count
+    if fresh_review_count:
+        add(15, "P2", "agent-review-fresh", "%d agent attempt(s) recently entered review" % fresh_review_count,
+            "oms agent-events --repo . list --state review", fresh_review_count)
+    if aged_review_count:
+        add(16, "P2", "agent-review-aged", "%d agent attempt(s) awaiting owner review; settle when decided" % aged_review_count,
+            "oms panel --settle-review", aged_review_count)
 
     approvals = state.get("approvals", {})
     if not approvals.get("healthy", True):

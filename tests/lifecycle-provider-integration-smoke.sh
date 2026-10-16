@@ -139,6 +139,47 @@ assert "agent-waiting-approval" in codes, inbox
 assert "pending-approval" in codes, inbox
 PY
 
+review_attempt="$(env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" start --provider codex --tool review-fixture)"
+for review_state in starting working verifying review; do
+  env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" transition \
+    --attempt "$review_attempt" --state "$review_state" >/dev/null
+done
+"$ROOT/scripts/state.sh" --repo "$TMP/repo" --json > "$TMP/review-state.json"
+"$ROOT/scripts/inbox.sh" --repo "$TMP/repo" --json > "$TMP/review-inbox.json"
+env OMS_REVIEW_AGED_DAYS=0 "$ROOT/scripts/state.sh" --repo "$TMP/repo" --json > "$TMP/aged-review-state.json"
+env OMS_REVIEW_AGED_DAYS=0 "$ROOT/scripts/inbox.sh" --repo "$TMP/repo" --json > "$TMP/aged-review-inbox.json"
+env OMS_REVIEW_AGED_DAYS=invalid "$ROOT/scripts/state.sh" --repo "$TMP/repo" > "$TMP/invalid-review-days.txt"
+cp "$TMP/repo/.oms/lifecycle/events.jsonl" "$TMP/lifecycle-events.backup"
+python3 - "$TMP/repo/.oms/lifecycle/events.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({"event_type": "attempt.state_changed", "attempt_id": [], "to_state": "review",
+                             "ts": "2026-10-16T00:00:00Z"}) + "\n")
+PY
+"$ROOT/scripts/state.sh" --repo "$TMP/repo" --json > "$TMP/corrupt-state.json" || fail "state did not handle a corrupt lifecycle stream"
+"$ROOT/scripts/inbox.sh" --repo "$TMP/repo" --json > "$TMP/corrupt-inbox.json" || fail "inbox did not handle a corrupt lifecycle stream"
+mv "$TMP/lifecycle-events.backup" "$TMP/repo/.oms/lifecycle/events.jsonl"
+python3 - "$TMP/review-state.json" "$TMP/review-inbox.json" "$TMP/aged-review-state.json" "$TMP/aged-review-inbox.json" \
+  "$TMP/invalid-review-days.txt" "$TMP/corrupt-state.json" "$TMP/corrupt-inbox.json" <<'PY' || fail "review aging projection is incorrect"
+import json, sys
+fresh_state, fresh_inbox, aged_state, aged_inbox, invalid_text = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:5]] + [open(sys.argv[5], encoding="utf-8").read()]
+corrupt_state = json.load(open(sys.argv[6], encoding="utf-8"))
+corrupt_inbox = json.load(open(sys.argv[7], encoding="utf-8"))
+assert fresh_state["agent_operations"]["review"] == 1, fresh_state
+assert fresh_state["agent_operations"]["review_aged"] == 0, fresh_state
+assert fresh_state["agent_operations"]["executing"] == 1, fresh_state
+assert "agent-review-fresh" in {item["code"] for item in fresh_inbox["items"]}, fresh_inbox
+assert aged_state["agent_operations"]["review_aged"] == 1, aged_state
+aged = next(item for item in aged_inbox["items"] if item["code"] == "agent-review-aged")
+assert aged["count"] == 1 and aged["command"] == "oms panel --settle-review", aged
+assert "3d" in invalid_text, invalid_text
+assert corrupt_state["agent_operations"]["healthy"] is False, corrupt_state
+assert corrupt_state["agent_operations"]["review_aged"] == 0, corrupt_state
+assert "agent-lifecycle-corrupt" in {item["code"] for item in corrupt_inbox["items"]}, corrupt_inbox
+PY
+env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" transition \
+  --attempt "$review_attempt" --state "done" >/dev/null
+
 # A direct write attempt belongs to the whole delegated worker round, not just
 # the provider subprocess. Provider exit 0 must not become review before the
 # declared verifier finishes, and a verifier failure must terminalize the
