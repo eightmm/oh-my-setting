@@ -791,10 +791,18 @@ class RuntimeFixture(RuntimeFixtureBase):
         item = next(c for c in evidence.build_coverage(self.repo)['criteria'] if c['id'] == criterion)
         self.assertEqual(item['status'], 'failed')
 
+    def _admission_verification_fields(self) -> dict:
+        report = self.repo / '.oms' / 'artifacts' / 'admission.md'
+        report.write_text('# Patch admission: ADMIT\n\n- verification: command\n'
+                          '- verify_sha256: %s\n\n## Ladder\n' % sha256_text('python3 -m unittest'),
+                          encoding='utf-8')
+        return {'status': 'verified', 'verify_exit': 0,
+                'artifact': '.oms/artifacts/admission.md', 'artifact_sha256': sha256_file(report)}
+
     def test_plan_tasks_are_criteria_and_admission_is_their_evidence(self) -> None:
         # Every plan task projects as a criterion; the admission receipt that
-        # carries its task lineage is the automatic evidence — verified on
-        # ADMIT (exit 0), failed on REJECT, and a receipt naming no current
+        # carries its task lineage is automatic evidence — verified after
+        # executing the stored verifier, failed on REJECT; a receipt naming no current
         # plan task stays inert instead of guessing.
         plan_path = self.repo / '.oms' / 'plan' / 'tasks.json'
         plan = read_json(plan_path)
@@ -807,6 +815,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
             'schema': 1, 'event_id': 'evt-admit-t1', 'kind': 'patch-admit',
             'exit': 0, 'task_id': 't1', 'plan_id': plan['plan_id'],
+            **self._admission_verification_fields(),
         })
         append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
             'schema': 1, 'event_id': 'evt-admit-ghost', 'kind': 'patch-admit',
@@ -818,6 +827,43 @@ class RuntimeFixture(RuntimeFixtureBase):
         supports = [e.get('support') for e in by_id['plan-task-t1']['evidence']]
         self.assertIn('patch-admission-receipt', supports)
         self.assertNotIn('plan-task-no-such-task', by_id)
+        # Exit-zero structural admission and unproven historical rows are
+        # inconclusive, even when they claim covers or carry a zero placeholder.
+        for fields in ({}, {'context_verification': 'none', 'verify_exit': 0, 'status': 'verified'},
+                       {'status': 'verified'}, {'verify_exit': 0}):
+            self.assertEqual(evidence.outcome(dict(kind='patch-admit', exit=0, **fields)),
+                             'inconclusive')
+        for exit_code in (False, 0.0, None):
+            self.assertEqual(evidence.outcome(dict(kind='patch-admit', exit=exit_code,
+                                                  status='verified', verify_exit=0)), 'inconclusive')
+        index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+        original = index.read_text(encoding='utf-8')
+        verified = dict(kind='patch-admit', exit=0, task_id='t1', plan_id=plan['plan_id'],
+                        **self._admission_verification_fields())
+        for label, fields in (
+                ('no command', {'status': 'inconclusive'}),
+                ('missing report', {'artifact': '.oms/artifacts/missing.md'}),
+                ('changed report', {'artifact_sha256': '0' * 64}),
+                ('structural covers', {'status': 'inconclusive', 'task_id': '', 'covers': ['plan-task-t1']})):
+            with self.subTest(label=label):
+                index.write_text(json.dumps(dict(verified, **fields)) + '\n', encoding='utf-8')
+                current = evidence.build_envelope(self.repo)
+                self.assertEqual(next(c['status'] for c in current['criteria']
+                                      if c['id'] == 'plan-task-t1'), 'inconclusive')
+        # A changed verifier in the same plan instance invalidates the binding.
+        plan['tasks']['t1']['verify'] = 'false'
+        atomic_write_json(plan_path, plan)
+        index.write_text(json.dumps(verified) + '\n', encoding='utf-8')
+        current = evidence.build_envelope(self.repo)
+        self.assertEqual(next(c['status'] for c in current['criteria']
+                              if c['id'] == 'plan-task-t1'), 'inconclusive')
+        index.write_text(json.dumps(dict(verified, task_id='', covers=['plan-task-t1'])) + '\n', encoding='utf-8')
+        current = evidence.build_envelope(self.repo)
+        self.assertEqual(next(c['status'] for c in current['criteria']
+                              if c['id'] == 'plan-task-t1'), 'inconclusive')
+        plan['tasks']['t1']['verify'] = 'python3 -m unittest'
+        atomic_write_json(plan_path, plan)
+        index.write_text(original, encoding='utf-8')
         append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
             'schema': 1, 'event_id': 'evt-admit-t1-reject', 'kind': 'patch-admit',
             'exit': 3, 'task_id': 't1', 'plan_id': plan['plan_id'],
@@ -848,7 +894,8 @@ class RuntimeFixture(RuntimeFixtureBase):
 
         mechanisms = (
             ({'schema': 1, 'event_id': 'evt-auto', 'kind': 'patch-admit',
-              'exit': 0, 'task_id': 't1', 'plan_id': first_id}, None),
+              'exit': 0, 'task_id': 't1', 'plan_id': first_id,
+              **self._admission_verification_fields()}, None),
             ({'schema': 1, 'event_id': 'evt-covers', 'kind': 'verify',
               'status': 'verified', 'covers': ['plan-task-t1'],
               'plan_id': first_id}, None),

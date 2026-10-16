@@ -28,6 +28,10 @@ ROOT_LIB="$ROOT/scripts/lib"
 REPO="$PWD"
 PATCH=""
 VERIFY=""
+VERIFY_EXPLICIT=0
+VERIFY_EXIT=""
+VERIFICATION="none"
+BASE_VERIFY=""
 ML=0
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
@@ -70,6 +74,7 @@ Options:
   --patch FILE   Patch file to admit (required).
   --repo PATH    Target git repo (default: current directory).
   --verify CMD   Verification command run in the worktree after applying.
+                 With --plan-task, defaults to and must match its stored verifier.
                  Default: scripts/check.sh fast when implemented; otherwise
                  an existing check.sh requires an explicit --verify CMD.
   --ml           Prefer the ml-smoke verification mode when auto-detecting.
@@ -77,11 +82,12 @@ Options:
   --plan-task ID  Enforce this agent-plan task's allowed/forbidden paths.
   --covers ID    Acceptance criterion this admission proves (repeatable).
                  Ids are validated against the runtime envelope before any
-                 work; the receipt records them exit-judged — verified on
-                 ADMIT, failed on REJECT — bound to the patch digest.
+                 work; the receipt records executed verification separately
+                 from structural admission, bound to the patch digest.
   --keep-worktree  Keep the worktree for inspection.
   --allow-verifier-change  Permit a patch that modifies the verify command's
-                 own files. The base-owned verification floor still runs.
+                 own files. Assertion-only test additions need no override.
+                 The base-owned verification floor still runs.
   --allow-test-reduction  Admit a patch that net-removes test assertions or
                  deletes a test file (normally rejected: passing by deleting
                  the check is the other way to self-certify). The base-owned
@@ -94,8 +100,10 @@ Options:
 
 Ladder: patch applies cleanly (not stale) -> changed files stay in scope ->
 changed shell files parse (bash -n) -> patch does not weaken the tests ->
-candidate verification passes -> changed verification surfaces also pass with
-those changes restored from HEAD. Exit 0 only if every gate passes. Without
+candidate verification passes -> unchanged baseline checks also pass with
+verification surfaces restored from HEAD. Newly invoked tests run on the
+candidate; an available HEAD project suite supplies their baseline floor.
+Exit 0 only if every gate passes. Without
 --plan-task there is no declared scope, so the structural floor
 stands in for it: keep the existing layout.
 EOF
@@ -143,7 +151,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --patch) [ "$#" -ge 2 ] || fail "--patch requires a file"; PATCH="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
-    --verify) [ "$#" -ge 2 ] || fail "--verify requires a command"; VERIFY="$2"; shift 2 ;;
+    --verify) [ "$#" -ge 2 ] || fail "--verify requires a command"; VERIFY="$2"; VERIFY_EXPLICIT=1; shift 2 ;;
     --ml) ML=1; shift ;;
     --report) [ "$#" -ge 2 ] || fail "--report requires a path"; REPORT="$2"; shift 2 ;;
     --plan-task) [ "$#" -ge 2 ] || fail "--plan-task requires id"; PLAN_TASK="$2"; shift 2 ;;
@@ -161,7 +169,7 @@ done
 
 [ -n "$PATCH" ] || fail "--patch is required"
 [ -f "$PATCH" ] || fail "patch not found: $PATCH"
-REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
+REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
 reference_state="$(oms_state_root "$REPO")" || fail "cannot resolve reference state"
@@ -208,6 +216,26 @@ if [ -n "$PLAN_TASK" ]; then
   SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("allowed_paths",[])))')"
   SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
   ACCEPTANCE_FILES="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("project_contract") or {}; print("\n".join(c.get("acceptance_files") or d.get("acceptance_files") or []))')"
+  read_task_verify() {
+    printf '%s' "$plan_json" | python3 -c '
+import json,sys
+value=json.load(sys.stdin).get("verify", "")
+if not isinstance(value, str) or "\x00" in value:
+    raise SystemExit(1)
+sys.stdout.write(value + "__OMS_VERIFY_END__")
+' | tr -d '\r'
+  }
+  task_verify_raw="$(read_task_verify)" || fail "cannot read task verify contract"
+  case "$task_verify_raw" in
+    *"__OMS_VERIFY_END__") ;;
+    *) fail "cannot decode task verify contract" ;;
+  esac
+  task_verify="${task_verify_raw%__OMS_VERIFY_END__}"
+  [ -n "$task_verify" ] || fail "plan task $PLAN_TASK has no stored verify contract"
+  VERIFY="${VERIFY//$'\r'/}"
+  [ "$VERIFY_EXPLICIT" = 0 ] || [ "$VERIFY" = "$task_verify" ] ||
+    fail "--verify does not match plan task $PLAN_TASK review contract"
+  VERIFY="$task_verify"
   export OMS_TASK_ID="$PLAN_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
 fi
 
@@ -266,8 +294,15 @@ if [ "$apply_ok" = 1 ]; then
     # Auto-detection belongs to the trusted base, not to the patch being
     # admitted. Otherwise deleting or rewriting check.sh can also rewrite the
     # command that is supposed to judge that patch.
-    if [ -z "$VERIFY" ] && [ -x "$worktree/scripts/check.sh" ]; then
-      VERIFY="$(oms_default_verify_command "$worktree/scripts/check.sh" "$ML")" || exit 2
+    if [ -x "$worktree/scripts/check.sh" ]; then
+      # An explicit candidate-only test can use the unchanged project suite as
+      # its floor. An unusable default must not invalidate an explicit command.
+      BASE_VERIFY="$(oms_default_verify_command "$worktree/scripts/check.sh" "$ML" 2>/dev/null)" || BASE_VERIFY=""
+      BASE_VERIFY="${BASE_VERIFY//$'\r'/}"
+      if [ -z "$VERIFY" ]; then
+        [ -n "$BASE_VERIFY" ] || oms_default_verify_command "$worktree/scripts/check.sh" "$ML" >/dev/null
+        VERIFY="$BASE_VERIFY"
+      fi
     fi
     # The apply into the worktree must succeed, otherwise the syntax/verify
     # gates below would run against the UNPATCHED tree and pass vacuously. Gate
@@ -410,61 +445,180 @@ EOF
     # --- Gate 3a: identify the automatic verification surface ---------------
     # A candidate verifier is allowed to exercise its own proposed tests, but
     # it cannot be the only authority over them. The floor below treats paths
-    # directly named by VERIFY, common verifier configs, and test/spec paths as
+    # executed by VERIFY, common verifier configs, and test/spec paths as
     # one surface. This scan is independent of both --allow-* flags: overrides
     # may permit the edit, but they never suppress the base-owned second run.
     verifier_hit=""
     verification_surface=""
     surface_scan=""
+    surface_tab="$(printf "\t")"
     if [ -n "$VERIFY" ] && command -v python3 >/dev/null 2>&1; then
-      surface_scan="$(OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" \
-        OMS_ACCEPTANCE_FILES="$ACCEPTANCE_FILES" python3 - <<'PY' | tr -d '\r'
+      scan_surface() {
+        OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" OMS_WORKTREE="$worktree" \
+          OMS_ACCEPTANCE_FILES="$ACCEPTANCE_FILES" python3 - <<'SURFACE_PY'
+import difflib
 import os
+import posixpath
 import re
-try:
-    import shlex
-    toks = shlex.split(os.environ["OMS_VERIFY"])
-except Exception:
-    toks = os.environ["OMS_VERIFY"].split()
+import shlex
+import subprocess
+
+wt = os.environ["OMS_WORKTREE"]
+def base(path):
+    result = subprocess.run(["git", "-C", wt, "show", "HEAD:" + path],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.stdout if result.returncode == 0 else None
+
+# Operand readers inspect files without running them; their operands are data.
+READERS = {"grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "sed", "awk", "wc", "diff", "cmp",
+           "test", "[", "jq", "ls", "stat", "file", "sha256sum", "shasum", "md5sum"}
+
+def resolve(token, cwd=""):
+    if os.path.isabs(token):
+        token = os.path.relpath(token, wt).replace(os.sep, "/")
+    else:
+        token = posixpath.join(cwd, token)
+    path = posixpath.normpath(token)
+    return path if path != ".." and not path.startswith("../") else ""
+
+# Only executed paths confer verifier authority. Arguments to grep, hashes or
+# other content readers remain product inputs, even if their basename matches
+# a script elsewhere. Do not evaluate shell expansions while classifying them.
 named = set()
-for t in toks:
-    if "/" in t or "." in t:
-        named.add(t)
-        named.add(t.lstrip("./"))
-        named.add(os.path.basename(t))
+new_only = []
+def commands(command, cwd="", candidate_eligible=True):
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return
+    segments, segment = [], []
+    for token in tokens:
+        if token in (";", "&&", "||", "|", "&", "(", ")"):
+            if segment:
+                segments.append(segment)
+            segment = []
+        else:
+            segment.append(token)
+    if segment:
+        segments.append(segment)
+    for parts in segments:
+        while parts and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", parts[0]):
+            parts = parts[1:]
+        # Peel wrappers so `timeout 10 bash x.sh`, `nice -n 5 x.sh` or `exec x.sh`
+        # still name x.sh; a wrapped verifier must not escape consent or the floor.
+        while parts:
+            head = os.path.basename(parts[0])
+            if head in ("command", "env", "exec", "time", "nohup", "builtin", "stdbuf", "nice", "timeout"):
+                parts = parts[1:]
+                while parts and (parts[0] == "--" or parts[0].startswith("-")
+                                 or re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", parts[0])):
+                    flag = parts[0]
+                    parts = parts[1:]
+                    if parts and ((head == "nice" and flag == "-n") or (head == "timeout" and flag in ("-s", "-k"))
+                                  or (head == "stdbuf" and flag in ("-i", "-o", "-e"))):
+                        parts = parts[1:]
+                if head == "timeout" and parts:
+                    parts = parts[1:]
+                continue
+            break
+        if not parts:
+            continue
+        executable = os.path.basename(parts[0])
+        if executable in (".", "source") and len(parts) > 1:
+            path = resolve(parts[1], cwd)
+            if path:
+                named.add(path)
+            continue
+        if executable not in READERS:
+            for operand in parts[1:]:
+                if operand.endswith((".sh", ".bash", ".py")) and not operand.startswith("-"):
+                    operand_path = resolve(operand, cwd)
+                    if operand_path:
+                        named.add(operand_path)
+        if executable == "cd" and len(parts) == 2:
+            cwd = resolve(parts[1], cwd)
+            continue
+        target = parts[0]
+        if executable in ("bash", "sh", "python", "python3", "node", "ruby", "perl"):
+            args = parts[1:]
+            if "-c" in args and args.index("-c") + 1 < len(args):
+                commands(args[args.index("-c") + 1], cwd, False)
+                continue
+            if "-m" in args or not args or args[0] == "-":
+                continue
+            target = next((arg for arg in args if not arg.startswith("-")), "")
+        path = resolve(target, cwd) if target else ""
+        if path:
+            named.add(path)
+            if (candidate_eligible and len(segments) == 1 and not cwd and "<" not in parts and ">" not in parts
+                    and base(path) is None and os.path.isfile(os.path.join(wt, path))):
+                new_only.append(path)
+commands(os.environ["OMS_VERIFY"])
 reviewed = set(x for x in os.environ.get("OMS_ACCEPTANCE_FILES", "").splitlines() if x)
 ENTRY = {"check.sh", "Makefile", "makefile", "GNUmakefile", "package.json",
          "pyproject.toml", "tox.ini", "noxfile.py", "conftest.py",
          "setup.py", "setup.cfg", "justfile", "Justfile"}
-# Top-level verifiers commonly fan out to repo-owned helpers without naming
-# them in the command (for example check.sh -> check-python.sh). Treat the
-# conventional helper family as verifier authority wherever it lives. This is
-# intentionally narrower than a generic "contains check" rule so ordinary
-# product modules such as checksum.py do not become false verification gates.
 HELPER_PATH = re.compile(
     r"(^|/)(?:run[-_.])?(?:checks?|tests?|verify|lint)"
-    r"(?:[-_.][^/]*)?\.(?:sh|bash|py|js|cjs|mjs|ts|tsx|rb|pl|ps1)$",
-    re.IGNORECASE,
-)
+    r"(?:[-_.][^/]*)?\.(?:sh|bash|py|js|cjs|mjs|ts|tsx|rb|pl|ps1)$", re.IGNORECASE)
 TEST_PATH = re.compile(
     r"(^|/)(tests?|spec)(/|$)|(^|/)test_[^/]+$|"
-    r"[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$"
-)
+    r"[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$")
+# This exemption permits assertion additions, not an arbitrary insertion such
+# as `exit 0`, a skip decorator, or a replacement of an existing assertion.
+ASSERTION = re.compile(
+    r"^(?:assert\s+|self\.assert\w+\(|(?:contains|lacks|assert_\w+)\s+|"
+    r"\[.*\]\s*\|\|\s*fail\s+|test\s+.*\|\|\s*fail\s+)")
+def assertion_extension(path, old):
+    if old is None or not TEST_PATH.search(path):
+        return False
+    try:
+        new = open(os.path.join(wt, path), "rb").read()
+        before, after = old.decode("utf-8").splitlines(), new.decode("utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    additions = []
+    for tag, a, b, c, d in difflib.SequenceMatcher(a=before, b=after, autojunk=False).get_opcodes():
+        if tag not in ("equal", "insert"):
+            return False
+        if tag == "insert":
+            additions.extend(line.strip() for line in after[c:d])
+    code = [line for line in additions if line and not line.startswith("#")]
+    return bool(code) and all(ASSERTION.match(line) and ";" not in line for line in code)
+
 for f in os.environ["OMS_CHANGED"].splitlines():
     if not f:
         continue
-    direct = f in named or os.path.basename(f) in named
+    direct = f in named
     common = os.path.basename(f) in ENTRY or bool(HELPER_PATH.search(f))
     explicit = f in reviewed
-    if direct or common or explicit:
-        print("verifier\t" + f)
+    old = base(f)
     if direct or common or explicit or TEST_PATH.search(f):
         print("surface\t" + f)
-PY
-)"
+        if old is not None:
+            print("existing\t" + f)
+    if (direct or common or explicit) and old is not None and not assertion_extension(f, old):
+        print("verifier\t" + f)
+if len(new_only) == 1:
+    print("candidate-only\t" + new_only[0])
+SURFACE_PY
+      }
+      surface_scan="$(scan_surface)"
+      surface_scan="${surface_scan//$'\r'/}"
       surface_tab="$(printf '\t')"
       verifier_hit="$(printf '%s\n' "$surface_scan" | awk -F "$surface_tab" '$1 == "verifier" {print substr($0, length($1) + 2); exit}')"
       verification_surface="$(printf '%s\n' "$surface_scan" | awk -F "$surface_tab" '$1 == "surface" {print substr($0, length($1) + 2)}')"
+    fi
+    floor_verify="$VERIFY"
+    surface_rows() {
+      printf '%s\n' "$surface_scan" | awk -F "$surface_tab" -v kind="$1" '$1 == kind {print $2}'
+    }
+    existing_surface="$(surface_rows existing)"
+    candidate_only="$(surface_rows candidate-only)"
+    if [ -n "$candidate_only" ]; then
+      floor_verify="$BASE_VERIFY"
     fi
     # --- Gate 3b: the patch must not quietly weaken the tests ---------------
     # Gate 3a protects the verify *entrypoint*, which leaves the other way to
@@ -581,8 +735,12 @@ PY
       if [ "$preverify_failed" = 1 ]; then
         record "verify" "SKIP" "pre-verification policy or integrity gate failed"
       elif verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
+        VERIFICATION="command"
+        VERIFY_EXIT=0
         record "verify" "PASS" "$VERIFY"
       else
+        VERIFY_EXIT=$?
+        VERIFICATION="command"
         record "verify" "FAIL" "$VERIFY"
       fi
     else
@@ -591,11 +749,17 @@ PY
 
     # If any automatic verification surface changed, apply the complete patch
     # to a second worktree at the same HEAD, restore only that surface from the
-    # base, and run the identical command. Product changes remain in place, so
+    # base, and run the baseline command. Product changes remain in place, so
     # a helper that made a broken candidate pass fails under base-owned checks.
     if [ "$preverify_failed" = 1 ]; then
       record "verify-floor" "SKIP" "pre-verification policy or integrity gate failed"
-    elif [ -n "$VERIFY" ] && [ -n "$verification_surface" ]; then
+    elif [ -n "$candidate_only" ] && [ -z "$floor_verify" ]; then
+      if [ -n "$existing_surface" ]; then
+        record "verify-floor" "FAIL" "candidate-only command cannot verify changed baseline surfaces; supply an unchanged base verifier"
+      else
+        record "verify-floor" "SKIP" "candidate-only test; no changed baseline verification surface"
+      fi
+    elif [ -n "$floor_verify" ] && [ -n "$verification_surface" ]; then
       if floor_worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")"; then
         floor_worktree="$floor_worktree_parent/wt"
         oms_harness_mark_tmpdir "$floor_worktree_parent" "$REPO" "$floor_worktree"
@@ -635,10 +799,10 @@ PY
 $verification_surface
 EOF
             if [ "$floor_restore_ok" = 1 ]; then
-              if floor_verify_out="$(cd "$floor_worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
-                record "verify-floor" "PASS" "$VERIFY (restored from HEAD: $surface_detail)"
+              if floor_verify_out="$(cd "$floor_worktree" && run_verify_with_timeout bash -c "$floor_verify" 2>&1)"; then
+                record "verify-floor" "PASS" "$floor_verify (restored from HEAD: $surface_detail)"
               else
-                record "verify-floor" "FAIL" "$VERIFY (restored from HEAD: $surface_detail)"
+                record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)"
               fi
             else
               record "verify-floor" "FAIL" "$floor_restore_detail"
@@ -682,6 +846,8 @@ mkdir -p "$(dirname "$REPORT")"
   printf -- '- patch: %s\n' "$PATCH"
   printf -- '- patch_sha: %s\n' "$patch_sha"
   printf -- '- base: %s\n' "$base_sha"
+  printf -- '- verification: %s\n' "$VERIFICATION"
+  printf -- '- verify_sha256: %s\n' "$(printf "%s" "$VERIFY" | oms_sha256_stream)"
   [ -z "$COVERS" ] || printf -- '- covers:%s\n' "$COVERS"
   printf -- '- checked: %s\n\n' "$ts"
   printf '## Ladder\n\n'
@@ -717,41 +883,29 @@ append_admission_index() {
 }
 admit_exit=1
 [ "$verdict" = "ADMIT" ] && admit_exit=0
-if [ -n "$COVERS" ]; then
-  # Explicit coverage is exit-judged by the admission itself and bound to the
-  # patch digest; a receipt that failed to record its covers would read as
-  # unbound evidence forever, so this path fails closed instead of shrugging.
-  admit_covers="$(OMS_PA_COVERS_IDS="$COVERS" OMS_PA_EXIT="$admit_exit" \
-    OMS_PA_SCOPE="$patch_sha" python3 -c '
-import json, os, re
-ids = [item for item in os.environ.get("OMS_PA_COVERS_IDS", "").split() if item]
-payload = {"covers": ids,
-           "status": "verified" if os.environ.get("OMS_PA_EXIT") == "0" else "failed"}
-scope = os.environ.get("OMS_PA_SCOPE", "")
-if re.match(r"^[0-9a-f]{16,64}$", scope):
-    payload["scope_digest"] = scope
-print(json.dumps(payload))')" || fail "could not compose the criterion coverage payload"
-  OMS_INDEX_COVERS_JSON="$admit_covers" \
-    OMS_INDEX_OPERATION_ID="$reference_operation" append_admission_index patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
-    fail "criterion coverage was not recorded; failing closed"
-elif [ -n "${OMS_TASK_ID:-}" ]; then
-  # A task-linked admission receipt is trusted evidence even without explicit
-  # covers: the projection links it by task lineage and judges it by exit.
-  # One that cannot be recorded must not vanish while an older row keeps
-  # speaking for the task — a dropped REJECT would let a stale ADMIT read as
-  # current verification.
-  OMS_INDEX_OPERATION_ID="$reference_operation" append_admission_index patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
-    fail "task-linked admission receipt was not indexed; failing closed"
-else
-  if ! OMS_INDEX_OPERATION_ID="$reference_operation" append_admission_index patch-admit "" "$admit_exit" "$REPORT" "$PATCH"; then
-    [ "$managed_input" = 0 ] || fail "managed admission receipt was not indexed"
+admission_coverage() {
+  OMS_PA_COVERS_IDS="$COVERS" OMS_PA_EXIT="$admit_exit" OMS_PA_SCOPE="$patch_sha" \
+    OMS_PA_VERIFICATION="$VERIFICATION" OMS_PA_VERIFY_EXIT="$VERIFY_EXIT" python3 - <<'COVER_PY'
+import json, os
+ids = os.environ["OMS_PA_COVERS_IDS"].split()
+status = "failed" if os.environ["OMS_PA_EXIT"] != "0" else "inconclusive"
+if status != "failed" and os.environ["OMS_PA_VERIFICATION"] == "command" and os.environ["OMS_PA_VERIFY_EXIT"] == "0":
+    status = "verified"
+print(json.dumps({"covers": ids, "status": status, "scope_digest": os.environ["OMS_PA_SCOPE"]}))
+COVER_PY
+}
+admit_covers="$(admission_coverage)" || fail "cannot compose admission evidence"
+if ! OMS_INDEX_COVERS_JSON="$admit_covers" OMS_INDEX_OPERATION_ID="$reference_operation" \
+  append_admission_index patch-admit "" "$admit_exit" "$REPORT" "$PATCH" "" "$VERIFY_EXIT"; then
+  if [ -n "$COVERS${OMS_TASK_ID:-}" ] || [ "$managed_input" = 1 ]; then
+    fail "admission receipt was not indexed; failing closed"
   fi
 fi
 if [ "$verdict" = "ADMIT" ]; then
   work_journal_observe "$REPO" patch-admit "$REPORT" \
     --source-id "admit:$patch_sha:$base_sha:$verdict" \
     --outcome "Patch admission passed" --outcome-status success \
-    --verification-status passed
+    --verification-status "$([ "$VERIFICATION" = command ] && echo passed || echo skipped)"
 else
   work_journal_observe "$REPO" patch-admit "$REPORT" \
     --source-id "admit:$patch_sha:$base_sha:$verdict" \

@@ -370,7 +370,8 @@ git -C "$SWAP_REPO" commit -qm fixture
 "$ROOT/scripts/agent-plan.sh" --repo "$SWAP_REPO" init \
   --goal 'swap lineage' --accept true >/dev/null
 "$ROOT/scripts/agent-plan.sh" --repo "$SWAP_REPO" add --id t1 \
-  --title 'swap task' --allowed PROJECT.md --verify true >/dev/null
+  --title 'swap task' --allowed PROJECT.md \
+  --verify "cp '$TMP/swap-plan-b.json' '$SWAP_REPO/.oms/plan/tasks.json'" >/dev/null
 swap_first="$(python3 - "$SWAP_REPO/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
 import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["plan_id"])
@@ -380,6 +381,7 @@ python3 - "$SWAP_REPO/.oms/plan/tasks.json" "$TMP/swap-plan-b.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 row["plan_id"] = "plan_" + "b" * 32
+row["tasks"]["t1"]["verify"] = "true"
 with open(sys.argv[2], "w", encoding="utf-8") as handle:
     json.dump(row, handle, ensure_ascii=False, indent=2)
 PY

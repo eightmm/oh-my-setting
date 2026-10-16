@@ -101,7 +101,24 @@ def outcome(row: Mapping[str, Any]) -> Optional[str]:
         if isinstance(exit_code, str) and exit_code == "0":
             return "verified"
         return "inconclusive"
-    if kind in ("acceptance", "patch-admit"):
+    if kind == "patch-admit":
+        if status in failed_statuses:
+            return "failed"
+        exit_code = row.get("exit")
+        if type(exit_code) is int and exit_code != 0:
+            return "failed"
+        if isinstance(exit_code, str) and exit_code.lstrip("-").isdigit() and int(exit_code) != 0:
+            return "failed"
+        if row.get("context_verification") in ("none", "dry-run"):
+            return "inconclusive"
+        # ADMIT also covers structural-only checks. Legacy exit-zero rows and
+        # a placeholder verifier exit do not establish command execution.
+        if ((type(exit_code) is int and exit_code == 0 or exit_code == "0")
+                and status == "verified" and type(row.get("verify_exit")) is int
+                and row["verify_exit"] == 0):
+            return "verified"
+        return "inconclusive"
+    if kind == "acceptance":
         if status in failed_statuses:
             return "failed"
         exit_code = row.get("exit")
@@ -167,6 +184,27 @@ def outcome(row: Mapping[str, Any]) -> Optional[str]:
 
 
 INDEX_SOURCE = ".oms/artifacts/index.jsonl"
+
+
+def _admission_command_digest(repo: Path, row: Mapping[str, Any]) -> str:
+    """Read the executed command binding from the unchanged indexed report."""
+    raw = row.get("artifact")
+    if not isinstance(raw, str) or not raw or Path(raw).is_absolute() or ".." in Path(raw).parts:
+        return ""
+    path = repo / raw
+    parts = Path(raw).parts
+    if any(repo.joinpath(*parts[:count]).is_symlink() for count in range(1, len(parts) + 1)):
+        return ""
+    try:
+        if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024 or sha256_file(path) != row.get("artifact_sha256"):
+            return ""
+        metadata = path.read_text(encoding="utf-8").split("\n## Ladder", 1)[0].splitlines()
+    except (OSError, UnicodeError):
+        return ""
+    if metadata[:1] != ["# Patch admission: ADMIT"] or "- verification: command" not in metadata:
+        return ""
+    digests = [line[len("- verify_sha256: "):] for line in metadata if line.startswith("- verify_sha256: ")]
+    return digests[0] if len(digests) == 1 and re.fullmatch(r"[0-9a-f]{64}", digests[0]) else ""
 
 
 def resolved_event_ids(rows: Sequence[Mapping[str, Any]]) -> set:
@@ -326,7 +364,9 @@ def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: st
         signal = ("execution_feedback" if type(row.get("exit")) is int or
                   isinstance(row.get("exit"), str) and row.get("exit").lstrip("-").isdigit()
                   else "unknown")
-    elif kind in ("acceptance", "patch-admit"):
+    elif kind == "patch-admit":
+        signal = "execution_feedback" if outcome(row) in ("verified", "failed") else "unknown"
+    elif kind == "acceptance":
         signal = ("execution_feedback" if type(row.get("exit")) is int or
                   isinstance(row.get("exit"), str) and row.get("exit").lstrip("-").isdigit()
                   else "unknown")
@@ -387,7 +427,14 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     resolved = resolved_event_ids(rows)
     row_by_ref = {evidence_ref(row): row for row in rows if evidence_ref(row)}
     plan_criteria = {str(item.get("id")): str(item.get("command_digest", "")) for item in criteria if item.get("source") == "plan" and item.get("command_digest")}
+    task_verifiers = {str(item.get("id")): str(item.get("verify_digest", ""))
+                      for item in base_envelope.get("plan", {}).get("tasks", [])}
     for row in rows:
+        if str(row.get("kind", "")).lower() == "patch-admit" and outcome(row) == "verified":
+            digest = _admission_command_digest(repo, row)
+            task_id = str(row.get("task_id", ""))
+            if not digest or task_id and digest != task_verifiers.get(task_id):
+                row = dict(row, status="inconclusive")
         refs = []
         for ref in criterion_refs(row):
             criterion = criteria_by_id.get(ref)
@@ -400,6 +447,9 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                         not PLAN_ID_RE.fullmatch(observed_plan) or
                         observed_plan != expected_plan):
                     continue
+                if (str(row.get("kind", "")).lower() == "patch-admit" and outcome(row) == "verified"
+                        and _admission_command_digest(repo, row) != task_verifiers.get(str(criterion.get("plan_task_id", "")))):
+                    row = dict(row, status="inconclusive")
             elif criterion.get("source") == "task":
                 expected_task = str(criterion.get("active_task_id", ""))
                 observed_task = str(row.get("active_task_id", ""))
@@ -416,11 +466,8 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                 if refs:
                     support = "plan-acceptance-receipt"
         if not refs and str(row.get("kind", "")).lower() == "patch-admit":
-            # An admission receipt is the evidence for the plan task it
-            # admitted: admission re-ran the task's verify in an isolated
-            # tree. The link is the row's own task lineage — retroactive over
-            # historical rows, no schema change. Rows whose task matches no
-            # current plan task stay inert.
+            # Task lineage links admission evidence, while the command-backed
+            # outcome above distinguishes verification from structural ADMIT.
             admitted_task = str(row.get("task_id", ""))
             admitted_plan = str(row.get("plan_id", ""))
             if admitted_task and PLAN_ID_RE.fullmatch(admitted_plan):
@@ -430,11 +477,6 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                         and str(item.get("plan_id", "")) == admitted_plan]
                 if refs:
                     support = "patch-admission-receipt"
-                    # Admission rows speak through their exit code, not a
-                    # status field: ADMIT recorded 0, REJECT recorded nonzero.
-                    exit_code = row.get("exit")
-                    judged = "verified" if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0 else "failed"
-                    row = dict(row, status=judged)
         item = _evidence_item(row, repo, support=support, head=head, resolved=resolved)
         if refs:
             for ref in refs:

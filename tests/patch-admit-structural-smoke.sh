@@ -108,4 +108,35 @@ contains "$TMP/r5.md" "structure: SKIP"
 lacks "$TMP/r5.md" "structure: FAIL"
 contains "$TMP/r5.md" "verify: SKIP"
 
+# Admission adopts the stored verifier; an explicit mismatch fails before
+# candidate code executes. Structural-only ADMIT remains inconclusive evidence.
+"$ADMIT" --repo "$repo" --patch "$TMP/inplace.patch" \
+  --plan-task t1 --report "$TMP/task-verify.md" >/dev/null 2>&1 ||
+  fail "stored task verifier was not adopted"
+contains "$TMP/task-verify.md" 'verification: command'
+contains "$TMP/task-verify.md" 'verify: PASS'
+"$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id t2 --title failing \
+  --allowed src/ --verify false >/dev/null
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/inplace.patch" \
+  --plan-task t2 --report "$TMP/task-failed.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "stored failing verifier was skipped"
+contains "$TMP/task-failed.md" 'verify: FAIL'
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/inplace.patch" \
+  --plan-task t1 --verify false --report "$TMP/mismatch.md" > "$TMP/mismatch.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "task verifier mismatch should be a usage error"
+contains "$TMP/mismatch.out" 'does not match plan task t1 review contract'
+"$ADMIT" --repo "$repo" --patch "$TMP/inplace.patch" \
+  --report "$TMP/structural-only.md" >/dev/null 2>&1 || fail "structural admission failed"
+contains "$TMP/structural-only.md" 'verification: none'
+python3 - "$repo/.oms/artifacts/index.jsonl" <<'EOF'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert rows[-1]["status"] == "inconclusive", rows[-1]
+assert "verify_exit" not in rows[-1], rows[-1]
+assert rows[-3]["status"] == "verified", rows[-3]
+assert rows[-3]["verify_exit"] == 0, rows[-3]
+EOF
+
 echo "patch-admit-structural-smoke: ok"

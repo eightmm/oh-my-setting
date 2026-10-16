@@ -252,6 +252,95 @@ contains "$TMP/custom-oracle.md" "verify: PASS"
 contains "$TMP/custom-oracle.md" "verify-floor: FAIL"
 contains "$TMP/custom-oracle.md" "quality/contract.data"
 
+# Exact executable paths distinguish the test from same-named product files.
+cat > "$repo/tests/feature.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+fail() { echo "$*" >&2; exit 1; }
+[ -s src/value.txt ] || fail "missing value"
+EOF
+printf '# product\n' > "$repo/src/feature.sh"
+printf 'value = 1\n' > "$repo/src/feature.py"
+git -C "$repo" add tests/feature.sh src/feature.sh src/feature.py
+git -C "$repo" commit -qm exact-verifier-fixtures
+printf '# changed product\n' >> "$repo/src/feature.sh"
+git -C "$repo" diff > "$TMP/same-name.patch"
+git -C "$repo" checkout -q -- src/feature.sh
+"$ADMIT" --repo "$repo" --patch "$TMP/same-name.patch" \
+  --verify 'bash ./tests/feature.sh' --report "$TMP/same-name.md" >/dev/null 2>&1 ||
+  fail "same-named product file was mistaken for its test"
+contains "$TMP/same-name.md" 'verifier: PASS'
+printf 'value = 2\n' > "$repo/src/feature.py"
+git -C "$repo" diff > "$TMP/reader.patch"
+git -C "$repo" checkout -q -- src/feature.py
+"$ADMIT" --repo "$repo" --patch "$TMP/reader.patch" \
+  --verify 'grep -qx "value = 2" src/feature.py' --report "$TMP/reader.md" >/dev/null 2>&1 ||
+  fail "a content-reader argument was mistaken for its verifier"
+contains "$TMP/reader.md" 'verify: PASS'
+
+# Assertion-only extension of the invoked suite needs no verifier override.
+printf '[ -f src/feature.py ] || fail "missing product"\n' >> "$repo/tests/feature.sh"
+git -C "$repo" diff > "$TMP/assertion-extension.patch"
+git -C "$repo" checkout -q -- tests/feature.sh
+"$ADMIT" --repo "$repo" --patch "$TMP/assertion-extension.patch" \
+  --verify 'bash tests/feature.sh' --report "$TMP/assertion-extension.md" >/dev/null 2>&1 ||
+  fail "assertion-only verifier extension required an override"
+contains "$TMP/assertion-extension.md" 'verify-floor: PASS'
+# Replacing an assertion with a weaker one is not an extension, even when the
+# assertion count is unchanged. Inserting an early exit is not one either.
+for edit in weaken early-exit; do
+  if [ "$edit" = weaken ]; then
+    sed 's/\[ -s src\/value.txt \]/[ -n src\/value.txt ]/' "$repo/tests/feature.sh" > "$TMP/feature.new"
+  else
+    sed '/set -eu/a\
+exit 0' "$repo/tests/feature.sh" > "$TMP/feature.new"
+  fi
+  cp "$TMP/feature.new" "$repo/tests/feature.sh"
+  git -C "$repo" diff > "$TMP/$edit.patch"
+  git -C "$repo" checkout -q -- tests/feature.sh
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/$edit.patch" \
+    --verify 'bash tests/feature.sh' --report "$TMP/$edit.md" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "$edit unexpectedly bypassed verifier consent"
+  contains "$TMP/$edit.md" 'verifier: FAIL'
+  contains "$TMP/$edit.md" 'verify: SKIP'
+done
+# Sourcing or wrapping the suite still names it as the verifier.
+for wrapped in '. tests/feature.sh' 'timeout 10 bash tests/feature.sh' 'nice -n 5 bash tests/feature.sh'; do
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/early-exit.patch" \
+    --verify "$wrapped" --report "$TMP/wrapped.md" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "'$wrapped' let an early exit bypass verifier consent"
+  contains "$TMP/wrapped.md" 'verifier: FAIL'
+done
+
+# Newly added, directly invoked tests run on the candidate; unchanged HEAD
+# checks run on the floor instead of attempting to execute the removed file.
+printf 'from pathlib import Path\nassert Path("src/value.txt").read_text().strip() == "good"\n' > "$repo/tests/test_new.py"
+git -C "$repo" add -N tests/test_new.py
+git -C "$repo" diff > "$TMP/new-test.patch"
+git -C "$repo" reset -q HEAD -- tests/test_new.py
+rm "$repo/tests/test_new.py"
+"$ADMIT" --repo "$repo" --patch "$TMP/new-test.patch" \
+  --verify 'python3 tests/test_new.py' --report "$TMP/new-test.md" >/dev/null 2>&1 ||
+  fail "new directly invoked regression test should be admissible"
+contains "$TMP/new-test.md" 'verify: PASS'
+contains "$TMP/new-test.md" 'verify-floor: PASS'
+# A new passing test must not replace the unchanged product baseline.
+printf 'bad\n' > "$repo/src/value.txt"
+printf 'assert True\n' > "$repo/tests/test_new.py"
+git -C "$repo" add -N tests/test_new.py
+git -C "$repo" diff > "$TMP/new-test-bypass.patch"
+git -C "$repo" reset -q HEAD -- tests/test_new.py
+rm "$repo/tests/test_new.py"
+git -C "$repo" checkout -q -- src/value.txt
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/new-test-bypass.patch" \
+  --verify 'python3 tests/test_new.py' --report "$TMP/new-test-bypass.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "candidate-only test replaced the baseline"
+contains "$TMP/new-test-bypass.md" 'verify: PASS'
+contains "$TMP/new-test-bypass.md" 'verify-floor: FAIL'
+
 # Worktree creation/checkouts can invoke worker-planted fsmonitor or content
 # filters under the admitting parent's authority. Refuse executable Git config
 # before the first such Git operation; the marker proves refusal came first.
