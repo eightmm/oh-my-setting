@@ -39,6 +39,9 @@ MODEL=""
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
+CANDIDATE_PATCH=""
+CANDIDATE_SHA256=""
+CANDIDATE_BASE=""
 
 usage() {
   cat <<'EOF'
@@ -82,6 +85,9 @@ Options:
   --fallback-model M   One-shot capacity fallback; requires one provider.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --no-diff            Do not attach git diff/status context.
+  --candidate-patch P  Automatic panel gate: indexed patch in the owner repo.
+  --candidate-sha256 H Expected patch digest; requires --candidate-base SHA.
+                       Verify and review a private checkout of base + patch.
   --memory             Attach shared harness memory.
   --task               Attach the active task handoff packet.
   --ml-context         Attach the compact ML context digest.
@@ -512,6 +518,15 @@ while [ "$#" -gt 0 ]; do
       BASE_REF="$2"
       shift 2
       ;;
+    --candidate-patch|--candidate-sha256|--candidate-base)
+      [ "$#" -ge 2 ] || fail "$1 requires a value"
+      case "$1" in
+        --candidate-patch) CANDIDATE_PATCH="$2" ;;
+        --candidate-sha256) CANDIDATE_SHA256="$2" ;;
+        --candidate-base) CANDIDATE_BASE="$2" ;;
+      esac
+      shift 2
+      ;;
     --providers)
       [ "$#" -ge 2 ] || fail "--providers requires list"
       PROVIDERS="$2"
@@ -646,6 +661,13 @@ if [ -z "$PROMPT" ] && [ "$ML_PRESET" -eq 1 ]; then
   PROMPT="Review the current diff for silent ML bugs before running training or expensive experiments."
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
+if [ -n "$CANDIDATE_PATCH$CANDIDATE_SHA256$CANDIDATE_BASE" ]; then
+  [ -n "$CANDIDATE_PATCH" ] && [ -n "$CANDIDATE_SHA256" ] && [ -n "$CANDIDATE_BASE" ] ||
+    fail "candidate review requires patch, digest and recorded base"
+  [ "$GATE" -eq 1 ] && [ "$NO_DIFF" -eq 0 ] && [ -z "$BASE_REF" ] && [ "$NO_VERIFY" -eq 0 ] &&
+    [ -n "$VERIFY_CMD" ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ] ||
+    fail "candidate review requires an automatic panel gate, a verifier and the complete candidate diff"
+fi
 validate_provider_list
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
@@ -712,6 +734,7 @@ gate_verify_temp="$(mktemp)" || fail "mktemp failed"
 debate_dir=""
 MA_COUNCIL_CONTEXT_DIR=""
 read_guard_temp="$(mktemp -d)" || fail "mktemp failed"
+candidate_temp=""
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
@@ -722,6 +745,9 @@ cleanup() {
   fi
   ma_cleanup_council_context
   rm -rf "$read_guard_temp"
+  if [ -n "$candidate_temp" ]; then
+    rm -rf "$candidate_temp"
+  fi
   oms_canonical_call_release || true
 }
 cleanup_signal() {
@@ -780,6 +806,23 @@ trap 'cleanup_signal 143' TERM
 if git -C "$REPO" check-ignore -q .oms/locks/canonical-sync.d 2>/dev/null; then
   oms_canonical_call_acquire "$REPO" "${OMS_HARNESS_CALL_ID:-review-$$}" ||
     fail "canonical checkout sync is busy or review registration failed; retry after sync"
+fi
+if [ -n "$CANDIDATE_PATCH" ]; then
+  candidate_temp="$(mktemp -d)" || fail "mktemp failed"
+  python3 - "$(ma_scripts_dir)/lib" "$REPO" "$MA_READ_SOURCE_REPO" "$CANDIDATE_PATCH" \
+    "$CANDIDATE_SHA256" "$CANDIDATE_BASE" "$candidate_temp" "$VERIFY_CMD" > "$read_guard_temp/candidate.json" <<'PYCANDIDATE' || fail "candidate checkout could not be verified"
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from panel_salvage import review_candidate
+from terminal_panel import _validate_dispatch_verifier
+receipt = review_candidate(*sys.argv[2:8])
+_validate_dispatch_verifier(sys.argv[7], sys.argv[8])
+print(json.dumps(receipt))
+PYCANDIDATE
+  MA_READ_SOURCE_REPO="$(cd "$candidate_temp" && pwd -P)" || fail "candidate checkout is unavailable"
+  export OMS_INDEX_BASE_REPO="$MA_READ_SOURCE_REPO"
+  BASE_REF="$CANDIDATE_BASE"
+  candidate_before="$(oms_git_tracked_state_fingerprint "$MA_READ_SOURCE_REPO")" || fail "cannot freeze candidate"
 fi
 ma_read_guard_begin "$read_guard_temp" || fail "cannot freeze review repositories"
 
@@ -845,6 +888,10 @@ EOF
 fi
 
 if [ "$gate_verify_ran" -eq 1 ]; then
+  if [ -n "$CANDIDATE_PATCH" ]; then
+    [ "$(oms_git_tracked_state_fingerprint "$MA_READ_SOURCE_REPO")" = "$candidate_before" ] ||
+      fail "gate verifier changed the immutable candidate"
+  fi
   ma_read_guard_rebaseline_source || fail "review verification changed protected Git execution config/index state or output capture failed"
 fi
 ma_read_guard_assert || fail "review verification changed protected repository state"
@@ -914,6 +961,7 @@ export OMS_OPERATION_ID="${OMS_OPERATION_ID:-review-$timestamp}"
 # An outcome names exactly what was reviewed; parent recovery in another
 # checkout is never implied by a passing campaign review.
 review_scope_file="$ARTIFACT_DIR/_scope-$timestamp.json"
+OMS_REVIEW_CANDIDATE_RECEIPT="${candidate_temp:+$read_guard_temp/candidate.json}" \
 python3 - "$MA_READ_SOURCE_REPO" "${diff_base:-}" "$REVIEW_DIFF_SHA" "$NO_DIFF" "${MA_SAFE_PATHS[@]}" > "$review_scope_file" <<'PYSCOPE' || fail "cannot record review scope"
 import json, os, subprocess, sys
 repo, base, digest, omitted = sys.argv[1:5]
@@ -925,9 +973,13 @@ paths = []
 if omitted != "1":
     paths = subprocess.check_output(git + ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, "--"] + sys.argv[5:], env=env).decode("utf-8", "surrogateescape").split("\0")
     base = subprocess.check_output(git + ["rev-parse", base], env=env).decode().strip()
-print(json.dumps({"schema": 1, "kind": "review-scope", "base": base,
+scope = {"schema": 1, "kind": "review-scope", "base": base,
     "head": head, "diff_sha256": digest, "paths": [p for p in paths if p],
-    "diff_included": omitted != "1", "external_recovery": "not-covered"}, sort_keys=True))
+    "diff_included": omitted != "1", "external_recovery": "not-covered"}
+if os.environ.get("OMS_REVIEW_CANDIDATE_RECEIPT"):
+    with open(os.environ["OMS_REVIEW_CANDIDATE_RECEIPT"], encoding="utf-8") as handle:
+        scope["candidate"] = json.load(handle)
+print(json.dumps(scope, sort_keys=True))
 PYSCOPE
 if [ "$NO_DIFF" -eq 0 ]; then
   [ "$(oms_git_tracked_state_fingerprint "$MA_READ_SOURCE_REPO")" = "$review_source_before" ] &&
@@ -1028,9 +1080,9 @@ record_review_outcome() {
     # The gate authored these verdicts itself one extraction pass ago, so a
     # payload that no longer composes is a bug, and the row must not go out
     # thin while looking authoritative: fail the gate loudly.
-    payload="$(OMS_REVIEW_GATE_VERIFY_EXIT="${gate_verify_exit:-}" \
+    OMS_REVIEW_GATE_VERIFY_EXIT="${gate_verify_exit:-}" \
       OMS_REVIEW_DIFF_SHA256="$REVIEW_DIFF_SHA" \
-      python3 - "$verdict_json_file" <<'PY'
+      python3 - "$verdict_json_file" "${candidate_temp:+$read_guard_temp/candidate.json}" <<'PY' || fail "typed review outcome could not be composed; failing closed"
 import json, os, sys
 with open(sys.argv[1], encoding="utf-8") as fh:
     data = json.load(fh)
@@ -1041,9 +1093,13 @@ data["gate_verify_exit"] = int(gate_verify) if gate_verify.lstrip("-").isdigit()
 diff_sha = os.environ.get("OMS_REVIEW_DIFF_SHA256", "")
 if diff_sha:
     data["diff_sha256"] = diff_sha
-print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+if sys.argv[2]:
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        data["candidate"] = json.load(fh)
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
 PY
-)" || fail "typed review outcome could not be composed; failing closed"
+    payload="$(cat "$verdict_json_file")" || fail "typed review outcome could not be read; failing closed"
     OMS_INDEX_REVIEW_OUTCOME_JSON="$payload" ma_append_artifact_index \
       "$REPO" review-outcome local "$review_rc" "$synth_file" ||
       fail "typed review outcome was not recorded; failing closed"

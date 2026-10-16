@@ -94,13 +94,18 @@ def _managed(repo, path):
     return physical, common, head
 
 
-def _latest(repo, task):
+def _latest(repo, task, attempt_id=None):
     attempts = panel_results._query(repo, 'agent-events', 'list')
     rows = panel_results._query(repo, 'artifact-index', 'list', '1000000').get('rows', [])
     matching = [row for row in rows if row.get('kind') == 'delegate' and row.get('task_id') == task]
-    record = matching[-1] if matching else {}
     candidates = [a for a in attempts if a.get('task_id') == task and
                   (a.get('tool') == 'peer-delegate' or a.get('refs', {}).get('panel_access') == 'write')]
+    if attempt_id is not None:
+        candidates = [a for a in candidates if a.get('attempt_id') == attempt_id]
+        if len(candidates) != 1:
+            raise ValueError('selected attempt does not uniquely belong to task ' + task)
+        matching = [row for row in matching if row.get('attempt_id') == attempt_id]
+    record = matching[-1] if matching else {}
     attempt = max(candidates, key=lambda a: a.get('created_at', ''), default={})
     if record.get('attempt_id') and attempt and record['attempt_id'] != attempt['attempt_id']:
         raise ValueError('latest delegate attempt has no matching artifact; refusing older result')
@@ -112,7 +117,7 @@ def _latest(repo, task):
     if record.get('artifact'):
         if not record['artifact'].startswith('.oms/artifacts/'):
             raise ValueError('delegate artifact is outside OMS evidence')
-        text = _read(repo, record['artifact']).decode('utf-8')
+        text = panel_results._indexed(repo, record, MAX_EVIDENCE).decode('utf-8')
     matches = re.findall(r'^(?:error: )?worktree kept(?: at|:) (.+)$|^- worktree: (/.+)$', text, re.M)
     paths = [a or b for a, b in matches]
     location = attempt.get('refs', {}).get('panel_location', '')
@@ -418,11 +423,11 @@ def record_provenance(repo, metadata):
 
 
 def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None):
-    if attempt_id is not None:
+    if attempt_id is not None and task is None:
         path, attempt, reason, execution = _standalone(repo, attempt_id, artifact)
         task = attempt_id
     else:
-        path, attempt, reason, execution = _latest(repo, task)
+        path, attempt, reason, execution = _latest(repo, task, attempt_id)
     if selected_repo is not None:
         selected = work_repository(selected_repo)
         if selected not in {Path(repo).resolve(strict=True), execution}:
@@ -456,6 +461,50 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
     return dict(metadata, patch_path=target, metadata_path=sidecar, patch_bytes=len(body))
 
 
+def review_candidate(state_repo, source_repo, patch, digest, base, destination):
+    """Materialize indexed patch bytes on their recorded base, without source Git execution config."""
+    if not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{7,64}', base):
+        raise ValueError('candidate requires a recorded base commit')
+    body = panel_results.verified_patch(state_repo, {'patch': patch, 'patch_sha256': digest})
+    paths = panel_results._patch_paths(body)
+    if not paths or any(not path or path.startswith(('/', '\\')) or '\\' in path or ':' in path or
+                        any(part in {'', '.', '..', '.git', '.oms'} for part in path.split('/'))
+                        for path in paths):
+        raise ValueError('candidate patch contains unsafe or control paths')
+    source_repo = work_repository(source_repo)
+    common = _common(_git_directory(source_repo))
+    destination = Path(destination).resolve(strict=True)
+    if any(destination.iterdir()):
+        raise ValueError('candidate directory is not empty')
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_ATTR_NOSYSTEM='1', GIT_NO_LAZY_FETCH='1', GIT_OPTIONAL_LOCKS='0')
+    command = ['git', '-c', 'core.hooksPath=' + os.devnull, '-c', 'core.fsmonitor=false',
+               '-c', 'core.attributesFile=' + os.devnull, '-C', str(destination)]
+
+    def git(*args, data=None):
+        result = subprocess.run(command + list(args), input=data, capture_output=True, env=env,
+                                timeout=60, check=False)
+        if result.returncode:
+            raise ValueError('candidate Git failed: ' + result.stderr.decode(errors='replace')[:300])
+        return result.stdout.decode().replace('\r', '').strip()
+
+    # The alternate supplies immutable objects only. Repack copies them into
+    # the private repository before verification; Git never loads source config/index/hooks.
+    config = _read(common, 'config', MAX_EVIDENCE).decode('utf-8')
+    format_flags = (['--object-format=sha256'] if
+                    re.search(r'^\s*objectformat\s*=\s*sha256\s*$', config, re.I | re.M) else [])
+    git('init', '--quiet', '--template=', *format_flags)
+    env['GIT_ALTERNATE_OBJECT_DIRECTORIES'] = str(common / 'objects')
+    resolved = git('rev-parse', '--verify', base + '^{commit}')
+    git('checkout', '--quiet', '--detach', resolved)
+    git('repack', '-a', '-d')
+    del env['GIT_ALTERNATE_OBJECT_DIRECTORIES']
+    git('apply', '--binary', '--index', '--whitespace=nowarn', '-', data=body)
+    tree = git('write-tree')
+    return {'base': resolved, 'tree': tree, 'patch_sha256': digest, 'root': str(destination)}
+
+
 def admission(patch, accept_salvaged=False, accept_encoding_loss=False, source=None, state_repo=None, repo=None):
     patch = Path(patch)
     if state_repo is None:
@@ -483,19 +532,22 @@ def admission(patch, accept_salvaged=False, accept_encoding_loss=False, source=N
 def cli_main(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo')
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument('--salvage', metavar='TASK_ID')
-    selection.add_argument('--attempt', metavar='ATTEMPT_ID',
-                           help='explicit stopped standalone delegate attempt')
+    parser.add_argument('--salvage', metavar='TASK_ID')
+    parser.add_argument('--attempt', metavar='ATTEMPT_ID',
+                        help='select a stopped task attempt, or a standalone attempt with --artifact')
     parser.add_argument('--artifact', help='indexed .oms/artifacts/ path for --attempt')
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args(arguments)
     try:
         panel_results._owner()
-        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', args.attempt or args.salvage):
+        if not (args.attempt or args.salvage) or any(
+                not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', value)
+                for value in (args.attempt, args.salvage) if value is not None):
             raise ValueError('invalid task or attempt ID')
-        if bool(args.attempt) != bool(args.artifact):
-            raise ValueError('--attempt requires --artifact, which is standalone-only')
+        if args.salvage and args.artifact:
+            raise ValueError('--artifact is standalone-only')
+        if not args.salvage and (not args.attempt or not args.artifact):
+            raise ValueError('--attempt requires --artifact for standalone recovery')
         selected = Path(args.repo or os.getcwd()).resolve(strict=True)
         inherited = os.environ.get('OMS_ROOM_REPO') if os.environ.get('OMS_ROOM_ID') else None
         repo = (state_repository(Path(inherited).resolve(strict=True)) if inherited else

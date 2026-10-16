@@ -86,8 +86,13 @@ selects an exact installed catalog model; swap has no dry-run and requires tmux.
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,
 and call results; `--repo` still selects the source and execution repository
-for workers, researchers, advisors and reviewers. Review diff/HEAD checks and
-verification also run in that source repository. `--room` selects a room without
+for workers, researchers, advisors and reviewers. Explicit reviews inspect and verify
+that source repository. Automatic patch reviews instead construct a private checkout
+of the worker's recorded base plus its digest-verified patch; both the complete diff
+and mechanical gate use that candidate. Missing base objects, digest mismatches or
+patch-application failures require manual review; they never fall back to testing
+the unpatched source. The gate rejects candidate changes by the verifier.
+`--room` selects a room without
 changing `OMS_ROOM_REPO`. With no `OMS_ROOM_REPO`, that room resolves in `--repo`.
 An owner result saved with `--finalize --outcome completed --verify COMMAND`
 binds to the current plan and task. Plan displays **completed locally** for a
@@ -631,21 +636,25 @@ never moves it. Stderr names the next verbs, `oms agent-plan review` after
 acceptance and `finish --landed-commit SHA` after `oms land`. The panel never
 passes `--plan-task`, whose per-worker transitions assume one worker per task.
 
-Continue a timed-out or reviewed worker with `--continue TASK_ID` instead of
-re-dispatching from scratch: `oms panel --repo . --dispatch refactorer --owner claude
+Continue reviewed work with `--continue TASK_ID`: `oms panel --repo . --dispatch refactorer --owner claude
 --continue TASK_ID --access write --brief-file next.md --verify COMMAND` takes the same role,
 workload and access checks; any write-capable role may continue (a builder session can
 become a refactorer), while reviewer, verifier, security-auditor, critic and the other
 read-only roles never resume. It finds the latest worker of that task owned by this
 main, and starts a new run in a new worktree at the current HEAD that resumes
 the worker's native session (recorded as `refs.native_session` in the attempt,
-never in room text). The brief is prefixed with "Your earlier work was on OLD;
-the repository is now at NEW. Your previous patch is at PATH (apply what still
-fits). New instructions follow." A session that is missing, or from a provider
-without resume, falls back to a fresh worker given the previous patch and
-summary, and says so on stderr. A worker that ended by timeout (exit 124) shows
-"timed out · continue with --continue" on its card; there is no `c` key for it, and
-a continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N". Unless the
+never in room text). A continuation transfers native conversation history only when
+that provider session is still available. Files and the old worktree never transfer.
+Only an exact exit-zero result contributes its verified patch inline, plus a bounded
+recorded summary for a fresh session. Stderr names what actually transferred.
+An oversized patch refuses continuation instead of pointing at artifacts absent
+from the new worktree. Inspect and admit that patch in the owner checkout first,
+or include a bounded recovery in a fresh dispatch brief.
+Stopped writes with a recorded worktree must first go through
+`oms panel --salvage TASK_ID --attempt ATTEMPT_ID`; inspect the recovery and include
+the recovered work in a fresh dispatch brief. A timeout result card may still offer
+the general continuation hint; the CLI enforces this salvage prerequisite for writes.
+A continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N". Unless the
 environment sets them, write calls get a 40m wall (60m at high effort) and any
 call with `--verify` gets a 20m verify wall, enough for the repository smoke suites.
 
@@ -846,11 +855,21 @@ main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
 Role dispatch refuses a full room before enrollment, checking headroom for assignment and result
 messages. A main has no cap on concurrent calls: split separable work into as many parallel calls as it
-needs. `pool.max_rework_rounds` in `config/panel-routing.json` (default two) bounds rework rounds per task
-after its first worker call; at that limit, review the brief, raise `--workload` or ask the person.
+needs. `pool.max_rework_rounds` in `config/panel-routing.json` (default two) counts
+successful write rounds that reached review after the first successful write.
+Read calls, failed launches, guard stops and failed verification consume no rounds.
+At the cap, review the brief; the owner can pass `--allow-extra-round REASON` with
+`--continue` for one additional call. Its reason is recorded in that call's launch
+inputs. Changing `--workload` does not change the cap.
 Interruptions give the child up to 20 seconds to clean up, settle unfinished attempts and send a numeric
 result handoff. Sensitive summaries are withheld with an `oms panel --results --task-id` pointer;
 room races can still prevent delivery, while the indexed evidence remains available.
+Each reviewer result sends one addressed handoff containing the judgment and a
+findings pointer. A passing automatic review also prepares an editable completion
+summary and an owner finalization command; admission and acceptance remain explicit.
+Room hook delivery still requires explicit `oms room ack` after consumption.
+Acknowledgment reminders are at most once per five minutes per session and are
+omitted when that hook delivers new mail.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
 other sessions merely because they share a repository. Auto uses the connected tree when the board is at least 20 columns wide and 12 rows high. Every
 joined main of the room, the live one first, has rows; empty role cards are omitted. Explicit parent IDs
@@ -1603,9 +1622,11 @@ their room evidence stay intact.
 
 ## Salvaging a stopped worker
 
-Run `oms panel --repo . --salvage TASK_ID [--json]` to capture the latest stopped
+Run `oms panel --repo . --salvage TASK_ID [--attempt ATTEMPT_ID] [--json]` to capture the latest stopped
 delegate's recorded, kept execution worktree, including a separate clone or
-scratch worktree. It preserves that checkout and index,
+scratch worktree, or the explicitly selected stopped attempt of that task.
+Selection keeps the same room-owner, stopped-state and worktree identity checks;
+an attempt from another task is refused. It preserves that checkout and index,
 and reports changed paths, before/after byte sizes, the patch path and its
 `.patch.json` metadata under `.oms/artifacts/delegate/`. Metadata and the patch
 header carry `salvaged_from` (task, attempt, kept path and stop reason), base and

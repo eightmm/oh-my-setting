@@ -409,7 +409,7 @@ def bootstrap(provider, repo):
         "Use fresh scoped briefs with paths, authority, constraints, success "
         "criteria and a return contract. Inspect the returned artifacts and "
         "patch, use patch-admit/patch-land when authorized, and verify the result. "
-        "Continue a timed-out or reviewed worker with --continue TASK_ID instead of re-dispatching from scratch. "
+        "Continue reviewed work with --continue TASK_ID. Salvage stopped write work first with --salvage TASK_ID. "
         "Worker completion is not acceptance. Workers cannot recursively "
         "orchestrate. Do not commit, push or install without user authority. "
         "OMS records are shared; native conversations are separate. "
@@ -1193,7 +1193,7 @@ def owning_attempt(repo, owner, main, env):
     return lineage_ids(repo, owner, participant, current["attempt_id"])
 
 
-def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
+def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, allow_extra_round=None):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
         raise ValueError("invalid task ID to continue")
@@ -1228,11 +1228,8 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
     # A released main does not prove its worker or provider session has stopped.
     if not all(historical_worker_exited(row) for row in earlier):
         raise ValueError("historical worker exit is unconfirmed for task %s; continuation refused" % task_id)
-    rounds = len(earlier) - 1
+    rounds = _revision_rounds(repo, earlier)
     limit = policy()["pool"]["max_rework_rounds"]
-    if rounds >= limit:
-        raise ValueError("task %s reached %d rework rounds; escalate: review the brief, raise --workload "
-                         "or ask the person" % (task_id, limit))
     last = earlier[-1]
     session = last.get("refs", {}).get("native_session")
     found = results(repo, task_id)["rows"]
@@ -1246,22 +1243,34 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
     # a prior patch to the next worker.
     eligible_result = (call.get("attempt_id") == last.get("attempt_id")
                        and type(call.get("exit")) is int and call.get("exit") == 0)
+    if (last.get("refs", {}).get("panel_access") == "write" and not eligible_result
+            and last.get("refs", {}).get("panel_location", "").startswith("worktree:")):
+        raise ValueError("stopped write work is not transferred by --continue; first run oms panel --salvage %s "
+                         "--attempt %s, inspect the recovery, then include recovered work in a fresh dispatch brief"
+                         % (task_id, last["attempt_id"]))
+    if rounds >= limit and not allow_extra_round:
+        raise ValueError("task %s reached %d completed write rework rounds (cap %d); "
+                         "review the brief, then use --allow-extra-round REASON for one owner override"
+                         % (task_id, rounds, limit))
     patch = call.get("patch") if eligible_result else None
     where = ""
     if patch:
         # Absolute machine paths never leave in a prompt (the outbound scrubber refuses them), and the new
         # worktree has no .oms artifacts, so the earlier patch travels inline while it fits.
         try:
-            body = verified_patch(repo, call).decode("utf-8", errors="replace")
-        except (OSError, ValueError, TypeError):
+            body = verified_patch(repo, call).decode("utf-8")
+        except (OSError, ValueError, TypeError, UnicodeError):
             body = None
         name = os.path.relpath(Path(repo) / patch, repo)
         if body is None:
             where = " The previous patch could not be verified and is not included."
         elif body and len(body.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 <= MAX_PROMPT:
             where = " Your previous patch (%s) follows; apply what still fits.\n```diff\n%s```\n" % (name, body)
+        elif body:
+            raise ValueError("previous patch exceeds the continuation input budget; inspect and admit it in the "
+                             "owner checkout or include a bounded recovery in a fresh dispatch brief")
         else:
-            where = " Your previous patch is %s in the main checkout (apply what still fits)." % name
+            where = " The previous patch is empty; no patch is transferred."
     # A provider fallback swaps the attempt's provider after its row was written; the session belongs to
     # the provider that actually ran.
     ran = last.get("refs", {}).get("panel_provider") or last.get("provider")
@@ -1270,15 +1279,19 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
     if resume:
         preamble = ("Your earlier work was on %s; the repository is now at %s.%s New instructions follow.\n\n"
                     % (old, head, where))
-        note = "continuing round %d of %s in its native session" % (len(earlier) + 1, task_id)
+        note = "continuing %s in its native session; %s" % (task_id, "verified patch included" if patch and body else
+                                                          "no patch transferred")
     else:
-        summary = clean(str(call.get("answer") or "no summary recorded"), 1500) if eligible_result else "no verified summary recorded"
+        has_summary = eligible_result and bool(call.get("answer"))
+        summary = clean(str(call["answer"]), 1500) if has_summary else "no verified summary recorded"
         reason = ("the earlier worker ran on %s, not %s" % (ran, route["provider"])
                   if session and ran != route["provider"] else
                   "the earlier session is not recorded or no longer on disk")
         preamble = ("A fresh worker continues earlier work on %s (%s). The repository is now at %s.%s "
                     "Earlier summary: %s\nNew instructions follow.\n\n" % (task_id, reason, head, where, summary))
-        note = "no resumable session (%s); started a fresh worker with the previous patch and summary" % reason
+        note = "no resumable session (%s); fresh worker transfers %s and %s" % (
+            reason, "verified inline patch" if patch and body else "no patch",
+            "recorded summary" if has_summary else "no verified summary")
     text = preamble + Path(brief).read_text(encoding="utf-8")
     if len(text.encode("utf-8")) > MAX_PROMPT:
         raise ValueError("brief plus continuation preamble exceeds the panel input contract")
@@ -1324,7 +1337,13 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
-             main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None):
+             main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
+             allow_extra_round=None, candidate=None):
+    if allow_extra_round is not None:
+        if (not continue_task or not isinstance(allow_extra_round, str) or not allow_extra_round.strip()
+                or len(allow_extra_round.encode("utf-8")) > 1000 or "\0" in allow_extra_round):
+            raise ValueError("--allow-extra-round requires --continue and a reason of 1..1000 bytes")
+        _validate_dry_run_inputs(allow_extra_round, None)
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main)
     label = safe_label(label)
     alias_pattern = r"[A-Za-z0-9-]{1,8}"
@@ -1371,7 +1390,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         if role not in WRITERS or not brief or prompt or task_id:
             raise ValueError("--continue takes a write-capable role and --brief-file, not --prompt or --task-id")
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
-                                           child_environment(owner, repo), work_repo)
+                                           child_environment(owner, repo), work_repo, allow_extra_round)
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
@@ -1390,8 +1409,13 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                         fallback = None
                 except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
                     fallback = None
+        options = {}
+        if allow_extra_round is not None:
+            options["allow_extra_round"] = allow_extra_round
+        if candidate is not None:
+            options["candidate"] = candidate
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                            dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias)
+                            dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias, **options)
     finally:
         if temporary:
             temporary.unlink()
@@ -1734,6 +1758,24 @@ def _rework_history(rows, task_id, parents):
                   key=lambda row: row.get("sequence", 0))
 
 
+def _revision_rounds(repo, history):
+    """Only successful write products that reached review consume the rework budget."""
+    import panel_results
+    _, artifacts = panel_results._records(repo, full=True)
+    completed = set()
+    for row in history:
+        if row.get("refs", {}).get("panel_access") != "write" or row.get("state") not in {"review", "succeeded", "done"}:
+            continue
+        product = next((item for item in reversed(artifacts)
+                        if item.get("kind") == "delegate" and item.get("attempt_id") == row.get("attempt_id")
+                        and item.get("task_id") == row.get("task_id")), {})
+        if (type(product.get("exit")) is int and product["exit"] == 0
+                and (product.get("verify_exit") is None or
+                     type(product.get("verify_exit")) is int and product["verify_exit"] == 0)):
+            completed.add(row["attempt_id"])
+    return max(0, len(completed) - 1)
+
+
 def _write_brief_artifact(repo, relative, content):
     body = content.encode("utf-8")
     if len(body) > MAX_PROMPT or "\0" in content:
@@ -1829,18 +1871,27 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
     earlier = _rework_history(attempts, task_id, parents)
     if not earlier or earlier[-1].get("attempt_id") != worker.get("attempt_id"):
         raise ValueError("review no longer names the latest owned worker")
-    rounds, limit = len(earlier) - 1, policy()["pool"]["max_rework_rounds"]
+    rounds, limit = _revision_rounds(repo, earlier), policy()["pool"]["max_rework_rounds"]
     capped = rounds >= limit
     cap = ""
     if capped:
-        workload = original.get("workload")
-        higher = TIERS[TIERS.index(workload) + 1] if workload in TIERS[:-1] else None
-        suggestion = "consider --workload " + higher if higher else "review the brief and workload with the main"
-        cap = ("\n## Rework cap\n\nThe cap of %d rework rounds is reached; --continue is blocked. "
-               "Suggestion only: %s. No workload or authority change has been applied.\n" % (limit, suggestion))
+        cap = ("\n## Rework cap\n\nThe cap of %d completed write rework rounds is reached; --continue is blocked. "
+               "After reviewing the brief, the owner may add --allow-extra-round REASON for one recorded override. "
+               "Changing --workload does not change this cap.\n" % limit)
     finding_text = "\n\n".join(findings)
+    roots = {str(repo), str(anchor.get("execution_repo") or repo)}
+    candidate = outcome.get("candidate") if isinstance(outcome, dict) else None
+    if candidate is not None:
+        root = candidate.get("root") if isinstance(candidate, dict) else None
+        if (not isinstance(root, str) or not os.path.isabs(root) or "\0" in root
+                or Path(root).parent == Path(root)
+                or any(part in {".", ".."} for part in re.split(r"[/\\]", root))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(candidate.get("patch_sha256")))
+                or candidate["patch_sha256"] != context.get("patch_sha256")):
+            raise ValueError("candidate review root is invalid or not linked to the reviewed patch")
+        roots.add(root)
     # Only known repository prefixes are relativized; the outbound screen refuses all other private paths.
-    for root in sorted({str(repo), str(anchor.get("execution_repo") or repo)}, key=len, reverse=True):
+    for root in sorted(roots, key=len, reverse=True):
         finding_text = finding_text.replace(root.rstrip("/\\") + "/", "")
         finding_text = finding_text.replace(root.rstrip("/\\") + "\\", "")
     content = ("# Draft fix brief for task %s\n\n## Scope and authority\n\n"
@@ -1880,6 +1931,25 @@ def _dispatch_execution_repository(repo, room_id, member, caller):
         return work_repository(value)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def _completion_inputs(repo, room_id, member, caller, task_id, record, context):
+    artifact = record.get("artifact")
+    worker = context.get("call_id")
+    if not worker or not _safe_patch_path(artifact) or not artifact.startswith(".oms/artifacts/"):
+        return ""
+    verifier = _review_verifier(repo, room_id, worker, caller, task_id)
+    if not verifier:
+        return ""
+    relative = ".oms/artifacts/panel-results/completion-%s.md" % member
+    content = ("# Completion draft for %s\n\nReview evidence: %s\n\n"
+               "Verifier: %s\n\nOwner: inspect the findings and candidate, admit the patch, "
+               "and edit this summary before accepting.\n" % (task_id, artifact, verifier))
+    _validate_dry_run_inputs(content, None)
+    _write_brief_artifact(repo, relative, content)
+    arguments = ["oms", "panel", "--finalize", "--task-id", task_id, "--summary-file", relative,
+                 "--outcome", "accepted", "--verify", verifier, "--evidence", artifact]
+    return " After admission and editing the summary, owner command: " + " ".join(shlex.quote(p) for p in arguments)
 
 
 def _review_verifier(repo, room_id, member, caller, task_id):
@@ -2110,6 +2180,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
     guard_stop = "worker guard stopped this run" in str(summary).lower()
     review_delivered = False
     dispatched_role = result_record.get("dispatched_role")
+    review_notice = None
     if role == "reviewer" or dispatched_role in {"verifier", "security-auditor", "critic", "architect"}:
         gate_required = bool(review_context) or dispatched_role == "review"
         verdict = _review_verdict(summary)
@@ -2130,18 +2201,21 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                       "guard stopped the review" if guard_stop else
                       "review exited with status %s" % status if status != 0 else
                       "review ended without a final GATE verdict")
-            _judgment_mail(repo, room_id, member, caller, task_id,
-                           "Task %s review failed or is inconclusive: %s." % (task_id, reason))
+            review_notice = "Task %s review failed or is inconclusive: %s." % (task_id, reason)
         elif not gate_required:
-            _judgment_mail(repo, room_id, member, caller, task_id,
-                           "Task %s findings are ready for owner judgment; no automatic gate was requested."
-                           % task_id)
+            review_notice = ("Task %s findings are ready for owner judgment; no automatic gate was requested."
+                             % task_id)
         else:
             if verdict == "pass":
                 patch_digest = (result_event or {}).get("patch_sha256")
                 notice = ("Review passed for task %s; patch %s is awaiting admission by the main." %
                           (task_id, patch_digest or "digest unavailable") if patch_digest else
                           "Review gate passed for task %s; the row still awaits owner finalization." % task_id)
+                if review_context:
+                    try:
+                        notice += _completion_inputs(repo, room_id, member, caller, task_id, result_record, review_context)
+                    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                        notice += " Completion inputs unavailable; finalize explicitly after admission."
             else:
                 patch_digest = (result_event or {}).get("patch_sha256")
                 notice = ("Review verdict FAIL for task %s; patch %s." % (task_id, patch_digest)
@@ -2152,7 +2226,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                                                      result_record, review_context) or notice)
                     except (OSError, ValueError, KeyError, TypeError, UnicodeError, subprocess.SubprocessError):
                         notice += " Fix draft unavailable; the main must re-brief manually."
-            _judgment_mail(repo, room_id, member, caller, task_id, notice)
+            review_notice = notice
     elif status != 0 or verify_failed or guard_stop:
         reason = ("verification failed" if verify_failed else
                   "worker guard stopped the call" if guard_stop else
@@ -2169,8 +2243,10 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         artifact, patch_path = result_event.get("artifact"), result_event.get("patch")
         evidence_paths = (("artifact " + artifact + " and ") if artifact else "") + "patch " + str(patch_path)
         prompt = ("Review the completed write result for task " + task_id + ".\n"
-                  "Read the repo-relative " + evidence_paths + ".\n"
-                  "Assess correctness and safety. Do not apply or execute the patch.\n"
+                  "The controller has applied the digest-verified patch to its recorded base in a private candidate checkout.\n"
+                  "Review the complete attached candidate diff and inspect candidate source. "
+                  "The original evidence in the owner state is " + evidence_paths + ".\n"
+                  "Assess correctness and safety. Keep the candidate unchanged; the controller runs the verifier there.\n"
                   "End with exactly one final line: GATE: pass or GATE: fail, then concise findings before it.")
         verifier = _review_verifier(repo, room_id, member, caller, task_id)
         manual_notice = False
@@ -2225,12 +2301,13 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                 if pending_claim or room.claim_review(repo, room_id, review_event):
                     try:
                         review_workload = _automatic_review_workload(result_event)
+                        candidate = dict(patch=patch_path, sha256=digest, base=result_record.get("base_sha"))
                         with redirect_stdout(io.StringIO()):
                             dispatch(repo, owner, "reviewer", review_workload, "read", None, prompt=prompt, verify=verifier,
-                                     task_id=task_id, dry_run=True, label="Automatic patch review")
+                                     task_id=task_id, dry_run=True, label="Automatic patch review", candidate=candidate)
                         dispatch(repo, owner, "reviewer", review_workload, "read", None, prompt=prompt, verify=verifier,
                                  task_id=task_id, label="Automatic patch review", member_id=review_member,
-                                 work_repo=work_repo)
+                                 work_repo=work_repo, candidate=candidate)
                     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                         if _review_launch_state(repo, review_member) != "absent":
                             # A launch record means the spawn may have happened; keep the reservation.
@@ -2275,6 +2352,17 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
     prefix = "Call exit=%d; parent acceptance pending.\n" % status
     message = (prefix + str(summary)).encode("utf-8")[:3800].decode("utf-8", "ignore")
     message_id = "result-" + member
+    if review_notice is not None:
+        # The result id also settles the call on the board and across room rollover.
+        pointer = " Read findings: oms panel --results --task-id " + task_id
+        message = review_notice + pointer
+        if len(message.encode("utf-8")) > 4000:
+            artifact = result_record.get("artifact")
+            full = (" Full findings: " + artifact + "." if _safe_patch_path(artifact)
+                    and artifact.startswith(".oms/artifacts/") and len(artifact.encode("utf-8")) <= 1000 else "")
+            pointer = " [Notice truncated.]" + full + pointer
+            message = review_notice.encode("utf-8")[:4000 - len(pointer.encode("utf-8"))].decode("utf-8", "ignore") + pointer
+        room_quiet = False
     for retry in (False, True):
         try:
             room.send(repo, room_id, member, caller, message, "handoff", message_id=message_id,
@@ -2619,7 +2707,11 @@ def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution
 
 
 def _valid_rework_context(context, member):
-    return (isinstance(context, dict) and set(context) == {"role", "scope", "workload", "brief", "brief_sha256"}
+    return (isinstance(context, dict) and set(context) in (
+                {"role", "scope", "workload", "brief", "brief_sha256"},
+                {"role", "scope", "workload", "brief", "brief_sha256", "extra_round_reason"})
+            and ("extra_round_reason" not in context or isinstance(context["extra_round_reason"], str)
+                 and 0 < len(context["extra_round_reason"].encode("utf-8")) <= 1000)
             and context.get("role") in WRITERS and context.get("workload") in TIERS
             and isinstance(context.get("scope"), list)
             and all(isinstance(path, str) and room.normalize_scope(path) == path for path in context["scope"])
@@ -3191,7 +3283,8 @@ def _settle_dispatch(repo, room_id, member, status):
 
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                 dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None):
+                 dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
+                 allow_extra_round=None, candidate=None):
     source_repo = repo
     if os.environ.get("OMS_ROOM_REPO"):
         repo = repository(os.environ["OMS_ROOM_REPO"])
@@ -3200,7 +3293,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         execution = work_repository(work_repo or source_repo)
     elif route["kind"] in {"worker", "researcher"}:
         execution = native_repository(repo)
-    _validate_dispatch_verifier(execution, verify)
+    if candidate is None:
+        _validate_dispatch_verifier(execution, verify)
+    # Candidate suite/selector validation runs after materialization in peer-review.
     if dry_run:
         _validate_dry_run_inputs(prompt, brief)
     if task_id is None:
@@ -3209,8 +3304,20 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         raise ValueError("invalid task ID")
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
     argv[argv.index("--repo") + 1] = str(execution)
+    if candidate is not None:
+        if (role != "reviewer" or access != "read" or not verify or
+                not isinstance(candidate, dict) or set(candidate) != {"patch", "sha256", "base"} or
+                not _safe_patch_path(candidate.get("patch")) or
+                not candidate["patch"].startswith(".oms/artifacts/") or
+                not re.fullmatch(r"[0-9a-f]{64}", str(candidate.get("sha256"))) or
+                not re.fullmatch(r"[0-9a-f]{7,64}", str(candidate.get("base")))):
+            raise ValueError("automatic review requires a linked patch digest and recorded base")
+        argv += ["--candidate-patch", candidate["patch"], "--candidate-sha256", candidate["sha256"],
+                 "--candidate-base", candidate["base"]]
     plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "task_id": task_id,
             "argv": argv, "executes": False}
+    if allow_extra_round is not None:
+        plan["extra_round_reason"] = allow_extra_round
     if scopes:
         if role not in WRITERS or access != "write":
             raise ValueError("--scope declares a write role's files; use it with --access write")
@@ -3393,6 +3500,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 recorded_brief = repo / recorded_brief
             rework = (dict(role=role, scope=scopes or [], workload=route["workload"],
                            brief=_read_dispatch_brief(recorded_brief).decode("utf-8")) if access == "write" else None)
+            if rework is not None and allow_extra_round is not None:
+                rework["extra_round_reason"] = allow_extra_round
             launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
                                              task_id=task_id)
             command = argv
@@ -7459,7 +7568,7 @@ def main(argv=None):
     parser.add_argument("--settle-review", action="store_true", help="list stopped review workers; --apply closes eligible attempts")
     parser.add_argument("--apply", action="store_true", help="apply --settle-review (default: dry run)")
     parser.add_argument("--owner-attempt", help="--settle-review for a named dead main's lineage")
-    parser.add_argument("--attempt", action="append", help="--settle-review: explicitly supersede this worker")
+    parser.add_argument("--attempt", action="append", help="--salvage: select one stopped attempt; --settle-review: supersede this worker")
     parser.add_argument("--reason", help="record why explicitly selected workers are superseded")
     parser.add_argument("--summary-file", help="bounded owner summary for --finalize")
     parser.add_argument("--outcome", choices=("completed", "accepted", "failed", "rejected"))
@@ -7477,6 +7586,8 @@ def main(argv=None):
     parser.add_argument("--brief-file", help="scoped task brief for --dispatch")
     parser.add_argument("--continue", dest="continue_task", metavar="TASK_ID",
                         help="continue this main's earlier worker for TASK_ID with --brief-file (worker dispatch)")
+    parser.add_argument("--allow-extra-round", metavar="REASON",
+                        help="owner override of the completed write rework cap for one --continue call; records the reason")
     parser.add_argument("--verify", help="mechanical verifier for a write or review")
     parser.add_argument("--task-id", help="existing plan/task identifier for the worker")
     parser.add_argument("--label", help="short task title for the role board")
@@ -7487,11 +7598,11 @@ def main(argv=None):
         if args.finalize or args.results or args.retry_delivery:
             parser.error("--settle-review cannot be combined with result actions")
         return review_settlement.cli_main(arguments)
-    if args.apply or args.owner_attempt or args.attempt or args.reason is not None:
-        parser.error("--apply, --owner-attempt, --attempt and --reason require --settle-review")
     if args.salvage is not None:
         import panel_salvage
         return panel_salvage.cli_main(arguments)
+    if args.apply or args.owner_attempt or args.attempt or args.reason is not None:
+        parser.error("--apply, --owner-attempt and --reason require --settle-review; --attempt also supports --salvage")
     if args.repo is not None:
         try:
             git_toplevel(args.repo)
@@ -7558,6 +7669,8 @@ def main(argv=None):
         parser.error("--main requires --dispatch")
     if args.continue_task and (args.dispatch not in WRITERS or not args.brief_file or args.prompt or args.task_id):
         parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no --prompt or --task-id")
+    if args.allow_extra_round is not None and not args.continue_task:
+        parser.error("--allow-extra-round requires --continue and an owner reason")
     if args.scope and (args.dispatch not in WRITERS or args.access != "write"):
         parser.error("--scope requires a write-capable --dispatch role with --access write")
     if args.main:
@@ -7801,7 +7914,8 @@ def main(argv=None):
             status = dispatch(repo, owner, args.dispatch, args.workload, args.access, args.purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
-                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias)
+                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias,
+                              allow_extra_round=args.allow_extra_round)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

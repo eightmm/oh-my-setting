@@ -4835,6 +4835,15 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
         assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task', '--json']) == 0
     room_salvaged = json.loads(output.getvalue())
     assert Path(room_salvaged['patch_path']).is_relative_to(salvage_repo)
+    newer_attempt = dict(salvage_attempt, attempt_id='att_newer_fixture', created_at='2026-10-16T00:00:00Z', refs={})
+    with patch.object(panel_results, '_query', side_effect=lambda repo, verb, *args:
+                      [salvage_attempt, newer_attempt] if verb == 'agent-events' else {'rows': []}):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task',
+                               '--attempt', salvage_attempt['attempt_id']]) == 0
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task',
+                               '--attempt', 'att_foreign']) == 2
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         assert panel.main(['--repo', str(salvage_execution_repo), '--salvage', 'salvage-task', '--json']) == 0
@@ -8742,7 +8751,8 @@ auto_attempt = {"attempt_id": auto_attempt, "task_id": auto_task,
 auto_index = {"kind": "delegate", "attempt_id": auto_attempt["attempt_id"], "task_id": auto_task,
               "artifact": auto_artifact, "patch": auto_patch_path, "patch_sha256": auto_digest,
               "artifact_sha256": hashlib.sha256(auto_artifact_file.read_bytes()).hexdigest(),
-              "verify_exit": 0}
+              "verify_exit": 0,
+              "base_sha": subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()}
 run_dispatch = panel.run_dispatch
 actual_dispatch_calls = []
 def fixture_dispatch(*args, **kwargs):
@@ -8795,7 +8805,8 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert dispatch_args[2:4] == ("reviewer", "read")
     assert dispatch_args[10]["workload"] == "deep", dispatch_args[10]
     assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
-    assert dispatch_kwargs == {}
+    assert dispatch_kwargs == {"candidate": {"patch": auto_patch_path, "sha256": auto_digest,
+                                             "base": auto_index["base_sha"]}}, dispatch_kwargs
     assert dispatch_args[15] == room.review_ids(auto_call, auto_digest, 1)[2]
     assert dispatch_args[14] == worker_execution_repo and dispatch_args[14] != project, dispatch_args
     result_events = [row["room_event"] for row in room.records(project, shared)
@@ -9071,7 +9082,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert preflight_result["role"] == "reviewer" and preflight_result["task_id"] == auto_task, preflight_result
     panel.deliver_result(project, shared, preflight_member, room_owner, "wrong-task", 1)
     reviewer_mail = next(m for m in room.status(project, shared)["messages"]
-                         if m["id"] == "judgment-" + preflight_member)
+                         if m["id"] == "result-" + preflight_member)
     assert "review failed or is inconclusive" in reviewer_mail["text"] and room_owner in reviewer_mail["targets"]
     reviewer_result = next(row["room_event"] for row in room.records(project, shared)
                            if row.get("room_event", {}).get("kind") == "call-result"
@@ -9267,7 +9278,7 @@ for reviewer_call, answer, exit_status, expected in (
             patch.dict(os.environ, room_env, clear=True):
         panel.deliver_result(project, shared, reviewer_call, room_owner, auto_task, exit_status)
     verdict_mail = next(m for m in room.status(project, shared)["messages"]
-                        if m["id"] == "judgment-" + reviewer_call)
+                        if m["id"] == "result-" + reviewer_call)
     assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"]
 for dispatched_role in ("verifier", "security-auditor", "critic", "architect"):
     judge_call = "call-judge-no-gate-" + dispatched_role
@@ -9284,7 +9295,7 @@ for dispatched_role in ("verifier", "security-auditor", "critic", "architect"):
             patch.dict(os.environ, room_env, clear=True):
         panel.deliver_result(project, shared, judge_call, room_owner, auto_task, 0)
     judge_mail = next(m for m in room.status(project, shared)["messages"]
-                      if m["id"] == "judgment-" + judge_call)
+                      if m["id"] == "result-" + judge_call)
     assert "findings are ready for owner judgment" in judge_mail["text"]
     assert "review failed or is inconclusive" not in judge_mail["text"]
     assert "awaiting admission" not in judge_mail["text"] and room_owner in judge_mail["targets"]
@@ -9296,28 +9307,36 @@ draft_main = {"attempt_id": "attempt-fix-draft-main", "tool": "panel-main", "pro
 original_fix_brief = "# Task\n\nRepair scripts/fixture.py only.\n\n# Constraints\n\nNo commits or dependency changes.\n"
 fix_verify = "python3 -c 'print(\"it works\")'"
 fix_execution = Path.home() / "oms-fixture-review-worktree"
+fix_candidate = Path.home() / "oms-fixture-candidate-tmp" / "tmp.candidate"
 fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the caller contract." % project,
                       "- **P1** Refuse the unsafe path in `%s/scripts/fixture.py:9`.\n"
                       "  ```python\nP0: example within the finding\n  ```" % fix_execution,
-                      "### P2 Preserve the verifier.", "P3: Keep the manual dispatch step.")
+                      "### P2 Preserve the verifier in `%s/scripts/fixture.py:11`." % fix_candidate,
+                      "P3: Keep the manual dispatch step.")
 fix_findings = "\n".join(fix_finding_blocks)
+original_fix_notice = panel._review_fix_notice
 for case_number, (case, expected_draft) in enumerate((
         ("failed-gate", True), ("cap", True), ("truncated-summary", True), ("multiline-verify", True),
+        ("notice-limit", True), ("notice-exact-limit", True),
         ("private-verifier", False),
+        ("missing-candidate", False), ("wrong-candidate-digest", False),
+        ("unsafe-candidate-root", False), ("relative-candidate-root", False),
         ("no-priorities", False), ("passed-gate", False), ("missing-context", False),
         ("bad-digest", False), ("private-path", False), ("stale-review", False),
         ("failed-provider", False), ("failed-verifier", False), ("oversized", False))):
     fix_task = "fix-draft-" + case
+    if case.startswith("notice-"):
+        fix_task = fix_task.ljust(160, "x")
     fix_worker = "call-%016x" % (0xD400 + case_number)
     claim_id, _, fix_reviewer = room.review_ids(fix_worker, auto_digest, 1)
     for ident, kind in ((fix_worker, "worker"), (fix_reviewer, "reviewer")):
         room.join(project, shared, ident, "codex", kind, parent=room_owner)
     worker_attempt = dict(auto_attempt, attempt_id="attempt-" + fix_worker, task_id=fix_task,
-        sequence=3, parent_attempt_id=draft_main["attempt_id"],
+        sequence=3, state="review", parent_attempt_id=draft_main["attempt_id"],
         refs=dict(auto_attempt["refs"], panel_room_participant=fix_worker, panel_owner="claude"))
     reviewer_attempt = dict(worker_attempt, attempt_id="attempt-" + fix_reviewer,
         refs=dict(worker_attempt["refs"], panel_room_participant=fix_reviewer, panel_role="reviewer",
-                  panel_access="read"))
+                  panel_access="read", panel_location="worktree:oms-fixture-candidate-tmp/tmp.candidate"))
     fix_history = [draft_main, worker_attempt, reviewer_attempt]
     if case == "cap":
         fix_history[1:1] = [dict(worker_attempt, attempt_id="attempt-prior-%d" % n, sequence=n,
@@ -9357,9 +9376,28 @@ for case_number, (case, expected_draft) in enumerate((
     # after the provider artifact. Provider failures and verifier failures still require manual judgment.
     outcome_index = dict(review_index, kind="review-outcome", exit=0 if gate == "pass" else 1,
                          review={"gate_verify_exit": 1 if case == "failed-verifier" else 0,
+                                 "candidate": {"root": str(fix_candidate), "patch_sha256": auto_digest},
                                  "seats": [{"verdict": gate, "artifact": Path(review_relative).name}]})
+    if case == "missing-candidate":
+        outcome_index["review"].pop("candidate")
+    elif case == "wrong-candidate-digest":
+        outcome_index["review"]["candidate"]["patch_sha256"] = "0" * 64
+    elif case == "unsafe-candidate-root":
+        outcome_index["review"]["candidate"]["root"] = fix_candidate.anchor
+    elif case == "relative-candidate-root":
+        outcome_index["review"]["candidate"]["root"] = "tmp.candidate"
     projected_answer = "Retained prefix without the verdict" if case == "truncated-summary" else review_answer
-    with patch.object(panel_result_store, "_records", return_value=(fix_history, [review_index, outcome_index])), \
+    fix_products = [dict(auto_index, attempt_id=a["attempt_id"], task_id=fix_task, exit=0)
+                    for a in fix_history if a.get("refs", {}).get("panel_access") == "write"]
+    def notice_at_limit(*args, **kwargs):
+        notice = original_fix_notice(*args, **kwargs)
+        if case.startswith("notice-"):
+            pointer = " Read findings: oms panel --results --task-id " + fix_task
+            size = 3800 if case == "notice-limit" else 4000 - len(pointer.encode("utf-8"))
+            notice = "검" * (size // 3) + "x" * (size % 3)
+        return notice
+    with patch.object(panel_result_store, "_records", return_value=(fix_history, fix_products + [review_index, outcome_index])), \
+            patch.object(panel, "_review_fix_notice", side_effect=notice_at_limit), \
             patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": projected_answer,
                 "answer_truncated": case == "truncated-summary"}]}]}), \
             patch.object(panel, "dispatch") as draft_dispatch, patch.dict(os.environ, room_env, clear=True):
@@ -9368,14 +9406,28 @@ for case_number, (case, expected_draft) in enumerate((
         draft_dispatch.assert_not_called()
     draft_relative = str(Path(review_relative).with_suffix(".fix-brief.md"))
     draft_file = project / draft_relative
-    draft_mail = [m for m in room.status(project, shared)["messages"] if m["id"] == "judgment-" + fix_reviewer]
+    draft_mail = [m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + fix_reviewer]
     assert len(draft_mail) == 1 and room_owner in draft_mail[0]["targets"], draft_mail
+    assert draft_mail[0]["message_kind"] == "handoff" and room_owner in draft_mail[0]["pending_for"]
+    assert fix_reviewer in room.status(project, shared)["call_results"]
+    assert not any(m["id"] == "judgment-" + fix_reviewer for m in room.status(project, shared)["messages"])
     assert draft_file.exists() == expected_draft, (case, draft_mail)
+    if case.startswith("notice-"):
+        delivered = draft_mail[0]["text"]
+        assert 3998 <= len(delivered.encode("utf-8")) <= 4000, delivered
+        assert "oms panel --results --task-id " + fix_task in delivered
+        if case == "notice-limit":
+            assert 3800 + len((" Read findings: oms panel --results --task-id " + fix_task).encode("utf-8")) > 4000
+            assert "[Notice truncated.]" in delivered and review_relative in delivered
+        else:
+            assert len(delivered.encode("utf-8")) == 4000 and "truncated" not in delivered
+        continue
     if expected_draft:
         draft_text = draft_file.read_text(encoding="utf-8")
         assert fix_task in draft_text and original_fix_brief in draft_text, draft_text
         for finding in fix_finding_blocks:
-            relative_finding = finding.replace(str(project) + "/", "").replace(str(fix_execution) + "/", "")
+            relative_finding = (finding.replace(str(project) + "/", "").replace(str(fix_execution) + "/", "")
+                               .replace(str(fix_candidate) + "/", ""))
             assert relative_finding in draft_text, relative_finding
         assert "Declared scope: scripts/fixture.py" in draft_text and verifier in draft_text
         assert "Fix every finding; same scope and authority as the previous round." in draft_text
@@ -9383,18 +9435,22 @@ for case_number, (case, expected_draft) in enumerate((
         assert "quoted example" not in draft_text and "fenced example" not in draft_text
         assert "P0: example within the finding" in draft_text
         assert "\n" not in draft_mail[0]["text"], draft_mail
-        command = draft_mail[0]["text"].split("manual command: ", 1)[1]
+        command = draft_mail[0]["text"].split("manual command: ", 1)[1].split(" Read findings: ", 1)[0]
         capture = subprocess.run(["bash", "-c", "oms() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; }; " + command],
                                  capture_output=True, text=True, check=True)
         assert json.loads(capture.stdout) == ["panel", "--dispatch", "builder", "--continue", fix_task,
                                               "--brief-file", draft_relative, "--verify", verifier,
                                               "--access", "write", "--scope", "scripts/fixture.py"], command
         if case == "cap":
-            assert "cap of 2 rework rounds is reached" in draft_text and "consider --workload deep" in draft_text
+            assert "cap of 2 completed write rework rounds is reached" in draft_text and "--allow-extra-round REASON" in draft_text
             assert "--workload" not in command and "rework cap reached" in draft_mail[0]["text"]
         if case == "truncated-summary":
             assert "complete evidence " * 2300 in draft_text
         assert draft_file.stat().st_mode & 0o077 == 0
+    if case == "passed-gate":
+        completion = project / (".oms/artifacts/panel-results/completion-%s.md" % fix_reviewer)
+        assert completion.is_file() and verifier in completion.read_text()
+        assert "--summary-file" in draft_mail[0]["text"] and "After admission" in draft_mail[0]["text"]
 # Draft writes preserve existing evidence and reject links just like the call artifacts.
 try:
     panel._write_brief_artifact(project, ".oms/artifacts/fixture/review-failed-gate.fix-brief.md",
@@ -9496,6 +9552,74 @@ parallel_messages = [message for message in room.status(project, shared)["messag
                      if message.get("id") == "result-" + parallel_call]
 assert len(parallel_events) == len(parallel_messages) == 1, (parallel_events, parallel_messages)
 assert panel.dispatch_store.read(project, panel._settlement_claim_path(parallel_call))["complete"]
+
+# Repeated tool hooks remind about delivered mail only once per interval, and never acknowledge it.
+import hook_state
+ack_room = room.create(project, "ack-reminder-fixture", "Acknowledgment throttle")
+room.join(project, ack_room, "ack-sender", "codex", "main")
+room.join(project, ack_room, "ack-reader", "claude", "reviewer", native_session="panel-ack-fixture")
+room.send(project, ack_room, "ack-sender", "ack-reader", "Review result ready.", message_id="ack-mail")
+ack_payload = {"cwd": str(project), "session_id": "panel-ack-fixture", "hook_event_name": "PostToolUse"}
+with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=ack_room, OMS_ROOM_REPO=str(project),
+                                OMS_ROOM_PARTICIPANT="ack-reader"), clear=True):
+    delivered = hook_state.live_thread_hint(ack_payload, project)
+    assert "ack-mail" in delivered and "explicitly ack" in delivered
+    later = room.now() + room.ACK_AFTER + 1
+    with patch.object(room, "now", return_value=later):
+        assert "delivered message" in hook_state.live_thread_hint(ack_payload, project)
+        assert not hook_state.live_thread_hint(ack_payload, project)
+        assert room.status(project, ack_room)["pending_count"] == 1
+    with patch.object(room, "now", return_value=later + room.ACK_AFTER + 1):
+        assert "delivered message" in hook_state.live_thread_hint(ack_payload, project)
+    room.acknowledge(project, ack_room, "ack-reader", ["ack-mail"])
+    assert not hook_state.live_thread_hint(ack_payload, project)
+
+# Mechanical review sees base + patch, even when the original checkout still fails the verifier.
+source_value = (project / "value.txt").read_bytes()
+candidate_base = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
+(project / "value.txt").write_text("candidate-only\n")
+candidate_patch = subprocess.check_output(["git", "-C", str(project), "diff", "--binary", "HEAD", "--", "value.txt"])
+(project / "value.txt").write_bytes(source_value)
+candidate_patch += (b"diff --git a/tests/candidate-check.sh b/tests/candidate-check.sh\nnew file mode 100644\n"
+                    b"--- /dev/null\n+++ b/tests/candidate-check.sh\n@@ -0,0 +1,2 @@\n"
+                    b"+#!/usr/bin/env bash\n+grep -qx candidate-only value.txt\n")
+candidate_relative = ".oms/artifacts/fixture/candidate.patch"
+(project / candidate_relative).write_bytes(candidate_patch)
+request = ["bash", str(root / "scripts/peer-review.sh"), "--repo", str(project), "--providers", "codex",
+           "--model", "gpt-6-luna", "--gate", "--prompt", "Review the complete candidate diff.",
+           "--candidate-patch", candidate_relative, "--candidate-base", candidate_base,
+           "--candidate-sha256", hashlib.sha256(candidate_patch).hexdigest(), "--verify",
+           "bash tests/candidate-check.sh"]
+candidate_env = dict(room_env, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="reviewer", OMS_PANEL_PURPOSE="review",
+                     OMS_TASK_ID="candidate-gate")
+candidate_temp = home / "review candidate tmp"
+candidate_temp.mkdir()
+candidate_temp_alias = temporary / "review candidate tmp alias"
+if os.name == "posix":
+    candidate_temp_alias.symlink_to(candidate_temp, target_is_directory=True)
+else:
+    candidate_temp_alias = candidate_temp
+candidate_env["TMPDIR"] = str(candidate_temp_alias)
+assert subprocess.run(["grep", "-qx", "candidate-only", "value.txt"], cwd=project).returncode == 1
+candidate_run = subprocess.run(request, env=candidate_env, capture_output=True, text=True, timeout=90)
+assert candidate_run.returncode == 0 and "gate verify: pass" in candidate_run.stdout, candidate_run
+assert (project / "value.txt").read_bytes() == source_value
+review_dir = project / ".oms/artifacts/review"
+scope = json.loads(max(review_dir.glob("_scope-*.json"), key=lambda p: p.stat().st_mtime_ns).read_text())
+assert scope["paths"] == ["tests/candidate-check.sh", "value.txt"] and scope["base"] == candidate_base and scope["diff_sha256"]
+assert scope["candidate"]["patch_sha256"] == hashlib.sha256(candidate_patch).hexdigest() and scope["candidate"]["tree"]
+candidate_root = Path(scope["candidate"]["root"])
+assert candidate_root.is_absolute() and candidate_root.parent == candidate_temp.resolve(), scope
+assert not candidate_root.exists(), "candidate metadata must survive checkout cleanup"
+candidate_outcomes = [row for row in panel_result_store._records(project, full=True)[1]
+                      if row.get("kind") == "review-outcome" and row.get("task_id") == "candidate-gate"]
+assert candidate_outcomes[-1]["review"]["candidate"] == scope["candidate"], candidate_outcomes
+before_bad_gate = worker_log.read_bytes()
+for invalid in (request[:-1] + ["printf tampered > value.txt"],
+                ["0" * 64 if arg == hashlib.sha256(candidate_patch).hexdigest() else arg for arg in request]):
+    rejected_gate = subprocess.run(invalid, env=candidate_env, capture_output=True, text=True, timeout=90)
+    assert rejected_gate.returncode != 0 and "candidate" in rejected_gate.stderr, rejected_gate
+    assert worker_log.read_bytes() == before_bad_gate and (project / "value.txt").read_bytes() == source_value
 shared, room_env = shared_before_auto, room_env_before_auto
 # OPERATOR_SECTION_END auto_review
 _operator_run("auto-review")
@@ -9515,6 +9639,71 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     from contextlib import redirect_stderr
     from unittest.mock import Mock, patch
     from panel_routing import allocate
+    # Only successful write products at review count; launch/guard failures and read calls do not.
+    main = {"attempt_id": "round-main", "terminal": False}
+    history = [dict(attempt_id="round-%d" % i, task_id="round-task", parent_attempt_id="round-main",
+                    sequence=i, state="review", refs={"panel_role": "worker", "panel_access": "write"})
+               for i in range(3)]
+    products = [dict(kind="delegate", attempt_id=a["attempt_id"], task_id="round-task", exit=0, verify_exit=0)
+                for a in history]
+    noise = [dict(history[0], attempt_id="round-" + name, state=state, sequence=10 + i,
+                  refs=dict(history[0]["refs"], panel_access=access))
+             for i, (name, state, access) in enumerate((("launch", "failed", "write"),
+                    ("guard", "failed", "write"), ("read", "review", "read"), ("unindexed", "review", "write")))]
+    with patch.object(panel_results, "_records", return_value=([main] + history + noise, products)):
+        assert panel._revision_rounds(project, history + noise) == 2
+        assert panel._revision_rounds(project, history[:1] + noise) == 0
+        with patch.object(panel, "owning_attempt", return_value={"round-main"}), \
+                patch.object(panel, "events", side_effect=lambda *a, **k: json.dumps([main] + history)), \
+                patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 0}]}]}):
+            round_brief = temporary / "round-brief.md"
+            round_brief.write_text("Fix the remaining reviewed finding.\n")
+            for workload in ("routine", "frontier"):
+                try:
+                    panel.continuation(project, "claude", None, "round-task", {"provider": "codex", "workload": workload},
+                                       round_brief, {})
+                except ValueError as error:
+                    assert "2 completed write rework rounds" in str(error) and "--allow-extra-round REASON" in str(error)
+                    assert "raise --workload" not in str(error)
+                else:
+                    raise AssertionError("completed rework cap was bypassed")
+            continued, native, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
+                round_brief, {}, allow_extra_round="One final verified correction")
+            assert native is None and "no patch" in note and "no resumable session" in note
+            continued.unlink()
+            with patch.object(panel, "_revision_rounds", return_value=0), \
+                    patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 0,
+                                                                                     "patch": ".oms/artifacts/large.patch"}]}]}), \
+                    patch.object(panel, "verified_patch", return_value=b"x" * panel.MAX_PROMPT):
+                try:
+                    panel.continuation(project, "claude", None, "round-task", {"provider": "codex"}, round_brief, {})
+                except ValueError as error:
+                    assert "exceeds the continuation input budget" in str(error), error
+                else:
+                    raise AssertionError("continuation promised an inaccessible oversized patch")
+            with patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 124}]}]}), \
+                    patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
+                try:
+                    panel.continuation(project, "claude", None, "round-task", {"provider": "codex"}, round_brief, {})
+                except ValueError as error:
+                    assert "--salvage round-task --attempt round-2" in str(error), error
+                else:
+                    raise AssertionError("stopped write work bypassed salvage")
+    override_member = "call-0123456789abcdee"
+    panel._prepare_dispatch_call(project, shared, override_member, room_owner, "true", project,
+        dict(role="builder", scope=["value.txt"], workload="routine", brief="Bounded correction.",
+             extra_round_reason="One final verified correction"))
+    override = panel.dispatch_store.read(project, override_member + "-launch.json")["rework"]
+    assert override["extra_round_reason"] == "One final verified correction"
+    assert panel._valid_rework_context(override, override_member)
+    for invalid in ("", " " * 2, "x" * 1001):
+        try:
+            panel.dispatch(project, "claude", "builder", None, "write", None,
+                           continue_task="round-task", allow_extra_round=invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("empty or oversized owner override was accepted")
     if os.name != "posix":
         return
     import panel_terminals
@@ -11593,7 +11782,25 @@ third = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room
 assert third.returncode == 0, third
 escalated = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
                           capture_output=True, text=True)
-assert escalated.returncode != 0 and "task room-continue reached 2 rework rounds; escalate:" in escalated.stderr
+assert escalated.returncode == 0, escalated  # Read calls never exhaust the write rework budget.
+read_rounds = [a for a in listed() if a["task_id"] == "room-continue" and a["refs"].get("panel_role") == "worker"]
+failed_launch = dict(read_rounds[-1], attempt_id="failed-continuation-launch", state="failed",
+                     refs=dict(read_rounds[-1]["refs"], panel_access="write"))
+failed_launch["refs"].pop("panel_location", None)
+reviewed_rounds = [dict(a, state="review", refs=dict(a["refs"], panel_access="write")) for a in read_rounds[:3]]
+products = [dict(kind="delegate", attempt_id=a["attempt_id"], task_id="room-continue", exit=0, verify_exit=0)
+            for a in reviewed_rounds]
+products.append(dict(kind="delegate", attempt_id=failed_launch["attempt_id"], task_id="room-continue", exit=125))
+with patch.object(panel_results, "_records", return_value=(reviewed_rounds + [failed_launch], products)):
+    assert panel._revision_rounds(project, read_rounds + [failed_launch]) == 0
+    with patch.object(panel, "_rework_history", return_value=reviewed_rounds + [failed_launch]), \
+            patch.object(panel, "results", return_value={"rows": []}):
+        try:
+            panel.continuation(project, "claude", None, "room-continue", {"provider": "codex"}, brief, room_env)
+        except ValueError as error:
+            assert "2 completed write rework rounds" in str(error) and "--allow-extra-round REASON" in str(error), error
+        else:
+            raise AssertionError("completed write rounds did not enforce the rework cap")
 # Continuation survives retained results that omit the task and never inlines patch bytes it cannot verify.
 import hashlib
 last_round = [a for a in listed() if a["task_id"] == "room-inspection" and a["refs"].get("panel_role") == "worker"][-1]
