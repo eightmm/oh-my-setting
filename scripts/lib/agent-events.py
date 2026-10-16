@@ -746,6 +746,9 @@ def validate_event_row(row: Dict[str, Any], number: int = 0) -> None:
     old = row.get("from_state")
     if old is not None and old not in ALL_STATES:
         raise OpsError("%s has invalid from_state" % where)
+    if "expected_state" in row and (event_type != "attempt.state_changed"
+                                    or row["expected_state"] not in ALL_STATES):
+        raise OpsError("%s has invalid expected_state" % where)
     usage = row.get("usage", {})
     if usage:
         if not isinstance(usage, dict):
@@ -900,6 +903,8 @@ def append_lifecycle(repo: Path, candidate: Dict[str, Any]) -> Dict[str, Any]:
             if event_type == "attempt.state_changed":
                 old = projection[attempt_id]["state"]
                 new = candidate.get("to_state")
+                if candidate.get("expected_state", old) != old:
+                    raise OpsError("expected lifecycle state %s, found %s" % (candidate["expected_state"], old))
                 candidate["from_state"] = old
                 if old in TERMINAL_STATES or new not in TRANSITIONS.get(old, set()):
                     raise OpsError("illegal lifecycle transition: %s -> %s" % (old, new))
@@ -1099,7 +1104,7 @@ def event_transition(args: argparse.Namespace) -> int:
     for state, _key in steps:
         if state not in ALL_STATES:
             raise OpsError("invalid lifecycle state: %s" % state)
-    for state, key in steps:
+    for index, (state, key) in enumerate(steps):
         event = new_event(
             attempt,
             0,
@@ -1109,6 +1114,8 @@ def event_transition(args: argparse.Namespace) -> int:
             reason_code=safe_reason(args.reason_code),
             actor={"kind": safe_id(args.actor_kind, "actor kind"), "name": safe_id(args.actor, "actor")},
             idempotency_key=safe_id(key, "idempotency_key", optional=True),
+            expected_state=args.expected_state if index == 0 else None,
+            refs=parse_refs(args.ref),
         )
         row = append_lifecycle(repo, event)
         print(row["event_id"])
@@ -2004,6 +2011,8 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     transition = subparsers.add_parser("transition", help="append a validated state transition")
     transition.add_argument("--attempt", required=True)
     transition.add_argument("--state", required=True)
+    transition.add_argument("--expected-state", choices=sorted(ALL_STATES))
+    transition.add_argument("--ref", action="append", default=[], metavar="NAME=VALUE")
     transition.add_argument("--reason-code", default="")
     transition.add_argument("--actor-kind", default="owner")
     transition.add_argument("--actor", default="agent-events")

@@ -745,6 +745,25 @@ window. Missing retained patch or landing evidence refuses acceptance. A failed,
 abandoned or rejected write worker under the same main also refuses `accepted`;
 the owner can record `completed` or `failed` with its actual summary instead.
 
+After saving the immutable result, finalize closes stopped `review` workers of
+exactly that task and the owner's lineage: `completed` → `done`
+(`owner_completed`), `accepted` → `done` (`owner_accepted`), and `rejected` →
+`cancelled` (`owner_rejected`). `failed` keeps `review` for rework. Running
+workers and unknown exits remain pending; settlement errors are reported without
+undoing the result. Lifecycle `done` grants no acceptance: `completed` retains
+plan review/acceptance, and acceptance derives only from the `accepted` outcome.
+The result must still match the current plan task generation. Workers created
+after the result revision remain pending as `newer_than_decision`.
+
+`oms panel --settle-review` lists eligible finalized-task leftovers without
+writing, including task, age in review, selection reason and target state.
+Add `--apply` to close them. Repeat `--attempt ID` with `--reason TEXT` to
+explicitly cancel stopped review workers as `owner_superseded`, recording the
+reason. The default scope is the calling main's lineage. `--owner-attempt ID`
+selects a named dead main's lineage. Unknown ownership and other live mains are
+refused. Compare-and-set transitions and per-attempt revision keys make retries
+safe after partial settlement. No worktree, patch or artifact is deleted.
+
 ```bash
 oms panel --finalize --owner codex --task-id ID \
   --summary-file SUMMARY.txt --outcome accepted \

@@ -5988,8 +5988,7 @@ for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
 import panel_results as saved
 from panel_view import render_results
 first = json.loads(call(final_args))
-second = json.loads(call(final_args))
-assert first["revision"] == second["revision"] and first["verification"]["status"] == "passed"
+assert first["verification"]["status"] == "passed"
 # A result recorded without panel identity still reaches the shared Plan,
 # while an old generation, reopened task or changed proof cannot settle it.
 plan_path = project / ".oms/plan/tasks.json"
@@ -6010,6 +6009,88 @@ external_call = subprocess.run(outside_args, cwd=other_directory, env=environmen
                                capture_output=True, text=True, check=True)
 outside = json.loads(external_call.stdout)
 assert outside["plan_binding"]["plan_id"] == "plan_elsewhere" and outside["main_attempt_id"] is None, outside
+# A result may close only workers from its plan generation and created before
+# that revision. A later worker remains pending even while older work settles.
+import review_settlement
+decision = dict(outside, main_attempt_id=main_attempts["codex"])
+result_row = {"ts": "2026-10-16T00:00:00Z"}
+old_worker = {"attempt_id": "att_before-result", "task_id": "elsewhere-task",
+              "parent_attempt_id": main_attempts["codex"], "state": "review", "terminal": False,
+              "created_at": "2026-10-15T00:00:00Z", "refs": {"panel_role": "worker"}}
+new_worker = dict(old_worker, attempt_id="att_after-result", created_at="2026-10-17T00:00:00Z")
+with patch.object(review_settlement, "_stopped", return_value=True), \
+        patch.object(review_settlement, "_apply") as settle_apply:
+    report = review_settlement._settle(project, [old_worker, new_worker], [],
+        {main_attempts["codex"]}, {"elsewhere-task": (decision, result_row)}, apply=True)
+assert report["applied"] == [old_worker["attempt_id"]], report
+assert report["pending"][0]["attempt"] == new_worker["attempt_id"]
+assert report["pending"][0]["pending_reason"] == "newer_than_decision", report
+assert settle_apply.call_count == 1
+# Exercise persistence and lifecycle writes: settlement must not mint another
+# result revision or notification when an identical finalize is retried.
+event_command = ["bash", str(panel.ENTRY), "agent-events", "--repo", str(project)]
+exit_artifact = project / ".oms/artifacts/settlement-exit.md"
+exit_artifact.write_text("## Output\nCompleted fixture work.\n## Exit\n0\n")
+def settlement_worker(task, parent, review=True):
+    command = event_command + ["start", "--provider", "local", "--tool", "peer-delegate", "--task-id", task,
+        "--parent-attempt-id", parent, "--ref", "panel_role=worker", "--then", "starting", "--then", "working"]
+    ident = call(command + (["--then", "verifying", "--then", "review"] if review else [])).strip()
+    if review:
+        call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" delegate local 0 "$3"', "settlement-fixture",
+              str(root / "scripts/lib/peer-common.sh"), str(project), str(exit_artifact)],
+             dict(environment, OMS_TASK_ID=task, OMS_ATTEMPT_ID=ident))
+    return ident
+stopped = settlement_worker("elsewhere-task", main_attempts["codex"])
+running = settlement_worker("elsewhere-task", main_attempts["codex"], review=False)
+time.sleep(1.1)  # The lifecycle and artifact ledgers record whole seconds.
+with patch.dict(os.environ, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]), clear=True), \
+        patch.object(saved.codex_app_notify, "deliver", return_value={"status": "sent", "persisted": True}) as notify:
+    settled = saved.finalize(project, "codex", "elsewhere-task", str(summary), "completed",
+                             "test -f value.txt", ["value.txt"], notify=True)
+    assert settled["settlement"]["applied"] == [stopped], settled
+    assert running in {r["attempt"] for r in settled["settlement"]["pending"]}, settled
+    retry = saved.finalize(project, "codex", "elsewhere-task", str(summary), "completed",
+                           "test -f value.txt", ["value.txt"], notify=True)
+assert retry["revision"] == settled["revision"] and notify.call_count == 1, (settled, retry, notify.call_count)
+assert json.loads(call(event_command + ["show", "--attempt", stopped, "--json"]))["state"] == "done"
+assert json.loads(call(event_command + ["show", "--attempt", running, "--json"]))["state"] == "working"
+assert json.loads(plan_path.read_text())["tasks"]["elsewhere-task"]["state"] == "review"
+# Retrying an older finalize revision never settles against the newer decision.
+superseded = review_settlement.after_finalize(project, dict(outside, main_attempt_id=main_attempts["codex"]))
+assert superseded.get("skipped") == "superseded_revision", superseded
+# A proven-dead main uses its participant history, rather than the live-only
+# continuation helper. Keep a saved result whose first settlement was deferred.
+import panel_release
+gone = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+gone_refs = dict(panel_release.process_refs(gone.pid, "wrapper"), **panel_release.process_refs(gone.pid, "native"))
+gone.communicate(b"", timeout=10)
+dead_command = event_command + ["start", "--provider", "codex", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_participant=settlement-dead-main", "--ref", "panel_host=inline"]
+for name, value in gone_refs.items():
+    dead_command += ["--ref", name + "=" + value]
+dead_main = call(dead_command + ["--then", "starting", "--then", "working"]).strip()
+dead_task = "settlement-dead-task"
+external_plan["tasks"][dead_task] = dict(external_plan["tasks"]["elsewhere-task"], id=dead_task)
+write_external_plan()
+dead_worker = settlement_worker(dead_task, dead_main)
+time.sleep(1.1)
+with patch.dict(os.environ, dict(environment, OMS_PANEL_MAIN_ATTEMPT=dead_main), clear=True), \
+        patch.object(review_settlement, "_apply", side_effect=ValueError("fixture deferred settlement")):
+    deferred = saved.finalize(project, "codex", dead_task, str(summary), "completed")
+assert deferred["settlement"]["errors"] and not deferred["settlement"]["applied"], deferred
+call(event_command + ["transition", "--attempt", dead_main, "--state", "cancelled"])
+dead_successor = call(dead_command + ["--then", "starting", "--then", "working"]).strip()
+call(event_command + ["transition", "--attempt", dead_successor, "--state", "cancelled"])
+recover = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--settle-review",
+           "--owner-attempt", dead_successor, "--apply", "--json"]
+recovered = json.loads(call(recover))
+assert recovered["applied"] == [dead_worker] and not recovered["errors"], recovered
+assert json.loads(call(event_command + ["show", "--attempt", dead_worker, "--json"]))["state"] == "done"
+refused_live = subprocess.run(recover[:recover.index("--owner-attempt")] + [
+    "--owner-attempt", main_attempts["codex"], "--apply"], env=environment, capture_output=True)
+assert refused_live.returncode, "recovery selected a live owner"
+del external_plan["tasks"][dead_task]
+write_external_plan()
 complete = saved.completed_tasks(project, ["elsewhere-task"])
 assert complete == {"elsewhere-task": "completed"}, complete
 from room_view import plan_rows, goal_box
@@ -6026,6 +6107,15 @@ assert "Plan acceptance: review" in task_navigation["detail"]["text"], task_navi
 external_plan["tasks"]["elsewhere-task"]["state"] = "running"
 write_external_plan()
 assert not saved.completed_tasks(project, ["elsewhere-task"]), "reopened task inherited completion"
+with patch.object(review_settlement, "_stopped", return_value=True):
+    stale = review_settlement._settle(project, [new_worker], [], {main_attempts["codex"]},
+        {"elsewhere-task": (decision, result_row)}, apply=False)
+assert stale["pending"][0]["pending_reason"] == "stale_generation", stale
+plan_path.write_text("{unreadable", encoding="utf-8")
+with patch.object(review_settlement, "_stopped", return_value=True):
+    unreadable = review_settlement._settle(project, [old_worker], [], {main_attempts["codex"]},
+        {"elsewhere-task": (decision, result_row)}, apply=False)
+assert unreadable["pending"][0]["pending_reason"] == "plan_unreadable", unreadable
 external_plan["tasks"]["elsewhere-task"]["state"] = "review"
 external_plan["plan_id"] = "plan_replaced"
 write_external_plan()

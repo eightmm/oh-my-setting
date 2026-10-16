@@ -378,6 +378,13 @@ def _plan_bindings(repo, task_ids):
             for task in tasks if task['id'] in task_ids}
 
 
+def result_matches_plan(repo, task_id, result, bindings=None):
+    """Whether this result names the current plan generation for its task."""
+    current = bindings if bindings is not None else _plan_bindings(repo, {task_id})
+    binding = current.get(task_id)
+    return isinstance(binding, dict) and result.get('plan_binding') == binding
+
+
 def completed_tasks(repo, task_ids, _shared=False, _tick=None):
     """Locally verified products of the current plan generation, without granting acceptance."""
     wanted = {ident for ident in task_ids if isinstance(ident, str) and ID.fullmatch(ident)}
@@ -400,7 +407,7 @@ def completed_tasks(repo, task_ids, _shared=False, _tick=None):
             verified = result.get('verification') or {}
             if not isinstance(verified, dict):
                 continue
-            if (result.get('plan_binding') == bindings[ident]
+            if (result_matches_plan(repo, ident, result, bindings)
                     and result.get('outcome') in {'completed', 'accepted'}
                     and verified.get('status') == 'passed' and type(verified.get('exit')) is int
                     and verified['exit'] == 0
@@ -495,7 +502,8 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
     # Other tasks are accepted independently; unassigned children still belong to this main.
     workers = sorted([a for a in related if (a.get('task_id') == task_id or not a.get('task_id'))
                       and a.get('refs', {}).get('panel_access') == 'write'
-                      and a.get('refs', {}).get('panel_role') == 'worker'], key=lambda a: a.get('created_at', ''))
+                      and a.get('refs', {}).get('panel_role') == 'worker'],
+                     key=lambda a: (a.get('created_at', ''), a['attempt_id']))
     admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
     # Fence this task and its unassigned write workers while other tasks keep moving.
     worker_ids = {a.get('attempt_id') for a in workers}
@@ -570,7 +578,10 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                    'verification': verification, 'evidence': refs,
                    'main_attempt_id': main_id,
                    'admission_event_ids': [a.get('event_id') for a in admissions if a],
-                   'attempt_ids': [a['attempt_id'] for a in related[-20:]]}
+                   # This display window also enters the revision. Settlement
+                   # changes updated_at, so retain the latest-created attempts.
+                   'attempt_ids': [a['attempt_id'] for a in sorted(related, key=lambda a: (
+                       a.get('created_at', ''), a['attempt_id']))[-20:]]}
         if binding:
             payload['plan_binding'] = binding
         payload['revision'] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:24]
@@ -578,10 +589,20 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         path = _write(repo, relative, payload)
         if not any(r.get('kind') == 'panel-result' and r.get('artifact') == relative for r in rows):
             _register(repo, owner, task_id, path)
+        try:
+            from review_settlement import after_finalize
+            settlement = after_finalize(repo, payload)
+        except Exception as error:
+            settlement = {'candidates': [], 'pending': [], 'applied': [], 'executes': True,
+                          'errors': [{'error': clean(str(error), 240)}]}
+        for error in settlement.get('errors', []):
+            print('OMS review settlement error: ' + clean(str(error), 300), file=sys.stderr)
+        if settlement.get('pending'):
+            print('OMS review settlement: %d worker(s) remain pending' % len(settlement['pending']), file=sys.stderr)
         delivery = _deliver(repo, payload, relative, rows) if notify else _last_delivery(repo, rows, task_id, payload['revision'])
         if outcome == 'accepted':
             _plan_hint(repo, task_id)
-        return dict(payload, artifact=relative, delivery=delivery)
+        return dict(payload, artifact=relative, delivery=delivery, settlement=settlement)
 
 
 def retry_delivery(repo, task_id, revision=None):

@@ -31,6 +31,7 @@ import panel_debate
 import panel_messages
 import panel_reader
 import dispatch_supervisor as dispatch_store
+import review_settlement
 
 from dashboard_projection import clean
 from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_results
@@ -7455,6 +7456,11 @@ def main(argv=None):
     parser.add_argument("--open-chat", help="navigate to a selected room participant without starting a model turn")
     parser.add_argument("--chat-surface", choices=("auto", "terminal", "app"), default="auto")
     parser.add_argument("--finalize", action="store_true", help="record an owner result")
+    parser.add_argument("--settle-review", action="store_true", help="list stopped review workers; --apply closes eligible attempts")
+    parser.add_argument("--apply", action="store_true", help="apply --settle-review (default: dry run)")
+    parser.add_argument("--owner-attempt", help="--settle-review for a named dead main's lineage")
+    parser.add_argument("--attempt", action="append", help="--settle-review: explicitly supersede this worker")
+    parser.add_argument("--reason", help="record why explicitly selected workers are superseded")
     parser.add_argument("--summary-file", help="bounded owner summary for --finalize")
     parser.add_argument("--outcome", choices=("completed", "accepted", "failed", "rejected"))
     parser.add_argument("--evidence", action="append", help="safe repository-relative evidence for --finalize (up to eight)")
@@ -7477,6 +7483,12 @@ def main(argv=None):
     parser.add_argument("--alias", help="short unique room call name (1-8 letters, digits or hyphens)")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
+    if args.settle_review:
+        if args.finalize or args.results or args.retry_delivery:
+            parser.error("--settle-review cannot be combined with result actions")
+        return review_settlement.cli_main(arguments)
+    if args.apply or args.owner_attempt or args.attempt or args.reason is not None:
+        parser.error("--apply, --owner-attempt, --attempt and --reason require --settle-review")
     if args.salvage is not None:
         import panel_salvage
         return panel_salvage.cli_main(arguments)

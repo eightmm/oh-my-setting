@@ -358,7 +358,22 @@ if $EVENTS --repo "$REPO" transition --attempt "$attempt" --state queued >/dev/n
   fail "illegal review -> queued transition was accepted"
 fi
 
-$EVENTS --repo "$REPO" transition --attempt "$attempt" --state "done" >/dev/null
+before_cas="$(cksum < "$REPO/.oms/lifecycle/events.jsonl")"
+if $EVENTS --repo "$REPO" transition --attempt "$attempt" --state "done" \
+  --expected-state working --idempotency-key cas-done >/dev/null 2>&1; then
+  fail "expected-state mismatch was accepted"
+fi
+[ "$(cksum < "$REPO/.oms/lifecycle/events.jsonl")" = "$before_cas" ] || fail "CAS mismatch wrote an event"
+$EVENTS --repo "$REPO" transition --attempt "$attempt" --state "done" \
+  --expected-state review --idempotency-key cas-done >/dev/null
+after_cas="$(cksum < "$REPO/.oms/lifecycle/events.jsonl")"
+$EVENTS --repo "$REPO" transition --attempt "$attempt" --state "done" \
+  --expected-state review --idempotency-key cas-done >/dev/null
+[ "$(cksum < "$REPO/.oms/lifecycle/events.jsonl")" = "$after_cas" ] || fail "CAS retry double-wrote"
+if $EVENTS --repo "$REPO" transition --attempt "$attempt" --state "done" \
+  --expected-state working --idempotency-key cas-done >/dev/null 2>&1; then
+  fail "CAS retry changed its precondition"
+fi
 if $EVENTS --repo "$REPO" transition --attempt "$attempt" --state working >/dev/null 2>&1; then
   fail "terminal attempt was revived in place"
 fi
