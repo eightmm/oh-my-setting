@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 import uuid
 
 import codex_app_notify
@@ -29,6 +30,7 @@ ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z')
 REVISION = re.compile(r'[0-9a-f]{24}\Z')
 MAX_SUMMARY, MAX_RESULT = 8192, 32768
 MAX_DRAFT = 4096
+MAX_VERIFY_OUTPUT = 8192
 
 
 def _owner():
@@ -46,12 +48,24 @@ def _query(repo, verb, *args):
     return json.loads(result.stdout)
 
 
-def _records(repo, full=False, _attempts=None):
+def _records(repo, full=False, _attempts=None, task_id=None):
     attempts = (_query(repo, 'agent-events', 'list', *([] if full else ['--limit', '300']))
                 if _attempts is None else (_attempts if full else _attempts[-300:]))
-    index = _query(repo, 'artifact-index', 'list', '1000').get('rows', [])
-    if not isinstance(attempts, list) or not isinstance(index, list):
+    if not isinstance(attempts, list):
         raise ValueError('invalid result evidence')
+    # The CLI's tail window cannot prove task coverage. Reuse its strict,
+    # no-follow reader and select this task only after validating the snapshot.
+    store = runpy.run_path(str(ROOT / 'scripts/lib/artifact-index-store.py'))
+    try:
+        body = store['read_index'](str(repo), '.oms/artifacts/index.jsonl', missing_ok=True)
+    except (OSError, ValueError, SystemExit) as error:
+        raise ValueError('artifact evidence coverage incomplete: strict retained-index read failed') from error
+    linked = {a.get('attempt_id') for a in attempts if a.get('task_id') == task_id}
+    index = [json.loads(line) for line in body.splitlines()]
+    # A whole-main result has no task attempt; keep its children's rows available.
+    if task_id and linked:
+        index = [r for r in index if not r.get('task_id') or r.get('task_id') == task_id
+                 or r.get('attempt_id') in linked]
     return attempts, index
 
 
@@ -287,7 +301,7 @@ def _lock(repo, name='panel-results', timeout=10):
             release()
 
 
-def _write(repo, relative, payload):
+def _write(repo, relative, payload, maximum=MAX_RESULT):
     body = (json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False) + '\n').encode()
     def immutable(old):
         if old and old != body:
@@ -296,7 +310,7 @@ def _write(repo, relative, payload):
     try:
         path = DURABLE['canonical_repo_path'](str(repo), relative, 'panel result', True)
         DURABLE['atomic_mutate'](path, immutable, str(repo), missing_ok=True,
-                                 create_parent=True, max_output=MAX_RESULT, label='panel result')
+                                 create_parent=True, max_output=maximum, label='panel result')
         return path
     except SystemExit as error:
         raise ValueError('panel artifact write refused') from error
@@ -363,6 +377,12 @@ def _load_result(repo, row):
             or result.get('owner') not in ('codex', 'claude') or result.get('outcome') not in ('completed', 'accepted', 'failed', 'rejected')
             or not isinstance(result.get('summary'), str) or not isinstance(result.get('evidence'), list)):
         raise ValueError('invalid result artifact')
+    superseded = result.get('superseded_attempts', [])
+    if (not isinstance(superseded, list) or any(
+            not isinstance(item, dict) or any(not isinstance(item.get(key), str)
+                or not ID.fullmatch(item[key]) for key in ('attempt_id', 'superseded_by'))
+            or item['attempt_id'] == item['superseded_by'] for item in superseded)):
+        raise ValueError('invalid supersession evidence')
     return result
 
 
@@ -465,12 +485,34 @@ def _plan_hint(repo, task_id):
 def _run_verifier(repo, verify, timeout):
     creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) if os.name == 'nt' else 0
     process = subprocess.Popen(['bash', '-c', verify], cwd=str(repo),
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, start_new_session=os.name == 'posix',
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=os.name == 'posix',
                                creationflags=creationflags)
+    output = {}
+    def drain(name, pipe):
+        retained, total = bytearray(), 0
+        output[name] = {'data': retained, 'bytes': 0, 'complete': False}
+        try:
+            while True:
+                chunk = pipe.read1(8192)
+                if not chunk:
+                    break
+                retained.extend(chunk)
+                del retained[:-MAX_VERIFY_OUTPUT]
+                total += len(chunk)
+                output[name]['bytes'] = total
+            output[name]['complete'] = True
+        finally:
+            pipe.close()
+    readers = [threading.Thread(target=drain, args=(name, pipe), daemon=True)
+               for name, pipe in (('stdout', process.stdout), ('stderr', process.stderr))]
+    for reader in readers:
+        reader.start()
+    timed_out = False
     try:
         returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
+    except subprocess.TimeoutExpired:
+        timed_out = True
         if os.name == 'posix':
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -485,14 +527,67 @@ def _run_verifier(repo, verify, timeout):
                 pass
             if process.poll() is None:
                 process.kill()
-        process.wait()
-        raise ValueError('verifier timed out after %s s' % timeout) from error
-    return returncode
+        returncode = process.wait()
+    for reader in readers:
+        reader.join(timeout=1)
+    result = {'exit': returncode}
+    if returncode or timed_out:
+        diagnostic = {'schema': 1, 'kind': 'oms-panel-verifier', 'exit': returncode,
+                      'timed_out': timed_out, 'command_sha256': hashlib.sha256(verify.encode()).hexdigest()}
+        for name, stream in output.items():
+            data = bytes(stream['data'])
+            diagnostic[name] = {'text': data.decode('utf-8', 'replace'), 'bytes': stream['bytes'],
+                                'truncated': stream['bytes'] > len(data) or not stream['complete'],
+                                'complete': stream['complete'], 'retained': 'tail'}
+        relative = '.oms/artifacts/panel-results/verify-%s.json' % uuid.uuid4().hex
+        _write(repo, relative, diagnostic, maximum=16 * MAX_VERIFY_OUTPUT)
+        result['diagnostics'] = _relative(repo, relative)
+    if timed_out:
+        raise ValueError('verifier timed out after %s s; private diagnostics: %s'
+                         % (timeout, result['diagnostics']['path']))
+    return result
+
+
+def _write_candidates(workers, admissions, attempts, owner, main_id=None):
+    """Account for discarded retries without treating failure as admission."""
+    from review_settlement import _participant_parents
+
+    superseded, selected, landed, lineages = [], [], [], {}
+    for index, worker in enumerate(workers):
+        replacement = None
+        # Unassigned writes and distinct aliases cannot be assumed to be retries.
+        if (not admissions[index] and worker.get('task_id') and worker.get('parent_attempt_id')
+                and worker.get('state') in {'failed', 'timed_out', 'cancelled', 'abandoned'}):
+            for later, admission in zip(workers[index + 1:], admissions[index + 1:]):
+                parent = later.get('parent_attempt_id')
+                anchor = main_id or parent
+                if anchor not in lineages:
+                    main = next((a for a in attempts if a.get('attempt_id') == anchor), {})
+                    try:
+                        lineages[anchor] = (_participant_parents(attempts, main)
+                                            if main.get('provider') == owner else set())
+                    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                        lineages[anchor] = set()
+                if (admission and later.get('task_id') == worker['task_id']
+                        and ((parent == worker.get('parent_attempt_id') and (not main_id or parent == main_id))
+                             or {parent, worker.get('parent_attempt_id')} <= lineages[anchor])
+                        and later.get('refs', {}).get('panel_alias') == worker.get('refs', {}).get('panel_alias')
+                        and later.get('created_at', '') > worker.get('created_at', '')):
+                    replacement = later
+                    break
+        if replacement:
+            superseded.append({'attempt_id': worker['attempt_id'],
+                               'superseded_by': replacement['attempt_id'],
+                               'reason': worker.get('reason_code') or worker['state']})
+        else:
+            selected.append(worker)
+            landed.append(admissions[index])
+    return selected, landed, superseded
 
 
 def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
     binding = _plan_bindings(repo, {task_id}).get(task_id)
-    attempts, rows = _records(repo, full=True)
+    attempts, rows = _records(repo, full=True, task_id=task_id)
     if main_id:
         main = next((a for a in attempts if a.get('attempt_id') == main_id), {})
         if main.get('tool') != 'panel-main' or main.get('provider') != owner:
@@ -505,6 +600,7 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
                       and a.get('refs', {}).get('panel_role') == 'worker'],
                      key=lambda a: (a.get('created_at', ''), a['attempt_id']))
     admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
+    selected, admissions, superseded = _write_candidates(workers, admissions, attempts, owner, main_id)
     # Fence this task and its unassigned write workers while other tasks keep moving.
     worker_ids = {a.get('attempt_id') for a in workers}
     task_attempts = [a for a in related if a.get('task_id') == task_id or a.get('attempt_id') in worker_ids]
@@ -514,7 +610,7 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
                  if r.get('kind') == 'panel-result' and r.get('task_id') == task_id]
     return {'binding': binding, 'main_attempt_id': main_id, 'related_attempts': task_attempts,
             'related_rows': related_rows, 'admissions': admissions, 'evidence': evidence,
-            'finalized': finalized}, attempts, rows, related, workers, admissions
+            'finalized': finalized, 'superseded_attempts': superseded}, attempts, rows, related, selected, admissions
 
 
 def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False,
@@ -553,11 +649,15 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
     verification = {'status': 'not_run'}
     if verify:
         # Output remains local; a verifier transcript is never exported as a summary.
-        verify_exit = _run_verifier(repo, verify, verify_timeout)
+        verified = _run_verifier(repo, verify, verify_timeout)
+        verify_exit = verified['exit']
         verification = {'status': 'passed' if verify_exit == 0 else 'failed',
                         'exit': verify_exit, 'command_sha256': hashlib.sha256(verify.encode()).hexdigest()}
+        if verified.get('diagnostics'):
+            verification['diagnostics'] = verified['diagnostics']
         if outcome == 'accepted' and verify_exit:
-            raise ValueError('accepted verifier failed (exit %s)' % verify_exit)
+            raise ValueError('accepted verifier failed (exit %s); private diagnostics: %s'
+                             % (verify_exit, verified['diagnostics']['path']))
     with _lock(repo):
         current_evidence = [_relative(repo, ref['path']) for ref in refs]
         current, attempts, rows, related, workers, admissions = _finalize_snapshot(
@@ -566,6 +666,7 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                 ('binding', 'plan task changed during result verification'),
                 ('evidence', 'evidence changed during verification'),
                 ('admissions', 'admission evidence changed during verification'),
+                ('superseded_attempts', 'supersession evidence changed during verification'),
                 ('related_attempts', 'related attempts changed during verification'),
                 ('related_rows', 'related artifact evidence changed during verification'),
                 ('finalized', 'another finalize for this task landed during verification'),
@@ -578,6 +679,7 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                    'verification': verification, 'evidence': refs,
                    'main_attempt_id': main_id,
                    'admission_event_ids': [a.get('event_id') for a in admissions if a],
+                   'superseded_attempts': current['superseded_attempts'],
                    # This display window also enters the revision. Settlement
                    # changes updated_at, so retain the latest-created attempts.
                    'attempt_ids': [a['attempt_id'] for a in sorted(related, key=lambda a: (
@@ -610,7 +712,7 @@ def retry_delivery(repo, task_id, revision=None):
     if not ID.fullmatch(task_id) or (revision and not REVISION.fullmatch(revision)):
         raise ValueError('invalid saved result ID')
     with _lock(repo):
-        _, rows = _records(repo)
+        _, rows = _records(repo, full=True, task_id=task_id)
         matching = [r for r in rows if r.get('kind') == 'panel-result' and r.get('task_id') == task_id]
         for row in reversed(matching):
             payload = _load_result(repo, row)
@@ -657,7 +759,8 @@ def pending_admissions(repo, task_ids, _tick=None):
     """Recorded patches without admission; capped evidence stays conservatively pending.
 
     This is an inbox hint, not verified patch or acceptance evidence. No artifact
-    bytes are read. At the latest-300-attempt/1000-event boundary, a task with
+    bytes are read. At the latest-300-attempt or possible index-retention
+    boundary (1000 events), a task with
     no retained record rows stays pending because its evidence may be outside
     coverage. Retained non-patch rows alone do not imply a pending patch.
     """
@@ -702,7 +805,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         from panel_cache import read_shared
         attempts, rows = read_shared(repo, 'result-records', lambda: _records(repo))
     else:
-        attempts, rows = _records(repo)
+        attempts, rows = _records(repo, full=bool(task_id), task_id=task_id)
     latest = {}
     for row in sorted(attempts + rows, key=lambda r: r.get('updated_at') or r.get('ts') or ''):
         ident = row.get('task_id')
@@ -801,8 +904,12 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 except (OSError, ValueError, TypeError):
                     call['changes'] = {'issue': 'patch evidence unavailable'}
             calls.append(call)
+        superseded_ids = {item['attempt_id'] for item in (result or {}).get('superseded_attempts', [])}
         calls_by_stage = {'implement': [], 'verify': [], 'review': [], 'main_decision': []}
         for call in calls:
+            if call.get('attempt_id') in superseded_ids:
+                call['superseded'] = True
+                continue
             if call.get('verify_exit') is not None:
                 calls_by_stage['verify'].append(dict(call, stage_exit=call.get('verify_exit')))
             stage = ('review' if call.get('kind') == 'review' else
@@ -833,7 +940,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         elif ending == 'timed_out':
             representative = 'timed out'
             stages[failed_stage]['state'] = 'timed out'
-            action = 'continue with --continue TASK_ID'
+            action = 'continue with --continue TASK_ID; at the revision-round cap use the owner override'
         elif ending == 'verify_failed':
             representative, action = 'verify failed', 'retry verify'
             stages[failed_stage]['state'] = 'verify failed'
@@ -864,7 +971,9 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                        'issue': issue, 'missing_result': result is None,
                        'stages': stages, 'representative_state': representative, 'next_action': action})
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
-            'coverage': 'latest 300 attempts and 1000 artifact events',
+            'coverage': ('all retained attempts' if task_id and not (_records_data or _tick or _shared)
+                         else 'latest 300 attempts; attempt coverage may be incomplete')
+                        + '; all retained artifact events; previously pruned evidence unavailable',
             'truncated': capped or (bool(task_id) and not chosen), 'offset': offset,
             # A capped page knows only that more rows follow, not how many survive the scope checks.
             'omitted': None if capped else 0,
@@ -873,6 +982,6 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
 
 def results_snapshot(repo, task_id=None, room_participant=None):
     """Collect retained result records once for a reader that also needs their event index."""
-    records = _records(repo)
+    records = _records(repo, full=bool(task_id), task_id=task_id)
     report = results(repo, task_id, room_participant, _records_data=records)
     return report, records

@@ -6585,6 +6585,29 @@ use_unicode(previous_unicode)
 failure = subprocess.run(final_args[:-4] + ["--verify", "false", "--evidence", "value.txt"],
                          cwd=project, env=environment, capture_output=True, text=True)
 assert failure.returncode != 0 and "verifier failed" in failure.stderr
+verify_failure = list(final_args)
+verify_failure[verify_failure.index("--verify") + 1] = "printf verifier-out; printf verifier-err >&2; exit 7"
+failed_verify = subprocess.run(verify_failure, cwd=project, env=environment, capture_output=True, text=True)
+assert failed_verify.returncode and "exit 7" in failed_verify.stderr, failed_verify.stderr
+def private_diagnostics(error):
+    relative = re.search(r"private diagnostics: (\.oms/artifacts/panel-results/verify-[a-f0-9]+\.json)", error).group(1)
+    path = project / relative
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o077 == 0, oct(path.stat().st_mode)
+    return json.loads(path.read_text())
+diagnostic = private_diagnostics(failed_verify.stderr)
+assert diagnostic["stdout"]["text"] == "verifier-out" and diagnostic["stderr"]["text"] == "verifier-err", diagnostic
+assert "verifier-out" not in failed_verify.stderr and "verifier-err" not in failed_verify.stderr
+with patch.dict(os.environ, environment, clear=True):
+    noisy = saved._run_verifier(project, "printf '%20000s' x; printf '%20000s' y >&2; exit 8", 5)
+    diagnostic = json.loads((project / noisy["diagnostics"]["path"]).read_text())
+    assert noisy["exit"] == 8 and saved._relative(project, noisy["diagnostics"]["path"]) == noisy["diagnostics"]
+    assert all(diagnostic[name]["truncated"] and diagnostic[name]["complete"]
+               and diagnostic[name]["bytes"] == 20000
+               and len(diagnostic[name]["text"].encode()) == saved.MAX_VERIFY_OUTPUT
+               for name in ("stdout", "stderr")), diagnostic
+    failed_result = saved.finalize(project, "codex", "verifier-completed-failure", str(summary), "completed", "exit 9")
+    assert failed_result["verification"]["exit"] == 9 and failed_result["verification"]["diagnostics"]["path"]
 write_finalize = list(final_args)
 write_finalize[write_finalize.index("--task-id") + 1] = "panel-route-3"
 failure = subprocess.run(write_finalize, cwd=project, env=environment, capture_output=True, text=True)
@@ -6609,7 +6632,7 @@ def controlled_verifier(repo, command, timeout):
         slow_started.set()
         if not release_slow.wait(5):
             raise AssertionError("slow verifier was not released")
-    return 0
+    return {"exit": 0}
 def finalize_slow():
     try:
         saved.finalize(project, "codex", "finalize-slow-a", str(summary), "completed", "slow")
@@ -6633,10 +6656,11 @@ timeout_args = list(final_args)
 timeout_args[timeout_args.index("--task-id") + 1] = "finalize-timeout"
 timeout_args[timeout_args.index("--outcome") + 1] = "completed"
 timeout_args += ["--verify-timeout", "1"]
-timeout_args[timeout_args.index("--verify") + 1] = "sleep 5"
+timeout_args[timeout_args.index("--verify") + 1] = "printf before-timeout; sleep 5"
 timeout_result = subprocess.run(timeout_args, cwd=project, env=environment, capture_output=True, text=True)
 assert timeout_result.returncode != 0 and "verifier timed out after 1 s" in timeout_result.stderr, timeout_result.stderr
 assert "Traceback" not in timeout_result.stderr, timeout_result.stderr
+assert private_diagnostics(timeout_result.stderr)["stdout"]["text"] == "before-timeout"
 assert not any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-timeout"
                for row in saved._records(project)[1]), "timed-out verifier wrote a result"
 
@@ -6765,6 +6789,90 @@ with patch.dict(os.environ, environment, clear=True), \
         except ValueError as error:
             assert "24 path(s) outside its declared scope" in str(error) and "file8" in str(error) and "file9" not in str(error), error
     assert saved._patch_paths(b"--- a/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n") == ["deleted.txt"]
+# Failed/withdrawn history is accounted for only by a later landed retry.
+retry_patch = extra_patch.split(b"diff --git a/other.txt")[0]
+retry_rows = scope_evidence(retry_patch)
+retry_rows[1]["event_id"] = "evt_retry_landed"
+retry_worker = dict(scope_worker, created_at="2026-10-16T00:00:02Z", state="review")
+failed_worker = dict(retry_worker, attempt_id="att_retry_failed", state="failed",
+                     created_at="2026-10-16T00:00:01Z")
+failed_row = {"kind": "delegate", "task_id": "scope-result", "attempt_id": failed_worker["attempt_id"], "exit": 7}
+with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_register"), \
+        patch.object(saved, "_plan_hint"), patch.object(saved, "_worker_owns", return_value=["value.txt"]):
+    for state in ("failed", "timed_out", "cancelled", "abandoned"):
+        previous = dict(failed_worker, state=state)
+        with patch.object(saved, "_records", return_value=([previous, retry_worker], [failed_row] + retry_rows)):
+            accepted_retry = saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+            assert accepted_retry["admission_event_ids"] == ["evt_retry_landed"], accepted_retry
+            assert accepted_retry["superseded_attempts"] == [{"attempt_id": previous["attempt_id"],
+                "superseded_by": retry_worker["attempt_id"], "reason": state}], accepted_retry
+            with patch.object(saved, "_load_result", return_value=accepted_retry):
+                report_rows = [failed_row] + retry_rows + [{"kind": "panel-result", "task_id": "scope-result"}]
+                with patch.object(saved, "_records", return_value=([previous, retry_worker], report_rows)):
+                    view = saved.results(project, "scope-result")["rows"][0]
+                    assert view["representative_state"] == "accepted" and view["calls"][0]["superseded"], view
+            settled_retry = review_settlement._settle(project, [previous], [], {"scope-main"},
+                {"scope-result": (accepted_retry, {"ts": "2026-10-17T00:00:00Z"})})
+            assert not settled_retry["pending"] and settled_retry["superseded"][0]["attempt"] == previous["attempt_id"]
+    # A -> B -> C retains one participant even after both write parents stop.
+    gone = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    gone_refs = dict(panel_release.process_refs(gone.pid, "wrapper"), **panel_release.process_refs(gone.pid, "native"))
+    gone.communicate(b"", timeout=10)
+    old_main = {"attempt_id": "scope-main", "provider": "codex", "tool": "panel-main", "state": "done",
+                "terminal": True, "created_at": "2026-10-15T00:00:00Z",
+                "refs": dict(gone_refs, panel_host="inline", panel_role="main",
+                             panel_room_participant="retry-main-stable", panel_owner="codex")}
+    resumed_main = dict(old_main, attempt_id="scope-main-resumed", state="working", terminal=False,
+                        created_at="2026-10-16T00:00:00Z")
+    resumed_worker = dict(retry_worker, parent_attempt_id=resumed_main["attempt_id"])
+    latest_main = dict(resumed_main, attempt_id="scope-main-latest", created_at="2026-10-17T00:00:00Z")
+    for current, history in ((resumed_main, [old_main, resumed_main]),
+            (latest_main, [old_main, dict(resumed_main, state="done", terminal=True), latest_main])):
+        with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": current["attempt_id"]}):
+            attempts = history + [failed_worker, resumed_worker]
+            with patch.object(saved, "_records", return_value=(attempts, [failed_row] + retry_rows)):
+                accepted_retry = saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                assert accepted_retry["main_attempt_id"] == current["attempt_id"]
+                assert accepted_retry["admission_event_ids"] == ["evt_retry_landed"]
+                assert accepted_retry["superseded_attempts"][0]["attempt_id"] == failed_worker["attempt_id"]
+            for previous_main, rows in (
+                    (dict(old_main, state="working", terminal=False), retry_rows),
+                    (dict(old_main, terminal=None), retry_rows),
+                    (dict(old_main, provider="claude"), retry_rows),
+                    (dict(old_main, refs=dict(old_main["refs"], panel_room_participant="foreign-main")), retry_rows),
+                    (dict(old_main, refs=dict(old_main["refs"], panel_wrapper_identity="")), retry_rows),
+                    (dict(old_main, refs=dict(old_main["refs"], panel_native_identity="")), retry_rows),
+                    (old_main, retry_rows[:1])):
+                attempts = [previous_main] + history[1:] + [failed_worker, resumed_worker]
+                with patch.object(saved, "_records", return_value=(attempts, [failed_row] + rows)):
+                    try:
+                        saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                        raise AssertionError("unverified lineage or unlanded resumed retry was accepted")
+                    except ValueError as error:
+                        assert "matching landed patch" in str(error), error
+            foreign_main = dict(old_main, attempt_id="foreign-main", refs=dict(old_main["refs"],
+                                panel_room_participant="foreign-owner"))
+            foreign_workers = [dict(worker, parent_attempt_id="foreign-main") for worker in (failed_worker, resumed_worker)]
+            with patch.object(saved, "_records", return_value=(history + [foreign_main] + foreign_workers, [failed_row] + retry_rows)):
+                try:
+                    saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                    raise AssertionError("same-parent retries of a foreign owner escaped admission")
+                except ValueError as error:
+                    assert "matching landed patch" in str(error), error
+    # A live, ambiguous, distinct or unlanded candidate still blocks acceptance.
+    for previous, candidate, rows in (
+            (dict(failed_worker, state="working"), retry_worker, retry_rows),
+            (dict(failed_worker, state="review"), retry_worker, retry_rows),
+            (dict(failed_worker, created_at=retry_worker["created_at"]), retry_worker, retry_rows),
+            (dict(failed_worker, parent_attempt_id="other-main"), retry_worker, retry_rows),
+            (dict(failed_worker, refs=dict(failed_worker["refs"], panel_alias="W2")), retry_worker, retry_rows),
+            (failed_worker, retry_worker, retry_rows[:1])):
+        with patch.object(saved, "_records", return_value=([previous, candidate], [failed_row] + rows)):
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("unaccounted attempt escaped admission")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
 # END patch-scope finalize regression.
 
 whole = json.loads(call(whole_finalize, owner_env))
@@ -6821,6 +6929,36 @@ assert saved._admission(project, [delegated, landed], "test-land", {"attempt_id"
 assert saved._admission(project, [delegated, dict(landed, plan_id="other")], "test-land", {"attempt_id": "att_worker"}) is None
 patch_file.write_text("changed patch bytes\n")
 assert saved._admission(project, [delegated, landed], "test-land", {"attempt_id": "att_worker"}) is None
+
+# A strict full snapshot retains task evidence older than 1000 unrelated rows.
+import runpy
+index_store = runpy.run_path(str(root / "scripts/lib/artifact-index-store.py"))
+index_path = str(project / ".oms/artifacts/index.jsonl")
+index_before = index_store["read_index"](str(project), index_path)
+try:
+    old_event = {"event_id": "evt_before_window", "kind": "call", "task_id": "before-index-window", "attempt_id": "att_before_window", "exit": 0}
+    index_store["append_rows"](str(project), index_path,
+        [old_event] + [{"event_id": "evt_noise_%s" % n, "kind": "call", "task_id": "noise-%s" % n, "exit": 0} for n in range(1005)],
+        keep=5000, high=6000)
+    assert old_event in saved._records(project, full=True)[1]
+    selected_rows = saved._records(project, full=True, task_id="before-index-window",
+                                   _attempts=[{"attempt_id": "att_before_window", "task_id": "before-index-window"}])[1]
+    assert old_event in selected_rows and not any(r.get("task_id", "").startswith("noise-") for r in selected_rows)
+    retained = saved.results(project, "before-index-window")
+    assert retained["rows"][0]["calls"][0]["attempt_id"] == "att_before_window", retained
+    assert "all retained artifact events" in retained["coverage"]
+    with patch.object(review_settlement, "_parents", return_value={"fixture-parent"}), \
+            patch.object(review_settlement, "_settle", return_value={}) as settle:
+        review_settlement.settle_review(project)
+        assert old_event in settle.call_args.args[2]
+    with patch.object(saved.runpy, "run_path", return_value={"read_index": lambda *a, **k: (_ for _ in ()).throw(ValueError("partial"))}):
+        try:
+            saved._records(project, full=True)
+            raise AssertionError("partial index evidence was accepted")
+        except ValueError as error:
+            assert "coverage incomplete" in str(error), error
+finally:
+    index_store["replace_bytes"](str(project), index_path, index_before, keep=5000)
 
 # Test retry fencing and durable reopen using the transport boundary alone.
 # The production artifact/lifecycle writers still run; no app socket is used.
@@ -6887,7 +7025,7 @@ with patch.dict(os.environ, environment, clear=True):
         ("guard", {"exit": 1, "state": "failed", "guard": "scope"},
          "implement guard stop (scope)", "guard stop (scope)", "inspect guard stop and salvage partial work"),
         ("timeout", {"exit": 124, "state": "timed_out"},
-         "timed out", "timed out", "continue with --continue TASK_ID"),
+         "timed out", "timed out", "continue with --continue TASK_ID; at the revision-round cap use the owner override"),
         ("verify", {"exit": 0, "verify_exit": 1, "state": "done", "reason_code": "verification_failed"},
          "verify failed", "verify failed", "retry verify"),
         ("provider", {"exit": 1, "state": "failed", "provider_error_exit": 1},

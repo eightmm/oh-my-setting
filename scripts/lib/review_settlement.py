@@ -20,6 +20,32 @@ def _main(row):
             and row.get("refs", {}).get("panel_owner", row.get("provider")) == row.get("provider"))
 
 
+def _participant_parents(attempts, main, require_dead=False):
+    """Retain one participant's main chain after terminal predecessors are proven absent."""
+    import panel_release
+    from panel_view import TERMINAL_STATES
+    member = main.get("refs", {}).get("panel_room_participant", main.get("attempt_id"))
+    if not _main(main) or not isinstance(member, str) or not member:
+        raise ValueError("review settlement ownership is unknown")
+    history = [a for a in attempts if (a.get("tool") == "panel-main"
+        or a.get("refs", {}).get("panel_role") == "main") and a.get("refs", {}).get(
+        "panel_room_participant", a.get("attempt_id")) == member]
+    ids = [row.get("attempt_id") for row in history]
+    if (main not in history or any(not isinstance(ident, str) or not ident for ident in ids)
+            or len(ids) != len(set(ids)) or not all(_main(row)
+                and type(row.get("terminal")) is bool
+                and row.get("state") in TERMINAL_STATES | {"queued", "starting", "working", "verifying",
+                    "review", "blocked", "waiting_input", "waiting_approval"}
+                and row["terminal"] == (row["state"] in TERMINAL_STATES) for row in history)
+            or sum(row["terminal"] is False for row in history) > (0 if require_dead else 1)):
+        raise ValueError("review settlement ownership is unknown")
+    for row in history:
+        if row["terminal"]:
+            panel_release.prove_host_absent(row.get("refs", {}), row["attempt_id"])
+            panel_release.prove_native_absent(row)
+    return set(ids)
+
+
 def _parents(repo, attempts, owner=None, main_id=None, require_dead=False):
     import terminal_panel as panel
     if main_id:
@@ -29,21 +55,9 @@ def _parents(repo, attempts, owner=None, main_id=None, require_dead=False):
         if require_dead and main.get("terminal") is not True:
             raise ValueError("--owner-attempt must name a dead main")
         if require_dead:
-            member = main["refs"].get("panel_room_participant", main_id)
-            if not member:
-                raise ValueError("review settlement ownership is unknown")
-            history = [a for a in attempts if (a.get("tool") == "panel-main"
-                or a.get("refs", {}).get("panel_role") == "main") and a.get("refs", {}).get(
-                "panel_room_participant", a.get("attempt_id")) == member]
-            if not all(_main(row) for row in history):
-                raise ValueError("review settlement ownership is unknown")
-            import panel_release
-            for row in history:
-                panel_release.prove_host_absent(row.get("refs", {}), row["attempt_id"])
-                panel_release.prove_native_absent(row)
             # The continuation helper requires one live main. Recovery instead
             # owns only this participant's chain, with every process proven gone.
-            return {row["attempt_id"] for row in history}
+            return _participant_parents(attempts, main, require_dead=True)
         parents = panel.lineage_ids_from_rows(attempts, main["provider"],
             main.get("refs", {}).get("panel_room_participant", main_id), main_id)
         if not parents:
@@ -100,7 +114,7 @@ def _apply(repo, attempt, target, code, task, revision, reason=None):
 
 
 def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=None, apply=False):
-    report = {"candidates": [], "pending": [], "errors": [], "applied": [], "executes": apply}
+    report = {"candidates": [], "pending": [], "errors": [], "applied": [], "superseded": [], "executes": apply}
     # An absent plan lets retired decisions stand; a present plan that cannot be
     # read leaves generation evidence unknown, so no decision may settle.
     plan_unreadable = (os.path.lexists(os.path.join(str(repo), ".oms", "plan", "tasks.json"))
@@ -141,6 +155,11 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
                 "target_state": target, "reason_code": code}
         if chosen:
             item["reason"] = reason
+        discarded = next((row for row in payload.get("superseded_attempts", [])
+                          if row.get("attempt_id") == ident), None) if not chosen else None
+        if discarded and attempt.get("state") in {"failed", "timed_out", "cancelled", "abandoned"}:
+            report["superseded"].append(dict(item, superseded_by=discarded["superseded_by"]))
+            continue
         if attempt.get("state") != "review" or target is None:
             report["pending"].append(dict(item, pending_reason="rework" if target is None else "not_in_review"))
             continue
@@ -187,7 +206,7 @@ def _decisions(repo, attempts, artifacts, parents):
 
 def after_finalize(repo, payload):
     try:
-        attempts, artifacts = saved._records(repo, full=True)
+        attempts, artifacts = saved._records(repo, full=True, task_id=payload["task_id"])
         if not payload.get("main_attempt_id"):
             return {"candidates": [], "pending": [], "applied": [], "errors": [{"error": "result has no owner lineage"}], "executes": True}
         parents = _parents(repo, attempts, payload["owner"], payload["main_attempt_id"])
