@@ -5017,10 +5017,46 @@ assert (salvage_repo / 'new.txt').read_bytes() == '새 파일\r\n'.encode()
 assert (salvage_repo / 'binary.dat').read_bytes() == b'\0new\xfe'
 assert (salvage_repo / 'unicode.txt').read_bytes() == b'label:   cafe\n'
 assert not (salvage_repo / 'deleted.txt').exists()
-assert panel_salvage.encoding_warnings('accent.txt', 'café\n'.encode(), b'cafe\n',
-                                       b'@@ -1 +1 @@\n-caf\xc3\xa9\n+cafe\n')
-assert not panel_salvage.encoding_warnings('added.txt', b'', '한글\n'.encode(), b'')
-assert not panel_salvage.encoding_warnings('kept.txt', '한글\n'.encode(), '한글!\n'.encode(), b'')
+import difflib
+encoding_cases = [
+    ('café 한글\n', 'cafe ??\n', True),
+    ('café café\n', 'cafe caf?\n', True),
+    ('naïve\n', 'na�ve\n', True),
+    ('café\n', 'café'.encode().decode('latin-1') + '\n', True),
+    ('price €\n', 'price €'.encode().decode('cp1252') + '\n', True),
+    ('# old comment — details\n', '# rewritten with different words\n', False),
+    ('café\n', 'café?\n', False),
+    ('', 'AMANHÃ\n', False),
+    ('ASCII before\n', 'ASCII after\n', False),
+    ('한글\n', '', False),
+    ('café\n', 'cafe\nordinary insertion\n', True),
+    ('café\n', 'cafe ordinary insertion\n', False),
+    ('café\n漢字\n', 'cafe\n', True),
+    ('café\nASCII before\n', 'cafe\nASCII after\n', True),
+    ('漢字\n', '??\n', True),
+    ('café\n', 'caf\n', True),
+    ('café\n', 'cafX\n', False),
+    ('--café\n', '--cafe\n', True),
+    ('++café\n', '++cafe\n', True),
+]
+for before, after, lossy in encoding_cases:
+    diff = ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                                       fromfile='a/text.txt', tofile='b/text.txt')).encode()
+    payload = b'diff --git a/text.txt b/text.txt\n' + diff
+    for warnings in (panel_salvage.encoding_warnings('text.txt', before.encode(), after.encode(), diff),
+                     panel_salvage.patch_encoding_warnings(payload)):
+        assert bool(warnings) == lossy, (before, after, warnings)
+        assert all(row['file'] == 'text.txt' and row.get('hunk', '@@').startswith('@@') for row in warnings)
+# Equal lines inside replacement blocks anchor pairing; hunks never cross-pair.
+for fragment in ('@@ -1,2 +1,2 @@\n-café\n-anchor\n+anchor\n+cafe\n',
+                 '@@ -1 +0,0 @@\n-café\n@@ -9,0 +9 @@\n+cafe\n'):
+    diff = fragment.encode()
+    assert not panel_salvage.encoding_warnings('text.txt', 'café\n'.encode(), b'cafe\n', diff)
+    assert not panel_salvage.patch_encoding_warnings(b'diff --git a/text.txt b/text.txt\n' + diff)
+# Latin-1 mojibake can include U+0085, which is content rather than a diff newline.
+diff = ('@@ -1 +1 @@\n-Å\n+' + 'Å'.encode().decode('latin-1') + '\n').encode()
+assert panel_salvage.encoding_warnings('text.txt', 'Å\n'.encode(), b'', diff)
+assert panel_salvage.patch_encoding_warnings(b'diff --git a/text.txt b/text.txt\n' + diff)
 
 # OPERATOR_SECTION_END salvage
 _operator_run("salvage")

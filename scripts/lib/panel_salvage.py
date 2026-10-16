@@ -1,6 +1,7 @@
 """Capture stopped delegate bytes for owner review, without trusting checkout Git config."""
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -200,14 +201,49 @@ def _skeleton(line):
 
 
 def encoding_warnings(path, before, after, diff):
-    old_count = sum(byte >= 128 for byte in before)
-    new_count = sum(byte >= 128 for byte in after)
-    warnings = []
-    if old_count and new_count * 2 < old_count:
-        warnings.append({'file': path, 'kind': 'non_ascii_drop',
-                         'before_non_ascii_bytes': old_count, 'after_non_ascii_bytes': new_count})
-    warnings.extend(_transliteration_warnings(path, diff))
-    return warnings
+    # File totals cannot distinguish encoding loss from ordinary rewrites.
+    return _transliteration_warnings(path, diff)
+
+
+def _encoding_loss(before, after):
+    if before.isascii():
+        return False
+    for run in re.findall(r'[^\x00-\x7f]+', before):
+        for encoding in ('latin-1', 'cp1252'):
+            try:
+                mojibake = run.encode('utf-8').decode(encoding)
+            except UnicodeDecodeError:
+                continue
+            if mojibake in after:
+                return True
+    changed = False
+    for tag, i, j, k, end in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+        if tag == 'equal':
+            continue
+        removed, added = before[i:j], after[k:end]
+        if tag not in ('replace', 'delete') or any(ord(char) < 128 for char in removed):
+            return False
+        if added and added != _skeleton(removed) and any(char not in '?\ufffd' for char in added):
+            return False
+        changed = True
+    return changed
+
+
+def _hunk_encoding_warnings(path, heading, removed, added):
+    # Exact equal lines anchor the replacement blocks; extra lines stay unpaired.
+    matcher = difflib.SequenceMatcher(None, removed, added)
+    for tag, i, j, k, end in matcher.get_opcodes():
+        if tag != 'replace':
+            continue
+        if any(_encoding_loss(old, new) for old, new in zip(removed[i:j], added[k:end])):
+            warnings = [{'file': path, 'kind': 'transliteration_hunk', 'hunk': heading}]
+            old_count = sum(sum(byte >= 128 for byte in line.encode('utf-8')) for line in removed)
+            new_count = sum(sum(byte >= 128 for byte in line.encode('utf-8')) for line in added)
+            if new_count < old_count:
+                warnings.append({'file': path, 'kind': 'non_ascii_drop', 'hunk': heading,
+                                 'before_non_ascii_bytes': old_count, 'after_non_ascii_bytes': new_count})
+            return warnings
+    return []
 
 
 def _transliteration_warnings(path, diff):
@@ -215,17 +251,9 @@ def _transliteration_warnings(path, diff):
     removed, added, hunk = [], [], None
 
     def inspect():
-        skeletons = {}
-        for line in removed:
-            count = sum(ord(c) >= 128 for c in line)
-            skeleton = _skeleton(line)
-            skeletons[skeleton] = max(count, skeletons.get(skeleton, 0))
-        for line in added:
-            if sum(ord(c) >= 128 for c in line) < skeletons.get(_skeleton(line), 0):
-                warnings.append({'file': path, 'kind': 'transliteration_hunk', 'hunk': hunk})
-                break
+        warnings.extend(_hunk_encoding_warnings(path, hunk, removed, added))
 
-    for line in diff.decode('utf-8', errors='replace').splitlines():
+    for line in diff.decode('utf-8', errors='replace').split('\n'):
         if line.startswith('@@'):
             inspect()
             removed, added, hunk = [], [], line
@@ -251,24 +279,14 @@ def patch_encoding_warnings(patch):
     def inspect_file():
         if path is None or not hunks:
             return
-        old_bytes = sum(sum(byte >= 128 for byte in line.encode('utf-8')) for _, old, _ in hunks for line in old)
-        new_bytes = sum(sum(byte >= 128 for byte in line.encode('utf-8')) for _, _, new in hunks for line in new)
-        if old_bytes and new_bytes * 2 < old_bytes:
-            for heading, old, _ in hunks:
-                if any(any(ord(char) >= 128 for char in line) for line in old):
-                    warnings.append({'file': path, 'kind': 'non_ascii_drop', 'hunk': heading,
-                                     'before_non_ascii_bytes': old_bytes,
-                                     'after_non_ascii_bytes': new_bytes})
         for heading, old, new in hunks:
-            fragment = (heading + '\n' + ''.join('-' + line + '\n' for line in old) +
-                        ''.join('+' + line + '\n' for line in new)).encode('utf-8')
-            warnings.extend(_transliteration_warnings(path, fragment))
+            warnings.extend(_hunk_encoding_warnings(path, heading, old, new))
 
     def finish_hunk():
         if hunk is not None:
             hunks.append((hunk, removed, added))
 
-    for line in text.splitlines():
+    for line in text.split('\n'):
         if line.startswith('diff --git '):
             finish_hunk()
             inspect_file()
@@ -287,9 +305,9 @@ def patch_encoding_warnings(patch):
         elif line.startswith('@@'):
             finish_hunk()
             hunk, removed, added = line, [], []
-        elif hunk and line.startswith('-') and not line.startswith('---'):
+        elif hunk and line.startswith('-'):
             removed.append(line[1:])
-        elif hunk and line.startswith('+') and not line.startswith('+++'):
+        elif hunk and line.startswith('+'):
             added.append(line[1:])
         elif hunk and line.startswith('\\ No newline'):
             continue
