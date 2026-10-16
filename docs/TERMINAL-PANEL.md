@@ -783,6 +783,24 @@ selects a named dead main's lineage. Unknown ownership and other live mains are
 refused. Compare-and-set transitions and per-attempt revision keys make retries
 safe after partial settlement. No worktree, patch or artifact is deleted.
 
+For legacy terminal mains with no host/native ownership refs, explicitly add
+`--legacy` to `--owner-attempt ID`. Every legacy main in that participant's chain
+must have its last lifecycle event older than 24 hours; override this threshold
+with `--legacy-older-than HOURS` (finite and positive). Selected workers report
+`selection_reason: legacy_terminal_main` and `legacy_older_than_hours`. Mains
+with any host/native ownership refs still require the normal absence proofs;
+age never substitutes for those proofs. Finalized-result and explicit `--attempt`
+selection otherwise remain unchanged.
+
+`oms panel --settle-review --standalone --older-than DAYS` selects parentless
+workers in review, without requiring a main. The finite positive threshold
+measures time since entering review. Only matching indexed legacy artifacts
+whose Exit section proves termination allow cancellation as `owner_superseded`,
+with reason `aged standalone review`. Recent, unknown-age or unproven-exit
+attempts remain pending. This mode cannot be combined with owner or explicit
+attempt selection. Both recovery modes are dry runs until `--apply` is added
+and use the same result lock and expected-review-state transitions.
+
 ```bash
 oms panel --finalize --owner codex --task-id ID \
   --summary-file SUMMARY.txt --outcome accepted \

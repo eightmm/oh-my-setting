@@ -390,6 +390,10 @@ def main(argv=None):
     parser.add_argument("--settle-review", action="store_true", help="list stopped review workers; --apply closes eligible attempts")
     parser.add_argument("--apply", action="store_true", help="apply --settle-review (default: dry run)")
     parser.add_argument("--owner-attempt", help="--settle-review for a named dead main's lineage")
+    parser.add_argument("--legacy", action="store_true", help="allow aged terminal mains with no host/native ownership refs")
+    parser.add_argument("--legacy-older-than", type=float, metavar="HOURS", help="legacy main lifecycle age (default: 24 hours)")
+    parser.add_argument("--standalone", action="store_true", help="settle aged parentless review workers with artifact exit proof")
+    parser.add_argument("--older-than", type=float, metavar="DAYS", help="required minimum review age for --standalone")
     parser.add_argument("--attempt", action="append", help="--salvage: select one stopped attempt; --settle-review: supersede this worker")
     parser.add_argument("--reason", help="record why explicitly selected workers are superseded")
     parser.add_argument("--summary-file", help="bounded owner summary for --finalize")
@@ -423,8 +427,9 @@ def main(argv=None):
     if args.salvage is not None:
         import panel_salvage
         return panel_salvage.cli_main(arguments)
-    if args.apply or args.owner_attempt or args.attempt or args.reason is not None:
-        parser.error("--apply, --owner-attempt and --reason require --settle-review; --attempt also supports --salvage")
+    if (args.apply or args.owner_attempt or args.attempt or args.reason is not None or args.legacy
+            or args.legacy_older_than is not None or args.standalone or args.older_than is not None):
+        parser.error("settlement options require --settle-review; --attempt also supports --salvage")
     if args.repo is not None:
         try:
             git_toplevel(args.repo)

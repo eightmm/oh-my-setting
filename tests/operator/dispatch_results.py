@@ -541,11 +541,15 @@ assert settle_apply.call_count == 1
 event_command = ["bash", str(panel.ENTRY), "agent-events", "--repo", str(project)]
 exit_artifact = project / ".oms/artifacts/settlement-exit.md"
 exit_artifact.write_text("## Output\nCompleted fixture work.\n## Exit\n0\n")
-def settlement_worker(task, parent, review=True):
+def settlement_worker(task, parent=None, review=True, legacy=False, exit_proof=True):
     command = event_command + ["start", "--provider", "local", "--tool", "peer-delegate", "--task-id", task,
-        "--parent-attempt-id", parent, "--ref", "panel_role=worker", "--then", "starting", "--then", "working"]
+        "--then", "starting", "--then", "working"]
+    if parent:
+        command += ["--parent-attempt-id", parent]
+    if not legacy:
+        command += ["--ref", "panel_role=worker"]
     ident = call(command + (["--then", "verifying", "--then", "review"] if review else [])).strip()
-    if review:
+    if review and exit_proof:
         call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" delegate local 0 "$3"', "settlement-fixture",
               str(root / "scripts/lib/peer-common.sh"), str(project), str(exit_artifact)],
              dict(environment, OMS_TASK_ID=task, OMS_ATTEMPT_ID=ident))
@@ -599,6 +603,93 @@ assert json.loads(call(event_command + ["show", "--attempt", dead_worker, "--jso
 refused_live = subprocess.run(recover[:recover.index("--owner-attempt")] + [
     "--owner-attempt", main_attempts["codex"], "--apply"], env=environment, capture_output=True)
 assert refused_live.returncode, "recovery selected a live owner"
+# Legacy recovery needs opt-in and the age of the last event, never creation age.
+legacy_main = call(event_command + ["start", "--provider", "codex", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--then", "starting", "--then", "working", "--then", "cancelled"]).strip()
+legacy_worker = settlement_worker("settlement-legacy-task", legacy_main)
+legacy_args = recover[:recover.index("--owner-attempt")] + ["--owner-attempt", legacy_main,
+    "--attempt", legacy_worker, "--reason", "legacy fixture", "--json"]
+for extra, message in (([], "recorded host ownership unavailable"),
+                       (["--legacy"], "last lifecycle event")):
+    refused = subprocess.run(legacy_args + extra, env=environment, capture_output=True, text=True)
+    assert refused.returncode and message in refused.stderr, refused
+legacy_row = json.loads(call(event_command + ["show", "--attempt", legacy_main, "--json"]))
+aged_legacy = dict(legacy_row, created_at="2000-01-01T00:00:00Z", updated_at="2000-01-02T00:00:00Z")
+assert review_settlement._participant_parents([aged_legacy], aged_legacy, True, 24) == {legacy_main}
+for changed in ({"updated_at": legacy_row["updated_at"]}, {"updated_at": "invalid"},
+                {"updated_at": "2999-01-01T00:00:00Z"}, {"updated_at": None},
+                {"terminal": False, "state": "working"},
+                *({"refs": dict(aged_legacy["refs"], **{key: ""})} for key in
+                  ("panel_host", "panel_wrapper_pid", "panel_native_identity", "panel_pane_id", "panel_launcher_pid"))):
+    guarded = dict(aged_legacy, **changed)
+    try:
+        review_settlement._participant_parents([guarded], guarded, True, 24)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("legacy opt-in bypassed age, state or recorded ownership: " + repr(changed))
+with patch.object(review_settlement, "_age", return_value=86400):
+    try:
+        review_settlement._participant_parents([aged_legacy], aged_legacy, True, 24)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("legacy threshold boundary accepted")
+time.sleep(1.1)
+legacy_args += ["--legacy", "--legacy-older-than", "0.000001"]
+legacy_preview = json.loads(call(legacy_args))
+assert not legacy_preview["applied"] and not legacy_preview["executes"], legacy_preview
+assert legacy_preview["candidates"][0]["selection_reason"] == "legacy_terminal_main", legacy_preview
+assert legacy_preview["candidates"][0]["legacy_older_than_hours"] == 0.000001, legacy_preview
+assert json.loads(call(event_command + ["show", "--attempt", legacy_worker, "--json"]))["state"] == "review"
+assert json.loads(call(legacy_args + ["--apply"]))["applied"] == [legacy_worker]
+assert not json.loads(call(legacy_args + ["--apply"]))["applied"], "legacy retry reapplied"
+# Standalone legacy calls have no panel_role ref. Only aged reviews with a
+# matching indexed Exit proof may be cancelled, regardless of main environment.
+standalone_worker = settlement_worker("settlement-standalone-task", legacy=True)
+unproven_worker = settlement_worker("settlement-no-exit-task", legacy=True, exit_proof=False)
+standalone_running = settlement_worker("settlement-running-task", review=False, legacy=True)
+standalone_args = recover[:recover.index("--owner-attempt")] + ["--standalone", "--older-than", "1", "--json"]
+young = json.loads(call(standalone_args))
+assert standalone_worker in {r["attempt"] for r in young["pending"] if r["pending_reason"] == "review_too_recent"}, young
+with patch.object(review_settlement, "_age", return_value=None), \
+        patch.dict(os.environ, environment, clear=True):
+    unknown_age = review_settlement.settle_review(project, standalone=True, older_than=1)
+assert standalone_worker in {r["attempt"] for r in unknown_age["pending"] if r["pending_reason"] == "review_age_unknown"}
+time.sleep(1.1)
+standalone_args[standalone_args.index("--older-than") + 1] = "0.00000001"
+preview = json.loads(call(standalone_args))
+assert standalone_worker in {r["attempt"] for r in preview["candidates"]}, preview
+assert not preview["executes"] and not preview["applied"], preview
+assert unproven_worker in {r["attempt"] for r in preview["pending"] if r["pending_reason"] == "exit_unknown"}, preview
+assert not {standalone_running, running} & {r["attempt"] for r in preview["candidates"]}, preview
+standalone_rows, standalone_artifacts = saved._records(project, full=True)
+standalone_attempt = next(a for a in standalone_rows if a["attempt_id"] == standalone_worker)
+indexed_exit = next(r for r in standalone_artifacts if r.get("attempt_id") == standalone_worker)
+for artifact in (dict(indexed_exit, exit=1), dict(indexed_exit, artifact_sha256="0" * 64)):
+    unproven = review_settlement._settle(project, [standalone_attempt], [artifact], set(), {},
+                                        standalone_older_than=0.00000001)
+    assert not unproven["candidates"] and not unproven["errors"], unproven
+    assert unproven["pending"][0]["pending_reason"] == "exit_unknown", unproven
+bound_standalone = dict(standalone_attempt, refs={"panel_room_participant": "unknown", "panel_room_id": "unknown"})
+with patch.object(review_settlement, "_stopped", side_effect=AssertionError("room proof used for standalone")):
+    unproven = review_settlement._settle(project, [bound_standalone], [indexed_exit], set(), {},
+                                        standalone_older_than=0.00000001)
+assert unproven["pending"][0]["pending_reason"] == "exit_unknown", unproven
+settlement = json.loads(call(standalone_args + ["--apply"]))
+assert standalone_worker in settlement["applied"] and unproven_worker not in settlement["applied"], settlement
+standalone_final = json.loads(call(event_command + ["show", "--attempt", standalone_worker, "--json"]))
+assert standalone_final["state"] == "cancelled" and standalone_final["reason_code"] == "owner_superseded", standalone_final
+assert standalone_final["refs"]["owner_superseded_reason"] == "aged standalone review", standalone_final
+assert standalone_worker not in json.loads(call(standalone_args + ["--apply"]))["applied"]
+for extra in (["--legacy"], ["--legacy-older-than", "1"], ["--standalone"], ["--older-than", "1"],
+              ["--standalone", "--older-than", "nan"], ["--standalone", "--older-than", "inf"],
+              ["--standalone", "--older-than", "0"], ["--standalone", "--older-than", "-1"],
+              ["--standalone", "--older-than", "1", "--owner-attempt", legacy_main],
+              ["--owner-attempt", legacy_main, "--legacy", "--legacy-older-than", "nan"]):
+    refused = subprocess.run(recover[:recover.index("--owner-attempt")] + extra,
+                             env=environment, capture_output=True)
+    assert refused.returncode, ("invalid settlement selection accepted", extra, refused.stdout)
 del external_plan["tasks"][dead_task]
 write_external_plan()
 complete = saved.completed_tasks(project, ["elsewhere-task"])
