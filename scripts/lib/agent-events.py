@@ -749,6 +749,9 @@ def validate_event_row(row: Dict[str, Any], number: int = 0) -> None:
     if "expected_state" in row and (event_type != "attempt.state_changed"
                                     or row["expected_state"] not in ALL_STATES):
         raise OpsError("%s has invalid expected_state" % where)
+    if "expected_seq" in row and (event_type != "attempt.state_changed"
+                                  or type(row["expected_seq"]) is not int or row["expected_seq"] < 1):
+        raise OpsError("%s has invalid expected_seq" % where)
     usage = row.get("usage", {})
     if usage:
         if not isinstance(usage, dict):
@@ -905,6 +908,9 @@ def append_lifecycle(repo: Path, candidate: Dict[str, Any]) -> Dict[str, Any]:
                 new = candidate.get("to_state")
                 if candidate.get("expected_state", old) != old:
                     raise OpsError("expected lifecycle state %s, found %s" % (candidate["expected_state"], old))
+                sequence = projection[attempt_id]["sequence"]
+                if candidate.get("expected_seq", sequence) != sequence:
+                    raise OpsError("expected lifecycle sequence %s, found %s" % (candidate["expected_seq"], sequence))
                 candidate["from_state"] = old
                 if old in TERMINAL_STATES or new not in TRANSITIONS.get(old, set()):
                     raise OpsError("illegal lifecycle transition: %s -> %s" % (old, new))
@@ -1097,6 +1103,8 @@ def event_start(args: argparse.Namespace) -> int:
 def event_transition(args: argparse.Namespace) -> int:
     repo = repo_root(args.repo)
     attempt = safe_id(args.attempt, "attempt")
+    if args.expected_seq is not None and args.expected_seq < 1:
+        raise OpsError("expected sequence must be positive")
     # Each --then STATE[:KEY] appends the row a further `transition` with the
     # same actor would, from this one process (see event_start).
     steps = [(args.state, args.idempotency_key)] + [
@@ -1115,6 +1123,7 @@ def event_transition(args: argparse.Namespace) -> int:
             actor={"kind": safe_id(args.actor_kind, "actor kind"), "name": safe_id(args.actor, "actor")},
             idempotency_key=safe_id(key, "idempotency_key", optional=True),
             expected_state=args.expected_state if index == 0 else None,
+            expected_seq=args.expected_seq if index == 0 else None,
             refs=parse_refs(args.ref),
         )
         row = append_lifecycle(repo, event)
@@ -2012,6 +2021,8 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     transition.add_argument("--attempt", required=True)
     transition.add_argument("--state", required=True)
     transition.add_argument("--expected-state", choices=sorted(ALL_STATES))
+    transition.add_argument("--expected-seq", type=int,
+                            help="require this attempt sequence under the lifecycle lock (first transition only)")
     transition.add_argument("--ref", action="append", default=[], metavar="NAME=VALUE")
     transition.add_argument("--reason-code", default="")
     transition.add_argument("--actor-kind", default="owner")

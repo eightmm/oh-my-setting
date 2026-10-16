@@ -116,6 +116,7 @@ def _stopped(repo, attempt, attempts, artifacts):
 def _apply(repo, attempt, target, code, task, revision, reason=None):
     command = ["bash", str(saved.ENTRY), "agent-events", "--repo", str(repo), "transition",
         "--attempt", attempt["attempt_id"], "--state", target, "--expected-state", "review",
+        "--expected-seq", str(attempt["sequence"]),
         "--reason-code", code, "--actor", "panel-review-settlement",
         "--idempotency-key", "review-settle-" + hashlib.sha256((task + ":" + revision).encode()).hexdigest()]
     if reason:
@@ -127,7 +128,7 @@ def _apply(repo, attempt, target, code, task, revision, reason=None):
 
 
 def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=None, apply=False,
-            legacy_parents=None, standalone_older_than=None):
+            legacy_parents=None, standalone_older_than=None, aged_days=None, standalone_mode=False):
     report = {"candidates": [], "pending": [], "errors": [], "applied": [], "superseded": [], "executes": apply}
     # An absent plan lets retired decisions stand; a present plan that cannot be
     # read leaves generation evidence unknown, so no decision may settle.
@@ -152,7 +153,7 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
     for attempt in attempts:
         ident, task = attempt["attempt_id"], attempt.get("task_id", "")
         refs = attempt.get("refs", {})
-        standalone = (standalone_older_than is not None and not attempt.get("parent_attempt_id")
+        standalone = ((standalone_mode or standalone_older_than is not None) and not attempt.get("parent_attempt_id")
                       and attempt.get("tool") != "panel-main"
                       and refs.get("panel_role") in {None, "worker"}
                       and (refs.get("panel_role") == "worker"
@@ -163,10 +164,12 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
             continue
         decision = decisions.get(task)
         chosen = ident in explicit
-        if not chosen and not standalone and not decision:
+        aged = aged_days is not None
+        if not chosen and not standalone and not decision and not aged:
             continue
-        superseding = chosen or standalone
-        selection_reason = "aged standalone review" if standalone else reason
+        superseding = chosen or standalone or aged
+        selection_reason = ("aged review without owner decision (%g days)" % aged_days if aged
+                            else "aged standalone review" if standalone else reason)
         if superseding:
             target, code, rev = "cancelled", "owner_superseded", hashlib.sha256(selection_reason.encode()).hexdigest()[:24]
         else:
@@ -175,7 +178,7 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
             rev = payload["revision"]
         item = {"attempt": ident, "task": task, "state": attempt.get("state"),
                 "age_in_review_seconds": _age(review_since.get(ident)),
-                "selection_reason": "aged_standalone_review" if standalone else (
+                "selection_reason": "aged_review_without_owner_decision" if aged else "aged_standalone_review" if standalone else (
                     "owner_selected" if chosen else "finalized_" + payload["outcome"]),
                 "target_state": target, "reason_code": code}
         if superseding:
@@ -191,10 +194,11 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
         if attempt.get("state") != "review" or target is None:
             report["pending"].append(dict(item, pending_reason="rework" if target is None else "not_in_review"))
             continue
-        if standalone:
-            item["older_than_days"] = standalone_older_than
+        if aged or standalone:
+            threshold = aged_days if aged else standalone_older_than
+            item["aged_days" if aged else "older_than_days"] = threshold
             age = item["age_in_review_seconds"]
-            if age is None or age <= standalone_older_than * 86400:
+            if age is None or age <= threshold * 86400:
                 report["pending"].append(dict(item, pending_reason="review_age_unknown" if age is None else "review_too_recent"))
                 continue
         if not superseding:
@@ -214,8 +218,10 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
                 continue
         stopped = False
         try:
+            # Review is entered after execution and verification. Only the
+            # explicit aged policy may replace missing exit evidence with age.
             if ((standalone and (refs.get("panel_room_participant") or refs.get("panel_room_id")))
-                    or not _stopped(repo, attempt, attempts, artifacts)):
+                    or (not aged and not _stopped(repo, attempt, attempts, artifacts))):
                 report["pending"].append(dict(item, pending_reason="exit_unknown"))
                 continue
             stopped = True
@@ -265,7 +271,7 @@ def after_finalize(repo, payload):
 
 
 def settle_review(repo, owner=None, owner_attempt=None, explicit=(), reason=None, apply=False,
-                  legacy=False, legacy_older_than=None, standalone=False, older_than=None):
+                  legacy=False, legacy_older_than=None, standalone=False, older_than=None, aged_days=None):
     saved._owner()
     if legacy and not owner_attempt:
         raise ValueError("--legacy requires --owner-attempt")
@@ -273,8 +279,17 @@ def settle_review(repo, owner=None, owner_attempt=None, explicit=(), reason=None
         raise ValueError("--legacy-older-than requires --legacy")
     if standalone and (owner or owner_attempt or explicit or reason is not None or legacy):
         raise ValueError("--standalone cannot be combined with owner or attempt selection")
-    if standalone != (older_than is not None):
-        raise ValueError("--standalone requires --older-than DAYS; --older-than requires --standalone")
+    if aged_days is not None:
+        if not math.isfinite(aged_days) or aged_days < 7:
+            raise ValueError("--aged-days must be finite and at least 7")
+        if not (legacy or standalone):
+            raise ValueError("--aged-days requires --legacy or --standalone")
+        if older_than is not None or explicit or reason is not None:
+            raise ValueError("--aged-days cannot be combined with --older-than, --attempt or --reason")
+    if older_than is not None and not standalone:
+        raise ValueError("--older-than requires --standalone")
+    if standalone and older_than is None and aged_days is None:
+        raise ValueError("--standalone requires --older-than DAYS or --aged-days DAYS")
     for name, value in (("--legacy-older-than", legacy_older_than), ("--older-than", older_than)):
         if value is not None and (not math.isfinite(value) or value <= 0):
             raise ValueError(name + " must be finite and positive")
@@ -289,9 +304,11 @@ def settle_review(repo, owner=None, owner_attempt=None, explicit=(), reason=None
             require_dead=bool(owner_attempt), legacy_older_than=legacy_hours)
         legacy_parents = {a["attempt_id"]: legacy_hours for a in attempts
                           if legacy and a["attempt_id"] in parents and _legacy_main(a)}
-        return _settle(repo, attempts, artifacts, parents, _decisions(repo, attempts, artifacts, parents),
+        decisions = {} if aged_days is not None else _decisions(repo, attempts, artifacts, parents)
+        return _settle(repo, attempts, artifacts, parents, decisions,
                        explicit, reason, apply, legacy_parents=legacy_parents,
-                       standalone_older_than=older_than if standalone else None)
+                       standalone_older_than=older_than if standalone else None,
+                       aged_days=aged_days, standalone_mode=standalone)
     if not apply:
         return run()
     # finalize publishes under this lock; selecting and settling under it keeps a
@@ -311,6 +328,7 @@ def cli_main(arguments):
     parser.add_argument("--legacy-older-than", type=float, metavar="HOURS")
     parser.add_argument("--standalone", action="store_true")
     parser.add_argument("--older-than", type=float, metavar="DAYS")
+    parser.add_argument("--aged-days", type=float, metavar="DAYS")
     parser.add_argument("--attempt", action="append", default=[])
     parser.add_argument("--reason")
     parser.add_argument("--apply", action="store_true")
@@ -318,7 +336,7 @@ def cli_main(arguments):
     args = parser.parse_args(arguments)
     try:
         report = settle_review(repository(args.repo), args.owner, args.owner_attempt, args.attempt, args.reason, args.apply,
-                               args.legacy, args.legacy_older_than, args.standalone, args.older_than)
+                               args.legacy, args.legacy_older_than, args.standalone, args.older_than, args.aged_days)
     except Exception as error:
         print("oms panel: " + clean(str(error), 240), file=sys.stderr)
         return 1

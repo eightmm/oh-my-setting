@@ -801,6 +801,23 @@ attempts remain pending. This mode cannot be combined with owner or explicit
 attempt selection. Both recovery modes are dry runs until `--apply` is added
 and use the same result lock and expected-review-state transitions.
 
+For an undecided backlog, explicitly use `--aged-days N` with
+`--owner-attempt ID --legacy` or with `--standalone`. There is no default;
+N must be finite and at least 7. This selects only attempts still in `review`
+whose last transition into review was more than N days ago, even without a
+finalized result or indexed exit artifact. Entering review follows the worker's
+provider run and verification. Selected attempts are cancelled with
+`reason_code: owner_superseded` and reason
+`aged review without owner decision (N days)`. Unknown review ages and recent
+reviews remain pending. Dead-main lineage and host/native absence checks still
+apply; live mains and their workers cannot be selected. Parentless attempts
+with room ownership refs remain pending. This option cannot be combined with
+`--older-than`, `--attempt` or `--reason`. Preview first; `--apply` uses the same
+result lock and expected-review-state transitions, without deleting artifacts.
+Settlement also compares the selected attempt's lifecycle sequence under the
+lifecycle lock. Leaving review and re-entering it before apply invalidates the
+selection, even when the state name is again `review`; retry rechecks its age.
+
 ```bash
 oms panel --finalize --owner codex --task-id ID \
   --summary-file SUMMARY.txt --outcome accepted \

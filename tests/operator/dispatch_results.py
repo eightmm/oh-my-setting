@@ -682,14 +682,113 @@ standalone_final = json.loads(call(event_command + ["show", "--attempt", standal
 assert standalone_final["state"] == "cancelled" and standalone_final["reason_code"] == "owner_superseded", standalone_final
 assert standalone_final["refs"]["owner_superseded_reason"] == "aged standalone review", standalone_final
 assert standalone_worker not in json.loads(call(standalone_args + ["--apply"]))["applied"]
+# The explicit seven-day policy covers undecided legacy work and missing exits.
+# Append through the lifecycle API with a controlled event clock, never rewrite
+# the fixture ledger; a later review entry must replace the earlier review age.
+lifecycle = __import__("runpy").run_path(str(root / "scripts/lib/agent-events.py"))
+def settlement_transition(ident, state, stamp="2000-01-01T00:00:00Z"):
+    with patch.dict(lifecycle["new_event"].__globals__, {"utc_now": lambda: stamp}):
+        event = lifecycle["new_event"](ident, 0, "attempt.state_changed", from_state=None,
+            to_state=state, actor={"kind": "owner", "name": "settlement-fixture"})
+    lifecycle["append_lifecycle"](project, event)
+
+undecided = settlement_worker("settlement-undecided-task", legacy_main, review=False, exit_proof=False)
+settlement_transition(undecided, "verifying")
+settlement_transition(undecided, "review")
+legacy_aged_args = recover[:recover.index("--owner-attempt")] + ["--owner-attempt", legacy_main,
+    "--legacy", "--legacy-older-than", "0.000001", "--json"]
+assert not json.loads(call(legacy_aged_args))["candidates"], "undecided work selected without opt-in"
+legacy_aged_args += ["--aged-days", "7"]
+recent_review = settlement_worker("settlement-recent-task", legacy_main, exit_proof=False)
+reentered_review = settlement_worker("settlement-reentered-task", legacy_main, review=False, exit_proof=False)
+for state in ("verifying", "review", "working", "verifying"):
+    settlement_transition(reentered_review, state)
+call(event_command + ["transition", "--attempt", reentered_review, "--state", "review"])
+aged_preview = json.loads(call(legacy_aged_args))
+assert [r["attempt"] for r in aged_preview["candidates"]] == [undecided], aged_preview
+assert not aged_preview["executes"] and not aged_preview["applied"], aged_preview
+assert {recent_review, reentered_review} <= {r["attempt"] for r in aged_preview["pending"]
+    if r["pending_reason"] == "review_too_recent"}, aged_preview
+assert aged_preview["candidates"][0]["reason"] == "aged review without owner decision (7 days)"
+assert json.loads(call(event_command + ["show", "--attempt", undecided, "--json"]))["state"] == "review"
+for state in ("working", "verifying", "review"):
+    settlement_transition(unproven_worker, state)
+aged_standalone_args = recover[:recover.index("--owner-attempt")] + ["--standalone", "--aged-days", "7", "--json"]
+aged_preview = json.loads(call(aged_standalone_args))
+assert [r["attempt"] for r in aged_preview["candidates"]] == [unproven_worker], aged_preview
+assert not aged_preview["executes"] and not aged_preview["applied"], aged_preview
+with patch.dict(os.environ, environment, clear=True):
+    for age, pending_reason in ((None, "review_age_unknown"), (7 * 86400, "review_too_recent")):
+        with patch.object(review_settlement, "_age", return_value=age):
+            guarded = review_settlement.settle_review(project, standalone=True, aged_days=7)
+        assert not guarded["candidates"] and unproven_worker in {r["attempt"] for r in guarded["pending"]
+            if r["pending_reason"] == pending_reason}, guarded
+rows, artifacts = saved._records(project, full=True)
+aged_attempt = next(a for a in rows if a["attempt_id"] == undecided)
+for state in ("starting", "working", "verifying", "cancelled"):
+    guarded = review_settlement._settle(project, [dict(aged_attempt, state=state)], [],
+        {legacy_main}, {}, aged_days=7)
+    assert not guarded["candidates"] and guarded["pending"][0]["pending_reason"] == "not_in_review", guarded
+with patch.object(review_settlement, "_stopped", side_effect=AssertionError("aged policy used exit proof")):
+    guarded = review_settlement._settle(project, [dict(bound_standalone, attempt_id=unproven_worker)], [],
+        set(), {}, aged_days=7, standalone_mode=True)
+assert not guarded["candidates"] and guarded["pending"][0]["pending_reason"] == "exit_unknown", guarded
+refused_live = subprocess.run(recover[:recover.index("--owner-attempt")] + ["--owner-attempt",
+    main_attempts["codex"], "--legacy", "--aged-days", "7"], env=environment, capture_output=True)
+assert refused_live.returncode, "aged policy selected a live main's lineage"
+# A state change after selection must still lose the expected-review-state CAS.
+call(event_command + ["transition", "--attempt", undecided, "--state", "working"])
+try:
+    review_settlement._apply(project, aged_attempt, "cancelled", "owner_superseded",
+                             aged_attempt["task_id"], "aged-cas-fixture")
+except ValueError as error:
+    assert "expected lifecycle state review, found working" in str(error), error
+else:
+    raise AssertionError("aged settlement bypassed expected-state CAS")
+settlement_transition(undecided, "verifying")
+settlement_transition(undecided, "review")
+apply_selected = review_settlement._apply
+def interleave_review(*args):
+    call(event_command + ["transition", "--attempt", undecided, "--state", "working",
+                          "--then", "verifying", "--then", "review"])
+    return apply_selected(*args)
+
+with patch.dict(os.environ, environment, clear=True), \
+        patch.object(review_settlement, "_apply", side_effect=interleave_review):
+    raced = review_settlement.settle_review(project, owner_attempt=legacy_main, legacy=True,
+                                           legacy_older_than=0.000001, aged_days=7, apply=True)
+assert not raced["applied"] and len(raced["errors"]) == 1, raced
+assert "expected lifecycle sequence" in raced["errors"][0]["error"], raced
+fresh_review = json.loads(call(event_command + ["show", "--attempt", undecided, "--json"]))
+assert fresh_review["state"] == "review", fresh_review
+assert not json.loads(call(legacy_aged_args))["candidates"], "re-entered review retained its old age"
+for state in ("working", "verifying", "review"):
+    settlement_transition(undecided, state)
+assert json.loads(call(legacy_aged_args + ["--apply"]))["applied"] == [undecided]
+with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_lock", wraps=saved._lock) as result_lock:
+    applied_aged = review_settlement.settle_review(project, standalone=True, aged_days=7, apply=True)
+assert applied_aged["applied"] == [unproven_worker] and result_lock.call_count == 1, applied_aged
+for ident in (undecided, unproven_worker):
+    final = json.loads(call(event_command + ["show", "--attempt", ident, "--json"]))
+    assert final["state"] == "cancelled" and final["reason_code"] == "owner_superseded", final
+    assert final["refs"]["owner_superseded_reason"] == "aged review without owner decision (7 days)", final
+assert not json.loads(call(legacy_aged_args + ["--apply"]))["applied"]
+assert not json.loads(call(aged_standalone_args + ["--apply"]))["applied"]
 for extra in (["--legacy"], ["--legacy-older-than", "1"], ["--standalone"], ["--older-than", "1"],
               ["--standalone", "--older-than", "nan"], ["--standalone", "--older-than", "inf"],
               ["--standalone", "--older-than", "0"], ["--standalone", "--older-than", "-1"],
               ["--standalone", "--older-than", "1", "--owner-attempt", legacy_main],
-              ["--owner-attempt", legacy_main, "--legacy", "--legacy-older-than", "nan"]):
+              ["--owner-attempt", legacy_main, "--legacy", "--legacy-older-than", "nan"],
+              ["--aged-days", "7"], ["--standalone", "--aged-days", "6.99"],
+              ["--standalone", "--aged-days", "nan"], ["--standalone", "--aged-days", "inf"],
+              ["--standalone", "--aged-days", "7", "--older-than", "1"],
+              ["--owner-attempt", legacy_main, "--legacy", "--aged-days", "7", "--attempt", recent_review,
+               "--reason", "cannot bypass age"]):
     refused = subprocess.run(recover[:recover.index("--owner-attempt")] + extra,
                              env=environment, capture_output=True)
     assert refused.returncode, ("invalid settlement selection accepted", extra, refused.stdout)
+assert subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--aged-days", "7"],
+                      env=environment, capture_output=True).returncode
 del external_plan["tasks"][dead_task]
 write_external_plan()
 complete = saved.completed_tasks(project, ["elsewhere-task"])
