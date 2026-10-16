@@ -1,0 +1,308 @@
+# Salvage captures raw checkout bytes with a private index/config and owner-only admission.
+import contextlib
+import panel_salvage
+salvage_repo = temporary / 'salvage-repo'
+salvage_execution_repo = temporary / 'salvage-execution-repo'
+salvage_registry = temporary / 'salvage-registry'
+salvage_tree = salvage_registry / 'oh-my-setting-delegate.fixture' / 'wt'
+salvage_tree.parent.mkdir(parents=True)
+subprocess.run(['git', 'init', '-q', str(salvage_repo)], check=True)
+for key, value in (('user.email', 'test@example.com'), ('user.name', 'test')):
+    subprocess.run(['git', '-C', str(salvage_repo), 'config', key, value], check=True)
+(salvage_repo / 'unicode.txt').write_text('label: 한글 ─ café\n', encoding='utf-8')
+(salvage_repo / 'deleted.txt').write_text('delete me\n')
+(salvage_repo / 'binary.dat').write_bytes(b'\0old\xff')
+(salvage_repo / '.gitattributes').write_text('*.txt filter=trap working-tree-encoding=UTF-8\n')
+subprocess.run(['git', '-C', str(salvage_repo), 'add', '.'], check=True)
+subprocess.run(['git', '-C', str(salvage_repo), 'commit', '-qm', 'base'], check=True)
+subprocess.run(['git', 'clone', '-q', str(salvage_repo), str(salvage_execution_repo)], check=True)
+subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'add', '--detach', str(salvage_tree)],
+               check=True, stdout=subprocess.DEVNULL)
+(salvage_tree.parent / '.oh-my-setting-tmp').write_text(
+    'kind=oh-my-setting-temp\ntemporary=1\npid=99999999\nrepo=%s\nworktree=%s\n' %
+    (salvage_execution_repo, salvage_tree))
+(salvage_tree / 'unicode.txt').write_text('label:   cafe\n', encoding='utf-8')
+(salvage_tree / 'deleted.txt').unlink()
+(salvage_tree / 'binary.dat').write_bytes(b'\0new\xfe')
+(salvage_tree / 'new.txt').write_bytes('새 파일\r\n'.encode('utf-8'))
+trap_file = temporary / 'salvage-git-executed'
+trap_command = 'touch ' + shlex.quote(str(trap_file))
+for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
+    subprocess.run(['git', '-C', str(salvage_execution_repo), 'config', key, trap_command], check=True)
+# Native-path conversion handles Bash marker spellings before Python resolves them.
+path_bin = temporary / 'salvage-path-bin'
+path_bin.mkdir()
+bash_registry = '/c/oms-fixture/registry'
+bash_tree = bash_registry + '/oh-my-setting-delegate.fixture/wt'
+bash_repo = '/c/oms-fixture/repo'
+path_mapping = {bash_registry: str(salvage_registry), bash_tree: str(salvage_tree),
+                bash_repo: str(salvage_execution_repo), '/c/oms-fixture/foreign': str(project)}
+(path_bin / 'cygpath').write_text('#!%s\nimport sys\n' % sys.executable +
+    'mapping = %r\nassert sys.argv[1] == "-m"\nsys.stdout.write(mapping.get(sys.argv[2], sys.argv[2]) + "\\r\\n")\n' % path_mapping)
+(path_bin / 'cygpath').chmod(0o755)
+path_env = {'MSYSTEM': 'MINGW64', 'PATH': str(path_bin) + os.pathsep + os.environ['PATH'],
+            'OMS_DELEGATE_WORKTREE_ROOT': bash_registry}
+marker_path = salvage_tree.parent / '.oh-my-setting-tmp'
+marker_before = marker_path.read_bytes()
+try:
+    marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\npid=99999999\nrepo=%s\nworktree=%s\n' %
+                           (bash_repo, bash_tree))
+    with patch.dict(os.environ, path_env):
+        assert panel_salvage._native_path(bash_repo) == salvage_execution_repo, 'CRLF native path not normalized'
+        assert panel_salvage._managed(salvage_execution_repo, bash_tree)[0] == salvage_tree
+        marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\nrepo=/c/oms-fixture/foreign\nworktree=%s\n' % bash_tree)
+        try:
+            panel_salvage._managed(salvage_execution_repo, bash_tree)
+        except ValueError as error:
+            assert 'does not belong' in str(error), error
+        else:
+            raise AssertionError('foreign Bash marker repository passed native identity validation')
+finally:
+    marker_path.write_bytes(marker_before)
+
+index_path = panel_salvage._git_directory(salvage_tree) / 'index'
+index_before = index_path.read_bytes()
+metadata_before = {p: p.read_bytes() for p in salvage_execution_repo.joinpath('.git').rglob('*')
+                   if p.is_file()}
+salvage_attempt = {'task_id': 'salvage-task', 'attempt_id': 'att_fixture', 'tool': 'peer-delegate',
+                   'created_at': '2026-10-14T00:00:00Z', 'terminal': True, 'state': 'failed',
+                   'reason_code': 'worker_authority_violation',
+                   'refs': {'panel_location': 'worktree:oh-my-setting-delegate.fixture/wt',
+                            'panel_room_participant': 'call-0123456789abcdef', 'panel_room_id': 'room-fixture'}}
+def salvage_query(repo, verb, *args):
+    return [salvage_attempt] if verb == 'agent-events' else {'rows': []}
+salvage_env = {'OMS_DELEGATE_WORKTREE_ROOT': str(salvage_registry),
+               'OMS_HARNESS_CHILD': '0', 'OMS_HARNESS_DELEGATE_DEPTH': '0',
+               'OMS_ROOM_ID': 'room-fixture', 'OMS_ROOM_REPO': str(salvage_repo)}
+with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', side_effect=salvage_query), \
+        patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+            'call': {'participant': 'call-0123456789abcdef', 'room': 'room-fixture',
+                     'task_id': 'salvage-task'},
+            'execution_repo': str(salvage_execution_repo)}):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task', '--json']) == 0
+    room_salvaged = json.loads(output.getvalue())
+    assert Path(room_salvaged['patch_path']).is_relative_to(salvage_repo)
+    newer_attempt = dict(salvage_attempt, attempt_id='att_newer_fixture', created_at='2026-10-16T00:00:00Z', refs={})
+    with patch.object(panel_results, '_query', side_effect=lambda repo, verb, *args:
+                      [salvage_attempt, newer_attempt] if verb == 'agent-events' else {'rows': []}):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task',
+                               '--attempt', salvage_attempt['attempt_id']]) == 0
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task',
+                               '--attempt', 'att_foreign']) == 2
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert panel.main(['--repo', str(salvage_execution_repo), '--salvage', 'salvage-task', '--json']) == 0
+    salvaged = json.loads(output.getvalue())
+    scratch_execution_repo = temporary / 'salvage-scratch-execution'
+    scratch_tree = salvage_registry / 'oh-my-setting-delegate.scratch' / 'wt'
+    scratch_tree.parent.mkdir(parents=True)
+    subprocess.run(['git', '-C', str(salvage_repo), 'worktree', 'add', '--detach',
+                    str(scratch_execution_repo)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['git', '-C', str(scratch_execution_repo), 'worktree', 'add', '--detach',
+                    str(scratch_tree)], check=True, stdout=subprocess.DEVNULL)
+    (scratch_tree.parent / '.oh-my-setting-tmp').write_text(
+        'kind=oh-my-setting-temp\ntemporary=1\nrepo=%s\nworktree=%s\n' % (salvage_repo, scratch_tree))
+    (scratch_tree / 'unicode.txt').write_text('scratch change\n')
+    scratch_attempt = {'task_id': 'scratch-task', 'attempt_id': 'att_scratch_fixture',
+                       'tool': 'peer-delegate', 'created_at': '2026-10-14T00:01:00Z',
+                       'terminal': True, 'reason_code': 'worker_authority_violation',
+                       'refs': {'panel_location': 'worktree:oh-my-setting-delegate.scratch/wt',
+                                'panel_room_participant': 'call-abcdef0123456789',
+                                'panel_room_id': 'room-fixture'}}
+    def scratch_query(repo, verb, *args):
+        return [scratch_attempt] if verb == 'agent-events' else {'rows': []}
+    with patch.object(panel_results, '_query', side_effect=scratch_query), \
+            patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+                'call': {'participant': 'call-abcdef0123456789', 'room': 'room-fixture',
+                         'task_id': 'scratch-task'},
+                'execution_repo': str(scratch_execution_repo)}):
+        scratch_salvaged = panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        assert Path(scratch_salvaged['patch_path']).is_relative_to(salvage_repo)
+    with patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+            'call': {'participant': 'call-0123456789abcdef', 'room': 'room-fixture',
+                     'task_id': 'another-task'},
+            'execution_repo': str(salvage_execution_repo)}):
+        try:
+            panel_salvage.salvage(salvage_repo, 'salvage-task', salvage_execution_repo)
+        except ValueError as error:
+            assert 'matching recorded execution repository' in str(error), error
+        else:
+            raise AssertionError('a launch anchor recorded for another task was accepted')
+    assert salvaged['salvaged_from'] == {'task': 'salvage-task', 'attempt': 'att_fixture',
+        'kept_path': str(salvage_tree), 'stop_reason': 'worker_authority_violation'}
+    assert {f['path'] for f in salvaged['files']} == {'unicode.txt', 'deleted.txt', 'binary.dat', 'new.txt'}
+    flagged = {(w['file'], w['kind']) for w in salvaged['encoding_warnings']}
+    assert ('unicode.txt', 'transliteration_hunk') in flagged, flagged
+    assert ('unicode.txt', 'non_ascii_drop') in flagged, flagged
+    saved_patch = Path(salvaged['patch_path'])
+    assert saved_patch.exists() and Path(salvaged['metadata_path']).exists()
+    assert saved_patch.read_bytes().startswith(panel_salvage.PREFIX)
+    assert saved_patch.is_relative_to(salvage_repo), 'salvaged artifact was not written to the room repository'
+    assert not trap_file.exists(), 'salvage executed repository Git config'
+    assert index_path.read_bytes() == index_before, 'salvage changed kept index'
+    assert all(p.read_bytes() == data for p, data in metadata_before.items()), 'salvage changed Git metadata'
+    for options, message in (({}, '--accept-salvaged'),
+                             ({'accept_salvaged': True}, '--accept-encoding-loss')):
+        try:
+            panel_salvage.admission(saved_patch, repo=salvage_repo, **options)
+        except ValueError as error:
+            assert message in str(error), error
+        else:
+            raise AssertionError('salvaged patch passed without explicit acceptance')
+    panel_salvage.admission(saved_patch, True, True, repo=salvage_repo)
+    copy = temporary / 'copied-salvage.patch'
+    copy.write_bytes(saved_patch.read_bytes())
+    try:
+        panel_salvage.admission(copy, repo=salvage_repo)
+    except ValueError as error:
+        assert '--accept-salvaged' in str(error)
+    else:
+        raise AssertionError('copied salvage lost admission protection')
+    controller_path = salvage_repo / salvaged['provenance']
+    controller_before = controller_path.read_bytes()
+    original_body = saved_patch.read_bytes()
+    first, unused, payload = original_body.partition(b'\n')
+    display = json.loads(first[len(panel_salvage.PREFIX):])
+    display.pop('encoding_warnings')
+    stripped = panel_salvage.PREFIX + json.dumps(display).encode() + b'\n' + payload
+    for body in (b'\n' + original_body, stripped, payload, original_body + b'\n'):
+        copy.write_bytes(body)
+        for options, message in (({}, '--accept-salvaged'),
+                                 ({'accept_salvaged': True}, '--accept-encoding-loss')):
+            try:
+                panel_salvage.admission(copy, repo=salvage_repo, **options)
+            except ValueError as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError('editable display provenance bypassed controller record')
+        panel_salvage.admission(copy, True, True, repo=salvage_repo)
+    assert controller_path.read_bytes() == controller_before
+    # Recording the same payload with fewer warnings never erases earlier ones.
+    panel_salvage.record_provenance(salvage_repo, dict(salvaged, encoding_warnings=[]))
+    try:
+        panel_salvage.admission(copy, True, repo=salvage_repo)
+    except ValueError as error:
+        assert '--accept-encoding-loss' in str(error)
+    else:
+        raise AssertionError('a repeated payload erased controller warnings')
+    # An unrecorded payload is ordinary even with forged or malformed display metadata.
+    unrecorded = temporary / 'unrecorded-salvage.patch'
+    unrecorded.write_bytes(b'# oms-salvage: not JSON\n' + payload.replace(b'label:   cafe', b'label: unrelated'))
+    panel_salvage.admission(unrecorded, repo=salvage_repo)
+    with patch.dict(salvage_attempt, terminal=False), contextlib.redirect_stderr(io.StringIO()):
+        assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+    for invalid in (['--dry-run'], ['--dispatch', 'worker'], ['--results']):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task', *invalid])
+        except SystemExit as error:
+            assert error.code == 2
+        else:
+            raise AssertionError('salvage accepted conflicting operation')
+    with patch.dict(os.environ, {'OMS_HARNESS_CHILD': '1'}), contextlib.redirect_stderr(io.StringIO()):
+        assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+    pointer = salvage_tree / '.git'
+    pointer_before = pointer.read_bytes()
+    pointer.write_bytes((project / '.git').read_bytes() if (project / '.git').is_file() else b'gitdir: /missing\n')
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+    finally:
+        pointer.write_bytes(pointer_before)
+# The generated binary patch restores exact bytes through Git's normal apply path.
+# Standalone calls have no room launch; explicit attempt + hashed index evidence
+# binds their stopped checkout to this execution repository without a room bypass.
+standalone_artifact = '.oms/artifacts/delegate/stopped.md'
+standalone_body = ('- worktree: ' + str(salvage_tree) + '\n').encode()
+standalone_path = salvage_execution_repo / standalone_artifact
+standalone_path.parent.mkdir(parents=True)
+standalone_path.write_bytes(standalone_body)
+standalone_attempt = dict(attempt_id='att_standalone', tool='peer-delegate', terminal=True,
+                          reason_code='worker_authority_violation', refs={})
+standalone_record = dict(kind='delegate', attempt_id='att_standalone', exit=1,
+                        artifact=standalone_artifact,
+                        artifact_sha256=hashlib.sha256(standalone_body).hexdigest(),
+                        base_sha=panel_salvage._read(panel_salvage._git_directory(salvage_tree), 'HEAD').decode().strip()[:12])
+def standalone_query(repo, verb, *args):
+    return [standalone_attempt] if verb == 'agent-events' else {'rows': [standalone_record]}
+with patch.dict(os.environ, dict(salvage_env, OMS_ROOM_ID='', OMS_ROOM_REPO='')), \
+        patch.object(panel_results, '_query', side_effect=standalone_query), \
+        patch.object(panel_salvage.dispatch_supervisor, 'read', side_effect=AssertionError('standalone read room launch')):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert panel_salvage.cli_main(['--repo', str(salvage_execution_repo), '--attempt',
+                                      'att_standalone', '--artifact', standalone_artifact, '--json']) == 0
+    standalone = json.loads(output.getvalue())
+    assert standalone['salvaged_from']['attempt'] == 'att_standalone'
+    assert Path(standalone['patch_path']).is_relative_to(salvage_execution_repo)
+    assert not trap_file.exists() and index_path.read_bytes() == index_before
+    for mapping, values, message in (
+            (standalone_attempt, {'terminal': False}, 'stopped delegate'),
+            (standalone_attempt, {'refs': {'panel_room_id': 'room-fixture'}}, 'room delegates'),
+            (standalone_record, {'artifact_sha256': '0' * 64}, 'digest'),
+            (standalone_record, {'attempt_id': 'att_unrelated'}, 'matching failed'),
+            (standalone_record, {'base_sha': '0' * 12}, 'recorded base'),
+            (standalone_record, {'task_id': 'other-task'}, 'matching failed')):
+        with patch.dict(mapping, values):
+            try:
+                panel_salvage.salvage(salvage_execution_repo, attempt_id='att_standalone',
+                                      artifact=standalone_artifact)
+            except ValueError as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError('unbound standalone recovery accepted: ' + message)
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert panel_salvage.cli_main(['--repo', str(salvage_execution_repo), '--attempt', 'att_standalone']) == 2
+
+for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
+    subprocess.run(['git', '-C', str(salvage_execution_repo), 'config', '--unset', key], check=True)
+subprocess.run(['git', '-C', str(salvage_repo), 'apply', '--check', '--binary', str(saved_patch)], check=True)
+subprocess.run(['git', '-C', str(salvage_repo), 'apply', '--binary', str(saved_patch)], check=True)
+assert (salvage_repo / 'new.txt').read_bytes() == '새 파일\r\n'.encode()
+assert (salvage_repo / 'binary.dat').read_bytes() == b'\0new\xfe'
+assert (salvage_repo / 'unicode.txt').read_bytes() == b'label:   cafe\n'
+assert not (salvage_repo / 'deleted.txt').exists()
+import difflib
+encoding_cases = [
+    ('café 한글\n', 'cafe ??\n', True),
+    ('café café\n', 'cafe caf?\n', True),
+    ('naïve\n', 'na�ve\n', True),
+    ('café\n', 'café'.encode().decode('latin-1') + '\n', True),
+    ('price €\n', 'price €'.encode().decode('cp1252') + '\n', True),
+    ('# old comment — details\n', '# rewritten with different words\n', False),
+    ('café\n', 'café?\n', False),
+    ('', 'AMANHÃ\n', False),
+    ('ASCII before\n', 'ASCII after\n', False),
+    ('한글\n', '', False),
+    ('café\n', 'cafe\nordinary insertion\n', True),
+    ('café\n', 'cafe ordinary insertion\n', False),
+    ('café\n漢字\n', 'cafe\n', True),
+    ('café\nASCII before\n', 'cafe\nASCII after\n', True),
+    ('漢字\n', '??\n', True),
+    ('café\n', 'caf\n', True),
+    ('café\n', 'cafX\n', False),
+    ('--café\n', '--cafe\n', True),
+    ('++café\n', '++cafe\n', True),
+]
+for before, after, lossy in encoding_cases:
+    diff = ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                                       fromfile='a/text.txt', tofile='b/text.txt')).encode()
+    payload = b'diff --git a/text.txt b/text.txt\n' + diff
+    for warnings in (panel_salvage.encoding_warnings('text.txt', before.encode(), after.encode(), diff),
+                     panel_salvage.patch_encoding_warnings(payload)):
+        assert bool(warnings) == lossy, (before, after, warnings)
+        assert all(row['file'] == 'text.txt' and row.get('hunk', '@@').startswith('@@') for row in warnings)
+# Equal lines inside replacement blocks anchor pairing; hunks never cross-pair.
+for fragment in ('@@ -1,2 +1,2 @@\n-café\n-anchor\n+anchor\n+cafe\n',
+                 '@@ -1 +0,0 @@\n-café\n@@ -9,0 +9 @@\n+cafe\n'):
+    diff = fragment.encode()
+    assert not panel_salvage.encoding_warnings('text.txt', 'café\n'.encode(), b'cafe\n', diff)
+    assert not panel_salvage.patch_encoding_warnings(b'diff --git a/text.txt b/text.txt\n' + diff)
+# Latin-1 mojibake can include U+0085, which is content rather than a diff newline.
+diff = ('@@ -1 +1 @@\n-Å\n+' + 'Å'.encode().decode('latin-1') + '\n').encode()
+assert panel_salvage.encoding_warnings('text.txt', 'Å\n'.encode(), b'', diff)
+assert panel_salvage.patch_encoding_warnings(b'diff --git a/text.txt b/text.txt\n' + diff)

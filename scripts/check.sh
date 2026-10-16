@@ -991,9 +991,10 @@ if [ "$RUN_LINT" = 1 ]; then
   # scripts/oms is named explicitly: the dispatcher has no .sh extension, so
   # the glob alone would silently skip it.
   stage shellcheck lint_shell install.sh scripts/oms scripts/*.sh \
-    scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
+    scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh tests/operator/*.sh
 
-  stage bash-compat bash scripts/check-bash32.sh
+  stage bash-compat bash scripts/check-bash32.sh install.sh scripts/oms scripts/*.sh \
+    scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh tests/operator/*.sh
   stage python-syntax bash scripts/check-python.sh
 
   stage skill-manifest bash scripts/install-skills.sh
@@ -1124,7 +1125,7 @@ if [ "$RUN_QUICK" = 1 ]; then
     # Tier routing picks among installed providers, so these are the inputs
     # that let a fixture pass only where a provider CLI exists (f698ac9).
     case "$path" in
-      config/panel-routing.json|config/models.json|scripts/lib/provider-registry.sh|scripts/lib/panel_routing.py|scripts/lib/panel_view.py|scripts/lib/terminal_panel.py|tests/operator-tools-smoke.sh)
+      config/panel-routing.json|config/models.json|scripts/lib/provider-registry.sh|scripts/lib/panel_routing.py|scripts/lib/panel_view.py|scripts/lib/terminal_panel.py|tests/operator-tools-smoke.sh|tests/operator/*)
         quick_routing=1
         ;;
     esac
