@@ -196,23 +196,33 @@ update
 "
 
 OMS_FRONTDOOR_TOOLS="
+# Setup and capabilities
+init
+install-profile
+# Goals and daily work
+panel
+agent-plan
 autopilot
-consult
-dashboard
-doctor
 harness
 inbox
+status
+dashboard
+runtime
 journal
-land
-panel
-patch-admit
-patch-land
+tick
+# Collaboration and review
+room
+consult
 peer-delegate
 peer-review
-room
-runtime
-tick
+# Admission and delivery
+patch-admit
+patch-land
+land
+# Maintenance and removal
+doctor
 update
+uninstall
 "
 
 tool_in_list() {
@@ -230,15 +240,18 @@ is_public_tool() {
 
 cmd_list() {
   local selected="$1"
-  local f
   local name
 
-  for f in "$SCRIPTS_DIR"/*.sh; do
-    [ -f "$f" ] || continue
-    name="$(basename "$f" .sh)"
-    tool_in_list "$name" "$selected" || continue
-    printf '%-26s %s\n' "$name" "$(describe "$f")"
-  done
+  while IFS= read -r name; do
+    case "$name" in
+      "") continue ;;
+      "# "*) printf '%s:\n' "${name#\# }"; continue ;;
+    esac
+    [ -f "$SCRIPTS_DIR/$name.sh" ] || continue
+    printf '%-26s %s\n' "$name" "$(describe "$SCRIPTS_DIR/$name.sh")"
+  done <<EOF_LIST
+$selected
+EOF_LIST
 }
 
 case "${1:-}" in

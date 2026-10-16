@@ -14,6 +14,8 @@ SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
 AUTO_UPDATE_SET="${OH_MY_SETTING_AUTO_UPDATE+x}"
 AUTO_UPDATE_MODE_SET="${OH_MY_SETTING_AUTO_UPDATE_MODE+x}"
 CODEX_PLUGIN_SET="${OH_MY_SETTING_CODEX_PLUGIN+x}"
+MCP_SET="${OH_MY_SETTING_MCP+x}"
+AGY_PLUGIN_SET="${OH_MY_SETTING_AGY_PLUGIN+x}"
 CLAUDE_HOOKS_SET="${OH_MY_SETTING_CLAUDE_HOOKS+x}"
 MACHINE_SNAPSHOT_SET="${OH_MY_SETTING_GENERATE_MACHINE+x}"
 SLURM_SNAPSHOT_SET="${OH_MY_SETTING_GENERATE_SLURM+x}"
@@ -21,6 +23,8 @@ LINK_MODE_SET="${OH_MY_SETTING_LINK_MODE+x}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-}"
 AUTO_UPDATE_MODE="${OH_MY_SETTING_AUTO_UPDATE_MODE:-}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-}"
+MCP="${OH_MY_SETTING_MCP:-}"
+AGY_PLUGIN="${OH_MY_SETTING_AGY_PLUGIN:-}"
 CLAUDE_HOOKS="${OH_MY_SETTING_CLAUDE_HOOKS:-}"
 MACHINE_SNAPSHOT="${OH_MY_SETTING_GENERATE_MACHINE:-}"
 SLURM_SNAPSHOT="${OH_MY_SETTING_GENERATE_SLURM:-}"
@@ -62,6 +66,8 @@ Options:
 Environment overrides persisted receipt components when explicitly set:
   OH_MY_SETTING_CLAUDE_HOOKS=0|1  Claude Code hooks and usage HUD
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto
+  OH_MY_SETTING_MCP=0|1
+  OH_MY_SETTING_AGY_PLUGIN=0|1|auto
   OH_MY_SETTING_AUTO_UPDATE=0|1
   OH_MY_SETTING_AUTO_UPDATE_MODE=check|apply
   OH_MY_SETTING_GENERATE_MACHINE=0|1|auto
@@ -211,6 +217,14 @@ fi
 if [ -z "$CODEX_PLUGIN_SET" ]; then
   CODEX_PLUGIN="$PREVIOUS_CODEX_PLUGIN"
 fi
+if [ -z "$MCP_SET" ]; then MCP="$(receipt_bool mcp 1)"; fi
+if [ -z "$AGY_PLUGIN_SET" ]; then
+  AGY_PLUGIN="$(oms_install_receipt_mode agy_plugin auto "$RECEIPT")"
+fi
+case "$MCP:$AGY_PLUGIN" in
+  [01]:0|[01]:1|[01]:auto) ;;
+  *) echo "error: MCP must be 0 or 1; Antigravity plugin must be 0, 1, or auto" >&2; exit 2 ;;
+esac
 if [ -z "$AUTO_UPDATE_SET" ]; then
   AUTO_UPDATE="$PREVIOUS_AUTO_UPDATE"
 fi
@@ -251,6 +265,7 @@ export OH_MY_SETTING_REF="$INSTALL_REF"
 export OH_MY_SETTING_LINK_MODE="$LINK_MODE"
 export OH_MY_SETTING_CLAUDE_HOOKS="$CLAUDE_HOOKS"
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
+export OH_MY_SETTING_MCP="$MCP" OH_MY_SETTING_AGY_PLUGIN="$AGY_PLUGIN"
 export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
 export OH_MY_SETTING_AUTO_UPDATE_MODE="$AUTO_UPDATE_MODE"
 OH_MY_SETTING_INSTALL_TOOLS="$(receipt_bool tools 0)"
@@ -414,6 +429,7 @@ for managed_path in \
   "$HOME/.codex/skills" "$HOME/.claude/skills" "$HOME/.gemini/antigravity/skills" \
   "$HOME/.oh-my-setting-prompts" "$HOME/.oh-my-setting-workflows" \
   "$HOME/.local/bin/oms" "$HOME/.claude/settings.json" \
+  "$HOME/.claude.json" "$HOME/.gemini/config/plugins/oh-my-setting" \
   "$CODEX_CONFIG_PATH" "$CODEX_CONFIG_PATH.oms-bak" \
   "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$ROOT/local/machine.md}" \
   "${OH_MY_SETTING_SLURM_REF:-$ROOT/local/slurm.md}"; do
@@ -552,24 +568,43 @@ TRANSACTION_ACTIVE=0
 if [ "$ROLLBACK" = 1 ]; then
   REFRESH_PROVIDERS=0
 fi
-if [ "$SKIP_TOOLS" != "1" ]; then
-  # An install that chose its capabilities updates exactly that choice; an
-  # install from before the capability receipt keeps the legacy full-tool
-  # refresh, so updating never silently shrinks what someone already has.
-  capability_receipt="${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
-  if [ -f "$capability_receipt" ] && [ ! -L "$capability_receipt" ]; then
-    "$ROOT/scripts/install-profile.sh" --reapply --upgrade
-  else
-    "$ROOT/scripts/install-tools.sh" --upgrade
+TOOLS_REFRESHED=0
+refresh_tools() {
+  if [ "$SKIP_TOOLS" != "1" ]; then
+    # An install that chose its capabilities updates exactly that choice; an
+    # install from before the capability receipt keeps the legacy full-tool
+    # refresh, so updating never silently shrinks what someone already has.
+    capability_receipt="${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
+    if [ -f "$capability_receipt" ] && [ ! -L "$capability_receipt" ]; then
+      "$ROOT/scripts/install-profile.sh" --reapply --upgrade || return 1
+      TOOLS_REFRESHED=1
+    else
+      "$ROOT/scripts/install-tools.sh" --upgrade || return 1
+      TOOLS_REFRESHED=1
+    fi
+  elif [ "$REFRESH_PROVIDERS" = 1 ]; then
+    # `--ref` may deliberately select a release from before provider refreshes
+    # existed. The transaction now runs files from that selected checkout, so do
+    # not pass a new option to its old installer after the core commit is final.
+    if [ -f "$ROOT/scripts/lib/provider-latest.py" ]; then
+      "$ROOT/scripts/install-tools.sh" --providers || return 1
+      TOOLS_REFRESHED=1
+    else
+      echo "note: selected target predates automatic provider refresh; installed providers were not changed" >&2
+    fi
   fi
-elif [ "$REFRESH_PROVIDERS" = 1 ]; then
-  # `--ref` may deliberately select a release from before provider refreshes
-  # existed. The transaction now runs files from that selected checkout, so do
-  # not pass a new option to its old installer after the core commit is final.
-  if [ -f "$ROOT/scripts/lib/provider-latest.py" ]; then
-    "$ROOT/scripts/install-tools.sh" --providers
-  else
-    echo "note: selected target predates automatic provider refresh; installed providers were not changed" >&2
+  return 0
+}
+if ! refresh_tools; then
+  echo "error: core update succeeded; provider/tool refresh failed (tools were not rolled back)" >&2
+  exit 1
+fi
+if [ "$TOOLS_REFRESHED" = 1 ]; then
+  if [ "$SKIP_DOCTOR" = 1 ]; then
+    echo "note: core update succeeded; provider integration health was not checked (--no-doctor)"
+  elif ! oms_install_check_provider_health "$ROOT"; then
+    echo "error: core update succeeded; provider integration health failed (tools were not rolled back)" >&2
+    exit 1
   fi
 fi
 if [ "$AUTO_UPDATE" = "1" ]; then

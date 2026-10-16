@@ -24,6 +24,31 @@ EOF_RECEIPT
 reapply="$($ROOT/scripts/install-profile.sh --plan --reapply --receipt "$TMP/capabilities.json")"
 printf '%s' "$reapply" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["requested"] == ["core","github"]; assert r["primary_provider"] == "codex"; assert r["managed_tools"] == ["node","codex","gh"]'
 
+added="$("$ROOT/scripts/install-profile.sh" --plan --add --profile notion --profile github --receipt "$TMP/capabilities.json")"
+printf '%s' "$added" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["requested"] == ["core","github","notion"]; assert r["primary_provider"] == "codex"'
+replacement="$("$ROOT/scripts/install-profile.sh" --plan --profile github --receipt "$TMP/capabilities.json")"
+printf '%s' "$replacement" | python3 -c 'import json,sys; assert json.load(sys.stdin)["requested"] == ["github"]'
+# Exercise the actual receipt write without downloading tools: these profiles
+# only check external capabilities and retain the existing degraded policy.
+cat > "$TMP/external.json" <<'EOF_EXTERNAL'
+{"schema":1,"plan":{"requested":["hpc"],"primary_provider":"agy"},"allow_missing":true}
+EOF_EXTERNAL
+HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg-config" "$ROOT/scripts/install-profile.sh" \
+  --apply --add --profile remote --receipt "$TMP/external.json" > "$TMP/added.json"
+python3 - "$TMP/external.json" <<'PY_ADDED'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["plan"]["requested"] == ["hpc", "remote"]
+assert r["primary_provider"] == "agy" and r["allow_missing"] is True
+PY_ADDED
+printf 'invalid\n' > "$TMP/invalid.json"
+if "$ROOT/scripts/install-profile.sh" --plan --add --profile github --receipt "$TMP/invalid.json" >/dev/null 2>&1; then
+  echo "FAIL: --add accepted an invalid receipt" >&2; exit 1
+fi
+if "$ROOT/scripts/install-profile.sh" --plan --add --reapply --receipt "$TMP/capabilities.json" >/dev/null 2>&1; then
+  echo "FAIL: --add accepted --reapply" >&2; exit 1
+fi
+
 assert_child_install_refused() {
   local label="$1"
   shift

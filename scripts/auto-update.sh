@@ -351,6 +351,18 @@ receipt_transaction_context() {
   RECEIPT_TRANSACTION_REF="$ref"
 }
 
+auto_update_provider_health() {
+  if [ "$SKIP_DOCTOR" = 1 ]; then
+    echo "note: provider integration health was not checked (OH_MY_SETTING_AUTO_UPDATE_SKIP_DOCTOR=1)"
+    return 0
+  fi
+  if ! declare -F oms_install_check_provider_health >/dev/null; then
+    echo "error: provider integration health checker is unavailable" >&2
+    return 1
+  fi
+  oms_install_check_provider_health "$ROOT"
+}
+
 auto_update_ci_ready() {
   local sha="$1" remote="${2:-origin}" destination result query_rc=0
   destination="$(git -C "$ROOT" remote get-url "$remote" 2>/dev/null)" || destination=""
@@ -375,7 +387,7 @@ receipt_transaction_update() {
 
   if [ "$MODE" = check ]; then
     set +e
-    output="$($ROOT/scripts/update.sh --check 2>&1)"
+    output="$("$ROOT/scripts/update.sh" --check 2>&1)"
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
@@ -408,7 +420,7 @@ receipt_transaction_update() {
   fi
 
   set +e
-  output="$($ROOT/scripts/update.sh --check 2>&1)"
+  output="$("$ROOT/scripts/update.sh" --check 2>&1)"
   status=$?
   set -e
   if [ "$status" -ne 0 ]; then
@@ -427,6 +439,10 @@ receipt_transaction_update() {
   if [ "$current" = "$remote" ]; then
     if ! "$ROOT/scripts/install-tools.sh" --providers; then
       write_state failed "provider update failed" "$current" "$remote" "$upstream"
+      return 1
+    fi
+    if ! auto_update_provider_health; then
+      write_state failed "core unchanged; provider integration health failed (tools were not rolled back)" "$current" "$remote" "$upstream"
       return 1
     fi
     write_state up_to_date "already up to date" "$current" "$remote" "$upstream"
@@ -557,6 +573,10 @@ auto_update_apply_locked() {
         write_state failed "provider update failed" "$(git -C "$ROOT" rev-parse HEAD)" "" "$upstream"
         return 1
       fi
+      if ! auto_update_provider_health; then
+        write_state failed "core unchanged; provider integration health failed (tools were not rolled back)" "$(git -C "$ROOT" rev-parse HEAD)" "" "$upstream"
+        return 1
+      fi
     fi
     print_status
     return 0
@@ -647,6 +667,10 @@ auto_update_apply_locked() {
     return "$doctor_status"
   fi
 
+  if ! auto_update_provider_health; then
+    write_state failed "core updated; provider integration health failed (tools were not rolled back)" "$new_full" "$remote_full" "$upstream"
+    return 1
+  fi
   write_state applied "$state_message" "$new_full" "$remote_full" "$upstream"
   echo "auto-update: applied ($old_short -> $new_short)"
 }

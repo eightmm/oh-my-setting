@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # The TOML helpers need the interpreter that wrote the config; a host python3
 # of 3.9 or 3.10 has no parser and stopped the uninstall.
 if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
@@ -84,8 +84,18 @@ confirm() {
 }
 
 refuse_unsafe_purge_root() {
+  # ROOT is physical, so HOME must be too: a symlinked HOME would otherwise
+  # slip past the comparison. A ROOT that contains HOME is refused as well.
+  local home_physical
+  home_physical="$(cd "$HOME" 2>/dev/null && pwd -P)" || home_physical="$HOME"
   case "$ROOT" in
-    "$HOME"|/|"")
+    "$HOME"|"$home_physical"|/|"")
+      echo "error: refusing to purge $ROOT" >&2
+      exit 1
+      ;;
+  esac
+  case "$home_physical/" in
+    "$ROOT"/*)
       echo "error: refusing to purge $ROOT" >&2
       exit 1
       ;;
@@ -121,7 +131,8 @@ oms_install_require_owner "$ROOT" "uninstall" || exit 1
 # Purge is the only uninstall mode that destroys the checkout itself. Resolve
 # the complete dirty set before removing any integration so refusal is atomic:
 # a protected local file must not leave the installation half-unlinked.
-if [ "$PURGE" = 1 ] && [ "$PURGE_DIRTY" != 1 ] && [ -d "$ROOT/.git" ]; then
+if [ "$PURGE" = 1 ] && [ "$PURGE_DIRTY" != 1 ] &&
+   { [ -e "$ROOT/.git" ] || [ -L "$ROOT/.git" ]; }; then
   purge_dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all 2>/dev/null)" || {
     echo "error: cannot inspect checkout before purge: $ROOT" >&2
     exit 1

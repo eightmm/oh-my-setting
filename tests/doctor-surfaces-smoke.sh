@@ -732,7 +732,7 @@ EOF_CAP
     *) printf '%s\n' "$out"; fail "the chosen core provider's absence must be a defect, not a council note" ;;
   esac
   case "$out" in
-    *"capability notion not installed: command ntn (add it: oms install-profile --apply --profile notion)"*) ;;
+    *"capability notion not installed: command ntn (add it: oms install-profile --apply --add --profile notion)"*) ;;
     *) printf '%s\n' "$out"; fail "an unselected capability must be reported as not installed, with the add command" ;;
   esac
   case "$out" in
@@ -801,6 +801,51 @@ test_apparmor_userns_restriction_warns_only_on_linux() {
   case "$out" in *"AppArmor restricts unprivileged user namespaces"*) fail "non-Linux systems must not report this Linux restriction" ;; esac
 }
 
+# The scheduled/manual refresh audit is a separate path from a full doctor:
+# it must exercise management interfaces, honor opt-outs and avoid inference.
+test_post_refresh_integration_audit() {
+  local home="$TMP/provider-health" bin="$TMP/provider-health/bin" out
+  make_fixture "$home" rows "$EXPECTED_HOOKS_SCHEMA"
+  mkdir -p "$bin" "$home/.gemini/config/plugins/oh-my-setting"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 bash -c \
+    '. "$1/scripts/lib/install-contract.sh"; oms_install_write_receipt "$1"' _ "$ROOT"
+  cat > "$bin/claude" <<'EOF_CLI'
+#!/usr/bin/env bash
+[ "$*" = 'mcp get oh-my-setting' ] || exit 73
+printf '%s/scripts/oms-mcp-server.py\n' "${OMS_TEST_MCP_ROOT:-/wrong}"
+EOF_CLI
+  cat > "$bin/agy" <<'EOF_AGY'
+#!/usr/bin/env bash
+[ "$*" = 'plugin list' ] || exit 73
+printf '%s\n' '{"imports":[{"name":"oh-my-setting"}]}'
+EOF_AGY
+  chmod +x "$bin/claude" "$bin/agy"
+  run_health() {
+    # NVM_BIN/NVM_DIR would put the host's provider CLIs back on PATH.
+    env -u NVM_BIN -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" PATH="${OMS_TEST_HEALTH_PATH:-$bin:/usr/bin:/bin}" \
+      OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
+      OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
+      bash -c '. "$1/scripts/lib/install-contract.sh"; oms_install_check_provider_health "$1"' _ "$ROOT" 2>&1
+  }
+  out="$(run_health)" || { printf '%s\n' "$out"; fail "receipt opt-outs failed integration audit"; }
+  out="$(OH_MY_SETTING_MCP=1 OH_MY_SETTING_AGY_PLUGIN=auto OMS_TEST_HEALTH_PATH=/usr/bin:/bin run_health)" ||
+    { printf '%s\n' "$out"; fail "provider-free integration audit failed"; }
+  python3 - "$home/.gemini/config/plugins/oh-my-setting/mcp_config.json" "$ROOT" <<'PY_CONFIG'
+import json, sys
+json.dump({"mcpServers": {"oh-my-setting": {"args": [sys.argv[2] + "/scripts/oms-mcp-server.py"]}}}, open(sys.argv[1], "w"))
+PY_CONFIG
+  out="$(OH_MY_SETTING_MCP=1 OH_MY_SETTING_AGY_PLUGIN=auto OMS_TEST_MCP_ROOT="$ROOT" run_health)" ||
+    { printf '%s\n' "$out"; fail "healthy provider interfaces failed integration audit"; }
+  if out="$(OH_MY_SETTING_MCP=1 run_health)"; then fail "MCP drift passed the integration audit"; fi
+  case "$out" in *"MCP registration does not point at this install"*) ;; *) fail "MCP drift was not named: $out" ;; esac
+  printf '{}\n' > "$home/.gemini/config/plugins/oh-my-setting/mcp_config.json"
+  if out="$(OH_MY_SETTING_AGY_PLUGIN=auto run_health)"; then fail "Antigravity drift passed the integration audit"; fi
+  rm -f "$home/.claude/settings.json"
+  if out="$(run_health)"; then fail "missing hooks passed the integration audit"; fi
+  case "$out" in *"claude hooks not registered"*) ;; *) fail "hook drift was not named: $out" ;; esac
+}
+
 test_expected_surface_list_is_bump_gated() {
   local computed
   local source_schema
@@ -856,6 +901,7 @@ test_absent_receipt_schema_warns
 test_install_stamps_hooks_schema_into_the_receipt
 test_displaced_user_config_is_reported
 test_clean_home_reports_no_displaced_config
+test_post_refresh_integration_audit
 test_expected_surface_list_is_bump_gated
 test_capability_receipt_names_tool_absences
 test_receiptless_home_keeps_legacy_wording

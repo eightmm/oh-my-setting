@@ -637,6 +637,8 @@ hydrate_repair_from_receipt() {
   OH_MY_SETTING_INSTALL_TOOLS="$(repair_receipt_bool tools)" || return
   OH_MY_SETTING_CLAUDE_HOOKS="$(repair_receipt_bool claude_hooks)" || return
   OH_MY_SETTING_CODEX_PLUGIN="$(repair_receipt_bool codex_plugin)" || return
+  OH_MY_SETTING_MCP="$(oms_install_receipt_mode mcp 1 "$RECEIPT")"
+  OH_MY_SETTING_AGY_PLUGIN="$(oms_install_receipt_mode agy_plugin auto "$RECEIPT")"
   OH_MY_SETTING_AUTO_UPDATE="$(repair_receipt_bool auto_update)" || return
   OH_MY_SETTING_GENERATE_MACHINE="$(oms_install_receipt_mode machine_snapshot 0 "$RECEIPT")"
   OH_MY_SETTING_GENERATE_SLURM="$(oms_install_receipt_mode slurm_snapshot 0 "$RECEIPT")"
@@ -645,7 +647,7 @@ hydrate_repair_from_receipt() {
   OH_MY_SETTING_AUTO_UPDATE_MODE="$auto_update_mode"
   export OH_MY_SETTING_PROFILE OH_MY_SETTING_REF OH_MY_SETTING_LINK_MODE \
     OMS_INSTALL_PREVIOUS_COMMIT OH_MY_SETTING_INSTALL_TOOLS \
-    OH_MY_SETTING_CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN \
+    OH_MY_SETTING_CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN OH_MY_SETTING_MCP OH_MY_SETTING_AGY_PLUGIN \
     OH_MY_SETTING_AUTO_UPDATE OH_MY_SETTING_AUTO_UPDATE_MODE \
     OH_MY_SETTING_GENERATE_MACHINE OH_MY_SETTING_GENERATE_SLURM
 }
@@ -804,7 +806,7 @@ check_cmd() {
         echo "missing: command $1 (selected capability $capability)"
         FAILED=1
       else
-        echo "capability $capability not installed: command $1 (add it: oms install-profile --apply --profile $capability)"
+        echo "capability $capability not installed: command $1 (add it: oms install-profile --apply --add --profile $capability)"
       fi
       return 0
     fi
@@ -1938,6 +1940,71 @@ if [ "$SURFACES" = "1" ]; then
     exit 1
   fi
   echo "surfaces: ok"
+  exit 0
+fi
+
+# Internal update audit: no model/auth/network probes or project-state scans.
+# The lifecycle caller bounds the whole process, including legacy plugin probes.
+if [ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ]; then
+  check_install_receipt
+  OH_MY_SETTING_CLAUDE_HOOKS="${OH_MY_SETTING_CLAUDE_HOOKS-$(oms_install_receipt_mode claude_hooks 1 "$RECEIPT")}"
+  OH_MY_SETTING_CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN-$(oms_install_receipt_mode codex_plugin auto "$RECEIPT")}"
+  OH_MY_SETTING_MCP="${OH_MY_SETTING_MCP-$(oms_install_receipt_mode mcp 1 "$RECEIPT")}"
+  OH_MY_SETTING_AGY_PLUGIN="${OH_MY_SETTING_AGY_PLUGIN-$(oms_install_receipt_mode agy_plugin auto "$RECEIPT")}"
+  case "$OH_MY_SETTING_MCP:$OH_MY_SETTING_AGY_PLUGIN" in
+    [01]:0|[01]:1|[01]:auto) ;;
+    *) echo "error: invalid MCP/Antigravity integration setting" >&2; exit 2 ;;
+  esac
+  export OH_MY_SETTING_MCP OH_MY_SETTING_AGY_PLUGIN
+  check_claude_hooks
+  check_codex_plugin
+  OMS_DOCTOR_INSTALL_ROOT="$INSTALL_ROOT" python3 - "$INSTALL_ROOT" <<'PY_INTEGRATIONS' || FAILED=1
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+server = str(root / "scripts/oms-mcp-server.py").replace(chr(92), "/")
+agy_server = os.environ["OMS_DOCTOR_INSTALL_ROOT"].rstrip("/") + "/scripts/oms-mcp-server.py"
+
+def available(cli):
+    return subprocess.call(["bash", "-c", 'command -v "$1" >/dev/null', "oms-integration-probe", cli],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15) == 0
+
+def probe(argv):
+    # Bash resolves the same native shims as the lifecycle scripts on Git Bash.
+    return subprocess.check_output(["bash", "-c", 'exec "$@"', "oms-integration-probe"] + argv,
+                                   stdin=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                                   timeout=15, text=True)
+
+try:
+    if os.environ["OH_MY_SETTING_MCP"] == "1":
+        for cli in ("claude", "codex"):
+            if available(cli) and server not in probe([cli, "mcp", "get", "oh-my-setting"]).replace(chr(92), "/"):
+                raise ValueError(cli + " MCP registration does not point at this install")
+    if os.environ["OH_MY_SETTING_AGY_PLUGIN"] != "0":
+        cli = os.environ.get("OMS_AGY_BIN", "agy")
+        if available(cli):
+            plugins = json.loads(probe([cli, "plugin", "list"]))["imports"]
+            if not any(row.get("name") == "oh-my-setting" for row in plugins):
+                raise ValueError("Antigravity plugin is not installed")
+            config = Path.home() / ".gemini/config/plugins/oh-my-setting/mcp_config.json"
+            entry = json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["oh-my-setting"]
+            args = entry.get("args")
+            if not isinstance(args, list) or len(args) != 1 or args[0].replace(chr(92), "/") not in (agy_server, server):
+                raise ValueError("Antigravity MCP registration does not point at this install")
+        elif os.environ["OH_MY_SETTING_AGY_PLUGIN"] == "1":
+            raise ValueError("required Antigravity CLI is missing")
+except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
+    print("error: provider integration check failed: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+print("ok: provider MCP/plugin interfaces")
+PY_INTEGRATIONS
+  [ "$FAILED" -eq 0 ] || { echo "doctor integrations: failed"; exit 1; }
+  echo "doctor integrations: ok"
   exit 0
 fi
 

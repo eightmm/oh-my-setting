@@ -13,6 +13,8 @@ TIMER_FILE="$SYSTEMD_DIR/oh-my-setting-autoupdate.timer"
 CRON_FILE="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
 CLAUDE_HOOKS="${OH_MY_SETTING_CLAUDE_HOOKS:-1}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-1}"
+MCP="${OH_MY_SETTING_MCP:-$(oms_install_receipt_mode mcp 1)}"
+AGY_PLUGIN="${OH_MY_SETTING_AGY_PLUGIN:-$(oms_install_receipt_mode agy_plugin auto)}"
 
 usage() {
   cat <<'EOF'
@@ -65,6 +67,11 @@ esac
 case "$CLAUDE_HOOKS:$CODEX_PLUGIN" in
   0:0|0:1|1:0|1:1) ;;
   *) echo "error: hook/plugin opt-outs must be 0 or 1" >&2; exit 2 ;;
+esac
+
+case "$MCP:$AGY_PLUGIN" in
+  [01]:0|[01]:1|[01]:auto) ;;
+  *) echo "error: invalid MCP/Antigravity opt-out" >&2; exit 2 ;;
 esac
 
 install_systemd() (
@@ -148,6 +155,8 @@ Description=oh-my-setting auto-update
 Type=oneshot
 Environment=OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS
 Environment=OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN
+Environment=OH_MY_SETTING_MCP=$MCP
+Environment=OH_MY_SETTING_AGY_PLUGIN=$AGY_PLUGIN
 Environment=OMS_AUTO_UPDATE_MANAGED=1
 ExecStart="$ROOT/scripts/auto-update.sh" $MODE
 EOF
@@ -187,7 +196,7 @@ install_cron() {
   local filtered
   local line
   local state
-  line="17 6 * * * OMS_AUTO_UPDATE_MANAGED=1 OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
+  line="17 6 * * * OMS_AUTO_UPDATE_MANAGED=1 OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN OH_MY_SETTING_MCP=$MCP OH_MY_SETTING_AGY_PLUGIN=$AGY_PLUGIN \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
 
   current="$(mktemp)" || return
   filtered="$(mktemp)" || {

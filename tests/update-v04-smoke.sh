@@ -130,6 +130,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_PROFILE=minimal OH_MY_SETTING_REF=edge \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 \
     OH_MY_SETTING_AUTO_UPDATE=0 "$installed/scripts/link.sh" >/dev/null
   cp "$receipt" "$before_receipt"
   rm -f "$home/.codex/AGENTS.md"
@@ -162,6 +163,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_PROFILE=minimal OH_MY_SETTING_REF=edge \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 \
     OH_MY_SETTING_AUTO_UPDATE=0 "$installed/scripts/link.sh" >/dev/null
 
   cp "$installed/scripts/doctor.sh" "$source/scripts/doctor.sh"
@@ -172,6 +174,14 @@ test_update_rolls_back_and_supports_explicit_rollback() {
     PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools >"$TMP/good.out" 2>&1 ||
     { cat "$TMP/good.out" >&2; fail "healthy update should succeed"; }
   [ "$(git -C "$installed" rev-parse HEAD)" = "$good" ] || fail "successful update missed target"
+  grep -Fq 'mcp: skipped (OH_MY_SETTING_MCP=0)' "$TMP/good.out" || fail "clean update lost MCP opt-out"
+  grep -Fq 'agy-plugin: skipped (OH_MY_SETTING_AGY_PLUGIN=0)' "$TMP/good.out" || fail "clean update lost Antigravity opt-out"
+  python3 - "$receipt" <<'PY_OPTOUT'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["components"]["mcp"] is False and r["components"]["agy_plugin"] is False
+assert r["component_modes"]["agy_plugin"] == "0"
+PY_OPTOUT
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_commit"])' "$receipt")" = "$first" ] ||
     fail "successful update did not record previous_commit"
   ! grep -Fq 'skill-router.sh' "$home/.claude/settings.json" 2>/dev/null ||
@@ -235,6 +245,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_PROFILE=minimal OH_MY_SETTING_REF=edge \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 \
     OH_MY_SETTING_AUTO_UPDATE=0 "$installed/scripts/link.sh" >/dev/null
   cp "$receipt" "$TMP/divergent-receipt"
   if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
@@ -260,6 +271,8 @@ test_doctor_failure_restores_previous_plugin_payload() {
   local state="$home/plugin-state"
   local codex_config="$home/.codex/config.toml"
   local first
+  local claude_config="$home/.claude.json"
+  local agy_payload="$home/.gemini/config/plugins/oh-my-setting"
 
   mkdir -p "$source/scripts/lib" "$bin" "$(dirname "$receipt")" "$(dirname "$codex_config")"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
@@ -305,6 +318,21 @@ json.dump({
 }, open(sys.argv[1], "w", encoding="utf-8"))
 PY
 
+  printf '{"user":"keep","mcpServers":{}}\n' > "$claude_config"
+  cp "$claude_config" "$TMP/claude-before.json"
+  mkdir -p "$agy_payload"
+  printf 'old agy\n' > "$agy_payload/plugin.json"
+  cat > "$source/scripts/install-mcp.sh" <<'EOF_MCP'
+#!/usr/bin/env bash
+printf '{"mcpServers":{"oh-my-setting":{"args":["new"]}}}\n' > "$HOME/.claude.json"
+EOF_MCP
+  cat > "$source/scripts/install-agy-plugin.sh" <<'EOF_AGY'
+#!/usr/bin/env bash
+payload="$HOME/.gemini/config/plugins/oh-my-setting"
+mkdir -p "$payload"
+printf 'new agy\n' > "$payload/plugin.json"
+printf 'new hook\n' > "$payload/hooks.json"
+EOF_AGY
   printf 'new\n' > "$source/plugin-payload"
   cat > "$source/scripts/install-codex-plugin.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -319,7 +347,7 @@ else
 fi
 EOF
   printf '#!/usr/bin/env bash\nexit 41\n' > "$source/scripts/doctor.sh"
-  git -C "$source" add plugin-payload scripts/doctor.sh scripts/install-codex-plugin.sh
+  git -C "$source" add plugin-payload scripts
   git -C "$source" commit -qm "fixture: new plugin with failing doctor"
 
   if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
@@ -334,6 +362,46 @@ EOF
     fail "plugin rollback left a backup created by the failed target"
   [ "$(git -C "$installed" rev-parse HEAD)" = "$first" ] ||
     fail "plugin rollback did not restore source HEAD"
+  cmp -s "$claude_config" "$TMP/claude-before.json" || fail "rollback lost Claude MCP/user config"
+  grep -Fxq 'old agy' "$agy_payload/plugin.json" || fail "rollback left new Antigravity payload"
+  [ ! -e "$agy_payload/hooks.json" ] || fail "rollback left newly generated Antigravity hooks"
+  rm -f "$claude_config"
+  rm -rf "$agy_payload"
+  if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_PLUGIN_STATE="$state" PATH="$bin:/usr/bin:/bin" \
+    "$installed/scripts/update.sh" --no-tools >"$TMP/absent-integration.out" 2>&1; then
+    fail "absent integration fixture should fail doctor"
+  fi
+  [ ! -e "$claude_config" ] && [ ! -e "$agy_payload" ] || fail "rollback retained newly created integrations"
+
+  # Provider refresh is outside source rollback: prove a later health failure
+  # keeps the successful core update and cannot print unconditional success.
+  cat > "$source/scripts/doctor.sh" <<'EOF_HEALTH'
+#!/usr/bin/env bash
+if [ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ]; then
+  [ -f "$HOME/provider-refreshed" ] || exit 42
+  exit "${OMS_TEST_HEALTH_FAIL:-0}"
+fi
+EOF_HEALTH
+  cat > "$source/scripts/install-tools.sh" <<'EOF_TOOLS'
+#!/usr/bin/env bash
+touch "$HOME/provider-refreshed"
+EOF_TOOLS
+  touch "$source/scripts/lib/provider-latest.py"
+  git -C "$source" add scripts
+  git -C "$source" commit -qm "fixture: post-refresh health"
+  if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_PLUGIN_STATE="$state" OMS_TEST_HEALTH_FAIL=1 PATH="$bin:/usr/bin:/bin" \
+    "$installed/scripts/update.sh" >"$TMP/provider-health.out" 2>&1; then
+    fail "provider health failure reported update success"
+  fi
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$(git -C "$source" rev-parse HEAD)" ] || fail "provider failure rolled back successful core update"
+  grep -Fq 'core update succeeded; provider integration health failed' "$TMP/provider-health.out" || fail "provider failure did not separate core outcome"
+  if grep -Fxq 'update: ok' "$TMP/provider-health.out"; then fail "unhealthy providers reported update: ok"; fi
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_PLUGIN_STATE="$state" PATH="$bin:/usr/bin:/bin" \
+    "$installed/scripts/update.sh" >"$TMP/provider-healthy.out" 2>&1 || fail "healthy provider refresh failed"
+  grep -Fxq 'update: ok' "$TMP/provider-healthy.out" || fail "healthy refresh did not report success"
 }
 
 test_schema1_update_preserves_channel_pin_and_cron() {
@@ -498,7 +566,7 @@ PY
 }
 
 test_detached_schema2_auto_update_check() {
-  local repo="$TMP/detached-auto"
+  local repo="$TMP/detached auto"
   local home="$TMP/detached-auto-home"
   local receipt="$home/.config/oh-my-setting/install.json"
   local commit
@@ -523,6 +591,12 @@ EOF
 printf 'provider refresh\n' >> "$HOME/provider-refresh.log"
 exit "${OMS_TEST_PROVIDER_REFRESH_EXIT:-0}"
 EOF
+  cat > "$repo/scripts/doctor.sh" <<'EOF_HEALTH'
+#!/usr/bin/env bash
+[ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ] || exit 2
+[ -f "$HOME/provider-refresh.log" ] || exit 3
+exit "${OMS_TEST_HEALTH_FAIL:-0}"
+EOF_HEALTH
   chmod +x "$repo/scripts/install-tools.sh"
   printf 'local/\n' > "$repo/.gitignore"
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
@@ -554,6 +628,12 @@ PY
   [ "$(wc -l < "$home/provider-refresh.log" | tr -d ' ')" = 1 ] ||
     fail "unchanged OMS must still refresh providers exactly once"
   if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_TEST_HEALTH_FAIL=1 "$repo/scripts/auto-update.sh" apply >/dev/null; then
+    fail "unchanged-source provider health failure reported success"
+  fi
+  grep -Fq 'core unchanged; provider integration health failed' "$repo/local/auto-update.status" ||
+    fail "provider health failure not recorded"
+  if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     OMS_TEST_PROVIDER_REFRESH_EXIT=1 "$repo/scripts/auto-update.sh" apply >/dev/null; then
     fail "provider refresh failure must not report success"
   fi
@@ -561,7 +641,7 @@ PY
 }
 
 test_schema1_auto_update_reuses_update_transaction() {
-  local repo="$TMP/schema1-auto-transaction"
+  local repo="$TMP/schema1 auto transaction"
   local home="$TMP/schema1-auto-home"
   local receipt="$home/.config/oh-my-setting/install.json"
   local marker="$home/update.argv"

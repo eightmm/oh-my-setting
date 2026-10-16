@@ -55,7 +55,26 @@ existing locked download transactions, records the exact requested profile in a
 private receipt, and reapplies only that tool set during updates. Existing
 installs without a capability receipt retain the legacy full-tool update path
 until an agent explicitly migrates them. See
-[OMS-RUNTIME.md](OMS-RUNTIME.md).
+[OMS-RUNTIME.md](OMS-RUNTIME.md). `oms install-profile --apply --add --profile github`
+adds a capability while retaining the recorded profiles, provider, and degraded
+policy. Without `--add`, `--profile` replaces the recorded selection; `--reapply`
+reuses it exactly. `--plan` previews either operation without changing it.
+
+`OH_MY_SETTING_MCP=0` and `OH_MY_SETTING_AGY_PLUGIN=0` skip their respective
+integrations. Installation records both choices in the receipt; environment-clean
+updates and scheduled triggers preserve them. An explicit environment override
+on `oms update` changes the recorded choice. Antigravity also accepts `auto`
+(the default: install only when available) or `1` (require it).
+
+After refreshing provider tools, updates run a bounded integration audit of
+Claude hooks, the Codex plugin, and enabled MCP/Antigravity interfaces. A failed
+audit returns failure and names the successful core update separately; provider
+binaries are outside the core rollback transaction. `--no-doctor` (or the
+scheduled doctor opt-out) explicitly skips that health evidence.
+
+`oms list` groups commands by intent: setup (`init`, `install-profile`), daily
+work (`agent-plan`, `status`), collaboration, delivery, and maintenance
+(`doctor`, `update`, `uninstall`). `oms list --all` retains the complete catalog.
 
 When GitHub or Notion capabilities are selected, an interactive installer can
 delegate browser login to `gh auth login` and `ntn login` and discover the Work

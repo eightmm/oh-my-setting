@@ -8,10 +8,12 @@ script_dir="${BASH_SOURCE[0]%/*}"
 ROOT="$(cd "$script_dir/.." && pwd -P)"
 ACTION=apply
 PRIMARY_PROVIDER="${OH_MY_SETTING_PRIMARY_PROVIDER:-auto}"
+PRIMARY_PROVIDER_SET="${OH_MY_SETTING_PRIMARY_PROVIDER+x}"
 UPGRADE_FLAG=0
 ALLOW_MISSING=0
 ALLOW_MISSING_SET=0
 REAPPLY=0
+ADD=0
 RECEIPT="${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
 declare -a PROFILES=()
 declare -a SELECTED_TOOLS=()
@@ -35,7 +37,10 @@ Actions:
 
 Options:
   --profile NAME          core, council, github, notion, research, hpc,
-                          container, remote, or full. Repeatable.
+                          container, remote, or full. Repeatable. Replaces
+                          the recorded selection unless --add is used.
+  --add                   Merge profiles into the existing receipt, keeping
+                          its provider and degraded policy unless overridden.
   --primary-provider NAME auto (default), codex, claude, or agy for core.
   --upgrade               Refresh selected tools (stable providers, locked bootstrap).
   --allow-missing         Permit a degraded apply receipt when external or
@@ -57,9 +62,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--profile requires a value"
       PROFILES+=("$2"); shift 2 ;;
     --reapply) REAPPLY=1; shift ;;
+    --add) ADD=1; shift ;;
     --primary-provider)
       [ "$#" -ge 2 ] || fail "--primary-provider requires a value"
-      PRIMARY_PROVIDER="$2"; shift 2 ;;
+      PRIMARY_PROVIDER="$2"; PRIMARY_PROVIDER_SET=x; shift 2 ;;
     --upgrade) UPGRADE_FLAG=1; shift ;;
     --allow-missing) ALLOW_MISSING=1; ALLOW_MISSING_SET=1; shift ;;
     --receipt)
@@ -75,10 +81,21 @@ done
   fail "a harness child cannot install or apply capability profiles"
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+[ "$REAPPLY:$ADD" != 1:1 ] || fail "--reapply cannot be combined with --add"
 if [ "$REAPPLY" -eq 1 ]; then
   [ "${#PROFILES[@]}" -eq 0 ] || fail "--reapply cannot be combined with --profile"
-  [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || fail "--reapply needs a regular capability receipt: $RECEIPT"
-  receipt_values="$(python3 - "$RECEIPT" <<'PY_RECEIPT'
+fi
+if [ "$ADD" -eq 1 ]; then
+  [ "${#PROFILES[@]}" -gt 0 ] || fail "--add needs at least one --profile"
+fi
+if [ "$ACTION" = apply ]; then
+  # shellcheck source=scripts/lib/install-lifecycle-lock.sh
+  . "$ROOT/scripts/lib/install-lifecycle-lock.sh"
+  trap oms_install_lifecycle_lock_release EXIT
+  oms_install_lifecycle_lock_acquire_or_borrow "apply capability tools" || exit $?
+fi
+read_receipt_values() {
+  python3 - "$RECEIPT" <<'PY_RECEIPT'
 import json
 import sys
 try:
@@ -100,16 +117,31 @@ try:
 except (OSError, ValueError, TypeError, json.JSONDecodeError):
     raise SystemExit(1)
 PY_RECEIPT
-)" || fail "invalid capability receipt: $RECEIPT"
-  PRIMARY_PROVIDER="$(printf '%s\n' "$receipt_values" | sed -n '1p')"
-  if [ "$ALLOW_MISSING_SET" -eq 0 ]; then
-    ALLOW_MISSING="$(printf '%s\n' "$receipt_values" | sed -n '2p')"
+}
+if [ "$REAPPLY" -eq 1 ] || { [ "$ADD" -eq 1 ] && { [ -e "$RECEIPT" ] || [ -L "$RECEIPT" ]; }; }; then
+  [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || fail "a regular capability receipt is required: $RECEIPT"
+  receipt_values="$(read_receipt_values)" || fail "invalid capability receipt: $RECEIPT"
+  receipt_values="${receipt_values//$'\r'/}"
+  if [ "$REAPPLY" -eq 1 ] || [ -z "$PRIMARY_PROVIDER_SET" ]; then
+    PRIMARY_PROVIDER="$(printf "%s\n" "$receipt_values" | sed -n "1p")"
   fi
+  if [ "$ALLOW_MISSING_SET" -eq 0 ]; then
+    ALLOW_MISSING="$(printf "%s\n" "$receipt_values" | sed -n "2p")"
+  fi
+  ADDED_PROFILES=(${PROFILES[@]+"${PROFILES[@]}"})
+  PROFILES=()
   while IFS= read -r value; do
     [ -n "$value" ] && PROFILES+=("$value")
   done <<EOF_REAPPLY
-$(printf '%s\n' "$receipt_values" | sed -n '3,$p')
+$(printf "%s\n" "$receipt_values" | sed -n "3,\$p")
 EOF_REAPPLY
+  for value in ${ADDED_PROFILES[@]+"${ADDED_PROFILES[@]}"}; do
+    found=0
+    for selected_profile in "${PROFILES[@]}"; do
+      [ "$selected_profile" != "$value" ] || found=1
+    done
+    [ "$found" -eq 1 ] || PROFILES+=("$value")
+  done
 fi
 [ "${#PROFILES[@]}" -gt 0 ] || fail "at least one --profile or --reapply is required"
 case "$PRIMARY_PROVIDER" in
@@ -140,12 +172,9 @@ if [ "$ACTION" = check ]; then
   exit $?
 fi
 [ "$ACTION" = apply ] || fail "invalid action: $ACTION"
-# shellcheck source=scripts/lib/install-lifecycle-lock.sh
-. "$ROOT/scripts/lib/install-lifecycle-lock.sh"
-trap oms_install_lifecycle_lock_release EXIT
-oms_install_lifecycle_lock_acquire_or_borrow "apply capability tools" || exit $?
 
 while IFS= read -r line; do
+  line="${line//$'\r'/}"
   [ -n "$line" ] && SELECTED_TOOLS+=("$line")
 done <<EOF_PLAN
 $(printf '%s' "$plan_json" | python3 -c '

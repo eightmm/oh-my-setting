@@ -565,12 +565,15 @@ row["components"].update({
     "tools": False,
     "claude_hooks": False,
     "codex_plugin": False,
+    "mcp": False,
+    "agy_plugin": False,
     "auto_update": False,
     "machine_snapshot": False,
     "slurm_snapshot": False,
 })
 row["component_modes"] = {
     "auto_update": "check",
+    "agy_plugin": "0",
     "machine_snapshot": "0",
     "slurm_snapshot": "0",
 }
@@ -602,12 +605,15 @@ assert row["components"] == {
     "tools": False,
     "claude_hooks": False,
     "codex_plugin": False,
+    "mcp": False,
+    "agy_plugin": False,
     "auto_update": False,
     "machine_snapshot": False,
     "slurm_snapshot": False,
 }, row
 assert row["component_modes"] == {
     "auto_update": "check",
+    "agy_plugin": "0",
     "machine_snapshot": "0",
     "slurm_snapshot": "0",
 }, row
@@ -641,15 +647,22 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 
 printf 'keep before explicit purge\n' > "$dest/user-local.txt"
-purge_status=0
-(cd "$HOME" && "$dest/scripts/uninstall.sh" --yes --purge) \
-  >"$TMP/purge-dirty.out" 2>&1 || purge_status=$?
-[ "$purge_status" -ne 0 ] || fail "purge deleted a dirty checkout without explicit consent"
-grep -Fq 'purge-dirty' "$TMP/purge-dirty.out" ||
-  fail "dirty purge refusal did not name the override: $(cat "$TMP/purge-dirty.out")"
-[ -f "$dest/user-local.txt" ] || fail "refused dirty purge removed the user-owned file"
-[ -e "$HOME/.codex/AGENTS.md" ] ||
-  fail "dirty purge refusal partially unlinked the installation"
+for git_layout in directory file; do
+  if [ "$git_layout" = file ]; then
+    mv "$dest/.git" "$TMP/purge-git"
+    printf 'gitdir: %s\n' "$TMP/purge-git" > "$dest/.git"
+    git -C "$dest" rev-parse --is-inside-work-tree >/dev/null || fail "invalid gitfile fixture"
+  fi
+  purge_status=0
+  (cd "$HOME" && "$dest/scripts/uninstall.sh" --yes --purge) \
+    >"$TMP/purge-dirty.out" 2>&1 || purge_status=$?
+  [ "$purge_status" -ne 0 ] || fail "purge deleted a dirty $git_layout checkout without explicit consent"
+  grep -Fq 'purge-dirty' "$TMP/purge-dirty.out" ||
+    fail "dirty purge refusal did not name the override: $(cat "$TMP/purge-dirty.out")"
+  [ -f "$dest/user-local.txt" ] || fail "refused dirty purge removed the user-owned file"
+  [ -e "$HOME/.codex/AGENTS.md" ] ||
+    fail "dirty purge refusal partially unlinked the installation"
+done
 
 (cd "$HOME" && "$dest/scripts/uninstall.sh" --yes --purge --purge-dirty)
 [ -f "$HOME/.codex/AGENTS.md" ] &&
@@ -801,7 +814,8 @@ chmod +x "$tools_bin/npm"
 
 (cd "$tools_home" && env -u NVM_DIR -u CODEX_HOME HOME="$tools_home" \
   XDG_CONFIG_HOME="$tools_home/.config" XDG_CACHE_HOME="$tools_home/.cache" \
-  PATH="$tools_bin:$PATH" bash "$upstream/install.sh") > "$TMP/tools-install.txt" 2>&1 ||
+  PATH="$tools_bin:$PATH" OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 \
+  bash "$upstream/install.sh") > "$TMP/tools-install.txt" 2>&1 ||
   { cat "$TMP/tools-install.txt" >&2; fail "the default install must succeed"; }
 grep -Fq 'install-profile: ok (core)' "$TMP/tools-install.txt" ||
   fail "the default install did not apply the core capability profile"
@@ -820,6 +834,12 @@ grep -Fq 'doctor: ok' "$TMP/tools-install.txt" ||
 # the fresh checkout in every ownership mode, so nested scripts/lib packages
 # provably arrived (spec: post-install verification).
 tools_dest="$tools_home/.oh-my-setting"
+(cd "$tools_home" && env -u CODEX_HOME -u OH_MY_SETTING_MCP -u OH_MY_SETTING_AGY_PLUGIN \
+  HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" XDG_CACHE_HOME="$tools_home/.cache" \
+  PATH="$tools_bin:$PATH" "$tools_dest/scripts/update.sh" --no-tools) > "$TMP/optout-update.txt" 2>&1 ||
+  { cat "$TMP/optout-update.txt" >&2; fail "environment-clean opt-out update failed"; }
+grep -Fq 'mcp: skipped (OH_MY_SETTING_MCP=0)' "$TMP/optout-update.txt" || fail "update enabled MCP after an opted-out install"
+grep -Fq 'agy-plugin: skipped (OH_MY_SETTING_AGY_PLUGIN=0)' "$TMP/optout-update.txt" || fail "update enabled Antigravity after an opted-out install"
 (cd "$tools_home" && HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
   "$tools_dest/scripts/oms" runtime envelope show > "$TMP/tools-runtime.json" 2>"$TMP/tools-runtime.err") ||
   fail "oms runtime must answer right after a default install: $(cat "$TMP/tools-runtime.err")"

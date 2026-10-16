@@ -48,6 +48,19 @@ Windows에서 기본 Codex 설치나 Node 기반 도구를 고른 프로필은 �
 묶음만 다시 적용한다. capability receipt가 없는 기존 설치는 agent가 명시적으로
 옮기기 전까지 예전의 전체 도구 업데이트 경로를 유지한다.
 [OMS-RUNTIME.md](OMS-RUNTIME.md)를 참고한다.
+`oms install-profile --apply --add --profile github`은 기존 프로필, provider,
+누락 허용 정책을 유지하며 capability를 추가한다. `--add` 없는 `--profile`은
+기록된 선택을 대체하고, `--reapply`는 그대로 다시 적용한다. `--plan`으로
+변경 없이 미리 확인할 수 있다.
+
+`OH_MY_SETTING_MCP=0`, `OH_MY_SETTING_AGY_PLUGIN=0`은 각각의 연동 설치를
+건너뛴다. 설치 receipt에 두 선택을 기록하므로 환경 변수가 없는 업데이트와
+예약 실행도 유지한다. `oms update`에 환경 변수를 명시하면 기록된 선택을
+바꾼다. Antigravity는 `auto`(기본: 있을 때 설치), `1`(필수)도 받는다.
+
+`oms list`는 설정(`init`, `install-profile`), 일상 작업(`agent-plan`, `status`),
+협업, 전달, 유지보수(`doctor`, `update`, `uninstall`) 순으로 명령을 묶는다.
+`oms list --all`은 전체 목록을 유지한다.
 
 없는 Git·tar·gzip·find를 설치할 때를 빼면 root가 필요 없다. 관리 도구의
 부트스트랩 버전, 플랫폼 URL, 무결성 값은 `tools.lock.json`에 고정되어 있다.
@@ -80,6 +93,12 @@ OMS가 기본으로 켜지 않는다.
 체크아웃은 건너뛴다. 기존 설치의 업그레이드는 `oms update` 한 번이고, 릴리스마다
 바뀌는 것은 마이그레이션 노트(현재 [MIGRATION-0.7.md](MIGRATION-0.7.md))에
 있다.
+
+provider 도구 갱신 뒤에는 시간 제한이 있는 연동 점검으로 Claude hooks,
+Codex plugin, 활성 MCP/Antigravity 인터페이스를 확인한다. 실패하면 core
+업데이트 성공과 연동 상태 실패를 따로 보고하고 실패로 종료한다. provider
+바이너리는 core 롤백 대상이 아니다. `--no-doctor`나 예약 실행의 doctor
+생략 설정을 쓰면 이 검증 근거도 생략한다.
 
 ## 서비스와 화면
 

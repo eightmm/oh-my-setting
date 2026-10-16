@@ -21,6 +21,40 @@ oms_strip_cr() {
   printf '%s\n' "${value//$'\r'/}"
 }
 
+# Provider binaries are outside the core rollback transaction. Bound the
+# post-refresh audit, including its subprocesses, before reporting health.
+oms_install_check_provider_health() {
+  OMS_DOCTOR_INTEGRATIONS_ONLY=1 python3 - "$1/scripts/doctor.sh" <<'PY_HEALTH'
+import os
+import signal
+import subprocess
+import sys
+
+child = subprocess.Popen(["bash", sys.argv[1], "--no-model-doctor"],
+                         stdin=subprocess.DEVNULL, start_new_session=os.name != "nt")
+try:
+    code = child.wait(timeout=120)
+except subprocess.TimeoutExpired:
+    if os.name != "nt":
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        try:
+            subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if child.poll() is None:
+            child.kill()
+    child.wait()
+    print("error: provider integration health check timed out", file=sys.stderr)
+    code = 124
+raise SystemExit(code if code >= 0 else 1)
+PY_HEALTH
+}
+
 case "${BASH_SOURCE[0]}" in
   */*) OMS_INSTALL_CONTRACT_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)" ;;
   *) OMS_INSTALL_CONTRACT_LIB_DIR="$(pwd -P)" ;;
@@ -453,11 +487,14 @@ row = {
         "tools": os.environ.get("OH_MY_SETTING_INSTALL_TOOLS", "0") == "1",
         "claude_hooks": os.environ.get("OH_MY_SETTING_CLAUDE_HOOKS", "1") == "1",
         "codex_plugin": os.environ.get("OH_MY_SETTING_CODEX_PLUGIN", "0") == "1",
+        "mcp": os.environ.get("OH_MY_SETTING_MCP", "1") == "1",
+        "agy_plugin": os.environ.get("OH_MY_SETTING_AGY_PLUGIN", "auto") != "0",
         "auto_update": os.environ.get("OH_MY_SETTING_AUTO_UPDATE", "0") == "1",
         "machine_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_MACHINE", "0") != "0",
         "slurm_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_SLURM", "0") != "0",
     },
     "component_modes": {
+        "agy_plugin": os.environ.get("OH_MY_SETTING_AGY_PLUGIN", "auto"),
         "auto_update": (
             "apply"
             if os.environ.get("OH_MY_SETTING_AUTO_UPDATE_MODE") == "apply"

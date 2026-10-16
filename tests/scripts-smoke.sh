@@ -4797,6 +4797,7 @@ write_auto_update_fixture_scripts() {
 
   mkdir -p "$repo/scripts/lib"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
@@ -13229,6 +13230,12 @@ test_uninstall_purge_guard_refuses_home_and_root() {
   fi
   assert_file_contains "$home_dir/home-err" "error: refusing to purge $home_dir"
   [ -d "$home_dir" ] || fail "purge guard removed HOME"
+  # A symlinked HOME resolves to the same physical checkout.
+  ln -s "$home_dir" "$TMP/uninstall-guard-home-link"
+  if HOME="$TMP/uninstall-guard-home-link" "$home_script" --purge --yes >"$home_dir/link-out" 2>"$home_dir/link-err"; then
+    fail "uninstall purge should refuse ROOT=HOME through a symlinked HOME"
+  fi
+  [ -d "$home_dir/scripts" ] || fail "purge guard removed a symlinked HOME"
 
   cp "$ROOT/scripts/uninstall.sh" "$root_script"
   chmod +x "$root_script"
@@ -14193,12 +14200,15 @@ test_autoupdate_cron_install_and_uninstall() {
 
   OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >"$TMP/autoupdate-install"
   assert_file_contains "$TMP/autoupdate-install" "cron installed (apply)"
   assert_file_contains "$cron_file" "# oh-my-setting autoupdate:begin"
   assert_file_contains "$cron_file" "auto-update.sh\" apply"
   assert_file_contains "$cron_file" "OH_MY_SETTING_CLAUDE_HOOKS=0"
   assert_file_contains "$cron_file" "OH_MY_SETTING_CODEX_PLUGIN=0"
+  assert_file_contains "$cron_file" "OH_MY_SETTING_MCP=0"
+  assert_file_contains "$cron_file" "OH_MY_SETTING_AGY_PLUGIN=0"
 
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
   contains "$out" '- trigger: cron' || fail "status.sh missing cron trigger"
@@ -17561,7 +17571,7 @@ test_oms_frontdoor_routes_primary_subsystems() {
   printf '%s\n' "$review_help" | grep >/dev/null -F 'With --gate, enforce and record the typed gate outcome.' ||
     fail "peer-review help should scope its typed outcome to gate mode"
 
-  for primary in autopilot consult dashboard doctor inbox journal land panel patch-admit patch-land \
+  for primary in init agent-plan install-profile status uninstall autopilot consult dashboard doctor inbox journal land panel patch-admit patch-land \
     peer-delegate peer-review room runtime tick update; do
     printf '%s\n' "$frontdoors" | grep >/dev/null -E "^${primary} " ||
       fail "frontdoor catalog should route the canonical workflow: $primary"
@@ -17573,7 +17583,15 @@ test_oms_frontdoor_routes_primary_subsystems() {
   printf '%s\n' "$all_tools" | grep >/dev/null -E '^agent-call ' ||
     fail "list --all should retain the read primitive: agent-call"
 
-  duplicate="$(printf '%s\n' "$frontdoors" | awk '{ seen[$1]++ } END { for (name in seen) if (seen[name] > 1) print name }')"
+  printf '%s\n' "$frontdoors" | awk '
+    /^Setup and capabilities:/ { group="setup"; next }
+    /^Goals and daily work:/ { group="work"; next }
+    /^Maintenance and removal:/ { group="maintenance"; next }
+    $1 == "init" || $1 == "install-profile" { if (group != "setup") exit 1 }
+    $1 == "agent-plan" || $1 == "status" { if (group != "work") exit 1 }
+    $1 == "uninstall" { if (group != "maintenance") exit 1 }
+  ' || fail "lifecycle commands are not grouped by intent"
+  duplicate="$(printf "%s\n" "$frontdoors" | awk "/^[a-z][a-z-]* +/ { seen[\$1]++ } END { for (name in seen) if (seen[name] > 1) print name }")"
   [ -z "$duplicate" ] || fail "frontdoor catalog contains duplicate tools: $duplicate"
   printf '%s\n' "$frontdoors" | grep >/dev/null -E '^peer-review .*diff' ||
     fail "peer-review catalog description should distinguish diff review from peer-ask"
