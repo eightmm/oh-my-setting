@@ -36,6 +36,7 @@ _PREFIX_ATTEMPTS = {}
 _ROOM_STATES = {}
 _PROJECT_ATTEMPTS = None
 MAX_STREAM = 16 * 1024 * 1024
+SEGMENT_BYTES = 256 * 1024
 MAX_PREFIX_CACHE = 64 * 1024 * 1024
 ROOM_STAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z')
 
@@ -186,15 +187,152 @@ def capture_prefixes(repo, room):
                        ('lifecycle', '.oms/lifecycle/events.jsonl')):
         raw = read(repo, path, MAX_STREAM)
         records = stream_rows(raw)
-        proof[kind] = dict(immutable_object(repo, '.oms/plan/completion-prefixes', raw,
-                                           '.jsonl', MAX_STREAM),
-                           schema=1, kind=kind, source=path, bytes=len(raw), rows=len(records))
+        segments = [immutable_object(repo, '.oms/plan/completion-segments', raw[offset:offset + SEGMENT_BYTES],
+                                     '.bin', SEGMENT_BYTES)
+                    for offset in range(0, len(raw), SEGMENT_BYTES)]
+        manifest = dict(schema=1, stream_sha256=sha(raw), segments=segments)
+        proof[kind] = dict(immutable_object(repo, '.oms/plan/completion-prefixes', encoded(manifest),
+                                           '.json', MAX_JSON),
+                           schema=2, kind=kind, source=path, bytes=len(raw), rows=len(records))
     # This separate immutable capture binds the references to the trusted EOF
     # capture. Rehashing a shortened stream/ref cannot replace its checkpoint.
     capture = immutable_object(repo, '.oms/plan/completion-captures', encoded(proof), '.json', MAX_JSON)
     proof['capture'] = capture
     load_prefixes(repo, proof)
     return proof
+
+
+def captured_stream_raw(repo, item):
+    """Read legacy whole prefixes or authenticated shared immutable segments."""
+    ref = {'path': item['path'], 'sha256': item['sha256']}
+    if item['schema'] == 1:
+        return reference(repo, ref, MAX_STREAM)
+    manifest = parsed(reference(repo, ref))
+    keys(manifest, ('schema', 'stream_sha256', 'segments'))
+    segments = manifest['segments']
+    if (type(manifest['schema']) is not int or manifest['schema'] != 1 or
+            not isinstance(segments, list) or
+            len(segments) != (item['bytes'] + SEGMENT_BYTES - 1) // SEGMENT_BYTES):
+        fail('invalid captured segment manifest')
+    parts = []
+    for index, segment in enumerate(segments):
+        keys(segment, ('path', 'sha256'))
+        if segment['path'] != '.oms/plan/completion-segments/' + digest(segment['sha256']) + '.bin':
+            fail('noncanonical captured segment')
+        raw = reference(repo, segment, SEGMENT_BYTES)
+        expected = min(SEGMENT_BYTES, item['bytes'] - index * SEGMENT_BYTES)
+        if len(raw) != expected:
+            fail('captured segment boundary mismatch')
+        parts.append(raw)
+    raw = b''.join(parts)
+    if sha(raw) != digest(manifest['stream_sha256']):
+        fail('captured stream digest changed')
+    return raw
+
+
+def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
+    """Collect aged unreferenced captures under the completion/plan writer locks.
+
+    A verifier releases its locks between preflight and finalize. Any unsettled
+    leased task therefore vetoes collection, regardless of apparent lease age.
+    Approval markers and receipts remain roots, including receipts whose plan
+    publication failed. Unknown or unsafe input aborts before any deletion.
+    """
+    if os.unlink not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
+        return []  # Keep everything where descriptor-relative deletion is unavailable.
+    plan_raw = read(repo, '.oms/plan/tasks.json', missing=True)
+    if plan_raw:
+        plan = parsed(plan_raw)
+        if not isinstance(plan, dict):
+            fail('invalid plan during capture collection')
+        tasks = plan.get('tasks')
+        if not isinstance(tasks, dict) or any(not isinstance(task, dict) for task in tasks.values()):
+            fail('invalid plan during capture collection')
+        if any(task.get('lease_id') and task.get('state') not in ('done', 'cancelled')
+               for task in tasks.values()):
+            return []
+    objects, values, roots, parents = {}, {}, set(), {}
+    directories = ('completion-captures', 'completion-prefixes', 'completion-segments', 'completions')
+    scanned_bytes = 0
+    for directory in directories:
+        rel = '.oms/plan/' + directory
+        folder = Path(DURABLE['canonical_repo_path'](repo, rel + '/probe', 'completion collection')).parent
+        if not folder.exists():
+            continue
+        if folder.is_symlink() or not folder.is_dir():
+            fail('unsafe completion collection namespace')
+        parents[rel] = folder.stat()
+        for entry in folder.iterdir():
+            if len(objects) >= 8192 or not re.fullmatch(r'[0-9a-f]{64}\.(json|jsonl|bin)', entry.name):
+                fail('unknown or oversized completion collection namespace')
+            info = entry.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                fail('unsafe completion collection object')
+            path = rel + '/' + entry.name
+            objects[path] = info
+            if directory == 'completions' or info.st_mtime >= cutoff:
+                roots.add(path)
+            if directory in ('completion-captures', 'completions'):
+                raw = reference(repo, {'path': path, 'sha256': entry.name.split('.')[0]})
+                scanned_bytes += len(raw)
+                if scanned_bytes > MAX_PREFIX_CACHE:
+                    fail('completion collection metadata bound exceeded')
+                value = parsed(raw)
+                if not isinstance(value, dict):
+                    fail('invalid completion collection metadata')
+                values[path] = value
+                if directory == 'completion-captures' and set(value) != {
+                        'schema', 'repository_sha256', 'room_id', 'room', 'lifecycle'}:
+                    roots.add(path)  # Bearer approvals and unknown captures are never transient.
+
+    def references(value):
+        if isinstance(value, dict):
+            path = value.get('path')
+            if isinstance(path, str) and any(path.startswith('.oms/plan/' + name + '/') for name in directories):
+                if path not in objects or value.get('sha256') != Path(path).name.split('.')[0]:
+                    fail('missing or malformed retained completion reference')
+                yield path
+            for child in value.values():
+                yield from references(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from references(child)
+
+    kept, pending = set(), list(roots)
+    while pending:
+        path = pending.pop()
+        if path in kept:
+            continue
+        kept.add(path)
+        if path.endswith('.json') and path not in values:
+            raw = reference(repo, {'path': path, 'sha256': Path(path).stem})
+            scanned_bytes += len(raw)
+            if scanned_bytes > MAX_PREFIX_CACHE:
+                fail('completion collection metadata bound exceeded')
+            values[path] = parsed(raw)
+        pending.extend(references(values.get(path)))
+    candidates = sorted(set(objects) - kept)
+    # Resolve every namespace and compare every generation before deleting any.
+    with contextlib.ExitStack() as stack:
+        descriptors, checked = {}, []
+        for path in candidates:
+            target = Path(DURABLE['canonical_repo_path'](repo, path, 'completion collection'))
+            parent = path.rsplit('/', 1)[0]
+            if parent not in descriptors:
+                fd = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+                             getattr(os, 'O_NOFOLLOW', 0))
+                stack.callback(os.close, fd)
+                if not DURABLE['same_file'](os.fstat(fd), parents[parent]):
+                    fail('completion collection namespace changed')
+                descriptors[parent] = fd
+            fd = descriptors[parent]
+            if not DURABLE['_snapshot_matches'](objects[path], os.stat(target.name, dir_fd=fd, follow_symlinks=False)):
+                fail('completion collection object changed')
+            checked.append((fd, target.name))
+        if not dry_run:
+            for fd, name in checked:
+                os.unlink(name, dir_fd=fd)
+    return candidates
 
 
 def room_records(records, room, content_sha=None):
@@ -302,14 +440,15 @@ def load_prefixes(repo, proof):
         item = proof[kind]
         keys(item, ('schema', 'kind', 'source', 'path', 'sha256', 'bytes', 'rows'))
         expected = '.oms/threads/' + proof['room_id'] + '.jsonl' if kind == 'room' else '.oms/lifecycle/events.jsonl'
-        if (type(item['schema']) is not int or item['schema'] != 1 or item['kind'] != kind or
+        if (type(item['schema']) is not int or item['schema'] not in (1, 2) or item['kind'] != kind or
                 item['source'] != expected or
-                item['path'] != '.oms/plan/completion-prefixes/' + digest(item['sha256']) + '.jsonl' or
+                item['path'] != '.oms/plan/completion-prefixes/' + digest(item['sha256']) +
+                ('.jsonl' if item['schema'] == 1 else '.json') or
                 type(item['bytes']) is not int or not 0 < item['bytes'] <= MAX_STREAM or
                 type(item['rows']) is not int or not 0 < item['rows'] <= MAX_STREAM):
             fail('invalid captured stream boundary or identity')
         key = (repo, item['path'], item['sha256'])
-        raw = reference(repo, {'path': item['path'], 'sha256': item['sha256']}, MAX_STREAM)
+        raw = captured_stream_raw(repo, item)
         if len(raw) != item['bytes'] or not raw.endswith(b'\n'):
             fail('captured byte/row boundary mismatch')
         if key in _PREFIXES:

@@ -7239,9 +7239,9 @@ proof = receipt['snapshot']['provenance']
 assert proof['schema'] == 1 and proof['room_id'] == room
 for kind in ('room', 'lifecycle'):
     item = proof[kind]
-    prefix = (repo / item['path']).read_bytes()
+    prefix = completion_core['captured_stream_raw'](str(repo), item)
     assert prefix == (repo / item['source']).read_bytes()
-    assert h(prefix) == item['sha256'] and len(prefix) == item['bytes']
+    assert h((repo / item['path']).read_bytes()) == item['sha256'] and len(prefix) == item['bytes']
     assert len(prefix.splitlines()) == item['rows']
     if os.name != 'nt': assert stat.S_IMODE((repo / item['path']).stat().st_mode) == 0o600
 # Each captured file is rehashed even when parsed rows are cached. Exact JSONL
@@ -7249,15 +7249,15 @@ for kind in ('room', 'lifecycle'):
 scope = completion_core['load_prefixes'].__globals__
 original_stream_rows = scope['stream_rows']
 original_cache_limit = scope['MAX_PREFIX_CACHE']
-life_raw = (repo / proof['lifecycle']['path']).read_bytes()
+life_raw = completion_core['captured_stream_raw'](str(repo), proof['lifecycle'])
 life_lines = life_raw.splitlines(keepends=True)
 assert len(life_lines) >= 3
-room_raw = (repo / proof['room']['path']).read_bytes()
+room_raw = completion_core['captured_stream_raw'](str(repo), proof['room'])
 def variant(raw, count=None, kind='lifecycle'):
     changed = copy.deepcopy(proof)
     item = changed[kind]
     digest = h(raw)
-    item.update(path='.oms/plan/completion-prefixes/' + digest + '.jsonl',
+    item.update(schema=1, path='.oms/plan/completion-prefixes/' + digest + '.jsonl',
                 sha256=digest, bytes=len(raw), rows=raw.count(b'\n') if count is None else count)
     (repo / item['path']).write_bytes(raw)
     capture = completion_core['encoded']({k: v for k, v in changed.items() if k != 'capture'})
@@ -7265,6 +7265,8 @@ def variant(raw, count=None, kind='lifecycle'):
     changed['capture'] = {'path': '.oms/plan/completion-captures/' + digest + '.json', 'sha256': digest}
     (repo / changed['capture']['path']).write_bytes(capture)
     return changed
+legacy = variant(life_raw)
+scope['load_prefixes'](str(repo), legacy)
 short_raw, next_raw = life_lines[0], b''.join(life_lines[:2])
 short, next_prefix = variant(short_raw), variant(next_raw)
 parsed_lengths = []
@@ -7430,10 +7432,10 @@ def forged_receipt(mutator):
 
 def shorten(forged):
     item = forged['snapshot']['provenance']['room']
-    raw = (repo / item['path']).read_bytes().splitlines(keepends=True)[0]
+    raw = completion_core['captured_stream_raw'](str(repo), item).splitlines(keepends=True)[0]
     path = '.oms/plan/completion-prefixes/' + h(raw) + '.jsonl'
     (repo / path).write_bytes(raw)
-    item.update(path=path, sha256=h(raw), bytes=len(raw), rows=1)
+    item.update(schema=1, path=path, sha256=h(raw), bytes=len(raw), rows=1)
 assert 'complete capture' in forged_receipt(shorten)
 for key, value in (('schema', 2), ('schema', True), ('repository_sha256', '0'*64),
                    ('room_id', 'room-'+'0'*12)):
@@ -7444,7 +7446,7 @@ assert forged_receipt(lambda r: r['snapshot']['provenance']['lifecycle'].__setit
 # Even a fully rehashed fake capture must pass stream sequence/ancestor checks.
 def malformed_prefix(forged, kind, mode):
     p = forged['snapshot']['provenance']; item = p[kind]
-    raw = (repo / item['path']).read_bytes()
+    raw = completion_core['captured_stream_raw'](str(repo), item)
     records = [json.loads(line) for line in raw.splitlines()]
     if mode == 'mid-row': raw = raw[:-2]
     elif mode == 'missing': records.pop(1)
@@ -7464,7 +7466,7 @@ def malformed_prefix(forged, kind, mode):
                 row['refs']['panel_access'] = 'write'
     if mode not in ('mid-row', 'duplicate-json'):
         raw = b''.join((json.dumps(row, allow_nan=True)+'\n').encode() for row in records)
-    item.update(path='.oms/plan/completion-prefixes/' + h(raw) + '.jsonl', sha256=h(raw),
+    item.update(schema=1, path='.oms/plan/completion-prefixes/' + h(raw) + '.jsonl', sha256=h(raw),
                 bytes=len(raw), rows=len(records))
     (repo / item['path']).write_bytes(raw)
     capture = completion_core['encoded']({k: v for k, v in p.items() if k != 'capture'})
@@ -11633,6 +11635,33 @@ index = repo / '.oms/artifacts/index.jsonl'
 receipts = repo / '.oms/plan/completions'
 receipts.mkdir(parents=True)
 store = runpy.run_path(str(root / 'scripts/lib/artifact-index-store.py'))
+retain = store['RETENTION']['retained_lines']
+failure = dict(schema=1, event_id='evt_failure', kind='call', exit=1, operation_id='op', artifact_id='art',
+               ts='2026-10-16T00:00:00Z', provider='codex')
+successes = [dict(event_id='evt_ok%d' % i, kind='call', exit=0) for i in range(3)]
+def lines(rows):
+    return [json.dumps(row).encode() + b'\n' for row in rows]
+failed_history = lines([failure] + successes)
+assert failure in [json.loads(line) for line in retain(failed_history, 2)]
+index.write_bytes(b''.join(failed_history))
+store['append_rows'](str(repo), str(index), [dict(event_id='evt_new', exit=0)], keep=2, high=2)
+assert 'evt_failure' in {json.loads(line)['event_id'] for line in index.read_bytes().splitlines()}
+resolution = dict(schema=1, event_id='evt_resolution', kind='artifact-resolution', exit=0,
+                  parent_event_id='evt_failure', resolves_event_id='evt_failure', resolution='resolved',
+                  operation_id='op', artifact_id='art', ts='2026-10-16T00:00:01Z', provider='codex')
+resolved_history = lines([failure, resolution] + successes)
+assert 'evt_failure' not in {json.loads(line)['event_id'] for line in retain(resolved_history, 2)}
+resolution['operation_id'] = 'foreign'
+assert 'evt_failure' in {json.loads(line)['event_id'] for line in retain(lines([failure, resolution] + successes), 2)}
+resolution['operation_id'] = 'op'
+resolution.pop('provider')
+assert 'evt_failure' in {json.loads(line)['event_id'] for line in retain(lines([failure, resolution] + successes), 2)}
+try:
+    retain(failed_history, 2, max_bytes=len(failed_history[-1]))
+except ValueError:
+    pass
+else:
+    raise AssertionError('protected failures exceeded the durable byte ceiling')
 rows = []
 for number, kind in enumerate(('research', 'main_research')):
     artifact = '.oms/artifacts/pinned-%d.md' % number
@@ -19226,6 +19255,7 @@ room.join(project, "gc-room-unread", "reader", "claude", role="worker")
 room.send(project, "gc-room-unread", "creator", "reader", "Unread", message_id="gc-unread")
 room.append(project, "gc-room-unread", {"kind": "leave", "participant": "reader"}, "Left")
 room.close(project, "gc-room-unread", "creator")
+room.append(project, "gc-room-unread", {"kind": "leave", "participant": "creator"}, "Left after closure")
 malformed = project / ".oms/threads/gc-room-malformed.jsonl"
 with malformed.open("a") as handle:
     handle.write('{broken\\n')
@@ -19245,6 +19275,134 @@ PY
     [ -f "$project/.oms/threads/gc-room-$room_kind.jsonl" ] || fail "$room_kind room was deleted"
   done
   [ -L "$project/.oms/threads/gc-room-link.jsonl" ] || fail "room GC followed a symlink"
+  python3 - "$ROOT/scripts/lib" "$project" <<'PYROOM'
+import os, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import room
+repo = Path(sys.argv[2])
+with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": "another"}):
+    try:
+        room.append(repo, "gc-room-closedjoined", {"kind": "leave", "participant": "creator"}, "Forged departure")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("another participant authorized departure")
+room.append(repo, "gc-room-closedjoined", {"kind": "leave", "participant": "creator"}, "Left after closure")
+os.utime(repo / ".oms/threads/gc-room-closedjoined.jsonl", (1, 1))
+PYROOM
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply ) > "$project/room-left.out" 2>&1 || fail "closed departure GC failed"
+  [ ! -e "$project/.oms/threads/gc-room-closedjoined.jsonl" ] || fail "closed room could not be reclaimed after departure"
+  [ -f "$project/.oms/threads/gc-room-unread.jsonl" ] || fail "post-closure departure erased unread mail"
+
+  # Shared segments bound repeated-prefix storage; GC preserves the reference
+  # closure of receipts/approvals and recent captures, including legacy blobs.
+  local completion_project="$TMP/gc-completion-captures"
+  make_committed_repo "$completion_project"
+  python3 - "$ROOT" "$completion_project" <<'PYCAPTURE'
+import copy, json, os, runpy, subprocess, sys, time
+from pathlib import Path
+root, repo = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'scripts/lib'))
+import room
+core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+ident = room.create(repo, title='Segment capture fixture')
+cli = ['bash', str(root / 'scripts/agent-events.sh'), '--repo', str(repo)]
+attempt = subprocess.check_output(cli + ['start', '--provider', 'codex', '--tool', 'capture-fixture'], text=True).strip()
+for state in ('starting', 'working', 'verifying', 'review', 'done'):
+    subprocess.run(cli + ['transition', '--attempt', attempt, '--state', state], check=True, stdout=subprocess.DEVNULL)
+source = repo / '.oms/threads' / (ident + '.jsonl')
+rows = room.records(repo, ident)
+for i in range(100):
+    rows.append(dict(schema=1, thread=ident, seq=len(rows)+1, ts=rows[-1]['ts'], role='note', agent='agent', text='x'*4000))
+source.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+proofs, copied = [], 0
+for i in range(8):
+    row = dict(rows[-1], seq=len(rows)+1, text='next capture %d' % i)
+    rows.append(row)
+    with source.open('a') as handle:
+        handle.write(json.dumps(row)+'\n')
+    proofs.append(core['capture_prefixes'](str(repo), ident))
+    copied += sum(proofs[-1][kind]['bytes'] for kind in ('room', 'lifecycle'))
+objects = list((repo / '.oms/plan').glob('completion-*/*'))
+stored = sum(path.stat().st_size for path in objects)
+assert stored < copied / 2, (stored, copied)
+first = json.loads((repo / proofs[0]['room']['path']).read_bytes())['segments']
+last = json.loads((repo / proofs[-1]['room']['path']).read_bytes())['segments']
+assert first[0] == last[0], 'unchanged segment was duplicated'
+# A complete legacy proof still loads after the new storage format is enabled.
+legacy = copy.deepcopy(proofs[0])
+for kind in ('room', 'lifecycle'):
+    item = legacy[kind]
+    raw = core['captured_stream_raw'](str(repo), item)
+    item.update(core['immutable_object'](str(repo), '.oms/plan/completion-prefixes', raw, '.jsonl', core['MAX_STREAM']), schema=1)
+legacy['capture'] = core['immutable_object'](str(repo), '.oms/plan/completion-captures',
+    core['encoded']({k:v for k,v in legacy.items() if k != 'capture'}), '.json', core['MAX_JSON'])
+core['load_prefixes'](str(repo), legacy)
+# A segment is independently hashed on every read, even with warm parsed caches.
+segment = repo / last[0]['path']; original = segment.read_bytes()
+segment.write_bytes(b'!' + original[1:])
+try:
+    core['load_prefixes'](str(repo), proofs[-1])
+except ValueError:
+    pass
+else:
+    raise AssertionError('segment corruption escaped cached validation')
+segment.write_bytes(original)
+# Mark all objects aged. One receipt and one bearer approval retain their graph;
+# a young unreferenced capture retains its older segments until the next sweep.
+for path in (repo / '.oms/plan').glob('completion-*/*'):
+    os.utime(path, (1, 1))
+receipt = dict(snapshot=dict(provenance=legacy))
+core['immutable_object'](str(repo), '.oms/plan/completions', core['encoded'](receipt), '.json', core['MAX_JSON'])
+core['immutable_object'](str(repo), '.oms/plan/completion-captures',
+    core['encoded'](dict(kind='oms-main-read-approval-v1', snapshot=dict(provenance=proofs[1]))), '.json', core['MAX_JSON'])
+os.utime(repo / proofs[-1]['capture']['path'], None)
+if os.unlink not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
+    print('capture collector preserved all objects: descriptor-relative deletion unavailable')
+    raise SystemExit(0)
+(repo / 'capture-gc-supported').touch()
+plan_path = repo / '.oms/plan/tasks.json'
+plan_path.write_text(json.dumps(dict(tasks=dict(active=dict(state='blocked', lease_id='lease')))))
+cutoff = time.time() - 86400
+assert core['collect_abandoned_prefixes'](str(repo), cutoff) == [], 'unsettled lease lost its preflight'
+plan_path.write_text(json.dumps(dict(tasks={})))
+expected = core['collect_abandoned_prefixes'](str(repo), cutoff)
+assert proofs[3]['capture']['path'] in expected
+assert legacy['capture']['path'] not in expected and proofs[1]['capture']['path'] not in expected
+assert proofs[-1]['capture']['path'] not in expected
+# Unknown/corrupt reference graphs veto deletion before it starts.
+bad = core['immutable_object'](str(repo), '.oms/plan/completions', b'{', '.json', core['MAX_JSON'])
+try:
+    core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+except ValueError:
+    pass
+else:
+    raise AssertionError('malformed receipt authorized capture deletion')
+assert (repo / proofs[3]['capture']['path']).exists()
+(repo / bad['path']).unlink()
+(repo / 'retained-proofs.json').write_text(json.dumps(dict(proofs=[legacy, proofs[1], proofs[-1]], removed=expected)))
+print('capture storage: %d bytes vs %d bytes whole-prefix copies' % (stored, copied))
+PYCAPTURE
+  if [ -f "$completion_project/capture-gc-supported" ]; then
+    "$ROOT/scripts/gc.sh" --repo "$completion_project" --days 1 > "$completion_project/dry.out" 2>&1
+    grep -Fq 'completion-provenance:' "$completion_project/dry.out" || fail "capture dry-run found no abandoned objects"
+    "$ROOT/scripts/gc.sh" --repo "$completion_project" --days 1 --apply > "$completion_project/apply.out" 2>&1
+    grep -Fq 'completion-provenance:' "$completion_project/apply.out" || fail "capture apply found no abandoned objects"
+    python3 - "$ROOT/scripts/lib/plan-completion.py" "$completion_project" <<'PYRETAINED'
+import json, runpy, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+core, repo = runpy.run_path(sys.argv[1]), Path(sys.argv[2])
+expected = json.loads((repo / 'retained-proofs.json').read_bytes())
+for proof in expected['proofs']:
+    core['load_prefixes'](str(repo), proof)
+assert all(not (repo / path).exists() for path in expected['removed']), 'abandoned objects survived apply'
+PYRETAINED
+    "$ROOT/scripts/gc.sh" --repo "$completion_project" --days 1 > "$completion_project/again.out" 2>&1
+    ! grep -Fq -- '- completion-provenance: .oms/' "$completion_project/again.out" || fail "capture GC was not idempotent"
+  fi
 
   # No marker and a verified dead marker permit normal cleanup. Every
   # ambiguous marker shape defers both transient operations byte-for-byte.

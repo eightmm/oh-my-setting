@@ -554,7 +554,7 @@ def validate_event(rows, event, text, repo=None):
         if who != state["creator"]:
             participant(state, who)
         return not state["closed"]
-    if state["closed"] and kind != "received":
+    if state["closed"] and kind not in {"received", "leave"}:
         raise ValueError("room is closed")
     if kind in {"call-result", "review-dispatch", "review-dispatch-failed"}:
         key = "event_id"
@@ -731,6 +731,9 @@ def validate_event(rows, event, text, repo=None):
             # main-swap retains its participant after verifying the old attempt's release;
             # it never authorizes a different participant to join alongside a live main.
     elif kind == "leave":
+        caller = os.environ.get("OMS_ROOM_PARTICIPANT")
+        if caller and (caller != event.get("participant") or not _bound_room(rows, repo)):
+            raise ValueError("leave must name this session's participant and room")
         participant(state, event.get("participant"))
     elif kind == "call-result":
         identifier(event.get("event_id"), "event")

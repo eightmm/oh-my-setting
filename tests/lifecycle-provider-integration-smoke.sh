@@ -139,6 +139,28 @@ assert "agent-waiting-approval" in codes, inbox
 assert "pending-approval" in codes, inbox
 PY
 
+# A structurally valid JSON resolution with missing lineage is still damage,
+# even when no outcome contributes to the unresolved count.
+mkdir -p "$TMP/artifact-health/.oms/artifacts"
+git -C "$TMP/artifact-health" init -q
+printf '%s\n' '{"schema":1,"kind":"artifact-resolution","event_id":"evt_orphan","parent_event_id":"evt_missing","resolves_event_id":"evt_missing","resolution":"resolved","operation_id":"op_health","artifact_id":"art_health","exit":0}' > "$TMP/artifact-health/.oms/artifacts/index.jsonl"
+"$ROOT/scripts/state.sh" --repo "$TMP/artifact-health" --json > "$TMP/artifact-health-state.json"
+"$ROOT/scripts/inbox.sh" --repo "$TMP/artifact-health" --json > "$TMP/artifact-health-inbox.json"
+python3 - "$ROOT" "$TMP/artifact-health-state.json" "$TMP/artifact-health-inbox.json" <<'PYHEALTH' || fail "inbox hid semantic artifact corruption"
+import json, runpy, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+state, inbox = [json.loads(Path(path).read_bytes()) for path in sys.argv[2:]]
+assert not state['artifacts']['healthy'] and state['artifacts']['invalid_rows'] > 0, state
+assert state['artifacts']['counts']['unresolved'] == 0, state
+item = next(item for item in inbox['items'] if item['code'] == 'artifact-store-corrupt')
+assert 'validate' in item['command'] and item['command'].endswith('salvage'), item
+project = runpy.run_path(str(root / 'scripts/lib/inbox_projection.py'))['project_inbox']
+report = project(dict(artifacts=state['artifacts'], runtime=dict(healthy=True)))
+assert [item['code'] for item in report['items']] == ['artifact-store-corrupt'], report
+assert project(dict(artifacts=dict(healthy=True, invalid_rows=0), runtime=dict(healthy=True)))['actionable'] == 0
+PYHEALTH
+
 review_attempt="$(env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" start --provider codex --tool review-fixture)"
 for review_state in starting working verifying review; do
   env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" transition \

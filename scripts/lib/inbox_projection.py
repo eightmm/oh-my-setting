@@ -110,6 +110,9 @@ def project_inbox(state, *, safe_actions=(), include_threads=True):
             "git push", ahead)
 
     artifacts = state.get("artifacts", {})
+    if not artifacts.get("healthy", True) or artifacts.get("invalid_rows", 0):
+        add(9, "P1", "artifact-store-corrupt", "artifact index contains invalid rows or lineage",
+            "oms artifact-index --repo . validate; oms artifact-index --repo . salvage")
     unresolved = int(artifacts.get("counts", {}).get("unresolved", 0) or 0)
     if unresolved:
         add(30, "P1", "unresolved-artifacts", "%d unresolved artifact outcome(s)" % unresolved,

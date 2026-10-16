@@ -23,8 +23,9 @@ def retained_lines(
     those rows (and a resolution's target) either survive together or the
     mutation fails before replacing the ledger.
 
-    Completion pins survive the count limit. An unreadable pin namespace
-    (``None``) preserves every row; the durable byte ceiling still applies.
+    Unresolved failures and completion pins survive the count limit. An
+    unreadable pin namespace (``None``) preserves every row; the durable byte
+    ceiling still applies.
     """
     if keep <= 0:
         raise ValueError("keep must be positive")
@@ -34,6 +35,7 @@ def retained_lines(
     parsed = []
     id_indices = {}
     resolved_targets = set()
+    settled_failures = set()
     for index, line in enumerate(source):
         try:
             row = json.loads(line)
@@ -51,12 +53,32 @@ def retained_lines(
         if len(indices) == 1
     }
 
+    def complete_outcome(row):
+        return (type(row.get("schema")) is int and row["schema"] == 1 and
+                all(isinstance(row.get(key), str) and row[key]
+                    for key in ("event_id", "operation_id", "artifact_id", "ts", "kind")) and
+                isinstance(row.get("provider"), str) and
+                type(row.get("exit")) is int and row["exit"] >= 0)
+
     for index, row in enumerate(parsed):
         if not isinstance(row, dict) or row.get("kind") != "artifact-resolution":
             continue
         target_index = by_id.get(row.get("resolves_event_id"))
         if target_index is not None and target_index < index:
             resolved_targets.add(target_index)
+            target = parsed[target_index]
+            # Match the attention reader's resolution predicate. A malformed
+            # or foreign resolution must never authorize eviction of a failure.
+            if (complete_outcome(row) and complete_outcome(target) and
+                    by_id.get(row.get("event_id")) == index and
+                    row.get("parent_event_id") == row.get("resolves_event_id") and
+                    row.get("resolution") == "resolved" and
+                    type(row.get("exit")) is int and row["exit"] == 0 and
+                    target.get("schema") == 1 and target.get("kind") != "artifact-resolution" and
+                    type(target.get("exit")) is int and target["exit"] > 0 and
+                    row.get("operation_id") == target.get("operation_id") and
+                    row.get("artifact_id") == target.get("artifact_id")):
+                settled_failures.add(target_index)
 
     def group_for(index):
         # Follow the entire backward target closure. Valid current rows have
@@ -116,6 +138,10 @@ def retained_lines(
         if len(selected) == keep or (
                 max_bytes is not None and selected_bytes(selected) == max_bytes):
             break
+    for index, row in enumerate(parsed):
+        if (isinstance(row, dict) and row.get("kind") != "artifact-resolution" and
+                type(row.get("exit")) is int and row["exit"] > 0 and index not in settled_failures):
+            selected.add(index)
     if pinned_event_ids is None:
         selected.update(range(len(source)))
     else:
@@ -128,7 +154,7 @@ def retained_lines(
                     break
                 selected.update(group)
     if max_bytes is not None and selected_bytes(selected) > max_bytes:
-        raise ValueError("completion-pinned artifact rows exceed byte retention")
+        raise ValueError("protected artifact rows exceed byte retention")
     return [line for index, line in enumerate(source) if index in selected]
 
 
