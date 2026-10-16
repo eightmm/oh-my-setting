@@ -69,6 +69,10 @@ INCLUDE_ML_CONTEXT=0
 THREAD_ID=""
 TASK_ID=""
 RESUME_SESSION=""
+continuation_reference="${OMS_PANEL_CONTINUATION:-}"
+unset OMS_PANEL_CONTINUATION
+continuation_base=HEAD
+continuation_patch_file=""
 PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
 unset OBSERVED_BINDING
@@ -1134,17 +1138,52 @@ if ! OMS_SCAN_BRIEF_RANGE="$brief_first:$brief_last" ma_validate_outbound_prompt
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
   [ -z "$patch_file" ] || : > "$patch_file"
-  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" || true
   echo "blocked: $TO sensitive outbound context -> $artifact"
   echo "artifact: $artifact"
   echo "patch: ${patch_file:-none (read-only)}"
   plan_failure_transition
   exit 3
 fi
+if [ -n "$continuation_reference" ]; then
+  [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$WORKER_ACCESS" = write ] ||
+    fail "continuation patch requires a panel write dispatch"
+  continuation_patch_file="$worktree_parent/continuation.patch"
+  # Revalidate and copy the recorded bytes before Git consumes them. The private
+  # copy binds application to the digest, even if shared evidence changes later.
+  if ! python3 -B - "$(ma_scripts_dir)/lib" "$REPO" "$DELEGATE_SOURCE_REPO" \
+      "$continuation_reference" "$continuation_patch_file" > "$worktree_parent/continuation-base" <<'PY'
+import json, re, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from panel_results import verified_patch
+try:
+    reference = json.loads(sys.argv[4])
+    if (not isinstance(reference, dict) or set(reference) != {"patch", "sha256", "base"}
+            or not re.fullmatch(r"[0-9a-f]{7,64}", str(reference.get("base")))):
+        raise ValueError("invalid patch reference or original base")
+    data = verified_patch(Path(sys.argv[2]), dict(patch=reference["patch"], patch_sha256=reference["sha256"]))
+    base = subprocess.check_output(["git", "-C", sys.argv[3], "rev-parse", "--verify",
+                                    reference["base"] + "^{commit}"], text=True).strip()
+    Path(sys.argv[5]).write_bytes(data)
+    print(base)
+except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+    print("error: continuation patch could not be verified: %s" % error, file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    fail "continuation patch preparation failed; no worker ran"
+  fi
+  IFS= read -r continuation_base < "$worktree_parent/continuation-base"
+  continuation_base="${continuation_base//$'\r'/}"
+  # Carrying bytes outside the prompt must retain the same outbound screen.
+  ma_validate_outbound_prompt "$continuation_patch_file" ||
+    fail "previous continuation patch failed outbound validation; no worker ran"
+fi
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
   -c core.fsmonitor=false -C "$DELEGATE_SOURCE_REPO" \
-  worktree add --detach "$worktree" HEAD >/dev/null 2>&1
+  worktree add --detach "$worktree" "$continuation_base" >/dev/null 2>&1
 worktree_created=1
 if ! oms_worker_worktree_identity_capture "$delegate_worktree_repo" "$worktree"; then
   KEEP_WORKTREE=1
@@ -1167,6 +1206,17 @@ if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] &&
     [ "$WORKER_ACCESS" = write ] && [ -x "$worktree/scripts/check.sh" ]; then
   VERIFY_CMD="$(oms_default_verify_command "$worktree/scripts/check.sh")" || exit 2
   echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
+fi
+
+if [ -n "$continuation_patch_file" ]; then
+  if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+      GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+      -c core.fsmonitor=false -C "$worktree" apply --index "$continuation_patch_file"; then
+    fail "previous continuation patch no longer applies to its original base; no worker ran"
+  fi
+  printf '\nThe previous round patch is already applied and staged in this worktree at its original base. Continue from these changes; do not reapply the patch. The returned patch includes both rounds against that base.\n' >> "$prompt_file"
+  ma_validate_outbound_prompt "$prompt_file" ||
+    fail "continuation context failed outbound validation; no worker ran"
 fi
 
 # Build against the worker's bytes, not dirty/untracked primary sources. The
@@ -1216,7 +1266,7 @@ context_compile_block() {
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
   [ -z "$patch_file" ] || : > "$patch_file"
-  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" || true
   echo "blocked: $TO context manifest compilation failed -> $artifact" >&2
   plan_failure_transition
   exit 3
@@ -1350,7 +1400,7 @@ print("%s\t%s\t%s\t%s\t%s" % (
       printf '\n\n## Exit\n\n3\n'
     } > "$artifact"
     [ -z "$patch_file" ] || : > "$patch_file"
-    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" || true
     echo "blocked: $TO sensitive compiled context -> $artifact" >&2
     plan_failure_transition
     exit 3
@@ -1842,7 +1892,7 @@ EOF
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
     -c diff.noprefix=false -c diff.mnemonicPrefix=false -C "$worktree" \
-    diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached --binary \
+    diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached --binary "$repair_replay_base" -- \
     > "$patch_file"
 }
 
@@ -2645,7 +2695,7 @@ if len(details) > 8:
     # Output above was never closed. Paths stay in the local bullets above.
     printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs by snapshot (up to 8 sanitized lines):\n%s\nExecution-state details:\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
       "$worker_guard_changed" "$guard_metadata_details" "$guard_execution_details" "$guard_failure_hint" >> "$artifact"
-    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
+    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition
     exit 1
@@ -2707,7 +2757,7 @@ if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
   index_exit=6
 fi
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
-  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
+  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" || true
 
 applied=0
 plan_reviewed=0

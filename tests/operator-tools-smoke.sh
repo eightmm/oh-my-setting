@@ -9742,6 +9742,89 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
             pass
         else:
             raise AssertionError("empty or oversized owner override was accepted")
+    # A continuation starts with the complete prior patch and returns one patch
+    # against the original base, including when the owner has since moved HEAD.
+    round_bin = temporary / "continuation-bin"
+    round_bin.mkdir()
+    original_cli = Path(room_env["PATH"].split(os.pathsep)[0]) / "codex"
+    round_cli = round_bin / "codex"
+    probe = '''  if [ -n "${CONTINUATION_EXPECT:-}" ]; then
+    python3 - <<'CONTINUATION'
+import json, os, subprocess
+from pathlib import Path
+value = Path("value.txt").read_bytes()
+assert value == bytes.fromhex(os.environ["CONTINUATION_EXPECT"]), value
+Path(os.environ["CONTINUATION_SNAPSHOT"]).write_text(json.dumps({
+    "head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+    "value": value.hex(),
+    "staged": subprocess.check_output(["git", "diff", "--cached", "--name-only"], text=True).strip()}))
+with Path("value.txt").open("ab") as handle:
+    handle.write(b"caf\\xe9\\n")
+CONTINUATION
+  fi
+'''
+    marker = '  if [ "${PANEL_TEST_MODE:-}" = write ]; then\n'
+    assert marker in original_cli.read_text()
+    round_cli.write_text(original_cli.read_text().replace(marker, probe + marker))
+    round_cli.chmod(0o755)
+    round_env = dict(room_env, PATH=str(round_bin) + os.pathsep + room_env["PATH"], PANEL_TEST_MODE="write",
+                     CONTINUATION_SNAPSHOT=str(temporary / "continuation-start.json"))
+    worker = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+              "--dispatch", "builder", "--owner", "claude", "--to", "codex", "--model", "gpt-6-luna",
+              "--access", "write", "--verify", "true", "--scope", "value.txt"]
+    def round_call(argv, env=None):
+        run = subprocess.run(argv, cwd=str(project), env=env or room_env, capture_output=True, text=True, timeout=90)
+        assert run.returncode == 0, (argv, run.stdout, run.stderr)
+        return run.stdout
+    original_base = round_call(["git", "rev-parse", "HEAD"]).strip()
+    round_brief = temporary / "cumulative-brief.md"
+    round_brief.write_text("Append new to value.txt.\n")
+    first = round_call(worker + ["--brief-file", str(round_brief), "--task-id", "cumulative-rounds"],
+                 dict(round_env, CONTINUATION_EXPECT=b"old\n".hex()))
+    assert json.loads(Path(round_env["CONTINUATION_SNAPSHOT"]).read_text())["staged"] == ""
+    first_patch = Path(re.search(r"^patch: (.+)$", first, re.M)[1])
+    assert b"+caf\xe9\n" in first_patch.read_bytes(), "fixture must capture a non-UTF-8 text hunk"
+    round_brief.write_text("Append new once more to value.txt.\n")
+    tree = round_call(["git", "rev-parse", "HEAD^{tree}"]).strip()
+    moved_head = round_call(["git", "commit-tree", tree, "-p", original_base, "-m", "Owner advances HEAD"]).strip()
+    round_call(["git", "update-ref", "HEAD", moved_head])
+    try:
+        second = round_call(worker + ["--brief-file", str(round_brief), "--continue", "cumulative-rounds"],
+                      dict(round_env, CONTINUATION_EXPECT=b"old\ncaf\xe9\nnew\n".hex()))
+    finally:
+        round_call(["git", "update-ref", "HEAD", original_base])
+    start = json.loads(Path(round_env["CONTINUATION_SNAPSHOT"]).read_text())
+    assert start == {"head": original_base, "value": b"old\ncaf\xe9\nnew\n".hex(), "staged": "value.txt"}, start
+    artifact_patch = Path(re.search(r"^patch: (.+)$", second, re.M)[1])
+    assert artifact_patch != first_patch
+    product = [json.loads(line) for line in (project / ".oms/artifacts/index.jsonl").read_text().splitlines()][-1]
+    assert original_base.startswith(product["base_sha"]), product
+    round_call(["git", "apply", "--check", str(artifact_patch)])
+    try:
+        round_call(["git", "apply", str(artifact_patch)])
+        assert (project / "value.txt").read_bytes() == b"old\ncaf\xe9\nnew\ncaf\xe9\nnew\n"
+    finally:
+        round_call(["git", "checkout", "--", "value.txt"])
+    # Digest drift and a verified but non-applicable patch both stop before a
+    # provider starts; application failure must never fall back to a clean tree.
+    bad_patch = project / ".oms/artifacts/continuation-conflict.patch"
+    bad_patch.write_bytes(artifact_patch.read_bytes().replace(b" old\n", b" absent\n"))
+    assert bad_patch.read_bytes() != artifact_patch.read_bytes()
+    digest = hashlib.sha256(bad_patch.read_bytes()).hexdigest()
+    sensitive_patch = bad_patch.with_name("continuation-sensitive.patch")
+    sensitive_patch.write_bytes(artifact_patch.read_bytes().replace(b"+new\n", b"+-----BE" + b"GIN PRIVATE KEY-----\n"))
+    before_workers = Path(room_env["PANEL_TEST_WORKER_LOG"]).read_bytes()
+    for previous, sha, message in ((bad_patch, "0" * 64, "could not be verified"),
+            (bad_patch, digest, "no longer applies"),
+            (sensitive_patch, hashlib.sha256(sensitive_patch.read_bytes()).hexdigest(), "failed outbound validation")):
+        reference = dict(patch=previous.relative_to(project).as_posix(), sha256=sha, base=original_base)
+        refused = subprocess.run(["bash", str(panel.ENTRY), "peer-delegate", "--repo", str(project),
+            "--to", "codex", "--model", "gpt-6-luna", "--brief-file", str(round_brief), "--verify", "true"],
+            cwd=str(project), env=dict(round_env, OMS_PANEL_DISPATCH="1", OMS_PANEL_CONTINUATION=json.dumps(reference)),
+            capture_output=True, text=True, timeout=90)
+        assert refused.returncode != 0 and message in refused.stderr, refused
+        assert Path(room_env["PANEL_TEST_WORKER_LOG"]).read_bytes() == before_workers
+    assert (project / "value.txt").read_text() == "old\n"
     if os.name != "posix":
         return
     import panel_terminals

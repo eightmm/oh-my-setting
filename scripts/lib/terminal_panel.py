@@ -386,7 +386,7 @@ def panel_repository(value):
 
 def child_environment(provider, repo):
     env = {name: value for name, value in os.environ.items()
-           if name not in {"OMS_PANEL_EXECUTION_ROOT", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO"} and not name.startswith(("OMS_DL_", "OMS_OBSERVE_PLAN_", "OMS_OBSERVER_"))}
+           if name not in {"OMS_PANEL_EXECUTION_ROOT", "OMS_PANEL_CONTINUATION", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO"} and not name.startswith(("OMS_DL_", "OMS_OBSERVE_PLAN_", "OMS_OBSERVER_"))}
     env["OMS_AGENT"] = provider
     env["OMS_PANEL_REPO"] = str(repo)
     env["OMS_PANEL_ENTRYPOINT"] = str(ENTRY)
@@ -1197,7 +1197,8 @@ def owning_attempt(repo, owner, main, env):
     return lineage_ids(repo, owner, participant, current["attempt_id"])
 
 
-def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, allow_extra_round=None):
+def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, allow_extra_round=None,
+                 patch_reference=None):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
         raise ValueError("invalid task ID to continue")
@@ -1259,20 +1260,36 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     patch = call.get("patch") if eligible_result else None
     where = ""
     if patch:
-        # Absolute machine paths never leave in a prompt (the outbound scrubber refuses them), and the new
-        # worktree has no .oms artifacts, so the earlier patch travels inline while it fits.
+        # Pass write continuations a verified artifact reference. Legacy callers
+        # without a materialization channel retain the bounded inline context.
         try:
-            body = verified_patch(repo, call).decode("utf-8")
-        except (OSError, ValueError, TypeError, UnicodeError):
+            body = verified_patch(repo, call)
+        except (OSError, ValueError, TypeError):
             body = None
         name = os.path.relpath(Path(repo) / patch, repo)
         if body is None:
+            if patch_reference is not None:
+                raise ValueError("previous patch could not be verified; continuation refused")
             where = " The previous patch could not be verified and is not included."
-        elif body and len(body.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 <= MAX_PROMPT:
-            where = " Your previous patch (%s) follows; apply what still fits.\n```diff\n%s```\n" % (name, body)
+        elif body and patch_reference is not None:
+            import panel_results
+            _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
+            record = next((row for row in reversed(artifacts)
+                           if row.get("attempt_id") == last["attempt_id"] and row.get("kind") == "delegate"
+                           and row.get("patch") == patch and row.get("patch_sha256") == call.get("patch_sha256")
+                           and row.get("event_id") == call.get("event_id")), {})
+            base = record.get("base_sha")
+            if not re.fullmatch(r"[0-9a-f]{7,64}", str(base)):
+                raise ValueError("previous patch has no recorded base; continuation refused")
+            patch_reference.update(patch=patch, sha256=call.get("patch_sha256"), base=base)
+            where = (" The harness applies your previous patch (%s) at its original base before this round. "
+                     "Continue from the applied changes; do not reapply it." % name)
         elif body:
-            raise ValueError("previous patch exceeds the continuation input budget; inspect and admit it in the "
-                             "owner checkout or include a bounded recovery in a fresh dispatch brief")
+            excerpt = body.decode("utf-8", errors="replace")
+            if len(excerpt.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 > MAX_PROMPT:
+                raise ValueError("previous patch exceeds the continuation input budget; inspect and admit it in the "
+                                 "owner checkout or include a bounded recovery in a fresh dispatch brief")
+            where = " Your previous patch (%s) follows; apply what still fits.\n```diff\n%s```\n" % (name, excerpt)
         else:
             where = " The previous patch is empty; no patch is transferred."
     # A provider fallback swaps the attempt's provider after its row was written; the session belongs to
@@ -1283,7 +1300,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     if resume:
         preamble = ("Your earlier work was on %s; the repository is now at %s.%s New instructions follow.\n\n"
                     % (old, head, where))
-        note = "continuing %s in its native session; %s" % (task_id, "verified patch included" if patch and body else
+        note = "continuing %s in its native session; %s" % (task_id, "verified patch carried forward" if patch and body else
                                                           "no patch transferred")
     else:
         has_summary = eligible_result and bool(call.get("answer"))
@@ -1294,7 +1311,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
         preamble = ("A fresh worker continues earlier work on %s (%s). The repository is now at %s.%s "
                     "Earlier summary: %s\nNew instructions follow.\n\n" % (task_id, reason, head, where, summary))
         note = "no resumable session (%s); fresh worker transfers %s and %s" % (
-            reason, "verified inline patch" if patch and body else "no patch",
+            reason, "verified patch" if patch and body else "no patch",
             "recorded summary" if has_summary else "no verified summary")
     text = preamble + Path(brief).read_text(encoding="utf-8")
     if len(text.encode("utf-8")) > MAX_PROMPT:
@@ -1390,11 +1407,13 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         raise ValueError("call alias is already used in this room lineage")
     resume = None
     temporary = None
+    continuation_patch = {} if continue_task and access == "write" else None
     if continue_task:
         if role not in WRITERS or not brief or prompt or task_id:
             raise ValueError("--continue takes a write-capable role and --brief-file, not --prompt or --task-id")
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
-                                           child_environment(owner, repo), work_repo, allow_extra_round)
+                                           child_environment(owner, repo), work_repo, allow_extra_round,
+                                           patch_reference=continuation_patch)
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
@@ -1418,6 +1437,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             options["allow_extra_round"] = allow_extra_round
         if candidate is not None:
             options["candidate"] = candidate
+        if continuation_patch:
+            options["continuation_patch"] = continuation_patch
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                             dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias, **options)
     finally:
@@ -3299,7 +3320,7 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
-                 allow_extra_round=None, candidate=None):
+                 allow_extra_round=None, candidate=None, continuation_patch=None):
     source_repo = repo
     if os.environ.get("OMS_ROOM_REPO"):
         repo = repository(os.environ["OMS_ROOM_REPO"])
@@ -3344,6 +3365,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
     env = child_environment(owner, repo)
+    if continuation_patch:
+        env["OMS_PANEL_CONTINUATION"] = json.dumps(continuation_patch, separators=(",", ":"))
     if access == "write" and not env.get("OMS_PEER_TIMEOUT"):
         # A scoped build plus its own checks outlasts the 30m delegate wall; high effort gets the longest.
         env["OMS_PEER_TIMEOUT"] = "60m" if route.get("effort") == "high" else "40m"
@@ -3437,6 +3460,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                                         "OMS_PLAN_ID", "OMS_PLAN_TASK_ID", "OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"}}
         # Keep canonical artifact routing, but not the caller or child identity.
         preview_env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_REPO=str(repo), OMS_ROOM_REPO=str(repo))
+        if continuation_patch:
+            preview_env["OMS_PANEL_CONTINUATION"] = env["OMS_PANEL_CONTINUATION"]
         checked = subprocess.run(preview + ["--dry-run"], cwd=str(execution), env=preview_env,
                                  capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
         if checked.returncode:

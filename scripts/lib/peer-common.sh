@@ -1137,8 +1137,10 @@ ma_append_artifact_index() {
   # Lineage: the commit the run was based on, and the optional plan/task id
   # (OMS_TASK_ID) that triggered it. Both let a row be traced back to its work.
   local base_sha=""
-  # A scratch worktree's row is stored in the main checkout but based on the scratch's HEAD.
-  base_sha="$(git -C "${OMS_INDEX_BASE_REPO:-$repo}" rev-parse --short HEAD 2>/dev/null || true)"
+  # Continuations retain the original base even after the checkout is removed
+  # or the owner's HEAD advances. Other callers keep their source HEAD.
+  base_sha="$(git -C "${OMS_INDEX_BASE_REPO:-$repo}" rev-parse --short "${10:-HEAD}" 2>/dev/null || true)"
+  base_sha="${base_sha//$'\r'/}"
 
   OMS_INDEX_PROMPT_BYTES="$prompt_bytes" \
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
