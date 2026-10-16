@@ -151,6 +151,45 @@ def _latest(repo, task):
     return paths[-1], attempt.get('attempt_id') or record.get('attempt_id'), reason, execution
 
 
+def _standalone(repo, attempt_id, artifact):
+    """Recover an explicitly selected failed call using indexed, hashed evidence."""
+    attempts = panel_results._query(repo, 'agent-events', 'list')
+    owned = [a for a in attempts if a.get('attempt_id') == attempt_id]
+    if len(owned) != 1 or owned[0].get('tool') != 'peer-delegate' or not owned[0].get('terminal'):
+        raise ValueError('standalone recovery requires one stopped delegate attempt')
+    attempt = owned[0]
+    refs = attempt.get('refs', {})
+    if refs.get('panel_room_participant') or refs.get('panel_room_id'):
+        raise ValueError('room delegates require the recorded room execution owner')
+    rows = panel_results._query(repo, 'artifact-index', 'list', '1000000').get('rows', [])
+    records = [r for r in rows if r.get('kind') == 'delegate' and
+               r.get('attempt_id') == attempt_id and r.get('artifact') == artifact]
+    if (len(records) != 1 or not isinstance(records[0].get('exit'), int) or
+            records[0]['exit'] == 0 or
+            records[0].get('task_id', '') != attempt.get('task_id', '')):
+        raise ValueError('standalone recovery requires matching failed indexed artifact')
+    record = records[0]
+    if not isinstance(artifact, str) or not artifact.startswith('.oms/artifacts/'):
+        raise ValueError('delegate artifact is outside OMS evidence')
+    body = _read(repo, artifact)
+    if hashlib.sha256(body).hexdigest() != record.get('artifact_sha256'):
+        raise ValueError('standalone artifact digest does not match index')
+    paths = [a or b for a, b in re.findall(
+        r'^(?:error: )?worktree kept(?: at|:) (.+)$|^- worktree: (/.+)$',
+        body.decode('utf-8'), re.M)]
+    paths = [str(_native_path(value)) for value in paths]
+    if not paths or len(set(paths)) != 1:
+        raise ValueError('standalone artifact has no unique kept worktree path')
+    base = record.get('base_sha', '')
+    if not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{7,64}', base):
+        raise ValueError('standalone artifact has no recorded base')
+    execution = Path(repo).resolve(strict=True)
+    if not _managed(execution, paths[0])[2].startswith(base):
+        raise ValueError('standalone kept HEAD does not match recorded base')
+    return (paths[0], attempt_id, attempt.get('reason_code') or
+            'delegate exit ' + str(record['exit']), execution)
+
+
 def _skeleton(line):
     return ''.join(c for c in unicodedata.normalize('NFKD', line) if ord(c) < 128)
 
@@ -378,8 +417,12 @@ def record_provenance(repo, metadata):
     return relative
 
 
-def salvage(repo, task, selected_repo=None):
-    path, attempt, reason, execution = _latest(repo, task)
+def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None):
+    if attempt_id is not None:
+        path, attempt, reason, execution = _standalone(repo, attempt_id, artifact)
+        task = attempt_id
+    else:
+        path, attempt, reason, execution = _latest(repo, task)
     if selected_repo is not None:
         selected = work_repository(selected_repo)
         if selected not in {Path(repo).resolve(strict=True), execution}:
@@ -440,18 +483,24 @@ def admission(patch, accept_salvaged=False, accept_encoding_loss=False, source=N
 def cli_main(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo')
-    parser.add_argument('--salvage', required=True, metavar='TASK_ID')
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--salvage', metavar='TASK_ID')
+    selection.add_argument('--attempt', metavar='ATTEMPT_ID',
+                           help='explicit stopped standalone delegate attempt')
+    parser.add_argument('--artifact', help='indexed .oms/artifacts/ path for --attempt')
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args(arguments)
     try:
         panel_results._owner()
-        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', args.salvage):
-            raise ValueError('invalid task ID')
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', args.attempt or args.salvage):
+            raise ValueError('invalid task or attempt ID')
+        if bool(args.attempt) != bool(args.artifact):
+            raise ValueError('--attempt requires --artifact, which is standalone-only')
         selected = Path(args.repo or os.getcwd()).resolve(strict=True)
         inherited = os.environ.get('OMS_ROOM_REPO') if os.environ.get('OMS_ROOM_ID') else None
         repo = (state_repository(Path(inherited).resolve(strict=True)) if inherited else
                 state_repository(selected))
-        result = salvage(repo, args.salvage, selected if args.repo else None)
+        result = salvage(repo, args.salvage, selected if args.repo else None, args.attempt, args.artifact)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:

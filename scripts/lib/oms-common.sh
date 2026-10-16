@@ -1614,6 +1614,7 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
 
   OMS_WG_GITMETA_SOFT=""
   git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
+  git_dir="${git_dir//$'\r'/}"
   case "$git_dir" in
     "") return 1 ;;
     /*) ;;
@@ -1635,7 +1636,16 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
           ;;
         *) return 1 ;;
       esac
-      grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null || return 1
+      if grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-managed-replaced" 2>/dev/null; then
+        cleaned=1
+        continue
+      fi
+      # A mixed wave can remove a baseline-live sibling while another becomes
+      # kept. Its admin leaves remain in the snapshot even though HEAD was exempt.
+      if ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null; then
+        grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" 2>/dev/null || return 1
+        [ ! -e "$git_dir/worktrees/$entry" ] && [ ! -L "$git_dir/worktrees/$entry" ] || return 1
+      fi
       # A dead-owner scratch its main still uses moves only its HEAD.
       if [ "$line" != "${line#"worktree worktrees/$entry/HEAD "}" ] &&
         awk -v k="worktrees/$entry/HEAD" '$1 == "worktree" && $2 == k { f = 1 } END { exit !f }' \
@@ -1661,6 +1671,7 @@ EOF
       *) return 1 ;;
     esac
     if ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" 2>/dev/null &&
+      ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-managed-replaced" 2>/dev/null &&
       ! { [ "$line" != "${line#"worktree worktrees/$entry/HEAD "}" ] &&
         grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null; }; then
       ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
@@ -1766,15 +1777,15 @@ oms_worker_path_is_managed_foreign_worktree() {  # PATH CURRENT_WORKTREE
 }
 
 # Lifecycle exemptions cannot hide executable per-worktree config or rewired
-# registrations. Admin bytes of a surviving entry stay fixed; a new entry may
-# not replace any checkout identity captured before the provider ran.
+# registrations. Admin bytes stay fixed for surviving checkouts. Git may reuse
+# a removed managed sibling slot only after both checkout identities are proven.
 oms_worker_gitmeta_admin_changes_are_safe() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local repo="$1" before="$2" worker="${3:-}"
-  local common entry receipt physical line side
+  local common entry receipt physical line side head
   OMS_WG_GITMETA_ADMIN_QUIET=0
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   oms_worker_surface_capture_one "$repo" gitmeta "$worker" > "$before/gitmeta-admin-now" || return 1
-  python3 - "$before/gitmeta" "$before/gitmeta-admin-now" "$before/gitmeta-admin-lifecycle" <<'PY' > "$before/gitmeta-new-entries" || return 1
+  python3 - "$before/gitmeta" "$before/gitmeta-admin-now" "$before/gitmeta-admin-lifecycle" "$before/gitmeta-replacement-candidates" <<'PY' > "$before/gitmeta-new-entries" || return 1
 import sys
 def entries(path):
     result = {}
@@ -1791,10 +1802,16 @@ def entries(path):
             result.setdefault(entry, {})[leaf] = (kind, digest)
     return result
 old, new = (entries(path) for path in sys.argv[1:3])
+replacements = []
 for entry in old.keys() & new.keys():
-    for leaf in ('gitdir', 'commondir', 'config.worktree'):
-        if old[entry].get(leaf) != new[entry].get(leaf):
-            raise SystemExit(1)
+    if old[entry].get('config.worktree') != new[entry].get('config.worktree'):
+        raise SystemExit(1)
+    if any(old[entry].get(leaf) != new[entry].get(leaf) for leaf in ('gitdir', 'commondir')):
+        # Shell validates the old checkout's disappearance and the new managed
+        # checkout's reciprocal identity before this slot can be reused.
+        replacements.append(entry[len('worktrees/'):])
+with open(sys.argv[4], 'w') as handle:
+    handle.write(''.join(entry + '\n' for entry in sorted(replacements)))
 for entry in new.keys() - old.keys():
     if 'config.worktree' in new[entry]:
         raise SystemExit(1)
@@ -1814,6 +1831,28 @@ with open(sys.argv[3], 'w') as handle:
         for entry in sorted(old.keys() ^ new.keys()):
             handle.write(('added ' if entry in new else 'removed ') + entry[len('worktrees/'):] + '\n')
 PY
+  : > "$before/gitmeta-managed-replaced"
+  while IFS= read -r entry; do
+    entry="${entry//$'\r'/}"
+    if ! grep -Fxq "worktrees/$entry" "$before/gitmeta-exempt"; then
+      grep -Fxq "worktrees/$entry" "$before/gitmeta-residue" || return 1
+    fi
+    receipt="$before/foreign-worktrees/$entry"
+    [ -f "$receipt/physical" ] && [ -f "$receipt/gitdir" ] || return 1
+    physical="$(cat "$receipt/physical")"
+    physical="${physical//$'\r'/}"
+    [ ! -e "$physical" ] && [ ! -L "$physical" ] || return 1
+    oms_worker_path_is_managed_foreign_worktree "$physical" "$worker" 1 || return 1
+    # Bind the saved checkout identity to the protected baseline admin bytes.
+    grep -Fxq "worktree worktrees/$entry/gitdir $(oms_sha256_file "$receipt/gitdir")" \
+      "$before/gitmeta" || return 1
+    oms_worker_gitmeta_is_live_managed_worktree "$repo" "$common/worktrees/$entry/gitdir" "$worker" kept || return 1
+    head="$(sed -n '1p' "$common/worktrees/$entry/HEAD")"
+    head="${head//$'\r'/}"
+    case "$head" in ""|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#head}" = 40 ] || [ "${#head}" = 64 ] || return 1
+    printf 'worktrees/%s\n' "$entry" >> "$before/gitmeta-managed-replaced"
+  done < "$before/gitmeta-replacement-candidates"
   while IFS= read -r entry; do
     entry="${entry//$'\r'/}"
     if oms_worker_gitmeta_is_foreign_worktree "$repo" "$common/worktrees/$entry" "$worker"; then
@@ -2473,9 +2512,11 @@ for base, dirs, files in os.walk(root):
                      and not (base == root and d == "delegations")
                      # Canonical sync admission and call holders have the same
                      # ephemeral lifecycle as delegation liveness markers.
-                     and not (base == os.path.join(root, "locks") and d in (
+                     and not (base == os.path.join(root, "locks") and (d in (
                          "canonical-sync.d", "canonical-sync.gate",
-                         "canonical-sync.gate.reclaim-queue")))
+                         "canonical-sync.gate.reclaim-queue")
+                         # A call entry is staged here, then renamed into canonical-sync.d.
+                         or d.startswith(".canonical-call."))))
     for name in sorted(files):
         path = os.path.join(base, name)
         rel = os.path.relpath(path, root).replace(os.sep, "/")

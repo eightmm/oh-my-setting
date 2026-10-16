@@ -22,14 +22,16 @@ oms_canonical_sync_gate() {  # REPO COMMAND ARGS...
 }
 
 oms_canonical_call_register() {  # ENTRY OWNER PID START
-  local entry="$1" owner="$2" pid="$3" start="$4"
-  mkdir "$entry" || return 2
-  # Registration and scanning are serialized, so incomplete entries are never
-  # mistaken for expired holders. A crash with partial metadata blocks safely.
-  if ! { printf '%s\n' "$owner" > "$entry/owner" &&
-    printf '%s\n' "$pid" > "$entry/pid" &&
-    printf '%s\n' "$start" > "$entry/process-start"; }; then
-    rm -rf -- "$entry"
+  local entry="$1" owner="$2" pid="$3" start="$4" pending
+  [ ! -e "$entry" ] && [ ! -L "$entry" ] || return 2
+  # Stage outside the scanned registry. A crash before publication leaves no
+  # live entry; after rename the complete PID-generation identity is visible.
+  pending="$(mktemp -d "${entry%/*}/../.canonical-call.XXXXXX")" || return 2
+  if ! { printf '%s\n' "$owner" > "$pending/owner" &&
+    printf '%s\n' "$pid" > "$pending/pid" &&
+    printf '%s\n' "$start" > "$pending/process-start" &&
+    mv "$pending" "$entry"; }; then
+    rm -rf -- "$pending"
     return 2
   fi
 }

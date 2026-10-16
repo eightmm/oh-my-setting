@@ -60,6 +60,8 @@ no_change=0
 ARTIFACT_DIR=""
 APPLY=0
 ALLOW_RESTRUCTURE=0
+ALLOW_VERIFIER_CHANGE=0
+ALLOW_TEST_REDUCTION=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=0
 INCLUDE_TASK=1
@@ -167,6 +169,10 @@ Options:
   --allow-restructure  Forward to the landing gate: permit an unscoped patch
                        that adds top-level files or moves files across
                        directories (normally rejected by the structural floor).
+  --allow-verifier-change  Forward explicit consent to change verifier files;
+                       the landing gate still runs the base verification floor.
+  --allow-test-reduction  Forward explicit consent to reduce test assertions;
+                       the landing gate still runs the base verification floor.
   --keep-worktree      Keep the worktree for manual inspection.
   --memory             Attach shared harness memory.
   --task               Attach the active task packet (default for writes).
@@ -354,6 +360,8 @@ while [ "$#" -gt 0 ]; do
       APPLY=1
       shift
       ;;
+    --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
+    --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
     --allow-restructure)
       ALLOW_RESTRUCTURE=1
       shift
@@ -1053,6 +1061,11 @@ write_minimal_change_doctrine() {
   fi
   write_minimal_change_doctrine
   printf '\n'
+  if [ "$APPLY" = 1 ]; then
+    printf 'Automatic apply uses patch-land admission: verifier edits and test reductions require explicit caller consent; the base verification floor remains mandatory.\n'
+    printf 'Admission consent: verifier-change=%s test-reduction=%s restructure=%s\n\n' \
+      "$ALLOW_VERIFIER_CHANGE" "$ALLOW_TEST_REDUCTION" "$ALLOW_RESTRUCTURE"
+  fi
   ma_write_harness_context "$delegate_worktree_repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$PROMPT"
   ma_write_thread_context "$REPO" "$THREAD_ID"
   if [ -n "$role_file" ]; then
@@ -1860,7 +1873,7 @@ run_verify() {
     verify_status=125
     return 0
   fi
-  if ! worker_worktree_require_identity "verification"; then
+  if ! worker_protected_boundary_check || ! worker_worktree_require_identity "verification"; then
     worker_status=125
     verify_status=125
     route_retry_terminal=1
@@ -1892,14 +1905,13 @@ run_verify() {
   set -e
   stop_verify_heartbeat
   verify_child_status="$verify_status"
-  if [ -n "$worker_guard_dir" ] && ! worker_execution_boundary_check; then
-    worker_boundary_failed=1
+  if [ -n "$worker_guard_dir" ] && ! worker_protected_boundary_check; then
     worker_status=125
     verify_status=125
     route_retry_terminal=1
     KEEP_WORKTREE=1
     cat "$verify_out" >> "$artifact"
-    printf '\n- verify exit: %s\n- post-verify Git execution boundary: blocked\n' \
+    printf '\n- verify exit: %s\n- post-verify protected boundary: blocked\n' \
       "$verify_child_status" >> "$artifact"
     return 0
   fi
@@ -2139,6 +2151,22 @@ if [ -n "$worker_guard_dir" ]; then
   worker_guard_identity_valid=1
   OMS_WRITE_POST_ATTEMPT_GUARD_FN=worker_execution_boundary_check
 fi
+worker_hard_surface_changed=""
+worker_protected_boundary_check() {
+  local changed surface
+  [ -n "$worker_guard_dir" ] || return 0
+  if ! worker_worktree_require_identity "protected boundary" || ! worker_execution_boundary_check; then
+    worker_boundary_failed=1
+    return 2
+  fi
+  changed="$(worker_protected_surface_diff)" || { worker_boundary_failed=1; return 2; }
+  for surface in $(printf "%s" "$changed" | tr "," " "); do
+    if ! oms_worker_surface_is_soft "$surface" || [ "${OMS_WORKER_GUARD_STRICT:-0}" = 1 ]; then
+      worker_hard_surface_changed="${worker_hard_surface_changed:+$worker_hard_surface_changed, }$surface"
+    fi
+  done
+  [ -z "$worker_hard_surface_changed" ]
+}
 conversation_boundary_check() {
   local changed surface
   worker_worktree_require_identity "conversation boundary" || return 2
@@ -2180,11 +2208,11 @@ if [ -n "$worker_guard_dir" ]; then
   # status/diff/ls-files before this raw comparison would execute the planted
   # command with parent authority. Bind config bytes and the index before
   # capturing either checkout.
-  if ! worker_execution_boundary_check; then
-    worker_boundary_failed=1
+  if ! worker_protected_boundary_check; then
+    route_retry_terminal=1
   fi
 fi
-if [ "$worker_boundary_failed" = 1 ]; then
+if [ "$worker_boundary_failed" = 1 ] || [ -n "$worker_hard_surface_changed" ]; then
   worker_status=125
   route_retry_terminal=1
   KEEP_WORKTREE=1
@@ -2225,8 +2253,8 @@ if [ -n "$VERIFY_CMD" ]; then
     # Empty is not run; receipts must not claim a successful verification.
     verify_status=""
     printf 'DRY RUN: verify skipped.\n' >> "$artifact"
-  elif [ "$worker_boundary_failed" = 1 ]; then
-    printf 'SKIPPED: worker changed Git execution config/index state.\n' >> "$artifact"
+  elif [ "$worker_boundary_failed" = 1 ] || [ -n "$worker_hard_surface_changed" ]; then
+    printf 'SKIPPED: worker failed protected-boundary checks.\n' >> "$artifact"
     verify_status=125
   elif [ "$INTERACTIVE" = 1 ] && [ "$worker_status" -ne 0 ]; then
     printf 'SKIPPED: conversation did not finish successfully.\n' >> "$artifact"
@@ -2347,6 +2375,13 @@ if [ "$DRY_RUN" != "1" ]; then
   while [ "$repair_used" -lt "$REPAIR" ] && [ "$repair_replay_stop" = 0 ] &&
       [ "$route_retry_terminal" = 0 ] && [ "$worker_status" -ne 126 ] && [ "$worker_status" -ne 127 ] &&
       { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
+    if ! worker_protected_boundary_check; then
+      worker_status=125
+      verify_status=125
+      route_retry_terminal=1
+      KEEP_WORKTREE=1
+      break
+    fi
     repair_used=$((repair_used + 1))
     write_repair_prompt "$repair_prompt_file"
     [ "$repair_used" -lt 2 ] || advise_after_repeated_failure "$repair_prompt_file"
@@ -2374,8 +2409,7 @@ if [ "$DRY_RUN" != "1" ]; then
       printf '\n\n### Output\n\n'
     } >> "$artifact"
     run_worker "$repair_prompt_file"
-    if ! worker_execution_boundary_check; then
-      worker_boundary_failed=1
+    if ! worker_protected_boundary_check; then
       worker_status=125
       verify_status=125
       route_retry_terminal=1
@@ -2411,6 +2445,12 @@ if [ -n "$worker_guard_dir" ]; then
     worker_guard_changed="execution-state"
   else
     worker_guard_changed="$(worker_protected_surface_diff)"
+    for guard_surface in $(printf "%s" "$worker_hard_surface_changed" | tr "," " "); do
+      case ", $worker_guard_changed, " in
+        *", $guard_surface, "*) ;;
+        *) worker_guard_changed="${worker_guard_changed:+$worker_guard_changed, }$guard_surface" ;;
+      esac
+    done
   fi
   if ! worker_worktree_require_identity "final worker guard"; then
     worker_guard_identity_valid=0
@@ -2470,7 +2510,8 @@ if [ -n "$worker_guard_dir" ]; then
       [ ! -s "$worker_guard_dir/worktree-identity-detail" ] ||
         printf -- '- worktree identity: %s\n' \
           "$(tr '\n' ';' < "$worker_guard_dir/worktree-identity-detail")"
-      printf -- '- worktree kept for inspection\n'
+      # Recovery must bind the retained path to the indexed artifact digest.
+      printf -- '- worktree: %s\n' "$worktree"
     } >> "$artifact"
     echo "error: $TO changed protected state outside its worktree: $worker_guard_changed" >&2
     if [ -s "$worker_guard_dir/state-detail" ]; then
@@ -2690,6 +2731,8 @@ elif [ "$APPLY" = 1 ]; then
     [ -n "$VERIFY_CMD" ] && land_args+=(--verify "$VERIFY_CMD")
     [ -n "$PLAN_TASK_ID" ] && land_args+=(--plan-task "$PLAN_TASK_ID")
     [ "$ALLOW_RESTRUCTURE" = 1 ] && land_args+=(--allow-restructure)
+    [ "$ALLOW_VERIFIER_CHANGE" = 1 ] && land_args+=(--allow-verifier-change)
+    [ "$ALLOW_TEST_REDUCTION" = 1 ] && land_args+=(--allow-test-reduction)
     if OMS_HARNESS_DELEGATE_DEPTH="$DELEGATE_DEPTH" bash "$land_script" "${land_args[@]}" >/dev/null; then
       applied=1
     else

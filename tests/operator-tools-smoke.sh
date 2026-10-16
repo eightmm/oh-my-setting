@@ -4956,6 +4956,50 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
     finally:
         pointer.write_bytes(pointer_before)
 # The generated binary patch restores exact bytes through Git's normal apply path.
+# Standalone calls have no room launch; explicit attempt + hashed index evidence
+# binds their stopped checkout to this execution repository without a room bypass.
+standalone_artifact = '.oms/artifacts/delegate/stopped.md'
+standalone_body = ('- worktree: ' + str(salvage_tree) + '\n').encode()
+standalone_path = salvage_execution_repo / standalone_artifact
+standalone_path.parent.mkdir(parents=True)
+standalone_path.write_bytes(standalone_body)
+standalone_attempt = dict(attempt_id='att_standalone', tool='peer-delegate', terminal=True,
+                          reason_code='worker_authority_violation', refs={})
+standalone_record = dict(kind='delegate', attempt_id='att_standalone', exit=1,
+                        artifact=standalone_artifact,
+                        artifact_sha256=hashlib.sha256(standalone_body).hexdigest(),
+                        base_sha=panel_salvage._read(panel_salvage._git_directory(salvage_tree), 'HEAD').decode().strip()[:12])
+def standalone_query(repo, verb, *args):
+    return [standalone_attempt] if verb == 'agent-events' else {'rows': [standalone_record]}
+with patch.dict(os.environ, dict(salvage_env, OMS_ROOM_ID='', OMS_ROOM_REPO='')), \
+        patch.object(panel_results, '_query', side_effect=standalone_query), \
+        patch.object(panel_salvage.dispatch_supervisor, 'read', side_effect=AssertionError('standalone read room launch')):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert panel_salvage.cli_main(['--repo', str(salvage_execution_repo), '--attempt',
+                                      'att_standalone', '--artifact', standalone_artifact, '--json']) == 0
+    standalone = json.loads(output.getvalue())
+    assert standalone['salvaged_from']['attempt'] == 'att_standalone'
+    assert Path(standalone['patch_path']).is_relative_to(salvage_execution_repo)
+    assert not trap_file.exists() and index_path.read_bytes() == index_before
+    for mapping, values, message in (
+            (standalone_attempt, {'terminal': False}, 'stopped delegate'),
+            (standalone_attempt, {'refs': {'panel_room_id': 'room-fixture'}}, 'room delegates'),
+            (standalone_record, {'artifact_sha256': '0' * 64}, 'digest'),
+            (standalone_record, {'attempt_id': 'att_unrelated'}, 'matching failed'),
+            (standalone_record, {'base_sha': '0' * 12}, 'recorded base'),
+            (standalone_record, {'task_id': 'other-task'}, 'matching failed')):
+        with patch.dict(mapping, values):
+            try:
+                panel_salvage.salvage(salvage_execution_repo, attempt_id='att_standalone',
+                                      artifact=standalone_artifact)
+            except ValueError as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError('unbound standalone recovery accepted: ' + message)
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert panel_salvage.cli_main(['--repo', str(salvage_execution_repo), '--attempt', 'att_standalone']) == 2
+
 for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
     subprocess.run(['git', '-C', str(salvage_execution_repo), 'config', '--unset', key], check=True)
 subprocess.run(['git', '-C', str(salvage_repo), 'apply', '--check', '--binary', str(saved_patch)], check=True)
@@ -5477,6 +5521,7 @@ run_verify_with_timeout() {
 worker_worktree_require_identity() { return 0; }
 delegate_attempt_transition() { return 0; }
 worker_execution_boundary_check() { test -f "$worker_guard_dir/snapshot"; }
+worker_protected_boundary_check() { worker_execution_boundary_check; }
 worker_status=0 worker_attempt_owned=1 WORKER_ACCESS=write
 worker_attempt_id=fixture VERIFY_CMD=fixture
 run_verify

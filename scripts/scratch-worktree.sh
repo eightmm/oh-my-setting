@@ -9,6 +9,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/lib/harness-residue.sh
 . "$ROOT/scripts/lib/harness-residue.sh"
+# shellcheck source=scripts/lib/oms-common.sh
+. "$ROOT/scripts/lib/oms-common.sh"
 
 PREFIX=oh-my-setting-scratch
 
@@ -137,7 +139,8 @@ cmd_add() {
   local sha="" parent="" parent_physical="" worktree="" old_umask
 
   if [ -n "$OWNER_PID" ]; then
-    case "$OWNER_PID" in *[!0-9]*) fail "--owner-pid must be a process id: $OWNER_PID" ;; esac
+    oms_worker_marker_pid_is_positive_decimal "$OWNER_PID" ||
+      fail "--owner-pid must be a positive process id: $OWNER_PID"
     [ "$OWNER_PID" != "$$" ] || fail "--owner-pid must outlive this command"
   else
     OWNER_PID="$(default_owner_pid)" ||

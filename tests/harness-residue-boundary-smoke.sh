@@ -30,6 +30,16 @@ git -C "$repo" add file.txt
 git -C "$repo" commit -qm base
 git -C "$repo" worktree add --detach "$victim" HEAD >/dev/null 2>&1
 
+# Reject process-group PIDs before creating a scratch root or registration.
+for invalid_pid in 0 00 000; do
+  if OMS_HARNESS_CHILD=0 OMS_HARNESS_DELEGATE_DEPTH=0 \
+    bash "$ROOT/scripts/scratch-worktree.sh" add --repo "$repo" --owner-pid "$invalid_pid" > "$TMP/invalid-pid" 2>&1; then
+    fail "scratch accepted process-group pid $invalid_pid"
+  fi
+  grep -Fq 'positive process id' "$TMP/invalid-pid" || fail "scratch PID refusal is unclear"
+  [ ! -e "$XDG_CACHE_HOME/oh-my-setting/worktrees" ] || fail "invalid PID created scratch root"
+done
+
 # The residue directory is worker-writeable. A planted marker must never turn
 # an unrelated registered worktree into git-worktree-remove's target.
 planted="$TMPDIR/oh-my-setting-delegate.planted"

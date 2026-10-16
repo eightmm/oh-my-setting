@@ -5203,15 +5203,33 @@ test_delegate_fake_worker_apply() {
   local home_dir="$TMP/delegate-apply-home"
 
   make_committed_repo "$project"
+  mkdir -p "$project/tests"
+  printf 'assert() { test -f file.txt; }\nassert\nassert\n' > "$project/tests/verify.sh"
+  git -C "$project" add tests/verify.sh
+  git -C "$project" commit -qm 'verification fixture'
   git -C "$project" config diff.noprefix true
   mkdir -p "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'hello from worker\n' > delegated.txt
+printf 'assert() { test -f file.txt; }\nassert\n' > tests/verify.sh
 echo "worker done"
 EOF
   chmod +x "$bin_dir/codex"
+
+  local consent out
+  for consent in none --allow-verifier-change --allow-test-reduction; do
+    local -a consent_args
+    consent_args=()
+    [ "$consent" = none ] || consent_args=("$consent")
+    out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+      --artifact-dir "$artifact_dir" --apply --allow-restructure \
+      --verify "bash tests/verify.sh" ${consent_args[@]+"${consent_args[@]}"} --prompt "Create delegated file" 2>&1)" || true
+    [ ! -f "$project/delegated.txt" ] || fail "apply bypassed missing consent ($consent): $out"
+    contains "$out" 'patch-land rejected' || fail "missing consent did not reach admission: $out"
+  done
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
@@ -5219,7 +5237,8 @@ EOF
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --apply \
-    --allow-restructure \
+    --allow-restructure --allow-verifier-change --allow-test-reduction \
+    --verify "bash tests/verify.sh" \
     --prompt "Create delegated file" >/dev/null
 
   [ -f "$project/delegated.txt" ] || fail "applied patch should create delegated.txt in main tree"
@@ -26266,6 +26285,41 @@ EOF
   [ ! -e "$marker" ] || fail "verifier-planted diff.external ran before repair"
   contains "$out" 'execution-state' ||
     fail "verifier config violation did not name the boundary: $out"
+  # Hard shared-state changes must stop before verification or another paid turn.
+  local phase counter="$TMP/hard-boundary-count" verify_count="$TMP/hard-verify-count"
+  for phase in worker verify repair; do
+    local fixture="$TMP/hard-boundary-$phase" expected=1
+    make_committed_repo "$fixture"
+    rm -f "$counter" "$verify_count"
+    cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}:\${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+cat >/dev/null
+n=0; [ ! -f "$counter" ] || n=\$(cat "$counter")
+n=\$((n + 1)); printf '%s\\n' "\$n" > "$counter"
+printf 'worker edit\\n' >> file.txt
+if [ "$phase" = worker ] || { [ "$phase" = repair ] && [ "\$n" = 2 ]; }; then
+  printf 'forbidden\\n' >> "$fixture/.git/info/exclude"
+fi
+echo done
+exit 1
+EOF
+    chmod +x "$bin_dir/codex"
+    rc=0
+    out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-delegate.sh" --repo "$fixture" --to codex --prompt x --repair 2 \
+      --verify "echo verify >> \"$verify_count\"; if [ \"$phase\" = verify ]; then echo forbidden >> \"$fixture/.git/info/exclude\"; fi; false" 2>&1)" || rc=$?
+    [ "$phase" != repair ] || expected=2
+    [ "$rc" != 0 ] && [ "$(cat "$counter")" = "$expected" ] ||
+      fail "hard boundary spent extra repair budget ($phase): $out"
+    if [ "$phase" = worker ]; then
+      [ ! -e "$verify_count" ] || fail "invalid worker reached verification"
+    else
+      [ "$(wc -l < "$verify_count" | tr -d " ")" = 1 ] || fail "invalid repair reached verification"
+    fi
+    contains "$out" 'outside its worktree: gitmeta' || fail "hard surface lost its identity: $out"
+  done
+
 }
 
 test_delegate_allows_worker_staging_without_hidden_index_flags() {
@@ -26527,6 +26581,24 @@ lock.mkdir()
 result = run_sync()
 assert result.returncode == 0 and not lock.exists(), result.stdout
 identity.communicate('\n', timeout=10)
+# Crash before atomic publication leaves staging outside the live registry.
+register = '''. "$1/scripts/lib/canonical-sync.sh"
+mv() { kill -KILL "$$"; }
+oms_canonical_call_register "$2/.oms/locks/canonical-sync.d/interrupted" owner "$$" generation
+'''
+crashed = subprocess.run(['bash', '-c', register, 'bash', str(root), str(repo)],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+assert crashed.returncode != 0 and not (lock.parent / 'interrupted').exists()
+assert list(lock.parent.parent.glob('.canonical-call.*')), 'crash did not reach staged registration'
+# Another worker's guard must not record staging that a rename later removes.
+staged_snapshot = repo.parent / 'staged-call-snapshot'
+staged_snapshot.mkdir(exist_ok=True)
+subprocess.run(['bash', '-c', '. "$1/scripts/lib/oms-common.sh"; oms_worker_surface_snapshot "$2" "$3"',
+                'observer', str(root), str(repo), str(staged_snapshot)], check=True)
+assert '.canonical-call.' not in (staged_snapshot / 'omsstate').read_text(), 'guard snapshot saw call staging'
+result = run_sync()
+assert result.returncode == 0, result.stdout
+
 # Partial owners fail closed, including arbitrarily old entries.
 lock.mkdir()
 (lock / 'started').write_text('1\n')
@@ -28166,10 +28238,38 @@ test_worker_guard_sees_object_store_and_metadata_writes() {
 
   local excl="$TMP/guard-exclude"
   make_guard_repo "$excl"
-  result="$(run_guarded_worker "$excl" "printf 'drop\n' >> $excl/.git/info/exclude")"
+  local recovery_root="$TMP/guard-exclude-worktrees"
+  local recovery_body="printf 'recoverable worker edit\\n' >> file.txt
+printf 'drop\\n' >> $excl/.git/info/exclude"
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$recovery_root" run_guarded_worker "$excl" "$recovery_body")"
   [ "${result%%	*}" != 0 ] || fail "editing .git/info/exclude should fail the run"
   contains "$result" 'gitmeta' ||
     fail "an exclude-file edit should be named: $result"
+  # Exercise real failed-attempt/index evidence, without --keep-worktree or mocks.
+  OMS_DELEGATE_WORKTREE_ROOT="$recovery_root" python3 - "$ROOT/scripts/lib" "$excl" <<'PYTEST' ||
+import contextlib, hashlib, io, json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import panel_results, panel_salvage
+repo = Path(sys.argv[2])
+rows = panel_results._query(repo, 'artifact-index', 'list', '1000000')['rows']
+record, = [row for row in rows if row['kind'] == 'delegate']
+body = (repo / record['artifact']).read_bytes()
+attempt, = [a for a in panel_results._query(repo, 'agent-events', 'list')
+            if a['attempt_id'] == record['attempt_id']]
+assert attempt['task_id'] == '' and 'task_id' not in record, 'fixture has a linked task'
+assert b'- worktree: temporary (removed after run)' in body, 'fixture opted into retention'
+assert hashlib.sha256(body).hexdigest() == record['artifact_sha256']
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    assert panel_salvage.cli_main(['--repo', str(repo), '--attempt', record['attempt_id'],
+                                  '--artifact', record['artifact'], '--json']) == 0
+salvaged = json.loads(output.getvalue())
+assert {item['path'] for item in salvaged['files']} == {'file.txt'}, salvaged
+assert b'+recoverable worker edit' in Path(salvaged['patch_path']).read_bytes()
+assert Path(salvaged['salvaged_from']['kept_path']).is_dir()
+PYTEST
+    fail "default guard retention did not produce recoverable indexed evidence"
 }
 
 test_worker_guard_rejects_duplicate_live_managed_worktree_metadata() {
@@ -28561,6 +28661,40 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   contains "$result" 'during this run: kept-sibling' ||
     fail "a late kept sibling should be reported as a soft change: $result"
 
+  # Same wave: one live sibling disappears while another finishes kept.
+  local wave="$project-wave" gone="$managed_root/oh-my-setting-delegate.gone"
+  local wave_kept="$managed_root/oh-my-setting-delegate.wave"
+  make_guard_repo "$wave"
+  make_live_managed_sibling "$wave" "$gone"
+  local old_metadata
+  old_metadata="$(git -C "$gone/wt" rev-parse --git-dir)"
+  local wave_body="git -C $wave worktree remove --force $gone/wt && rm -rf $gone
+mkdir -p $wave_kept && git -C $wave worktree add --quiet --detach $wave_kept/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$wave\\nworktree=$wave_kept/wt\\ntemporary=1\\n' > $wave_kept/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$wave" "$managed_root" "$wave_body" --allow-no-change)"
+  [ "${result%%	*}" = 0 ] || fail "mixed sibling removal/kept creation must pass: $result"
+  contains "$result" 'kept-sibling' || fail "mixed wave lost kept-sibling classification: $result"
+  [ "$(git -C "$wave_kept/wt" rev-parse --git-dir)" = "$old_metadata" ] ||
+    fail "mixed-wave fixture did not reuse the deleted registration slot"
+  local invalid bad bad_gone bad_kept bad_metadata bad_body
+  for invalid in surviving-checkout executable-config; do
+    bad="$project-$invalid"; bad_gone="$gone-$invalid"; bad_kept="$wave_kept-$invalid"
+    make_guard_repo "$bad"
+    make_live_managed_sibling "$bad" "$bad_gone"
+    bad_metadata="$(git -C "$bad_gone/wt" rev-parse --git-dir)"
+    bad_body="git -C $bad worktree remove --force $bad_gone/wt && rm -rf $bad_gone
+mkdir -p $bad_kept && git -C $bad worktree add --quiet --detach $bad_kept/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$bad\\nworktree=$bad_kept/wt\\ntemporary=1\\n' > $bad_kept/.oh-my-setting-tmp"
+    if [ "$invalid" = surviving-checkout ]; then
+      bad_body="$bad_body
+mkdir -p $bad_gone/wt"
+    else
+      bad_body="$bad_body
+printf '[core]\\nfsmonitor=unsafe\\n' > $bad_metadata/config.worktree"
+    fi
+    result="$(run_delegate_beside_sibling "$bad" "$managed_root" "$bad_body" --allow-no-change)"
+    [ "${result%%	*}" != 0 ] || fail "unproven slot replacement passed ($invalid): $result"
+    contains "$result" 'outside its worktree: gitmeta' || fail "slot rejection lost gitmeta: $result"
+  done
+
   make_guard_repo "$project-strict"
   result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-strict" "$managed_root" \
     "${body//$project/$project-strict}" --allow-no-change)"
@@ -28613,7 +28747,7 @@ test_worker_guard_softens_cleanup_of_a_dead_kept_sibling() {
   local probe='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'
 
   dead_pid="$(sh -c 'echo $$')"
-  for p in "$project" "$project-strict" "$project-partial"; do
+  for p in "$project" "$project-strict" "$project-partial" "$project-reused"; do
     make_guard_repo "$p"
     make_live_managed_sibling "$p" "$sibling_parent${p#"$project"}"
     printf 'kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
@@ -28627,6 +28761,18 @@ git -C $project worktree remove --force $sibling_parent/wt && rm -rf $sibling_pa
     fail "cleanup of a dead kept sibling must not fail the run: $result"
   contains "$result" 'during this run: sibling-cleanup' ||
     fail "cleanup of a dead kept sibling should be reported softly: $result"
+
+  # Cleanup can free the same registry slot for another stopped delegate.
+  local replacement="$managed_root/oh-my-setting-delegate.replacement" previous_metadata reuse_body
+  previous_metadata="$(git -C "$sibling_parent-reused/wt" rev-parse --git-dir)"
+  reuse_body="$probe
+git -C $project-reused worktree remove --force $sibling_parent-reused/wt && rm -rf $sibling_parent-reused
+mkdir -p $replacement && git -C $project-reused worktree add --quiet --detach $replacement/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project-reused\\nworktree=$replacement/wt\\ntemporary=1\\n' > $replacement/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project-reused" "$managed_root" "$reuse_body")"
+  [ "${result%%	*}" = 0 ] || fail "cleanup then reuse of an already-kept slot must pass: $result"
+  contains "$result" 'kept-sibling' || fail "kept replacement lost its classification: $result"
+  [ "$(git -C "$replacement/wt" rev-parse --git-dir)" = "$previous_metadata" ] ||
+    fail "kept replacement fixture did not reuse the registration slot"
 
   result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-strict" "$managed_root" \
     "$probe
