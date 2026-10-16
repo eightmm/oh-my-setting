@@ -597,7 +597,14 @@ with patch.dict(os.environ, coord_env), patch.object(hook_state.subprocess, "run
         host_identity["room"] = target
         assert hook_state.coordination_room(payload("coord-native")) is None, "coordination accepted mismatched " + case
     host_identity["room"] = "coord-target"
-    room.append(repo, "coord-target", {"kind": "leave", "participant": "coord-reader"}, "Reader left coordination")
+    try:
+        room.append(repo, "coord-target", {"kind": "leave", "participant": "coord-reader"}, "Reader left coordination")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("primary-room binding authorized a coordination-room departure")
+    with patch.dict(os.environ, {"OMS_ROOM_ID": "coord-target"}):
+        room.append(repo, "coord-target", {"kind": "leave", "participant": "coord-reader"}, "Reader left coordination")
     assert hook_state.coordination_room(payload("coord-native")) is None, "departed coordination receiver remained bound"
     # The bound room rolls over: the inherited old id resolves to the successor, whose tmux id is not a second
     # coordination room; the cursor restarts there and the first delivery says once why the id changed.
@@ -1221,7 +1228,8 @@ os.environ["OMS_ROOM_PARTICIPANT"] = "provider-mismatch"
 room.send(repo, "binding-room", "fresh-main", "provider-mismatch", "Only the enrolled provider may read this", message_id="provider-only")
 assert not hook_state.live_thread_hint(payload("not-a-codex-session")), "wrong provider consumed an explicitly addressed message"
 assert not room.participant(room.status(repo, "binding-room"), "provider-mismatch").get("consumer")
-room.append(repo, "binding-room", {"kind": "leave", "participant": "codex-main"}, "Codex fixture main left")
+with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": "codex-main"}):
+    room.append(repo, "binding-room", {"kind": "leave", "participant": "codex-main"}, "Codex fixture main left")
 for key in ("OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_ROOM_REPO", "OMS_HOOK_AGENT"):
     os.environ.pop(key)
 room.append(repo, "binding-room", {"kind": "leave", "participant": "fresh-main"}, "Explicit subscription change")
