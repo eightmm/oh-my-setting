@@ -827,14 +827,14 @@ def without_now(text):
     return re.sub(r"^(?:now\s*[:·-]\s*)+", "", text, flags=re.I)
 
 
-def declared_status(room, participant, width):
-    """The main's declared task with its recorded clock and a stale marker after 30 minutes."""
+def declared_status(room, participant, width, activity_since=None):
+    """The main's declared task with its recorded clock and a marker for prolonged unreported work."""
     found = mapping(mapping(room.get("statuses")).get(participant))
     text = without_now(readable(found.get("text"), " "))
     try:
         then = calendar.timegm(time.strptime(str(found.get("ts")), "%Y-%m-%dT%H:%M:%SZ"))
         stamp = time.strftime("%H:%M", time.localtime(then))
-        stale = " (stale)" if time.time() - then > 1800 else ""
+        stale = " (stale)" if type(activity_since) in (int, float) and activity_since - then > 1800 else ""
     except ValueError:
         stamp, stale = "", ""
     lines = wrapped("Now: " + text + (" (" + stamp + ")" if stamp else "") + stale, width, 2) if text else []
@@ -1395,9 +1395,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         awaiting_tasks, ended_tasks = held_split(report, members)
         current = [t for t in held if t.get("id") not in awaiting_tasks | ended_tasks]
         lead = (current or held)[0] if held else {}
-        task = primary.get("task_id") or lead.get("id") or primary.get("title") or "no status yet"
-        if task == "Native task not recorded":
-            task = "no status yet"
+        title = primary.get("title")
+        task = (primary.get("task_id") or lead.get("id")
+                or (title if title and title != "Native task not recorded" else "none claimed"))
         if lead:
             word = "awaiting decision" if lead.get("id") in awaiting_tasks else "worker ended" if lead.get("id") in ended_tasks else "in review" if lead.get("state") == "review" else clean(lead.get("state"))
             task += " · " + word
@@ -1407,7 +1407,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if waiting:
                 task += " · %s awaiting decision" % waiting
         content = [status, "Task: " + clean(task)]
-        latest = declared_status(room, primary["participant"], main_width - 4)
+        # Only a main still working long after its last declaration is stale; an idle main is not.
+        activity_since = time.time() if main_state(primary) == "working" else None
+        latest = declared_status(room, primary["participant"], main_width - 4, activity_since)
         latest_text = " ".join(latest) if latest else "No latest statement recorded"
         stale = " (stale)" if any("(stale)" in line for line in latest) else ""
         def statement(span):

@@ -15503,7 +15503,7 @@ ended_pairs = {"room": {"pairs": [{"recipient": who, "pending": n} for who, n in
 ended_pairs["room"]["messages"] = [{"pending_for": ["ur", "ub"]}, {"pending_for": ["uw", "um"]},
                                      {"pending_for": ["uw"]}, {"pending_for": ["um"]}]
 assert graph_text.live_unread(ended_pairs, ended_members, lambda m: False) == 3
-assert "no status yet" in picture and "Latest sent" not in picture, picture
+assert "Task: none claimed" in picture and "Latest sent" not in picture, picture
 assert "explorer" not in picture and "Past work" not in picture and "Past 1" in picture, picture
 pic_rows = picture.splitlines()
 goal_at = next(i for i, line in enumerate(pic_rows) if line.startswith("╭─ Goal"))
@@ -15524,12 +15524,19 @@ landing["land"]["active"] = False
 assert "LANDING" not in render(landing, "codex", 157, 34, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
 declared_board = deepcopy(counted)
 declared_board["room"]["statuses"] = {"flow-main": {"text": "Fixing the parser", "ts": "2026-10-07T09:05:00Z", "seq": 3}}
+declared_board["main_activity"] = {"flow-main": {"state": "idle", "since": time.time() - 60}}
 declared_picture = render(declared_board, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                  navigation={"dismissed": True})
-assert "Now: Fixing the parser" in declared_picture and "(stale)" in declared_picture and "Latest sent:" not in declared_picture, declared_picture
+assert "Now: Fixing the parser" in declared_picture and "(stale)" not in declared_picture and "Latest sent:" not in declared_picture, declared_picture
+assert "Task: none claimed" in declared_picture, declared_picture
+working_board = deepcopy(declared_board)
+working_board["main_activity"]["flow-main"] = {"state": "working", "since": time.time() - 60}
+working_picture = render(working_board, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
+                         navigation={"dismissed": True})
+assert "Now: Fixing the parser" in working_picture and "(stale)" in working_picture, working_picture
 long_status = deepcopy(declared_board["room"])
 long_status["statuses"]["flow-main"]["text"] = "Checking the parser and cached dashboard projection for a very long declared status"
-status_rows = graph_text.declared_status(long_status, "flow-main", 28)
+status_rows = graph_text.declared_status(long_status, "flow-main", 28, time.time())
 assert len(status_rows) == 2 and "(stale)" in status_rows[-1] and all(display_width(row) <= 28 for row in status_rows), status_rows
 declared_board["plan"] = {"tasks": [
     {"id": "old", "title": "Old claim", "state": "claimed", "claimed_by": "flow-main", "claimed_at": "2026-10-10T09:00:00Z"},
@@ -15542,9 +15549,9 @@ assert "Task: current · running · +1 more running" in claimed_card and "+2 mor
 claim_detail = graph_text.detail(dict(main, title="Native task not recorded"), {}, 100, people, {}, claims=held)[0]
 assert "Task: Current claim" in claim_detail, claim_detail
 declared_board["plan"] = deepcopy(counted.get("plan", {}))
-declared_picture = render(declared_board, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
+working_picture = render(working_board, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                  navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}})
-assert re.search(r"Now: Fixing the parser \(\d\d:\d\d\) \(stale\)", declared_picture), declared_picture
+assert re.search(r"Now: Fixing the parser \(\d\d:\d\d\) \(stale\)", working_picture), working_picture
 # A board too small for the box keeps the one-row tab strip: its names switch tabs, and no hint names a closed box.
 for glyphs in (True, False):
     strips = 0
@@ -15610,7 +15617,7 @@ for columns in (139, 140, 141, 200):
     mail_drawn = render(wide_flow, "codex", columns, 44, view="graph", main_attempt="flow-attempt",
                         navigation={"band_offsets": {"detail": 99}})
     assert "CHECK FIXTURE FIRST" not in mail_drawn and "PRIVATE OTHER MAIL" not in mail_drawn and "Mail 2" in mail_drawn, mail_drawn
-    assert "no status yet" in drawn and "Native task not recorded" not in drawn
+    assert "Task: none claimed" in drawn and "Native task not recorded" not in drawn
     for hit in nav["hits"]:
         # Card hits stay inside the card; the full-width detail area is a separate target.
         if hit["action"] == ("chat", "flow-main") and hit["y"] > 6 and not hit.get("preview"):
