@@ -494,6 +494,7 @@ for verify in 'awk -f quality/oracle.awk src/value.txt' \
   'sed -f quality/oracle.sed src/value.txt | grep -qx good' \
   'sed -fquality/oracle.sed src/value.txt | grep -qx good' \
   'sed -nf quality/oracle.sed src/value.txt | grep -qx good' \
+  'sed -nfquality/oracle.sed src/value.txt | grep -qx good' \
   'sed -bf quality/oracle.sed src/value.txt | grep -qx good' \
   'jq -eR -f quality/oracle.jq src/value.txt' \
   'jq -Rf -e quality/oracle.jq src/value.txt' \
@@ -537,6 +538,12 @@ done
 for verify in 'awk -v ignored=1 src/feature.py' 'gawk -f src/feature.py' \
   'mawk -f src/feature.py' 'nawk -f src/feature.py' \
   'sed -bf src/feature.py' 'jq -Rf src/feature.py' \
+  'awk -bfsrc/feature.py' 'gawk -bf./src/feature.py' \
+  'mawk -bf src/feature.py' 'nawk -bf./src/feature.py' \
+  'sed -nf./src/feature.py' 'jq -eRf./src/feature.py' \
+  'awk --file=src/feature.py' 'gawk --file src/feature.py' \
+  'sed --file=src/feature.py' 'sed --file src/feature.py' \
+  'jq --from-file=src/feature.py' 'jq --from-file src/feature.py' \
   'sed -n p src/feature.py' 'jq . src/feature.py' \
   'cd src && sed -bf ./feature.py' 'command sed -bf src/feature.py'; do
   rc=0

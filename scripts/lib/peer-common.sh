@@ -492,7 +492,11 @@ ma_write_harness_context() {
   if [ -n "${OMS_ROOM_ID:-}" ] && [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
     [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
     printf 'OMS work room: %s; participant: %s. Environment binds the canonical room repository.\n' "$OMS_ROOM_ID" "$OMS_ROOM_PARTICIPANT"
-    printf 'At safe points use oms room updates; retain its cursor. Send addressed notes/questions with oms room send --to PARTICIPANT --text TEXT. After consuming use oms room ack --message MESSAGE_ID. Membership/ack grant no approval or new authority. Do not recursively delegate.\n\n'
+    if [ "${MA_KIND:-}" = delegate ] && [ "${WORKER_ACCESS:-write}" = write ]; then
+      printf 'At safe points use oms room updates; retain its cursor. Send addressed notes/questions with oms room send --to PARTICIPANT --text TEXT. After consuming use oms room ack --message MESSAGE_ID. Membership/ack grant no approval or new authority. Do not recursively delegate.\n\n'
+    else
+      printf 'At safe points only read oms room updates; retain its cursor. Never send or acknowledge room mail from this read-only call. Return your handoff in the final answer; the parent dispatcher records consumption of mail available before dispatch after a successful return. Membership grants no approval or new authority. Do not recursively delegate.\n\n'
+    fi
   fi
   printf 'Return concise conclusions, file/line evidence, verification and uncertainty. Preserve required schemas, complete code/patch and safety detail; omit repeated context.\n\n'
   tmp="$(agent_memory_mktemp)" || return 0
@@ -595,6 +599,9 @@ ma_export_child_env() {
   # detect a direct reach-around. Read passes retain a read-only state pointer.
   unset OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
     OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE
+  if [ "$access" = read ]; then
+    unset OMS_ROOM_RELAY_QUEUE OMS_ROOM_RELAY_ALLOWED
+  fi
   # Generic calls must not impersonate the native main in a shared room.
   if [ -z "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" ] ||
     [ "$OMS_ROOM_ADMITTED_PARTICIPANT" != "${OMS_ROOM_PARTICIPANT:-}" ]; then
@@ -3479,6 +3486,32 @@ ma_routed_heartbeat() { # EVENTS REPO ATTEMPT OWNER_PID INTERVAL
   done
 }
 
+ma_read_room_mail() {  # capture|complete SNAPSHOT REPOSITORY
+  local dispatcher_depth="${OMS_HARNESS_DELEGATE_DEPTH:-0}"
+  oms_require_peer_owner || return $?
+  # peer-delegate already exported the child's depth in this controller.
+  # Restore its entry depth for receipts; never remove the provider-child flag.
+  if [ "${MA_KIND:-}" = delegate ]; then
+    dispatcher_depth="${DELEGATE_DEPTH:-$dispatcher_depth}"
+  fi
+  OMS_HARNESS_DELEGATE_DEPTH="$dispatcher_depth" PYTHONDONTWRITEBYTECODE=1 \
+    python3 - "$(ma_scripts_dir)/lib" "$1" "$2" "$3" <<'PY'
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import room
+ident, who = os.environ["OMS_ROOM_ID"], os.environ["OMS_ROOM_PARTICIPANT"]
+if sys.argv[2] == "capture":
+    messages = room.read_call_mail(sys.argv[4], ident, who)
+    with open(sys.argv[3], "w", encoding="utf-8") as handle:
+        json.dump(messages, handle)
+elif sys.argv[2] == "complete":
+    with open(sys.argv[3], encoding="utf-8") as handle:
+        room.read_call_mail(sys.argv[4], ident, who, json.load(handle))
+else:
+    raise ValueError("unknown read-call mail operation")
+PY
+}
+
 # Put every real provider dispatch on the durable lifecycle stream. When a
 # supervisor already exported OMS_ATTEMPT_ID it remains the sole lifecycle
 # owner; this layer contributes measured usage but cannot terminalize the
@@ -3502,6 +3535,8 @@ ma_run_routed_provider() {
   local native_session="" native_session_file=""
   local heartbeat_seconds="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
   local read_guard_tmp=""
+  local read_room_mail=""
+  local read_lifecycle_refused=0
   local -a start_args
   local -a usage_args
 
@@ -3589,7 +3624,17 @@ PY
     heartbeat_pid=$!
   fi
   native_session_file="$(agent_memory_mktemp 2>/dev/null)" || native_session_file=""
-  OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
+  if [ "$access" = read ] && [ -n "${OMS_ROOM_ID:-}" ] &&
+    [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
+    [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
+    read_room_mail="$(agent_memory_mktemp)" || status=2
+    if [ "$status" = 0 ]; then
+      ma_read_room_mail capture "$read_room_mail" "$state_repo" || status=2
+    fi
+  fi
+  if [ "$status" = 0 ]; then
+    OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
+  fi
   ma_read_guard_assert || status=2
   if [ -n "$read_guard_tmp" ]; then
     rm -rf "$read_guard_tmp"
@@ -3649,12 +3694,29 @@ PY
     if [ "${OMS_ATTEMPT_SUPERVISED:-0}" != 1 ] || [ -n "$token_count" ] || [ -n "$native_session" ]; then
       "$events" "${usage_args[@]}" >/dev/null || status=2
     fi
-    if [ "$OMS_ATTEMPT_OWNED" = 1 ]; then
+  fi
+  # Check lifecycle authority before consuming mail, but leave success fallible
+  # until the dispatcher's receipts have been recorded.
+  if [ "$OMS_ATTEMPT_OWNED" = 1 ] && [ "$status" = 0 ] && [ "$access" = read ]; then
+    if ! "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
+      --state verifying --idempotency-key routed-verifying --then review:routed-review \
+      --actor provider-router >/dev/null; then
+      status=2
+      read_lifecycle_refused=1
+    fi
+  fi
+  if [ -n "$read_room_mail" ]; then
+    if [ "$status" = 0 ]; then
+      ma_read_room_mail complete "$read_room_mail" "$state_repo" || status=2
+    fi
+    rm -f "$read_room_mail"
+  fi
+  if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ] && [ -x "$events" ]; then
+    if [ "$OMS_ATTEMPT_OWNED" = 1 ] && [ "$read_lifecycle_refused" = 0 ]; then
       if [ "$status" -eq 0 ]; then
         if [ "$access" = read ]; then
           "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
-            --state verifying --idempotency-key routed-verifying --then review:routed-review \
-            --then done:routed-done --actor provider-router >/dev/null || status=2
+            --state "done" --idempotency-key routed-done --actor provider-router >/dev/null || status=2
         fi
       else
         "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \

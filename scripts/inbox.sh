@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 
-REPO="$PWD"
+REPO="${OMS_ROOM_REPO:-$PWD}"
 AS_JSON=0
 FIX_SAFE=0
 

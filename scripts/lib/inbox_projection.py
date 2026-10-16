@@ -1,8 +1,39 @@
 """Pure attention projection shared by inbox and the operator cockpit."""
 
+import calendar
 import json
 import os
+import shlex
+import subprocess
 import sys
+import time
+
+
+def pending_room_mail(repo):
+    """Read only this caller's mailbox; retain no message bodies or receipts."""
+    ident = os.environ.get("OMS_ROOM_ID")
+    who = os.environ.get("OMS_ROOM_PARTICIPANT")
+    result = {"bound": bool(ident or who), "healthy": True, "pending": 0,
+              "oldest_age_seconds": None, "room_id": ident, "participant": who,
+              "command": ""}
+    if not result["bound"]:
+        return result
+    try:
+        import room
+        from room_repository import state_repository
+        repository = state_repository(repo)
+        ident = room.resolve(repository, room.identifier(ident, "room"))
+        snapshot = room.project(room.records(repository, ident))
+        pending = room.unread_messages(snapshot, who)
+        now = time.time()
+        ages = [max(0, int(now - calendar.timegm(time.strptime(message["ts"], "%Y-%m-%dT%H:%M:%SZ"))))
+                for message in pending]
+        result.update(room_id=ident, pending=len(pending), oldest_age_seconds=max(ages) if ages else None,
+                      command=shlex.join(["oms", "room", "updates", "--repo", str(repository),
+                                          "--id", ident, "--participant", who]))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+        result.update(healthy=False, pending=None)
+    return result
 
 
 def project_inbox(state, *, safe_actions=(), include_threads=True):
@@ -17,6 +48,16 @@ def project_inbox(state, *, safe_actions=(), include_threads=True):
             "summary": summary,
             "command": command,
         })
+
+    mail = state.get("room_mail", {})
+    if mail.get("bound"):
+        if not mail.get("healthy"):
+            add(4, "P1", "room-mail-unavailable", "bound room mailbox is unavailable; check repository and participant",
+                "oms room updates")
+        elif mail.get("pending"):
+            count = mail["pending"]
+            add(9, "P1", "pending-room-mail", "%d unacknowledged room message(s); oldest %ss" %
+                (count, mail["oldest_age_seconds"]), mail["command"], count)
 
     plan = state.get("plan", {})
     stale = plan.get("stale", [])
@@ -200,6 +241,7 @@ def project_inbox(state, *, safe_actions=(), include_threads=True):
         "safe_actions": actions,
         "items": items,
         "recommended_actions": recommended,
+        "room_mail": mail,
     }
 
 

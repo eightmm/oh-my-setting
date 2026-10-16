@@ -20,7 +20,13 @@ git -C "$TMP/repo" commit -qm base
 
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-cat >/dev/null
+if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_MAIL_PROMPT:-}" ]; then
+  cat > "$OMS_TEST_MAIL_PROMPT"
+  printf '%s\n' "$@" > "$OMS_TEST_MAIL_PROMPT.argv"
+  [ -z "${OMS_ROOM_RELAY_QUEUE:-}${OMS_ROOM_RELAY_ALLOWED:-}${OMS_ATTEMPT_ID:-}" ] || exit 98
+else
+  cat >/dev/null
+fi
 if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_OPERATOR_BLOCK:-}" ]; then
   # The read worker correctly receives no owner's attempt capability. This
   # fixture simulates an independent operator using the parent's local ledger.
@@ -53,6 +59,7 @@ fi
 printf 'tokens used\n3\n'
 printf 'provider answer\n'
 printf 'tokens used\n17\n'
+[ "${1:-}" != exec ] || exit "${OMS_TEST_MAIL_EXIT:-0}"
 EOF
 chmod +x "$TMP/bin/codex"
 
@@ -85,6 +92,91 @@ own_events = [row for row in events if row["attempt_id"] == attempt["attempt_id"
 assert sum(row["event_type"] == "attempt.heartbeat" for row in own_events) >= 2, own_events
 assert not any(row.get("reason_code") == "heartbeat_expired" for row in own_events), own_events
 PY
+
+# A read participant never gets a relay or write sandbox. Only its parent
+# records receipts after success; failure leaves the addressed mail pending.
+mkdir -p "$TMP/mail-repo"
+git -C "$TMP/mail-repo" init -q
+git -C "$TMP/mail-repo" -c user.name=test -c user.email=test@example.com commit --allow-empty -qm base
+python3 - "$ROOT" "$TMP/mail-repo" <<'PY'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+import room
+repo = pathlib.Path(sys.argv[2])
+room.create(repo, "read-mail", "Read call fixture")
+room.join(repo, "read-mail", "main", "codex")
+room.join(repo, "read-mail", "reader", "codex", "reviewer", parent="main")
+room.join(repo, "read-mail", "other", "claude", "researcher", parent="main")
+room.send(repo, "read-mail", "main", "reader", "Assignment", message_id="assignment")
+room.send(repo, "read-mail", "main", "other", "Other assignment", message_id="other-assignment")
+PY
+mail_python="$(command -v python3)"
+for mail_case in failed blocked ack-failed "done" delegate; do
+  mail_exit=0 mail_block=""
+  mail_script=agent-call
+  mail_options=()
+  [ "$mail_case" != failed ] || mail_exit=7
+  [ "$mail_case" != blocked ] || mail_block="$TMP/mail-repo"
+  if [ "$mail_case" = ack-failed ]; then
+    cat > "$TMP/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${3:-}" = complete ]; then
+  cat >/dev/null
+  echo 'forced receipt failure' >&2
+  exit 2
+fi
+exec "$OMS_TEST_REAL_PYTHON" "$@"
+EOF
+    chmod +x "$TMP/bin/python3"
+  fi
+  if [ "$mail_case" = delegate ]; then
+    mail_script=peer-delegate
+    mail_options=(--read-only --no-verify)
+    "$ROOT/scripts/room.sh" send --repo "$TMP/mail-repo" --id read-mail --participant main \
+      --to reader --text 'Delegate assignment' --message-id delegate-assignment >/dev/null
+  fi
+  mail_status=0
+  env -u NVM_BIN -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+    OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+    OMS_ROOM_ID=read-mail OMS_ROOM_PARTICIPANT=reader OMS_ROOM_ADMITTED_PARTICIPANT=reader \
+    OMS_ROOM_RELAY_QUEUE="$TMP/inherited-relay" OMS_ROOM_RELAY_ALLOWED=1 \
+    OMS_TEST_OPERATOR_BLOCK="$mail_block" OMS_TEST_ROOT="$ROOT" \
+    OMS_TEST_REAL_PYTHON="$mail_python" \
+    OMS_ROOM_REPO="$TMP/mail-repo" OMS_TEST_MAIL_PROMPT="$TMP/mail-prompt" OMS_TEST_MAIL_EXIT="$mail_exit" \
+    "$ROOT/scripts/$mail_script.sh" --repo "$TMP/mail-repo" --to codex ${mail_options[@]+"${mail_options[@]}"} \
+    --prompt 'read mail completion' > "$TMP/mail-output" 2>&1 || mail_status=$?
+  rm -f "$TMP/bin/python3"
+  if [ "$mail_case" = ack-failed ]; then
+    [ "$mail_status" = 2 ] && grep -Fq 'forced receipt failure' "$TMP/mail-output" ||
+      fail "receipt failure was not propagated"
+    "$ROOT/scripts/agent-events.sh" --repo "$TMP/mail-repo" list --json > "$TMP/mail-attempts.json"
+    python3 - "$TMP/mail-attempts.json" "$TMP/mail-repo/.oms/lifecycle/events.jsonl" <<'PY' || fail "receipt failure recorded false success"
+import json, sys
+attempt = json.load(open(sys.argv[1], encoding="utf-8"))[-1]
+assert attempt["state"] == "failed", attempt
+events = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8")]
+states = [row.get("to_state") for row in events if row.get("attempt_id") == attempt["attempt_id"]]
+assert "done" not in states and states[-1] == "failed", states
+PY
+  fi
+  if { [ "$mail_case" != ack-failed ] && [ "$mail_exit" = 0 ] && [ -z "$mail_block" ] && [ "$mail_status" != 0 ]; } ||
+    { { [ "$mail_exit" != 0 ] || [ -n "$mail_block" ]; } && [ "$mail_status" = 0 ]; }; then
+    cat "$TMP/mail-output" >&2
+    fail "read mail exit is incorrect ($mail_case -> $mail_status)"
+  fi
+  grep -Fxq read-only "$TMP/mail-prompt.argv" || fail "read call lost its read-only sandbox"
+  if grep -Eq 'oms room (send|ack)' "$TMP/mail-prompt"; then fail "read call was instructed to write mail"; fi
+  python3 - "$ROOT" "$TMP/mail-repo" "$mail_case" <<'PY' || fail "read call receipt is missing or overbroad"
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+import room
+mail = {m["id"]: m for m in room.messages(pathlib.Path(sys.argv[2]), "read-mail")}
+assert ("reader" in mail["assignment"]["received_by"]) == (sys.argv[3] in ("done", "delegate")), mail
+if sys.argv[3] == "delegate":
+    assert mail["delegate-assignment"]["received_by"] == ["reader"], mail
+assert mail["other-assignment"]["received_by"] == [], mail
+PY
+done
 
 # A supervisor owns its outer lifecycle. A provider invoked inside it reports
 # usage to that attempt and must not create or terminalize a nested attempt.

@@ -16,7 +16,7 @@ ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
 
-REPO="$PWD"
+REPO="${OMS_ROOM_REPO:-$PWD}"
 AS_JSON=0
 REFRESH_CI=0
 
@@ -331,8 +331,12 @@ OMS_RS_BRANCH="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 OMS_RS_UPSTREAM="$(git -C "$REPO" rev-parse --abbrev-ref '@{u}' 2>/dev/null || true)" \
 OMS_RS_AHEAD="$(git -C "$REPO" rev-list --count '@{u}..HEAD' 2>/dev/null || true)" \
 OMS_RS_HAS_WORKFLOWS="$([ -d "$REPO/.github/workflows" ] && echo 1 || echo 0)" \
-python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
 import calendar, glob, json, math, os, runpy, sys, time
+
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from inbox_projection import pending_room_mail
+from work_journal import journal_storage
 
 process_liveness = runpy.run_path(sys.argv[1])
 process_pid_alive = process_liveness["pid_alive"]
@@ -390,6 +394,8 @@ def oms(*parts):
 # Machine consumers key on this the way artifact-index/model-doctor do;
 # bump it only with a deliberate output-contract change.
 state = {"schema": 1}
+state["room_mail"] = pending_room_mail(repo)
+state["work_journal"] = journal_storage(repo)
 
 # --- Durable agent attempts and private approvals ---------------------------
 def load_json_file(path, fallback):
@@ -1066,6 +1072,25 @@ else:
         print(s)
 
     line("# state: %s" % repo)
+
+    mail = state["room_mail"]
+    if mail["bound"]:
+        line("\n## Room mail")
+        if not mail["healthy"]:
+            line("  unavailable; check repository and participant (run: oms room updates)")
+        else:
+            line("  %d unacknowledged; oldest age: %s" % (
+                mail["pending"], "-" if mail["oldest_age_seconds"] is None else "%ss" % mail["oldest_age_seconds"]))
+            line("  read: %s (explicit acknowledgment required)" % mail["command"])
+
+    journal = state["work_journal"]
+    if journal["present"]:
+        line("\n## Work Journal storage")
+        line("  %s event lines, %s event bytes; %s files, %s total bytes" % (
+            journal["event_lines"], journal["events_bytes"], journal["file_count"], journal["total_bytes"]))
+        if not journal["healthy"]:
+            line("  measurement incomplete; journal storage is unavailable or changed during read")
+        line("  %s%s" % ("ATTENTION: " if journal["threshold_exceeded"] else "", journal["threshold_note"]))
 
     h = state["harness"]
     if h["rules"] == "missing" and h["spec"] == "missing" and h["private"] != "exposed":

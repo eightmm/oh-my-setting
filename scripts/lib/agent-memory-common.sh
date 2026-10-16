@@ -285,7 +285,7 @@ agent_memory_secret_re() {
 agent_memory_machine_re() {
   # Home prefixes identify a machine only at the start of an absolute path
   # token. A fixture's "$TMP/home/user" or relative/home/user is portable.
-  printf '%s\n' '((^[+]?|[[:space:]=(:]|\[)["'\''`]?/(hom[e]|User[s])/[^/$[:space:]"'\''`{}]+|/scratc[h]/[^[:space:]]+|/lustr[e]/[^[:space:]]+|/gpf[s]/[^[:space:]]+|/beegf[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
+  printf '%s\n' '((^[+]?|[[:space:]=(:<>]|\[|[a-z][a-z0-9+.-]*://)["'\''`]?/(hom[e]|User[s])/[^/$[:space:]"'\''`{}]+|/scratc[h]/[^[:space:]]+|/lustr[e]/[^[:space:]]+|/gpf[s]/[^[:space:]]+|/beegf[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
 }
 
 agent_memory_sensitive_re() {

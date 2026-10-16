@@ -18,6 +18,7 @@ import pathlib
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1672,6 +1673,64 @@ def optional_enrichment(
     return enriched if isinstance(enriched, str) and enriched.strip() else template
 
 
+def journal_storage(repo: Union[os.PathLike, str]) -> Dict[str, Any]:
+    """Measure physical retention without opening the mutable derived index."""
+    root = pathlib.Path(repo) / ".oms" / "work-journal"
+    thresholds = {"event_lines": 1000, "events_bytes": 5 * 1024 * 1024, "file_count": 100}
+    result = {"present": root.exists() or root.is_symlink(), "healthy": True,
+              "event_lines": 0, "events_bytes": 0, "file_count": 0, "total_bytes": 0,
+              "thresholds": thresholds, "threshold_exceeded": [], "cold_partition": False,
+              "threshold_note": "Review retention at >=1000 event lines, >=5 MiB event bytes or >=100 files; "
+                                "cold partition deferred; preserve canonical events for replay."}
+    if not result["present"]:
+        return result
+    def failed(error):
+        raise error
+    try:
+        if root.parent.is_symlink() or root.is_symlink() or not root.is_dir():
+            raise ValueError("journal storage is not a real directory")
+        scanned = 0
+        for directory, folders, files in os.walk(root, followlinks=False, onerror=failed):
+            for name in folders + files:
+                scanned += 1
+                if scanned > 10000:
+                    raise ValueError("journal storage measurement entry limit")
+                path = pathlib.Path(directory) / name
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    raise ValueError("journal storage contains a symlink")
+                if not stat.S_ISREG(info.st_mode):
+                    if path == root / "events.jsonl":
+                        raise ValueError("canonical journal is not a regular file")
+                    continue
+                result["file_count"] += 1
+                result["total_bytes"] += info.st_size
+                if path != root / "events.jsonl":
+                    continue
+                result["events_bytes"] = info.st_size
+                descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                                     getattr(os, "O_NONBLOCK", 0))
+                with os.fdopen(descriptor, "rb") as handle:
+                    opened = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        raise ValueError("canonical journal changed during open")
+                    remaining, last = info.st_size, b""
+                    while remaining:
+                        chunk = handle.read(min(65536, remaining))
+                        if not chunk:
+                            raise ValueError("canonical journal shortened during measurement")
+                        remaining -= len(chunk)
+                        result["event_lines"] += chunk.count(b"\n")
+                        last = chunk[-1:]
+                    after = os.fstat(handle.fileno())
+                    if after.st_size != info.st_size or after.st_mtime_ns != info.st_mtime_ns or last not in (b"", b"\n"):
+                        raise ValueError("canonical journal changed or has an incomplete event")
+    except (OSError, ValueError):
+        result["healthy"] = False
+    result["threshold_exceeded"] = [key for key, threshold in thresholds.items() if result[key] >= threshold]
+    return result
+
+
 class JournalStore:
     def __init__(
         self,
@@ -2577,6 +2636,7 @@ class JournalStore:
             "event_count": summary["event_count"],
             "active_event_count": summary["active_event_count"],
             "events_bytes": size,
+            "storage": journal_storage(self.repo),
             "daily_count": len(summary["daily"]),
             "weekly_count": len(summary["weekly"]),
             "dirty_period_count": dirty_count,

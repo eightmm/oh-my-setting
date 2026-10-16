@@ -140,6 +140,100 @@ cli = subprocess.run([sys.executable, str(root / "scripts/lib/room.py"), "send",
 assert cli.returncode == 0 and json.loads(cli.stdout)["recipient"] == "all", cli.stderr or cli.stdout
 assert not (repo / ".oms/artifacts/mcp").exists(), "room messages never start another model"
 assert len(m.tool_definitions()) == 12, "do not grow core tool discovery"
+# Inbox mail follows the room reader's repository, participant and rollover;
+# a query (including --fix-safe) never acknowledges mail or copies its body.
+from inbox_projection import pending_room_mail
+mail_room = room.create(repo, "mail-room", "Inbox fixture")
+room.join(repo, mail_room, "main", "codex")
+room.join(repo, mail_room, "reader", "claude", "researcher", parent="main")
+room.join(repo, mail_room, "other", "claude", "worker", parent="main")
+room.send(repo, mail_room, "main", "reader", "MAIL-BODY-PRIVATE", "question", message_id="pending")
+room.send(repo, mail_room, "main", "other", "OTHER-BODY-PRIVATE", message_id="other-mail")
+room.send(repo, mail_room, "main", "all", "BROADCAST-BODY", message_id="broadcast")
+room.send(repo, mail_room, "main", "reader", "Status only", "status", message_id="status")
+room.send(repo, mail_room, "reader", "main", "Answer without acknowledgment", "answer", reply_to="pending")
+with patch.dict(os.environ, {"OMS_ROOM_ID": mail_room, "OMS_ROOM_PARTICIPANT": "reader", "OMS_ROOM_REPO": str(repo)}):
+    before = (repo / ".oms/threads/mail-room.jsonl").read_bytes()
+    import calendar, time
+    sent_at = calendar.timegm(time.strptime(room.messages(repo, mail_room)[0]["ts"], "%Y-%m-%dT%H:%M:%SZ"))
+    with patch("inbox_projection.time.time", return_value=sent_at + 120):
+        mail = pending_room_mail(repo)
+    assert mail["healthy"] and mail["pending"] == 2 and mail["oldest_age_seconds"] == 120, mail
+    for script in ("state", "inbox"):
+        command = [str(root / ("scripts/" + script + ".sh")), "--json"]
+        if script == "inbox":
+            command.append("--fix-safe")
+        result = subprocess.run(command, cwd=repo.parent, capture_output=True, text=True, check=True)
+        report = json.loads(result.stdout)
+        assert report["room_mail"]["pending"] == 2, report
+        assert "BODY" not in result.stdout, result.stdout
+        if script == "inbox":
+            item = next(item for item in report["items"] if item["code"] == "pending-room-mail")
+            assert item["count"] == 2 and item["command"] == mail["command"], item
+    assert (repo / ".oms/threads/mail-room.jsonl").read_bytes() == before
+    import shlex
+    reader = subprocess.run([str(root / "scripts/oms")] + shlex.split(mail["command"])[1:],
+                            capture_output=True, text=True, check=True)
+    assert len(json.loads(reader.stdout)["turns"]) == 2, reader.stdout
+    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": "not-enrolled"}):
+        assert pending_room_mail(repo)["healthy"] is False
+    assert pending_room_mail(repo.parent)["healthy"] is False, "foreign repo must not expose bound mail"
+    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": "main"}):
+        moved = room.rollover(repo, mail_room, "main")
+    mail = pending_room_mail(repo)
+    assert mail["pending"] == 2 and mail["room_id"] == moved, mail
+    room.acknowledge(repo, mail_room, "reader", ["pending", "broadcast"])
+    mail = pending_room_mail(repo)
+    assert mail["pending"] == 0 and mail["oldest_age_seconds"] is None, mail
+    path = repo / (".oms/threads/" + moved + ".jsonl")
+    with path.open("ab") as handle:
+        handle.write(b"{broken\n")
+    assert pending_room_mail(repo)["healthy"] is False, "corrupt mail must not look empty"
+    result = subprocess.run([str(root / "scripts/inbox.sh"), "--json"],
+                            capture_output=True, text=True, check=True)
+    assert "room-mail-unavailable" in {item["code"] for item in json.loads(result.stdout)["items"]}, result.stdout
+assert pending_room_mail(repo)["bound"] is False
+# Re-enrolling the same participant must agree with the room reader: earlier
+# mail remains historical pending state, but is outside this enrollment.
+room.create(repo, "enrollment-mail", "Enrollment fixture")
+room.join(repo, "enrollment-mail", "sender", "codex")
+room.join(repo, "enrollment-mail", "reader", "claude", "researcher", parent="sender")
+room.send(repo, "enrollment-mail", "sender", "reader", "Earlier enrollment", message_id="earlier")
+room.append(repo, "enrollment-mail", {"kind": "leave", "participant": "reader"}, "Left")
+room.join(repo, "enrollment-mail", "reader", "claude", "researcher", parent="sender")
+with patch.dict(os.environ, {"OMS_ROOM_ID": "enrollment-mail", "OMS_ROOM_PARTICIPANT": "reader", "OMS_ROOM_REPO": str(repo)}):
+    assert not room.updates(repo, "enrollment-mail", "reader")["turns"]
+    mail = pending_room_mail(repo)
+    assert mail["pending"] == 0 and mail["oldest_age_seconds"] is None, mail
+    room.send(repo, "enrollment-mail", "sender", "reader", "Current enrollment", message_id="current")
+    assert pending_room_mail(repo)["pending"] == len(room.updates(repo, "enrollment-mail", "reader")["turns"]) == 1
+    with patch.dict(os.environ, {"OMS_ROOM_ADMITTED_PARTICIPANT": "reader"}):
+        captured = room.read_call_mail(repo, "enrollment-mail", "reader")
+        for child in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
+            with patch.dict(os.environ, child):
+                try:
+                    room.read_call_mail(repo, "enrollment-mail", "reader", captured)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("read worker recorded its own dispatcher receipt")
+        room.send(repo, "enrollment-mail", "sender", "reader", "Late mail", message_id="late")
+        assert room.read_call_mail(repo, "enrollment-mail", "reader", captured) == 1
+        assert room.read_call_mail(repo, "enrollment-mail", "reader", captured) == 0, "completion is idempotent"
+        assert [m["id"] for m in room.unread_messages(room.project(room.records(repo, "enrollment-mail")), "reader")] == ["late"]
+        # Legal long IDs exceed the metadata cap well before 200 messages.
+        for index in range(60):
+            room.send(repo, "enrollment-mail", "sender", "reader", "Long ID assignment",
+                      message_id=("long-%03d-" % index).ljust(160, "x"))
+        captured = room.read_call_mail(repo, "enrollment-mail", "reader")
+        before = len(room.records(repo, "enrollment-mail"))
+        assert room.read_call_mail(repo, "enrollment-mail", "reader", captured) == 61
+        receipts = [row["room_event"] for row in room.records(repo, "enrollment-mail")[before:]]
+        assert len(receipts) == 2, receipts
+        assert [mid for event in receipts for mid in event["messages"]] == captured
+        assert all(1 <= len(event["messages"]) <= 200 and
+                   len(json.dumps(event, ensure_ascii=False).encode("utf-8")) <= 8192 for event in receipts)
+        assert pending_room_mail(repo)["pending"] == len(room.updates(repo, "enrollment-mail", "reader")["turns"]) == 0
 if os.name != "nt":
     # A leaf can change after path validation. Opening a replacement FIFO must
     # reject it promptly rather than suspend the hook or mailbox reader.

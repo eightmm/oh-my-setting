@@ -531,13 +531,21 @@ def program_files(executable, args, cwd):
     if executable not in ("awk", "gawk", "mawk", "nawk", "sed", "jq"):
         return
     # Option sets vary by tool/version. Every existing file operand is part
-    # of the verifier, including data operands, so grouped flags cannot hide
-    # a program. Retain the conventional attached file-option spellings.
-    for arg in args:
+    # of the verifier, including data operands. Also unwrap file options,
+    # including a program attached after f inside a single-dash bundle.
+    for index, arg in enumerate(args):
         targets = [arg]
-        for prefix in ("--file=", "--from-file=", "-f"):
+        for prefix in ("--file=", "--from-file="):
             if arg.startswith(prefix):
                 targets.append(arg[len(prefix):])
+        if arg in ("--file", "--from-file") and index + 1 < len(args):
+            targets.append(args[index + 1])
+        elif arg.startswith("-") and not arg.startswith("--") and "f" in arg[1:]:
+            attached = arg.split("f", 1)[1]
+            if attached:
+                targets.append(attached)
+            elif index + 1 < len(args):
+                targets.append(args[index + 1])
         for target in targets:
             path = resolve(target, cwd)
             if path and (os.path.isfile(os.path.join(wt, path)) or base(path) is not None):

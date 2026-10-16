@@ -30,6 +30,7 @@ MAX_PARTICIPANTS = 32
 # Call slots stay bounded even when a full mailbox cannot deliver notifications.
 MAX_CALLS = 480
 MAX_MESSAGES = 1024
+MAX_METADATA_BYTES = 8192
 MAIN_RESERVE = 8
 CALL_RESERVE = 64
 MESSAGE_RESERVE = 128
@@ -488,7 +489,7 @@ def validate_event(rows, event, text, repo=None):
     if set(event) - keys:
         raise ValueError("unknown room event fields")
     metadata = json.dumps(event, ensure_ascii=False)
-    if len(metadata.encode("utf-8")) > 8192:
+    if len(metadata.encode("utf-8")) > MAX_METADATA_BYTES:
         raise ValueError("room metadata is oversized")
     check = subprocess.run(["bash", "-c",
         '. "$1"; grep -Eiq "$(agent_memory_sensitive_re)"', "room-metadata",
@@ -1427,6 +1428,52 @@ def visible(row, who, joined_seq=0):
             and event.get("recipient") in ("all", who) and who in event.get("audience", [who]))
 
 
+def unread_messages(state, who):
+    """Unacknowledged mail visible in this participant's latest enrollment."""
+    member = participant(state, who)
+    return [message for message in state["messages"] if who in message["pending_for"]
+            and visible({"seq": message["seq"], "room_event": message}, who, member["seq"])]
+
+
+def read_call_mail(repo, ident, who, consumed=None):
+    """Parent-only capture/receipt for a read call, never a new worker capability.
+
+    Capture before dispatch and acknowledge only those IDs after a successful
+    return. Later arrivals and mail from a superseded enrollment stay pending.
+    """
+    if (_child() or who != os.environ.get("OMS_ROOM_PARTICIPANT")
+            or who != os.environ.get("OMS_ROOM_ADMITTED_PARTICIPANT")):
+        raise ValueError("read-call mail consumption requires the admitted parent dispatcher")
+    repo = state_repository(repo)
+    ident = resolve(repo, identifier(ident, "room"))
+    rows = records(repo, ident)
+    if not _bound_room(rows, repo):
+        raise ValueError("read-call mail does not belong to the inherited room")
+    state = project(rows)
+    member = participant(state, who)
+    if member["role"] == "main" or not member.get("parent"):
+        raise ValueError("read-call mail requires an admitted child participant")
+    pending = [message["id"] for message in unread_messages(state, who)]
+    if consumed is None:
+        return pending
+    if not isinstance(consumed, list) or len(consumed) > MAX_MESSAGES:
+        raise ValueError("read-call consumption requires bounded captured message ids")
+    captured = {identifier(mid, "message") for mid in consumed}
+    selected = [mid for mid in pending if mid in captured]
+    batch = []
+    for mid in selected:
+        candidate = batch + [mid]
+        metadata = json.dumps({"kind": "received", "participant": who, "messages": candidate}, ensure_ascii=False)
+        if batch and (len(candidate) > 200 or len(metadata.encode("utf-8")) > MAX_METADATA_BYTES):
+            acknowledge(repo, ident, who, batch)
+            batch = [mid]
+        else:
+            batch = candidate
+    if batch:
+        acknowledge(repo, ident, who, batch)
+    return len(selected)
+
+
 def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
     if (type(budget) is not int or not 1 <= budget <= thread_live.MAX_ROW
             or type(limit) is not int or not 1 <= limit <= 200):
@@ -1443,8 +1490,7 @@ def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
         return dict(delta, turns=[r for r in delta["turns"] if visible(r, who, member["seq"])])
 
     known = {message["id"] for message in state["messages"]}
-    unread = {message["id"] for message in state["messages"]
-              if who in message["targets"] and who not in message["received_by"]}
+    unread = {message["id"] for message in unread_messages(state, who)}
     with thread_live.open_thread(repo, room) as handle:
         scanned = 0
         enrollment = None

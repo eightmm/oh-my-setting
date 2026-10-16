@@ -12375,6 +12375,22 @@ test_agent_call_context_is_opt_in() {
   ) > "$project/context"
   assert_not_exists "$project/model-probe"
   assert_file_contains "$project/context" 'verification and uncertainty'
+  local room_case
+  for room_case in call:read ask:read review:read delegate:read delegate:write; do
+    (
+      . "$ROOT/scripts/lib/peer-common.sh"
+      MA_KIND="${room_case%:*}" WORKER_ACCESS="${room_case#*:}"
+      OMS_ROOM_ID=room OMS_ROOM_PARTICIPANT=reader OMS_ROOM_ADMITTED_PARTICIPANT=reader
+      ma_write_harness_context "$project" 0 0 0 'Assess this plan'
+    ) > "$project/room-context"
+    if [ "$room_case" = delegate:write ]; then
+      assert_file_contains "$project/room-context" 'oms room send'
+      assert_file_contains "$project/room-context" 'oms room ack --message'
+    else
+      if grep -Eq 'oms room (send|ack)' "$project/room-context"; then fail 'read prompt instructs room writes'; fi
+      assert_file_contains "$project/room-context" 'final answer'
+    fi
+  done
   HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
     --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
 
@@ -12904,6 +12920,9 @@ test_scrubber_tiers_split_secret_from_machine() {
   local path
   for path in '/ho''me/researcher' '+/ho''me/researcher/config' \
     'path="/ho''me/researcher/config"' "'/User""s/researcher/config'" \
+    'file:///ho''me/researcher/config' 'file:///User''s/researcher/config' \
+    'cat >/ho''me/researcher/config' 'cat </User''s/researcher/config' \
+    'cat >>"/ho''me/researcher/config"' 'cat 2>/User''s/researcher/config' \
     '["/ho''me/researcher/config"]' '/ho''me/user@domain/config' '/ho''me/사용자/config'; do
     printf '%s\n' "$path" > "$f"
     agent_memory_file_has_sensitive_content "$f" || fail "absolute home path escaped scanner"
@@ -12914,6 +12933,8 @@ test_scrubber_tiers_split_secret_from_machine() {
     'relative/home/researcher/config' './home/researcher/config' \
     '/tmp/fixture/home/researcher/config' '/home/' '/home/$USER/config' \
     '"$TMP/Users/researcher/config"' '$TMP"/home/researcher/config"' \
+    'file://$TMP/home/researcher/config' 'cat >"$TMP/home/researcher/config"' \
+    'cat <"${tmp}/Users/researcher/config"' 'file:///tmp/fixture/home/researcher/config' \
     'relative"/home/researcher/config"'; do
     printf '%s\n' "$path" > "$f"
     if agent_memory_file_has_sensitive_content "$f"; then

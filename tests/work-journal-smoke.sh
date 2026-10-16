@@ -74,6 +74,51 @@ count="$(wc -l < "$repo/.oms/work-journal/events.jsonl" | tr -d ' ')"
 [ -f "$repo/.oms/work-journal/weekly/2026-W31.md" ] ||
   fail "weekly summary was not materialized"
 
+# Storage attention is a pure physical measurement, including when the index
+# is absent. It neither creates journal state nor drops canonical replay data.
+python3 - "$ROOT" "$TMP/storage-repo" <<'PY' || fail "journal storage measurement is incorrect or writes state"
+import json, pathlib, subprocess, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+from work_journal import journal_storage
+root, repo = map(pathlib.Path, sys.argv[1:])
+repo.mkdir()
+subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+assert journal_storage(repo)["present"] is False
+assert not (repo / ".oms").exists()
+journal = repo / ".oms/work-journal"
+journal.mkdir(parents=True)
+events = journal / "events.jsonl"
+events.write_bytes(b"{}\n" * 999)
+small = journal_storage(repo)
+assert small["event_lines"] == 999 and small["events_bytes"] == 2997, small
+assert not small["threshold_exceeded"] and small["file_count"] == 1, small
+with events.open("ab") as handle:
+    handle.write(b"{}\n")
+for index in range(99):
+    (journal / ("view-%d.md" % index)).write_text("view\n", encoding="utf-8")
+before = {str(path): path.read_bytes() for path in journal.iterdir()}
+large = journal_storage(repo)
+assert large["healthy"] and large["event_lines"] == 1000 and large["file_count"] == 100, large
+assert large["total_bytes"] == 3000 + 99 * 5, large
+assert set(large["threshold_exceeded"]) == {"event_lines", "file_count"}, large
+assert large["cold_partition"] is False and large["threshold_note"], large
+result = subprocess.run([str(root / "scripts/state.sh"), "--repo", str(repo), "--json"],
+                        capture_output=True, text=True, check=True)
+assert json.loads(result.stdout)["work_journal"] == large, result.stdout
+assert {str(path): path.read_bytes() for path in journal.iterdir()} == before
+events.write_bytes(b" " * (5 * 1024 * 1024 - 1) + b"\n")
+assert "events_bytes" in journal_storage(repo)["threshold_exceeded"]
+events.write_bytes(b"partial")
+assert journal_storage(repo)["healthy"] is False
+if sys.platform != "win32":
+    events.unlink()
+    events.symlink_to(root / "VERSION")
+    assert journal_storage(repo)["healthy"] is False, "do not follow a linked canonical log"
+    events.unlink()
+    events.mkdir()
+    assert journal_storage(repo)["healthy"] is False
+PY
+
 # Prompt/Stop remain local even with a configured mirror. Periodic maintenance
 # and explicit sync own network work.
 fake_boundary_journal="$TMP/fake-boundary-journal.py"
