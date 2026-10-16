@@ -283,7 +283,9 @@ agent_memory_secret_re() {
 }
 
 agent_memory_machine_re() {
-  printf '%s\n' '(/hom[e]/[^[:space:]]+|/User[s]/[^[:space:]]+|/scratc[h]/[^[:space:]]+|/lustr[e]/[^[:space:]]+|/gpf[s]/[^[:space:]]+|/beegf[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
+  # Home prefixes identify a machine only at the start of an absolute path
+  # token. A fixture's "$TMP/home/user" or relative/home/user is portable.
+  printf '%s\n' '((^[+]?|[[:space:]=(:]|\[)["'\''`]?/(hom[e]|User[s])/[^/$[:space:]"'\''`{}]+|/scratc[h]/[^[:space:]]+|/lustr[e]/[^[:space:]]+|/gpf[s]/[^[:space:]]+|/beegf[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
 }
 
 agent_memory_sensitive_re() {
@@ -293,7 +295,15 @@ agent_memory_sensitive_re() {
 # This exact public checkout toggle carries no credential material. Blank the
 # whole line only, retaining line numbers and scanning comments/other values.
 agent_memory_scan_input() {
-  LC_ALL=C sed -E 's/^[+]?[[:space:]]*persist-credentia[l]s: false[[:space:]]*$//' "$@"
+  local reference_arg reference_call
+  # Source assignments to reference-only calls carry no literal credential.
+  # Remove only the assignment prefix; known key formats in the expression
+  # still scan. Quoted values other than empty/path separators stay guarded.
+  reference_arg='([A-Za-z_][A-Za-z0-9_.]*|"[/.]*"|'\''[/.]*'\'')'
+  reference_call="[A-Za-z_][A-Za-z0-9_.]*\\([[:space:]]*($reference_arg([[:space:]]*,[[:space:]]*$reference_arg)*)?[[:space:]]*\\)"
+  LC_ALL=C sed -E \
+    -e 's/^[+]?[[:space:]]*persist-credentia[l]s: false[[:space:]]*$//' \
+    -e "s/^([+]?[[:space:]]*)[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*($reference_call(\\.$reference_call)*)[[:space:]]*$/\\1\\2/" "$@"
 }
 
 # Preserve filter errors: pipefail alone can report grep's no-match (1)

@@ -35,6 +35,8 @@ BASE_VERIFY=""
 ML=0
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
+ALLOW_FLOOR_CHANGE_REASON=""
+FLOOR_CHANGE_USED=false
 ALLOW_RESTRUCTURE=0
 ACCEPT_ENCODING_LOSS=0
 KEEP_WORKTREE=0
@@ -95,6 +97,9 @@ Options:
   --allow-restructure  Admit a patch that adds a new top-level file or moves a
                  file across directories (normally rejected when no scope is
                  supplied: nothing else says where the patch may write).
+  --allow-floor-change REASON  Owner-only exception for an intentional baseline
+                 contract change. Run and record the failing base floor, but
+                 admit only if candidate verification and all other gates pass.
   --accept-encoding-loss  Accept detected non-ASCII loss or transliteration in patch hunks.
   -h, --help     Show this help.
 
@@ -103,7 +108,8 @@ changed shell files parse (bash -n) -> patch does not weaken the tests ->
 candidate verification passes -> unchanged baseline checks also pass with
 verification surfaces restored from HEAD. Newly invoked tests run on the
 candidate; an available HEAD project suite supplies their baseline floor.
-Exit 0 only if every gate passes. Without
+Only --allow-floor-change REASON can accept a failed baseline command, after
+candidate verification passes. Exit 0 only if every gate passes. Without
 --plan-task there is no declared scope, so the structural floor
 stands in for it: keep the existing layout.
 EOF
@@ -160,6 +166,15 @@ while [ "$#" -gt 0 ]; do
     --keep-worktree) KEEP_WORKTREE=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
+    --allow-floor-change)
+      [ "$#" -ge 2 ] || fail "--allow-floor-change requires a reason"
+      [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || fail "--allow-floor-change is parent-only"
+      case "$2" in *$'\n'*|*$'\r'*) fail "--allow-floor-change requires a single-line reason" ;; esac
+      printf '%s' "$2" | LC_ALL=C grep -Eq '[^[:space:]]' || fail "--allow-floor-change requires a nonblank reason"
+      if printf '%s' "$2" | LC_ALL=C grep -Eq '[[:cntrl:]]'; then
+        fail "--allow-floor-change reason cannot contain control characters"
+      fi
+      ALLOW_FLOOR_CHANGE_REASON="$2"; shift 2 ;;
     --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
     --accept-encoding-loss) ACCEPT_ENCODING_LOSS=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -802,7 +817,13 @@ EOF
               if floor_verify_out="$(cd "$floor_worktree" && run_verify_with_timeout bash -c "$floor_verify" 2>&1)"; then
                 record "verify-floor" "PASS" "$floor_verify (restored from HEAD: $surface_detail)"
               else
-                record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)"
+                floor_verify_exit=$?
+                if [ -n "$ALLOW_FLOOR_CHANGE_REASON" ] && [ "$VERIFY_EXIT" = 0 ] && [ "$VERIFICATION" = command ]; then
+                  FLOOR_CHANGE_USED=true
+                  record "verify-floor" "PASS" "owner override: base floor failed (exit $floor_verify_exit); reason: $ALLOW_FLOOR_CHANGE_REASON; $floor_verify (restored from HEAD: $surface_detail)"
+                else
+                  record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)"
+                fi
               fi
             else
               record "verify-floor" "FAIL" "$floor_restore_detail"
@@ -848,6 +869,10 @@ mkdir -p "$(dirname "$REPORT")"
   printf -- '- base: %s\n' "$base_sha"
   printf -- '- verification: %s\n' "$VERIFICATION"
   printf -- '- verify_sha256: %s\n' "$(printf "%s" "$VERIFY" | oms_sha256_stream)"
+  if [ -n "$ALLOW_FLOOR_CHANGE_REASON" ]; then
+    printf -- '- floor_change_reason: %s\n' "$ALLOW_FLOOR_CHANGE_REASON"
+    printf -- '- floor_change_used: %s\n' "$FLOOR_CHANGE_USED"
+  fi
   [ -z "$COVERS" ] || printf -- '- covers:%s\n' "$COVERS"
   printf -- '- checked: %s\n\n' "$ts"
   printf '## Ladder\n\n'
@@ -864,7 +889,9 @@ mkdir -p "$(dirname "$REPORT")"
   if [ -n "$verify_out" ]; then
     printf '\n## Verify output (tail)\n\n```\n%s\n```\n' "$(printf '%s' "$verify_out" | tail -n 40)"
   fi
-  if [ -n "$floor_verify_out" ]; then
+  if [ "$FLOOR_CHANGE_USED" = true ]; then
+    printf '\n## Base-floor verify output (owner override)\n\n```\n%s\n```\n' "${floor_verify_out:-(no output)}"
+  elif [ -n "$floor_verify_out" ]; then
     printf '\n## Base-floor verify output (tail)\n\n```\n%s\n```\n' "$(printf '%s' "$floor_verify_out" | tail -n 40)"
   fi
 } > "$REPORT"

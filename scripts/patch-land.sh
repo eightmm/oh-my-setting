@@ -48,6 +48,7 @@ PLAN_VERIFY=""
 PLAN_VERIFY_RAW=""
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
+ALLOW_FLOOR_CHANGE_REASON=""
 ALLOW_RESTRUCTURE=0
 ACCEPT_SALVAGED=0
 ACCEPT_ENCODING_LOSS=0
@@ -93,6 +94,8 @@ Options:
                    its own verifier (normally rejected).
   --allow-test-reduction  Forward to patch-admit: permit a patch that
                    net-removes test assertions (normally rejected).
+  --allow-floor-change REASON  Forward an explicit owner exception for a failed
+                   base floor; candidate verification must still pass.
   --allow-restructure  Forward to patch-admit: permit an unscoped patch that
                    adds top-level files or moves files across directories
                    (normally rejected by the structural floor).
@@ -144,6 +147,14 @@ while [ "$#" -gt 0 ]; do
     --executor) fail "Soul executors were removed; use a fresh plan task and brief" ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
+    --allow-floor-change)
+      [ "$#" -ge 2 ] || fail "--allow-floor-change requires a reason"
+      case "$2" in *$'\n'*|*$'\r'*) fail "--allow-floor-change requires a single-line reason" ;; esac
+      printf '%s' "$2" | LC_ALL=C grep -Eq '[^[:space:]]' || fail "--allow-floor-change requires a nonblank reason"
+      if printf '%s' "$2" | LC_ALL=C grep -Eq '[[:cntrl:]]'; then
+        fail "--allow-floor-change reason cannot contain control characters"
+      fi
+      ALLOW_FLOOR_CHANGE_REASON="$2"; shift 2 ;;
     --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
     --accept-salvaged) ACCEPT_SALVAGED=1; shift ;;
     --accept-encoding-loss) ACCEPT_ENCODING_LOSS=1; shift ;;
@@ -1041,6 +1052,7 @@ APPROVAL_PARAMETERS="$( \
   OMS_APPROVAL_RESTRUCTURE="$approval_allow_restructure" \
   OMS_APPROVAL_TEST_REDUCTION="$approval_allow_test_reduction" \
   OMS_APPROVAL_VERIFIER_CHANGE="$approval_allow_verifier_change" \
+  OMS_APPROVAL_FLOOR_CHANGE_REASON="$ALLOW_FLOOR_CHANGE_REASON" \
   OMS_APPROVAL_ML="$approval_ml" \
   OMS_APPROVAL_VERIFY_EXPLICIT="$approval_verify_explicit" \
   OMS_APPROVAL_VERIFY_SHA="$approval_verify_sha" \
@@ -1055,7 +1067,7 @@ import os
 def flag(name):
     return os.environ[name] == "true"
 
-print(json.dumps({
+parameters = {
     "admission_contract_schema": 1,
     "allow_restructure": flag("OMS_APPROVAL_RESTRUCTURE"),
     "allow_test_reduction": flag("OMS_APPROVAL_TEST_REDUCTION"),
@@ -1067,7 +1079,10 @@ print(json.dumps({
     "verify_sha256": os.environ["OMS_APPROVAL_VERIFY_SHA"],
     "executor_id": os.environ["OMS_APPROVAL_EXECUTOR_ID"] or None,
     "executor_soul_sha256": os.environ["OMS_APPROVAL_EXECUTOR_SOUL"] or None,
-}, sort_keys=True, separators=(",", ":")))
+}
+if os.environ["OMS_APPROVAL_FLOOR_CHANGE_REASON"]:
+    parameters["allow_floor_change_reason"] = os.environ["OMS_APPROVAL_FLOOR_CHANGE_REASON"]
+print(json.dumps(parameters, sort_keys=True, separators=(",", ":")))
 PY
 )" || fail "cannot encode the approval admission contract"
 
@@ -1248,6 +1263,7 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ -n "$PLAN_TASK" ] && admit_cmd+=(--plan-task "$PLAN_TASK")
 [ "$ALLOW_VERIFIER_CHANGE" = 1 ] && admit_cmd+=(--allow-verifier-change)
 [ "$ALLOW_TEST_REDUCTION" = 1 ] && admit_cmd+=(--allow-test-reduction)
+[ -z "$ALLOW_FLOOR_CHANGE_REASON" ] || admit_cmd+=(--allow-floor-change "$ALLOW_FLOOR_CHANGE_REASON")
 [ "$ALLOW_RESTRUCTURE" = 1 ] && admit_cmd+=(--allow-restructure)
 [ "$ACCEPT_ENCODING_LOSS" = 1 ] && admit_cmd+=(--accept-encoding-loss)
 # Admission may persist a report even when it fails. Keep its actual input path

@@ -12773,7 +12773,9 @@ test_scrubber_blocks_credential_variants() {
 
   (
   . "$ROOT/scripts/lib/agent-memory-common.sh"
-  for s in "MY_API_K""EY=x" "api k""ey: x" "secret k""ey=x" "MY_PRIVATE_K""EY=x" "client_s""ecret = x" "CREDENTIAL""S=x" "aws_credential""s: x"; do
+  for s in "MY_API_K""EY=x" "api k""ey: x" "secret k""ey=x" "MY_PRIVATE_K""EY=x" "client_s""ecret = x" "CREDENTIAL""S=x" "aws_credential""s: x" \
+    'toke'"n = str(\"literal-private-value\")" 'toke'"n = normalize('literal-private-value')" \
+    'toke'"n = lookup(reference) # passw"'ord=literal-private-value'; do
     printf '%s\n' "$s" > "$f"
     agent_memory_file_has_sensitive_content "$f" ||
       fail "scrubber should block: $s"
@@ -12817,6 +12819,27 @@ test_scrubber_tiers_split_secret_from_machine() {
   if agent_memory_file_has_secret_content "$f"; then
     fail "home path must not match the secret tier"
   fi
+
+  local path
+  for path in '/ho''me/researcher' '+/ho''me/researcher/config' \
+    'path="/ho''me/researcher/config"' "'/User""s/researcher/config'" \
+    '["/ho''me/researcher/config"]' '/ho''me/user@domain/config' '/ho''me/사용자/config'; do
+    printf '%s\n' "$path" > "$f"
+    agent_memory_file_has_sensitive_content "$f" || fail "absolute home path escaped scanner"
+    agent_memory_sensitive_report "$f" | grep -F 'machine-tier match' >/dev/null ||
+      fail "absolute home path missing diagnostic"
+  done
+  for path in '"$TMP/home/researcher/config"' '"${tmp}/home/researcher/config"' \
+    'relative/home/researcher/config' './home/researcher/config' \
+    '/tmp/fixture/home/researcher/config' '/home/' '/home/$USER/config' \
+    '"$TMP/Users/researcher/config"' '$TMP"/home/researcher/config"' \
+    'relative"/home/researcher/config"'; do
+    printf '%s\n' "$path" > "$f"
+    if agent_memory_file_has_sensitive_content "$f"; then
+      fail "fixture or incomplete home path must remain clean: $path"
+    fi
+    [ -z "$(agent_memory_sensitive_report "$f")" ] || fail "fixture scan/report disagreement"
+  done
 
   # Secret tier: a credential assignment matches both.
   printf 'export MY_API_T''OKEN=abc\n' > "$f"
@@ -12907,6 +12930,10 @@ https://example.com/org/repo.git
 git@github.com:org/repo.git
 the word password appears here without a value assignment
 max_tokens: 512
+def resolve(token, cwd=""):
+for token in tokens:
+    token = os.path.relpath(token, wt).replace(os.sep, "/")
+    token = posixpath.join(cwd, token)
 EOF
   printf '%s%s.%s.%s\n' 'ey' 'J' 'short' 'short' >> "$f"
   if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
@@ -12917,6 +12944,11 @@ EOF
   if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
     fail "placeholder-only URL password should pass the scrubber"
   fi
+
+  # A reference-only expression exemption must keep known key material visible.
+  printf 'toke''n = normalize(gh''p_abcdefghijklmnopqrstuvwxyz0123456789)\n' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_secret_content '$f'" ||
+    fail "code reference filtering hid a known key format in an argument"
 }
 
 test_review_diff_side_blocks_env_token() {

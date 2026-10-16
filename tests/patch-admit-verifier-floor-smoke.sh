@@ -29,7 +29,7 @@ cat > "$repo/tests/check-helper.sh" <<'EOF'
 verify_product() {
   expected="$(sed -n 's/^expected = "\(.*\)"$/\1/p' pyproject.toml)"
   [ -n "$expected" ]
-  grep -qx "$expected" src/value.txt
+  grep -qx "$expected" src/value.txt || { echo "expected product value: $expected"; return 1; }
 }
 EOF
 printf 'good\n' > "$repo/src/value.txt"
@@ -95,6 +95,79 @@ contains "$TMP/common-config.md" "verifier change permitted"
 contains "$TMP/common-config.md" "verify: PASS"
 contains "$TMP/common-config.md" "verify-floor: FAIL"
 contains "$TMP/common-config.md" "pyproject.toml"
+
+# An owner can explicitly accept an intentional contract change, with both the
+# reason and the failed baseline preserved. Candidate verification still runs.
+reason='Owner reviewed the expected product value change'
+"$ADMIT" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify 'bash scripts/check.sh' --allow-verifier-change \
+  --allow-floor-change "$reason" --report "$TMP/floor-change.md" >/dev/null 2>&1 ||
+  fail "explicit owner floor override did not admit the verified candidate"
+contains "$TMP/floor-change.md" 'Patch admission: ADMIT'
+contains "$TMP/floor-change.md" 'verify: PASS'
+contains "$TMP/floor-change.md" 'verify-floor: PASS'
+contains "$TMP/floor-change.md" "$reason"
+contains "$TMP/floor-change.md" 'floor_change_used: true'
+contains "$TMP/floor-change.md" 'base floor failed (exit 1)'
+contains "$TMP/floor-change.md" 'expected product value: good'
+
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify 'bash scripts/check.sh; exit 9' --allow-verifier-change \
+  --allow-floor-change "$reason" --report "$TMP/candidate-failed.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "floor override accepted a failing candidate"
+contains "$TMP/candidate-failed.md" 'verify: FAIL'
+contains "$TMP/candidate-failed.md" 'floor_change_used: false'
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify 'bash scripts/check.sh' --allow-floor-change "$reason" \
+  --report "$TMP/verifier-consent.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "floor override bypassed verifier consent"
+contains "$TMP/verifier-consent.md" 'verifier: FAIL'
+contains "$TMP/verifier-consent.md" 'verify: SKIP'
+for invalid_reason in '' '   ' $'line one\nline two'; do
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/common-config.patch" \
+    --verify 'bash scripts/check.sh' --allow-verifier-change \
+    --allow-floor-change "$invalid_reason" >"$TMP/invalid-reason.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "empty or multiline floor reason accepted"
+  contains "$TMP/invalid-reason.out" '--allow-floor-change requires'
+done
+rc=0
+OMS_HARNESS_CHILD=1 "$ADMIT" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --allow-floor-change "$reason" >"$TMP/child-override.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "worker could grant itself a floor override"
+contains "$TMP/child-override.out" 'parent-only'
+
+# Approval binds the reason as well as forwarding it. A grant cannot be used
+# for another exception, and rejecting that mismatch must preserve the grant.
+verify_command='bash scripts/check.sh'
+approval="$("$ROOT/scripts/patch-land.sh" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify "$verify_command" --allow-verifier-change --allow-floor-change "$reason" --request-approval)"
+"$ROOT/scripts/approval-inbox.sh" --repo "$repo" show --approval "$approval" --json > "$TMP/floor-approval.json"
+python3 - "$TMP/floor-approval.json" "$reason" <<'PY_FLOOR_APPROVAL'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    request = json.load(handle)
+assert request["parameters"]["allow_floor_change_reason"] == sys.argv[2], request
+PY_FLOOR_APPROVAL
+grant="$("$ROOT/scripts/approval-inbox.sh" --repo "$repo" decide --approval "$approval" \
+  --decision approve --expected-version 1 --actor operator)"
+rc=0
+OMS_REQUIRE_LANDING_APPROVAL=1 "$ROOT/scripts/patch-land.sh" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify "$verify_command" --allow-verifier-change --allow-floor-change 'Different exception' \
+  --approval "$approval" --approval-version 2 --approval-token "$grant" \
+  >"$TMP/reason-mismatch.out" 2>&1 || rc=$?
+[ "$rc" != 0 ] || fail "landing approval accepted a different floor exception"
+contains "$repo/src/value.txt" 'good'
+OMS_REQUIRE_LANDING_APPROVAL=1 "$ROOT/scripts/patch-land.sh" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify 'bash scripts/check.sh' --allow-verifier-change \
+  --allow-floor-change "$reason" --approval "$approval" --approval-version 2 --approval-token "$grant" \
+  >"$TMP/land-floor-change.out" 2>&1 ||
+  fail "patch-land did not forward the floor override"
+contains "$repo/src/value.txt" 'bad'
+git -C "$repo" checkout -q -- src/value.txt pyproject.toml
 
 # The same floor remains mandatory for the explicitly named entrypoint.
 printf 'bad\n' > "$repo/src/value.txt"
