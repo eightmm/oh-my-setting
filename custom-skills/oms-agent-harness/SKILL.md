@@ -1,7 +1,8 @@
 ---
 name: oms-agent-harness
 description: >
-  Use OMS for shared task state, graph-guided context, agent collaboration,
+  Use OMS for shared task state, graph-guided context, document summaries,
+  agent collaboration,
   authorized FSD-style automatic collaboration, recovery or verified landing;
   ordinary self-contained edits need no harness workflow.
 ---
@@ -41,10 +42,11 @@ Use `oms list` for entrypoints, command routing for variants,
 and `oms list --all` for compatibility primitives. Read only references
 needed for the current decision, not the entire catalog.
 
-Work locally unless the user or applicable instructions explicitly request
-subagents or delegation. Task size or routine complexity alone is not permission
-to launch a worker. Questions do not authorize edits or autopilot.
-Avoid duplicate collectors, worker calls, or full-conversation replay.
+For lengthy reading/summaries, use one scoped read-only subagent when available;
+follow [source-reading.md](references/source-reading.md) for coverage and parent
+verification. Other delegation requires explicit authorization from the user or
+applicable instructions; task size alone grants none. Questions authorize neither
+edits nor autopilot. Avoid duplicate collectors, worker calls or conversation replay.
 
 For an authorized FSD-style or automatic discussion-and-implementation request
 using Codex and Claude Code, use `autopilot --collaboration auto` after reading
