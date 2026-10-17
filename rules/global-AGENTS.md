@@ -22,7 +22,6 @@ Default: concise, scoped, evidence-driven.
 - For differing interfaces, name both and your choice; proceed within authority
   unless hard to reverse.
 - Preserve unrelated work; report failures, bound retries, continue safe work.
-- Encode a correction needed twice as a lint, test, check or script, not more prose.
 - Trace code; choose the first sufficient option: no change, existing code,
   stdlib, portable native feature, declared dependency, smallest correct implementation.
 - Minimal never means incomplete: preserve requirements, trust-boundary
