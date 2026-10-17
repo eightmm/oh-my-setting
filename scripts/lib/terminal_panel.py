@@ -394,7 +394,7 @@ def main(argv=None):
     parser.add_argument("--legacy-older-than", type=float, metavar="HOURS", help="legacy main lifecycle age (default: 24 hours)")
     parser.add_argument("--standalone", action="store_true", help="settle aged parentless review workers")
     parser.add_argument("--older-than", type=float, metavar="DAYS", help="minimum review age with exit proof for --standalone")
-    parser.add_argument("--aged-days", type=float, metavar="DAYS", help="explicitly cancel reviews aged over DAYS (at least 7) with --legacy or --standalone")
+    parser.add_argument("--aged-days", type=float, metavar="DAYS", help="explicitly cancel aged review or blocked workers in the selected lineage (at least 7 days)")
     parser.add_argument("--attempt", action="append", help="--salvage: select one stopped attempt; --settle-review: supersede this worker")
     parser.add_argument("--reason", help="record why explicitly selected workers are superseded")
     parser.add_argument("--summary-file", help="bounded owner summary for --finalize")

@@ -710,6 +710,31 @@ assert not aged_preview["executes"] and not aged_preview["applied"], aged_previe
 assert {recent_review, reentered_review} <= {r["attempt"] for r in aged_preview["pending"]
     if r["pending_reason"] == "review_too_recent"}, aged_preview
 assert aged_preview["candidates"][0]["reason"] == "aged review without owner decision (7 days)"
+own_aged = settlement_worker("settlement-own-aged-task", main_attempts["codex"], exit_proof=False)
+settlement_transition(own_aged, "working")
+settlement_transition(own_aged, "verifying")
+settlement_transition(own_aged, "review")
+own_args = recover[:recover.index("--owner-attempt")] + ["--aged-days", "7", "--json"]
+own_preview = json.loads(call(own_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"])))
+assert own_aged in {r["attempt"] for r in own_preview["candidates"]}, own_preview
+assert not own_preview["executes"] and not own_preview["applied"], own_preview
+blocked_worker = settlement_worker("settlement-blocked-task", main_attempts["codex"], review=False)
+settlement_transition(blocked_worker, "blocked")
+blocked_rows, _ = saved._records(project, full=True)
+blocked_preview = review_settlement._settle(project, blocked_rows, [],
+    {main_attempts["codex"]}, {}, aged_days=7)
+assert blocked_worker in {r["attempt"] for r in blocked_preview["candidates"]}, blocked_preview
+assert next(r for r in blocked_preview["candidates"] if r["attempt"] == blocked_worker)["reason"] == \
+    "aged blocked without owner decision (7 days)", blocked_preview
+explicit_blocked = review_settlement._settle(project, blocked_rows, [],
+    {main_attempts["codex"]}, {}, explicit=[blocked_worker], reason="owner choice")
+assert explicit_blocked["pending"][0]["pending_reason"] == "aged_days_required", explicit_blocked
+with patch.dict(os.environ, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]), clear=True):
+    blocked_applied = review_settlement.settle_review(project, aged_days=7, apply=True)
+assert blocked_worker in blocked_applied["applied"], blocked_applied
+blocked_final = json.loads(call(event_command + ["show", "--attempt", blocked_worker, "--json"]))
+assert blocked_final["state"] == "cancelled" and blocked_final["reason_code"] == "owner_superseded", blocked_final
+assert blocked_final["refs"]["owner_superseded_reason"] == "aged blocked without owner decision (7 days)", blocked_final
 assert json.loads(call(event_command + ["show", "--attempt", undecided, "--json"]))["state"] == "review"
 for state in ("working", "verifying", "review"):
     settlement_transition(unproven_worker, state)
@@ -728,7 +753,11 @@ aged_attempt = next(a for a in rows if a["attempt_id"] == undecided)
 for state in ("starting", "working", "verifying", "cancelled"):
     guarded = review_settlement._settle(project, [dict(aged_attempt, state=state)], [],
         {legacy_main}, {}, aged_days=7)
-    assert not guarded["candidates"] and guarded["pending"][0]["pending_reason"] == "not_in_review", guarded
+    assert not guarded["candidates"]
+    if state == "cancelled":
+        assert guarded["terminal"] == 1 and not guarded["pending"], guarded
+    else:
+        assert guarded["pending"][0]["pending_reason"] == "not_in_review", guarded
 with patch.object(review_settlement, "_stopped", side_effect=AssertionError("aged policy used exit proof")):
     guarded = review_settlement._settle(project, [dict(bound_standalone, attempt_id=unproven_worker)], [],
         set(), {}, aged_days=7, standalone_mode=True)

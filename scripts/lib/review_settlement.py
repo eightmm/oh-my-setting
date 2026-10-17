@@ -115,7 +115,7 @@ def _stopped(repo, attempt, attempts, artifacts):
 
 def _apply(repo, attempt, target, code, task, revision, reason=None):
     command = ["bash", str(saved.ENTRY), "agent-events", "--repo", str(repo), "transition",
-        "--attempt", attempt["attempt_id"], "--state", target, "--expected-state", "review",
+        "--attempt", attempt["attempt_id"], "--state", target, "--expected-state", attempt.get("state", "review"),
         "--expected-seq", str(attempt["sequence"]),
         "--reason-code", code, "--actor", "panel-review-settlement",
         "--idempotency-key", "review-settle-" + hashlib.sha256((task + ":" + revision).encode()).hexdigest()]
@@ -129,22 +129,19 @@ def _apply(repo, attempt, target, code, task, revision, reason=None):
 
 def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=None, apply=False,
             legacy_parents=None, standalone_older_than=None, aged_days=None, standalone_mode=False):
-    report = {"candidates": [], "pending": [], "errors": [], "applied": [], "superseded": [], "executes": apply}
+    report = {"candidates": [], "pending": [], "errors": [], "applied": [], "superseded": [], "terminal": 0, "executes": apply}
     # An absent plan lets retired decisions stand; a present plan that cannot be
     # read leaves generation evidence unknown, so no decision may settle.
     plan_unreadable = (os.path.lexists(os.path.join(str(repo), ".oms", "plan", "tasks.json"))
                        and not isinstance(read_plan(repo)[0].get("plan_id"), str))
     lifecycle = __import__("runpy").run_path(str(saved.ROOT / "scripts/lib/agent-events.py"))
-    review_since = {}
+    state_since = {}
     try:
         for row in lifecycle["read_rows"](lifecycle["event_path"](repo)):
             if row.get("event_type") == "attempt.state_changed":
-                if row.get("to_state") == "review":
-                    review_since[row["attempt_id"]] = row["ts"]
-                elif row.get("from_state") == "review":
-                    review_since.pop(row["attempt_id"], None)
+                state_since[(row["attempt_id"], row.get("to_state"))] = row["ts"]
     except (OSError, ValueError, KeyError, lifecycle["OpsError"]):
-        review_since = {}
+        state_since = {}
     by_id = {a["attempt_id"]: a for a in attempts}
     for ident in explicit:
         row = by_id.get(ident, {})
@@ -168,7 +165,8 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
         if not chosen and not standalone and not decision and not aged:
             continue
         superseding = chosen or standalone or aged
-        selection_reason = ("aged review without owner decision (%g days)" % aged_days if aged
+        aged_state = attempt.get("state") if aged and attempt.get("state") in {"review", "blocked"} else "review"
+        selection_reason = (("aged %s without owner decision (%g days)" % (aged_state, aged_days)) if aged
                             else "aged standalone review" if standalone else reason)
         if superseding:
             target, code, rev = "cancelled", "owner_superseded", hashlib.sha256(selection_reason.encode()).hexdigest()[:24]
@@ -176,9 +174,10 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
             payload, result_row = decision
             target, code = POLICY[payload["outcome"]]
             rev = payload["revision"]
+        age = _age(state_since.get((ident, aged_state)))
         item = {"attempt": ident, "task": task, "state": attempt.get("state"),
-                "age_in_review_seconds": _age(review_since.get(ident)),
-                "selection_reason": "aged_review_without_owner_decision" if aged else "aged_standalone_review" if standalone else (
+                "age_in_review_seconds": age,
+                "selection_reason": ("aged_%s_without_owner_decision" % aged_state) if aged else "aged_standalone_review" if standalone else (
                     "owner_selected" if chosen else "finalized_" + payload["outcome"]),
                 "target_state": target, "reason_code": code}
         if superseding:
@@ -191,13 +190,17 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
         if discarded and attempt.get("state") in {"failed", "timed_out", "cancelled", "abandoned"}:
             report["superseded"].append(dict(item, superseded_by=discarded["superseded_by"]))
             continue
-        if attempt.get("state") != "review" or target is None:
-            report["pending"].append(dict(item, pending_reason="rework" if target is None else "not_in_review"))
+        if attempt.get("state") in {"done", "failed", "cancelled", "timed_out", "abandoned"}:
+            report["terminal"] += 1
+            continue
+        eligible_aged_state = aged and attempt.get("state") in {"review", "blocked"}
+        if (attempt.get("state") != "review" and not eligible_aged_state) or target is None:
+            pending_reason = "rework" if target is None else "aged_days_required" if chosen and attempt.get("state") == "blocked" else "not_in_review"
+            report["pending"].append(dict(item, pending_reason=pending_reason))
             continue
         if aged or standalone:
             threshold = aged_days if aged else standalone_older_than
             item["aged_days" if aged else "older_than_days"] = threshold
-            age = item["age_in_review_seconds"]
             if age is None or age <= threshold * 86400:
                 report["pending"].append(dict(item, pending_reason="review_age_unknown" if age is None else "review_too_recent"))
                 continue
@@ -282,8 +285,8 @@ def settle_review(repo, owner=None, owner_attempt=None, explicit=(), reason=None
     if aged_days is not None:
         if not math.isfinite(aged_days) or aged_days < 7:
             raise ValueError("--aged-days must be finite and at least 7")
-        if not (legacy or standalone):
-            raise ValueError("--aged-days requires --legacy or --standalone")
+        if legacy and not owner_attempt:
+            raise ValueError("--legacy requires --owner-attempt")
         if older_than is not None or explicit or reason is not None:
             raise ValueError("--aged-days cannot be combined with --older-than, --attempt or --reason")
     if older_than is not None and not standalone:
@@ -344,6 +347,7 @@ def cli_main(arguments):
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         print("Review settlement: " + ("apply" if args.apply else "dry run"))
+        print("terminal: " + str(report["terminal"]))
         for key in ("candidates", "pending", "errors"):
             for row in report[key]:
                 print(key + ": " + json.dumps(row, ensure_ascii=False))
