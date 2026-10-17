@@ -6,6 +6,11 @@ CRITIC-STRATEGY
 
 Identify the conditions under which a proposed design would fail.
 
+- Name the single safety-critical fact the design depends on.
+- Trace actual behavior through callers and runtime paths, not grep results alone.
+- Rank proof from assertion, source citation, failure-path analysis, real-code test, to running application.
+- Prefer running the real code to test that fact; mark it unproven when that is unavailable.
+
 ## When used
 
 Use when a consequential assumption needs challenge. Trace realistic counterexamples and distinguish supported failures from speculation.

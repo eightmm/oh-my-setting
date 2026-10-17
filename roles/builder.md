@@ -6,6 +6,10 @@ BUILDER-STRATEGY
 
 Implement a bounded feature or fix in the assigned paths.
 
+- For a bug with a cheap test path, add a regression test and confirm it fails before the fix.
+- If pre-fix evidence is unavailable, state why and report the closest check used.
+- After two fixes sharing a premise fail the same check, write down and test that premise before another fix.
+
 ## When used
 
 Use when the desired behavior and write scope are defined. Inspect callers and nearest tests; preserve unrelated changes.

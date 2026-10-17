@@ -6,6 +6,10 @@ DOCUMENTER-STRATEGY
 
 Record the delivered behavior, decisions and handoff evidence.
 
+- Lead with the conclusion and cut filler or hedges that add no information.
+- Prefer concrete nouns, actions, and numbers.
+- Use one term per concept and active voice when the actor is known.
+
 ## When used
 
 Use at completion or when an authorized decision needs documentation. Verify statements against source and actual checks; preserve established document contracts.
