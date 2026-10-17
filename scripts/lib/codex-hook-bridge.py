@@ -99,6 +99,8 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
                 if not raw:
                     return
                 consumed += len(raw)
+                if consumed > limit:
+                    return  # over the cap: no answer is trusted
                 try:
                     row = json.loads(raw.decode("utf-8"))
                 except (ValueError, UnicodeError):

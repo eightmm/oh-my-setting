@@ -819,6 +819,7 @@ server.write_text('#!/usr/bin/env python3\n'
                   ' elif request.get("method") == "hooks/list":\n'
                   '  mode = os.environ.get("OMS_HOOKS_LIST_STATUS", "trusted")\n'
                   '  if mode == "unavailable": sys.exit(3)\n'
+
                   '  listed = []\n'
                   '  for event, groups in hooks.items():\n'
                   '   for gi, group in enumerate(groups):\n'
@@ -834,6 +835,11 @@ server.write_text('#!/usr/bin/env python3\n'
                   '  if mode == "missing": listed = listed[1:]\n'
                   '  data = [{"cwd": os.getcwd(), "errors": [], "hooks": listed, "warnings": []}]\n'
                   '  result = {"data": "invalid"} if mode == "garbage" else {"data": data}\n'
+                  '  if mode == "oversize":\n'
+                  '   result["padding"] = ""\n'
+                  '   base = len(json.dumps({"id": request["id"], "result": result})) + 1\n'
+                  '   sent = len(json.dumps({"id": 1, "result": {}})) + 1  # initialize answer\n'
+                  '   result["padding"] = "x" * (1024 * 1024 + 1 - sent - base)  # one byte over the cap\n'
                   '  print(json.dumps({"id": request["id"], "result": result}), flush=True)\n')
 server.chmod(0o700)
 server_env = dict(os.environ, OMS_HOOK_NATIVE_ROOT=str(native), OMS_HOOK_PLUGIN_ID=plugin_id)
@@ -871,6 +877,9 @@ native_hooks.write_bytes(saved_native)
 for mode in ("disabled", "no-enabled"):
     server_env["OMS_HOOKS_LIST_STATUS"] = mode
     assert report().stdout.startswith("untrusted: "), (mode, report().stdout)
+# A response that does not fit the 1 MiB cap is never trusted.
+server_env["OMS_HOOKS_LIST_STATUS"] = "oversize"
+assert report().stdout.strip() == "unknown", report().stdout
 server_env["OMS_HOOKS_LIST_STATUS"] = "disabled"
 assert run("--native-root", str(native)).returncode == 0
 unchanged()
