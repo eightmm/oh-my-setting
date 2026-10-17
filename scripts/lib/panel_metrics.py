@@ -529,7 +529,7 @@ def aggregate(repo, since=None, now=None):
     def first_failing_stage(attempt):
         indexed = calls_by_attempt.get(attempt.get("attempt_id"), [])
         stages = {"implement": [], "verify": [], "review": []}
-        if attempt.get("reason_code") == "provider_failed":
+        if attempt.get("reason_code") in {"provider_failed", "provider_timeout"}:
             return "implement"
         if attempt.get("reason_code") == "verification_failed" or attempt.get("verify_status") == "failed":
             return "verify"

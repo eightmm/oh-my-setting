@@ -3573,6 +3573,7 @@ ma_run_routed_provider() {
   local origin="$6"
   local state_repo="$7"
   local status=0
+  local failure_reason="provider_failed"
   local started_seconds="$SECONDS"
   local OMS_ATTEMPT_ID="${OMS_ATTEMPT_ID:-}"
   local OMS_ATTEMPT_OWNED=0
@@ -3767,8 +3768,14 @@ PY
             --state "done" --idempotency-key routed-done --actor provider-router >/dev/null || status=2
         fi
       else
+        if [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; then
+          failure_reason="worker_authority_violation"
+        elif [ "$status" -eq 124 ] &&
+          [ -z "${OMS_PANEL_PROVIDER_ERROR_CLASS:-${OMS_PROVIDER_ERROR_CLASSIFICATION:-}}" ]; then
+          failure_reason="provider_timeout"
+        fi
         "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
-          --state failed --reason-code provider_failed --actor provider-router \
+          --state failed --reason-code "$failure_reason" --actor provider-router \
           --idempotency-key routed-failed >/dev/null || status=2
       fi
     fi

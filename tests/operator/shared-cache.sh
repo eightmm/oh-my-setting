@@ -693,6 +693,8 @@ add_attempt('delegate-failed', 'metric-write-failed', 'worker', 'write', -11, -9
             tool='peer-delegate')
 add_attempt('delegate-blocked', 'metric-write-blocked', 'worker', 'write', -7, -6, 'failed',
             'provider_failed', tool='peer-delegate')
+add_attempt('delegate-timeout', 'metric-write-timeout', 'worker', 'write', -5, -3, 'failed',
+            'provider_timeout', tool='peer-delegate')
 add_attempt('delegate-typed-verify', 'metric-write-typed-verify', 'worker', 'write', -5, -4,
             'failed', tool='peer-delegate')
 add_attempt('delegate-provider-verify', 'metric-write-provider-verify', 'worker', 'write', -5, -4,
@@ -724,6 +726,9 @@ artifact_rows.extend([
     {'schema': 1, 'event_id': 'evt_delegate_blocked', 'operation_id': 'op_delegate_blocked',
      'ts': stamp_metric(-6), 'kind': 'delegate', 'exit': 1, 'verify_exit': 125,
      'reason_code': 'provider_failed', 'attempt_id': 'delegate-blocked'},
+    {'schema': 1, 'event_id': 'evt_delegate_timeout', 'operation_id': 'op_delegate_timeout',
+     'ts': stamp_metric(-3), 'kind': 'delegate', 'verify_exit': 125,
+     'reason_code': 'provider_timeout', 'attempt_id': 'delegate-timeout'},
     {'schema': 1, 'event_id': 'evt_delegate_typed_verify', 'operation_id': 'op_delegate_typed_verify',
      'ts': stamp_metric(-4), 'kind': 'delegate', 'reason_code': 'verification_failed',
      'attempt_id': 'delegate-typed-verify'},
@@ -741,17 +746,17 @@ assert expected_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, '
 assert expected_metrics['rework'] == {'tasks': 1, 'started': 6, 'rate': 0.1667}, expected_metrics
 assert expected_metrics['abandoned_calls'] == 1, expected_metrics
 assert expected_metrics['endings'] == {'timed_out': 2, 'cancelled': 1,
-                                       'verify_failed': 1, 'failed': 3}, expected_metrics
+                                       'verify_failed': 1, 'failed': 4}, expected_metrics
 write_metrics = expected_metrics['write_attempts']
-assert write_metrics['total'] == 7 and write_metrics['reconciles'], write_metrics
-assert write_metrics['state_counts'] == {'done': 1, 'failed': 4, 'review': 1, 'queued': 1}, write_metrics
+assert write_metrics['total'] == 8 and write_metrics['reconciles'], write_metrics
+assert write_metrics['state_counts'] == {'done': 1, 'failed': 5, 'review': 1, 'queued': 1}, write_metrics
 assert write_metrics['states']['other_by_state'] == {'queued': 1}, write_metrics
-assert write_metrics['failed_and_undecided']['reason_code'] == {'verification_failed': 1, 'provider_failed': 1, 'unknown': 3}, write_metrics
-assert write_metrics['failed_and_undecided']['first_failing_stage'] == {'verify': 2, 'implement': 2, 'unknown': 1}, write_metrics
+assert write_metrics['failed_and_undecided']['reason_code'] == {'verification_failed': 1, 'provider_failed': 1, 'provider_timeout': 1, 'unknown': 3}, write_metrics
+assert write_metrics['failed_and_undecided']['first_failing_stage'] == {'verify': 2, 'implement': 3, 'unknown': 1}, write_metrics
 assert write_metrics['provider_failed_categories']['capacity'] == 1, write_metrics
 # provider_failed without metadata and a provider failure followed by verify are both counted
 assert write_metrics['provider_failed_categories']['unknown'] == 2, write_metrics
-assert write_metrics['telemetry']['context_modes'] == {'graph': {'attempts': 1, 'done': 0}, 'unrecorded': {'attempts': 6, 'done': 1}}, write_metrics
+assert write_metrics['telemetry']['context_modes'] == {'graph': {'attempts': 1, 'done': 0}, 'unrecorded': {'attempts': 7, 'done': 1}}, write_metrics
 assert write_metrics['telemetry']['claude_fork_subagents'] == 'not_recorded', write_metrics
 assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
 assert expected_metrics['metric_scope']['completion']['coverage']['attempt_limit'] == 1000, expected_metrics
@@ -767,8 +772,8 @@ with redirect_stdout(metric_text):
 assert 'completion: 2/6 (33.3%)' in metric_text.getvalue(), metric_text.getvalue()
 assert 'awaiting review: n=' in metric_text.getvalue(), metric_text.getvalue()
 assert 'coverage:' in metric_text.getvalue() and 'until ' in metric_text.getvalue(), metric_text.getvalue()
-assert 'peer-delegate write attempts: 7' in metric_text.getvalue(), metric_text.getvalue()
-assert 'context modes (done/attempts)=graph 0/1, unrecorded 1/6;' in metric_text.getvalue(), metric_text.getvalue()
+assert 'peer-delegate write attempts: 8' in metric_text.getvalue(), metric_text.getvalue()
+assert 'context modes (done/attempts)=graph 0/1, unrecorded 1/7;' in metric_text.getvalue(), metric_text.getvalue()
 metric_json = io.StringIO()
 with redirect_stdout(metric_json):
     assert panel.main(['--repo', str(metric_repo), '--metrics', '--json']) == 0
@@ -785,7 +790,7 @@ except SystemExit as error:
     assert error.code == 0
 assert 'follow-up task IDs have no producer linkage' in ' '.join(metric_help.getvalue().split()), metric_help.getvalue()
 recent_metrics = panel_metrics.aggregate(metric_repo, since='1m', now=now_metric)
-assert recent_metrics['write_attempts']['total'] == 7, recent_metrics
+assert recent_metrics['write_attempts']['total'] == 8, recent_metrics
 outside_window_metrics = panel_metrics.aggregate(metric_repo, since='1s', now=now_metric)
 assert outside_window_metrics['write_attempts']['total'] == 0, outside_window_metrics
 assert recent_metrics['completion'] == {'finished': 1, 'started': 3, 'rate': 0.3333}, recent_metrics

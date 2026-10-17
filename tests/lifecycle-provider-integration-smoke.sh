@@ -322,6 +322,59 @@ assert states[-2:] == ["verifying", "failed"], states
 assert "review" not in states, states
 PY
 
+# The router owns the terminal failure reason for direct write attempts.
+mkdir -p "$TMP/routed-repo"
+git -C "$TMP/routed-repo" init -q
+git -C "$TMP/routed-repo" -c user.name=test -c user.email=test@example.com commit --allow-empty -qm base
+fixture_write_guard() { return 1; }
+export -f fixture_write_guard
+for routed_failure in guard timeout provider; do
+  failure_status=0
+  failure_timeout="${OMS_PEER_TIMEOUT:-}"
+  failure_sleep=""
+  failure_exit=0
+  failure_guard=""
+  case "$routed_failure" in
+    guard) failure_guard=fixture_write_guard ;;
+    timeout) failure_timeout=1; failure_sleep=3 ;;
+    provider) failure_exit=7 ;;
+  esac
+  printf 'routed failure probe\n' > "$TMP/routed-prompt"
+  touch "$TMP/routed-artifact"
+  env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+    OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+    OMS_PEER_TIMEOUT="$failure_timeout" OMS_TEST_PROVIDER_SLEEP="$failure_sleep" \
+    OMS_TEST_MAIL_EXIT="$failure_exit" OMS_WRITE_POST_ATTEMPT_GUARD_FN="$failure_guard" \
+    OMS_TEST_ROOT="$ROOT" bash -c '
+      . "$OMS_TEST_ROOT/scripts/lib/peer-common.sh"
+      REPO="$1"; MA_KIND=delegate; MA_SHOW_REPO=0; MA_QUORUM_FALLBACK=answer
+      MA_DEBATE_ROLE=advisors; MA_DEBATE_TOPIC=question; MA_DEBATE_SECTIONS=""
+      ma_run_routed_provider codex write "$2" "$3" "$1" peer-delegate "$1" ""
+    ' _ "$TMP/routed-repo" "$TMP/routed-prompt" "$TMP/routed-artifact" \
+    >/dev/null 2>&1 || failure_status=$?
+  [ "$failure_status" -ne 0 ] || fail "routed $routed_failure unexpectedly succeeded"
+  failure_attempt="$(python3 - "$TMP/routed-repo/.oms/lifecycle/events.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+print([row["attempt_id"] for row in rows if row.get("event_type") == "attempt.created" and
+       row.get("tool") == "peer-delegate"][-1])
+PY
+)"
+  failure_attempt="${failure_attempt//$'\r'/}"
+  "$ROOT/scripts/agent-events.sh" --repo "$TMP/routed-repo" show --attempt "$failure_attempt" --json \
+    > "$TMP/routed-$routed_failure.json"
+done
+python3 - "$TMP/routed-guard.json" "$TMP/routed-timeout.json" "$TMP/routed-provider.json" <<'PY' || fail "routed failure reason code was lost"
+import json, sys
+expected = ("worker_authority_violation", "provider_timeout", "provider_failed")
+for path, reason in zip(sys.argv[1:], expected):
+    attempt = json.load(open(path, encoding="utf-8"))
+    if isinstance(attempt, list):
+        attempt = attempt[-1]
+    assert attempt["state"] == "failed", attempt
+    assert attempt["reason_code"] == reason, (reason, attempt)
+PY
+
 # The worker's model, panel task and room are routing for its provider call
 # only. The declared verifier starts as clean as a top-level verify, so suites
 # it runs cannot record fixture attempts into the live room under this task.
