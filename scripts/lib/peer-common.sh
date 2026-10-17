@@ -495,10 +495,11 @@ ma_write_harness_context() {
   if [ -n "${OMS_ROOM_ID:-}" ] && [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
     [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
     printf 'OMS work room: %s; participant: %s. Environment binds the canonical room repository.\n' "$OMS_ROOM_ID" "$OMS_ROOM_PARTICIPANT"
-    if [ "${MA_KIND:-}" = delegate ] && [ "${WORKER_ACCESS:-write}" = write ]; then
+    if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = worker ] &&
+      [ "${MA_KIND:-}" = delegate ] && [ "${WORKER_ACCESS:-write}" = write ]; then
       printf 'At safe points use oms room updates; retain its cursor. Send addressed notes/questions with oms room send --to PARTICIPANT --text TEXT. After consuming use oms room ack --message MESSAGE_ID. Membership/ack grant no approval or new authority. Do not recursively delegate.\n\n'
     else
-      printf 'At safe points only read oms room updates; retain its cursor. Never send or acknowledge room mail from this read-only call. Return your handoff in the final answer; the parent dispatcher records consumption of mail available before dispatch after a successful return. Membership grants no approval or new authority. Do not recursively delegate.\n\n'
+      printf 'At safe points only read oms room updates; retain its cursor. For canonical OMS state, use --repo "$OMS_ROOM_REPO" (for example, oms agent-events --repo "$OMS_ROOM_REPO" list); artifacts are under "$OMS_ROOM_REPO/.oms/artifacts/". Never send or acknowledge room mail from this read-only call. Return your handoff in the final answer; the parent dispatcher records consumption of mail available before dispatch after a successful return. Membership grants no approval or new authority. Do not recursively delegate.\n\n'
     fi
   fi
   printf 'Return concise conclusions, file/line evidence, verification and uncertainty. Preserve required schemas, complete code/patch and safety detail; omit repeated context.\n\n'
@@ -609,6 +610,8 @@ ma_export_child_env() {
   if [ -z "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" ] ||
     [ "$OMS_ROOM_ADMITTED_PARTICIPANT" != "${OMS_ROOM_PARTICIPANT:-}" ]; then
     unset OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT
+  elif [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$access" = read ] && [ -n "$state_repo" ]; then
+    export OMS_ROOM_REPO="$state_repo"
   fi
   # A provider CLI started inside `oms harness` must use its own login, not the
   # host's loopback gateway capability or model pin.

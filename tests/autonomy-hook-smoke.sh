@@ -300,8 +300,10 @@ unset OMS_ROOM_ADMITTED_PARTICIPANT
 ma_export_child_env codex consult "$2" fixture read
 [ -z "${OMS_ROOM_PARTICIPANT:-}" ] && [ -z "${OMS_ROOM_ID:-}" ] && [ -z "${OMS_ROOM_REPO:-}" ]
 export OMS_ROOM_ID=team OMS_ROOM_PARTICIPANT=worker OMS_ROOM_REPO="$2" OMS_ROOM_ADMITTED_PARTICIPANT=worker
-ma_export_child_env claude delegate "$2" fixture read
+OMS_PANEL_DISPATCH=1 ma_export_child_env claude delegate "$2" fixture read
 [ "$OMS_ROOM_PARTICIPANT" = worker ] && [ "$OMS_ROOM_ID" = team ] && [ "$OMS_ROOM_REPO" = "$2" ]
+OMS_ROOM_REPO=/wrong/worktree OMS_PANEL_DISPATCH=1 ma_export_child_env claude delegate "$2" fixture read
+[ "$OMS_ROOM_REPO" = "$2" ]
 SH
 }
 

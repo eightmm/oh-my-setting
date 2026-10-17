@@ -12376,19 +12376,28 @@ test_agent_call_context_is_opt_in() {
   assert_not_exists "$project/model-probe"
   assert_file_contains "$project/context" 'verification and uncertainty'
   local room_case
-  for room_case in call:read ask:read review:read delegate:read delegate:write; do
+  for room_case in call:read ask:read review:read delegate:read delegate:write panel-write; do
     (
       . "$ROOT/scripts/lib/peer-common.sh"
       MA_KIND="${room_case%:*}" WORKER_ACCESS="${room_case#*:}"
       OMS_ROOM_ID=room OMS_ROOM_PARTICIPANT=reader OMS_ROOM_ADMITTED_PARTICIPANT=reader
+      if [ "$room_case" = panel-write ]; then
+        MA_KIND=delegate WORKER_ACCESS=write OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker
+      elif [ "$room_case" = call:read ]; then
+        OMS_PANEL_DISPATCH=1 OMS_ROOM_REPO=/canonical/state/repo
+      fi
       ma_write_harness_context "$project" 0 0 0 'Assess this plan'
     ) > "$project/room-context"
-    if [ "$room_case" = delegate:write ]; then
+    if [ "$room_case" = panel-write ]; then
       assert_file_contains "$project/room-context" 'oms room send'
       assert_file_contains "$project/room-context" 'oms room ack --message'
     else
       if grep -Eq 'oms room (send|ack)' "$project/room-context"; then fail 'read prompt instructs room writes'; fi
       assert_file_contains "$project/room-context" 'final answer'
+    fi
+    if [ "$room_case" = call:read ]; then
+      assert_file_contains "$project/room-context" 'oms agent-events --repo "$OMS_ROOM_REPO" list'
+      assert_file_contains "$project/room-context" '"$OMS_ROOM_REPO/.oms/artifacts/"'
     fi
   done
   HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
