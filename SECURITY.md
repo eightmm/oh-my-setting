@@ -56,6 +56,10 @@ privately first. Please allow time for a fix before public disclosure.
 
 ## Secret handling
 
+- Any credential in a worker's environment or in files readable by that worker
+  is exposed to the worker's code. Repository MCP configuration does not list
+  user-global or provider-managed MCP servers; check `codex mcp list`,
+  `claude mcp list`, or Antigravity CLI's `/mcp` manager.
 - Never commit tokens, API keys, private data, or cluster/machine details.
   `.gitignore` blocks `.env`, `*.key`, `*.pem`, `local/`, and generated state.
 - Project memory and its derived SQLite index are local plaintext under
