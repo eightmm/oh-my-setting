@@ -598,6 +598,14 @@ def aggregate(repo, since=None, now=None):
             if category not in provider_categories or category == "unknown":
                 category = "unknown"
             provider_categories[category] += 1
+    # peer-delegate indexes its context_mode on the delegate artifact row.
+    context_modes = {}
+    for attempt in delegate_writes:
+        mode = next((row.get("context_mode") for row in calls_by_attempt.get(attempt.get("attempt_id"), [])
+                     if row.get("kind") == "delegate" and isinstance(row.get("context_mode"), str)), "unrecorded")
+        entry = context_modes.setdefault(mode, {"attempts": 0, "done": 0})
+        entry["attempts"] += 1
+        entry["done"] += attempt.get("state") == "done"
     write_calls = [row for row in calls if row.get("refs", {}).get("panel_role") == "worker"
                    and row.get("refs", {}).get("panel_access") == "write"
                    and not any(item.get("reason_code") == "manual_clear" for item in row.get("transitions", []))]
@@ -741,8 +749,7 @@ def aggregate(repo, since=None, now=None):
                                                         "undecided_age_buckets": undecided_ages},
                                "provider_failed_categories": provider_categories,
                                "provider_error_category_field": "provider_error_category or refs.provider_error",
-                               "telemetry": {"graph_context": "not_recorded",
-                                             "graph_context_missing_field": "refs.context_pack_sha256",
+                               "telemetry": {"context_modes": dict(sorted(context_modes.items())),
                                              "claude_fork_subagents": "not_recorded",
                                              "claude_fork_subagents_missing_field": "refs.claude_fork_subagents"}},
             "interventions": {"manual_clears": clears, "cancels": cancels,
@@ -791,8 +798,10 @@ def metrics_text(report):
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("reason_code", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("first_failing_stage", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("undecided_age_buckets", {}), sort_keys=True)),
-        "provider failure categories: %s; graph context=not recorded (refs.context_pack_sha256); Claude fork subagents=not recorded (refs.claude_fork_subagents)" %
-        json.dumps(report.get("write_attempts", {}).get("provider_failed_categories", {}), sort_keys=True),
+        "provider failure categories: %s; context modes (done/attempts)=%s; Claude fork subagents=not recorded (refs.claude_fork_subagents)" % (
+            json.dumps(report.get("write_attempts", {}).get("provider_failed_categories", {}), sort_keys=True),
+            ", ".join("%s %d/%d" % (mode, entry["done"], entry["attempts"]) for mode, entry in
+                      report.get("write_attempts", {}).get("telemetry", {}).get("context_modes", {}).items()) or "none"),
         "main interventions: %d (manual clears=%d, cancels=%d, owner failures=%d)" % (
             report["interventions"]["total"], report["interventions"]["manual_clears"],
             report["interventions"]["cancels"], report["interventions"]["owner_finalized_failures"]),
