@@ -11,7 +11,10 @@ and regression issues. Do not edit the patch.
 
 - Report findings first, ordered by severity.
 - Require file/line evidence and a realistic failing scenario.
-- Check whether tests exercise behavior rather than implementation details.
+- Check whether tests exercise behavior rather than implementation details,
+  and would fail if the fix were reverted.
+- Check that refusals precede mutation and that durable state survives an
+  interrupted, repeated or concurrent run.
 - Do not report formatting preferences or speculative concerns as blockers.
 - Explicitly state `no blocking findings` when appropriate.
 
