@@ -2,8 +2,7 @@
 name: oms-agent-harness
 description: >
   Use OMS for shared task state, graph-guided context, document summaries,
-  agent collaboration,
-  authorized FSD-style automatic collaboration, recovery or verified landing;
+  agent collaboration, recovery or verified landing;
   ordinary self-contained edits need no harness workflow.
 ---
 
@@ -33,7 +32,7 @@ approvals, commit intents, or publication intents.
 | State | `oms inbox --repo .`; runtime envelope/next/evidence for detail, not another full dashboard by default. |
 | Collaboration | Existing live `thread` for active collaborators; `oms consult` for explicitly authorized new peer judgment. |
 | Context | Use `oms graph project context --task "..."` when relationships or change impact are unclear; reuse a current pack. Direct search suffices for known local scope. Outline a large file with `oms graph project api PATH` before reading it whole. `oms runtime context --target PATH` supplies bounded source bytes. |
-| Delegation | When authorized: `oms panel --dispatch ROLE`, `oms peer-delegate --to NAME` (one write), `oms autopilot` (reviewed plans). Load [roles.md](references/roles.md), [model-routing.md](references/model-routing.md), [delegation-artifacts.md](references/delegation-artifacts.md) as needed. |
+| Delegation | When authorized: `oms panel --dispatch ROLE`, `oms peer-delegate --to NAME` (one write). Load [roles.md](references/roles.md), [model-routing.md](references/model-routing.md), [delegation-artifacts.md](references/delegation-artifacts.md) as needed. |
 | Verification and landing | Run local checks directly. `oms peer-review --gate` is for authorized peer review, not every edit. `patch-land` admits/applies worker patches; `oms land` gates/pushes/updates a committed worktree when authorized. |
 | Continuity | Journal for history, agent-memory for stable facts, session-handoff for local sessions, runtime capsule for sanitized transfer. See [state-memory.md](references/state-memory.md). |
 | Operations | `oms doctor` for health, `oms update` for install updates, `oms tick` for scheduled repo maintenance. Optional profile/backend/experiment flows use [runtime-core.md](references/runtime-core.md). |
@@ -48,11 +47,8 @@ verification. Other delegation requires explicit authorization from the user or
 applicable instructions; task size alone grants none. Questions authorize neither
 edits nor autopilot. Avoid duplicate collectors, worker calls or conversation replay.
 
-For an authorized FSD-style or automatic discussion-and-implementation request
-using Codex and Claude Code, use `autopilot --collaboration auto` after reading
-[autonomy-loop.md](references/autonomy-loop.md). The parent starts the workflow,
-reviews proposals, runs and recovers it internally until completion or a material
-blocker. This is permission for the requested goal, not future unrelated goals.
+Only for an explicitly requested FSD-style automatic run, read
+[autonomy-loop.md](references/autonomy-loop.md) (`oms autopilot`).
 
 For skill evaluation/import, load
 [skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks or Codex
