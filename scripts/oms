@@ -159,8 +159,6 @@ journal
 land
 model-doctor
 models
-open-in
-otel-export
 panel
 patch-admit
 patch-land
@@ -186,7 +184,6 @@ snapshot
 state
 state-verify
 status
-support-bundle
 sync-shared
 thread
 tick
@@ -291,9 +288,7 @@ case "$TOOL" in
     ;;
 esac
 TOOL="${TOOL%.sh}"
-if [ "$TOOL" = semantic-eval ]; then
-  exec bash "$SCRIPTS_DIR/semantic-eval.sh" "$@"
-elif ! is_public_tool "$TOOL"; then
+if ! is_public_tool "$TOOL"; then
   echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
 fi

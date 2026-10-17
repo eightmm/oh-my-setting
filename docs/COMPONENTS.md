@@ -78,8 +78,6 @@ explains overlapping entrypoints.
 | `session-handoff` | Build a compact digest from an agent session. | `oms session-handoff` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `snapshot` | Record private local context for agents. | `oms snapshot` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `gc` | Apply retention to repository-local state. | `oms gc` | [State, memory, and handoff](#state-memory-and-handoff) |
-| `otel-export` | Export whitelisted metadata to stdout or a local file. | `oms otel-export` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
-| `support-bundle` | Prepare a redacted diagnostic bundle. | `oms support-bundle` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
 
 ## ML and HPC components
 
@@ -123,7 +121,6 @@ explains overlapping entrypoints.
 | Component | Purpose | Invoke | Details |
 |---|---|---|---|
 | `models` | List cached provider model capabilities. | `oms models` | [Models and reasoning effort](#models-and-reasoning-effort) |
-| `open-in` | Open a file in an editor or resume a Codex task. | `oms open-in` | [Durable operations and optional frontends](#durable-operations-and-optional-frontends) |
 | `graph` | Query project and execution graphs. | `oms graph` | [Graph engineering](GRAPH-ENGINEERING.md) |
 
 The catalog names the command front doors. Their variants and authority remain
@@ -176,7 +173,6 @@ provenance boundaries; remove duplicated routing and generated boilerplate.
 | Generic keyword skill hints | Off by default; native skill discovery remains. `OMS_SKILL_HINTS=1` restores keyword hints without changing live collaboration or journal delivery. |
 | Stop session budgets | Answer-format blocking is removed, including legacy opt-ins. Positive `OMS_SESSION_BUDGET_TURNS` or `OMS_SESSION_BUDGET_HOURS` enables a session cap. Journal finalization remains. |
 | External adapters | Removed the old Herdr pane-control command and standalone A2A HTTP bridge/card. The panel has a separate optional local Herdr terminal host for wrapper launch, identity-checked navigation and reported footer values; it grants no landing authority. Native peer calls, live threads and CLI/MCP state reads remain. No extras dispatcher remains. |
-| Standalone semantic evaluation | Retired executable engine; use current-HEAD `patch-admit` checks and `peer-review` with the minimal-change rubric. Historical reports remain readable. |
 
 The seven skills retain distinct installation, coordination, specification,
 diagnosis, security, Slurm and local-GPU responsibilities. Combining them would
@@ -197,8 +193,8 @@ user request
        -> write: peer-delegate -> isolated worktree -> patch
                                       -> patch-admit -> patch-land
        -> orchestrate: agent-supervisor -> agent-events -> approval-inbox
-       -> operate: runtime backend / open-in
-       -> observe: inbox / targeted state queries / otel-export
+       -> operate: runtime backend
+       -> observe: inbox / targeted state queries
   -> local state in .oms/
        -> inbox / state / handoff / MCP / Work Journal
 ```
@@ -1106,10 +1102,8 @@ Host ancestry aliases remain supported. This is not a same-user filesystem sandb
 | `land` | One detached job per landing: gate (in a detached worktree of the verified SHA, so untracked files and the live session's `.oms` writes stay out; `check.sh --affected --ci-parity --changed-from REMOTE/TARGET --changed-to HEAD` in the harness checkout itself, where a full selection runs lint and the quick lane, plus operator-tools when tier-routing inputs change, with every registry provider CLI hidden and a Bash 3.2 parse of changed shell files, and an explicit `--gate` overrides it), `git push --no-verify` of the verified SHA, CI success, then `oms update` guarded to that SHA when the repo is the harness checkout and a full local gate or a CI run whose jobs executed the full selection proves the SHA (`update.authority` records which), receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and single stale failure-ledger rows retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`; a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
-| `open-in` | Probed VS Code/Stably Orca/Codex launch plans. The redundant `ops-cockpit` aggregate was retired; use `inbox`, then the relevant state, approval, or artifact telemetry query. Historical records are unchanged. |
 | `panel` | Native Sol/Opus main plus OMS activity sidebar; scoped role dispatch and four-seat council reuse peer front doors. Owner summaries and app delivery receipts are immutable indexed artifacts. `--results` reads retained evidence; `--finalize` preserves owner acceptance authority; `--retry-delivery` never resends a persisted revision. See [terminal panel](TERMINAL-PANEL.md). |
 | `room` | Task-scoped work rooms on the canonical thread log: `new`, `join`/`bind`/`leave` with a declared role and scope, addressed `send`, cursor-based `updates` and `ack`, and `publish` to an explicitly enrolled Codex app or Claude Code session. Declared scope is not a write grant; acknowledgment is not approval. See [shared work rooms](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph). |
-| `otel-export` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; opt-in `--gen-ai` standard semantic attributes. |
 | `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |
 
 `check.sh` and `tick` coordinate through the existing per-file lock namespace.
@@ -1176,16 +1170,6 @@ classification; a malformed block is reported but never rewritten, so an
 orphan marker cannot consume unrelated user cron entries. That malformed
 verdict takes precedence over another installed trigger and is identical in
 dry-run and apply mode.
-
-`semantic-eval` is a migration-only shim: help explains the replacement, and
-old execution requests fail without running checks or rewriting stored reports.
-Use `patch-admit` at current HEAD and `peer-review`; this is not a replacement
-for historical-base evaluation. `otel-export` writes only to stdout or a local file and never
-sends network traffic. Writers accept a valid incoming `OMS_TRACEPARENT`, store
-only opaque trace/span IDs and flags, and derive child context without storing
-raw `traceparent`, `tracestate`, baggage, prompts, or tool arguments. Existing
-`oms.*` attributes remain the default; `gen_ai.*` is emitted only with
-`--gen-ai`.
 
 ## ML and HPC
 

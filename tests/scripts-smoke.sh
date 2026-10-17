@@ -17735,13 +17735,13 @@ test_oms_dispatcher_lists_and_dispatches() {
   out="$("$bin/oms" list)" || fail "oms list should succeed"
   [ "$out" = "$("$bin/oms" list --frontdoor)" ] || fail "default catalog must be compact"
   printf '%s' "$out" | grep >/dev/null -E '^inbox ' || fail "compact catalog needs inbox"
-  if printf '%s' "$out" | grep >/dev/null -E '^agent-run |^herdr-adapter |^semantic-eval '; then
+  if printf '%s' "$out" | grep >/dev/null -E '^agent-run |^herdr-adapter '; then
     fail "default catalog leaked primitive, optional or retired tools"
   fi
   out="$("$bin/oms" list --all)" || fail "expanded catalog should succeed"
   printf '%s' "$out" | grep >/dev/null -E '^run-ledger ' || fail "oms list should include run-ledger"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
-    runtime open-in otel-export sync-shared; do
+    runtime sync-shared; do
     printf '%s\n' "$out" | grep >/dev/null -E "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
@@ -17755,7 +17755,6 @@ test_oms_dispatcher_lists_and_dispatches() {
       fail "retired adapter still dispatched: $retired"
     fi
   done
-  "$bin/oms" semantic-eval --help >/dev/null || fail "retired evaluator needs migration help"
   for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
     generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule tool-lock uninstall-autoupdate write-machine-snapshot; do
     if printf '%s' "$out" | grep >/dev/null -E "^${hidden} "; then
@@ -32084,43 +32083,6 @@ EOF
     fail "stored non-portable skill link missing"
 }
 
-test_support_bundle_redacts_and_omits() {
-  local project="$TMP/sb-project"
-  local vector out bundle
-
-  make_committed_repo "$project"
-  mkdir -p "$project/.oms"
-  printf '*\n' > "$project/.oms/.gitignore"
-  # Secret-shaped vector assembled at runtime, never as a source literal. The
-  # ledger writer rightly refuses secret-shaped commands, so seed the row
-  # directly: the bundle's scan is the last line of defense and must hold
-  # even when state arrived past the writer rails.
-  vector="$(printf 'sk_%s_' liv''e)$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)"
-  printf '{"schema": 2, "event": "fail", "ts": "2026-08-01T00:00:00Z", "agent": "test", "fingerprint": "feedfeedfeedfeed", "kind": "cmd", "cmd": "curl -H x-key: %s", "exit": 1}\n' \
-    "$vector" >> "$project/.oms/failures.jsonl"
-
-  out="$("$ROOT/scripts/support-bundle.sh" --repo "$project" --dry-run)"
-  printf '%s\n' "$out" | grep >/dev/null 'would write' ||
-    fail "dry-run should describe the bundle: $out"
-  [ ! -d "$project/.oms/support" ] || fail "dry-run must write nothing"
-
-  out="$("$ROOT/scripts/support-bundle.sh" --repo "$project")"
-  bundle="${out#support-bundle: }"
-  [ -d "$bundle" ] || fail "bundle directory missing: $out"
-  [ -f "$bundle/MANIFEST.md" ] || fail "MANIFEST.md missing"
-
-  # The ledger row carries a secret, so failures.json must be omitted whole.
-  grep -q 'failures.json — redacted content still matched' "$bundle/MANIFEST.md" ||
-    fail "secret-carrying family not recorded as omitted: $(cat "$bundle/MANIFEST.md")"
-  grep -rq "$vector" "$bundle" &&
-    fail "the vector leaked into the bundle" || true
-  # The fixture's own absolute path must not survive redaction.
-  grep -rq "$project" "$bundle" &&
-    fail "the repo path leaked into the bundle" || true
-  grep -q 'harness-version.txt' "$bundle/MANIFEST.md" ||
-    fail "clean families should be included: $(cat "$bundle/MANIFEST.md")"
-}
-
 # The dispatch allowlist used to be one 500-character case line that nothing
 # reconciled against scripts/: a renamed or removed script became a ghost
 # entry that only failed at dispatch time, and a new script shipped without
@@ -32170,7 +32132,6 @@ pre-push-check
 precompact-handoff
 python-runtime
 resume-hook
-semantic-eval
 skill-router
 syntax-guard-hook
 tier-guard-hook

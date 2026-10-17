@@ -185,8 +185,7 @@ OMS에서 허용하지 않은 모델·권한 요청은 기존처럼 명시적으
 
 OMS에는 [runtime benchmark](../scripts/lib/oms_runtime/benchmark.py),
 [skill evaluation](../custom-skills/oms-agent-harness/references/skill-lifecycle.md),
-artifact telemetry와 acceptance evidence가 있다. 폐기한 semantic-eval 엔진을 부활시키거나
-새 평가 서비스를 상시 실행할 필요는 없다.
+artifact telemetry와 acceptance evidence가 있다. 새 평가 서비스를 상시 실행할 필요는 없다.
 
 Strands Evals는 output과 trajectory를 구분하고, Harness Optimizer는 성공/실패 trace를
 대조해 후보를 만든다. OMS에는 이 절차를 작은 고정 실험으로 가져오는 것이 적절하다.

@@ -134,10 +134,6 @@ exist. Skill routing/task experiments belong to an explicit skill-evaluation
 task, not ordinary code cleanup. Correctness and required checks are the gate;
 fewer files, dependencies, lines, tokens, or seconds are secondary.
 
-The retired `semantic-eval` command only reports migration instructions. Its
-historical-base reports remain evidence for their recorded subject, not
-current-HEAD admission; the replacement routes do not reproduce that old engine.
-
 This adapts the minimal-solution ladder popularized by
 [Ponytail](https://github.com/DietrichGebert/ponytail) (MIT) to OMS's existing
 authority and verification contracts; it does not vendor Ponytail's hooks,

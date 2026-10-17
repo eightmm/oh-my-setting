@@ -6,6 +6,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the unused `otel-export`, `open-in`, `support-bundle`, and `semantic-eval` commands.
+
 ### Added
 
 - `oms` in a terminal opens a control panel: the native Claude Code or Codex

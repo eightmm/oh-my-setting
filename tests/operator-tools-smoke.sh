@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Focused regressions for the read-only collaboration dashboard, content-free OTLP
-# JSONL export, explicit editor launch adapters, and retired semantic-eval
-# migration. Every fixture lives below TMP; no real provider or GUI is called.
+# Focused regressions for the read-only collaboration dashboard. Every fixture
+# lives below TMP; no real provider is called.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=tests/lib/smoke-env.sh

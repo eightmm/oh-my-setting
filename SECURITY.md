@@ -185,17 +185,13 @@ pulls, and connects to nothing; `runtime backend run` is a separate action.
 
 External frontend commit/merge/push actions bypass OMS; OMS authority applies
 only to managed flows. Frontend state is not proof of verification.
-The retired `semantic-eval` command refuses execution; use `patch-admit` and
-`peer-review` for current-HEAD verification and review. Historical semantic
-reports remain readable, but self-reported judge provenance is not independent
-evidence. Verification worktrees are not process sandboxes; use trusted checks.
+Use `patch-admit` and `peer-review` for current-HEAD verification and review.
+Historical semantic reports remain readable, but self-reported judge provenance
+is not independent evidence. Verification worktrees are not process sandboxes;
+use trusted checks.
 
 `inbox` and `state` expose local operational metadata, not atomic snapshots.
-`otel-export` writes a whitelisted, content-free OTLP
-JSONL stream to stdout or a local file and performs no network transmission. It
-links lifecycle, approval, landing, artifact, and hook metadata with opaque
-correlation IDs and labels usage as measured or advisory. Treat these outputs as
-local operational metadata.
+Treat these outputs as local operational metadata.
 
 ## Hardening recommendations for users
 
