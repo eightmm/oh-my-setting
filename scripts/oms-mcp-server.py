@@ -2023,7 +2023,7 @@ def handle(message: dict):
             return response(
                 msg_id,
                 error={
-                    "code": -32003,
+                    "code": -32021,
                     "message": "missing required client capability: %s" % TASKS_EXTENSION,
                 },
             )

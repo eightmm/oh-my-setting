@@ -2511,7 +2511,7 @@ missing = call({
     "jsonrpc": "2.0", "id": 4, "method": "tasks/get",
     "params": {"taskId": task_id},
 })
-assert missing["error"]["code"] == -32003, missing
+assert missing["error"]["code"] == -32021, missing
 
 working = call({
     "jsonrpc": "2.0", "id": 5, "method": "tasks/get",
