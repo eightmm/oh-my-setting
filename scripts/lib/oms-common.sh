@@ -1353,6 +1353,7 @@ oms_worker_surface_diff() {
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
     if ! OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
+      OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$before_dir/gitmeta-managed-complete" \
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_settles "$repo" \
@@ -1369,6 +1370,16 @@ oms_worker_surface_diff() {
         "$before_dir" "$current_worktree_physical"; then
         changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
         continue
+      fi
+      if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ] &&
+        [ "${OMS_WG_GITMETA_QUIET_STALE:-0}" = 1 ] &&
+        [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ]; then
+        # A resolved partial removal invalidates the earlier quiet verdict.
+        # Recompute it against the final registration set before deciding.
+        if oms_worker_gitmeta_admin_changes_are_safe "$repo" "$before_dir" \
+          "$current_worktree_physical" && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ]; then
+          OMS_WG_GITMETA_QUIET_STALE=0
+        fi
       fi
       # Strict mode rejects classified soft changes, but preserves this existing
       # quiet exemption for validated live managed-worktree lifecycle activity.
@@ -1627,12 +1638,13 @@ EOF
 # it softly only when an intermediate capture validated its marker/backpointer,
 # its entry was absent at baseline, and the complete registry entry is now gone.
 # A complete checkout must have a detached HEAD; a pending add with no checkout
-# is eligible only through the pending marker/path validator.
+# is eligible only through the pending marker/path validator. A missing HEAD
+# is a removal only after an earlier capture proved that entry complete.
 # A main may keep using its scratch after its owner pid died; a changed HEAD
 # line alone on such a residue entry that still exists is `kept-sibling` too.
 # This is false-positive relief for cooperative parallel runs, not
 # attribution: a same-UID worker can forge the same shape (SECURITY.md). A
-# removed marker, a partial removal, any other changed line, or
+# removed marker, an unresolved partial removal, any other changed line, or
 # OMS_WORKER_GUARD_STRICT=1 keeps gitmeta hard. The soft names are returned in
 # OMS_WG_GITMETA_SOFT.
 oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
@@ -1752,13 +1764,13 @@ oms_worker_gitmeta_delta_is_partial_managed_removal() {  # BEFORE_DIR COMMON_DIR
         '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
         "$before/gitmeta-before" || return 1
       [ -d "$common/worktrees/$entry" ] || return 1
-      # An add registers HEAD before materializing the checkout, so a missing
-      # checkout with HEAD still present is an in-progress creation. Removal
-      # deletes HEAD; only that evidence starts the bounded partial-remove retry.
-      if [ ! -e "$common/worktrees/$entry/HEAD" ]; then
+      # An add registers admin files before materializing the checkout. A
+      # missing HEAD is a removal only if an earlier capture saw this managed
+      # entry complete. Live and still-registering siblings are skipped rather
+      # than ending the scan, so they cannot mask another sibling's removal.
+      if [ ! -e "$common/worktrees/$entry/HEAD" ] &&
+        grep -Fxq "$entry" "$before/gitmeta-managed-complete" 2>/dev/null; then
         partial=1
-      else
-        return 1
       fi
     done < "$before/$side"
   done
@@ -1934,6 +1946,7 @@ oms_worker_gitmeta_admin_changes_are_safe() {  # REPO BEFORE_DIR CURRENT_WORKTRE
   OMS_WG_GITMETA_ADMIN_QUIET=0
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before/gitmeta-managed-added" \
+    OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$before/gitmeta-managed-complete" \
     oms_worker_surface_capture_one "$repo" gitmeta "$worker" \
     > "$before/gitmeta-admin-now" || return 1
   python3 - "$before/gitmeta" "$before/gitmeta-admin-now" "$before/gitmeta-admin-lifecycle" "$before/gitmeta-replacement-candidates" <<'PY' > "$before/gitmeta-new-entries" || return 1
@@ -2791,7 +2804,8 @@ PY
                 "$current_worktree_physical"; then
                 [ -z "${OMS_WG_GITMETA_EXEMPT_OUT:-}" ] ||
                   printf '%s\n' "${wt#"$git_dir"/}" >> "$OMS_WG_GITMETA_EXEMPT_OUT"
-                if [ -n "${OMS_WG_GITMETA_MANAGED_ADDED_OUT:-}" ]; then
+                if [ -n "${OMS_WG_GITMETA_MANAGED_ADDED_OUT:-}" ] ||
+                  [ -n "${OMS_WG_GITMETA_MANAGED_COMPLETE_OUT:-}" ]; then
                   if [ -f "$wt/HEAD" ] && [ ! -L "$wt/HEAD" ]; then
                     head="$(sed -n '1p' "$wt/HEAD" 2>/dev/null || true)"
                     head="${head//$'\r'/}"
@@ -2799,7 +2813,10 @@ PY
                       ""|*[!0-9a-f]*) ;;
                       *)
                         if [ "${#head}" = 40 ] || [ "${#head}" = 64 ]; then
-                          printf '%s\n' "${wt##*/}" >> "$OMS_WG_GITMETA_MANAGED_ADDED_OUT"
+                          [ -z "${OMS_WG_GITMETA_MANAGED_ADDED_OUT:-}" ] ||
+                            printf '%s\n' "${wt##*/}" >> "$OMS_WG_GITMETA_MANAGED_ADDED_OUT"
+                          [ -z "${OMS_WG_GITMETA_MANAGED_COMPLETE_OUT:-}" ] ||
+                            printf '%s\n' "${wt##*/}" >> "$OMS_WG_GITMETA_MANAGED_COMPLETE_OUT"
                         fi
                         ;;
                     esac
@@ -2811,7 +2828,8 @@ PY
                         worktree_path="${worktree_gitfile%/.git}"
                         if oms_worker_gitmeta_is_pending_managed_worktree "$repo" \
                           "$worktree_path" "$current_worktree_physical"; then
-                          printf '%s\n' "${wt##*/}" >> "$OMS_WG_GITMETA_MANAGED_ADDED_OUT"
+                          [ -z "${OMS_WG_GITMETA_MANAGED_ADDED_OUT:-}" ] ||
+                            printf '%s\n' "${wt##*/}" >> "$OMS_WG_GITMETA_MANAGED_ADDED_OUT"
                         fi
                         ;;
                     esac
@@ -2878,6 +2896,7 @@ oms_worker_surface_snapshot() {
   mkdir -p "$dir" || return 1
   : > "$dir/gitmeta-exempt"
   : > "$dir/gitmeta-residue"
+  : > "$dir/gitmeta-managed-complete"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks omsstate; do
     OMS_WG_GITMETA_EXEMPT_OUT="$dir/gitmeta-exempt" \
       OMS_WG_GITMETA_RESIDUE_OUT="$dir/gitmeta-residue" \

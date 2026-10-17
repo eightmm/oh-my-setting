@@ -28968,6 +28968,10 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   local project="$TMP/guard-sibling-late"
   local managed_root="$TMP/guard-sibling-late-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.late"
+  local live_a="$managed_root/oh-my-setting-delegate.live-a"
+  local live_b="$managed_root/oh-my-setting-scratch.live-b"
+  local finished="$managed_root/oh-my-setting-agy-read.finished"
+  local common metadata target pending_count=0
   local dead_pid
   local body
   local result
@@ -28980,6 +28984,40 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     fail "a sibling started and kept mid-run must not fail the run: $result"
   contains "$result" 'during this run: kept-sibling' ||
     fail "a late kept sibling should be reported as a soft change: $result"
+
+  # Match the overlapping-dispatch case: two registered siblings stay live
+  # through comparison while a third sibling completes its add/remove cycle.
+  # Keep the live entries in Git's registration window (admin leaves exist,
+  # checkout is not materialized) so the guard must use its validated quiet
+  # lifecycle classification rather than the kept-checkout classifier.
+  local concurrent_body
+  concurrent_body="set -e
+mkdir -p $live_a $live_b $finished
+printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$live_a/wt\\ntemporary=1\\n' > $live_a/.oh-my-setting-tmp
+printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$live_b/wt\\ntemporary=1\\n' > $live_b/.oh-my-setting-tmp
+git -C $project worktree add --quiet --detach $live_a/wt HEAD && git -C $project worktree add --quiet --detach $live_b/wt HEAD && metadata_a=\$(git -C $live_a/wt rev-parse --git-dir) && metadata_b=\$(git -C $live_b/wt rev-parse --git-dir) && case \"\$metadata_a\" in /*) ;; *) metadata_a=\"$project/\$metadata_a\" ;; esac && case \"\$metadata_b\" in /*) ;; *) metadata_b=\"$project/\$metadata_b\" ;; esac && mv $live_a/wt $live_a/pending && mv $live_b/wt $live_b/pending && rm -f \"\$metadata_a/HEAD\" \"\$metadata_b/HEAD\" && test ! -e \"\$metadata_a/HEAD\" && test ! -e \"\$metadata_b/HEAD\" && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project\\nworktree=$finished/tree\\ntemporary=1\\n' > $finished/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $finished/tree HEAD && git -C $project worktree remove --force $finished/tree && rm -rf $finished && echo pending-registration-repro"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$concurrent_body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "two live registered siblings plus one completed sibling must stay quiet: $result"
+  common="$(git -C "$project" rev-parse --git-common-dir)"
+  case "$common" in /*) ;; *) common="$project/$common" ;; esac
+  for metadata in "$common"/worktrees/*; do
+    [ -f "$metadata/gitdir" ] || continue
+    target="$(sed -n '1p' "$metadata/gitdir")"
+    target="${target%/.git}"
+    case "$target" in
+      "$live_a/wt"|"$live_b/wt")
+        [ ! -e "$metadata/HEAD" ] && pending_count=$((pending_count + 1))
+        ;;
+    esac
+  done
+  [ "$pending_count" = 2 ] ||
+    fail "the fixture must leave two live registrations headless at comparison (found $pending_count)"
+  git -C "$project" worktree prune --expire now >/dev/null 2>&1 || true
+  rm -rf "$live_a" "$live_b"
+  if contains "$result" 'outside the worktree'; then
+    fail "live sibling registrations must not be reported as gitmeta changes: $result"
+  fi
 
   # Reproduce a non-atomic remove: the intermediate admin capture sees a
   # validated managed add, then compare starts after its checkout and HEAD
@@ -29001,6 +29039,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     metadata="$(git -C "$root/oh-my-setting-delegate.transient/wt" rev-parse --git-dir)"
     case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
     OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$snap/gitmeta-managed-complete" \
       oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
       > "$snap/intermediate-gitmeta" || exit 12
     oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 12
@@ -29039,6 +29078,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     git -C "$repo" worktree add --quiet --detach \
       "$root/oh-my-setting-delegate.transient-stuck/wt" HEAD || exit 41
     OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$snap/gitmeta-managed-complete" \
       oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
       > "$snap/intermediate-gitmeta" || exit 42
     oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 43
@@ -29051,6 +29091,43 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     case "$changed" in *gitmeta*) ;; *) exit 45 ;; esac
   ' _ "$ROOT" "$transient_stuck" "$managed_root" "$transient_stuck_snap" ||
     fail "a validated partial sibling removal that remains stuck must stay hard (rc=$?)"
+
+  # A sibling still registering must not mask another sibling's stuck removal.
+  local transient_mixed="$project-transient-mixed"
+  local transient_mixed_snap="$TMP/guard-sibling-transient-mixed-snapshot"
+  make_guard_repo "$transient_mixed"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" root="$3" snap="$4"
+    oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 60
+    for name in mixed-stuck mixed-pending; do
+      mkdir -p "$root/oh-my-setting-delegate.$name"
+      printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s/wt\ntemporary=1\n" \
+        "$$" "$repo" "$root/oh-my-setting-delegate.$name" \
+        > "$root/oh-my-setting-delegate.$name/.oh-my-setting-tmp"
+    done
+    git -C "$repo" worktree add --quiet --detach \
+      "$root/oh-my-setting-delegate.mixed-stuck/wt" HEAD || exit 61
+    OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$snap/gitmeta-managed-complete" \
+      oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
+      > "$snap/intermediate-gitmeta" || exit 62
+    oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 63
+    git -C "$repo" worktree add --quiet --detach \
+      "$root/oh-my-setting-delegate.mixed-pending/wt" HEAD || exit 64
+    OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      oms_worker_surface_capture_one "$repo" gitmeta "$repo" > /dev/null || exit 65
+    for name in mixed-stuck mixed-pending; do
+      metadata="$(git -C "$root/oh-my-setting-delegate.$name/wt" rev-parse --git-dir)"
+      case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
+      rm -f "$metadata/HEAD"
+      [ "$name" = mixed-pending ] || rm -rf "$root/oh-my-setting-delegate.$name/wt"
+    done
+    changed="$(oms_worker_surface_diff "$repo" "$snap" "" "$repo")"
+    case "$changed" in *gitmeta*) ;; *) exit 66 ;; esac
+  ' _ "$ROOT" "$transient_mixed" "$managed_root" "$transient_mixed_snap" ||
+    fail "a registering sibling must not mask another sibling's stuck removal (rc=$?)"
 
   # An unrelated metadata write during the partial-removal wait must not be
   # excused by the quiet verdict computed before the wait.
@@ -29073,6 +29150,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     git -C "$repo" worktree add --quiet --detach \
       "$root/oh-my-setting-delegate.transient-race/wt" HEAD || exit 51
     OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$snap/gitmeta-managed-complete" \
       oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
       > "$snap/intermediate-gitmeta" || exit 52
     oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 53
@@ -29113,6 +29191,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     git -C "$repo" worktree add --quiet --detach \
       "$root/oh-my-setting-delegate.transient-exclude/wt" HEAD || exit 31
     OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$snap/gitmeta-managed-complete" \
       oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
       > "$snap/intermediate-gitmeta" || exit 32
     oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 33
