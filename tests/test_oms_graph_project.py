@@ -18,6 +18,7 @@ from oms_graph.errors import GraphError
 from oms_graph import render
 from oms_graph.project.build import build, check, ensure, load_graph
 from oms_graph.project.context import context_pack, select_context
+from oms_graph.project.benchmark import history_cases, run as benchmark_run
 from oms_graph.project.query import Graph
 
 
@@ -39,6 +40,50 @@ class ProjectGraphTest(unittest.TestCase):
     def graph(self):
         build(self.repo, state=self.state)
         return load_graph(self.repo, state=self.state)
+
+    def test_context_history_benchmark_uses_parent_and_excludes_prose_tests(self) -> None:
+        def git(*args):
+            return subprocess.check_output(
+                ["git", "-C", str(self.repo), "-c", "user.name=fixture", "-c",
+                 "user.email=fixture@example.com"] + list(args))
+
+        git("init", "-q")
+        self.write("src/needle.py", "def recoverLease(): return 1\n")
+        git("add", ".")
+        git("commit", "-qm", "base")
+        parent = git("rev-parse", "HEAD").decode().strip()
+        self.write("src/needle.py", "def unrelated(): return 2\n")
+        self.write("tests/test_needle.py", "# regression\n")
+        self.write("docs/design.md", "# prose\n")
+        git("add", ".")
+        git("commit", "-qm", "fix: recover lease")
+        fix = git("rev-parse", "HEAD").decode().strip()
+        self.write("README.md", "# docs only fix\n")
+        git("add", ".")
+        git("commit", "-qm", "fix: docs only")
+        cases = history_cases(self.repo, 1)
+        self.assertEqual(cases, [{"commit": fix, "parent": parent, "task": "recover lease",
+                                  "gold": ["src/needle.py"]}])
+        result = benchmark_run(self.repo, count=1, cache=Path(self.temp.name) / "bench")
+        self.assertEqual(result["metrics"]["recall_at_8"], 1)
+        self.assertEqual(result["metrics"]["hit_at_8"], 1)
+        self.assertGreater(result["metrics"]["median_pack_bytes"], 0)
+        self.assertFalse((self.repo / ".oms").exists())
+
+    def test_context_ranks_quoted_errors_and_diversifies_before_truncation(self) -> None:
+        self.write("a_hub.py", "\n".join("def needle_guard_%d(): pass" % n for n in range(60)))
+        for number in range(9):
+            self.write("peers/p%d.py" % number, "def needle_guard_peer(): pass\n")
+        self.write("dispatch.py", 'def validateDispatchVerifier():\n    raise ValueError("operator --section names rejected")\n')
+        graph = self.graph()
+        diverse = select_context(self.repo, graph, task="needle guard", state=self.state)
+        self.assertEqual(len(diverse["entries"]), 8)
+        self.assertEqual(len({Graph(graph).nodes[ident]["path"] for ident in diverse["entries"]}), 8)
+        literal = select_context(self.repo, graph, task="operator --section names rejected", state=self.state)
+        self.assertEqual(literal["entries"][0], "symbol:dispatch.py::validateDispatchVerifier")
+        self.write("dispatch.py", 'def validateDispatchVerifier():\n    return "UNINDEXED_ERROR"\n')
+        stale = select_context(self.repo, graph, task="UNINDEXED_ERROR", state=self.state)
+        self.assertEqual(stale["entries"], [])
 
     def test_determinism_incremental_and_symbol_changes(self) -> None:
         self.write("a.py", "def first():\n    return 1\n")
@@ -396,7 +441,9 @@ class ProjectGraphTest(unittest.TestCase):
         graph = self.graph()
         pack = context_pack(self.repo, graph, task="change keep", max_files=1, state=self.state)
         self.assertLessEqual(len(pack["files"]), 1)
-        self.assertIn("byte_estimate", pack)
+        from oms_runtime.common import canonical_json
+        self.assertEqual(pack["pack_bytes"], len(canonical_json(pack)))
+        self.assertNotIn("byte_estimate", pack)
         self.assertEqual(pack["project_graph_revision"], graph["revision"])
         self.assertTrue((self.state / pack["pack_path"]).is_file() if not pack["pack_path"].startswith("context/") else (self.state / pack["pack_path"]).is_file())
 

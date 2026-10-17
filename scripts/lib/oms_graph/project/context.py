@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -14,6 +17,80 @@ from .build import coverage as graph_coverage, state_dir
 from . import analytics
 from .query import Graph, _identifier_words
 from ..errors import GraphError
+
+_QUOTED_SOURCE = re.compile(r"""(['"])(.*?)(?<!\\)\1""", re.S)
+
+
+def _measure_pack(pack: Dict[str, Any]) -> None:
+    """Count canonical JSON payload bytes, including the size field itself."""
+    while True:
+        size = len(canonical_json(pack))
+        if pack["pack_bytes"] == size:
+            return
+        pack["pack_bytes"] = size
+
+
+def _rank_entries(repo: Path, index: Graph, tokens: Sequence[str]) -> List[Dict[str, Any]]:
+    """BM25 field scores; source is read only when it still matches the graph.
+
+    Quoted fragments supply option/error text absent from short summaries.
+    Source text stays local: only node IDs and scores enter the context pack.
+    """
+    terms = list(dict.fromkeys(tokens))
+    if not terms:
+        return []
+    root = Path(repo).resolve()
+    sources: Dict[str, List[str]] = {}
+    candidates = [node for node in index.nodes.values() if not index.is_test(node["id"])]
+    for node in candidates:
+        path = str(node.get("path", ""))
+        if path in sources:
+            continue
+        sources[path] = []
+        try:
+            target = root / path
+            target.resolve().relative_to(root)
+            if target.is_symlink() or not target.is_file() or target.stat().st_size > 2 * 1024 * 1024:
+                continue
+            data = target.read_bytes()
+            if hashlib.sha256(data).hexdigest() == node.get("source_digest"):
+                sources[path] = data.decode("utf-8", "replace").splitlines()
+        except (OSError, ValueError):
+            continue
+
+    documents = []
+    for node in candidates:
+        metadata = node.get("metadata") or {}
+        lines = sources.get(str(node.get("path", "")), [])
+        start = int(metadata.get("line", 0) or 0)
+        end = int(metadata.get("end_line", start) or start)
+        body = "\n".join(lines[max(0, start - 1):end] if start else lines)
+        quoted = " ".join(match.group(2) for match in _QUOTED_SOURCE.finditer(body))
+        fields = (str(node.get("name", "")) + " " + str(metadata.get("qualname", "")),
+                  str(node.get("path", "")), str(node.get("summary") or ""), quoted)
+        counters = [Counter(_identifier_words(field)) for field in fields]
+        documents.append((node, counters, [sum(counter.values()) for counter in counters]))
+    count = len(documents)
+    averages = [sum(lengths[field] for _, _, lengths in documents) / max(1, count)
+                for field in range(4)]
+    frequencies = {term: sum(any(term in counter for counter in counters)
+                             for _, counters, _ in documents) for term in terms}
+    weights = {term: math.log(1 + (count - frequencies[term] + 0.5) / (frequencies[term] + 0.5))
+               for term in terms}
+    rows = []
+    for node, counters, lengths in documents:
+        score = 0.0
+        for term in terms:
+            for field, counter in enumerate(counters):
+                frequency = counter[term]
+                if frequency:
+                    normalizer = 1.2 * (0.25 + 0.75 * lengths[field] / max(1, averages[field]))
+                    score += (3.0, 1.0, 1.5, 0.6)[field] * weights[term] * frequency * 2.2 / (frequency + normalizer)
+        if score:
+            rows.append({"id": node["id"], "score": round(score * 100)})
+    # Do not truncate symbols before the caller deduplicates files: a large
+    # module's matching symbols must not consume the entire candidate window.
+    return sorted(rows, key=lambda row: (-row["score"], not row["id"].startswith("symbol:"), row["id"]))
 
 
 def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None, entry_paths: Sequence[str] = ()) -> Dict[str, Any]:
@@ -33,13 +110,13 @@ def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, ma
     # Filter whole words before splitting identifiers: `update_cache` is a
     # subject, not the generic verb `update`. Short non-ASCII words are useful.
     tokens = [token for word in re.findall(r"\w+", task)
-              if (len(word) >= 3 or not word.isascii()) and word.casefold() not in stopwords
-              for token in _identifier_words(word)]
+              if word.casefold() not in stopwords
+              for token in _identifier_words(word) if len(token) > 1 or not token.isascii()]
     if entry_paths:
         raw_entries = [{"id": ident, "score": 100} for path in entry_paths
                        for ident in ("file:" + path, "test:" + path) if ident in index.nodes]
     else:
-        raw_entries = index.find(" ".join(tokens), limit=max(24, max_files * 4)) if tokens else []
+        raw_entries = _rank_entries(Path(repo), index, tokens)
     entries = []
     entry_keys = set()
     entry_limit = min(len(entry_paths) if entry_paths else 8, max(0, max_files))
@@ -151,7 +228,6 @@ def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, ma
             break
     evidence_degree = analytics.evidence_degrees(list(index.nodes.values()), index.graph.get("edges", []))
     hubs = sorted(({"id": ident, "degree": evidence_degree[ident]["total"]} for ident in selected_nodes if ident in index.nodes), key=lambda item: (-item["degree"], item["id"]))[:10]
-    raw_bytes = sum((Path(repo) / path).stat().st_size for path in score if (Path(repo) / path).is_file())
     evidence = [{"path": path, "reason": reasons[path], "score": score[path]} for path in ordered]
     blast_view = {
         "seeds": blast["seeds"][:max(0, max_nodes)],
@@ -222,7 +298,7 @@ def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, ma
                             "blast": blast_view, "hubs": hubs, "evidence": evidence,
                             "assurance": assurance_view, "change": change_view,
                             "coverage": graph_coverage(Path(repo), state=state),
-                            "byte_estimate": {"raw_candidate_files": raw_bytes, "pack": 0}}
+                            "pack_bytes": 0}
     unmatched = [path for path in entry_paths if "file:" + path not in index.nodes
                  and "test:" + path not in index.nodes]
     pack["retrieval"] = {
@@ -234,7 +310,7 @@ def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, ma
             "Lexical search does not translate the task; missing matches do not prove missing code."
         ),
     }
-    pack["byte_estimate"]["pack"] = len(canonical_json(pack))
+    _measure_pack(pack)
     return pack
 
 
@@ -247,6 +323,7 @@ def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_
     path = directory / (digest + ".json")
     pack["pack_digest"] = digest
     pack["pack_path"] = relative_path(path, Path(repo).resolve()) or ("context/" + path.name)
+    _measure_pack(pack)
     atomic_write_json(path, pack)
     return pack
 

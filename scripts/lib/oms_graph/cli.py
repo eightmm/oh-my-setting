@@ -540,8 +540,7 @@ def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
     print("test_cases:")
     for row in pack["test_cases"]:
         print("  %s" % row["id"])
-    estimate = pack["byte_estimate"]
-    print("byte_estimate: raw_candidate_files=%d pack=%d" % (estimate["raw_candidate_files"], estimate["pack"]))
+    print("pack_bytes: %d" % pack["pack_bytes"])
     print("pack_path: %s" % pack["pack_path"])
     if args.bundle:
         print("bundle: selected_bytes=%d path=%s" % (pack["bundle"]["selected_bytes"], pack["bundle"]["bundle_path"]))

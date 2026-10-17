@@ -336,6 +336,13 @@ PY
 
 run_graph "$work/context.json" project context --task "alpha entry helper for the beta runner" --max-files 3 --json
 [ "$graph_rc" -eq 0 ] || fail "context exited $graph_rc: $(cat "$work/context.json")"
+run_graph "$work/context.txt" project context --task "alpha entry helper for the beta runner" --max-files 3
+[ "$graph_rc" -eq 0 ] || fail "context text exited $graph_rc"
+tr -d '\r' < "$work/context.txt" | grep -Eq '^pack_bytes: [0-9]+$' \
+  || fail "context omitted pack_bytes"
+if grep -Eq 'byte_estimate|raw_candidate_files' "$work/context.txt"; then
+  fail "context still reports counterfactual candidate bytes"
+fi
 python3 - "$work/context.json" "$tmp" <<'PY'
 import json
 import os

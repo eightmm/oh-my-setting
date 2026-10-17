@@ -70,10 +70,14 @@ oms graph project context --task "fix lease recovery" --max-files 12 --base HEAD
 oms graph project context --task "잠금 복구" --entry-path scripts/lib/file-lock.sh --json
 ```
 
-The pack path-deduplicates lexical entries, excludes ambiguous traversal,
+The pack ranks split identifier, path, summary and quoted source terms with BM25,
+deduplicates entry files before bounding the list, excludes ambiguous traversal,
 ranks extracted before inferred evidence and near tests before distant ones,
 and lists files, tests, selectable test cases, graph revision, a capped blast
-view, hubs, structural assurance, and a byte estimate (never called tokens).
+view, hubs, structural assurance, and `pack_bytes` (canonical JSON payload
+bytes, including the size field; pretty-printed disk files may be larger).
+Quoted text is read only from bounded, digest-matching source files and stays local;
+the pack carries identifiers and scores, not source strings.
 With `--base`, `change` separately reports changed/untracked paths and only
 their `EXTRACTED` reverse-dependency impact. `--bundle` compiles the selected files
 through `oms runtime context`, so the delegate brief carries the same bounded
@@ -84,7 +88,17 @@ Retrieval is lexical, not translation or semantic search. Preserve the user's
 task and use discovered repo-relative `--entry-path` anchors when its language
 differs from identifiers. A `retrieval.status` of `no-match` or `partial` means
 inspect source directly; it never means there is no implementation. Byte
-estimates are payload size, not measured token savings or engineering quality.
+counts describe the pack payload, not measured reading savings or engineering quality.
+
+The opt-in history benchmark runs the newest 60 non-merge `fix:` subjects
+against their parent trees, with changed non-test, non-prose paths as gold
+(including additions/deletions). It reports mean per-task file recall@8,
+hit@8 and median canonical pack bytes. Archives and graph state stay in
+temporary directories; the default graph tests run only a tiny fixture:
+
+```bash
+PYTHONPATH=scripts/lib python3 -m oms_graph.project.benchmark --repo . --output /tmp/oms-context-recall.json
+```
 
 ## Work from the graph in an agent UI
 
