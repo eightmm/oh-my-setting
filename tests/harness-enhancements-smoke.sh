@@ -944,11 +944,13 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
     ;;
   error) exit 23 ;;
   *)
-    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator-tools-smoke.sh","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator-tools-smoke.sh","tests/operator/section.sh","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
     ;;
 esac
 EOF
   chmod +x "$gate/scripts/graph.sh"
+  mkdir -p "$gate/tests/operator"
+  printf '#!/usr/bin/env bash\necho operator-fragment-standalone >> "$OMS_TEST_AFFECTED_LOG"\n' > "$gate/tests/operator/section.sh"
   cat > "$gate/tests/operator-tools-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'operator-args:%s\n' "$*" >> "$OMS_TEST_AFFECTED_LOG"
@@ -1047,6 +1049,8 @@ EOF
   grep -Fxq 'distribution:--docs-only' "$log" || fail "leaf change ran unrelated CI orchestration probes"
   [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$log")" = 1 ] ||
     fail "affected selection did not run operator-tools once through its existing parallel runner"
+  ! grep -Fq operator-fragment-standalone "$log" ||
+    fail "affected selection ran an operator section fragment outside its suite"
   if grep -Fq unselected "$log"; then
     fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
   fi

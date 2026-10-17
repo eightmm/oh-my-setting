@@ -1187,7 +1187,14 @@ affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
 }
 
 if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
+  affected_operator_staged=0
   for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
+    # Operator section fragments only run inside their suite, once.
+    case "$affected_test" in tests/operator/*) affected_test=tests/operator-tools-smoke.sh ;; esac
+    if [ "$affected_test" = tests/operator-tools-smoke.sh ]; then
+      [ "$affected_operator_staged" = 0 ] || continue
+      affected_operator_staged=1
+    fi
     affected_test_was_run_by_quick "$affected_test" && continue
     if [ "$affected_test" = tests/scripts-smoke.sh ] || [ "$affected_test" = tests/autonomy-plan-run-smoke.sh ]; then
       affected_args=()
