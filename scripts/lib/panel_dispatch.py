@@ -478,6 +478,9 @@ def _validate_dispatch_verifier(repo, verify):
                 valid = [name.replace("_", "-") for name in
                          re.findall(r"^# OPERATOR_SECTION_BEGIN ([a-z_-]+)$", source, re.M)
                          if name not in {"core", "shared_cache"}]
+                # Split-out sections are registered in the runner manifest.
+                valid = list(dict.fromkeys(valid + re.findall(
+                    r'^    \("([a-z/-]+)", [0-9]+, ', _read_suite(repo / "tests/operator/runner.py"), re.M)))
             elif option == "--only" and _uses_smoke_runner(suite, target):
                 selected_suite = (repo / "tests/scripts-smoke.sh" if suite == "tests/run-smoke-shard.sh"
                                   else target)
