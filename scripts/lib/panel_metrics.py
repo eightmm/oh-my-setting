@@ -273,12 +273,12 @@ def _duration(value):
 
 METRIC_TAIL_BYTES = 16 * 1024 * 1024
 METRIC_TAIL_ROWS = 20000
-METRIC_ATTEMPTS = 300
+METRIC_ATTEMPTS = 1000
 PLAN_TASK_STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}
 
 
 def _attempt_history(repo):
-    """Project at most the newest 300 created attempts from a bounded ledger tail."""
+    """Project at most the newest 1000 created attempts from a bounded ledger tail."""
     from panel_results import DURABLE
 
     relative = ".oms/lifecycle/events.jsonl"
@@ -503,6 +503,100 @@ def aggregate(repo, since=None, now=None):
         ending = call_ending(evidence)
         if ending is not None:
             ending_counts[ending] = ending_counts.get(ending, 0) + 1
+    # Reconcile only explicitly recorded peer-delegate write attempts. The
+    # lifecycle state is the source of the state tally; artifact call rows are
+    # used only for stage attribution and typed error metadata.
+    delegate_writes = [row for row in calls if row.get("tool") == "peer-delegate"
+                       and row.get("refs", {}).get("panel_role") == "worker"
+                       and row.get("refs", {}).get("panel_access") == "write"
+                       and in_window(row.get("updated_at"))]
+    delegate_states = {}
+    for attempt in delegate_writes:
+        state = attempt.get("state")
+        label = state if isinstance(state, str) and state else "unknown"
+        delegate_states[label] = delegate_states.get(label, 0) + 1
+    state_totals = {"done": 0, "failed": 0, "cancelled": 0, "review": 0, "other_by_state": {}}
+    for state, count in delegate_states.items():
+        if state in state_totals and state != "other_by_state":
+            state_totals[state] += count
+        else:
+            state_totals["other_by_state"][state] = count
+    calls_by_attempt = {}
+    for row in artifacts:
+        if isinstance(row.get("attempt_id"), str):
+            calls_by_attempt.setdefault(row["attempt_id"], []).append(row)
+
+    def first_failing_stage(attempt):
+        indexed = calls_by_attempt.get(attempt.get("attempt_id"), [])
+        stages = {"implement": [], "verify": [], "review": []}
+        if attempt.get("reason_code") == "provider_failed":
+            return "implement"
+        if attempt.get("reason_code") == "verification_failed" or attempt.get("verify_status") == "failed":
+            return "verify"
+        for row in indexed:
+            kind = row.get("kind")
+            verify_exit = row.get("verify_exit")
+            verify_not_run = type(verify_exit) is int and verify_exit == 125
+            # Verify may still run after a provider failure; the provider failed first.
+            provider_failed = row.get("provider_error_exit") is not None or row.get("state") == "provider_error"
+            verify_failed = (not verify_not_run and not provider_failed and
+                             (type(verify_exit) is int and verify_exit != 0
+                              or row.get("reason_code") == "verification_failed"
+                              or row.get("verify_status") == "failed"))
+            stage = "review" if kind == "review" else "implement" if kind in (
+                "delegate", "call", "ask", "consult") else None
+            if stage and not verify_failed:
+                stages[stage].append(row)
+            if verify_failed:
+                stages["verify"].append(row)
+        for stage in ("implement", "verify", "review"):
+            for row in stages[stage]:
+                if stage == "verify":
+                    code = row.get("verify_exit")
+                    if (type(code) is int and code not in (0, 125)
+                            or row.get("reason_code") == "verification_failed"
+                            or row.get("verify_status") == "failed"
+                            or row.get("state") in {"failed", "provider_error", "timed_out"}):
+                        return stage
+                    continue
+                code = row.get("exit")
+                if type(code) is int and code != 0 or row.get("state") in {"failed", "provider_error", "timed_out"}:
+                    return stage
+        return "unknown"
+
+    failure_reason_counts, failure_stage_counts = {}, {}
+    provider_categories = {name: 0 for name in ("quota", "auth", "refusal", "permission_denial", "timeout", "other", "unknown")}
+    undecided_ages = {"under_1d": 0, "1d_to_7d": 0, "7d_or_more": 0, "unknown": 0}
+    for attempt in delegate_writes:
+        state = attempt.get("state")
+        if state not in {"failed", "provider_error", "review"}:
+            continue
+        reason = attempt.get("reason_code")
+        reason = reason if isinstance(reason, str) and reason else "unknown"
+        failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
+        stage = first_failing_stage(attempt)
+        failure_stage_counts[stage] = failure_stage_counts.get(stage, 0) + 1
+        if state == "review":
+            stamp = _stamp(attempt.get("updated_at"))
+            if stamp is None:
+                undecided_ages["unknown"] += 1
+            else:
+                age = max(0, now - stamp)
+                bucket = "under_1d" if age < 86400 else "1d_to_7d" if age < 604800 else "7d_or_more"
+                undecided_ages[bucket] += 1
+        attempt_calls = calls_by_attempt.get(attempt.get("attempt_id"), [])
+        refs = attempt.get("refs", {})
+        has_provider_error = (state == "provider_error" or attempt.get("reason_code") == "provider_failed"
+                              or refs.get("provider_error_exit") is not None
+                              or any(row.get("provider_error_exit") is not None for row in attempt_calls))
+        if has_provider_error:
+            category = refs.get("provider_error_category") or refs.get("provider_error")
+            if category is None:
+                category = next((row.get("provider_error_category") for row in attempt_calls
+                                 if row.get("provider_error_category") is not None), None)
+            if category not in provider_categories or category == "unknown":
+                category = "unknown"
+            provider_categories[category] += 1
     write_calls = [row for row in calls if row.get("refs", {}).get("panel_role") == "worker"
                    and row.get("refs", {}).get("panel_access") == "write"
                    and not any(item.get("reason_code") == "manual_clear" for item in row.get("transitions", []))]
@@ -635,6 +729,21 @@ def aggregate(repo, since=None, now=None):
                        "rate": round(len(reworked) / len(started), 4) if started else None},
             "abandoned_calls": abandoned,
             "endings": ending_counts,
+            "write_attempts": {"total": len(delegate_writes), "states": state_totals,
+                               "state_counts": delegate_states,
+                               "reconciles": (state_totals["done"] + state_totals["failed"]
+                                              + state_totals["cancelled"] + state_totals["review"]
+                                              + sum(state_totals["other_by_state"].values())
+                                              == len(delegate_writes)),
+                               "failed_and_undecided": {"reason_code": failure_reason_counts,
+                                                        "first_failing_stage": failure_stage_counts,
+                                                        "undecided_age_buckets": undecided_ages},
+                               "provider_failed_categories": provider_categories,
+                               "provider_error_category_field": "provider_error_category or refs.provider_error",
+                               "telemetry": {"graph_context": "not_recorded",
+                                             "graph_context_missing_field": "refs.context_pack_sha256",
+                                             "claude_fork_subagents": "not_recorded",
+                                             "claude_fork_subagents_missing_field": "refs.claude_fork_subagents"}},
             "interventions": {"manual_clears": clears, "cancels": cancels,
                               "owner_finalized_failures": owner_failures,
                               "total": clears + cancels + owner_failures},
@@ -673,6 +782,16 @@ def metrics_text(report):
         "review wait: n=%d median=%s p90=%s" % (waits["count"], seconds(waits["median"]), seconds(waits["p90"])),
         "rework: %d/%d (%s)" % (rework["tasks"], rework["started"], rate(rework["rate"])),
         "abandoned calls: %d" % report["abandoned_calls"],
+        "peer-delegate write attempts: %d; states=%s (reconciles=%s)" % (
+            report.get("write_attempts", {}).get("total", 0),
+            json.dumps(report.get("write_attempts", {}).get("state_counts", {}), sort_keys=True),
+            report.get("write_attempts", {}).get("reconciles", False)),
+        "write failure reasons/stages: %s / %s; undecided ages=%s" % (
+            json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("reason_code", {}), sort_keys=True),
+            json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("first_failing_stage", {}), sort_keys=True),
+            json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("undecided_age_buckets", {}), sort_keys=True)),
+        "provider failure categories: %s; graph context=not recorded (refs.context_pack_sha256); Claude fork subagents=not recorded (refs.claude_fork_subagents)" %
+        json.dumps(report.get("write_attempts", {}).get("provider_failed_categories", {}), sort_keys=True),
         "main interventions: %d (manual clears=%d, cancels=%d, owner failures=%d)" % (
             report["interventions"]["total"], report["interventions"]["manual_clears"],
             report["interventions"]["cancels"], report["interventions"]["owner_finalized_failures"]),
