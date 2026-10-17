@@ -1,5 +1,32 @@
 execution_repo = temporary / "verification-execution-root"
 execution_repo.mkdir()
+import panel_dispatch as dispatch
+from contextlib import redirect_stderr
+from unittest.mock import patch
+import io
+warning_plan = temporary / "dispatch-warning-plan"
+(warning_plan / ".oms/plan").mkdir(parents=True)
+(warning_plan / ".oms/plan/tasks.json").write_text(
+    '{"tasks":{"verified":{"verify":"test -f value.txt"},"empty":{"verify":""}}}')
+assert dispatch._plan_task_has_verifier(warning_plan, "verified")
+assert not dispatch._plan_task_has_verifier(warning_plan, "empty")
+assert not dispatch._plan_task_has_verifier(warning_plan, "missing")
+warning_route = {"kind": "worker", "provider": "codex", "model": "test-model",
+                 "role": "builder", "workload": "light", "effort": "low",
+                 "access": "write", "purpose": "implement"}
+for task, scopes, expected in (("missing", None, 1), ("verified", None, 0), ("missing", ["value.txt"], 0)):
+    warning = io.StringIO()
+    with patch.object(panel, "selected_route", return_value=warning_route), \
+         patch.object(panel, "safe_label", side_effect=lambda value: value), \
+         patch.object(panel, "child_environment", return_value={}), \
+         patch.object(dispatch.room, "resolve", return_value=None), \
+         patch.object(panel, "routing_status", return_value={}), \
+         patch.object(panel, "alternate_route", return_value=None), \
+         patch.object(panel, "run_dispatch", return_value=0), redirect_stderr(warning):
+        dispatch.dispatch(warning_plan, "codex", "builder", "light", "write", "implement",
+                          brief="scope is not parsed from this prose", verify=None, task_id=task,
+                          dry_run=True, scopes=scopes)
+    assert warning.getvalue().count("WARN:") == expected, warning.getvalue()
 try:
     panel.run_dispatch(root, "codex", "worker", "read", "inspect", None,
                        "bash tests/scripts-smoke.sh --only test_oms_allowlist_stays_in_sync_with_scripts",

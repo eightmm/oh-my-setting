@@ -1054,6 +1054,28 @@ write_minimal_change_doctrine() {
   printf 'Read applicable repository instructions and PROJECT.md. Use source evidence to bound the smallest complete change, preserve contracts and safety, reuse existing tests, and run affected checks. Report changes, evidence, verification and uncertainty; return code as patch artifacts.\n'
 }
 
+# Resolve the effective verification contract before assembling the first prompt.
+if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] &&
+    [ "$WORKER_ACCESS" = write ]; then
+  check_mode="$(git -C "$DELEGATE_SOURCE_REPO" ls-tree HEAD -- scripts/check.sh | awk 'NR == 1 {print $1}')"
+  if [ "$check_mode" = 100755 ]; then
+    check_snapshot="$(mktemp)" || fail "mktemp failed"
+    if ! git -C "$DELEGATE_SOURCE_REPO" show HEAD:scripts/check.sh > "$check_snapshot"; then
+      rm -f "$check_snapshot"
+      fail "could not inspect the trusted check script"
+    fi
+    VERIFY_CMD="$(oms_default_verify_command "$check_snapshot")" || { rm -f "$check_snapshot"; exit 2; }
+    rm -f "$check_snapshot"
+    echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
+  fi
+fi
+plan_allowed=""
+plan_forbidden=""
+if [ -n "$PLAN_JSON" ]; then
+  plan_allowed="$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin).get("allowed_paths", [])))' | tr -d '\r')"
+  plan_forbidden="$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin).get("forbidden_paths", [])))' | tr -d '\r')"
+fi
+
 {
   printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
   printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized.\n'
@@ -1089,6 +1111,14 @@ write_minimal_change_doctrine() {
     # quotes. Preserve the source artifact; sanitize only its bounded quote.
     OMS_PROMPT_QUOTE_BYTES=8000 ma_sanitize_quoted_output head < "$REVIEW_ARTIFACT" |
       ma_untrusted_block "peer review" "reviewer findings"
+    printf '\n'
+  fi
+  if [ "$WORKER_ACCESS" = write ]; then
+    printf '## Done when\n\n'
+    [ -z "$VERIFY_CMD" ] || printf -- '- verify: `%s`\n' "$VERIFY_CMD"
+    printf '%s\n' '- Admission also runs the checks restored from HEAD, so changing or deleting existing tests cannot make verify pass.'
+    [ -z "$plan_allowed" ] || printf -- '- allowed paths: %s\n' "$plan_allowed"
+    [ -z "$plan_forbidden" ] || printf -- '- forbidden paths: %s\n' "$plan_forbidden"
     printf '\n'
   fi
   printf '## Brief\n\n'
@@ -1199,14 +1229,6 @@ worker_identity_gitdir_stat="$OMS_WORKER_IDENTITY_GITDIR_STAT"
 repair_replay_base="$(git -C "$worktree" rev-parse HEAD)"
 repair_replay_base="${repair_replay_base//$'\r'/}"
 oms_seed_local_agent_files "$DELEGATE_SOURCE_REPO" "$worktree"
-
-# Resolve the trusted base's contract before graph work or provider startup.
-# Explicit commands and plan-task verification take precedence over defaults.
-if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] &&
-    [ "$WORKER_ACCESS" = write ] && [ -x "$worktree/scripts/check.sh" ]; then
-  VERIFY_CMD="$(oms_default_verify_command "$worktree/scripts/check.sh")" || exit 2
-  echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
-fi
 
 if [ -n "$continuation_patch_file" ]; then
   if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \

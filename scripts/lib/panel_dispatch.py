@@ -359,6 +359,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             raise ValueError("--allow-extra-round requires --continue and a reason of 1..1000 bytes")
         _validate_dry_run_inputs(allow_extra_round, None)
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main)
+    if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
+        print("WARN: write dispatch has neither a verify command nor a declared scope", file=sys.stderr)
     label = safe_label(label)
     alias_pattern = r"[A-Za-z0-9-]{1,8}"
     if alias is not None and not re.fullmatch(alias_pattern, alias):
@@ -494,6 +496,23 @@ def _validate_dispatch_verifier(repo, verify):
                 raise ValueError("unknown %s value(s): %s; valid names: %s" %
                                  (option, ", ".join(unknown), ", ".join(valid)))
             cursor += 2
+
+
+def _plan_task_has_verifier(repo, task_id):
+    """Check only the structured plan task contract; brief prose is not authority."""
+    if not task_id:
+        return False
+    from terminal_panel import _read
+    try:
+        raw = _read(Path(repo), ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
+        if not raw:
+            return False
+        document = json.loads(raw)
+        tasks = document.get("tasks", {}) if isinstance(document, dict) else {}
+        task = tasks.get(task_id) if isinstance(tasks, dict) else None
+        return isinstance(task, dict) and isinstance(task.get("verify"), str) and bool(task["verify"].strip())
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def _read_suite(path):

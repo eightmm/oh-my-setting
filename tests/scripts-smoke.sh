@@ -4974,6 +4974,11 @@ test_delegate_dry_run() {
   local artifact_dir="$project/artifacts"
 
   make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\ncase "${1:-}" in fast) exit 0 ;; esac\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' commit -qm 'add bounded check'
 
   if "$ROOT/scripts/peer-delegate.sh" --workload typo >"$TMP/workload.err" 2>&1; then
     fail "unknown workloads must be rejected"
@@ -4990,6 +4995,10 @@ test_delegate_dry_run() {
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --prompt "Add a helper" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'verify: `bash scripts/check.sh fast`'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'checks restored from HEAD'
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" 'exact-routine-model'
@@ -5022,13 +5031,21 @@ test_delegate_dry_run() {
     fail "dry-run verification reported a pass: $out"
   fi
   assert_one_artifact_contains "$artifact_dir" 'codex-dry-run-verify-*.md' 'DRY RUN: verify skipped.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-dry-run-verify-*.md' 'verify: `exit 91`'
   assert_file_contains "$project/.oms/task/current.md" 'verify=NOT RUN (dry run)'
+
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY_DRY' || fail "dry-run verify receipt reported a pass"
 import json, pathlib, sys
 row = json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
 assert 'verify_exit' not in row, row
 assert 'repair_replay' not in row, row
 PY_DRY
+
+  "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" --artifact-dir "$artifact_dir" \
+    --dry-run --no-verify --prompt 'No verify prompt' >/dev/null
+  artifact="$(find "$artifact_dir" -maxdepth 1 -name 'codex-no-verify-prompt-*.md' | head -1)"
+  [ -n "$artifact" ] || fail "no-verify prompt artifact missing"
+  if grep -Fq -- '- verify:' "$artifact"; then fail "--no-verify prompt printed a verify line"; fi
 
   mkdir -p "$project/cap"
   printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\n' > "$project/cap/codex.models"
