@@ -489,6 +489,9 @@ ma_write_harness_context() {
   local warnings
 
   printf 'Use task constraints, source/callers, tests and decisive evidence; inspect missing context where authorized. Truncated input is incomplete evidence.\n'
+  # Measured 2026-10-17: search and whole-file reads were ~95% of tool output
+  # in 30 days of sessions; a 129 KB script outlines to 2.7 KB.
+  printf 'Outline a large file before reading it whole (oms graph project api PATH), then read targeted ranges; bound search output (rg -l, -m N, narrowed paths).\n'
   if [ -n "${OMS_ROOM_ID:-}" ] && [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
     [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
     printf 'OMS work room: %s; participant: %s. Environment binds the canonical room repository.\n' "$OMS_ROOM_ID" "$OMS_ROOM_PARTICIPANT"
