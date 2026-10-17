@@ -689,7 +689,7 @@ add_attempt('clear-call', 'recent', 'worker', 'write', -35, -30, 'cancelled', 'm
 add_attempt('write-followup', 'followup', 'worker', 'write', -45, -40, 'done')
 add_attempt('delegate-done', 'metric-write-done', 'worker', 'write', -12, -10, 'done', tool='peer-delegate')
 add_attempt('delegate-failed', 'metric-write-failed', 'worker', 'write', -11, -9, 'failed',
-            'verification_failed', extra_refs={'provider_error': 'quota', 'provider_error_exit': 125},
+            'verification_failed', extra_refs={'provider_error': 'capacity', 'provider_error_exit': 125},
             tool='peer-delegate')
 add_attempt('delegate-blocked', 'metric-write-blocked', 'worker', 'write', -7, -6, 'failed',
             'provider_failed', tool='peer-delegate')
@@ -748,7 +748,7 @@ assert write_metrics['state_counts'] == {'done': 1, 'failed': 4, 'review': 1, 'q
 assert write_metrics['states']['other_by_state'] == {'queued': 1}, write_metrics
 assert write_metrics['failed_and_undecided']['reason_code'] == {'verification_failed': 1, 'provider_failed': 1, 'unknown': 3}, write_metrics
 assert write_metrics['failed_and_undecided']['first_failing_stage'] == {'verify': 2, 'implement': 2, 'unknown': 1}, write_metrics
-assert write_metrics['provider_failed_categories']['quota'] == 1, write_metrics
+assert write_metrics['provider_failed_categories']['capacity'] == 1, write_metrics
 # provider_failed without metadata and a provider failure followed by verify are both counted
 assert write_metrics['provider_failed_categories']['unknown'] == 2, write_metrics
 assert write_metrics['telemetry']['graph_context'] == 'not_recorded', write_metrics

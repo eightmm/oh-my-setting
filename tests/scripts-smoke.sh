@@ -4999,6 +4999,12 @@ test_delegate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'verify: `bash scripts/check.sh fast`'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'checks restored from HEAD'
+  # Panel dispatch hands the plan task's paths and declared scopes to the prompt.
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_PANEL_ALLOWED_PATHS="scripts/a.sh, tests/b.sh" \
+    OMS_PANEL_FORBIDDEN_PATHS="secrets/" "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$TMP/delegate-dry-panel" --prompt "Scoped helper" >/dev/null
+  assert_one_artifact_contains "$TMP/delegate-dry-panel" 'codex-scoped-helper-*.md' '- allowed paths: scripts/a.sh, tests/b.sh'
+  assert_one_artifact_contains "$TMP/delegate-dry-panel" 'codex-scoped-helper-*.md' '- forbidden paths: secrets/'
   # A continuation resolves its default verifier on its recorded base, which
   # here still has the check script that HEAD has since removed.
   local with_check

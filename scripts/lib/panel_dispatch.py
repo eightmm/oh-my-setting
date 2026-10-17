@@ -513,6 +513,25 @@ def _validate_dispatch_verifier(repo, verify):
             cursor += 2
 
 
+def _plan_task_paths(repo, task_id):
+    """Allowed and forbidden paths stored on the plan task; empty when absent."""
+    if not task_id:
+        return [], []
+    from terminal_panel import _read
+    try:
+        raw = _read(Path(repo), ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
+        tasks = json.loads(raw).get("tasks", {}) if raw else {}
+        task = tasks.get(task_id) if isinstance(tasks, dict) else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return [], []
+    if not isinstance(task, dict):
+        return [], []
+    def paths(key):
+        value = task.get(key)
+        return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
+    return paths("allowed_paths"), paths("forbidden_paths")
+
+
 def _plan_task_has_verifier(repo, task_id):
     """Check only the structured plan task contract; brief prose is not authority."""
     if not task_id:
@@ -1675,6 +1694,15 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     binding = plan_link(repo, owner, task_id, env, caller, access)
     if binding and route["kind"] in {"worker", "researcher"}:
         argv += ["--observe-plan-binding", json.dumps(binding._asdict(), separators=(",", ":"))]
+    if access == "write":
+        # The worker's first prompt states its path contract: the plan task's
+        # stored paths and the scopes this dispatch declared.
+        allowed, forbidden = _plan_task_paths(repo, task_id)
+        allowed = list(dict.fromkeys(allowed + list(scopes or [])))
+        if allowed:
+            env["OMS_PANEL_ALLOWED_PATHS"] = ", ".join(allowed)
+        if forbidden:
+            env["OMS_PANEL_FORBIDDEN_PATHS"] = ", ".join(forbidden)
     if room_id:
         member = member_id or "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],

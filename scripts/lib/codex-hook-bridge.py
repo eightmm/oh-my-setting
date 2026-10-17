@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import threading
 import re
 import shutil
 import subprocess
@@ -74,54 +75,68 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
         {"id": 2, "method": "hooks/list", "params": {"cwds": [str(Path.cwd())]}},
     ]
     payload = "".join(json.dumps(row) + "\n" for row in requests).encode()
-    # The probe owns its process group and reads at most 1 MiB of stdout, so a
-    # broken or hostile CLI can neither hang the installer nor flood memory.
+    # The app-server answers on the open connection; closing stdin first ends
+    # the session before hooks/list returns. Keep it open until the response
+    # (or the deadline), read at most 1 MiB, and own the process group so a
+    # broken CLI can neither hang the installer nor leave children behind.
     group = ({"start_new_session": True} if os.name != "nt"
              else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
     limit = 1024 * 1024
-    with tempfile.TemporaryFile() as captured:
-        try:
-            proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://"],
-                                    stdin=subprocess.PIPE, stdout=captured,
-                                    stderr=subprocess.DEVNULL, env=env, **group)
-        except OSError:
-            return "unknown", []
-        try:
-            proc.communicate(payload, timeout=8)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        finally:
-            if os.name != "nt":
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            elif proc.poll() is None:
-                proc.kill()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-        if timed_out or proc.returncode != 0:
-            return "unknown", []
-        captured.seek(0)
-        stdout = captured.read(limit + 1)
-    if len(stdout) > limit:
-        return "unknown", []
-    requested = os.path.realpath(str(Path.cwd()))
-    response = None
     try:
-        for line in stdout.decode("utf-8").splitlines():
-            try:
-                row = json.loads(line)
-            except (ValueError, TypeError):
-                continue
-            if isinstance(row, dict) and row.get("id") == 2:
-                response = row
-                break
-    except (UnicodeError, ValueError):
+        proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=env, **group)
+    except OSError:
         return "unknown", []
+    found_response = []
+    finished = threading.Event()
+
+    def read_until_response():
+        consumed = 0
+        try:
+            while consumed <= limit:
+                raw = proc.stdout.readline(limit + 1 - consumed)
+                if not raw:
+                    return
+                consumed += len(raw)
+                try:
+                    row = json.loads(raw.decode("utf-8"))
+                except (ValueError, UnicodeError):
+                    continue
+                if isinstance(row, dict) and row.get("id") == 2:
+                    found_response.append(row)
+                    return
+        finally:
+            finished.set()
+
+    reader = threading.Thread(target=read_until_response, daemon=True)
+    reader.start()
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+        finished.wait(8)
+    except OSError:
+        pass
+    finally:
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        elif proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        reader.join(2)
+        for stream in (proc.stdin, proc.stdout):
+            try:
+                stream.close()
+            except OSError:
+                pass
+    requested = os.path.realpath(str(Path.cwd()))
+    response = found_response[0] if found_response else None
     if not isinstance(response, dict) or "error" in response:
         return "unknown", []
     result_data = response.get("result")

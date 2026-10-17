@@ -2025,6 +2025,7 @@ def handle(message: dict):
                 error={
                     "code": -32021,
                     "message": "missing required client capability: %s" % TASKS_EXTENSION,
+                    "data": {"requiredCapabilities": {"extensions": {TASKS_EXTENSION: {}}}},
                 },
             )
         run_dir, err = task_run_dir(params.get("taskId"))

@@ -2512,6 +2512,7 @@ missing = call({
     "params": {"taskId": task_id},
 })
 assert missing["error"]["code"] == -32021, missing
+assert missing["error"]["data"] == {"requiredCapabilities": {"extensions": {"io.modelcontextprotocol/tasks": {}}}}, missing
 
 working = call({
     "jsonrpc": "2.0", "id": 5, "method": "tasks/get",

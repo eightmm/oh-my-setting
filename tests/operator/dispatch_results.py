@@ -7,7 +7,10 @@ import io
 warning_plan = temporary / "dispatch-warning-plan"
 (warning_plan / ".oms/plan").mkdir(parents=True)
 (warning_plan / ".oms/plan/tasks.json").write_text(
-    '{"tasks":{"verified":{"verify":"test -f value.txt"},"empty":{"verify":""}}}')
+    '{"tasks":{"verified":{"verify":"test -f value.txt","allowed_paths":["scripts/a.sh"],'
+    '"forbidden_paths":["secrets/"]},"empty":{"verify":""}}}')
+assert dispatch._plan_task_paths(warning_plan, "verified") == (["scripts/a.sh"], ["secrets/"])
+assert dispatch._plan_task_paths(warning_plan, "missing") == ([], [])
 assert dispatch._plan_task_has_verifier(warning_plan, "verified")
 assert not dispatch._plan_task_has_verifier(warning_plan, "empty")
 assert not dispatch._plan_task_has_verifier(warning_plan, "missing")

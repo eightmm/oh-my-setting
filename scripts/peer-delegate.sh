@@ -1090,6 +1090,10 @@ plan_forbidden=""
 if [ -n "$PLAN_JSON" ]; then
   plan_allowed="$(delegate_json_field allowed_paths "$PLAN_JSON")"
   plan_forbidden="$(delegate_json_field forbidden_paths "$PLAN_JSON")"
+else
+  # Panel dispatch passes the plan task's stored paths and its declared scopes.
+  plan_allowed="${OMS_PANEL_ALLOWED_PATHS:-}"
+  plan_forbidden="${OMS_PANEL_FORBIDDEN_PATHS:-}"
 fi
 
 {

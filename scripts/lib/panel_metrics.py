@@ -565,7 +565,8 @@ def aggregate(repo, since=None, now=None):
         return "unknown"
 
     failure_reason_counts, failure_stage_counts = {}, {}
-    provider_categories = {name: 0 for name in ("quota", "auth", "refusal", "permission_denial", "timeout", "other", "unknown")}
+    # The categories peer-common's provider classifier records; anything else is unknown.
+    provider_categories = {name: 0 for name in ("capacity", "model_unavailable", "provider_down", "unknown")}
     undecided_ages = {"under_1d": 0, "1d_to_7d": 0, "7d_or_more": 0, "unknown": 0}
     for attempt in delegate_writes:
         state = attempt.get("state")
