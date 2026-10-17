@@ -492,6 +492,7 @@ ma_write_harness_context() {
   # Measured 2026-10-17: search and whole-file reads were ~95% of tool output
   # in 30 days of sessions; a 129 KB script outlines to 2.7 KB.
   printf 'Outline a large file before reading it whole (oms graph project api PATH), then read targeted ranges; bound search output (rg -l, -m N, narrowed paths).\n'
+  printf 'Run long checks in the foreground: headless provider sessions stop background commands (Claude Code -p after 30 minutes by default).\n'
   if [ -n "${OMS_ROOM_ID:-}" ] && [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
     [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
     printf 'OMS work room: %s; participant: %s. Environment binds the canonical room repository.\n' "$OMS_ROOM_ID" "$OMS_ROOM_PARTICIPANT"
