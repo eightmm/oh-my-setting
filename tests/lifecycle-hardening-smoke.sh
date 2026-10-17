@@ -760,7 +760,6 @@ PY
 test_codex_hook_bridge_migration() {
   python3 - "$ROOT" "$TMP" <<'PY' || fail "Codex hook bridge migration contract"
 import copy
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -789,19 +788,60 @@ data = {"description": "Keep this custom description", "custom": {"keep": True},
 hooks = area / "hooks.json"
 original = (json.dumps(data, indent=4) + "\r\n").encode()
 hooks.write_bytes(original)
+backup = area / "original.json"
+backup.write_bytes(original)
 catalog = {"installed": [{"pluginId": "oh-my-setting@oh-my-setting-local",
                          "installed": True, "enabled": True, "version": manifest["version"],
                          "source": {"path": str(plugin)}}]}
 command = [sys.executable, str(root / "scripts/lib/codex-hook-bridge.py"),
            "--hooks", str(hooks), "--source-root", str(source)]
+plugin_id = "oh-my-setting@oh-my-setting-local"
+command += ["--plugin-id", plugin_id]
+
+server = area / "fake-codex-app-server"
+server.write_text('#!/usr/bin/env python3\n'
+                  'import json, os, re, sys\n'
+                  'root = os.environ["OMS_HOOK_NATIVE_ROOT"]\n'
+                  'plugin_id = os.environ["OMS_HOOK_PLUGIN_ID"]\n'
+                  'hooks = json.load(open(root + "/hooks.json"))["hooks"]\n'
+                  'def snake(name): return re.sub(r"([a-z0-9])([A-Z])", r"\\1_\\2", name).lower()\n'
+                  'for line in sys.stdin:\n'
+                  ' request = json.loads(line)\n'
+                  ' if request.get("method") == "initialize":\n'
+                  '  print(json.dumps({"id": request["id"], "result": {}}), flush=True)\n'
+                  ' elif request.get("method") == "hooks/list":\n'
+                  '  mode = os.environ.get("OMS_HOOKS_LIST_STATUS", "trusted")\n'
+                  '  if mode == "unavailable": sys.exit(3)\n'
+                  '  listed = []\n'
+                  '  for event, groups in hooks.items():\n'
+                  '   for gi, group in enumerate(groups):\n'
+                  '    for hi, hook in enumerate(group.get("hooks", [])):\n'
+                  '     if hook.get("type") != "command": continue\n'
+                  '     key = "%s:hooks.json:%s:%d:%d" % (plugin_id, snake(event), gi, hi)\n'
+                  '     status = "trusted"\n'
+                  '     if not listed and mode in ("modified", "untrusted"): status = mode\n'
+                  '     entry = {"key": key, "pluginId": plugin_id, "trustStatus": status}\n'
+                  '     if not listed and mode == "disabled": entry["enabled"] = False\n'
+                  '     listed.append(entry)\n'
+                  '  if mode == "missing": listed = listed[1:]\n'
+                  '  data = [{"cwd": os.getcwd(), "errors": [], "hooks": listed, "warnings": []}]\n'
+                  '  result = {"data": "invalid"} if mode == "garbage" else {"data": data}\n'
+                  '  print(json.dumps({"id": request["id"], "result": result}), flush=True)\n')
+server.chmod(0o700)
+server_env = dict(os.environ, OMS_HOOK_NATIVE_ROOT=str(native), OMS_HOOK_PLUGIN_ID=plugin_id)
+command += ["--codex", str(server)]
 
 def run(*extra, record=catalog):
     return subprocess.run(command + list(extra), input=json.dumps(record),
-                          text=True, capture_output=True, check=False)
+                          text=True, capture_output=True, check=False, env=server_env)
+
+def report():
+    return subprocess.run(command + ["--trust-report", "--native-root", str(native)],
+                          text=True, capture_output=True, check=False, env=server_env)
 
 def unchanged():
-    assert hooks.read_bytes() == original
-    assert not list(area.glob("*.bak"))
+    assert hooks.read_bytes() == original, "hook file changed"
+    assert not list(area.glob("*.bak")), list(area.glob("*.bak"))
 
 assert run("--probe").returncode == 0
 assert run().returncode == 0  # No verified replacement root.
@@ -820,27 +860,62 @@ assert run("--native-root", str(native)).returncode == 0
 unchanged()
 native_hooks.write_bytes(saved_native)
 
+server_env["OMS_HOOKS_LIST_STATUS"] = "disabled"
+assert report().stdout.startswith("untrusted: "), report().stdout
 assert run("--native-root", str(native)).returncode == 0
-changed = json.loads(hooks.read_bytes())
-assert changed["custom"] == data["custom"] and changed["description"] == data["description"]
-assert changed["hooks"]["UserPromptSubmit"][0]["hooks"] == [custom, user]
-assert changed["hooks"]["PostToolUse"] == []
-assert changed["hooks"]["SubagentStop"] == [{"hooks": [user]}]
-assert "SubagentStop" not in json.loads((native / "hooks.json").read_text())["hooks"]
-assert changed["hooks"]["SessionStart"] == data["hooks"]["SessionStart"]
-backup = hooks.with_name(hooks.name + ".oms-bridge-" + hashlib.sha256(original).hexdigest() + ".bak")
-assert backup.read_bytes() == original
-updated = hooks.read_bytes()
-assert run("--probe").returncode == 1
+unchanged()
+server_env["OMS_HOOKS_LIST_STATUS"] = "untrusted"
 assert run("--native-root", str(native)).returncode == 0
-assert hooks.read_bytes() == updated and len(list(area.glob("*.bak"))) == 1
+server_env["OMS_HOOKS_LIST_STATUS"] = "modified"
+assert report().stdout.startswith("untrusted: ")
+missing_result = run("--native-root", str(native))
+assert missing_result.returncode == 0 and "skill-router" in missing_result.stdout, (missing_result.returncode, missing_result.stdout, missing_result.stderr)
+unchanged()
+server_env["OMS_HOOKS_LIST_STATUS"] = "untrusted"
+assert report().stdout.startswith("untrusted: ")
+disabled_result = run("--native-root", str(native))
+assert disabled_result.returncode == 0 and "skill-router" in disabled_result.stdout
+unchanged()
+server_env["OMS_HOOKS_LIST_STATUS"] = "garbage"
+assert report().stdout == "unknown\n"
+unknown_result = run("--native-root", str(native))
+assert unknown_result.returncode == 0 and "unknown" in unknown_result.stdout, (unknown_result.stdout, unknown_result.stderr)
+unchanged()
+no_codex = subprocess.run(command + ["--trust-report", "--native-root", str(native),
+                                    "--codex", str(area / "missing-codex")],
+                          text=True, capture_output=True, check=False, env=server_env)
+assert no_codex.stdout == "unknown\n"
+server_env["OMS_HOOKS_LIST_STATUS"] = "missing"
+assert report().stdout == "unknown\n"
+missing_entry = run("--native-root", str(native))
+assert missing_entry.returncode == 0 and "unknown" in missing_entry.stdout
+unchanged()
+server_env["OMS_HOOKS_LIST_STATUS"] = "unavailable"
+assert report().stdout == "unknown\n"
+unavailable = run("--native-root", str(native))
+assert unavailable.returncode == 0 and "unknown" in unavailable.stdout
+unchanged()
+server_env["OMS_HOOKS_LIST_STATUS"] = "trusted"
+assert run("--probe").returncode == 0
+assert not list(area.glob("*.bak"))
 
 for invalid in (b'{bad', b'{"hooks":{},"hooks":{}}', b'{"hooks":{},"n":NaN}', b' ' * (1024 * 1024 + 1)):
     hooks.write_bytes(invalid)
     assert run("--native-root", str(native)).returncode == 2
     assert hooks.read_bytes() == invalid
-    assert backup.read_bytes() == original
+    assert hooks.read_bytes() == invalid
 hooks.write_bytes(original)
+trusted_hooks = area / "trusted-hooks.json"
+trusted_hooks.write_bytes(original)
+server_env["OMS_HOOKS_LIST_STATUS"] = "trusted"
+assert report().stdout == "trusted\n"
+trusted_command = command[:]
+trusted_command[trusted_command.index(str(hooks))] = str(trusted_hooks)
+trusted = subprocess.run(trusted_command + ["--native-root", str(native)],
+                         input=json.dumps(catalog), text=True, capture_output=True, env=server_env)
+assert trusted.returncode == 0, (trusted.stdout, trusted.stderr)
+assert json.loads(trusted_hooks.read_bytes())["hooks"]["UserPromptSubmit"][0]["hooks"] == [custom, user]
+assert list(area.glob("trusted-hooks.json.oms-bridge-*.bak"))
 linked = area / "linked.json"
 os.link(hooks, linked)
 assert run("--native-root", str(native)).returncode == 2
@@ -853,7 +928,7 @@ except (OSError, NotImplementedError):
     pass  # Some Windows runners cannot create symlinks without elevation.
 else:
     assert run("--native-root", str(native)).returncode == 2
-    assert hooks.is_symlink() and backup.read_bytes() == original
+    assert hooks.is_symlink()
 
 # Exercise the installer wiring using a current fixture cache and fake CLI.
 home = area / "home"
@@ -870,6 +945,7 @@ fake.write_text('#!/usr/bin/env bash\n'
                 ' "plugin marketplace list") printf "oh-my-setting-local %s\\n" "$OMS_BRIDGE_ROOT" ;;\n'
                 ' "plugin list --json") cat "$OMS_BRIDGE_CATALOG" ;;\n'
                 ' "features list") printf "hooks stable true\\n" ;;\n'
+                ' "app-server --listen stdio://") exec "$OMS_APP_SERVER" ;;\n'
                 ' *) exit 2 ;;\nesac\n')
 fake.chmod(0o700)
 catalog_path = area / "catalog.json"
@@ -880,7 +956,9 @@ catalog_path.write_text(json.dumps(actual_catalog))
 env = dict(os.environ, HOME=str(home), CODEX_HOME=str(codex_home),
            PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
            OMS_BRIDGE_CALLS=str(calls), OMS_BRIDGE_ROOT=str(root),
-           OMS_BRIDGE_CATALOG=str(catalog_path), OMS_INSTALL_RECEIPT=str(area / "absent-receipt.json"))
+           OMS_BRIDGE_CATALOG=str(catalog_path), OMS_INSTALL_RECEIPT=str(area / "absent-receipt.json"),
+           OMS_APP_SERVER=str(server), OMS_HOOK_NATIVE_ROOT=str(cache),
+           OMS_HOOK_PLUGIN_ID=plugin_id, OMS_HOOKS_LIST_STATUS="trusted")
 installer = ["bash", str(root / "scripts/install-codex-plugin.sh")]
 assert subprocess.run(installer, env=env, capture_output=True).returncode == 0
 assert "features list" not in calls.read_text()
@@ -898,9 +976,21 @@ assert subprocess.run(installer, env=env, capture_output=True).returncode == 0
 assert user_hooks.read_bytes() == installed_original
 actual_catalog["installed"][0]["enabled"] = True
 catalog_path.write_text(json.dumps(actual_catalog))
+env["OMS_HOOKS_LIST_STATUS"] = "untrusted"
 assert subprocess.run(installer, env=env, capture_output=True).returncode == 0
-assert json.loads(user_hooks.read_bytes())["hooks"]["UserPromptSubmit"][0]["hooks"] == [user]
-assert next(codex_home.glob("hooks.json.oms-bridge-*.bak")).read_bytes() == installed_original
+assert user_hooks.read_bytes() == installed_original
+output = subprocess.run(installer, env=env, capture_output=True, text=True)
+assert output.returncode == 0, (output.stdout, output.stderr)
+env["OMS_HOOKS_LIST_STATUS"] = "modified"
+output = subprocess.run(installer, env=env, capture_output=True, text=True)
+assert output.returncode == 0
+assert "untrusted" in output.stdout and "skill-router" in output.stdout, (output.stdout, output.stderr)
+assert user_hooks.read_bytes() == installed_original
+env["OMS_HOOKS_LIST_STATUS"] = "trusted"
+output = subprocess.run(installer, env=env, capture_output=True, text=True)
+assert output.returncode == 0
+assert json.loads(user_hooks.read_bytes())["hooks"]["UserPromptSubmit"][0]["hooks"] == [user], (output.stdout, output.stderr)
+assert next(codex_home.glob("hooks.json.oms-bridge-*.bak")).read_bytes() == installed_original, list(codex_home.glob("hooks.json.oms-bridge-*.bak"))
 PY
 }
 

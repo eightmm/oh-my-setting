@@ -10,6 +10,9 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import re
+import shutil
+import subprocess
 
 # Reuse the existing bounded, strict JSON and non-link file readers.
 sys.dont_write_bytecode = True
@@ -37,6 +40,87 @@ RETIRED = {("PostToolUse", "", "telemetry-hook"), ("SubagentStop", "", "telemetr
 
 def read_json(path):
     return io.strict_json_bytes(io.read_regular(path, path.name), path.name)
+
+
+def expected_hook_keys(native_root, plugin_id):
+    hooks = read_json(native_root / "hooks.json").get("hooks", {})
+    keys = {}
+    for event, groups in hooks.items():
+        snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", event).lower()
+        for group_index, group in enumerate(groups):
+            for hook_index, hook in enumerate(group.get("hooks", [])):
+                if isinstance(hook, dict) and hook.get("type") == "command":
+                    suffix = "hooks.json:%s:%d:%d" % (snake, group_index, hook_index)
+                    command = hook.get("command", "")
+                    marker = 'harness-hook.sh" '
+                    label = command.split(marker, 1)[1] if marker in command else event
+                    keys[plugin_id + ":" + suffix] = label
+    return keys
+
+
+def hooks_list_trust(native_root, plugin_id, binary=None):
+    expected = expected_hook_keys(native_root, plugin_id)
+    binary = binary or shutil.which("codex")
+    if not binary:
+        return "unknown", []
+    env = dict(os.environ)
+    for name in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"):
+        env.pop(name, None)
+    requests = [
+        {"id": 1, "method": "initialize", "params": {
+            "clientInfo": {"name": "oms_hook_trust", "version": "1"}}},
+        {"method": "initialized", "params": {}},
+        {"id": 2, "method": "hooks/list", "params": {"cwds": [str(Path.cwd())]}},
+    ]
+    payload = "".join(json.dumps(row) + "\n" for row in requests)
+    try:
+        result = subprocess.run([binary, "app-server", "--listen", "stdio://"],
+                                input=payload, text=True, capture_output=True,
+                                timeout=8, env=env, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown", []
+    if result.returncode != 0:
+        return "unknown", []
+    response = None
+    try:
+        for line in result.stdout.splitlines():
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(row, dict) and row.get("id") == 2:
+                response = row
+                break
+    except (UnicodeError, ValueError):
+        return "unknown", []
+    if not isinstance(response, dict) or "error" in response:
+        return "unknown", []
+    result_data = response.get("result")
+    if not isinstance(result_data, dict) or not isinstance(result_data.get("data"), list):
+        return "unknown", []
+    found = {}
+    for entry in result_data["data"]:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("cwd"), str)
+                or not isinstance(entry.get("errors"), list)
+                or not isinstance(entry.get("hooks"), list)
+                or not isinstance(entry.get("warnings"), list)):
+            return "unknown", []
+        for hook in entry["hooks"]:
+            if not isinstance(hook, dict):
+                return "unknown", []
+            if hook.get("pluginId") != plugin_id:
+                continue
+            key = hook.get("key")
+            status = hook.get("trustStatus")
+            if not isinstance(key, str) or key not in expected or status not in (
+                    "trusted", "untrusted", "modified", "managed") or key in found:
+                return "unknown", []
+            # Trust and enablement are separate fields; a disabled hook never runs.
+            found[key] = "disabled" if hook.get("enabled") is False else status
+    if set(found) != set(expected):
+        return "unknown", []
+    untrusted = [expected[key] for key in expected if found[key] != "trusted"]
+    return ("untrusted", untrusted) if untrusted else ("trusted", [])
 
 
 def sync_directory(path):
@@ -129,7 +213,12 @@ def migrate(args):
     if args.probe:
         return 0
     if not args.native_root or not native_verified(args):
-        print("codex-hook-bridge: preserved; enabled native replacement is unverified")
+        print("codex-hook-bridge: preserved; native plugin hooks are not verified")
+        return
+    state, untrusted = hooks_list_trust(args.native_root, args.plugin_id, args.codex)
+    if state != "trusted":
+        detail = "untrusted: " + ", ".join(untrusted) if state == "untrusted" else "unknown"
+        print("codex-hook-bridge: preserved; native hook trust %s (open /hooks in Codex and trust the OMS hooks)" % detail)
         return
     if args.dry_run:
         print("codex-hook-bridge: would retire %d legacy commands with an exact-byte backup" % count)
@@ -173,10 +262,18 @@ def main():
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--native-root", type=Path)
     parser.add_argument("--plugin-id", default="oh-my-setting@oh-my-setting-local")
+    parser.add_argument("--codex")
+    parser.add_argument("--trust-report", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--probe", action="store_true", help="read-only candidate check; 1 means absent")
     args = parser.parse_args()
     try:
+        if args.trust_report:
+            if not args.native_root:
+                raise ValueError("--native-root is required with --trust-report")
+            state, untrusted = hooks_list_trust(args.native_root, args.plugin_id, args.codex)
+            print(state + (": " + ", ".join(untrusted) if untrusted else ""))
+            return 0
         return migrate(args) or 0
     except (OSError, ValueError, TypeError, RecursionError, io.LifecycleError) as error:
         print("codex-hook-bridge: preserved; %s" % error, file=sys.stderr)

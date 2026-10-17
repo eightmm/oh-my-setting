@@ -407,6 +407,6 @@ if [ -e "$legacy_hooks" ] || [ -L "$legacy_hooks" ]; then
       echo "warning: Codex legacy hook migration was not completed; existing hooks were preserved" >&2
     fi
   else
-    echo "codex-hook-bridge: preserved; current native hook support is unverified"
+    echo "codex-hook-bridge: preserved; native hook trust is unknown (open /hooks in Codex and trust the OMS hooks)"
   fi
 fi

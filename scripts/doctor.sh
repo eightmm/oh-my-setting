@@ -1163,6 +1163,26 @@ PY
     FAILED=1
   else
     echo "ok: codex plugin oh-my-setting (cache parity)"
+    local hook_trust
+    hook_trust="$(python3 "$INSTALL_ROOT/scripts/lib/codex-hook-bridge.py" \
+      --trust-report --hooks "${CODEX_HOME:-$HOME/.codex}/hooks.json" \
+      --source-root "$INSTALL_ROOT" --native-root "$cache" \
+      --plugin-id "oh-my-setting@$marketplace_name" 2>/dev/null || true)"
+    hook_trust="${hook_trust//$'\r'/}"
+    case "$hook_trust" in
+      trusted)
+        echo "ok: Codex OMS native hooks trusted"
+        echo "note: Codex skips a changed hook until it is trusted again in /hooks"
+        ;;
+      untrusted:*)
+        echo "warning: Codex OMS native hooks untrusted (${hook_trust#untrusted: })"
+        echo "hint: open /hooks in Codex and trust the OMS hooks"
+        ;;
+      *)
+        echo "warning: Codex OMS native hook trust unknown"
+        echo "hint: open /hooks in Codex and trust the OMS hooks"
+        ;;
+    esac
   fi
 
   if hud_state="$(python3 "$INSTALL_ROOT/scripts/lib/codex-hud-config.py" \
