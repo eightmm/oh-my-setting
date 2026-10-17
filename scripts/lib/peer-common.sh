@@ -491,7 +491,13 @@ ma_write_harness_context() {
   printf 'Use task constraints, source/callers, tests and decisive evidence; inspect missing context where authorized. Truncated input is incomplete evidence.\n'
   # Measured 2026-10-17: search and whole-file reads were ~95% of tool output
   # in 30 days of sessions; a 129 KB script outlines to 2.7 KB.
-  printf 'Outline a large file before reading it whole (oms graph project api PATH), then read targeted ranges; bound search output (rg -l, -m N, narrowed paths).\n'
+  # Read-only seats cannot build the graph (it writes state), so only write
+  # workers get the outline route; everyone gets the search bound.
+  if [ "${MA_KIND:-}" = delegate ] && [ "${WORKER_ACCESS:-write}" = write ]; then
+    printf 'Outline a large file before reading it whole (oms graph project api PATH), then read targeted ranges; bound search output (rg -l, -m N, narrowed paths).\n'
+  else
+    printf 'Read targeted ranges of large files; bound search output (rg -l, -m N, narrowed paths).\n'
+  fi
   printf 'Run long checks in the foreground: headless provider sessions stop background commands (Claude Code -p after 30 minutes by default).\n'
   if [ -n "${OMS_ROOM_ID:-}" ] && [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
     [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
