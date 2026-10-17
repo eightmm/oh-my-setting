@@ -2886,8 +2886,114 @@ oms_worker_surface_is_soft() {
   esac
 }
 
+# Hash the refs and linked-worktree registration files that tie checkout
+# evidence to the baseline. This is deliberately smaller than the full surface
+# capture: it brackets the expensive scan without duplicating that scan.
+oms_worker_surface_boundary_fingerprint() {  # REPO
+  local repo="$1"
+  local common
+  common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  common="${common//$'\r'/}"
+  case "$common" in
+    /*|[A-Za-z]:/*) ;;
+    *) common="$repo/$common" ;;
+  esac
+  [ -d "$common" ] || return 1
+  common="$(cd "$common" && pwd -P)" || return 1
+  common="${common//$'\r'/}"
+  OMS_WG_REPO="$repo" OMS_WG_COMMON="$common" python3 - <<'PY'
+import hashlib, os, stat, subprocess
+
+repo = os.environ["OMS_WG_REPO"]
+common = os.environ["OMS_WG_COMMON"]
+digest = hashlib.sha256()
+
+def add(label, value):
+    if isinstance(label, str):
+        label = os.fsencode(label)
+    if isinstance(value, str):
+        value = os.fsencode(value)
+    digest.update(len(label).to_bytes(4, "big"))
+    digest.update(label)
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+def git_output(*args, empty_status=()):
+    try:
+        process = subprocess.Popen(["git", "-C", repo] + list(args),
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL)
+        output = process.communicate()[0]
+    except OSError:
+        raise SystemExit(1)
+    if process.returncode not in (0,) + tuple(empty_status):
+        raise SystemExit(1)
+    return output
+
+refs = git_output("show-ref", empty_status=(1,))
+add("refs", b"\n".join(sorted(refs.splitlines())))
+head = git_output("rev-parse", "--verify", "--quiet", "HEAD", empty_status=(1, 128))
+add("head", head.strip() or b"unborn")
+symbolic_head = git_output("symbolic-ref", "-q", "HEAD", empty_status=(1,))
+add("symbolic-head", symbolic_head.strip())
+
+worktrees = os.path.join(common, "worktrees")
+try:
+    root_stat = os.lstat(worktrees)
+except FileNotFoundError:
+    add("worktrees-root", b"missing")
+else:
+    if stat.S_ISLNK(root_stat.st_mode):
+        add("worktrees-root-link", os.fsencode(os.readlink(worktrees)))
+    elif stat.S_ISDIR(root_stat.st_mode):
+        add("worktrees-root", b"directory")
+        try:
+            entries = sorted(os.listdir(worktrees), key=os.fsencode)
+        except OSError:
+            raise SystemExit(1)
+        for name in entries:
+            entry = os.path.join(worktrees, name)
+            add("entry-name", os.fsencode(name))
+            try:
+                entry_stat = os.lstat(entry)
+            except OSError:
+                raise SystemExit(1)
+            if stat.S_ISLNK(entry_stat.st_mode):
+                add("entry-link", os.fsencode(os.readlink(entry)))
+                continue
+            if not stat.S_ISDIR(entry_stat.st_mode):
+                add("entry-type", str(stat.S_IFMT(entry_stat.st_mode)))
+                continue
+            add("entry-type", b"directory")
+            for field in ("HEAD", "gitdir", "commondir"):
+                path = os.path.join(entry, field)
+                try:
+                    field_stat = os.lstat(path)
+                except FileNotFoundError:
+                    add(field + "-state", b"missing")
+                    continue
+                except OSError:
+                    raise SystemExit(1)
+                if stat.S_ISLNK(field_stat.st_mode):
+                    add(field + "-link", os.fsencode(os.readlink(path)))
+                elif stat.S_ISREG(field_stat.st_mode):
+                    try:
+                        with open(path, "rb") as handle:
+                            value = handle.read()
+                    except OSError:
+                        raise SystemExit(1)
+                    add(field, value)
+                else:
+                    add(field + "-type", str(stat.S_IFMT(field_stat.st_mode)))
+    else:
+        add("worktrees-root-type", str(stat.S_IFMT(root_stat.st_mode)))
+
+print(digest.hexdigest())
+PY
+}
+
 # Capture each surface separately so a later comparison can name what moved.
-oms_worker_surface_snapshot() {
+oms_worker_surface_snapshot_capture_once() {
   local repo="$1"
   local dir="$2"
   local current_worktree_physical="${3:-}"
@@ -2902,6 +3008,21 @@ oms_worker_surface_snapshot() {
       OMS_WG_GITMETA_RESIDUE_OUT="$dir/gitmeta-residue" \
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
+    # Deterministic race coverage for the baseline consistency test. The
+    # barrier is inert outside the smoke runner and without all three paths.
+    if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" = 1 ] &&
+      [ "${OMS_TEST_WG_SNAPSHOT_PAUSE_AFTER:-}" = "$name" ] &&
+      [ -n "${OMS_TEST_WG_SNAPSHOT_READY:-}" ] &&
+      [ -n "${OMS_TEST_WG_SNAPSHOT_RELEASE:-}" ] &&
+      [ ! -e "$OMS_TEST_WG_SNAPSHOT_READY" ]; then
+      : > "$OMS_TEST_WG_SNAPSHOT_READY" || return 1
+      local wait_count=0
+      while [ ! -e "$OMS_TEST_WG_SNAPSHOT_RELEASE" ] && [ "$wait_count" -lt 400 ]; do
+        sleep 0.05
+        wait_count=$((wait_count + 1))
+      done
+      [ -e "$OMS_TEST_WG_SNAPSHOT_RELEASE" ] || return 1
+    fi
   done
   {
     printf 'refs/heads/main\nrefs/heads/master\nHEAD-identity\n'
@@ -2975,4 +3096,67 @@ with open(out, "w", encoding="utf-8") as handle:
     json.dump(sorted(pins), handle)
 PY
   fi
+}
+
+# A long surface scan is not an atomic Git read. Retry if refs or the worktree
+# registry changed across it, so checkout/ref-log evidence comes from one
+# stable baseline. Normal captures take one full scan; repeated churn fails
+# closed rather than accepting a partial baseline. This is bounded churn
+# detection, not an atomic snapshot: a change reverted within the scan (A->B->A)
+# keeps equal fingerprints, and the comparison then fails closed (hard), never open.
+# shellcheck disable=SC2034  # read by peer-delegate.sh after a failed snapshot
+OMS_WG_SNAPSHOT_ERROR=""
+# shellcheck disable=SC2034
+oms_worker_surface_snapshot() {
+  local repo="$1"
+  local dir="$2"
+  local current_worktree_physical="${3:-}"
+  local before after attempt=1 name
+
+  OMS_WG_SNAPSHOT_ERROR=""
+  mkdir -p "$dir" || {
+    OMS_WG_SNAPSHOT_ERROR="could not create worker guard baseline directory"
+    return 1
+  }
+  while [ "$attempt" -le 3 ]; do
+    before="$(oms_worker_surface_boundary_fingerprint "$repo")" || {
+      OMS_WG_SNAPSHOT_ERROR="could not fingerprint refs and worktree registrations"
+      return 1
+    }
+    before="${before//$'\r'/}"
+    if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" = 1 ] && [ -n "${OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT:-}" ]; then
+      printf 'capture\n' >> "$OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT" || {
+        OMS_WG_SNAPSHOT_ERROR="could not record worker guard test capture count"
+        return 1
+      }
+    fi
+    # Rebuild all baseline-owned files on a retry. In particular, old
+    # per-worktree receipts must not survive when an entry was removed.
+    for name in config remotes refs remote-refs work-branches tracked files \
+      gitmeta hooks omsstate refs-protected gitmeta-exempt gitmeta-residue \
+      gitmeta-managed-complete foreign-worktrees branch-logs \
+      omsstate.artifact-index omsstate.completion-pins; do
+      rm -rf "${dir:?}/$name" || {
+        OMS_WG_SNAPSHOT_ERROR="could not prepare worker guard baseline retry"
+        return 1
+      }
+    done
+    if ! oms_worker_surface_snapshot_capture_once "$repo" "$dir" \
+      "$current_worktree_physical"; then
+      OMS_WG_SNAPSHOT_ERROR="could not capture worker guard protected surfaces"
+      return 1
+    fi
+    after="$(oms_worker_surface_boundary_fingerprint "$repo")" || {
+      OMS_WG_SNAPSHOT_ERROR="could not fingerprint refs and worktree registrations"
+      return 1
+    }
+    after="${after//$'\r'/}"
+    if [ "$before" = "$after" ]; then
+      OMS_WG_SNAPSHOT_ERROR=""
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  OMS_WG_SNAPSHOT_ERROR="worker guard baseline did not stabilize after 3 attempts"
+  return 1
 }

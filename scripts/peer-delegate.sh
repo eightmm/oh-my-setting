@@ -2157,8 +2157,10 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
       fail "could not hash delegated worktree Git execution config snapshot"
     if [ "$delegate_worktree_repo" != "$REPO" ]; then
       worker_source_guard_dir="$worker_guard_dir/source"
-      oms_worker_surface_snapshot "$delegate_worktree_repo" "$worker_source_guard_dir" \
-        "$worker_guard_worktree_physical" || fail "could not freeze source repository protected surfaces"
+      if ! oms_worker_surface_snapshot "$delegate_worktree_repo" "$worker_source_guard_dir" \
+        "$worker_guard_worktree_physical"; then
+        fail "${OMS_WG_SNAPSHOT_ERROR:-could not freeze source repository protected surfaces}"
+      fi
       oms_git_execution_state_snapshot "$delegate_worktree_repo" \
         "$worker_source_guard_dir/git-execution-state" || fail "could not freeze source Git execution state"
       worker_source_execution_snapshot_sha="$(oms_sha256_file "$worker_source_guard_dir/git-execution-state")" ||
@@ -2198,6 +2200,7 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
       echo "warning: worker guard could not cover even the untracked files in ${OMS_WORKER_GUARD_MAX_FILES:-20000} entries; coverage is partial (raise OMS_WORKER_GUARD_MAX_FILES)" >&2
     fi
   else
+    [ -z "${OMS_WG_SNAPSHOT_ERROR:-}" ] || fail "$OMS_WG_SNAPSHOT_ERROR"
     worker_guard_dir=""
   fi
 fi

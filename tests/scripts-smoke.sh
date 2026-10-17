@@ -28476,6 +28476,101 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
   contains "$result" 'during this run: foreign-ref' ||
     fail "managed branch creation warning missing: $result"
 
+  # Parent-created scratch worktrees carry a live residue marker. Creating a
+  # branch there must still use the guarded foreign-ref evidence path.
+  local scratch_created
+  rm -f "$ready" "$done"
+  (
+    local tries=0
+    while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -f "$ready" ] || exit 1
+    scratch_created="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+      "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid "$$")" || exit 1
+    git -C "$scratch_created" checkout -q --no-track -b oms/scratch-created || exit 1
+    git -C "$scratch_created" -c user.name=test -c user.email=test@example.invalid \
+      commit -q --allow-empty -m follow-up || exit 1
+    touch "$done"
+  ) &
+  pid=$!
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+  wait "$pid" || fail "parent scratch branch fixture timed out"
+  [ "${result%%$'\t'*}" = 0 ] ||
+    fail "parent scratch branch creation should be soft: $result"
+  contains "$result" 'during this run: foreign-ref' ||
+    fail "parent scratch branch warning missing: $result"
+
+  # Pause after refs have been snapshotted but before gitmeta and reflog
+  # receipts, so the branch is created inside the baseline capture window.
+  local baseline_ready="$TMP/guard-foreign-ref-baseline-ready"
+  local baseline_release="$TMP/guard-foreign-ref-baseline-release"
+  local baseline_capture_count="$TMP/guard-foreign-ref-baseline-captures"
+  local stable_capture_count="$TMP/guard-foreign-ref-stable-captures"
+  local unstable_capture_count="$TMP/guard-foreign-ref-unstable-captures"
+  local unstable_fingerprint_state="$TMP/guard-foreign-ref-unstable-fingerprint"
+  : > "$stable_capture_count"
+  (
+    . "$ROOT/scripts/lib/harness-residue.sh"
+    . "$ROOT/scripts/lib/oms-common.sh"
+    export OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT="$stable_capture_count"
+    oms_worker_surface_snapshot "$project" \
+      "$TMP/guard-foreign-ref-stable-baseline" "$project"
+  ) || fail "a stable worker guard snapshot failed"
+  [ "$(awk 'END { print NR }' "$stable_capture_count")" = 1 ] ||
+    fail "an unchanged baseline should use one full capture"
+
+  : > "$unstable_capture_count"
+  rm -f "$unstable_fingerprint_state"
+  (
+    . "$ROOT/scripts/lib/harness-residue.sh"
+    . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_boundary_fingerprint() {
+      local count=0
+      [ ! -f "$unstable_fingerprint_state" ] ||
+        count="$(cat "$unstable_fingerprint_state")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$unstable_fingerprint_state"
+      printf 'unstable-%s\n' "$count"
+    }
+    oms_worker_surface_snapshot_capture_once() { return 0; }
+    export OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT="$unstable_capture_count"
+    if oms_worker_surface_snapshot "$project" \
+      "$TMP/guard-foreign-ref-unstable-baseline" "$project"; then
+      exit 1
+    fi
+    [ "$OMS_WG_SNAPSHOT_ERROR" = \
+      "worker guard baseline did not stabilize after 3 attempts" ]
+  ) || fail "an unstable baseline must fail closed with its reason"
+  [ "$(awk 'END { print NR }' "$unstable_capture_count")" = 3 ] ||
+    fail "an unstable baseline must stop after three captures"
+
+  rm -f "$baseline_ready" "$baseline_release" "$ready" "$done"
+  : > "$baseline_capture_count"
+  (
+    local tries=0
+    while [ ! -f "$baseline_ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -f "$baseline_ready" ] || exit 1
+    local baseline_scratch
+    baseline_scratch="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+      "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid "$$")" || exit 1
+    git -C "$baseline_scratch" checkout -q --no-track -b oms/baseline-created || exit 1
+    git -C "$baseline_scratch" -c user.name=test -c user.email=test@example.invalid \
+      commit -q --allow-empty -m baseline-follow-up || exit 1
+    touch "$baseline_release" "$done"
+  ) &
+  pid=$!
+  result="$(OMS_TEST_WG_SNAPSHOT_PAUSE_AFTER=refs \
+    OMS_TEST_WG_SNAPSHOT_READY="$baseline_ready" \
+    OMS_TEST_WG_SNAPSHOT_RELEASE="$baseline_release" \
+    OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT="$baseline_capture_count" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+  wait "$pid" || fail "baseline-window scratch branch fixture failed: $result"
+  [ "${result%%$'\t'*}" = 0 ] ||
+    fail "a scratch branch created during baseline capture stopped the worker: $result"
+  [ "$(awk 'END { print NR }' "$baseline_capture_count")" = 2 ] ||
+    fail "a torn baseline should be recaptured exactly once: $(cat "$baseline_capture_count")"
+
   result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" "git branch oms/unattached HEAD")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "an oms/* branch without a foreign checkout should stay hard: $result"
