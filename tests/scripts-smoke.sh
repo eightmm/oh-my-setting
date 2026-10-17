@@ -28934,6 +28934,105 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   contains "$result" 'during this run: kept-sibling' ||
     fail "a late kept sibling should be reported as a soft change: $result"
 
+  # Reproduce the comparison window: the intermediate admin capture sees a
+  # validated managed add, then the sibling is fully removed before compare.
+  local transient="$project-transient" transient_root="$managed_root/transient"
+  local transient_snap="$TMP/guard-sibling-transient-snapshot"
+  make_guard_repo "$transient"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" root="$3" snap="$4"
+    oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 10
+    mkdir -p "$root/oh-my-setting-delegate.transient"
+    printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s/wt\ntemporary=1\n" \
+      "$$" "$repo" "$root/oh-my-setting-delegate.transient" \
+      > "$root/oh-my-setting-delegate.transient/.oh-my-setting-tmp"
+    git -C "$repo" worktree add --quiet --detach \
+      "$root/oh-my-setting-delegate.transient/wt" HEAD || exit 11
+    metadata="$(git -C "$root/oh-my-setting-delegate.transient/wt" rev-parse --git-dir)"
+    case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
+    rm -rf "$root/oh-my-setting-delegate.transient/wt"
+    rm -f "$metadata/HEAD"
+    OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
+      > "$snap/intermediate-gitmeta" || exit 12
+    oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 12
+    [ -s "$snap/gitmeta-managed-added" ] || exit 13
+    git -C "$repo" worktree remove --force \
+      "$root/oh-my-setting-delegate.transient/wt" || exit 14
+    rm -rf "$root/oh-my-setting-delegate.transient"
+    oms_worker_gitmeta_only_added_removed_siblings "$repo" "$snap" "$repo" || exit 15
+    [ "$OMS_WG_GITMETA_SOFT" = kept-sibling ] || exit 16
+    if OMS_WORKER_GUARD_STRICT=1 \
+      oms_worker_gitmeta_only_added_removed_siblings "$repo" "$snap" "$repo"; then
+      exit 17
+    fi
+  ' _ "$ROOT" "$transient" "$managed_root" "$transient_snap" ||
+    fail "a validated sibling added during capture then removed before compare must be soft (rc=$?)"
+
+  local transient_bad_exclude="$project-transient-exclude"
+  local transient_bad_exclude_snap="$TMP/guard-sibling-transient-exclude-snapshot"
+  make_guard_repo "$transient_bad_exclude"
+  local exclude_path
+  exclude_path="$(git -C "$transient_bad_exclude" rev-parse --git-path info/exclude)"
+  case "$exclude_path" in /*) ;; *) exclude_path="$transient_bad_exclude/$exclude_path" ;; esac
+  mkdir -p "$(dirname "$exclude_path")"
+  : > "$exclude_path"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" root="$3" snap="$4"
+    exclude_path="$(git -C "$repo" rev-parse --git-path info/exclude)"
+    case "$exclude_path" in /*) ;; *) exclude_path="$repo/$exclude_path" ;; esac
+    oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 30
+    mkdir -p "$root/oh-my-setting-delegate.transient-exclude"
+    printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s/wt\ntemporary=1\n" \
+      "$$" "$repo" "$root/oh-my-setting-delegate.transient-exclude" \
+      > "$root/oh-my-setting-delegate.transient-exclude/.oh-my-setting-tmp"
+    git -C "$repo" worktree add --quiet --detach \
+      "$root/oh-my-setting-delegate.transient-exclude/wt" HEAD || exit 31
+    OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
+      > "$snap/intermediate-gitmeta" || exit 32
+    oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 33
+    [ -s "$snap/gitmeta-managed-added" ] || exit 34
+    git -C "$repo" worktree remove --force \
+      "$root/oh-my-setting-delegate.transient-exclude/wt" || exit 35
+    rm -rf "$root/oh-my-setting-delegate.transient-exclude"
+    printf "# unrelated worker edit\n" >> "$exclude_path"
+    if oms_worker_gitmeta_only_added_removed_siblings "$repo" "$snap" "$repo"; then
+      exit 36
+    fi
+  ' _ "$ROOT" "$transient_bad_exclude" "$managed_root" "$transient_bad_exclude_snap" ||
+    fail "an unrelated info/exclude edit must stay hard during a sibling add/remove (rc=$?)"
+
+  # Strict mode and executable per-worktree config remain hard.
+  local transient_bad="$project-transient-config"
+  local transient_bad_root="$managed_root/transient-config"
+  local transient_bad_snap="$TMP/guard-sibling-transient-config-snapshot"
+  make_guard_repo "$transient_bad"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" root="$3" snap="$4"
+    oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 20
+    mkdir -p "$root/oh-my-setting-delegate.transient-config"
+    printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s/wt\ntemporary=1\n" \
+      "$$" "$repo" "$root/oh-my-setting-delegate.transient-config" \
+      > "$root/oh-my-setting-delegate.transient-config/.oh-my-setting-tmp"
+    git -C "$repo" worktree add --quiet --detach \
+      "$root/oh-my-setting-delegate.transient-config/wt" HEAD || exit 21
+    metadata="$(git -C "$root/oh-my-setting-delegate.transient-config/wt" rev-parse --git-dir)"
+    case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
+    printf "[core]\nfsmonitor=unsafe\n" > \
+      "$metadata/config.worktree"
+    if oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo"; then
+      exit 22
+    fi
+  ' _ "$ROOT" "$transient_bad" "$managed_root" "$transient_bad_snap" ||
+    fail "a transient sibling with config.worktree must remain hard"
+
   # Same wave: one live sibling disappears while another finishes kept.
   local wave="$project-wave" gone="$managed_root/oh-my-setting-delegate.gone"
   local wave_kept="$managed_root/oh-my-setting-delegate.wave"
@@ -29197,6 +29296,39 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
     fail "a deleted state file should be named: $result"
   grep -Fq '"fingerprint":"abc"' "$removed/.oms/failures.jsonl" ||
     fail "deleted shared state should be restored"
+
+  local graph_cache="$TMP/guard-state-graph-cache"
+  local graph_cache_file="$TMP/guard-state-graph-cache/.oms/project-graph/cache/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+  local graph_cache_snapshot="$TMP/guard-state-graph-cache-snapshot"
+  make_guard_repo "$graph_cache"
+  mkdir -p "$(dirname "$graph_cache_file")"
+  printf '{"derived":true}\n' > "$graph_cache_file"
+  bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    oms_worker_surface_capture_one "$2" omsstate "$2" > "$3" || exit 10
+    rm -f "$4"
+    oms_worker_state_violations "$2" "$3" > "$3-detail" || exit 11
+    [ ! -s "$3-detail" ]
+  ' _ "$ROOT" "$graph_cache" "$graph_cache_snapshot" "$graph_cache_file" ||
+    fail "deleting an exact regular project-graph cache file should pass"
+
+  local graph_cache_rewrite="$TMP/guard-state-graph-cache-rewrite"
+  local graph_cache_rewrite_file="$TMP/guard-state-graph-cache-rewrite/.oms/project-graph/cache/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"
+  local graph_cache_rewrite_snapshot="$TMP/guard-state-graph-cache-rewrite-snapshot"
+  make_guard_repo "$graph_cache_rewrite"
+  mkdir -p "$(dirname "$graph_cache_rewrite_file")"
+  printf '{"derived":"before"}\n' > "$graph_cache_rewrite_file"
+  bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    oms_worker_surface_capture_one "$2" omsstate "$2" > "$3" || exit 20
+    printf "{\"derived\":\"after\"}\\n" > "$4"
+    oms_worker_state_violations "$2" "$3" > "$3-detail" || exit 21
+    grep -Fq "project-graph/cache/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json derived cache changed" "$3-detail"
+  ' _ "$ROOT" "$graph_cache_rewrite" "$graph_cache_rewrite_snapshot" \
+    "$graph_cache_rewrite_file" ||
+    fail "rewriting a surviving project-graph cache file should stay hard"
 
   # The parent's own prompt hook consumes its resume hint mid-run.
   local hint="$TMP/guard-state-hook-hint"

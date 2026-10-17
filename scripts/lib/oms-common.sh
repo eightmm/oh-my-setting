@@ -866,7 +866,7 @@ oms_worker_state_violations() {
 
   [ -f "$before" ] || return 0
   OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" python3 - <<'PY'
-import hashlib, json, os, stat
+import hashlib, json, os, re, stat
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 problems = []
@@ -948,7 +948,26 @@ with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
         rel, kind = parts[0], parts[1]
         path = os.path.join(root, rel)
         if not os.path.exists(path):
+            if kind == "CACHE" and re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel):
+                if not os.path.lexists(path):
+                    continue
             problems.append("%s was deleted" % rel)
+            continue
+        if kind == "CACHE":
+            try:
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                with os.fdopen(os.open(path, flags), "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(info.st_mode):
+                        problems.append("%s derived cache changed" % rel)
+                        continue
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != parts[3] or info.st_size != int(parts[2]):
+                    problems.append("%s derived cache changed" % rel)
+            except (OSError, ValueError, IndexError):
+                problems.append("%s derived cache became unreadable" % rel)
             continue
         if kind == "IMMUTABLE" and len(parts) == 4:
             try:
@@ -1329,9 +1348,11 @@ oms_worker_surface_diff() {
   local name
   local common
 
+  : > "$before_dir/gitmeta-managed-added"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
-    if ! oms_worker_surface_capture_one "$repo" "$name" \
+    if ! OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
+      oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_settles "$repo" \
         "$before_dir/gitmeta" "$current_worktree_physical"; then
@@ -1342,8 +1363,14 @@ oms_worker_surface_diff() {
         changed="${changed:+$changed, }gitmeta"
         continue
       fi
-      # Strict mode rejects classified soft changes, but preserves this existing
-      # quiet exemption for validated live managed-worktree lifecycle activity.
+      if [ "$name" = gitmeta ] && [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
+        oms_worker_gitmeta_only_added_removed_siblings "$repo" \
+        "$before_dir" "$current_worktree_physical"; then
+        changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
+        continue
+      fi
+      # Strict mode rejects additions; validated live managed removals retain
+      # the existing quiet lifecycle exemption.
       if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ]; then
         continue
       fi
@@ -1593,6 +1620,11 @@ EOF
 # another main may unregister a sibling that was already dead and kept at the
 # snapshot (`gitmeta-residue`); name that softly (`sibling-cleanup`) only when
 # every removed line belongs to such an entry and none of its lines remain.
+# If a managed sibling is added and removed between comparison captures, name
+# it softly only when an intermediate capture validated its marker/backpointer,
+# its entry was absent at baseline, and the complete registry entry is now gone.
+# A complete checkout must have a detached HEAD; a pending add with no checkout
+# is eligible only through the pending marker/path validator.
 # A main may keep using its scratch after its owner pid died; a changed HEAD
 # line alone on such a residue entry that still exists is `kept-sibling` too.
 # This is false-positive relief for cooperative parallel runs, not
@@ -1693,6 +1725,63 @@ EOF
   return 0
 }
 
+# A sibling can finish between two non-atomic comparison captures. Preserve
+# only the positive proof from the intermediate capture; at comparison time
+# require that the entry was absent at baseline and is now wholly gone.
+oms_worker_gitmeta_only_added_removed_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
+  local repo="$1" before="$2" worker="${3:-}"
+  local common entry line side
+  local found=0
+
+  OMS_WG_GITMETA_SOFT=""
+  [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 1
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  [ -s "$before/gitmeta-managed-added" ] || return 1
+  oms_worker_surface_capture_one "$repo" gitmeta "$worker" |
+    LC_ALL=C sort > "$before/gitmeta-now" || return 1
+  LC_ALL=C sort "$before/gitmeta" > "$before/gitmeta-before" || return 1
+  LC_ALL=C comm -23 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-removed" || return 1
+  LC_ALL=C comm -13 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-added" || return 1
+  while IFS= read -r entry; do
+    entry="${entry//$'\r'/}"
+    [ -n "$entry" ] || continue
+    if awk -v e="worktrees/$entry" \
+      '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
+      "$before/gitmeta-before"; then
+      continue
+    fi
+    if [ ! -e "$common/worktrees/$entry" ] && [ ! -L "$common/worktrees/$entry" ] &&
+      ! awk -v e="worktrees/$entry" \
+        '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
+        "$before/gitmeta-now"; then
+      found=1
+    fi
+  done < "$before/gitmeta-managed-added"
+  [ "$found" = 1 ] || return 1
+  for side in gitmeta-removed gitmeta-added; do
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree-dir worktrees/"*) entry="${line#worktree-dir worktrees/}" ;;
+        "worktree worktrees/"*/*)
+          entry="${line#worktree worktrees/}"
+          entry="${entry%%/*}"
+          ;;
+        *) return 1 ;;
+      esac
+      entry="${entry//$'\r'/}"
+      grep -Fxq "$entry" "$before/gitmeta-managed-added" || return 1
+      ! awk -v e="worktrees/$entry" \
+        '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
+        "$before/gitmeta-before" || return 1
+      [ ! -e "$common/worktrees/$entry" ] && [ ! -L "$common/worktrees/$entry" ] || return 1
+      ! awk -v e="worktrees/$entry" \
+        '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
+        "$before/gitmeta-now" || return 1
+    done < "$before/$side"
+  done
+  OMS_WG_GITMETA_SOFT=kept-sibling
+}
+
 # Neither `git worktree add` nor `remove` is atomic: for a moment the registry
 # entry exists without its `gitdir` file, or the file is already gone while the
 # entry directory remains, and no marker can classify what cannot be read.
@@ -1784,7 +1873,9 @@ oms_worker_gitmeta_admin_changes_are_safe() {  # REPO BEFORE_DIR CURRENT_WORKTRE
   local common entry receipt physical line side head
   OMS_WG_GITMETA_ADMIN_QUIET=0
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
-  oms_worker_surface_capture_one "$repo" gitmeta "$worker" > "$before/gitmeta-admin-now" || return 1
+  OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before/gitmeta-managed-added" \
+    oms_worker_surface_capture_one "$repo" gitmeta "$worker" \
+    > "$before/gitmeta-admin-now" || return 1
   python3 - "$before/gitmeta" "$before/gitmeta-admin-now" "$before/gitmeta-admin-lifecycle" "$before/gitmeta-replacement-candidates" <<'PY' > "$before/gitmeta-new-entries" || return 1
 import sys
 def entries(path):
@@ -1869,8 +1960,17 @@ PY
       line="${line//$'\r'/}"
       side="${line%% *}" entry="${line#* }"
       if [ "$side" = added ]; then
-        oms_worker_gitmeta_is_live_managed_worktree "$repo" "$common/worktrees/$entry/gitdir" "$worker" ||
+        if oms_worker_gitmeta_is_live_managed_worktree "$repo" \
+          "$common/worktrees/$entry/gitdir" "$worker"; then
+          if [ ! -e "$common/worktrees/$entry" ] &&
+            [ ! -L "$common/worktrees/$entry" ]; then
+            OMS_WG_GITMETA_ADMIN_QUIET=0
+          fi
+          [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] ||
+            OMS_WG_GITMETA_ADMIN_QUIET=0
+        else
           OMS_WG_GITMETA_ADMIN_QUIET=0
+        fi
       elif ! grep -Fxq "worktrees/$entry" "$before/gitmeta-exempt" ||
         [ -e "$common/worktrees/$entry" ] || [ -L "$common/worktrees/$entry" ]; then
         OMS_WG_GITMETA_ADMIN_QUIET=0
@@ -2494,7 +2594,7 @@ PY
       local transient_helper
       transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
       OMS_WG_REPO="$repo" python3 - "$transient_helper" <<'PY'
-import hashlib, importlib.util, os, sys
+import hashlib, importlib.util, os, re, stat, sys
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 if not os.path.isdir(root):
@@ -2524,6 +2624,25 @@ for base, dirs, files in os.walk(root):
             rows.append("%s LINK" % rel)
             continue
         if transients.is_internal_atomic_temp(root, rel):
+            continue
+        if re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel):
+            try:
+                info = os.lstat(path)
+                if stat.S_ISREG(info.st_mode):
+                    digest = hashlib.sha256()
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                    with os.fdopen(os.open(path, flags), "rb") as f:
+                        opened = os.fstat(f.fileno())
+                        if not stat.S_ISREG(opened.st_mode):
+                            rows.append("%s EXISTS" % rel)
+                            continue
+                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    rows.append("%s CACHE %d %s" % (rel, opened.st_size, digest.hexdigest()))
+                else:
+                    rows.append("%s EXISTS" % rel)
+            except OSError:
+                rows.append("%s UNREADABLE" % rel)
             continue
         # Append-only by contract: the JSONL families, plus the memory log and
         # its pins. summary.md is derived from shared.md and regenerated, and
@@ -2567,7 +2686,7 @@ PY
       # another checkout of this repo, and a submodule keeps its own config,
       # refs, and hooks under .git/modules.
       if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
-        local meta
+        local meta head worktree_gitfile worktree_path
         for meta in objects/info/alternates objects/info/http-alternates \
           info/exclude info/grafts info/attributes shallow; do
           if [ -f "$git_dir/$meta" ]; then
@@ -2614,6 +2733,32 @@ PY
                 "$current_worktree_physical"; then
                 [ -z "${OMS_WG_GITMETA_EXEMPT_OUT:-}" ] ||
                   printf '%s\n' "${wt#"$git_dir"/}" >> "$OMS_WG_GITMETA_EXEMPT_OUT"
+                if [ -n "${OMS_WG_GITMETA_MANAGED_ADDED_OUT:-}" ]; then
+                  if [ -f "$wt/HEAD" ] && [ ! -L "$wt/HEAD" ]; then
+                    head="$(sed -n '1p' "$wt/HEAD" 2>/dev/null || true)"
+                    head="${head//$'\r'/}"
+                    case "$head" in
+                      ""|*[!0-9a-f]*) ;;
+                      *)
+                        if [ "${#head}" = 40 ] || [ "${#head}" = 64 ]; then
+                          printf '%s\n' "${wt##*/}" >> "$OMS_WG_GITMETA_MANAGED_ADDED_OUT"
+                        fi
+                        ;;
+                    esac
+                  else
+                    worktree_gitfile="$(sed -n '1p' "$wt/gitdir" 2>/dev/null || true)"
+                    worktree_gitfile="${worktree_gitfile//$'\r'/}"
+                    case "$worktree_gitfile" in
+                      */.git)
+                        worktree_path="${worktree_gitfile%/.git}"
+                        if oms_worker_gitmeta_is_pending_managed_worktree "$repo" \
+                          "$worktree_path" "$current_worktree_physical"; then
+                          printf '%s\n' "${wt##*/}" >> "$OMS_WG_GITMETA_MANAGED_ADDED_OUT"
+                        fi
+                        ;;
+                    esac
+                  fi
+                fi
                 continue
               fi
               # Dead harness residue stays on the surface; the snapshot only
