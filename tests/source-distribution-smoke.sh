@@ -373,6 +373,16 @@ for step in workflow_text.split('      - name: ')[1:]:
         limit = re.search(r'^        timeout-minutes: ([0-9]+)$', step, re.M)
         assert limit and int(limit.group(1)) > 0, step.splitlines()[0]
 
+# Each job also has its own bound: action steps (checkout, setup) carry none, and
+# an unbounded job runs to GitHub's 360-minute default. The bound covers the
+# job's step limits so it never cuts a healthy run short.
+for name in jobs:
+    job_body = workflow_text.split("\n  %s:\n" % name, 1)[1].split("\n  #", 1)[0]
+    job_body = re.split(r"^  [a-z0-9_]+:$", job_body, maxsplit=1, flags=re.M)[0]
+    limit = re.search(r"^    timeout-minutes: ([0-9]+)$", job_body, re.M)
+    steps = sum(int(v) for v in re.findall(r"^        timeout-minutes: ([0-9]+)$", job_body, re.M))
+    assert limit and int(limit.group(1)) >= steps, (name, steps)
+
 if "gate" not in jobs:
     raise SystemExit("workflow has no gate job")
 required = set(jobs) - {"gate"}
