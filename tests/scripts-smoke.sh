@@ -28944,7 +28944,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
 
   # Reproduce the comparison window: the intermediate admin capture sees a
   # validated managed add, then the sibling is fully removed before compare.
-  local transient="$project-transient" transient_root="$managed_root/transient"
+  local transient="$project-transient"
   local transient_snap="$TMP/guard-sibling-transient-snapshot"
   make_guard_repo "$transient"
   OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
@@ -29017,7 +29017,6 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
 
   # Strict mode and executable per-worktree config remain hard.
   local transient_bad="$project-transient-config"
-  local transient_bad_root="$managed_root/transient-config"
   local transient_bad_snap="$TMP/guard-sibling-transient-config-snapshot"
   make_guard_repo "$transient_bad"
   OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
