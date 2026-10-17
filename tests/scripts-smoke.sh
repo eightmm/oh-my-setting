@@ -29312,6 +29312,16 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
     [ ! -s "$3-detail" ]
   ' _ "$ROOT" "$graph_cache" "$graph_cache_snapshot" "$graph_cache_file" ||
     fail "deleting an exact regular project-graph cache file should pass"
+  printf '{"derived":true}\n' > "$graph_cache_file"
+  OMS_WORKER_GUARD_STRICT=1 bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    oms_worker_surface_capture_one "$2" omsstate "$2" > "$3" || exit 10
+    rm -f "$4"
+    oms_worker_state_violations "$2" "$3" > "$3-detail" || exit 11
+    grep -Fq "was deleted" "$3-detail"
+  ' _ "$ROOT" "$graph_cache" "$graph_cache_snapshot" "$graph_cache_file" ||
+    fail "strict mode should keep a project-graph cache deletion hard"
 
   local graph_cache_rewrite="$TMP/guard-state-graph-cache-rewrite"
   local graph_cache_rewrite_file="$TMP/guard-state-graph-cache-rewrite/.oms/project-graph/cache/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"
