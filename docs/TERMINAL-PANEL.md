@@ -803,9 +803,9 @@ and use the same result lock and expected-review-state transitions.
 
 For an undecided backlog, explicitly use `--aged-days N` in the calling main's
 lineage, a named dead main's lineage, or with `--standalone`. There is no
-default; N must be finite and at least 7. This selects review workers, and
-blocked workers, whose last transition into their current state was more than
-N days ago, even without a finalized result or indexed exit artifact. Blocked
+default; N must be finite and at least 7. This selects review workers, and in a
+main's lineage also blocked workers, whose last transition into their current
+state was more than N days ago (`--standalone` selects review workers only), even without a finalized result or indexed exit artifact. Blocked
 workers are cancelled with `reason_code: owner_superseded` and reason
 `aged blocked without owner decision (N days)`; review workers use
 `aged review without owner decision (N days)`. Unknown ages and recent workers
