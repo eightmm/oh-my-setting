@@ -1372,7 +1372,8 @@ oms_worker_surface_diff() {
       fi
       # Strict mode rejects classified soft changes, but preserves this existing
       # quiet exemption for validated live managed-worktree lifecycle activity.
-      if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ]; then
+      if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ] &&
+        [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ]; then
         continue
       fi
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
@@ -1729,12 +1730,48 @@ EOF
 # A sibling can finish between two non-atomic comparison captures. Preserve
 # only the positive proof from the intermediate capture; at comparison time
 # require that the entry was absent at baseline and is now wholly gone.
+oms_worker_gitmeta_delta_is_partial_managed_removal() {  # BEFORE_DIR COMMON_DIR
+  local before="$1" common="$2"
+  local side line entry partial=0
+
+  [ -s "$before/gitmeta-managed-added" ] || return 1
+  for side in gitmeta-removed gitmeta-added; do
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree-dir worktrees/"*) entry="${line#worktree-dir worktrees/}" ;;
+        "worktree worktrees/"*/*)
+          entry="${line#worktree worktrees/}"
+          entry="${entry%%/*}"
+          ;;
+        *) return 1 ;;
+      esac
+      entry="${entry//$'\r'/}"
+      grep -Fxq "$entry" "$before/gitmeta-managed-added" || return 1
+      ! awk -v e="worktrees/$entry" \
+        '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
+        "$before/gitmeta-before" || return 1
+      [ -d "$common/worktrees/$entry" ] || return 1
+      # An add registers HEAD before materializing the checkout, so a missing
+      # checkout with HEAD still present is an in-progress creation. Removal
+      # deletes HEAD; only that evidence starts the bounded partial-remove retry.
+      if [ ! -e "$common/worktrees/$entry/HEAD" ]; then
+        partial=1
+      else
+        return 1
+      fi
+    done < "$before/$side"
+  done
+  [ "$partial" = 1 ]
+}
+
 oms_worker_gitmeta_only_added_removed_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local repo="$1" before="$2" worker="${3:-}"
   local common entry line side
   local found=0
+  local attempt=0
 
   OMS_WG_GITMETA_SOFT=""
+  OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK=0
   [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 1
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   [ -s "$before/gitmeta-managed-added" ] || return 1
@@ -1743,6 +1780,23 @@ oms_worker_gitmeta_only_added_removed_siblings() {  # REPO BEFORE_DIR CURRENT_WO
   LC_ALL=C sort "$before/gitmeta" > "$before/gitmeta-before" || return 1
   LC_ALL=C comm -23 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-removed" || return 1
   LC_ALL=C comm -13 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-added" || return 1
+  if oms_worker_gitmeta_delta_is_partial_managed_removal "$before" "$common"; then
+    while [ "$attempt" -lt 50 ]; do
+      attempt=$((attempt + 1))
+      sleep 0.1
+      oms_worker_surface_capture_one "$repo" gitmeta "$worker" |
+        LC_ALL=C sort > "$before/gitmeta-now" || return 1
+      LC_ALL=C comm -23 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-removed" || return 1
+      LC_ALL=C comm -13 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-added" || return 1
+      if ! oms_worker_gitmeta_delta_is_partial_managed_removal "$before" "$common"; then
+        break
+      fi
+    done
+    if oms_worker_gitmeta_delta_is_partial_managed_removal "$before" "$common"; then
+      OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK=1
+      return 1
+    fi
+  fi
   while IFS= read -r entry; do
     entry="${entry//$'\r'/}"
     [ -n "$entry" ] || continue

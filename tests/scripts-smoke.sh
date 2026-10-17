@@ -28942,8 +28942,9 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   contains "$result" 'during this run: kept-sibling' ||
     fail "a late kept sibling should be reported as a soft change: $result"
 
-  # Reproduce the comparison window: the intermediate admin capture sees a
-  # validated managed add, then the sibling is fully removed before compare.
+  # Reproduce a non-atomic remove: the intermediate admin capture sees a
+  # validated managed add, then compare starts after its checkout and HEAD
+  # disappear while the admin leaves remain.
   local transient="$project-transient"
   local transient_snap="$TMP/guard-sibling-transient-snapshot"
   make_guard_repo "$transient"
@@ -28960,24 +28961,57 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
       "$root/oh-my-setting-delegate.transient/wt" HEAD || exit 11
     metadata="$(git -C "$root/oh-my-setting-delegate.transient/wt" rev-parse --git-dir)"
     case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
-    rm -rf "$root/oh-my-setting-delegate.transient/wt"
-    rm -f "$metadata/HEAD"
     OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
       oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
       > "$snap/intermediate-gitmeta" || exit 12
     oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 12
     [ -s "$snap/gitmeta-managed-added" ] || exit 13
-    git -C "$repo" worktree remove --force \
-      "$root/oh-my-setting-delegate.transient/wt" || exit 14
-    rm -rf "$root/oh-my-setting-delegate.transient"
-    oms_worker_gitmeta_only_added_removed_siblings "$repo" "$snap" "$repo" || exit 15
-    [ "$OMS_WG_GITMETA_SOFT" = kept-sibling ] || exit 16
+    common="$(git -C "$repo" rev-parse --git-common-dir)"
+    case "$common" in /*) ;; *) common="$repo/$common" ;; esac
+    entry="$(sed -n 1p "$snap/gitmeta-managed-added")"
+    rm -rf "$root/oh-my-setting-delegate.transient/wt"
+    rm -f "$metadata/HEAD"
+    ( sleep 1.3; rm -rf "$common/worktrees/$entry" \
+      "$root/oh-my-setting-delegate.transient" ) &
+    changed="$(oms_worker_surface_diff "$repo" "$snap" "" "$repo")"
+    case "$changed" in *gitmeta*) exit 15 ;; esac
+    # Under load the removal may finish before compare captures; an empty
+    # change set is equally correct, any other surface is not.
+    case "$changed" in *kept-sibling*|"") ;; *) exit 16 ;; esac
     if OMS_WORKER_GUARD_STRICT=1 \
       oms_worker_gitmeta_only_added_removed_siblings "$repo" "$snap" "$repo"; then
       exit 17
     fi
   ' _ "$ROOT" "$transient" "$managed_root" "$transient_snap" ||
-    fail "a validated sibling added during capture then removed before compare must be soft (rc=$?)"
+    fail "a validated partially removed sibling that finishes during compare must be soft (rc=$?)"
+
+  local transient_stuck="$project-transient-stuck"
+  local transient_stuck_snap="$TMP/guard-sibling-transient-stuck-snapshot"
+  make_guard_repo "$transient_stuck"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" root="$3" snap="$4"
+    oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 40
+    mkdir -p "$root/oh-my-setting-delegate.transient-stuck"
+    printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s/wt\ntemporary=1\n" \
+      "$$" "$repo" "$root/oh-my-setting-delegate.transient-stuck" \
+      > "$root/oh-my-setting-delegate.transient-stuck/.oh-my-setting-tmp"
+    git -C "$repo" worktree add --quiet --detach \
+      "$root/oh-my-setting-delegate.transient-stuck/wt" HEAD || exit 41
+    OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
+      > "$snap/intermediate-gitmeta" || exit 42
+    oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 43
+    [ -s "$snap/gitmeta-managed-added" ] || exit 44
+    metadata="$(git -C "$root/oh-my-setting-delegate.transient-stuck/wt" rev-parse --git-dir)"
+    case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
+    rm -rf "$root/oh-my-setting-delegate.transient-stuck/wt"
+    rm -f "$metadata/HEAD"
+    changed="$(oms_worker_surface_diff "$repo" "$snap" "" "$repo")"
+    case "$changed" in *gitmeta*) ;; *) exit 45 ;; esac
+  ' _ "$ROOT" "$transient_stuck" "$managed_root" "$transient_stuck_snap" ||
+    fail "a validated partial sibling removal that remains stuck must stay hard (rc=$?)"
 
   local transient_bad_exclude="$project-transient-exclude"
   local transient_bad_exclude_snap="$TMP/guard-sibling-transient-exclude-snapshot"
