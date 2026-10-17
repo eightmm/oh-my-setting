@@ -635,6 +635,36 @@ ma_export_child_env() {
   [ -z "$call_id" ] || export OMS_HARNESS_CALL_ID="$call_id"
 }
 
+# A TOML basic string for VALUE. JSON string escapes are valid TOML; non-ASCII
+# stays literal UTF-8, since TOML rejects the surrogate escapes JSON would emit.
+ma_toml_basic_string() { # VALUE
+  python3 -c "import json, sys; sys.stdout.buffer.write(json.dumps(sys.argv[1], ensure_ascii=False).encode('utf-8', 'surrogateescape'))" "$1"
+}
+
+ma_codex_room_config() { # APPEND admitted room context as Codex shell-environment overrides
+  local name value encoded
+  local -a room_config
+  [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] &&
+    [ -n "${OMS_ROOM_ID:-}" ] && [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
+    [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ] || return 0
+  for name in OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT \
+    OMS_ROOM_RELAY_QUEUE OMS_ROOM_RELAY_ALLOWED; do
+    case "$name" in
+      OMS_ROOM_ID) value="${OMS_ROOM_ID:-}" ;;
+      OMS_ROOM_PARTICIPANT) value="${OMS_ROOM_PARTICIPANT:-}" ;;
+      OMS_ROOM_REPO) value="${OMS_ROOM_REPO:-}" ;;
+      OMS_ROOM_ADMITTED_PARTICIPANT) value="${OMS_ROOM_ADMITTED_PARTICIPANT:-}" ;;
+      OMS_ROOM_RELAY_QUEUE) value="${OMS_ROOM_RELAY_QUEUE:-}" ;;
+      OMS_ROOM_RELAY_ALLOWED) value="${OMS_ROOM_RELAY_ALLOWED:-}" ;;
+    esac
+    [ -n "$value" ] || continue
+    encoded="$(ma_toml_basic_string "$value")" || return 1
+    room_config+=(-c "shell_environment_policy.set.$name=$encoded")
+  done
+  [ "${#room_config[@]}" -gt 0 ] || return 0
+  cmd=("${cmd[@]:0:${#cmd[@]}-1}" "${room_config[@]}" "${cmd[${#cmd[@]}-1]}")
+}
+
 # Freeze the primary control-plane state around one explicitly exclusive write
 # provider. Equality and rollback are unsafe during ordinary multi-agent work:
 # a sibling can legitimately publish plan, memory, lifecycle, or artifact state
@@ -2891,6 +2921,9 @@ ma_provider_attempt() {
     fi
     (
       ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
+      if [ "$provider" = codex ]; then
+        ma_codex_room_config || exit 1
+      fi
       if [ -n "$panel_worker_root" ]; then
         export OMS_FIXTURE_ROOT="$panel_worker_root"
         export TMUX_TMPDIR="$panel_worker_root/tmux"

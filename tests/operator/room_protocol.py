@@ -1252,7 +1252,11 @@ assert again.returncode == 0 and "artifact:" in again.stdout and "native session
 resumed = [json.loads(line) for line in worker_log.read_text().splitlines()][-1]
 assert resumed["task_id"] == "room-continue", resumed
 assert len(re.findall(r"\btask_id=room-continue\b", again.stdout)) == 1, again.stdout
-assert resumed["argv"][-4:] == ["resume", "--all", session, "-"], (resumed, again)
+resume_at = resumed["argv"].index("resume")
+assert resumed["argv"][resume_at:resume_at + 3] == ["resume", "--all", session], (resumed, again)
+assert resumed["argv"][-1] == "-", (resumed, again)
+assert any(arg == 'shell_environment_policy.set.OMS_ROOM_REPO=' + json.dumps(str(project))
+           for arg in resumed["argv"]), (resumed, again)
 text = prompt_log.read_text()
 assert "Your earlier work was on" in text and "New instructions follow." in text and "Task: look at value.txt again." in text, text
 rounds = [a for a in listed() if a["task_id"] == "room-continue" and a["refs"].get("panel_role") == "worker"]

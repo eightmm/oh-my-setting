@@ -12018,6 +12018,8 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     mkdir -p "$root/parent/worktree"
     PANEL_ARGV="$root/argv" PANEL_ENV="$root/env" PATH="$fixture/bin:$PATH" \
       OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker MA_KIND=delegate REPO="$root/parent/worktree" \
+      OMS_ROOM_ID=room-one OMS_ROOM_PARTICIPANT=worker-one OMS_ROOM_ADMITTED_PARTICIPANT=worker-one \
+      OMS_ROOM_REPO="$root/room repo" OMS_ROOM_RELAY_QUEUE="$root/relay queue" OMS_ROOM_RELAY_ALLOWED=1 \
       OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" \
       XDG_CACHE_HOME="$fixture_cache" TMUX_TMPDIR="$original_tmux" \
       bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$4"; ma_provider_attempt "$2" write "$3/prompt" "$3/output" "$4" provider-default "" delegate "" ""' \
@@ -12032,7 +12034,34 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     [ "$(sed -n '4p' "$root/env")" = "$fixture_state" ] || fail "$provider worker XDG_STATE_HOME changed"
     [ "$(sed -n '5p' "$root/env")" = "$fixture_cache" ] || fail "$provider worker XDG_CACHE_HOME changed"
     [ "$provider" != codex ] || grep -Fxq -- 'workspace-write' "$root/argv" || fail 'Codex workspace-write sandbox changed'
+    if [ "$provider" = codex ]; then
+      for room_value in 'OMS_ROOM_ID="room-one"' 'OMS_ROOM_PARTICIPANT="worker-one"' \
+        "OMS_ROOM_REPO=\"$root/room repo\"" 'OMS_ROOM_ADMITTED_PARTICIPANT="worker-one"' \
+        "OMS_ROOM_RELAY_QUEUE=\"$root/relay queue\"" 'OMS_ROOM_RELAY_ALLOWED="1"'; do
+        grep -Fxq -- "shell_environment_policy.set.$room_value" "$root/argv" ||
+          fail "Codex admitted room override missing: $room_value"
+      done
+    fi
   done
+
+  # Generic/non-admitted panel calls must not turn room-shaped ambient values
+  # into shell-environment exceptions in Codex.
+  root="$fixture/codex-unadmitted"
+  mkdir -p "$root/parent/worktree"
+  PANEL_ARGV="$root/argv" PANEL_ENV="$root/env" PATH="$fixture/bin:$PATH" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker MA_KIND=delegate REPO="$root/parent/worktree" \
+    OMS_ROOM_ID=room-one OMS_ROOM_PARTICIPANT=worker-one OMS_ROOM_ADMITTED_PARTICIPANT=other \
+    OMS_ROOM_REPO="$root/room repo" OMS_ROOM_RELAY_QUEUE="$root/relay queue" OMS_ROOM_RELAY_ALLOWED=1 \
+    OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" XDG_CACHE_HOME="$fixture_cache" \
+    TMUX_TMPDIR="$original_tmux" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$4"; ma_provider_attempt codex write "$3/prompt" "$3/output" "$4" provider-default "" delegate "" ""' \
+    _ "$ROOT" codex "$fixture" "$root/parent/worktree" || fail 'Codex non-admitted room fixture failed'
+  if grep -q 'shell_environment_policy.set.OMS_ROOM_' "$root/argv"; then
+    fail 'Codex non-admitted room overrides were passed'
+  fi
+  # Non-ASCII room paths stay literal UTF-8: TOML rejects JSON surrogate escapes.
+  [ "$(bash -c '. "$1/scripts/lib/peer-common.sh"; ma_toml_basic_string "$2"' _ "$ROOT" '/tmp/room-é "q"')" = '"/tmp/room-é \"q\""' ] ||
+    fail 'Codex room override must encode non-ASCII paths as literal UTF-8'
 
   # Provider fallback classification reads only a CLI's own error signatures:
   # error/turn.failed events, an API-error result envelope and fixed ERROR:
