@@ -1370,8 +1370,8 @@ oms_worker_surface_diff() {
         changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
         continue
       fi
-      # Strict mode rejects additions; validated live managed removals retain
-      # the existing quiet lifecycle exemption.
+      # Strict mode rejects classified soft changes, but preserves this existing
+      # quiet exemption for validated live managed-worktree lifecycle activity.
       if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ]; then
         continue
       fi
@@ -1967,8 +1967,6 @@ PY
             [ ! -L "$common/worktrees/$entry" ]; then
             OMS_WG_GITMETA_ADMIN_QUIET=0
           fi
-          [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] ||
-            OMS_WG_GITMETA_ADMIN_QUIET=0
         else
           OMS_WG_GITMETA_ADMIN_QUIET=0
         fi
