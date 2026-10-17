@@ -1355,6 +1355,40 @@ try:
     assert verified_calls == [], verified_calls
 finally:
     panel.verified_patch = real_verified_patch
+
+# Failed write calls remain salvage-only unless the sole failure is a verified verification failure.
+write_last = dict(last_round, refs=dict(last_round["refs"], panel_access="write", panel_location="worktree:fixture"))
+real_history = panel._rework_history
+def salvage_error(evidence):
+    panel._rework_history = lambda rows, task, parents: [write_last]
+    panel.results = lambda repo, task: {"rows": [{"calls": [dict(
+        attempt_id=write_last["attempt_id"], patch=".oms/artifacts/cont.patch", patch_sha256=good, **evidence)]}]}
+    try:
+        panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"}, brief, room_env)
+    except ValueError as error:
+        assert "first run oms panel --salvage" in str(error), error
+    else:
+        raise AssertionError("unverified stopped write call did not require salvage")
+    finally:
+        panel._rework_history = real_history
+        panel.results = real_results
+salvage_error({"exit": 1, "state": "failed", "guard": "scope"})
+salvage_error({"exit": 124, "state": "timed_out"})
+# Producer shape: the attempt carries reason_code; the call row has exit=1 and
+# the verifier's exit. Such a write continues with its own verified patch.
+failed_verify = dict(write_last, reason_code="verification_failed")
+panel._rework_history = lambda rows, task, parents: [failed_verify]
+panel.results = lambda repo, task: {"rows": [{"calls": [dict(
+    attempt_id=failed_verify["attempt_id"], patch=".oms/artifacts/cont.patch", patch_sha256=good,
+    exit=1, verify_exit=1, answer="SAFE-CONTINUATION-SUMMARY")]}]}
+try:
+    carried = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"}, brief, room_env)
+    assert "tampered-marker" in carried[0].read_text(), carried[0].read_text()
+finally:
+    panel._rework_history = real_history
+    panel.results = real_results
+write_last = failed_verify
+salvage_error({"exit": 1, "verify_exit": 125, "state": "failed"})  # verifier never ran
 for path, digest in ((".oms/artifacts/cont.patch", "0" * 64), (".oms/artifacts/link.patch", good)):
     text = prompt_of(with_patch(path, digest))
     assert "tampered-marker" not in text, text

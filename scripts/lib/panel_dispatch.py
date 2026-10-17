@@ -233,10 +233,23 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                           text=True, check=False, stdin=subprocess.DEVNULL).stdout.strip()
     old = last.get("base_sha") or "an earlier commit"
     # A digest proves which bytes were recorded, not that the worker call
-    # completed successfully. Only an exact attempt-linked success may expose
-    # a prior patch to the next worker.
-    eligible_result = (call.get("attempt_id") == last.get("attempt_id")
-                       and type(call.get("exit")) is int and call.get("exit") == 0)
+    # completed successfully. A plain success or an exact verification failure
+    # may expose a prior patch; guard stops and other failures remain salvage-only.
+    linked_call = call.get("attempt_id") == last.get("attempt_id")
+    successful_call = type(call.get("exit")) is int and call.get("exit") == 0
+    # The lifecycle attempt carries the failure code; the indexed call row
+    # carries exit=1 and the verifier's own exit (125 means it never ran).
+    verified_failure = (linked_call and last.get("reason_code") == "verification_failed"
+                        and type(call.get("verify_exit")) is int and call.get("verify_exit") not in (0, 125)
+                        and "guard" not in call and bool(call.get("patch")))
+    if verified_failure:
+        try:
+            verified_patch(repo, call)
+        except (OSError, ValueError, TypeError):
+            verified_failure = False
+    eligible_result = (linked_call and "guard" not in call
+                       and call.get("reason_code") != "worker_authority_violation"
+                       and (successful_call or verified_failure))
     if (last.get("refs", {}).get("panel_access") == "write" and not eligible_result
             and last.get("refs", {}).get("panel_location", "").startswith("worktree:")):
         raise ValueError("stopped write work is not transferred by --continue; first run oms panel --salvage %s "
