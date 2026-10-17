@@ -238,9 +238,11 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     linked_call = call.get("attempt_id") == last.get("attempt_id")
     successful_call = type(call.get("exit")) is int and call.get("exit") == 0
     # The lifecycle attempt carries the failure code; the indexed call row
-    # carries exit=1 and the verifier's own exit (125 means it never ran).
+    # carries exit=1 and the verifier's own exit. 124 is a verifier timeout,
+    # 125 a verifier that never ran and higher codes a signal; none of those
+    # proves the checks judged the patch, so they stay salvage-only.
     verified_failure = (linked_call and last.get("reason_code") == "verification_failed"
-                        and type(call.get("verify_exit")) is int and call.get("verify_exit") not in (0, 125)
+                        and type(call.get("verify_exit")) is int and 0 < call.get("verify_exit") < 124
                         and "guard" not in call and bool(call.get("patch")))
     if verified_failure:
         try:

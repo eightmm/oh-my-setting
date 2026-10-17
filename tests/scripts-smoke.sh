@@ -4999,6 +4999,22 @@ test_delegate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'verify: `bash scripts/check.sh fast`'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'checks restored from HEAD'
+  # A continuation resolves its default verifier on its recorded base, which
+  # here still has the check script that HEAD has since removed.
+  local with_check
+  with_check="$(git -C "$project" rev-parse HEAD)"
+  git -C "$project" rm -q scripts/check.sh
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' commit -qm 'drop check'
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_PANEL_CONTINUATION="{\"patch\":\".oms/missing.patch\",\"sha256\":\"$(printf '0%.0s' $(seq 64))\",\"base\":\"$with_check\"}" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" --artifact-dir "$TMP/delegate-dry-cont" \
+    --prompt "Continue the helper" >"$TMP/delegate-dry-cont.out" 2>&1 || true
+  assert_file_contains "$TMP/delegate-dry-cont.out" 'auto-verify: bash scripts/check.sh fast'
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$TMP/delegate-dry-head" --prompt "Add another helper" >"$TMP/delegate-dry-head.out" 2>&1 || true
+  if grep -q 'auto-verify:' "$TMP/delegate-dry-head.out"; then
+    fail "HEAD without a check script must not resolve a default verifier"
+  fi
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' revert --no-edit HEAD >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" 'exact-routine-model'
@@ -29029,6 +29045,45 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     case "$changed" in *gitmeta*) ;; *) exit 45 ;; esac
   ' _ "$ROOT" "$transient_stuck" "$managed_root" "$transient_stuck_snap" ||
     fail "a validated partial sibling removal that remains stuck must stay hard (rc=$?)"
+
+  # An unrelated metadata write during the partial-removal wait must not be
+  # excused by the quiet verdict computed before the wait.
+  local transient_race="$project-transient-race"
+  local transient_race_snap="$TMP/guard-sibling-transient-race-snapshot"
+  make_guard_repo "$transient_race"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" root="$3" snap="$4"
+    exclude_path="$(git -C "$repo" rev-parse --git-path info/exclude)"
+    case "$exclude_path" in /*) ;; *) exclude_path="$repo/$exclude_path" ;; esac
+    mkdir -p "${exclude_path%/*}"
+    : > "$exclude_path"
+    oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 50
+    mkdir -p "$root/oh-my-setting-delegate.transient-race"
+    printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s/wt\ntemporary=1\n" \
+      "$$" "$repo" "$root/oh-my-setting-delegate.transient-race" \
+      > "$root/oh-my-setting-delegate.transient-race/.oh-my-setting-tmp"
+    git -C "$repo" worktree add --quiet --detach \
+      "$root/oh-my-setting-delegate.transient-race/wt" HEAD || exit 51
+    OMS_WG_GITMETA_MANAGED_ADDED_OUT="$snap/gitmeta-managed-added" \
+      oms_worker_surface_capture_one "$repo" gitmeta "$repo" \
+      > "$snap/intermediate-gitmeta" || exit 52
+    oms_worker_gitmeta_admin_changes_are_safe "$repo" "$snap" "$repo" || exit 53
+    common="$(git -C "$repo" rev-parse --git-common-dir)"
+    case "$common" in /*) ;; *) common="$repo/$common" ;; esac
+    entry="$(sed -n 1p "$snap/gitmeta-managed-added")"
+    metadata="$(git -C "$root/oh-my-setting-delegate.transient-race/wt" rev-parse --git-dir)"
+    case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
+    rm -rf "$root/oh-my-setting-delegate.transient-race/wt"
+    rm -f "$metadata/HEAD"
+    ( sleep 0.4; printf "late\n" >> "$exclude_path"; sleep 0.4
+      rm -rf "$common/worktrees/$entry" "$root/oh-my-setting-delegate.transient-race" ) &
+    changed="$(oms_worker_surface_diff "$repo" "$snap" "" "$repo")"
+    wait
+    case "$changed" in *gitmeta*) ;; *) exit 55 ;; esac
+  ' _ "$ROOT" "$transient_race" "$managed_root" "$transient_race_snap" ||
+    fail "an unrelated metadata write during the partial-removal wait must stay hard (rc=$?)"
 
   local transient_bad_exclude="$project-transient-exclude"
   local transient_bad_exclude_snap="$TMP/guard-sibling-transient-exclude-snapshot"

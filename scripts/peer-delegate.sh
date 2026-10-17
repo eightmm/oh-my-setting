@@ -1054,13 +1054,29 @@ write_minimal_change_doctrine() {
   printf 'Read applicable repository instructions and PROJECT.md. Use source evidence to bound the smallest complete change, preserve contracts and safety, reuse existing tests, and run affected checks. Report changes, evidence, verification and uncertainty; return code as patch artifacts.\n'
 }
 
-# Resolve the effective verification contract before assembling the first prompt.
+# Print one field of a JSON object (a list joins with ", "); empty when absent.
+# Kept out of $(...) so the quoting stays parseable by Bash 3.2.
+delegate_json_field() {
+  printf '%s' "$2" | python3 -c 'import json, sys
+value = json.load(sys.stdin).get(sys.argv[1], "")
+print(", ".join(value) if isinstance(value, list) else value)' "$1" 2>/dev/null | tr -d '\r'
+}
+
+# Resolve the effective verification contract before assembling the first prompt,
+# from the commit the worktree will check out: a continuation runs on its
+# recorded base, not on the source repository's current HEAD.
 if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] &&
     [ "$WORKER_ACCESS" = write ]; then
-  check_mode="$(git -C "$DELEGATE_SOURCE_REPO" ls-tree HEAD -- scripts/check.sh | awk 'NR == 1 {print $1}')"
+  verify_base=HEAD
+  if [ -n "$continuation_reference" ]; then
+    verify_base="$(delegate_json_field base "$continuation_reference")"
+    verify_base="$(git -C "$DELEGATE_SOURCE_REPO" rev-parse --verify --quiet "${verify_base}^{commit}" 2>/dev/null)" ||
+      fail "continuation base could not be resolved; no worker ran"
+  fi
+  check_mode="$(git -C "$DELEGATE_SOURCE_REPO" ls-tree "$verify_base" -- scripts/check.sh | awk 'NR == 1 {print $1}')"
   if [ "$check_mode" = 100755 ]; then
     check_snapshot="$(mktemp)" || fail "mktemp failed"
-    if ! git -C "$DELEGATE_SOURCE_REPO" show HEAD:scripts/check.sh > "$check_snapshot"; then
+    if ! git -C "$DELEGATE_SOURCE_REPO" show "$verify_base:scripts/check.sh" > "$check_snapshot"; then
       rm -f "$check_snapshot"
       fail "could not inspect the trusted check script"
     fi
@@ -1072,8 +1088,8 @@ fi
 plan_allowed=""
 plan_forbidden=""
 if [ -n "$PLAN_JSON" ]; then
-  plan_allowed="$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin).get("allowed_paths", [])))' | tr -d '\r')"
-  plan_forbidden="$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin).get("forbidden_paths", [])))' | tr -d '\r')"
+  plan_allowed="$(delegate_json_field allowed_paths "$PLAN_JSON")"
+  plan_forbidden="$(delegate_json_field forbidden_paths "$PLAN_JSON")"
 fi
 
 {

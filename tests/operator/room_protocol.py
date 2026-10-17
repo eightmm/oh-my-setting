@@ -1389,6 +1389,7 @@ finally:
     panel.results = real_results
 write_last = failed_verify
 salvage_error({"exit": 1, "verify_exit": 125, "state": "failed"})  # verifier never ran
+salvage_error({"exit": 1, "verify_exit": 124, "state": "failed"})  # verifier timed out
 for path, digest in ((".oms/artifacts/cont.patch", "0" * 64), (".oms/artifacts/link.patch", good)):
     text = prompt_of(with_patch(path, digest))
     assert "tampered-marker" not in text, text

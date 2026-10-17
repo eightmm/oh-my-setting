@@ -13,6 +13,7 @@ import tempfile
 import re
 import shutil
 import subprocess
+import signal
 
 # Reuse the existing bounded, strict JSON and non-link file readers.
 sys.dont_write_bytecode = True
@@ -72,18 +73,46 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
         {"method": "initialized", "params": {}},
         {"id": 2, "method": "hooks/list", "params": {"cwds": [str(Path.cwd())]}},
     ]
-    payload = "".join(json.dumps(row) + "\n" for row in requests)
-    try:
-        result = subprocess.run([binary, "app-server", "--listen", "stdio://"],
-                                input=payload, text=True, capture_output=True,
-                                timeout=8, env=env, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+    payload = "".join(json.dumps(row) + "\n" for row in requests).encode()
+    # The probe owns its process group and reads at most 1 MiB of stdout, so a
+    # broken or hostile CLI can neither hang the installer nor flood memory.
+    group = ({"start_new_session": True} if os.name != "nt"
+             else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
+    limit = 1024 * 1024
+    with tempfile.TemporaryFile() as captured:
+        try:
+            proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://"],
+                                    stdin=subprocess.PIPE, stdout=captured,
+                                    stderr=subprocess.DEVNULL, env=env, **group)
+        except OSError:
+            return "unknown", []
+        try:
+            proc.communicate(payload, timeout=8)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            if os.name != "nt":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            elif proc.poll() is None:
+                proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        if timed_out or proc.returncode != 0:
+            return "unknown", []
+        captured.seek(0)
+        stdout = captured.read(limit + 1)
+    if len(stdout) > limit:
         return "unknown", []
-    if result.returncode != 0:
-        return "unknown", []
+    requested = os.path.realpath(str(Path.cwd()))
     response = None
     try:
-        for line in result.stdout.splitlines():
+        for line in stdout.decode("utf-8").splitlines():
             try:
                 row = json.loads(line)
             except (ValueError, TypeError):
@@ -101,6 +130,7 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
     found = {}
     for entry in result_data["data"]:
         if (not isinstance(entry, dict) or not isinstance(entry.get("cwd"), str)
+                or os.path.realpath(entry["cwd"]) != requested
                 or not isinstance(entry.get("errors"), list)
                 or not isinstance(entry.get("hooks"), list)
                 or not isinstance(entry.get("warnings"), list)):
@@ -115,8 +145,9 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
             if not isinstance(key, str) or key not in expected or status not in (
                     "trusted", "untrusted", "modified", "managed") or key in found:
                 return "unknown", []
-            # Trust and enablement are separate fields; a disabled hook never runs.
-            found[key] = "disabled" if hook.get("enabled") is False else status
+            # Trust and enablement are separate fields; only a positively
+            # enabled hook runs, so a missing or malformed flag counts as disabled.
+            found[key] = status if hook.get("enabled") is True else "disabled"
     if set(found) != set(expected):
         return "unknown", []
     untrusted = [expected[key] for key in expected if found[key] != "trusted"]

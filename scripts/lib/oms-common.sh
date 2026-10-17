@@ -1373,7 +1373,8 @@ oms_worker_surface_diff() {
       # Strict mode rejects classified soft changes, but preserves this existing
       # quiet exemption for validated live managed-worktree lifecycle activity.
       if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ] &&
-        [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ]; then
+        [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ] &&
+        [ "${OMS_WG_GITMETA_QUIET_STALE:-0}" != 1 ]; then
         continue
       fi
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
@@ -1772,6 +1773,7 @@ oms_worker_gitmeta_only_added_removed_siblings() {  # REPO BEFORE_DIR CURRENT_WO
 
   OMS_WG_GITMETA_SOFT=""
   OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK=0
+  OMS_WG_GITMETA_QUIET_STALE=0
   [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 1
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   [ -s "$before/gitmeta-managed-added" ] || return 1
@@ -1781,6 +1783,9 @@ oms_worker_gitmeta_only_added_removed_siblings() {  # REPO BEFORE_DIR CURRENT_WO
   LC_ALL=C comm -23 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-removed" || return 1
   LC_ALL=C comm -13 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-added" || return 1
   if oms_worker_gitmeta_delta_is_partial_managed_removal "$before" "$common"; then
+    # The quiet lifecycle verdict was computed before this wait; anything that
+    # changes meanwhile must be judged afresh, never by that earlier verdict.
+    OMS_WG_GITMETA_QUIET_STALE=1
     while [ "$attempt" -lt 50 ]; do
       attempt=$((attempt + 1))
       sleep 0.1

@@ -820,8 +820,9 @@ server.write_text('#!/usr/bin/env python3\n'
                   '     key = "%s:hooks.json:%s:%d:%d" % (plugin_id, snake(event), gi, hi)\n'
                   '     status = "trusted"\n'
                   '     if not listed and mode in ("modified", "untrusted"): status = mode\n'
-                  '     entry = {"key": key, "pluginId": plugin_id, "trustStatus": status}\n'
+                  '     entry = {"key": key, "pluginId": plugin_id, "trustStatus": status, "enabled": True}\n'
                   '     if not listed and mode == "disabled": entry["enabled"] = False\n'
+                  '     if not listed and mode == "no-enabled": del entry["enabled"]\n'
                   '     listed.append(entry)\n'
                   '  if mode == "missing": listed = listed[1:]\n'
                   '  data = [{"cwd": os.getcwd(), "errors": [], "hooks": listed, "warnings": []}]\n'
@@ -860,8 +861,10 @@ assert run("--native-root", str(native)).returncode == 0
 unchanged()
 native_hooks.write_bytes(saved_native)
 
+for mode in ("disabled", "no-enabled"):
+    server_env["OMS_HOOKS_LIST_STATUS"] = mode
+    assert report().stdout.startswith("untrusted: "), (mode, report().stdout)
 server_env["OMS_HOOKS_LIST_STATUS"] = "disabled"
-assert report().stdout.startswith("untrusted: "), report().stdout
 assert run("--native-root", str(native)).returncode == 0
 unchanged()
 server_env["OMS_HOOKS_LIST_STATUS"] = "untrusted"
