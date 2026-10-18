@@ -2803,7 +2803,7 @@ sys.exit(status)
     blocked_db = temporary / "panel-blocked-watch.sqlite"
     read_finished = temporary / "panel-blocked-watch-finished"
     blocked_script = """
-import sqlite3, sys
+import os, sqlite3, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import terminal_panel as panel
@@ -2812,7 +2812,8 @@ with TerminalInput() as inputs:
     assert inputs.fd is None
 def blocked_read(*args):
     with sqlite3.connect(sys.argv[3], timeout=60, isolation_level=None) as database:
-        database.set_trace_callback(lambda sql: print('READ_BLOCKED', file=sys.stderr, flush=True))
+        # SIGINT can arrive before a daemon's buffered stderr write releases its lock.
+        database.set_trace_callback(lambda sql: os.write(2, b'READ_BLOCKED\\n'))
         try:
             database.execute('INSERT INTO held VALUES (1)')
         finally:
