@@ -241,6 +241,10 @@ def exercise_observed_worker_leases():
                    LEASE_FIXTURE_ENTERED=str(entered), LEASE_FIXTURE_RELEASE=str(release),
                    LEASE_FIXTURE_MODEL=model, LEASE_FIXTURE_EFFORT=effort, LEASE_FIXTURE_PROVIDER=worker,
                    OMS_PEER_TIMEOUT="90")
+        if access == "read":
+            # Read dispatch observes a lease owned by the main; it does not
+            # claim a ready plan task on the observer's behalf.
+            call(plan_api + ["claim", "--id", task_id, "--provider", worker], env)
         argv = ["bash", str(panel.ENTRY), "panel", "--repo", str(source), "--room", test_room,
                 "--dispatch", role, "--owner", owner, "--access", access]
         argv += ["--to", worker, "--model", model, "--reasoning-effort", effort]
