@@ -31208,6 +31208,15 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     printf '{}\n' > "$project/.oms/hooks/panel-activity/att_read.json"
     printf '{}\n' > "$project/.oms/plan/tasks.json"
     printf 'row\n' > "$project/.oms/failures.jsonl"
+    mkdir -p "$project/.oms/runtime/context" "$project/.oms/tick"
+    printf 'row\n' > "$project/.oms/runtime/outcomes.jsonl"
+    printf 'row\n' > "$project/.oms/tick/history.jsonl"
+    printf '{}\n' > "$project/.oms/runtime/context/pack.json"
+    ma_read_guard_begin "$snap/read-volatile-context" || fail "volatile context snapshot failed"
+    rm -f "$project/.oms/runtime/context/pack.json"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    [ "$rc" = 0 ] || fail "deleted runtime/context cache failed a read pass: $out"
     for vol_case in sessions/sess-a.json panel-activity/att_read.json; do
       ma_read_guard_begin "$snap/read-volatile-${vol_case%%/*}" || fail "volatile read snapshot failed"
       rm -f "$project/.oms/hooks/$vol_case"
@@ -31215,9 +31224,10 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
       out="$(ma_read_guard_assert 2>&1)" || rc=$?
       [ "$rc" = 0 ] || fail "deleted volatile hooks/$vol_case failed a read pass: $out"
     done
-    for vol_case in plan/tasks.json failures.jsonl; do
-      ma_read_guard_begin "$snap/read-authority-${vol_case%%/*}" || fail "authority read snapshot failed"
+    for vol_case in plan/tasks.json failures.jsonl runtime/outcomes.jsonl runtime/outcomes.jsonl.rm tick/history.jsonl; do
+      ma_read_guard_begin "$snap/read-authority-${vol_case//\//-}" || fail "authority read snapshot failed"
       case "$vol_case" in
+        runtime/outcomes.jsonl.rm) vol_case=runtime/outcomes.jsonl; rm -f "$project/.oms/$vol_case" ;;
         *.jsonl) printf 'x\n' > "$project/.oms/$vol_case" ;;
         *) rm -f "$project/.oms/$vol_case" ;;
       esac

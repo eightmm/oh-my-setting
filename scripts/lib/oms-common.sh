@@ -2667,12 +2667,17 @@ PY
       OMS_WG_REPO="$repo" OMS_WG_SKIP_VOLATILE="${OMS_WG_SKIP_VOLATILE:-0}" python3 - "$transient_helper" <<'PY'
 import hashlib, importlib.util, os, re, stat, sys
 
-# Read passes (OMS_WG_SKIP_VOLATILE=1) leave out presence/cache/telemetry
-# families that concurrent owners create and delete: per-session and per-attempt
-# hook presence rows, the tick receipt, panel dispatch logs and context packs.
-# Authority families (*.jsonl, plan/, memory/, artifacts/, threads/) stay tracked.
+# Read passes (OMS_WG_SKIP_VOLATILE=1) leave out presence/cache files that
+# concurrent owners create, rewrite and delete. Each prefix names its writer:
+# hooks/sessions and hooks/panel-activity are per-session/attempt presence rows
+# (hook_state.py), tick/last.json is the sweep receipt rewritten by tick.sh,
+# panel-state/dispatch-logs/*.log are panel_dispatch.py output logs, and
+# runtime/context/ is the content-addressed context-pack cache
+# (context_pack.py). Any *.jsonl is append-only history (runtime/outcomes.jsonl
+# feeds benchmark.py) and stays tracked everywhere, as do the rest of runtime/,
+# plan/, memory/, artifacts/ and threads/.
 VOLATILE = ("hooks/sessions/", "hooks/panel-activity/", "tick/",
-            "panel-state/dispatch-logs/", "runtime/")
+            "panel-state/dispatch-logs/", "runtime/context/")
 skip_volatile = os.environ.get("OMS_WG_SKIP_VOLATILE") == "1"
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
@@ -2704,7 +2709,7 @@ for base, dirs, files in os.walk(root):
             continue
         if transients.is_internal_atomic_temp(root, rel):
             continue
-        if skip_volatile and rel.startswith(VOLATILE):
+        if skip_volatile and rel.startswith(VOLATILE) and not rel.endswith(".jsonl"):
             continue
         if re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel):
             try:
