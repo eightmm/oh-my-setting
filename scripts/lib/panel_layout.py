@@ -123,6 +123,21 @@ def board_split_cells(stored, window, explicit=False):
     return cells if explicit else min(cells, window - 1 - minimum)
 
 
+def portrait_window(window, current=None):
+    """True when the board belongs above the CLI for a (columns, rows) window. A window narrower than the landscape
+    minimum is always portrait. A tall one is too: cells are about twice as tall as wide, so rows * 2 > columns is
+    physically taller than wide. The aspect rule has a +/-10 percent band (enter at rows * 2 >= 1.1 * columns, leave
+    at rows * 2 <= 0.9 * columns) so a near-square window keeps its `current` edge instead of flipping on every
+    resize; with no current edge the enter threshold decides. It needs the rows a portrait split requires."""
+    columns, rows = window
+    # The narrow rule keeps its 4-column release band, applied by the caller via `current`.
+    if columns < MIN_BOARD + 1 + NATIVE_MIN + (4 if current == "top" else 0):
+        return True
+    if rows < MIN_BOARD + 1 + MIN_CHAT:
+        return False
+    return rows * 20 > columns * 9 if current == "top" else rows * 20 >= columns * 11
+
+
 def work_split_cells(stored, window):
     """Apply the Work-mode board cap while preserving the narrow-window split contract."""
     from terminal_panel import MIN_BOARD, WORK_CHAT_RESERVE, split_cells
@@ -210,9 +225,12 @@ def board_split(pane, repo, command, main_watch=False):
         # Unknown geometry keeps the recorded edge, else the left default.
         orientation = stored[0] if stored else "left"
     else:
-        orientation = ("left" if left_fits else "top") if stored is None or (stored[0] == "top" and left_fits) \
-            else stored[0]
-        if orientation == "left" and not left_fits:
+        current = stored[0] if stored else None
+        if portrait_window(available, current) and top_fits:
+            orientation = "top"
+        elif left_fits:
+            orientation = "left"
+        else:
             orientation = "top" if top_fits else "left"
     if mode == "overview" and orientation == "left":
         share = OVERVIEW_SHARE
@@ -359,11 +377,7 @@ class SplitSync:
             "left" if pane[1] == window[1] and pane[0] < window[0] else None
         if current is None:
             return None
-        left_threshold = MIN_BOARD + 1 + NATIVE_MIN
-        if current == "left":
-            orientation = "top" if window[0] < left_threshold else "left"
-        else:
-            orientation = "left" if window[0] >= left_threshold + 4 else "top"
+        orientation = "top" if portrait_window(window, current) else "left"
         if self.manual is not None and (self.manual[0] != window or self.manual[1] != orientation):
             self.manual = None
         old_axis = window[1] if current == "top" else window[0]

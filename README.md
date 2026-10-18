@@ -25,7 +25,7 @@ health checks. Harness commands shown below are for the agent to run.
 
 The panel opens a tmux control window for the current project, with at most one
 live main in its room (Claude Code by default, or Pi). In the main window the
-board stays on the left when there is room and moves above the CLI when narrow;
+board stays on the left when there is room and moves above the CLI when narrow or tall;
 the right reader opens the selected worker, advisor, review or result.
 
 Start it with `oms`. Choose Pi with `OMS_PANEL_MAIN=pi oms` or the Pi start key

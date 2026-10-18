@@ -450,9 +450,27 @@ assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcodex\tleft:40") == [
     ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"], left_split("76")]
 assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("56")], "an older top record was kept"
-# A portrait window wide enough for a left board keeps the board on the left.
+def top_split(size):
+    return ["split-window", "-f", "-v", "-b", "-l", size, "-t", "%1", "-c", "/repo", "board"]
+# A physically tall window (rows * 2 >= 1.1 * columns) puts the board on top even when it is wide enough for the
+# left; 157x131 is the reported panel. Near-square and wide windows start left, and the hysteresis band keeps a
+# recorded edge.
 assert board_calls("80 90 1 $1\tcodex\t") == [
-    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:22c"], left_split("22")]
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:41r"], top_split("41")]
+assert board_calls("157 131 1 $1\tcodex\t") == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:59r"], top_split("59")]
+assert board_calls("220 50 1 $1\tcodex\t") == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:62c"], left_split("62")]
+assert board_calls("100 50 1 $1\tcodex\t")[-1] == left_split("28"), "a square window starts left"
+assert board_calls("80 43 1 $1\tcodex\t")[-1] == left_split("22"), "below the enter threshold stays left"
+assert board_calls("80 44 1 $1\tcodex\t")[-1] == top_split("20"), "the enter threshold is portrait"
+assert board_calls("80 40 1 $1\tcodex\t")[-1] == left_split("22"), "a tall window without 41 rows cannot split on top"
+assert board_calls("100 50 1 $1\tclaude\ttop:23r")[-1] == top_split("23"), "a recorded top edge survives the band"
+assert board_calls("100 50 1 $1\tclaude\tleft:30c")[-1] == left_split("30")
+assert board_calls("200 50 1 $1\tclaude\ttop:23r")[-1] == left_split("56"), "a wide window leaves a recorded top edge"
+assert board_calls("157 131 1 $1\tclaude\tleft:40c")[-1] == top_split("59"), "a tall window leaves a recorded left edge"
+assert board_calls("80 24 0 $1\tcodex\t", terminal=(157, 131)) == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:59r"], top_split("45%")], "the attaching terminal is sized too"
 assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 assert board_calls("") == [left_split("28%")]
@@ -490,8 +508,8 @@ assert board_calls("200 50 1 $1\tclaude\t", main_watch=True) == [
     ["split-window", "-P", "-F", "#{pane_id}", "-f", "-h", "-b", "-l", "56", "-t", "%1", "-c", "/repo", "board"],
     ["set-option", "-p", "-t", "%2", "@oms_panel_main_watch", "1"]]
 assert board_calls("80 90 1 $1\tclaude\t", main_watch=True) == [
-    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:22c"],
-    ["split-window", "-P", "-F", "#{pane_id}", "-f", "-h", "-b", "-l", "22", "-t", "%1", "-c", "/repo", "board"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:41r"],
+    ["split-window", "-P", "-F", "#{pane_id}", "-f", "-v", "-b", "-l", "41", "-t", "%1", "-c", "/repo", "board"],
     ["set-option", "-p", "-t", "%2", "@oms_panel_main_watch", "1"]]
 control_input = {"pane": "%10", "window": "@1", "session": "oms-fixture", "watch": False}
 for identity, expected_watch in (({}, False),
@@ -554,7 +572,7 @@ def sync_run_panes(sync, reads, listing):
 def reading(active, window, pane, text="", zoomed=False, panes=2, mode="work", native="%2", drag=""):
     return (active, zoomed, panes, window, pane, text, mode, native, drag)
 # Applying a saved landscape width keeps the native CLI at 40 columns without rewriting the preference.
-done, calls = sync_run(panel.SplitSync(), reading(False, (80, 50), (59, 50), "left:70c"))
+done, calls = sync_run(panel.SplitSync(), reading(False, (80, 40), (59, 40), "left:70c"))
 assert done == ["follow"] and calls == [["resize-pane", "-t", "%1", "-x", "39"]], (done, calls)
 done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (70, 50), "left:70c"))
 assert done == [None] and calls == [], (done, calls)
@@ -738,13 +756,13 @@ assert done == ["follow", None] and calls == [["resize-pane", "-t", "%1", "-x", 
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50), "left:25c"), reading(True, (120, 50), (30, 50), "left:25c"))
 assert done == [None, "record"] and calls == [["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:30c"]], (done, calls)
 # When a resize leaves the pane on a new edge, rescale its prior fraction and record that edge; never use left columns as top rows.
-done, calls = sync_run(panel.SplitSync(), reading(False, (80, 90), (22, 90), "left:22c"),
-                       reading(False, (60, 90), (60, 40), "left:22c"),
-                       reading(False, (65, 90), (65, 40), "top:25r"))
+done, calls = sync_run(panel.SplitSync(), reading(False, (80, 40), (22, 40), "left:22c"),
+                       reading(False, (60, 40), (60, 25), "left:22c"),
+                       reading(False, (65, 40), (65, 25), "top:25r"))
 assert done == [None, "follow", "record"] and calls == [
-    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:25r"],
-    ["resize-pane", "-t", "%1", "-y", "25"],
-    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:20c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:20r"],
+    ["resize-pane", "-t", "%1", "-y", "20"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:41c"],
     ["list-panes", "-t", "%1", "-F", "#{pane_id} #{pane_width} #{pane_height}"]], (done, calls)
 # Cap after scaling the original record, so repeated window shrinks preserve its fraction.
 done, calls = sync_run(panel.SplitSync(), reading(True, (400, 50), (112, 50), "left:112c"),
@@ -830,13 +848,31 @@ done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (25, 50), "l
                        reading(False, (100, 52), (25, 52), "left:25c"))
 assert done == [None, None, None] and calls == [], (done, calls)
 # A top board returns left as soon as the width clears the left threshold plus four columns,
-# and stays above the CLI inside that band.
-done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (100, 50), (100, 25), "top:25r")],
+# and stays above the CLI inside that band (100x45 is the aspect release point).
+done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (100, 45), (100, 25), "top:25r")],
                              "%1 100 25\n%2 80 25\n")
 assert done == ["follow"] and any(call[0] == "join-pane" and "-h" in call for call in calls), (done, calls)
 done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (63, 50), (63, 25), "top:25r")],
                              "%1 63 25\n%2 63 24\n")
 assert done == [None] and not any(call[0] == "join-pane" for call in calls), (done, calls)
+# A tall window moves a left board above the CLI (157x131 is the reported panel); a wide one does not. The band
+# (rows * 2 between 0.9 and 1.1 columns) keeps either edge, and a top board returns left only at rows * 2 <= 0.9 columns.
+done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (157, 131), (40, 131), "left:40c")],
+                             "%1 40 131\n%2 116 131\n")
+assert done == ["follow"] and any(call[0] == "join-pane" and "-v" in call for call in calls), (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (220, 50), (62, 50), "left:62c"))
+assert done == [None] and calls == [], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 54), (28, 54), "left:28c"),
+                       reading(False, (100, 55), (28, 55), "left:28c"))
+assert done[0] is None and done[1] and calls[0][-1].startswith("top:") and calls[1][0] == "list-panes", (done, calls)
+for height in (46, 50, 54):
+    done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (100, height), (100, 25), "top:25r")],
+                                 "%1 100 25\n%2 28 25\n")
+    assert done == [None] and not any(call[0] == "join-pane" for call in calls), (height, done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (80, 43), (22, 43), "left:22c"))
+assert done == [None] and calls == [], "a window without 41 rows never aspect-flips"
+done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (60, 30), (22, 30), "left:22c")], "%1 22 30\n%2 37 30\n")
+assert done == ["follow"] and any(call[0] == "join-pane" and "-v" in call for call in calls), "narrow still means top"
 # The new unsplit narrow-window path keeps the original single-pane/F9 regressions.
 done, calls = sync_run(panel.SplitSync(), reading(True, (42, 24), (42, 24), "left:22c", panes=1))
 assert done == [None] and calls == [], (done, calls)

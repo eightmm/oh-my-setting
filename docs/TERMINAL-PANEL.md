@@ -246,8 +246,11 @@ main ownership and exact pane/terminal/socket identity; reused panes and
 unproven sessions are rejected. Numeric footer readings retain their reported
 scope and unknown values. A socket error does not stop the native sibling.
 
-The board stays on the left whenever the window is wide enough; it moves above the
-CLI only when the window is too narrow, and returns left when it widens again (28
+The board stays on the left in a landscape window; it moves above the CLI when the
+window is too narrow or physically tall (terminal cells are about twice as tall as
+wide, so rows × 2 ≥ 1.1 × columns, with at least 41 rows), and returns left when it
+is wide enough again (4 columns past the narrow limit and rows × 2 ≤ 0.9 × columns;
+between the two a window keeps its current edge) (28
 percent of the width or 45 percent of the height the first time, sized from the
 terminal that is attaching; optional integer `OMS_PANEL_BOARD_PERCENT` overrides the
 landscape default, clamped to 25–35 percent, with invalid values ignored). In Work
@@ -259,7 +262,7 @@ split rules apply on narrower windows. A new landscape board stays unsplit when
 for that Work window and is recorded there. A call opened from the board shows in a
 reader pane above the CLI.
 Herdr uses the same left board, starting at the same 28 percent share and honoring
-`OMS_PANEL_BOARD_PERCENT`. Later Herdr resizing is not recorded or shared;
+`OMS_PANEL_BOARD_PERCENT`; the tall-window rule is tmux-only and Herdr's placement is unchanged. Later Herdr resizing is not recorded or shared;
 `SplitSync` synchronizes the board width or portrait height only in tmux.
 In tmux, each window records its board edge and size in its window option
 `@oms_panel_split` (`left:<cells>c` or `top:<rows>r`; the older percent form is
