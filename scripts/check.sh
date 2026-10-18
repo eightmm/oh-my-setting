@@ -1186,6 +1186,19 @@ affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
   return 1
 }
 
+# Whole-tree content invariants (the input is every tracked file or template),
+# so no changed-file selection can prove them; CI's full scripts-smoke does.
+REPO_INVARIANT_TESTS=(
+  test_scrubber_passes_harness_sources
+  test_global_rules_stay_compact_and_route_workflows
+  test_project_policy_templates_stay_compact
+  test_large_skills_use_progressive_disclosure
+  test_generated_project_contracts_stay_compact
+  test_apply_loader_allows_clear_bounded_changes
+)
+repo_invariants_in_plan=0
+repo_invariants_selected=" "
+
 if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
   affected_operator_staged=0
   for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
@@ -1207,6 +1220,13 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
         fi
         affected_index=$((affected_index + 1))
       done
+      if [ "$affected_test" = tests/scripts-smoke.sh ]; then
+        if [ "${#affected_args[@]}" -gt 0 ]; then
+          repo_invariants_selected="$repo_invariants_selected${affected_args[*]} "
+        else
+          repo_invariants_in_plan=1
+        fi
+      fi
       if [ "${#affected_args[@]}" -gt 0 ]; then
         stage affected-scripts-smoke env OMS_SMOKE_SUITE="$ROOT/$affected_test" bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}" "${affected_args[@]}"
       else
@@ -1232,6 +1252,19 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
       stage "affected:$affected_test" bash "$affected_test"
     fi
   done
+fi
+
+# A plan that already runs all of scripts-smoke (uncapped full) covers these.
+if [ "$RUN_AFFECTED" = 1 ] && [ "$RUN_SMOKE" = 0 ] && [ "$repo_invariants_in_plan" = 0 ]; then
+  repo_invariant_args=()
+  for repo_invariant_name in "${REPO_INVARIANT_TESTS[@]}"; do
+    case "$repo_invariants_selected" in *" $repo_invariant_name "*) continue ;; esac
+    repo_invariant_args[${#repo_invariant_args[@]}]=--only
+    repo_invariant_args[${#repo_invariant_args[@]}]="$repo_invariant_name"
+  done
+  if [ "${#repo_invariant_args[@]}" -gt 0 ]; then
+    stage repo-invariants bash tests/run-smoke-shard.sh "${repo_invariant_args[@]}"
+  fi
 fi
 
 if [ -n "${CHECK_STAGE_QUEUE:-}" ]; then

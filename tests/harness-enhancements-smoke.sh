@@ -966,9 +966,21 @@ test_selected() {
 test_unselected() {
   printf 'shell-unselected\n' >> "$OMS_TEST_AFFECTED_LOG"
 }
+test_scrubber_passes_harness_sources() { printf 'invariant:scrubber\n' >> "$OMS_TEST_AFFECTED_LOG"; }
+test_global_rules_stay_compact_and_route_workflows() { printf 'invariant:global-rules\n' >> "$OMS_TEST_AFFECTED_LOG"; }
+test_project_policy_templates_stay_compact() { printf 'invariant:policy-templates\n' >> "$OMS_TEST_AFFECTED_LOG"; }
+test_large_skills_use_progressive_disclosure() { printf 'invariant:large-skills\n' >> "$OMS_TEST_AFFECTED_LOG"; }
+test_generated_project_contracts_stay_compact() { printf 'invariant:project-contracts\n' >> "$OMS_TEST_AFFECTED_LOG"; }
+test_apply_loader_allows_clear_bounded_changes() { printf 'invariant:apply-loader\n' >> "$OMS_TEST_AFFECTED_LOG"; }
 # SMOKE_TEST_CALLS_BEGIN
 test_selected
 test_unselected
+test_scrubber_passes_harness_sources
+test_global_rules_stay_compact_and_route_workflows
+test_project_policy_templates_stay_compact
+test_large_skills_use_progressive_disclosure
+test_generated_project_contracts_stay_compact
+test_apply_loader_allows_clear_bounded_changes
 # SMOKE_TEST_CALLS_END
 EOF
   cat > "$gate/tests/leaf-smoke.sh" <<'EOF'
@@ -1045,6 +1057,10 @@ EOF
   grep -Fxq plan-context-selected "$log" || fail "affected gate omitted the selected plan context case"
   grep -Fxq python-selected "$log" || fail "affected gate omitted the selected Python case"
   grep -Fxq shell-file "$log" || fail "affected gate omitted the selected shell file"
+  for invariant in scrubber global-rules policy-templates large-skills project-contracts apply-loader; do
+    [ "$(grep -Fxc "invariant:$invariant" "$log")" = 1 ] ||
+      fail "affected gate did not run whole-tree invariant $invariant exactly once"
+  done
   grep -Fxq 'syntax:lib/leaf.py' "$log" || fail "affected syntax check did not select only the changed Python"
   grep -Fxq 'distribution:--docs-only' "$log" || fail "leaf change ran unrelated CI orchestration probes"
   [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$log")" = 1 ] ||
@@ -1094,6 +1110,9 @@ PYTEST
     fail "full affected fallback omitted lint: $out"
   printf '%s\n' "$out" | grep >/dev/null -Fx artifact-supersession ||
     fail "fail-open affected stage listing stopped before the full focused gate: $out"
+  # The uncapped full plan runs all of scripts-smoke, so the whole-tree
+  # invariants must not be staged a second time.
+  if grep -Fxq repo-invariants <<< "$out"; then fail "full plan staged repo-invariants twice: $out"; fi
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)" ||
     fail "affected gate propagated a graph-reader failure"
@@ -1116,7 +1135,7 @@ PYTEST
   out="$(cd "$gate" && bash scripts/check.sh --affected --ci-parity \
     --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
     fail "ci-parity gate rejected a selector-boundary change"
-  for stage_name in shellcheck source-distribution bash32-parse; do
+  for stage_name in shellcheck source-distribution bash32-parse repo-invariants; do
     grep -Fxq "$stage_name" <<< "$out" || fail "capped fallback omitted $stage_name: $out"
   done
   if grep -Eqx 'autonomy-hook|shellcheck-changed|operator-tools' <<< "$out"; then
@@ -1191,7 +1210,9 @@ EOF
   head="$(git -C "$gate" rev-parse HEAD)"
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error bash scripts/check.sh --affected \
     --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)"
-  [ "$out" = source-distribution ] || fail "docs expanded into unrelated checks: $out"
+  # Whole-tree invariants run for every affected plan (ba477b8 passed the
+  # gate while the scrubber test over the tracked tree failed in CI).
+  [ "$out" = "$(printf 'source-distribution\nrepo-invariants')" ] || fail "docs expanded into unrelated checks: $out"
   printf 'dirty\n' >> "$gate/README.md"
   out="$(cd "$gate" && bash scripts/check.sh --affected --print-affected-mode \
     --changed-from "$base" --changed-to "$head" 2>/dev/null)"
@@ -1279,6 +1300,7 @@ EOF
         ;;
     esac
     if grep -Fxq install-lifecycle <<< "$out"; then fail "scoped contract expanded to unrelated lifecycle tests"; fi
+    [ "$(grep -Fxc repo-invariants <<< "$out")" = 1 ] || fail "affected plan did not stage repo-invariants once: $out"
   done
   base="$head"
   git -C "$gate" rm -q templates/project-skills/example/SKILL.md
