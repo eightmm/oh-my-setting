@@ -142,7 +142,8 @@ def room_history(repo, owner, task_id=None, candidate=None):
     """Dispatches per provider in this room and the provider that wrote the reviewed work; empty when unknown.
 
     The writer is bound to linkage, never recency (attempt order follows updated_at, which telemetry advances):
-    the attempt owning the candidate patch digest, else the task's only writing provider."""
+    only the write attempts whose recorded artifact names the candidate's patch path, digest and base. Identical
+    bytes may come from several providers, so ambiguous or missing linkage leaves the writer unknown."""
     from terminal_panel import child_environment, events
     recent, writers, rows = {}, {}, []
     try:
@@ -158,17 +159,17 @@ def room_history(repo, owner, task_id=None, candidate=None):
             rows.append(attempt)
             if task_id and attempt.get("task_id") == task_id and refs.get("panel_access") == "write":
                 writers[attempt.get("attempt_id")] = ran
-        digest = candidate.get("sha256") if isinstance(candidate, dict) else None
-        if digest and writers:
-            import panel_results
-            _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
-            owner_attempt = next((a.get("attempt_id") for a in artifacts
-                                  if a.get("patch_sha256") == digest and a.get("attempt_id") in writers), None)
-            if owner_attempt:
-                return recent, writers[owner_attempt]
+        linkage = candidate if isinstance(candidate, dict) else {}
+        if not (writers and all(linkage.get(key) for key in ("patch", "sha256", "base"))):
+            return recent, None
+        import panel_results
+        _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
+        owners = {writers[a.get("attempt_id")] for a in artifacts if a.get("attempt_id") in writers
+                  and a.get("patch") == linkage["patch"] and a.get("patch_sha256") == linkage["sha256"]
+                  and a.get("base_sha") == linkage["base"]}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return None, None
-    return recent, next(iter(set(writers.values()))) if len(set(writers.values())) == 1 else None
+    return recent, next(iter(owners)) if len(owners) == 1 else None
 
 
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,

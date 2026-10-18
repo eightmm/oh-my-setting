@@ -435,21 +435,36 @@ for action in ("native", "council"):
 def history_row(attempt, provider, task="task-a"):
     return dict(attempt_id=attempt, task_id=task, provider=provider,
                 refs=dict(panel_alias="a", panel_room_id="r", panel_provider=provider, panel_access="write"))
+def patch_row(attempt, digest, base="b" * 40):
+    return dict(attempt_id=attempt, patch=".oms/artifacts/%s.patch" % attempt, patch_sha256=digest, base_sha=base)
+def linked(attempt, digest, base="b" * 40):
+    return dict(patch=".oms/artifacts/%s.patch" % attempt, sha256=digest, base=base)
 history_rows = [history_row("att_codex", "codex"), history_row("att_claude", "claude")]  # Claude is last
-patch_rows = [dict(attempt_id="att_codex", patch_sha256="c" * 64), dict(attempt_id="att_claude", patch_sha256="d" * 64)]
+patch_rows = [patch_row("att_codex", "c" * 64), patch_row("att_claude", "d" * 64)]
 import panel_dispatch
 with patch.object(panel, "events", side_effect=lambda *a, **k: json.dumps(history_rows)), \
         patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "r"}), \
         patch.object(panel_dispatch.room, "resolve", return_value="r"), \
         patch.object(panel_dispatch.room, "same_room", return_value=True), \
         patch.object(saved, "_records", return_value=([], patch_rows)):
-    _, writer = panel_dispatch.room_history(project, "claude", "task-a", dict(sha256="c" * 64))
+    _, writer = panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))
     assert writer == "codex", writer
     assert allocate("claude", role="reviewer", installed=both, writer=writer)["provider"] == "claude"
-    assert panel_dispatch.room_history(project, "claude", "task-a", dict(sha256="e" * 64))[1] is None
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "e" * 64))[1] is None
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64, "f" * 40))[1] is None
+    assert panel_dispatch.room_history(project, "claude", "task-a", dict(sha256="c" * 64))[1] is None  # digest alone
     assert panel_dispatch.room_history(project, "claude", "task-a")[1] is None  # mixed writers, no linkage
-    history_rows[1] = history_row("att_claude", "codex")
-    assert panel_dispatch.room_history(project, "claude", "task-a")[1] == "codex"  # one writing provider
+    # Identical bytes from both providers: the candidate's own patch path names its writer, never the first digest.
+    patch_rows[:] = [patch_row("att_claude", "c" * 64), patch_row("att_codex", "c" * 64)]
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))[1] == "codex"
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_claude", "c" * 64))[1] == "claude"
+    patch_rows.append(dict(patch_row("att_claude", "c" * 64), patch=linked("att_codex", "c" * 64)["patch"]))
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))[1] is None
+    # A task with one writing provider but no candidate linkage keeps the owner-opposite fallback.
+    history_rows[:] = [history_row("att_codex", "codex")]
+    _, writer = panel_dispatch.room_history(project, "claude", "task-a")
+    assert writer is None, writer
+    assert allocate("claude", role="reviewer", installed=both, writer=writer)["provider"] == "codex"
 
 for owner in panel.PROVIDERS:
     plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
