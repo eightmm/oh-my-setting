@@ -1473,17 +1473,64 @@ def encode_presence(row: dict[str, Any]) -> bytes:
     def encoded() -> bytes:
         return (json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n").encode("ascii")
     data = encoded()
+    if len(data) > PRESENCE_LIMIT:
+        row.pop("transcript_path", None)
+        data = encoded()
+    # Digests carry file identity, so they go last.
     for key in ("turn_edit_paths", "turn_edit_digests"):
         items = row.get(key)
         while len(data) > PRESENCE_LIMIT and isinstance(items, list) and items:
             items.pop()
             data = encoded()
     if len(data) > PRESENCE_LIMIT:
-        row.pop("transcript_path", None)
-        data = encoded()
-    if len(data) > PRESENCE_LIMIT:
         raise ValueError("panel activity row exceeds its cap")
     return data
+
+
+@contextlib.contextmanager
+def presence_lock(directory: Path, name: str, timeout: float = 0.5):
+    """Empty-directory lock anchored to the validated directory, never to its pathname.
+
+    Creation and removal go through one directory fd, so a directory swapped for a
+    symlink after acquisition cannot redirect the cleanup. Without dir_fd support
+    the parent identity is rechecked before the non-recursive rmdir.
+    """
+    anchored = os.mkdir in os.supports_dir_fd and os.rmdir in os.supports_dir_fd and hasattr(os, "O_DIRECTORY")
+    fd = os.open(str(directory), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)) \
+        if anchored else None
+    try:
+        before = os.fstat(fd) if fd is not None else os.lstat(directory)
+        target = {"dir_fd": fd} if fd is not None else {}
+        lock = name if fd is not None else str(directory / name)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                os.mkdir(lock, **target)
+                break
+            except FileExistsError:
+                try:
+                    stale = time.time() - os.stat(lock, **target).st_mtime > 60
+                except OSError:
+                    stale = False
+                if stale:
+                    with contextlib.suppress(OSError):
+                        os.rmdir(lock, **target)
+                        continue
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("hook event file is busy")
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            if fd is None:
+                now = os.lstat(directory)
+                if (now.st_dev, now.st_ino) != (before.st_dev, before.st_ino) or stat.S_ISLNK(now.st_mode):
+                    return
+            with contextlib.suppress(OSError):
+                os.rmdir(lock, **target)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def mutate_presence(repo: Path, relative: str, build):
@@ -1510,7 +1557,7 @@ def mutate_presence(repo: Path, relative: str, build):
         produced.append(row)
         return encode_presence(row)
 
-    with event_file_lock(path, timeout=0.5, name="." + path.stem + ".lockdir"):
+    with presence_lock(path.parent, "." + path.stem + ".lockdir"):
         thread_live.DURABLE["atomic_mutate"](
             str(path), transform, str(repo), missing_ok=True, create_parent=True,
             max_output=PRESENCE_LIMIT, label="panel activity")

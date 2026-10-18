@@ -1571,6 +1571,34 @@ with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", sid
         assert not hook_state.panel_direct_edit_hint(payload, [("v.py", 50)])
     assert not list(outside.iterdir()), list(outside.iterdir())
     path.parent.unlink()
+    # A swap after lock acquisition must not let lock cleanup delete through the new path.
+    import thread_live
+    path.parent.mkdir()
+    sentinel = outside / ".main.lockdir" / "sentinel"
+    sentinel.parent.mkdir()
+    sentinel.write_text("keep")
+    real_mutate = thread_live.DURABLE["atomic_mutate"]
+    def swapping(*args, **kwargs):
+        path.parent.rename(path.parent.with_name("moved-activity"))
+        path.parent.symlink_to(outside)
+        return real_mutate(*args, **kwargs)
+    with patch.dict(thread_live.DURABLE, {"atomic_mutate": swapping}), \
+            patch.object(hook_state.time, "time", return_value=307):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
+        hook_state.panel_direct_edit_hint(payload, [("s.py", 50)])
+    assert sentinel.read_text() == "keep" and [p.name for p in outside.iterdir()] == [".main.lockdir"]
+    assert not (path.parent.with_name("moved-activity") / ".main.lockdir").exists()
+    path.parent.unlink()
+    shutil.rmtree(path.parent.with_name("moved-activity"))
+    # Near-limit transcript metadata sheds before dedup digests: one file edited twice is one file.
+    path.parent.mkdir()
+    with patch.object(hook_state.time, "time", return_value=308):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit",
+                                              transcript_path="/t/" + "x" * 3780))
+        first = hook_state.panel_direct_edit_hint(payload, [("a.py", 1)])
+        second = hook_state.panel_direct_edit_hint(payload, [("a.py", 1)])
+    row = json.loads(path.read_text())
+    assert not first and not second and row["turn_edit_files"] == 1 and not row.get("turn_nudges"), row
 
 # No existing check exercised a Pi extension; reuse the panel-activity fixture.
 import shutil
