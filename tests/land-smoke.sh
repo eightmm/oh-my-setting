@@ -537,8 +537,10 @@ grep -q 'ci run-skipped' "$TMP/run-skipped.out" || fail "skipped run reason miss
 # third landing's whole range even when the first clone has an older receipt.
 python3 - "$ROOT" "$TMP" <<'PYRANGE' || fail "cross-clone receipt range regression"
 import ast
+import contextlib
 import hashlib
 import importlib.util as _importlib_util
+import io
 import json
 import os
 import re
@@ -729,7 +731,7 @@ plan_finish(unblocked, 'sibling-junk', True)
 # satisfy resolves its commit receipt through the same lookup as finish, so a
 # receipt that only a sibling checkout holds is found; without one it is refused.
 completion = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
-core_names = {'_load', 'read_regular_bytes', 'receipt_directories', 'sibling_receipt_binds_repo',
+core_names = {'_load', 'read_regular_bytes', 'read_receipt', 'receipt_directories', 'sibling_receipt_binds_repo',
               'read_sibling_receipt', 'commit_landing_proof', 'split_list'}
 core_ns = dict(globals(), __file__=str(core), env=lambda key: os.environ.get(key, ''), die=die)
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in core_names],
@@ -754,6 +756,49 @@ sibling_only = satisfy_receipt(unblocked, hashlib.sha256(original).hexdigest())
 assert sibling_only == 'completion: local Git proof unavailable', sibling_only
 refused = satisfy_receipt(foreign, hashlib.sha256(original).hexdigest())
 assert 'no passed oms land receipt' in refused, refused
+
+# Both lookups read candidates through the durable no-follow reader, so a
+# hard-linked receipt is refused, and the schema must be the integer 1.
+def refusal(call):
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        try:
+            outcome = call()
+        except (ValueError, SystemExit) as error:
+            return str(error) + err.getvalue()
+        if isinstance(outcome, str):
+            return outcome + err.getvalue()
+    raise AssertionError('receipt lookup accepted a refused candidate')
+strict = tmp / 'strict-receipts'
+strict.mkdir()
+candidate = strict / receipt.name
+candidate.write_bytes(original)
+assert core_ns['read_receipt'](str(candidate)) == original
+os.link(str(candidate), str(tmp / 'strict-receipt-link'))
+assert 'hard-linked' in refusal(lambda: core_ns['read_receipt'](str(candidate)))
+os.environ['OMS_LAND_RECEIPTS_DIR'] = str(strict)
+try:
+    assert 'hard-linked' in refusal(lambda: core_ns['commit_landing_proof'](sha))
+finally:
+    os.environ.pop('OMS_LAND_RECEIPTS_DIR', None)
+canonical = Path(completion['canonical_land_directory'](str(unblocked)))
+canonical.mkdir(parents=True, exist_ok=True)
+(canonical / receipt.name).write_bytes(original)
+os.link(str(canonical / receipt.name), str(tmp / 'canonical-receipt-link'))
+try:
+    assert 'hard-linked' in refusal(lambda: satisfy_receipt(unblocked, hashlib.sha256(original).hexdigest()))
+finally:
+    (canonical / receipt.name).unlink()
+candidate.unlink()
+os.unlink(str(tmp / 'strict-receipt-link'))
+os.environ['OMS_LAND_RECEIPTS_DIR'] = str(strict)
+try:
+    for bad in (True, 1.0):
+        candidate.write_text(json.dumps(dict(json.loads(original), schema=bad)) + '\n')
+        assert 'no passed oms land receipt' in refusal(lambda: core_ns['commit_landing_proof'](sha))
+        candidate.unlink()
+finally:
+    os.environ.pop('OMS_LAND_RECEIPTS_DIR', None)
 
 # Relative remote URLs name different repositories in different checkouts, so
 # identical request stamps prove nothing: no receipt is shared between them.

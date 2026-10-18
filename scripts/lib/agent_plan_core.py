@@ -13,7 +13,7 @@ def _load(path):
     return vars(module)
 
 
-import datetime, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, unicodedata
+import contextlib, datetime, hashlib, io, json, math, os, re, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
 path = os.environ["OMS_PLAN_FILE"]
@@ -245,13 +245,22 @@ def sibling_receipt_binds_repo(receipt, name):
     return (receipt.get("request") == name[:-5] and
             name[:-5].endswith("-" + digest) and name.startswith(receipt.get("sha", "") + "-"))
 
+def read_receipt(path):
+    """One land receipt through the durable no-follow reader: a linked,
+    hard-linked, non-regular, oversized or concurrently changing file is refused."""
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        die("oms land receipt must be a regular file")
+    absolute = os.path.abspath(path)
+    root = os.path.splitdrive(absolute)[0] + os.path.sep
+    return _load(os.path.join(os.path.dirname(__file__), "durable-jsonl.py"))["read_no_follow"](
+        root, os.path.relpath(absolute, root), "oms land receipt", max_bytes=1024 * 1024)
+
 def read_sibling_receipt(path):
     """A sibling directory belongs to another checkout: a candidate that is
     unreadable, oversized, linked or not a regular file is skipped, not fatal."""
     try:
-        if not stat.S_ISREG(os.lstat(path).st_mode):
-            return None
-        return read_regular_bytes(path, "oms land receipt", 1024 * 1024)
+        with contextlib.redirect_stderr(io.StringIO()):
+            return read_receipt(path)
     except (OSError, ValueError, SystemExit):
         return None
 
@@ -282,14 +291,14 @@ def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
             if raw is None:
                 continue
         else:
-            raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
+            raw = read_receipt(os.path.join(directory, name))
         if expected_receipt_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_receipt_sha256:
             continue
         try:
             receipt = json.loads(raw)
         except (ValueError, UnicodeError):
             continue
-        if not isinstance(receipt, dict) or receipt.get("schema") != 1:
+        if not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or receipt["schema"] != 1:
             continue
         if receipt.get("sha") != sha or receipt.get("state") != "passed":
             continue
