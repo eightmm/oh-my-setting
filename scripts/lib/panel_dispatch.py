@@ -138,8 +138,29 @@ def routing_status(repo, room_id=None, main=None):
         return {}
 
 
+def room_history(repo, owner, task_id=None):
+    """Dispatches per provider in this room and the provider of task_id's write attempt; empty when unknown."""
+    from terminal_panel import child_environment, events
+    recent, writer = {}, None
+    try:
+        room_id = room.resolve(repo, child_environment(owner, repo).get("OMS_ROOM_ID"))
+        if not room_id:
+            return None, None
+        for attempt in json.loads(events(repo, "list", "--json", output=True)):
+            refs = attempt.get("refs", {})
+            if not refs.get("panel_alias") or not room.same_room(repo, refs.get("panel_room_id"), room_id):
+                continue
+            ran = refs.get("panel_provider") or attempt.get("provider")
+            recent[ran] = recent.get(ran, 0) + 1
+            if task_id and attempt.get("task_id") == task_id and refs.get("panel_access") == "write":
+                writer = ran
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return None, None
+    return recent, writer
+
+
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
-                   repo=None, room_id=None, main=None):
+                   repo=None, room_id=None, main=None, task_id=None):
     from terminal_panel import MODEL_IDS, PROVIDERS, allocate, newest_route_model, policy, provider_catalog
     from terminal_panel import route_family, routing_status
     if owner not in PROVIDERS:
@@ -155,8 +176,10 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         rows = provider_catalog(target or ",".join(sorted({c["provider"] for tier in policy()["tiers"].values()
                                                            for c in tier})))
         readings = routing_status(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), room_id, main) if not target else {}
+        recent, writer = room_history(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), owner, task_id) \
+            if not target else (None, None)
         route = allocate(owner, role, workload, access, purpose,
-                         {row["provider"] for row in rows if row["installed"]}, readings)
+                         {row["provider"] for row in rows if row["installed"]}, readings, recent, writer)
         peer = next(row for row in rows if row["provider"] == route["provider"])
         route.update(binary=peer["binary"], model=newest_route_model(
             route["provider"], route["model"], peer.get("catalog_models", peer.get("models", []))))
@@ -406,7 +429,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 or len(allow_extra_round.encode("utf-8")) > 1000 or "\0" in allow_extra_round):
             raise ValueError("--allow-extra-round requires --continue and a reason of 1..1000 bytes")
         _validate_dry_run_inputs(allow_extra_round, None)
-    route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main)
+    route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
+                           task_id=task_id)
     if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
         print("WARN: write dispatch has neither a verify command nor a declared scope", file=sys.stderr)
     label = safe_label(label)

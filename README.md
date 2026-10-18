@@ -57,8 +57,10 @@ refactorer, documenter, integrator and performance-engineer; read roles are
 researcher, advisor, architect, critic, reviewer, verifier, security-auditor
 and release-engineer. Routing uses light, routine, deep and frontier capability
 tiers across available providers, not a fixed provider per role. Reviewer,
-verifier, security-auditor and critic prefer a provider other than the main when
-one is available. A role describes the call's mandate, not a separate main.
+verifier, security-auditor and critic prefer a provider other than the main (or
+than the reviewed task's writer, when known) when one is available; weekly
+readings within the `tie_band` of `config/panel-routing.json` count as equal, then
+fewer recent room dispatches decide. A role describes the call's mandate, not a separate main.
 
 ```bash
 oms panel --dispatch worker --purpose implement --access write --brief-file B --verify CMD --task-id T --label L

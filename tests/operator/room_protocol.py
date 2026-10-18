@@ -62,10 +62,36 @@ for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
 assert allocate("claude", role="reviewer", installed=both,
                 provider_status={"codex": {"weekly_used": 90}})["provider"] == "claude"
 # With both readings, more weekly quota left wins; missing readings put the owner last.
-for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude"), (40, 40, "claude")):
+for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude")):
     readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
     assert allocate("claude", role="builder", installed=both, provider_status=readings)["provider"] == expected, readings
     assert allocate("codex", role="integrator", installed=both, provider_status=readings)["provider"] == expected, readings
+# Readings inside the tie band (both under 50%, or within 15 points) are equal: fewer recent dispatches
+# win, else the provider opposite the main.
+for claude_used, codex_used in ((2, 11), (40, 40), (11, 2), (70, 60), (49, 5)):
+    readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
+    for owner in both:
+        other = "codex" if owner == "claude" else "claude"
+        assert allocate(owner, role="builder", installed=both, provider_status=readings)["provider"] == other, readings
+        assert allocate(owner, role="builder", installed=both, provider_status=readings,
+                        recent={other: 3, owner: 1})["provider"] == owner, readings
+        assert allocate(owner, role="builder", installed=both, provider_status=readings,
+                        recent={other: 2, owner: 2})["provider"] == other, readings
+        assert allocate(owner, role="builder", installed=both, provider_status=readings,
+                        recent={owner: 1})["provider"] == other, readings
+# Outside the band the quota decides whatever the recent counts say.
+outside = {"claude": {"weekly_used": 20}, "codex": {"weekly_used": 60}}
+assert allocate("claude", role="builder", installed=both, provider_status=outside,
+                recent={"claude": 9})["provider"] == "claude"
+assert policy()["tie_band"] == {"under": 50, "gap": 15}
+# Independent judges avoid the reviewed task's writer; without a known writer the main's opposite decides.
+for role in ("reviewer", "verifier", "security-auditor", "critic"):
+    for owner in both:
+        for writer in both:
+            judge = allocate(owner, role=role, installed=both, writer=writer)["provider"]
+            assert judge != writer, (role, owner, writer)
+        assert allocate(owner, role=role, installed=both, writer="unknown")["provider"] != owner
+assert allocate("claude", role="reviewer", installed={"codex"}, writer="codex")["provider"] == "codex"
 for readings in ({}, {"claude": {"weekly_used": 60}}, {"codex": {"weekly_used": 20}}):
     for owner in both:
         assert allocate(owner, role="builder", installed=both, provider_status=readings)["provider"] != owner
