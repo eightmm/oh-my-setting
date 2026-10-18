@@ -1571,11 +1571,11 @@ with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", sid
         assert not hook_state.panel_direct_edit_hint(payload, [("v.py", 50)])
     assert not list(outside.iterdir()), list(outside.iterdir())
     path.parent.unlink()
-    # A swap after lock acquisition must not let lock cleanup delete through the new path.
+    # The writer lock is a kernel lock on a file nothing deletes: a directory swap during the update
+    # leaves an external sentinel intact, and the lock file itself survives every update.
     import thread_live
     path.parent.mkdir()
-    sentinel = outside / ".main.lockdir" / "sentinel"
-    sentinel.parent.mkdir()
+    sentinel = outside / "sentinel"
     sentinel.write_text("keep")
     real_mutate = thread_live.DURABLE["atomic_mutate"]
     def swapping(*args, **kwargs):
@@ -1586,10 +1586,26 @@ with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", sid
             patch.object(hook_state.time, "time", return_value=307):
         hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
         hook_state.panel_direct_edit_hint(payload, [("s.py", 50)])
-    assert sentinel.read_text() == "keep" and [p.name for p in outside.iterdir()] == [".main.lockdir"]
-    assert not (path.parent.with_name("moved-activity") / ".main.lockdir").exists()
+    assert sentinel.read_text() == "keep" and [p.name for p in outside.iterdir()] == ["sentinel"]
+    locks = list((repo / ".oms/artifacts").glob("activity-*.lock"))
+    assert len(locks) == 1, locks
     path.parent.unlink()
     shutil.rmtree(path.parent.with_name("moved-activity"))
+    # A lock held elsewhere times out without failing the edit or touching the row.
+    try:
+        import fcntl
+    except ImportError:  # native Windows locks through msvcrt
+        fcntl = None
+    path.parent.mkdir()
+    if fcntl:
+        with patch.object(hook_state.time, "time", return_value=307.5):
+            hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
+        before = path.read_bytes()
+        with open(locks[0], "r+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            assert not hook_state.panel_direct_edit_hint(payload, [("t.py", 50)])
+        assert path.read_bytes() == before and locks[0].exists()
+    shutil.rmtree(path.parent)
     # Near-limit transcript metadata sheds before dedup digests: one file edited twice is one file.
     path.parent.mkdir()
     with patch.object(hook_state.time, "time", return_value=308):
