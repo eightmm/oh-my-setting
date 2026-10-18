@@ -1296,6 +1296,7 @@ with patch.object(panel, "events", return_value=json.dumps([{"tool": "panel-main
     assert not inline_start.called
 # Explicit recovery requires recorded host ownership and positive native termination evidence.
 import panel_release
+import panel_native
 import panel_health
 import panel_host
 import panel_terminals
@@ -1581,6 +1582,7 @@ try:
                     patch.object(panel, "live_mains", return_value=panel.MAX_LIVE_MAINS), \
                     patch.object(panel, "main_installed", return_value=True), \
                     patch.object(panel_host, "herdr_active", return_value=False), \
+                    patch.object(panel_release, "release_held", side_effect=ValueError("re-proof failed")), \
                     patch.dict(os.environ, TMUX="fixture", OMS_PANEL_SESSION="oms-fixture"):
                 for refuse in (lambda: panel.check_legacy_main(release_repo),
                                lambda: panel.spawn_main(release_repo, "claude"),
@@ -1679,6 +1681,26 @@ try:
     terminal_release = json.loads(panel_release.events(release_repo, "show", "--attempt", working_release, "--json"))
     with patch.object(panel, "events", return_value=json.dumps([terminal_release])), patch.object(panel.shutil, "which", return_value=None):
         panel.check_legacy_main(release_repo)
+    # A start after a crash or reboot abandons the proven-dead main itself instead of refusing.
+    auto_release = release_attempt("blocked", host="inline")
+    listed = panel.events
+    def only_auto(repo, *args, **kwargs):
+        rows = listed(repo, *args, **kwargs)
+        return json.dumps([r for r in json.loads(rows) if r["attempt_id"] == auto_release]) if args[0] == "list" else rows
+    def counted(*args):
+        row = json.loads(panel_release.events(release_repo, "show", "--attempt", auto_release, "--json"))
+        return 0 if row["terminal"] else panel.MAX_LIVE_MAINS
+    with patch.dict(os.environ, dict(release_env, TMUX="fixture", OMS_PANEL_SESSION="oms-fixture"), clear=True), \
+            patch.object(panel_release.time, "time", return_value=release_now), \
+            patch.object(panel, "events", side_effect=only_auto), patch.object(panel.shutil, "which", return_value=None), \
+            patch.object(panel, "main_installed", return_value=True), patch.object(panel_host, "herdr_active", return_value=False), \
+            patch.object(panel, "panel_room", return_value="release-room"), patch.object(panel, "live_mains", side_effect=counted), \
+            patch.object(panel, "add_main_window", return_value="%9") as opened_main, \
+            patch.object(panel, "tmux_command", return_value=["true"]), \
+            patch.object(sys, "stderr", new_callable=io.StringIO) as release_notice:
+        assert panel.open_native("claude", release_repo) == 0
+    assert opened_main.called and "released crashed main " + auto_release in release_notice.getvalue()
+    assert json.loads(panel_release.events(release_repo, "show", "--attempt", auto_release, "--json"))["state"] == "abandoned"
     with patch.object(panel.room, "status", return_value={"participants": [{"participant": working_release, "joined": True, "role": "main"}]}), \
             patch.object(panel, "main_history", return_value=[terminal_release]), \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
@@ -1760,11 +1782,14 @@ for harness, owner, previous_terminal, succeeds in (("claude", None, True, False
     previous = {"attempt_id": "exit-attempt", "terminal": previous_terminal, "provider": panel.main_owner(harness),
                 "tool": "panel-main", "refs": {"panel_role": "main", "panel_room_id": shared,
                                                "native_session": "recorded-session"}}
+    restart_order = []
     with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
             patch.object(panel, "check_legacy_main"), patch.object(panel, "session_stored", return_value=True), patch.object(panel, "run_single_native", side_effect=exited_native) as restart_main, \
             patch.object(panel, "managed_session", return_value=True), \
             patch.object(panel, "_main_window", return_value=["@42", "exit-attempt", "", str(project.resolve()), "exit-attempt"]), \
-            patch.object(panel, "session_owner", return_value=owner), patch.object(panel, "live_mains", return_value=0), \
+            patch.object(panel, "session_owner", return_value=owner), \
+            patch.object(panel, "live_mains", side_effect=lambda *a: restart_order.append("count") or 0), \
+            patch.object(panel_native, "release_dead_mains", side_effect=lambda repo: restart_order.append("release")), \
             patch.object(panel, "main_history", return_value=[previous]), \
             patch.object(panel.room, "status", return_value={"participants": [{"participant": "exit-attempt",
                 "joined": True, "role": "main", "provider": panel.main_owner(harness),
@@ -1777,6 +1802,8 @@ for harness, owner, previous_terminal, succeeds in (("claude", None, True, False
         assert restart_main.call_count == (2 if succeeds else 1)
         assert restart_main.call_args_list[0].args[4] == "push the release tag"
         if succeeds:
+            # A main that died while this window waited is released before the restart counts mains.
+            assert restart_order[:2] == ["release", "count"], restart_order
             assert restart_main.call_args.args[2] == (None if harness == "pi" else "recorded-session")
             assert restart_main.call_args.args[4] is None, "restart resent the original task"
 # Context or launch setup fails before a child exists, before or after replacement

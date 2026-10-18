@@ -358,6 +358,7 @@ def run_native(provider, repo, resume=None, model=None, task=None):
             with _lock(repo, "panel-main-session", timeout=.1):
                 if attempt:
                     previous = _main_terminal_owner(provider, repo, session, pane, attempt, ident)
+                    release_dead_mains(repo)
                     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
                         raise ValueError("another main is live or unverified; finish it before restarting here")
                     resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
@@ -860,13 +861,44 @@ def live_main_refusal(repo, history=None):
     return refusal if len(refusal) <= 140 else summary + "\n" + command
 
 
+def release_dead_mains(repo):
+    """A crash or reboot leaves its main open; start abandons it on the same proof --release-main requires."""
+    import panel_release
+    from terminal_panel import events
+    def history():
+        rows = json.loads(events(repo, "list", "--json", output=True))
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("main lifecycle status unavailable; existing sessions preserved")
+        return rows
+    rows, released = history(), False
+    for item in panel_release.classify(rows)["releasable"]:
+        try:
+            panel_release.release_held(repo, item["attempt"])
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            continue
+        released = True
+        print("OMS: released crashed main %s (host and native termination proven)" % item["attempt"], file=sys.stderr)
+    return history() if released else rows
+
+
+def release_unleased_dead_mains(repo):
+    """Release before counting mains; a held lease is a live main here, which the count then refuses."""
+    from terminal_panel import _lock
+    entered = False
+    try:
+        with _lock(repo, "panel-main-session", timeout=.1):
+            entered = True
+            release_dead_mains(repo)
+    except ValueError:
+        if entered:
+            raise
+
+
 def check_legacy_main(repo):
     """Pre-lease mains must also finish before an inline or host launch can replace them."""
-    from terminal_panel import MAX_LIVE_MAINS, events, legacy_session, live_main_refusal, live_mains
+    from terminal_panel import MAX_LIVE_MAINS, legacy_session, live_main_refusal, live_mains
     from terminal_panel import managed_session, recorded_room, resolve_session, session_owner, tmux_command
-    history = json.loads(events(repo, "list", "--json", output=True))
-    if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
-        raise ValueError("main lifecycle status unavailable; existing sessions preserved")
+    history = release_dead_mains(repo)
     if any(row.get("tool") == "panel-main" and row.get("terminal") is not True for row in history):
         raise ValueError(live_main_refusal(repo, history))
     if shutil.which("tmux"):
@@ -1174,6 +1206,7 @@ def spawn_single_main(repo, provider, task=None, model=None):
     env = os.environ.copy()
     env["OMS_PANEL_SESSION"] = session
     ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+    release_unleased_dead_mains(repo)
     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
         raise ValueError(live_main_refusal(repo))
     with _lock(repo, "panel-main-session", timeout=.1):
@@ -1239,6 +1272,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             if launch:
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+                release_unleased_dead_mains(repo)
                 if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
                     raise ValueError(live_main_refusal(repo))
                 with _lock(repo, "panel-main-session", timeout=.1):
@@ -1318,6 +1352,7 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
     if os.environ.get("TMUX") and re.fullmatch(PANEL_SESSION, session):
         with _lock(repo, "panel-main-start", timeout=3):
             ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+            release_unleased_dead_mains(repo)
             if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
                 raise ValueError(live_main_refusal(repo))
             with _lock(repo, "panel-main-session", timeout=.1):

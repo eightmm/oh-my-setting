@@ -208,17 +208,22 @@ def release(repo, attempt):
     if heartbeat_fresh(row):
         raise ValueError("main liveness unproven; heartbeat is fresh or attempt is pending")
     with _lock(repo, "panel-main-start", timeout=3), _lock(repo, "panel-main-session", timeout=.1):
-        row = main_attempt(repo, attempt)
-        if heartbeat_fresh(row):
-            raise ValueError("main liveness unproven; heartbeat is fresh or attempt is pending")
-        prove_host_absent(row["refs"], attempt)
-        prove_native_absent(row)
-        previous = row["state"]
-        steps = ["--state", "blocked", "--then", "abandoned"] if previous == "working" else ["--state", "abandoned"]
-        events(repo, "transition", "--attempt", attempt, *steps, "--actor", "panel-main-release", "--reason-code", REASON)
-        final = json.loads(events(repo, "show", "--attempt", attempt, "--json"))
-        if final.get("state") != "abandoned" or final.get("terminal") is not True:
-            raise ValueError("panel main release could not be verified; inspect lifecycle state")
+        return release_held(repo, attempt)
+
+
+def release_held(repo, attempt):
+    """Re-prove and abandon one main; the caller holds the panel-main-session lease every start takes."""
+    row = main_attempt(repo, attempt)
+    if heartbeat_fresh(row):
+        raise ValueError("main liveness unproven; heartbeat is fresh or attempt is pending")
+    prove_host_absent(row["refs"], attempt)
+    prove_native_absent(row)
+    previous = row["state"]
+    steps = ["--state", "blocked", "--then", "abandoned"] if previous == "working" else ["--state", "abandoned"]
+    events(repo, "transition", "--attempt", attempt, *steps, "--actor", "panel-main-release", "--reason-code", REASON)
+    final = json.loads(events(repo, "show", "--attempt", attempt, "--json"))
+    if final.get("state") != "abandoned" or final.get("terminal") is not True:
+        raise ValueError("panel main release could not be verified; inspect lifecycle state")
     return {"attempt": attempt, "previous_state": previous, "state": "abandoned", "reason": REASON}
 
 
