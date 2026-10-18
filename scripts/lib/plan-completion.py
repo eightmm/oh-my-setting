@@ -1447,45 +1447,26 @@ def commit_product(repo, bundle, task):
     declared = os.environ.get('OMS_LAND_RECEIPTS_DIR')
     if declared and os.path.normcase(os.path.abspath(declared)) != os.path.normcase(os.path.abspath(directory)):
         fail('foreign canonical land receipt namespace')
-    # Strictly freeze the exact raw canonical receipt, not a bundle-supplied path.
     root = os.path.splitdrive(os.path.abspath(directory))[0] + os.path.sep
-    rel_dir = os.path.relpath(directory, root)
-    DURABLE['canonical_repo_path'](root, os.path.join(rel_dir, 'probe'), 'canonical commit receipts')
-    names = sorted(os.listdir(directory))
-    if len(names) > 4096:
-        fail('too many canonical commit receipts')
-    matched = []
-    for name in names:
-        if not name.startswith(commit + '-') or not name.endswith('.json'):
-            continue
-        raw = DURABLE['read_no_follow'](root, os.path.join(rel_dir, name),
-                                        'canonical commit receipt', max_bytes=1024 * 1024)
-        value = parsed(raw)
-        if sha(raw) == wanted['receipt_sha256']:
-            matched.append((name, raw, value))
-    if len(matched) != 1:
-        fail('exact immutable canonical commit receipt unavailable')
-    name, raw, receipt = matched[0]
-    if (type(receipt.get('schema')) is not int or receipt['schema'] != 1 or
-            receipt.get('sha') != commit or receipt.get('state') != 'passed' or
-            type(receipt.get('gate', {}).get('rc')) is not int or receipt['gate']['rc'] != 0 or
-            type(receipt.get('push', {}).get('rc')) is not int or receipt['push']['rc'] != 0 or
-            receipt.get('ci', {}).get('conclusion') != 'success'):
-        fail('canonical commit receipt lacks passed gate/push/CI')
-    # Existing commit-finish owns gate/push/CI and local pushed-ref authority.
-    # Readers resolve this same canonical directory even outside a satisfy call.
+    DURABLE['canonical_repo_path'](root, os.path.join(os.path.relpath(directory, root), 'probe'),
+                                   'canonical commit receipts')
+    # commit-finish's receipt lookup is the one authority: it searches this
+    # canonical directory and the same-repository sibling checkouts it trusts.
     if _COMMIT_PROOF is None:
         fail('commit landing authority callback unavailable')
     previous = os.environ.get('OMS_LAND_RECEIPTS_DIR')
     os.environ['OMS_LAND_RECEIPTS_DIR'] = directory
     try:
-        if _COMMIT_PROOF(commit, wanted['receipt_sha256']) != wanted:
-            fail('successor commit receipt differs from existing landing proof')
+        found = _COMMIT_PROOF(commit, wanted['receipt_sha256'], with_receipt=True)
     finally:
         if previous is None:
             os.environ.pop('OMS_LAND_RECEIPTS_DIR', None)
         else:
             os.environ['OMS_LAND_RECEIPTS_DIR'] = previous
+    if found[0] != wanted:
+        fail('successor commit receipt differs from existing landing proof')
+    _, name, raw = found
+    receipt = parsed(raw)
     git(repo, 'merge-base', '--is-ancestor', bundle['base_commit'], commit)
     changed = git(repo, 'diff', '--name-only', '-z', bundle['base_commit'], commit)
     paths = [p for p in changed.decode('utf-8').split('\0') if p]

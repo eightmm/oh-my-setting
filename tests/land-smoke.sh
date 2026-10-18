@@ -541,6 +541,8 @@ import hashlib
 import importlib.util as _importlib_util
 import json
 import os
+import re
+import runpy
 from pathlib import Path
 import stat
 import subprocess
@@ -717,11 +719,41 @@ junk = receipt.parent.parent / 'a-junk-0-0'
 junk.mkdir()
 os.symlink(str(junk / 'missing'), str(junk / (sha + '-dangling.json')))
 (junk / (sha + '-big.json')).write_bytes(b' ' * (1024 * 1024 + 1))
-os.mkfifo(str(junk / (sha + '-fifo.json')))
+if hasattr(os, 'mkfifo'):
+    os.mkfifo(str(junk / (sha + '-fifo.json')))
 assert min(p.name for p in receipt.parent.parent.iterdir()) == junk.name
 unblocked = tmp / 'junk-plan'
 run('git', 'clone', '--quiet', remote, unblocked)
 plan_finish(unblocked, 'sibling-junk', True)
+
+# satisfy resolves its commit receipt through the same lookup as finish, so a
+# receipt that only a sibling checkout holds is found; without one it is refused.
+completion = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+core_names = {'_load', 'read_regular_bytes', 'receipt_directories', 'sibling_receipt_binds_repo',
+              'read_sibling_receipt', 'commit_landing_proof', 'split_list'}
+core_ns = dict(globals(), __file__=str(core), env=lambda key: os.environ.get(key, ''), die=die)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in core_names],
+                        type_ignores=[]), str(core), 'exec'), core_ns)
+product = completion['commit_product']
+product.__globals__['_COMMIT_PROOF'] = core_ns['commit_landing_proof']
+def satisfy_receipt(checkout, digest):
+    old = {k: os.environ.get(k) for k in ('OMS_REPO', 'OMS_LAND_RECEIPTS_DIR')}
+    canonical = completion['canonical_land_directory'](str(checkout))
+    os.environ.update(OMS_REPO=str(checkout), OMS_LAND_RECEIPTS_DIR=canonical)
+    try:
+        product(str(checkout), {'successor': {'commit_sha': sha, 'land_receipt_sha256': digest},
+                                'base_commit': '0' * 40},
+                {'landing': {'kind': 'commit', 'sha': sha, 'receipt_sha256': digest}})
+    except (ValueError, SystemExit) as error:
+        return str(error)
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    raise AssertionError('commit_product accepted a bogus base')
+sibling_only = satisfy_receipt(unblocked, hashlib.sha256(original).hexdigest())
+assert sibling_only == 'completion: local Git proof unavailable', sibling_only
+refused = satisfy_receipt(foreign, hashlib.sha256(original).hexdigest())
+assert 'no passed oms land receipt' in refused, refused
 
 # Relative remote URLs name different repositories in different checkouts, so
 # identical request stamps prove nothing: no receipt is shared between them.

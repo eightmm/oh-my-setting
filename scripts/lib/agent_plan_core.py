@@ -255,7 +255,8 @@ def read_sibling_receipt(path):
     except (OSError, ValueError, SystemExit):
         return None
 
-def commit_landing_proof(sha, expected_receipt_sha256=None):
+def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
+    """with_receipt also returns the proving receipt's (file name, raw bytes)."""
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
         die("--landed-commit must be a full lowercase commit SHA")
     primary = env("OMS_LAND_RECEIPTS_DIR")
@@ -333,6 +334,8 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
         if reachable:
             proof = {"kind": "commit", "sha": sha,
                      "receipt_sha256": hashlib.sha256(raw).hexdigest()}
+            if with_receipt:
+                proof = (proof, name, raw)
             if base is not None:
                 return proof
             # A reverify omits push.base; prefer the actual landing regardless
