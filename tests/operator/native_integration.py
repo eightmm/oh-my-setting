@@ -2835,7 +2835,9 @@ sys.exit(panel.main(['--repo', sys.argv[2], '--watch', '--no-animation']))
             watcher.send_signal(signal.SIGINT)
             # The held read would block for its 60 s busy timeout; 10 s still proves
             # SIGINT did not wait for it while tolerating loaded CI runners.
-            assert watcher.wait(timeout=10) == 130, "blocked status read delayed SIGINT"
+            watcher_code = watcher.wait(timeout=10)
+            watcher_tail = watcher.stderr.read() if watcher_code != 130 else ""
+            assert watcher_code == 130, ("blocked status read delayed SIGINT", watcher_code, watcher_tail)
             assert not read_finished.exists(), "watcher waited for its blocked status read"
             output, errors = watcher.communicate(timeout=10)
             assert not output and not errors, (output, errors)

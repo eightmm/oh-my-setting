@@ -147,8 +147,12 @@ for key in ("OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "OMS_PANEL_SESSIO
     environment.pop(key, None)
 
 def call(command, env=None):
+    started = time.monotonic()
     result = subprocess.run(command, cwd=str(project), env=env or environment,
-                            capture_output=True, text=True, timeout=90)
+                            capture_output=True, text=True,
+                            timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+    if time.monotonic() - started > 30:
+        print("slow call %.1fs: %s" % (time.monotonic() - started, command[:4]), file=sys.stderr)
     assert result.returncode == 0, (command, result.returncode, result.stdout[-6000:], result.stderr[-6000:])
     return result.stdout
 

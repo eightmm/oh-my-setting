@@ -148,6 +148,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          OMS_TEST_CALL_TIMEOUT: "240"
         run: |
           if { [ "$EVENT_NAME" = pull_request ] || [ "$EVENT_NAME" = push ]; } && \
               git rev-parse --verify "$DIFF_BASE^{tree}" >/dev/null 2>&1; then

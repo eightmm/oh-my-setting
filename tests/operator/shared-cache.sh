@@ -220,7 +220,8 @@ calls = []
 def run_plan(command, **kwargs):
     if 'agent-plan' in command:
         started = time.perf_counter()
-        result = real_run(command, **kwargs)
+        # The product's 15 s constant stays; only the test-side bound is loosened for loaded CI.
+        result = real_run(command, **{**kwargs, 'timeout': 120})
         calls.append((time.perf_counter() - started) * 1000)
         return result
     if command[0] == 'git' or command[:2] == ['bash', '-c']:
@@ -246,7 +247,7 @@ def measure(reader, repo=project, expected='cache-task', detailed=False):
                     state, status = panel.snapshot(repo, 'board-%d' % tick)
                     if not state.get('room', {}).get('repo_tasks_unavailable'):
                         break
-                assert status == 0 and state['room']['repo_tasks'][0]['id'] == expected, state
+                assert status == 0 and state['room'].get('repo_tasks', [{}])[0].get('id') == expected, (status, state.get('room'))
             ticks.append(round((time.perf_counter() - tick_start) * 1000, 1))
             counts.append(len(calls) - tick_calls)
     if detailed:

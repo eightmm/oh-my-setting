@@ -351,8 +351,14 @@ grep -q 'land attempt: 2 started_at=.* sha=' "$retry_log" || fail "attempt two m
 
 # --- 5. HEAD moves during the gate: nothing pushed -----------------------------
 before="$(remote_tip)"
-gate 'sleep 3; echo slow ok'
-( sleep 1; echo two > "$repo/two"; git -C "$repo" add two; git -C "$repo" commit -q -m two ) &
+export OMS_TEST_LAND_COUNT="$TMP/moved-gate-started" OMS_TEST_LAND_RELEASE="$TMP/moved-gate-release"
+gate 'echo slow ok; touch "$OMS_TEST_LAND_COUNT"; for ((i=0;i<400;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1'
+# Commit only after the gate runs (so after the landing stamped HEAD), then release it.
+(
+  for _ in $(seq 1 400); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
+  echo two > "$repo/two"; git -C "$repo" add two; git -C "$repo" commit -q -m two
+  touch "$OMS_TEST_LAND_RELEASE"
+) &
 if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/moved.out" 2>&1; then
   fail "a moved HEAD must fail the landing: $(cat "$TMP/moved.out")"
 fi
