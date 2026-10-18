@@ -2678,9 +2678,15 @@ import hashlib, importlib.util, os, re, stat, sys
 # plan/, memory/, artifacts/ and threads/.
 VOLATILE = ("hooks/sessions/", "hooks/panel-activity/", "tick/",
             "panel-state/dispatch-logs/", "runtime/context/")
+# Writer temps under runtime/ that exist only between create and unlink/replace
+# (mkstemp names, 8 chars of [a-z0-9_]): execution.py's runtime/logs/oms-exec.*
+# capture log, deleted on completion, and common.py atomic_write_bytes'
+# runtime/**/.<target>.<suffix>, renamed over the target. The final targets,
+# including runtime/*.jsonl, stay protected.
+RUNTIME_TEMP = re.compile(r"runtime/(?:logs/oms-exec\.[a-z0-9_]{8}|(?:[^/]+/)*\.[^/]+\.[a-z0-9_]{8})")
 skip_volatile = os.environ.get("OMS_WG_SKIP_VOLATILE") == "1"
 
-root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
+root =os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 if not os.path.isdir(root):
     raise SystemExit(0)
 rows = []
@@ -2710,6 +2716,8 @@ for base, dirs, files in os.walk(root):
         if transients.is_internal_atomic_temp(root, rel):
             continue
         if skip_volatile and rel.startswith(VOLATILE) and not rel.endswith(".jsonl"):
+            continue
+        if skip_volatile and RUNTIME_TEMP.fullmatch(rel):
             continue
         if re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel):
             try:

@@ -31217,6 +31217,17 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     rc=0
     out="$(ma_read_guard_assert 2>&1)" || rc=$?
     [ "$rc" = 0 ] || fail "deleted runtime/context cache failed a read pass: $out"
+    mkdir -p "$project/.oms/runtime/logs"
+    for vol_case in runtime/logs/oms-exec.ab12_x9z runtime/.outcomes.jsonl.q1w2e3r4; do
+      printf 'tmp\n' > "$project/.oms/$vol_case"
+      ma_read_guard_begin "$snap/read-temp-${vol_case//\//-}" || fail "runtime temp snapshot failed"
+      rm -f "$project/.oms/$vol_case"
+      printf 'tmp\n' > "$project/.oms/runtime/logs/oms-exec.new0_tmp"
+      rc=0
+      out="$(ma_read_guard_assert 2>&1)" || rc=$?
+      rm -f "$project/.oms/runtime/logs/oms-exec.new0_tmp"
+      [ "$rc" = 0 ] || fail "writer temp $vol_case failed a read pass: $out"
+    done
     for vol_case in sessions/sess-a.json panel-activity/att_read.json; do
       ma_read_guard_begin "$snap/read-volatile-${vol_case%%/*}" || fail "volatile read snapshot failed"
       rm -f "$project/.oms/hooks/$vol_case"
