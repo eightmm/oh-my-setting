@@ -247,42 +247,112 @@ try:
 
     wtb = os.fsencode(wt)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    def disk(path):
-        # (mode, oid) of the raw bytes on disk, as git would record them; None when absent.
-        # A link or file standing where a parent directory belongs makes the path absent.
-        cur = wtb
-        parts = path.split(b"/")
-        for part in parts[:-1]:
-            cur = os.path.join(cur, part)
-            try:
-                if not stat.S_ISDIR(os.lstat(cur).st_mode):
-                    return None
-            except FileNotFoundError:
-                return None
-        full = os.path.join(cur, parts[-1])
-        try:
-            st = os.lstat(full)
-        except FileNotFoundError:
-            return None
-        if stat.S_ISLNK(st.st_mode):
-            mode, data = b"120000", os.fsencode(os.readlink(full))
-        elif stat.S_ISREG(st.st_mode):
-            fd = os.open(full, os.O_RDONLY | nofollow)
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    return (b"other", b"")
-                with os.fdopen(fd, "rb", closefd=False) as handle:
-                    data = handle.read()
-            finally:
-                os.close(fd)
-            mode = b"100755" if st.st_mode & 0o111 else b"100644"
-        else:
-            return (b"other", b"")
+    OTHER = (b"other", b"")
+    anchored = (nofollow and hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd
+                and os.stat in os.supports_dir_fd and os.readlink in os.supports_dir_fd)
+
+    def blob(mode, data):
         digest = hashlib.new(algorithm)
         digest.update(b"blob %d\0" % len(data))
         digest.update(data)
         return (mode, digest.hexdigest().encode())
 
+    def walk(path):
+        # Anchored no-follow traversal: every component is opened relative to
+        # the previous directory descriptor with O_NOFOLLOW, so a parent swapped
+        # for a link mid-walk cannot redirect the read. Returns (fd, dir, name),
+        # None when a parent is absent, or OTHER when a link or file stands where
+        # a directory belongs. Without descriptor support (Windows) the parents
+        # are lstat-checked instead, rejecting links and reparse points.
+        parts = path.split(b"/")
+        if anchored:
+            fd = os.open(wtb, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+            try:
+                for part in parts[:-1]:
+                    try:
+                        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=fd)
+                    except FileNotFoundError:
+                        return None
+                    except OSError:
+                        return OTHER
+                    os.close(fd)
+                    fd = child
+                keep, fd = fd, None
+                return (keep, b"", parts[-1])
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        cur = wtb
+        for part in parts[:-1]:
+            cur = os.path.join(cur, part)
+            try:
+                info = os.lstat(cur)
+            except FileNotFoundError:
+                return None
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                return OTHER
+        return (None, cur, parts[-1])
+
+    def entry_stat(where):
+        fd, cur, name = where
+        return os.lstat(name, dir_fd=fd) if fd is not None else os.lstat(os.path.join(cur, name))
+
+    def disk(path):
+        # (mode, oid) of the raw bytes on disk, as git would record them; None when absent.
+        where = walk(path)
+        if where is None or where is OTHER:
+            return where
+        fd, cur, name = where
+        try:
+            try:
+                st = entry_stat(where)
+            except FileNotFoundError:
+                return None
+            if getattr(st, "st_file_attributes", 0) & 0x400 and not stat.S_ISLNK(st.st_mode):
+                return OTHER
+            if stat.S_ISLNK(st.st_mode):
+                target = os.readlink(name, dir_fd=fd) if fd is not None else os.readlink(os.path.join(cur, name))
+                return blob(b"120000", os.fsencode(target))
+            if not stat.S_ISREG(st.st_mode):
+                return OTHER
+            flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
+            handle = os.open(name, flags, dir_fd=fd) if fd is not None else os.open(os.path.join(cur, name), flags)
+            try:
+                if not stat.S_ISREG(os.fstat(handle).st_mode):
+                    return OTHER
+                with os.fdopen(handle, "rb", closefd=False) as stream:
+                    data = stream.read()
+            finally:
+                os.close(handle)
+            return blob(b"100755" if st.st_mode & 0o111 else b"100644", data)
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def inventory():
+        # Untracked and ignored paths, listed file by file (no --directory).
+        listed = lambda *a: [p for p in git("ls-files", "-z", "-o", *a, "--exclude-standard").split(b"\0") if p]
+        return listed(), listed("-i")
+
+    def bytecode(path):
+        # Regenerable Python bytecode is the only ignored content that may be discarded.
+        parts = path.split(b"/")
+        if len(parts) < 2 or parts[-2] != b"__pycache__" or not parts[-1].endswith((b".pyc", b".pyo")):
+            return False
+        where = walk(path)
+        if where is None or where is OTHER:
+            return False
+        try:
+            try:
+                return stat.S_ISREG(entry_stat(where).st_mode)
+            except OSError:
+                return False
+        finally:
+            if where[0] is not None:
+                os.close(where[0])
+
+    untracked, ignored = inventory()
     # Paths that differ from HEAD on disk.
     seen, differing = {}, set(untracked)
     for path in head:
@@ -292,6 +362,13 @@ try:
     if mode == "status":
         print("dirty" if differing or staged != head_tree else "clean")
         raise SystemExit(0)
+
+    # Ignored files are invisible to status and to the preserved patch. .oms is
+    # guarded separately by the caller.
+    for path in ignored:
+        if not path.startswith(b".oms/") and not bytecode(path):
+            print("holds ignored file %s" % os.fsdecode(path))
+            raise SystemExit(0)
 
     # The run: the one attempt whose recorded location is this worktree.
     name = "worktree:%s/wt" % os.path.basename(os.path.dirname(os.path.realpath(wt)))
@@ -356,18 +433,27 @@ try:
     if any(m == b"160000" for m, _ in expected.values()):
         print("the preserved patch involves a submodule, which is not compared")
         raise SystemExit(0)
-    # Plus those the patch touches.
-    differing.update(p for p in set(head) | set(expected) if head.get(p) != expected.get(p))
     proof = hashlib.sha256()
     for field in (head_commit, staged, expected_tree, hashlib.sha256(patch).hexdigest(),
                   run.get("attempt_id"), run.get("state"), run.get("updated_at")):
         proof.update(repr(field).encode() + b"\0")
+    # Everything above may be stale by now (the lifecycle and patch lookups
+    # run for a while), so the proof is the last read: the whole tree is read
+    # again, with no cached bytes, and must still equal the expected tree.
+    again_head = git("rev-parse", "HEAD").decode().strip()
+    again_staged = git("write-tree").decode().strip()
+    untracked_now, ignored_now = inventory()
     mismatch = 0
-    for path in sorted(differing):
-        have = seen[path] if path in seen else disk(path)
+    if (again_head, again_staged, sorted(untracked_now), sorted(ignored_now)) != (
+            head_commit, staged, sorted(untracked), sorted(ignored)):
+        mismatch = 1
+    for path in sorted(set(head) | set(expected) | set(untracked_now)):
+        have = disk(path)
         proof.update(path + b"\0" + repr(have).encode() + b"\0")
         if have != expected.get(path):
             mismatch += 1
+    for path in ignored_now:
+        proof.update(b"ignored\0" + path + b"\0")
     if mismatch:
         print("preserved patch %s does not reproduce the worktree's files" % rel)
     elif staged not in (head_tree, expected_tree):
@@ -627,6 +713,7 @@ oms_harness_cleanup_temp_dirs() {
   local safe
   local temporary
   local proof
+  local marker_text
 
   while IFS= read -r base; do
     [ -d "$base" ] || continue
@@ -643,6 +730,7 @@ oms_harness_cleanup_temp_dirs() {
       oms_file_lock_pid_alive "$pid" && continue
 
       safe=0
+      marker_text="$(cat "$marker" 2>/dev/null)"
       oms_harness_classify_dead_residue "$base" "$dir" "$marker" && safe=1
       if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
         printf 'kept: %s (dead harness temp dir; worktree %s)\n' \
@@ -657,12 +745,21 @@ oms_harness_cleanup_temp_dirs() {
       fi
 
       if [ "$safe" = 1 ]; then
-        # The proof is recomputed at the point of removal: the owner may have
-        # been dead, but the worktree and its run are read again, not trusted.
+        # The proof is recomputed at the point of removal: the evidence reads
+        # the lifecycle and patch first and the files last, with no cached
+        # bytes, and the owner must still be dead behind an unchanged marker.
+        # No OMS writer reuses a dead delegate worktree: every delegate run
+        # (including --continue, which applies the preserved patch to a fresh
+        # base) takes a new mktemp directory, and salvage only reads a kept
+        # tree into its own scratch. What remains is the operator-applied
+        # cleanup itself, between this last read and the removal below.
         proof="$OMS_HARNESS_RESIDUE_PROOF"
         if ! oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
             [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] ||
-            [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ]; then
+            [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ] ||
+            [ ! -f "$marker" ] || [ -L "$marker" ] ||
+            [ "$(cat "$marker" 2>/dev/null)" != "$marker_text" ] ||
+            oms_file_lock_pid_alive "$pid"; then
           printf 'kept: %s (dead harness temp dir; worktree changed during cleanup)\n' "$dir"
           OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
           continue

@@ -176,6 +176,37 @@ cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegat
 cleanup_out 0 >/dev/null
 [ ! -e "$TMPDIR/oh-my-setting-delegate.settled" ] || fail "apply kept a settled delegate"
 
+# Ignored files are invisible to status and to the patch: only regenerable
+# bytecode may go with the worktree.
+printf '__pycache__/\n*.log\n' >> "$repo/.git/info/exclude"
+delegate_run bytecode task-bytecode "done"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.bytecode/wt/pkg/__pycache__"
+printf 'x' > "$TMPDIR/oh-my-setting-delegate.bytecode/wt/pkg/__pycache__/m.cpython-312.pyc"
+cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegate.bytecode (dead harness temp dir)" ||
+  fail "ignored bytecode alone must not keep a settled delegate"
+cleanup_out 0 >/dev/null
+[ ! -e "$TMPDIR/oh-my-setting-delegate.bytecode" ] || fail "apply kept a delegate holding only bytecode"
+
+delegate_run ignored task-ignored "done"
+printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.ignored/wt/run.log"
+kept_with ignored "not settled: holds ignored file run.log" "an ignored non-bytecode file must keep the worktree"
+
+delegate_run fakecode task-fakecode "done"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt/cache"
+printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt/cache/m.pyc.log"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt/other/__pycache__"
+printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt/other/__pycache__/notes.log"
+kept_with fakecode "not settled: holds ignored file " "only *.pyc/*.pyo inside __pycache__ may be discarded"
+
+# A link standing where a tracked directory belongs is never followed.
+mkdir -p "$repo/sub" "$TMP/outside"
+printf 'tracked\n' > "$repo/sub/a.txt"; cp "$repo/sub/a.txt" "$TMP/outside/a.txt"
+git -C "$repo" add sub && git -C "$repo" commit -qm sub
+delegate_run linked task-linked "done"
+rm -rf "$TMPDIR/oh-my-setting-delegate.linked/wt/sub"
+ln -s "$TMP/outside" "$TMPDIR/oh-my-setting-delegate.linked/wt/sub"
+kept_with linked "not settled: preserved patch" "a symlinked parent directory must keep the worktree"
+
 delegate_run mismatch task-mismatch "done"
 printf 'later\n' >> "$TMPDIR/oh-my-setting-delegate.mismatch/wt/file.txt"
 kept_with mismatch "not settled: preserved patch .oms/artifacts/delegate/claude-mismatch-20261018T000000Z-$run_pid.patch does not reproduce the worktree's files" \
