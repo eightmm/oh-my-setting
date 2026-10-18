@@ -285,7 +285,7 @@ agent_memory_secret_re() {
 agent_memory_machine_re() {
   # Home prefixes identify a machine only at the start of an absolute path
   # token. A fixture's "$TMP/home/user" or relative/home/user is portable.
-  printf '%s\n' '((^[+]?|[[:space:]=(:<>]|\[|[a-z][a-z0-9+.-]*://)["'\''`]?/(hom[e]|User[s])/[^/$[:space:]"'\''`{}]+|(^|[[:space:]=(:<>]|\[|[a-z][a-z0-9+.-]*://)["'\''`]?/(scratc[h]|lustr[e]|gpf[s]|beegf[s])/[^[:space:]"'\''`{}]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
+  printf '%s\n' '((^[+]?|[[:space:]=(:<>]|\[|[a-z][a-z0-9+.-]*://)["'\''`]?/(hom[e]|User[s])/[^/$[:space:]"'\''`{}]+|(^[+]?|[[:space:]=(:<>]|\[|[a-z][a-z0-9+.-]*://)["'\''`]?/(scratc[h]|lustr[e]|gpf[s]|beegf[s])/[^[:space:]"'\''`{}]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
 }
 
 agent_memory_sensitive_re() {
@@ -430,10 +430,10 @@ agent_memory_sensitive_line_pattern() {  # TIER LINE
   else
     case "$lower" in */hom[e]/*) printf 'home-path\n'; return 0 ;; esac
     case "$lower" in */user[s]/*) printf 'user-path\n'; return 0 ;; esac
-    case "$lower" in /scratc[h]/*|*' /scratc[h]/'*|*'=/scratc[h]/'*) printf 'scratch-path\n'; return 0 ;; esac
-    case "$lower" in /lustr[e]/*|*' /lustr[e]/'*|*'=/lustr[e]/'*) printf 'lustre-path\n'; return 0 ;; esac
-    case "$lower" in /gpf[s]/*|*' /gpf[s]/'*|*'=/gpf[s]/'*) printf 'gpfs-path\n'; return 0 ;; esac
-    case "$lower" in /beegf[s]/*|*' /beegf[s]/'*|*'=/beegf[s]/'*) printf 'beegfs-path\n'; return 0 ;; esac
+    case "$lower" in /scratc[h]/*|+/scratc[h]/*|*' /scratc[h]/'*|*'=/scratc[h]/'*) printf 'scratch-path\n'; return 0 ;; esac
+    case "$lower" in /lustr[e]/*|+/lustr[e]/*|*' /lustr[e]/'*|*'=/lustr[e]/'*) printf 'lustre-path\n'; return 0 ;; esac
+    case "$lower" in /gpf[s]/*|+/gpf[s]/*|*' /gpf[s]/'*|*'=/gpf[s]/'*) printf 'gpfs-path\n'; return 0 ;; esac
+    case "$lower" in /beegf[s]/*|+/beegf[s]/*|*' /beegf[s]/'*|*'=/beegf[s]/'*) printf 'beegfs-path\n'; return 0 ;; esac
     case "$lower" in */.ss[h]/*) printf 'ssh-dir\n'; return 0 ;; esac
     case "$lower" in */.aw[s]/*) printf 'aws-dir\n'; return 0 ;; esac
     case "$lower" in *cluster*[=:]*) printf 'cluster-field\n'; return 0 ;; esac

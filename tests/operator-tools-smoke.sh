@@ -330,7 +330,7 @@ CONTINUATION
     sensitive_patch = bad_patch.with_name("continuation-sensitive.patch")
     sensitive_patch.write_bytes(artifact_patch.read_bytes().replace(b"+new\n", b"+-----BE" + b"GIN PRIVATE KEY-----\n"))
     # Repository context in a continuation patch is not outbound content; only added lines are scanned.
-    scratch_line = "$project/scratc" + "h/y.txt"
+    scratch_line = "/scratc" + "h/y.txt"
     head_lines = "--- a/value.txt\n+++ b/value.txt\n@@ -1 +1,2 @@\n old\n"
     context_patch = bad_patch.with_name("continuation-context.patch")
     context_patch.write_text(head_lines.replace("+1,2", "+1,3") + " " + scratch_line + "\n+new\n")
