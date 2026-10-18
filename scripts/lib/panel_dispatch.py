@@ -235,11 +235,10 @@ def _patch_in_head(repo, body):
             return False
 
 
-def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, allow_extra_round=None,
-                 patch_reference=None):
+def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, patch_reference=None):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
-    from terminal_panel import MAX_PROMPT, _revision_rounds, _rework_history, clean, events, owning_attempt
-    from terminal_panel import policy, repository, results, session_stored, verified_patch, work_repository
+    from terminal_panel import MAX_PROMPT, _rework_history, clean, events, owning_attempt
+    from terminal_panel import repository, results, session_stored, verified_patch, work_repository
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
         raise ValueError("invalid task ID to continue")
     head_repo = work_repository(work_repo or repo)
@@ -274,8 +273,6 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     # A released main does not prove its worker or provider session has stopped.
     if not all(historical_worker_exited(row) for row in earlier):
         raise ValueError("historical worker exit is unconfirmed for task %s; continuation refused" % task_id)
-    rounds = _revision_rounds(repo, earlier)
-    limit = policy()["pool"]["max_rework_rounds"]
     last = earlier[-1]
     session = last.get("refs", {}).get("native_session")
     found = results(repo, task_id)["rows"]
@@ -321,10 +318,6 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
         raise ValueError("stopped write work is not transferred by --continue; first run oms panel --salvage %s "
                          "--attempt %s, inspect the recovery, then include recovered work in a fresh dispatch brief"
                          % (task_id, last["attempt_id"]))
-    if rounds >= limit and not allow_extra_round:
-        raise ValueError("task %s reached %d completed write rework rounds (cap %d); "
-                         "review the brief, then use --allow-extra-round REASON for one owner override"
-                         % (task_id, rounds, limit))
     patch = call.get("patch") if eligible_result else None
     where = ""
     if patch:
@@ -433,15 +426,10 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
-             allow_extra_round=None, candidate=None):
+             candidate=None):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
     from terminal_panel import continuation, events, newest_route_model, provider_catalog, routing_status
     from terminal_panel import run_dispatch, safe_label, selected_route
-    if allow_extra_round is not None:
-        if (not continue_task or not isinstance(allow_extra_round, str) or not allow_extra_round.strip()
-                or len(allow_extra_round.encode("utf-8")) > 1000 or "\0" in allow_extra_round):
-            raise ValueError("--allow-extra-round requires --continue and a reason of 1..1000 bytes")
-        _validate_dry_run_inputs(allow_extra_round, None)
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
                            task_id=task_id, candidate=candidate)
     if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
@@ -492,7 +480,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         if role not in WRITERS or not brief or prompt or task_id:
             raise ValueError("--continue takes a write-capable role and --brief-file, not --prompt or --task-id")
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
-                                           child_environment(owner, repo), work_repo, allow_extra_round,
+                                           child_environment(owner, repo), work_repo,
                                            patch_reference=continuation_patch)
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
@@ -513,8 +501,6 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
                     fallback = None
         options = {}
-        if allow_extra_round is not None:
-            options["allow_extra_round"] = allow_extra_round
         if candidate is not None:
             options["candidate"] = candidate
         if continuation_patch:
@@ -1123,11 +1109,7 @@ def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution
 
 def _valid_rework_context(context, member):
     from terminal_panel import TIERS, WRITERS, _dispatch_call_path
-    return (isinstance(context, dict) and set(context) in (
-                {"role", "scope", "workload", "brief", "brief_sha256"},
-                {"role", "scope", "workload", "brief", "brief_sha256", "extra_round_reason"})
-            and ("extra_round_reason" not in context or isinstance(context["extra_round_reason"], str)
-                 and 0 < len(context["extra_round_reason"].encode("utf-8")) <= 1000)
+    return (isinstance(context, dict) and set(context) == {"role", "scope", "workload", "brief", "brief_sha256"}
             and context.get("role") in WRITERS and context.get("workload") in TIERS
             and isinstance(context.get("scope"), list)
             and all(isinstance(path, str) and room.normalize_scope(path) == path for path in context["scope"])
@@ -1600,7 +1582,7 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
-                 allow_extra_round=None, candidate=None, continuation_patch=None):
+                 candidate=None, continuation_patch=None):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
     from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
@@ -1642,8 +1624,6 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  "--candidate-base", candidate["base"]]
     plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "task_id": task_id,
             "argv": argv, "executes": False}
-    if allow_extra_round is not None:
-        plan["extra_round_reason"] = allow_extra_round
     if scopes:
         if role not in WRITERS or access != "write":
             raise ValueError("--scope declares a write role's files; use it with --access write")
@@ -1846,8 +1826,6 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 recorded_brief = repo / recorded_brief
             rework = (dict(role=role, scope=scopes or [], workload=route["workload"],
                            brief=_read_dispatch_brief(recorded_brief).decode("utf-8")) if access == "write" else None)
-            if rework is not None and allow_extra_round is not None:
-                rework["extra_round_reason"] = allow_extra_round
             launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
                                              task_id=task_id)
             command = argv

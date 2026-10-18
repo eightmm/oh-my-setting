@@ -926,7 +926,7 @@ with patch.dict(os.environ, OMS_HOOK_AGENT="codex"):
 assert "control-tower main" in tower and "--owner codex --room binding-room" in tower, tower
 assert "trust boundaries" in tower, tower
 assert all(token in tower for token in ("one notification per call", "configured parallelism", "same turn",
-                                       "--continue", "rework limit")), tower
+                                       "--continue")), tower
 for trigger in ("security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, install)",
                 "verifier before declaring completion (original request against final result)",
                 "integrator when merging or resolving conflicts", "performance-engineer when performance needs measurement",
@@ -947,7 +947,7 @@ assert "set your status: oms room send" in tower and "--kind status" in tower, t
 with patch.object(hook_state, "panel_status_hint", return_value=""):
     short = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 assert len(short) <= 450 and "control-tower main" in short and "your system prompt" in short, short
-assert all(token in short for token in ("per call", "same turn", "--continue", "rework limit")), short
+assert all(token in short for token in ("per call", "same turn", "--continue")), short
 assert "Delegate implementation" not in short and "keep review/admission/finalize" in short, short
 assert "fix of at most two lines" in short and "shorter than a brief" not in short, short
 assert "fix of at most two lines" in tower and "longer than the edit" not in tower, tower

@@ -1760,8 +1760,7 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
     agent = payload_agent(payload)
     base = ("[oms panel] control-tower main: delegate via oms panel --dispatch ROLE; "
             "wait per call (one notification); review/admit/re-dispatch on completion; refill configured slots "
-            "in the same turn with next ready or --continue. Review fixes: --continue or fresh scoped task at "
-            "rework limit; edit directly only for admitted-patch integration, conflict resolution, or a fix of at most two lines. "
+            "in the same turn with next ready or --continue. Review fixes: --continue; edit directly only for admitted-patch integration, conflict resolution, or a fix of at most two lines. "
             "keep review/admission/finalize; full rules in "
             + ("your system prompt." if agent == "claude" else "this context."))
     path = None
@@ -1921,7 +1920,7 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "conflict resolution, or a fix of at most two lines; everything else goes to a worker even when the brief feels longer. Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch "
             "it as soon as it finishes, never batch-wait for a wave. Keep configured parallelism full: start the "
             "next ready plan task or follow-up round in the same turn. Send remaining review findings to a worker "
-            "via --continue, or a fresh scoped task at the rework limit. "
+            "via --continue. "
             "Land your own work only when publication is authorized: oms scratch-worktree add starts detached; create a "
             "local nontracking branch with git checkout --no-track -b oms/<task>, then commit, rebase on the remote target, "
             "and run oms land from that worktree. No upstream is needed; oms land pushes the verified SHA to its target. "

@@ -128,7 +128,7 @@ def bootstrap(provider, repo):
         "Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch it "
         "as soon as it finishes, never batch-wait for a wave. Keep configured parallelism full: start the next "
         "ready plan task or follow-up round in the same turn. Send remaining review findings to a worker via "
-        "--continue, or a fresh scoped task at the rework limit. "
+        "--continue. "
         "Edit directly only for admitted-patch integration, conflict resolution, or a fix of at most two lines; "
         "everything else goes to a worker even when the brief feels longer. "
         "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it (--task-id moves it "

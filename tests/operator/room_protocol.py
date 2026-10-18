@@ -149,22 +149,8 @@ for role, rule in routes["roles"].items():
     assert rule["tier"] == expected["workload"]
 from panel_routing import policy
 configured = policy()
-assert configured["pool"] == {"max_rework_rounds": 2}
 assert configured["review_backlog_warn"] == 8
 assert configured["auto_review"] is True
-without_pool = dict(configured)
-del without_pool["pool"]
-with patch("panel_routing.Path.read_text", return_value=json.dumps(without_pool)):
-    assert policy()["pool"] == configured["pool"]
-for invalid_pool in (None, [], {"max_rework_rounds": 0}, {"max_rework_rounds": True},
-                     {"max_rework_rounds": "2"}, {"max_running": 3}, {"unexpected": 1}):
-    with patch("panel_routing.Path.read_text", return_value=json.dumps(dict(configured, pool=invalid_pool))):
-        try:
-            policy()
-        except ValueError as error:
-            assert "positive integers" in str(error)
-        else:
-            raise AssertionError("invalid pool policy accepted")
 for invalid_threshold in (True, -1, "8"):
     with patch("panel_routing.Path.read_text", return_value=json.dumps(dict(configured, review_backlog_warn=invalid_threshold))):
         try:
@@ -253,7 +239,7 @@ for owner in panel.PROVIDERS:
         "release-engineer when deploying", "never all concurrently by default"))
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert all(token in panel.bootstrap(owner, project) for token in (
-        "one notification per call", "configured parallelism", "same turn", "--continue", "rework limit"))
+        "one notification per call", "configured parallelism", "same turn", "--continue"))
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project)
     assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
@@ -1352,25 +1338,7 @@ third = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room
 assert third.returncode == 0, third
 escalated = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
                           capture_output=True, text=True)
-assert escalated.returncode == 0, escalated  # Read calls never exhaust the write rework budget.
-read_rounds = [a for a in listed() if a["task_id"] == "room-continue" and a["refs"].get("panel_role") == "worker"]
-failed_launch = dict(read_rounds[-1], attempt_id="failed-continuation-launch", state="failed",
-                     refs=dict(read_rounds[-1]["refs"], panel_access="write"))
-failed_launch["refs"].pop("panel_location", None)
-reviewed_rounds = [dict(a, state="review", refs=dict(a["refs"], panel_access="write")) for a in read_rounds[:3]]
-products = [dict(kind="delegate", attempt_id=a["attempt_id"], task_id="room-continue", exit=0, verify_exit=0)
-            for a in reviewed_rounds]
-products.append(dict(kind="delegate", attempt_id=failed_launch["attempt_id"], task_id="room-continue", exit=125))
-with patch.object(panel_results, "_records", return_value=(reviewed_rounds + [failed_launch], products)):
-    assert panel._revision_rounds(project, read_rounds + [failed_launch]) == 0
-    with patch.object(panel, "_rework_history", return_value=reviewed_rounds + [failed_launch]), \
-            patch.object(panel, "results", return_value={"rows": []}):
-        try:
-            panel.continuation(project, "claude", None, "room-continue", {"provider": "codex"}, brief, room_env)
-        except ValueError as error:
-            assert "2 completed write rework rounds" in str(error) and "--allow-extra-round REASON" in str(error), error
-        else:
-            raise AssertionError("completed write rounds did not enforce the rework cap")
+assert escalated.returncode == 0, escalated
 # Continuation survives retained results that omit the task and never inlines patch bytes it cannot verify.
 import hashlib
 last_round = [a for a in listed() if a["task_id"] == "room-inspection" and a["refs"].get("panel_role") == "worker"][-1]

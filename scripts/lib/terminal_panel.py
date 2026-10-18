@@ -111,7 +111,6 @@ from panel_review import _judgment_mail
 from panel_review import _review_verdict
 from panel_review import _review_dispatch_context
 from panel_review import _rework_history
-from panel_review import _revision_rounds
 from panel_review import _write_brief_artifact
 from panel_review import _review_findings
 from panel_review import _review_fix_notice
@@ -413,8 +412,6 @@ def main(argv=None):
     parser.add_argument("--brief-file", help="scoped task brief for --dispatch")
     parser.add_argument("--continue", dest="continue_task", metavar="TASK_ID",
                         help="continue this main's earlier worker for TASK_ID with --brief-file (worker dispatch)")
-    parser.add_argument("--allow-extra-round", metavar="REASON",
-                        help="owner override of the completed write rework cap for one --continue call; records the reason")
     parser.add_argument("--verify", help="mechanical verifier for a write or review")
     parser.add_argument("--task-id", help="existing plan/task identifier for the worker")
     parser.add_argument("--label", help="short task title for the role board")
@@ -497,8 +494,6 @@ def main(argv=None):
         parser.error("--main requires --dispatch")
     if args.continue_task and (args.dispatch not in WRITERS or not args.brief_file or args.prompt or args.task_id):
         parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no --prompt or --task-id")
-    if args.allow_extra_round is not None and not args.continue_task:
-        parser.error("--allow-extra-round requires --continue and an owner reason")
     if args.scope and (args.dispatch not in WRITERS or args.access != "write"):
         parser.error("--scope requires a write-capable --dispatch role with --access write")
     if args.main:
@@ -742,8 +737,7 @@ def main(argv=None):
             status = dispatch(repo, owner, args.dispatch, args.workload, args.access, args.purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
-                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias,
-                              allow_extra_round=args.allow_extra_round)
+                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

@@ -196,103 +196,68 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     from contextlib import redirect_stderr
     from unittest.mock import Mock, patch
     from panel_routing import allocate
-    # Only successful write products at review count; launch/guard failures and read calls do not.
     main = {"attempt_id": "round-main", "terminal": False}
     history = [dict(attempt_id="round-%d" % i, task_id="round-task", parent_attempt_id="round-main",
                     sequence=i, state="review", refs={"panel_role": "worker", "panel_access": "write"})
                for i in range(3)]
-    products = [dict(kind="delegate", attempt_id=a["attempt_id"], task_id="round-task", exit=0, verify_exit=0)
-                for a in history]
-    noise = [dict(history[0], attempt_id="round-" + name, state=state, sequence=10 + i,
-                  refs=dict(history[0]["refs"], panel_access=access))
-             for i, (name, state, access) in enumerate((("launch", "failed", "write"),
-                    ("guard", "failed", "write"), ("read", "review", "read"), ("unindexed", "review", "write")))]
-    with patch.object(panel_results, "_records", return_value=([main] + history + noise, products)):
-        assert panel._revision_rounds(project, history + noise) == 2
-        assert panel._revision_rounds(project, history[:1] + noise) == 0
-        with patch.object(panel, "owning_attempt", return_value={"round-main"}), \
-                patch.object(panel, "events", side_effect=lambda *a, **k: json.dumps([main] + history)), \
-                patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 0}]}]}):
-            round_brief = temporary / "round-brief.md"
-            round_brief.write_text("Fix the remaining reviewed finding.\n")
-            for workload in ("routine", "frontier"):
-                try:
-                    panel.continuation(project, "claude", None, "round-task", {"provider": "codex", "workload": workload},
-                                       round_brief, {})
-                except ValueError as error:
-                    assert "2 completed write rework rounds" in str(error) and "--allow-extra-round REASON" in str(error)
-                    assert "raise --workload" not in str(error)
-                else:
-                    raise AssertionError("completed rework cap was bypassed")
-            continued, native, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
-                round_brief, {}, allow_extra_round="One final verified correction")
-            assert native is None and "no patch" in note and "no resumable session" in note
+    with patch.object(panel, "owning_attempt", return_value={"round-main"}), \
+            patch.object(panel, "events", side_effect=lambda *a, **k: json.dumps([main] + history)), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 0}]}]}):
+        round_brief = temporary / "round-brief.md"
+        round_brief.write_text("Fix the remaining reviewed finding.\n")
+        continued, native, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
+            round_brief, {})
+        assert native is None and "no patch" in note and "no resumable session" in note
+        continued.unlink()
+        with patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 0,
+                                                                                 "patch": ".oms/artifacts/large.patch"}]}]}), \
+                patch.object(panel, "verified_patch", return_value=b"x" * panel.MAX_PROMPT):
+            try:
+                panel.continuation(project, "claude", None, "round-task", {"provider": "codex"}, round_brief, {})
+            except ValueError as error:
+                assert "exceeds the continuation input budget" in str(error), error
+            else:
+                raise AssertionError("continuation promised an inaccessible oversized patch")
+        with patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 124}]}]}), \
+                patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
+            try:
+                panel.continuation(project, "claude", None, "round-task", {"provider": "codex"}, round_brief, {})
+            except ValueError as error:
+                assert "--salvage round-task --attempt round-2" in str(error), error
+            else:
+                raise AssertionError("stopped write work bypassed salvage")
+        # A review/admit/land tail past the 8-call display slice must not hide the worker's own call,
+        # and a present-but-false guard key is not a guard stop.
+        tail = [{"attempt_id": "later-%d" % i, "exit": 0} for i in range(9)]
+        hidden = [dict(kind="delegate", attempt_id="round-2", task_id="round-task", exit=0, verify_exit=0,
+                       guard=False, event_id="e-round-2")]
+        with patch.object(panel, "results", return_value={"rows": [{"calls": tail}]}), \
+                patch.object(panel_results, "_records", return_value=([main] + history, hidden)), \
+                patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
+            continued, _, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
+                                                    round_brief, {})
             continued.unlink()
-            with patch.object(panel, "_revision_rounds", return_value=0), \
-                    patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 0,
-                                                                                     "patch": ".oms/artifacts/large.patch"}]}]}), \
-                    patch.object(panel, "verified_patch", return_value=b"x" * panel.MAX_PROMPT):
-                try:
-                    panel.continuation(project, "claude", None, "round-task", {"provider": "codex"}, round_brief, {})
-                except ValueError as error:
-                    assert "exceeds the continuation input budget" in str(error), error
-                else:
-                    raise AssertionError("continuation promised an inaccessible oversized patch")
-            with patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 124}]}]}), \
-                    patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
-                try:
-                    panel.continuation(project, "claude", None, "round-task", {"provider": "codex"}, round_brief, {})
-                except ValueError as error:
-                    assert "--salvage round-task --attempt round-2" in str(error), error
-                else:
-                    raise AssertionError("stopped write work bypassed salvage")
-            # A review/admit/land tail past the 8-call display slice must not hide the worker's own call,
-            # and a present-but-false guard key is not a guard stop.
-            tail = [{"attempt_id": "later-%d" % i, "exit": 0} for i in range(9)]
-            hidden = [dict(kind="delegate", attempt_id="round-2", task_id="round-task", exit=0, verify_exit=0,
-                           guard=False, event_id="e-round-2")]
-            with patch.object(panel, "results", return_value={"rows": [{"calls": tail}]}), \
-                    patch.object(panel_results, "_records", return_value=([main] + history, hidden)), \
-                    patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
+            assert "no patch" in note, note
+        # A patch HEAD already contains is not replayed at the old base; any other patch still is.
+        head_patch = b"--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-older\n+old\n"
+        for body, contained in ((head_patch, True), (head_patch.replace(b"-older\n+old", b"-old\n+older"), False)):
+            record = dict(kind="delegate", attempt_id="round-2", patch=".oms/artifacts/p.patch", patch_sha256="a" * 64,
+                          event_id="e-round-2", base_sha="a" * 12)
+            call = dict(attempt_id="round-2", exit=0, patch=".oms/artifacts/p.patch", patch_sha256="a" * 64,
+                        event_id="e-round-2")
+            reference = {}
+            with patch.object(panel, "results", return_value={"rows": [{"calls": [call]}]}), \
+                    patch.object(panel, "verified_patch", return_value=body), \
+                    patch.object(panel_results, "_records", return_value=([main] + history, [record])):
                 continued, _, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
-                                                        round_brief, {}, allow_extra_round="Hidden call stays eligible")
-                continued.unlink()
-                assert "no patch" in note, note
-            # A patch HEAD already contains is not replayed at the old base; any other patch still is.
-            head_patch = b"--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-older\n+old\n"
-            for body, contained in ((head_patch, True), (head_patch.replace(b"-older\n+old", b"-old\n+older"), False)):
-                record = dict(kind="delegate", attempt_id="round-2", patch=".oms/artifacts/p.patch", patch_sha256="a" * 64,
-                              event_id="e-round-2", base_sha="a" * 12)
-                call = dict(attempt_id="round-2", exit=0, patch=".oms/artifacts/p.patch", patch_sha256="a" * 64,
-                            event_id="e-round-2")
-                reference = {}
-                with patch.object(panel, "results", return_value={"rows": [{"calls": [call]}]}), \
-                        patch.object(panel, "verified_patch", return_value=body), \
-                        patch.object(panel_results, "_records", return_value=([main] + history, [record])):
-                    continued, _, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
-                        round_brief, {}, allow_extra_round="Patch placement", patch_reference=reference)
-                text = continued.read_text()
-                continued.unlink()
-                if contained:
-                    assert reference == {} and "already part of the repository at HEAD" in text, (reference, text)
-                else:
-                    assert reference["base"] == "a" * 12
-                    assert "original base, not the current HEAD" in text, text
-    override_member = "call-0123456789abcdee"
-    panel._prepare_dispatch_call(project, shared, override_member, room_owner, "true", project,
-        dict(role="builder", scope=["value.txt"], workload="routine", brief="Bounded correction.",
-             extra_round_reason="One final verified correction"))
-    override = panel.dispatch_store.read(project, override_member + "-launch.json")["rework"]
-    assert override["extra_round_reason"] == "One final verified correction"
-    assert panel._valid_rework_context(override, override_member)
-    for invalid in ("", " " * 2, "x" * 1001):
-        try:
-            panel.dispatch(project, "claude", "builder", None, "write", None,
-                           continue_task="round-task", allow_extra_round=invalid)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("empty or oversized owner override was accepted")
+                    round_brief, {}, patch_reference=reference)
+            text = continued.read_text()
+            continued.unlink()
+            if contained:
+                assert reference == {} and "already part of the repository at HEAD" in text, (reference, text)
+            else:
+                assert reference["base"] == "a" * 12
+                assert "original base, not the current HEAD" in text, text
     # A continuation starts with the complete prior patch and returns one patch
     # against the original base, including when the owner has since moved HEAD.
     round_bin = temporary / "continuation-bin"

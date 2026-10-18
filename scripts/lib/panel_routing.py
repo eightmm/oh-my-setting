@@ -17,7 +17,6 @@ WRITERS = {"worker", "builder", "refactorer", "documenter", "integrator", "perfo
 # Judges of another context's work prefer the provider other than the main's when the tier offers it.
 INDEPENDENT = {"reviewer", "verifier", "security-auditor", "critic"}
 RESEARCH_FAMILIES = {"luna", "haiku"}
-POOL_DEFAULTS = {"max_rework_rounds": 2}
 # Weekly readings are ratios of unlike limits: both under `under` percent, or within `gap` points, count as equal.
 TIE_BAND_DEFAULTS = {"under": 50, "gap": 15}
 
@@ -54,7 +53,7 @@ def valid_route(route):
 def policy():
     value = json.loads((ROOT / "config/panel-routing.json").read_text(encoding="utf-8"))
     if (not isinstance(value, dict) or not {"schema", "main", "tiers", "roles"} <= set(value)
-            <= {"schema", "main", "tiers", "roles", "pool", "tie_band", "review_backlog_warn", "auto_review"} or value.get("schema") != 2):
+            <= {"schema", "main", "tiers", "roles", "tie_band", "review_backlog_warn", "auto_review"} or value.get("schema") != 2):
         raise ValueError("unsupported panel routing policy")
     if "review_backlog_warn" in value and (type(value["review_backlog_warn"]) is not int
                                              or value["review_backlog_warn"] < 0):
@@ -62,11 +61,6 @@ def policy():
     if "auto_review" in value and type(value["auto_review"]) is not bool:
         raise ValueError("panel auto-review setting must be boolean")
     value.setdefault("auto_review", True)
-    pool = value.get("pool", {})
-    if (not isinstance(pool, dict) or not set(pool) <= set(POOL_DEFAULTS)
-            or any(type(number) is not int or number <= 0 for number in pool.values())):
-        raise ValueError("panel pool limits must be positive integers")
-    value["pool"] = dict(POOL_DEFAULTS, **pool)
     band = value.get("tie_band", {})
     if (not isinstance(band, dict) or not set(band) <= set(TIE_BAND_DEFAULTS)
             or any(type(number) is not int or not 0 <= number <= 100 for number in band.values())):

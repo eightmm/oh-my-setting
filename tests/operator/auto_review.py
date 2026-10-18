@@ -602,7 +602,7 @@ fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the ca
 fix_findings = "\n".join(fix_finding_blocks)
 original_fix_notice = panel._review_fix_notice
 for case_number, (case, expected_draft) in enumerate((
-        ("failed-gate", True), ("cap", True), ("truncated-summary", True), ("multiline-verify", True),
+        ("failed-gate", True), ("truncated-summary", True), ("multiline-verify", True),
         ("notice-limit", True), ("notice-exact-limit", True),
         ("private-verifier", False),
         ("missing-candidate", False), ("wrong-candidate-digest", False),
@@ -624,10 +624,6 @@ for case_number, (case, expected_draft) in enumerate((
         refs=dict(worker_attempt["refs"], panel_room_participant=fix_reviewer, panel_role="reviewer",
                   panel_access="read", panel_location="worktree:oms-fixture-candidate-tmp/tmp.candidate"))
     fix_history = [draft_main, worker_attempt, reviewer_attempt]
-    if case == "cap":
-        fix_history[1:1] = [dict(worker_attempt, attempt_id="attempt-prior-%d" % n, sequence=n,
-                                refs=dict(worker_attempt["refs"], panel_room_participant="prior-%d" % n))
-                            for n in (1, 2)]
     if case == "stale-review":
         fix_history.append(dict(worker_attempt, attempt_id="attempt-later-worker", sequence=4,
                                 refs=dict(worker_attempt["refs"], panel_room_participant="later-worker")))
@@ -727,9 +723,6 @@ for case_number, (case, expected_draft) in enumerate((
         assert json.loads(capture.stdout) == ["panel", "--dispatch", "builder", "--continue", fix_task,
                                               "--brief-file", draft_relative, "--verify", verifier,
                                               "--access", "write", "--scope", "scripts/fixture.py"], command
-        if case == "cap":
-            assert "cap of 2 completed write rework rounds is reached" in draft_text and "--allow-extra-round REASON" in draft_text
-            assert "--workload" not in command and "rework cap reached" in draft_mail[0]["text"]
         if case == "truncated-summary":
             assert "complete evidence " * 2300 in draft_text
         assert draft_file.stat().st_mode & 0o077 == 0

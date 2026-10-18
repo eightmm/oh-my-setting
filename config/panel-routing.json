@@ -1,7 +1,6 @@
 {
   "schema": 2,
   "auto_review": true,
-  "pool": {"max_rework_rounds": 2},
   "tie_band": {"under": 50, "gap": 15},
   "review_backlog_warn": 8,
   "main": {

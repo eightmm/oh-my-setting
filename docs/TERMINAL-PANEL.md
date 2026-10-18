@@ -589,7 +589,7 @@ Wait on each dispatched call separately, with one notification per call; review,
 admit or re-dispatch it as soon as it finishes, never batch-wait for a wave.
 Keep configured parallelism full: start the next ready plan task or follow-up
 round in the same turn. Send remaining review findings to a worker with
-`--continue`, or a fresh scoped task at the rework limit.
+`--continue`.
 It edits directly only for admitted-patch integration, conflict resolution, or
 a fix of at most two lines; everything else goes to a worker even when the brief
 feels longer. The syntax-guard PostToolUse hook counts a panel main's own edits
@@ -910,12 +910,6 @@ main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
 Role dispatch refuses a full room before enrollment, checking headroom for assignment and result
 messages. A main has no cap on concurrent calls: split separable work into as many parallel calls as it
-needs. `pool.max_rework_rounds` in `config/panel-routing.json` (default two) counts
-successful write rounds that reached review after the first successful write.
-Read calls, failed launches, guard stops and failed verification consume no rounds.
-At the cap, review the brief; the owner can pass `--allow-extra-round REASON` with
-`--continue` for one additional call. Its reason is recorded in that call's launch
-inputs. Changing `--workload` does not change the cap.
 Interruptions give the child up to 20 seconds to clean up, settle unfinished attempts and send a numeric
 result handoff. Sensitive summaries are withheld with an `oms panel --results --task-id` pointer;
 room races can still prevent delivery, while the indexed evidence remains available.
