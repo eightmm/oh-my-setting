@@ -363,10 +363,33 @@ try:
         print("dirty" if differing or staged != head_tree else "clean")
         raise SystemExit(0)
 
-    # Ignored files are invisible to status and to the preserved patch. .oms is
-    # guarded separately by the caller.
+    def disposable_oms(path):
+        # Worker-session telemetry and cache, plus empty lock files; nothing reads
+        # a finished delegate worktree's own .oms/hooks. Any other .oms file may be
+        # the only copy of a record or artifact.
+        rel = path.decode("utf-8", "surrogateescape")
+        parent, _, leaf = rel.rpartition("/")
+        if rel == ".oms/.gitignore" or rel == ".oms/hooks/events.jsonl":
+            empty_only = False
+        elif parent == ".oms/hooks/panel-cache" and leaf.endswith(".json"):
+            empty_only = False
+        elif parent == ".oms/artifacts" and leaf.endswith(".lock"):
+            empty_only = True
+        else:
+            return False
+        have = disk(path)
+        if have is None or have is OTHER or have[0] not in (b"100644", b"100755"):
+            return False
+        return not empty_only or have == blob(have[0], b"")
+
+    # Ignored files are invisible to status and to the preserved patch: only
+    # regenerable bytecode and the disposable .oms files above may be discarded.
     for path in ignored:
-        if not path.startswith(b".oms/") and not bytecode(path):
+        if path.startswith(b".oms/"):
+            if not disposable_oms(path):
+                print("holds %s" % os.fsdecode(path))
+                raise SystemExit(0)
+        elif not bytecode(path):
             print("holds ignored file %s" % os.fsdecode(path))
             raise SystemExit(0)
 

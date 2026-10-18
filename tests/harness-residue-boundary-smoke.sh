@@ -198,6 +198,30 @@ mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt/other/__pycache__"
 printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt/other/__pycache__/notes.log"
 kept_with fakecode "not settled: holds ignored file " "only *.pyc/*.pyo inside __pycache__ may be discarded"
 
+# Only worker-session telemetry, cache and empty locks under .oms are disposable;
+# an unindexed artifact or a non-empty lock may be the only copy.
+delegate_run omsok task-omsok "done"
+oms_wt="$TMPDIR/oh-my-setting-delegate.omsok/wt/.oms"
+mkdir -p "$oms_wt/hooks/panel-cache" "$oms_wt/artifacts"
+printf '*\n' > "$oms_wt/.gitignore"
+printf '{}\n' > "$oms_wt/hooks/events.jsonl"
+printf '{}\n' > "$oms_wt/hooks/panel-cache/dashboard.json"
+: > "$oms_wt/artifacts/index.lock"
+cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegate.omsok (dead harness temp dir)" ||
+  fail "allow-listed .oms files alone must not keep a settled delegate"
+cleanup_out 0 >/dev/null
+[ ! -e "$TMPDIR/oh-my-setting-delegate.omsok" ] || fail "apply kept a delegate holding only disposable .oms files"
+
+delegate_run omsart task-omsart "done"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.omsart/wt/.oms/artifacts"
+printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.omsart/wt/.oms/artifacts/x.md"
+kept_with omsart "holds .oms/artifacts/x.md" "an unindexed .oms artifact must keep the worktree"
+
+delegate_run omslock task-omslock "done"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.omslock/wt/.oms/artifacts"
+printf 'held\n' > "$TMPDIR/oh-my-setting-delegate.omslock/wt/.oms/artifacts/x.lock"
+kept_with omslock "holds .oms/artifacts/x.lock" "a non-empty lock file must keep the worktree"
+
 # A link standing where a tracked directory belongs is never followed.
 mkdir -p "$repo/sub" "$TMP/outside"
 printf 'tracked\n' > "$repo/sub/a.txt"; cp "$repo/sub/a.txt" "$TMP/outside/a.txt"

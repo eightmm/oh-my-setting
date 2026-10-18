@@ -19,7 +19,8 @@ never removes regular files, third-party plugins, caches, or directories.
 Dead harness temp dirs holding work are kept ("kept with work"), except a
 delegate worktree whose run finished (a failed one needs an owner decision or
 age) and whose uncommitted files equal, byte for byte, the patch the run
-preserved (digest-checked); the proof is read again just before removal.
+preserved (raw bytes compared with that patch applied to HEAD; no index row is
+needed, a present indexed digest must match); the proof is read again just before removal.
 Scratch worktrees with uncommitted files and HEADs on no ref stay kept. Every
 kept line names the missing proof.
 EOF
