@@ -1025,12 +1025,9 @@ plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "clai
 held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 assert "yours: t2 (running) → oms agent-plan brief --id t2" in held and "next ready: t3" in held and "before starting new work" not in held, held
 from unittest.mock import patch
-clock = int(time.time())
 owner = os.environ["OMS_ROOM_PARTICIPANT"]
-def worker_row(task_id, seconds=150, **overrides):
-    row = {"id": task_id, "state": "claimed", "claimed_by_participant": owner,
-           "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock - seconds)),
-           "ttl": "100", "lease_id": "lease_" + task_id}
+def worker_row(task_id, state="claimed", **overrides):
+    row = {"id": task_id, "state": state, "claimed_by_participant": owner}
     return dict(row, **overrides)
 
 def heartbeat_hint(rows, dormant=False):
@@ -1041,14 +1038,13 @@ def heartbeat_hint(rows, dormant=False):
             row["updated"] = "2020-01-01T00:00:00Z"
         plan_path.write_text(json.dumps(data))
     original = plan_path.read_bytes()
-    with patch.object(hook_state.time, "time", return_value=clock):
-        message = hook_state.panel_plan_hint(payload("tower"))
+    message = hook_state.panel_plan_hint(payload("tower"))
     assert original == plan_path.read_bytes(), "hint silently renewed a lease"
     assert len(message) < 500 and "\n" not in message, message
-    assert message.count("claim age:") <= 1 and message.count("refresh:") <= 1, message
+    assert "claim age:" not in message and "refresh:" not in message, message
     return message
 
-foreign = worker_row("foreign", seconds=100000, claimed_by_participant="different-main", provider="claude")
+foreign = worker_row("foreign", claimed_by_participant="different-main", provider="claude")
 for first_state, hold_state in (("review", "claimed"), ("landing", "running")):
     first = worker_row("first", state=first_state)
     second = worker_row("second", state=hold_state)
@@ -1056,35 +1052,12 @@ for first_state, hold_state in (("review", "claimed"), ("landing", "running")):
         message = heartbeat_hint([first, second, foreign], dormant)
         if first_state == "review":
             assert "yours: second (claimed)" in message and "(task second)" not in message, message
-        assert "claim age: 150s / ttl 100s" in message, message
-        assert "refresh: oms agent-plan touch --id second --lease-id lease_second" in message, message
+        assert "claim age:" not in message and "refresh:" not in message, message
         assert "foreign" not in message and "lease_first" not in message, message
     assert "claim age:" not in heartbeat_hint([first])
-younger, older = worker_row("younger", seconds=80), worker_row("older", seconds=200, state="running")
-message = heartbeat_hint([younger, older, foreign])
-assert "yours: older (running)" in message and "claim age: 200s / ttl 100s" in message, message
-assert "--id older --lease-id lease_older" in message and "lease_younger" not in message, message
-message = heartbeat_hint([older, younger])
-assert "yours: older (running)" in message and "--id older --lease-id lease_older" in message, message
-for bad_clock in (None, "", "garbage", {}, "2099-01-01T00:00:00Z"):
-    invalid = worker_row("invalid", claimed_at=bad_clock)
-    if bad_clock is None:
-        invalid.pop("claimed_at")
-    message = heartbeat_hint([invalid, older, foreign])
-    assert "claim age: 200s / ttl 100s" in message and "lease_older" in message, message
-    assert "claim age: unknown" in heartbeat_hint([invalid])
-assert "refresh:" not in heartbeat_hint([worker_row("fresh", seconds=79)])
-assert "refresh:" in heartbeat_hint([worker_row("near", seconds=80)])
-with patch.dict(os.environ, {"OMS_PLAN_CLAIM_TTL": "200"}):
-    assert "refresh:" not in heartbeat_hint([worker_row("default", seconds=159, ttl="")])
-    assert "refresh:" in heartbeat_hint([worker_row("default", seconds=160, ttl="")])
-for ttl in ("9" * 6000, "0" * 6000 + "100", "1" + "0" * 5999):
-    message = heartbeat_hint([worker_row("large", ttl=ttl)])
-    assert "9" * 100 not in message and "0" * 100 not in message, message
-    assert ("refresh:" in message) == (ttl.lstrip("0") == "100"), message
-for token in ("", "has whitespace", "x" * 1000):
-    assert "refresh:" not in heartbeat_hint([worker_row("missing-lease", lease_id=token)])
-assert "refresh:" not in heartbeat_hint([worker_row("x" * 100)])
+older = worker_row("older", state="running")
+message = heartbeat_hint([older, foreign])
+assert "yours: older (running)" in message and "claim age:" not in message and "refresh:" not in message, message
 assert "claim age:" not in heartbeat_hint([foreign])
 assert heartbeat_hint([foreign], dormant=True) == ""
 # Restore the task expected by the existing resume/status fixtures below.

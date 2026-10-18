@@ -6323,16 +6323,16 @@ test_agent_plan_lifecycle() {
   if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
     fail "commit finish without review evidence must be rejected"
   fi
-  assert_file_contains "$d/err" 'pass --artifact and --patch'
+  assert_file_contains "$d/err" 'pass --artifact'
   before="$(cat "$d/.oms/plan/tasks.json")"
-  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --artifact artifact.md --patch change.patch >"$d/err" 2>&1; then
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --artifact artifact.md >"$d/err" 2>&1; then
     fail "commit finish without receipt must be rejected"
   fi
   assert_file_contains "$d/err" 'no passed oms land receipt'
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "evidence on a rejected finish changed plan"
   "$SH" --repo "$d" release --id integrated >/dev/null
   "$SH" --repo "$d" claim --id integrated --provider codex >/dev/null
-  "$SH" --repo "$d" review --id integrated --artifact artifact.md --patch change.patch >/dev/null
+  "$SH" --repo "$d" review --id integrated --artifact artifact.md >/dev/null
   before="$(cat "$d/.oms/plan/tasks.json")"
   if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
     fail "commit finish without receipt must be rejected"
@@ -6406,7 +6406,7 @@ t = json.load(open(sys.argv[1], encoding="utf-8"))
 landing = {"kind": "commit", "sha": sys.argv[2],
            "receipt_sha256": hashlib.sha256(open(sys.argv[3], "rb").read()).hexdigest()}
 assert t["state"] == "done" and t["landing"] == landing, t
-assert t["artifact"] == "artifact.md" and t["patch"] == "change.patch", t
+assert t["artifact"] == "artifact.md" and t["patch"] == "", t
 assert t["history"][-1]["kind"] == "finish" and t["history"][-1]["landing"] == landing, t
 PY
   "$SH" --repo "$d" status --json | python3 -c '

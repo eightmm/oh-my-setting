@@ -1202,6 +1202,9 @@ assert "oms patch-land" not in plan_hint, "cross-repo plan hint suggested unsupp
 same_repo_hint = call(plan_hint_request + ["--repo", str(project)], dict(room_env, OMS_PANEL_DISPATCH="1"))
 assert "oms patch-land --repo %s --patch " % project in same_repo_hint and "--plan-task cross-repo-plan" in same_repo_hint, same_repo_hint
 call(plan_cli + ["add", "--id", "plan-link", "--title", "Plan-linked dispatch"])
+call(plan_cli + ["add", "--id", "plan-link-dependency", "--title", "Unfinished dependency"])
+call(plan_cli + ["add", "--id", "plan-link-dependent", "--title", "Blocked plan-linked dispatch",
+                 "--depends", "plan-link-dependency"])
 plan_dispatch = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                  "--dispatch", "worker", "--owner", "claude", "--purpose", "investigate", "--workload", "light",
                  "--prompt", "Inspect value.txt without edits.", "--task-id", "plan-link", "--label", "Plan linked"]
@@ -1210,13 +1213,28 @@ call(plan_dispatch + ["--dry-run"], room_env)
 assert plan_task()["state"] == "ready", plan_task()
 linked = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
 assert linked.returncode == 0, linked
-held = plan_task()
-assert held["state"] == "running" and held["provider"] == "claude" and held["claimed_by_participant"] == room_owner, held
-assert "plan plan-link running (lease %s)" % held["lease_id"] in linked.stderr, linked.stderr
-assert "agent-plan review --id plan-link --lease-id %s" % held["lease_id"] in linked.stderr, linked.stderr
-assert "agent-plan finish --id plan-link --landed-commit SHA" in linked.stderr, linked.stderr
+assert "plan plan-link is ready; panel left it unchanged" in linked.stderr, linked.stderr
+assert plan_task()["state"] == "ready", plan_task()
+call(plan_cli + ["claim", "--id", "plan-link", "--provider", "claude"], room_env)
+held = json.loads(call(plan_cli + ["show", "--id", "plan-link"]))
+call(plan_cli + ["start", "--id", "plan-link", "--lease-id", held["lease_id"]])
 again = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
-assert again.returncode == 0 and plan_task() == held and "lease %s" % held["lease_id"] in again.stderr, again
+assert again.returncode == 0 and plan_task()["state"] == "running", again
+assert "plan plan-link running (lease %s)" % held["lease_id"] in again.stderr, again.stderr
+dependent_read = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-link-dependent", "--label", "Read dependency"],
+                                env=room_env, capture_output=True, text=True)
+assert dependent_read.returncode == 0 and "is ready; panel left it unchanged" in dependent_read.stderr, dependent_read
+assert json.loads(call(plan_cli + ["show", "--id", "plan-link-dependent"]))["state"] == "ready"
+call(plan_cli + ["add", "--id", "plan-link-owned", "--title", "Already-owned read dispatch"])
+call(plan_cli + ["claim", "--id", "plan-link-owned", "--provider", "claude"],
+     room_env)
+owned = json.loads(call(plan_cli + ["show", "--id", "plan-link-owned"]))
+call(plan_cli + ["start", "--id", "plan-link-owned", "--lease-id", owned["lease_id"]])
+owned_dispatch = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-link-owned", "--label", "Observe owned"],
+                                env=room_env, capture_output=True, text=True)
+assert owned_dispatch.returncode == 0, owned_dispatch
+assert "plan plan-link-owned running (lease %s)" % owned["lease_id"] in owned_dispatch.stderr, owned_dispatch.stderr
+assert json.loads(call(plan_cli + ["show", "--id", "plan-link-owned"]))["lease_id"] == owned["lease_id"]
 call(plan_cli + ["add", "--id", "plan-held", "--title", "Held by codex"])
 call(plan_cli + ["claim", "--id", "plan-held", "--provider", "codex"],
      dict(environment, OMS_ROOM_PARTICIPANT=main_attempts["codex"]))
@@ -1232,6 +1250,10 @@ call(plan_cli + ["claim", "--id", "plan-ownerless", "--provider", "codex"])
 write_plan_dispatch = (plan_dispatch[:plan_dispatch.index("--prompt")] +
                        ["--purpose", "implement", "--access", "write", "--workload", "light",
                         "--brief-file", str(project / "write-brief.md"), "--verify", "true"])
+write_link = subprocess.run(write_plan_dispatch + ["--task-id", "plan-link-dependent", "--label", "Claim dependency task"],
+                            env=room_env, capture_output=True, text=True)
+assert write_link.returncode != 0 and "unfinished dependencies" in write_link.stderr, write_link
+assert json.loads(call(plan_cli + ["show", "--id", "plan-link-dependent"]))["state"] == "ready"
 thread = project / ".oms/threads" / (shared + ".jsonl")
 for refused_id in ("plan-blocked", "plan-held", "plan-ownerless"):
     before_thread, before_provider = thread.read_bytes(), worker_log.read_bytes()

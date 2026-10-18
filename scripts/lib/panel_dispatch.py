@@ -624,7 +624,7 @@ def _uses_smoke_runner(suite, target):
 
 
 def plan_link(repo, owner, task_id, env, caller, access="read"):
-    """Start a main's owned task; freeze observation without giving its worker plan authority."""
+    """Bind owned tasks for workers; leave ready read-only tasks informational."""
     from terminal_panel import ENTRY, PlanBinding, active_mains
     base = ["bash", str(ENTRY), "agent-plan", "--repo", str(repo)]
     plan_env = dict(env, OMS_ROOM_PARTICIPANT=caller) if caller else dict(env)
@@ -675,6 +675,9 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
         unprotected("is cancelled; panel left it unchanged")
         if access == "write":
             raise ValueError("plan task %s is cancelled; create a new task to continue" % task_id)
+        return None
+    if state == "ready" and access == "read":
+        unprotected("is ready; panel left it unchanged")
         return None
     if state not in ("ready", "claimed", "running"):
         unprotected("is %s; panel left it unchanged" % state)

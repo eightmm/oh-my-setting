@@ -1838,34 +1838,6 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
             mine_id, plain_line(mine.get("state"), 12), mine_id))
         if mine.get("state") == "review":
             parts.append("check retained results first; inspect the artifact, integrate and verify; record the owner result before stopping")
-    if worker_holds:
-        known_ages = []
-        for held in worker_holds:
-            with contextlib.suppress(TypeError, ValueError, OverflowError):
-                anchor = datetime.strptime(held.get("claimed_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                seconds = clock - anchor.timestamp()
-                if seconds >= 0:
-                    known_ages.append((int(seconds), held))
-        age, held = max(known_ages, key=lambda item: item[0]) if known_ages else (None, worker_holds[0])
-        # Normalize decimal text without converting a potentially thousands-
-        # digit TTL to one integer. The comparison below retains its exact value.
-        ttl = "3600"
-        for value in (os.environ.get("OMS_PLAN_CLAIM_TTL", ""), held.get("ttl", "")):
-            if isinstance(value, str) and value.isdecimal():
-                ttl = "".join(str(int(digit)) for digit in value).lstrip("0") or "0"
-        ttl_display = ttl + "s" if len(ttl) <= 12 else ttl[:12] + "…s (%d digits)" % len(ttl)
-        note = "claim age: %ss / ttl %s" % (age, ttl_display) if age is not None else "claim age: unknown"
-        if held is not mine:
-            note += " (task %s)" % plain_line(held["id"], 40)
-        parts.append(note)
-        # age*5 >= ttl*4 is the 80% threshold. Decimal length/order avoids
-        # interpreter integer digit limits and never truncates authority tokens.
-        limit = str(age * 5 // 4) if age is not None else ""
-        near_expiry = age is not None and (len(ttl) < len(limit) or len(ttl) == len(limit) and ttl <= limit)
-        task_id, lease = held["id"], held.get("lease_id", "")
-        if (near_expiry and isinstance(lease, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", lease)
-                and re.fullmatch(r"[A-Za-z0-9._-]{1,40}", task_id)):
-            parts.append("refresh: oms agent-plan touch --id %s --lease-id %s" % (task_id, lease))
     if ready_hint:
         parts.append(ready_hint)
         if not mine:
