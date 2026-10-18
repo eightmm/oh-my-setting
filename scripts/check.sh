@@ -1256,9 +1256,12 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
 fi
 
 # A plan that already runs all of scripts-smoke (uncapped full) covers these.
-if { [ "$RUN_QUICK" = 1 ] || [ "$RUN_AFFECTED" = 1 ]; } && [ "$RUN_SMOKE" = 0 ] && [ "$repo_invariants_in_plan" = 0 ]; then
+if { [ "$RUN_QUICK" = 1 ] || [ "$RUN_AFFECTED" = 1 ]; } && [ "$RUN_SMOKE" = 0 ] && [ "$repo_invariants_in_plan" = 0 ] \
+    && [ -f "$ROOT/tests/run-smoke-shard.sh" ] && [ -f "$ROOT/tests/scripts-smoke.sh" ]; then
   repo_invariant_args=()
   for repo_invariant_name in "${REPO_INVARIANT_TESTS[@]}"; do
+    # Fixture repositories copy check.sh without these tests; only name defined tests.
+    grep -q "^${repo_invariant_name}() {" "$ROOT/tests/scripts-smoke.sh" || continue
     case "$repo_invariants_selected" in *" $repo_invariant_name "*) continue ;; esac
     repo_invariant_args[${#repo_invariant_args[@]}]=--only
     repo_invariant_args[${#repo_invariant_args[@]}]="$repo_invariant_name"
