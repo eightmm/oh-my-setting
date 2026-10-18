@@ -126,7 +126,8 @@ ma_read_guard_begin() {  # PRIVATE_DIR
   MA_READ_GUARD_DIR="$1/read-guard"
   oms_git_assert_safe_execution_config "$REPO" diff-read || return 2
   oms_git_assert_plain_index "$REPO" || return 2
-  oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" "$MA_READ_SOURCE_REPO" || return 2
+  # Only the baseline needs the exclusion: the diff walks baseline rows alone.
+  OMS_WG_SKIP_VOLATILE=1 oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" "$MA_READ_SOURCE_REPO" || return 2
   oms_git_execution_state_snapshot "$REPO" "$MA_READ_GUARD_DIR/state/git-execution-state" || return 2
   MA_READ_STATE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/state/git-execution-state")" || return 2
   ma_read_guard_snapshot_source
@@ -172,6 +173,10 @@ ma_read_guard_assert() {
     oms_git_assert_plain_index "$root" || return 2
     changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" "" "$execution" | tr -d '\r')" || return 2
     hard="" soft=""
+    if [ -s "$MA_READ_GUARD_DIR/$name/state-detail" ]; then
+      echo "error: read pass changed $name shared-state files:" >&2
+      head -n 8 "$MA_READ_GUARD_DIR/$name/state-detail" | sed 's/^/  /' >&2
+    fi
     for surface in $(printf '%s' "$changed" | tr ',' ' '); do
       # Source content/control changes stay hard; only attributed foreign Git
       # activity gets the same relief as on the state side.

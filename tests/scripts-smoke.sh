@@ -31199,6 +31199,34 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     out="$(ma_read_guard_assert 2>&1)" || rc=$?
     [ "$rc" = 2 ] || fail "linked source tracked mutation must stay hard: $out"
     contains "$out" 'source repository protected surfaces: tracked' || fail "linked source content violation was not named: $out"
+    # Volatile presence families vanish under a read pass without failing it;
+    # authority state still fails and the message names the file.
+    local vol_case vol_file
+    MA_READ_SOURCE_REPO="$read_source"
+    mkdir -p "$project/.oms/hooks/sessions" "$project/.oms/hooks/panel-activity" "$project/.oms/plan"
+    printf '{}\n' > "$project/.oms/hooks/sessions/sess-a.json"
+    printf '{}\n' > "$project/.oms/hooks/panel-activity/att_read.json"
+    printf '{}\n' > "$project/.oms/plan/tasks.json"
+    printf 'row\n' > "$project/.oms/failures.jsonl"
+    for vol_case in sessions/sess-a.json panel-activity/att_read.json; do
+      ma_read_guard_begin "$snap/read-volatile-${vol_case%%/*}" || fail "volatile read snapshot failed"
+      rm -f "$project/.oms/hooks/$vol_case"
+      rc=0
+      out="$(ma_read_guard_assert 2>&1)" || rc=$?
+      [ "$rc" = 0 ] || fail "deleted volatile hooks/$vol_case failed a read pass: $out"
+    done
+    for vol_case in plan/tasks.json failures.jsonl; do
+      ma_read_guard_begin "$snap/read-authority-${vol_case%%/*}" || fail "authority read snapshot failed"
+      case "$vol_case" in
+        *.jsonl) printf 'x\n' > "$project/.oms/$vol_case" ;;
+        *) rm -f "$project/.oms/$vol_case" ;;
+      esac
+      rc=0
+      out="$(ma_read_guard_assert 2>&1)" || rc=$?
+      [ "$rc" = 2 ] || fail "read pass tolerated authority change $vol_case: $out"
+      contains "$out" 'protected surfaces: shared-state' || fail "authority change was not hard: $out"
+      contains "$out" "$vol_case" || fail "read failure did not name $vol_case: $out"
+    done
   )
 }
 

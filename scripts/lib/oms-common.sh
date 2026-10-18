@@ -2664,8 +2664,16 @@ PY
       # state file is a violation regardless of family.
       local transient_helper
       transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
-      OMS_WG_REPO="$repo" python3 - "$transient_helper" <<'PY'
+      OMS_WG_REPO="$repo" OMS_WG_SKIP_VOLATILE="${OMS_WG_SKIP_VOLATILE:-0}" python3 - "$transient_helper" <<'PY'
 import hashlib, importlib.util, os, re, stat, sys
+
+# Read passes (OMS_WG_SKIP_VOLATILE=1) leave out presence/cache/telemetry
+# families that concurrent owners create and delete: per-session and per-attempt
+# hook presence rows, the tick receipt, panel dispatch logs and context packs.
+# Authority families (*.jsonl, plan/, memory/, artifacts/, threads/) stay tracked.
+VOLATILE = ("hooks/sessions/", "hooks/panel-activity/", "tick/",
+            "panel-state/dispatch-logs/", "runtime/")
+skip_volatile = os.environ.get("OMS_WG_SKIP_VOLATILE") == "1"
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 if not os.path.isdir(root):
@@ -2695,6 +2703,8 @@ for base, dirs, files in os.walk(root):
             rows.append("%s LINK" % rel)
             continue
         if transients.is_internal_atomic_temp(root, rel):
+            continue
+        if skip_volatile and rel.startswith(VOLATILE):
             continue
         if re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel):
             try:
