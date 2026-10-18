@@ -117,6 +117,167 @@ if git -C "$repo" worktree list --porcelain |
   fail "valid dead delegate worktree registration survived cleanup"
 fi
 
+# A settled delegate worktree is removable only when its one recorded run
+# finished and the patch the run preserved reproduces the worktree's tree.
+# Scratch worktrees carry no such proof.
+sha() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+events() { bash "$ROOT/scripts/oms" agent-events --repo "$repo" "$@"; }
+run_pid=999999000
+delegate_run() {  # NAME TASK STATE [OUTCOME]: dirty delegate worktree, its run and its preserved patch
+  local dir="$TMPDIR/oh-my-setting-delegate.$1" art="$repo/.oms/artifacts/delegate" rel attempt
+  local tmpindex="$TMP/index.$1"
+  run_pid=$((run_pid + 1))
+  dead_residue "$dir"
+  sed "s/^pid=.*/pid=$run_pid/" "$dir/.oh-my-setting-tmp" > "$TMP/marker" && mv "$TMP/marker" "$dir/.oh-my-setting-tmp"
+  printf 'work %s\n' "$1" > "$dir/wt/new-$1.txt"
+  printf 'edit %s\n' "$1" >> "$dir/wt/file.txt"
+  mkdir -p "$art" "$repo/.oms/artifacts/panel-results"
+  # Two-digit abbreviations: preserved patches written when the repo held fewer objects.
+  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt" read-tree HEAD
+  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt" add -A
+  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt" diff --no-ext-diff --no-textconv --abbrev=4 \
+    --src-prefix=a/ --dst-prefix=b/ --cached --binary HEAD > "$art/claude-$1-20261018T000000Z-$run_pid.patch"
+  printf '# claude delegate\n' > "$art/claude-$1-20261018T000000Z-$run_pid.md"
+  attempt="$(events start --provider claude --tool peer-delegate --task-id "$2" \
+    --ref "panel_location=worktree:oh-my-setting-delegate.$1/wt" --then starting --then working)"
+  if [ "$3" = done ]; then
+    events transition --attempt "$attempt" --state review --then done >/dev/null
+  elif [ "$3" != working ]; then
+    events transition --attempt "$attempt" --state "$3" >/dev/null
+  fi
+  if [ -n "${4:-}" ]; then
+    rel=".oms/artifacts/panel-results/result-$2-0123456789abcdef01234567.json"
+    printf '{"schema":1,"kind":"oms-panel-result","task_id":"%s","revision":"0123456789abcdef01234567","owner":"claude","outcome":"%s","summary":"s","evidence":[]}\n' \
+      "$2" "$4" > "$repo/$rel"
+    index_row event_id="evt_result_$2" kind=panel-result provider=claude exit=0 task_id="$2" \
+      artifact="$rel" artifact_sha256="$(sha "$repo/$rel")"
+  fi
+}
+index_row() {  # JSON_FIELDS...: append one index row built from key=value pairs
+  python3 - "$repo/.oms/artifacts/index.jsonl" "$@" <<'PY'
+import json, sys
+row = dict(arg.split("=", 1) for arg in sys.argv[2:])
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(row) + "\n")
+PY
+}
+cleanup_out() { oms_harness_residue_reset; oms_harness_cleanup_temp_dirs "$1"; }
+drop() { rm -rf "$TMPDIR/oh-my-setting-$1"; git -C "$repo" worktree prune; }
+kept_with() {  # NAME FRAGMENT MESSAGE
+  cleanup_out 0 | grep >/dev/null -F "$2" || fail "$3"
+  [ -d "$TMPDIR/oh-my-setting-delegate.$1/wt" ] || fail "$1: kept delegate was removed"
+  drop "delegate.$1"
+}
+
+delegate_run settled task-settled done
+cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegate.settled (dead harness temp dir)" ||
+  fail "a finished delegate whose patch reproduces its tree must be removable"
+[ -d "$TMPDIR/oh-my-setting-delegate.settled/wt" ] || fail "dry-run removed a settled delegate"
+cleanup_out 0 >/dev/null
+[ ! -e "$TMPDIR/oh-my-setting-delegate.settled" ] || fail "apply kept a settled delegate"
+
+delegate_run mismatch task-mismatch done
+printf 'later\n' >> "$TMPDIR/oh-my-setting-delegate.mismatch/wt/file.txt"
+kept_with mismatch "not settled: preserved patch .oms/artifacts/delegate/claude-mismatch-20261018T000000Z-$run_pid.patch does not reproduce the worktree's files" \
+  "a delegate whose files moved past its patch must be kept with the mismatch named"
+
+delegate_run working task-working working
+kept_with working "is working, not finished" "an unfinished run must keep its worktree"
+
+delegate_run failed task-failed failed
+kept_with failed "is failed with no owner decision and younger than 7 days" "a recent failed run stays the salvage source"
+
+delegate_run decided task-decided failed rejected
+cleanup_out 0 | grep >/dev/null -Fx "removed: $TMPDIR/oh-my-setting-delegate.decided (dead harness temp dir)" ||
+  fail "a failed run whose owner decided may go"
+
+delegate_run aged task-aged failed
+OMS_HARNESS_RESIDUE_AGED_DAYS=0 cleanup_out 0 | grep >/dev/null -Fx "removed: $TMPDIR/oh-my-setting-delegate.aged (dead harness temp dir)" ||
+  fail "a failed run past the aged horizon may go"
+
+delegate_run unbound task-unbound done
+sed 's/^pid=.*/pid=999998999/' "$TMPDIR/oh-my-setting-delegate.unbound/.oh-my-setting-tmp" > "$TMP/marker" &&
+  mv "$TMP/marker" "$TMPDIR/oh-my-setting-delegate.unbound/.oh-my-setting-tmp"
+kept_with unbound "0 delegate artifacts carry pid 999998999, not one" "a run without its preserved patch must be kept"
+
+delegate_run twice task-twice done
+events start --provider claude --tool peer-delegate --task-id task-twice \
+  --ref "panel_location=worktree:oh-my-setting-delegate.twice/wt" --then starting --then working >/dev/null
+kept_with twice "2 attempts record this worktree, not one" "an ambiguous run binding must keep the worktree"
+
+delegate_run empty task-empty done
+: > "$repo/.oms/artifacts/delegate/claude-empty-20261018T000000Z-$run_pid.patch"
+kept_with empty "is empty while the worktree has changes" "an empty preserved patch proves nothing"
+
+# Content staged in the real index and then deleted from the tree is work too.
+delegate_run staged task-staged done
+printf 'staged only\n' > "$TMPDIR/oh-my-setting-delegate.staged/wt/ghost.txt"
+git -C "$TMPDIR/oh-my-setting-delegate.staged/wt" add ghost.txt
+rm "$TMPDIR/oh-my-setting-delegate.staged/wt/ghost.txt"
+kept_with staged "not settled: staged content in the worktree is not reproduced by preserved patch" \
+  "staged-only divergence must keep the delegate"
+
+# The same preserved evidence never frees a scratch worktree.
+delegate_run scratchlike task-scratchlike done
+mv "$TMPDIR/oh-my-setting-delegate.scratchlike" "$TMPDIR/oh-my-setting-scratch.like"
+git -C "$repo" worktree repair "$TMPDIR/oh-my-setting-scratch.like/wt" >/dev/null 2>&1
+oms_harness_mark_tmpdir "$TMPDIR/oh-my-setting-scratch.like" "$repo" "$TMPDIR/oh-my-setting-scratch.like/wt"
+sed "s/^pid=.*/pid=$run_pid/" "$TMPDIR/oh-my-setting-scratch.like/.oh-my-setting-tmp" > "$TMP/marker" &&
+  mv "$TMP/marker" "$TMPDIR/oh-my-setting-scratch.like/.oh-my-setting-tmp"
+cleanup_out 0 | grep >/dev/null -Fx "kept: $TMPDIR/oh-my-setting-scratch.like (dead harness temp dir; worktree has uncommitted or untracked files)" ||
+  fail "a scratch worktree with uncommitted files must stay kept"
+drop scratch.like
+
+# Index rows written inside a worktree reach the owning index before removal,
+# and only on apply; evidence only the worktree holds is copied there first.
+canonical="$repo/.oms/artifacts/index.jsonl"
+admit_case() {  # NAME ROW [EVIDENCE_BYTES]: dead worktree whose .oms holds ROW (and dup.md)
+  local dir="$TMPDIR/oh-my-setting-admit.$1"
+  dead_residue "$dir"
+  mkdir -p "$dir/wt/.oms/artifacts"
+  [ -z "${3:-}" ] || printf '%s\n' "$3" > "$dir/wt/.oms/artifacts/dup.md"
+  printf '%s\n' "$2" > "$dir/wt/.oms/artifacts/index.jsonl"
+}
+admit_case rows '{"event_id":"evt_inner","kind":"admit","exit":0}'
+before="$(sha "$canonical")"
+cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-admit.rows (dead harness temp dir; would merge 1 artifact index row(s) and copy 0 evidence file(s) first)" ||
+  fail "dry-run must report the index rows it would merge"
+[ "$(sha "$canonical")" = "$before" ] || fail "dry-run merged index rows"
+cleanup_out 0 >/dev/null
+[ ! -e "$TMPDIR/oh-my-setting-admit.rows" ] || fail "apply kept a mergeable worktree"
+grep >/dev/null -F '"evt_inner"' "$canonical" || fail "apply removed a worktree without merging its index rows"
+
+admit_case stranded '{"event_id":"evt_stranded","kind":"admit","exit":0,"artifact":".oms/artifacts/dup.md"}' 'only here'
+cleanup_out 1 | grep >/dev/null -F "would merge 1 artifact index row(s) and copy 1 evidence file(s) first" ||
+  fail "dry-run must report the evidence it would copy"
+[ ! -e "$repo/.oms/artifacts/dup.md" ] || fail "dry-run copied evidence"
+cleanup_out 0 >/dev/null
+[ ! -e "$TMPDIR/oh-my-setting-admit.stranded" ] || fail "apply kept a worktree whose evidence it copied"
+[ "$(cat "$repo/.oms/artifacts/dup.md")" = "only here" ] || fail "apply removed the only copy of row evidence"
+grep >/dev/null -F '"evt_stranded"' "$canonical" || fail "apply copied evidence without merging its row"
+
+# A different canonical file, a link in its place, a conflicting same-id row
+# or an absolute path keeps the worktree: nothing may stand in for its copy.
+unmergeable() {  # NAME ROW WANT_REASON_FRAGMENT
+  admit_case "$1" "$2" 'worktree copy'
+  cleanup_out 0 | grep >/dev/null -F "not mergeable: $3" || fail "$1: wrong or missing kept reason"
+  [ "$(cat "$TMPDIR/oh-my-setting-admit.$1/wt/.oms/artifacts/dup.md")" = "worktree copy" ] || fail "$1: worktree evidence was lost"
+  drop "admit.$1"
+}
+unmergeable differs '{"event_id":"evt_stranded","kind":"admit","exit":0,"artifact":".oms/artifacts/dup.md"}' \
+  "row evt_stranded evidence .oms/artifacts/dup.md differs from the owning repo's copy"
+rm -f "$repo/.oms/artifacts/dup.md"; ln -s /nonexistent-target "$repo/.oms/artifacts/dup.md"
+unmergeable dangling '{"event_id":"evt_stranded","kind":"admit","exit":0,"artifact":".oms/artifacts/dup.md"}' \
+  "row evt_stranded evidence .oms/artifacts/dup.md is not a safe regular file in the owning repo"
+rm -f "$repo/.oms/artifacts/dup.md"; printf 'worktree copy\n' > "$repo/.oms/artifacts/dup.md"
+unmergeable conflict '{"event_id":"evt_stranded","kind":"admit","exit":1,"artifact":".oms/artifacts/dup.md"}' \
+  "row evt_stranded conflicts with the owning repo's row of that id"
+unmergeable absolute '{"event_id":"evt_abs","kind":"admit","exit":0,"artifact":"'"$TMPDIR"'/oh-my-setting-admit.absolute/wt/.oms/artifacts/dup.md"}' \
+  "row evt_abs evidence $TMPDIR/oh-my-setting-admit.absolute/wt/.oms/artifacts/dup.md is an absolute path"
+admit_case identical '{"event_id":"evt_stranded","kind":"admit","exit":0,"artifact":".oms/artifacts/dup.md"}' 'worktree copy'
+cleanup_out 0 | grep >/dev/null -Fx "removed: $TMPDIR/oh-my-setting-admit.identical (dead harness temp dir)" ||
+  fail "an identical canonical row and copy must allow removal"
+
 # A delegate killed by SIGKILL leaves its liveness marker. The next delegate
 # start reaps it only when the pid is proven dead and no plan recovery needs it.
 markers="$repo/.oms/delegations"
