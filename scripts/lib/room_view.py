@@ -1341,6 +1341,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                          "action": action(member), "preview": True,
                          **({"tree": True, "expanded": True} if tree_card and n == 0 else {})})
 
+    upper_drawn = []
+
     def tree(group, name, slots):
         if not group or not slots:
             return
@@ -1355,9 +1357,28 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             shown = [group[index]] + shown[1:] if index < start else shown[:-1] + [group[index]]
         hidden = [c for c in group if c not in shown]
         first = len(lines) + 1
+        # Groups above MAIN mirror the tree: the trunk rises out of MAIN, so only the topmost row drawn above it takes the corner.
+        upper = name != "calls"
+        trunk_top = upper and not upper_drawn
+        if upper:
+            upper_drawn.append(name)
+
+        def overflow():
+            after = [m for m in group[start + visible:] if m in hidden]
+            corner = ("┌╌ " if unicode else ",- ") if trunk_top else ("├╌ " if unicode else "+- ") if upper else ("└╌ " if unicode else "`- ")
+            add(padded(" " * stem + corner + glyph("ellipsis", unicode) + " %s more %s / scroll" % (
+                len(hidden), name if name != "calls" else "workers"), width), "metadata")
+            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action((after or hidden)[0]), "preview": True, "tree": True})
+        show_overflow = bool(hidden) and slots > 1
+        if upper and show_overflow:
+            overflow()
         for n, member in enumerate(shown):
             style_key = band_style(member.get("role"), member.get("purpose"))
-            connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
+            if upper:
+                top = trunk_top and n == 0 and not show_overflow
+                connector = ("┌╌ " if top else "├╌ ") if unicode else (",- " if top else "+- ")
+            else:
+                connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
             band_prefix = (glyph(name, unicode) + " " + (name.title() + " " if n == 0 else "")) if name != "calls" else ""
             tag = tagged(member)
@@ -1374,11 +1395,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 hits.pop()
                 card_lines(member, [tagged(member) + "  " + (elapsed(member.get("joined_at")) or "unknown"),
                                     "Task: " + clean(member.get("title"))], indent=4, tree_card=True, band_prefix=band_prefix)
-        if hidden and slots > 1:
-            after = [m for m in group[start + visible:] if m in hidden]
-            add(padded(" " * stem + ("└╌ " if unicode else "`- ") + glyph("ellipsis", unicode) + " %s more %s / scroll" % (
-                len(hidden), name if name != "calls" else "workers"), width), "metadata")
-            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action((after or hidden)[0]), "preview": True, "tree": True})
+        if show_overflow and not upper:
+            overflow()
         bands.append({"name": name, "y1": first, "y2": len(lines), "x1": 1, "x2": width})
         offsets[name] = start
 

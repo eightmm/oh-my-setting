@@ -208,7 +208,7 @@ for columns, rows, menu in ((34, 50, False), (56, 50, False), (76, 16, False), (
             edge = next(hit for hit in tree_rows if hit["action"] == ("result", ident))
             row = geometry_lines[edge["y"] - 1]
             assert display_width(row) == columns and edge["x1"] == 1 and edge["x2"] == columns, (row, edge)
-            assert row.strip()[0] in ("├└╭" if glyphs else "+`"), geometry_picture
+            assert row.strip()[0] in ("┌├└╭" if glyphs else "+`,"), geometry_picture
             if ident == "builder":
                 assert ("╌ ▸ " if glyphs else "- > ") in row and "Sonnet 5.5" in row and "needs approval" in geometry_picture, row
                 assert columns < 100 or "한글 작업 제목" in row, row
@@ -2490,6 +2490,26 @@ for age, kept in ((60, True), (3600, False)):
     # Attention-only views still hide settled calls, lingering or not.
     assert "REVIEWER Fable" not in render(answered, "codex", 160, 50, view="graph", attention_only=True,
                                     navigation={"dismissed": True}), answered_lanes
+# Reviewers above MAIN mirror the call tree: the trunk rises out of MAIN, so the top row (or the fold) takes the corner.
+for glyphs, (top, mid) in ((True, ("┌╌", "├╌")), (False, (",-", "+-"))):
+    for reviewers, rows_high in ((3, 50), (8, 24)):
+        upper = crowd(flow, 0, 0, parent="flow-main", prefix="up")
+        for n in range(reviewers):
+            ident = "up-reviewer-%d" % n
+            upper["room"]["participants"].append({"participant": ident, "role": "reviewer", "joined": True,
+                                                  "model": "gpt-6-sol", "parent": "flow-main", "label": ident})
+            upper["attempts"]["active_recent"].append({"attempt_id": ident, "state": "working", "panel": {
+                "room_id": "flow-room", "room_participant": ident, "role": "reviewer"}})
+        upper_nav = {"dismissed": True}
+        upper_lines = render(upper, "codex", 160, rows_high, view="graph", main_attempt="flow-attempt",
+                             navigation=upper_nav, unicode=glyphs).splitlines()
+        main_y = next(i for i, row in enumerate(upper_lines) if "MAIN" in row)
+        rows = [(hit["y"], upper_lines[hit["y"] - 1]) for hit in upper_nav["hits"] if hit.get("tree") and hit["y"] <= main_y]
+        assert rows and all(y < main_y + 1 for y, _ in rows), (glyphs, reviewers, upper_lines)
+        assert rows[0][1].lstrip().startswith(top) and all(row.lstrip().startswith(mid) for _, row in rows[1:]), (glyphs, rows)
+        assert not any("└╌" in row or "`-" in row for _, row in rows), (glyphs, rows)
+        fold = [row for _, row in rows if " more " in row]
+        assert len(fold) <= 1 and (not fold or fold[0] is rows[0][1]), (glyphs, reviewers, rows)
 lonely = deepcopy(flow)
 lonely["room"]["participants"] = [p for p in lonely["room"]["participants"] if p["participant"] == "flow-main"]
 alone = render(lonely, "codex", 120, 30, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
