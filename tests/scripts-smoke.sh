@@ -19212,7 +19212,7 @@ print(row["hookSpecificOutput"]["additionalContext"])
 
   # Exclusions: memory, .oms, scratch, and paths outside the payload repository.
   rm -f "$row"
-  for excluded in "$project/memory/notes.txt" "$project/.oms/tmp/x.txt" "$project/scratch/y.txt" "$TMP/elsewhere-$$.txt"; do
+  for excluded in "$project/memory/notes.txt" "$project/.oms/tmp/x.txt" "$project/scratch"'/y.txt' "$TMP/elsewhere-$$.txt"; do
     out="$(cd "$project" && edit_payload Write "$excluded" "" "$(seq 1 50)" | panel_env bash "$SH")"
     [ -z "$out" ] || fail "$excluded is not an implementation edit: $out"
   done
