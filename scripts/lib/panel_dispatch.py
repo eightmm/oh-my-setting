@@ -138,10 +138,13 @@ def routing_status(repo, room_id=None, main=None):
         return {}
 
 
-def room_history(repo, owner, task_id=None):
-    """Dispatches per provider in this room and the provider of task_id's write attempt; empty when unknown."""
+def room_history(repo, owner, task_id=None, candidate=None):
+    """Dispatches per provider in this room and the provider that wrote the reviewed work; empty when unknown.
+
+    The writer is bound to linkage, never recency (attempt order follows updated_at, which telemetry advances):
+    the attempt owning the candidate patch digest, else the task's only writing provider."""
     from terminal_panel import child_environment, events
-    recent, writer = {}, None
+    recent, writers, rows = {}, {}, []
     try:
         room_id = room.resolve(repo, child_environment(owner, repo).get("OMS_ROOM_ID"))
         if not room_id:
@@ -152,15 +155,24 @@ def room_history(repo, owner, task_id=None):
                 continue
             ran = refs.get("panel_provider") or attempt.get("provider")
             recent[ran] = recent.get(ran, 0) + 1
+            rows.append(attempt)
             if task_id and attempt.get("task_id") == task_id and refs.get("panel_access") == "write":
-                writer = ran
+                writers[attempt.get("attempt_id")] = ran
+        digest = candidate.get("sha256") if isinstance(candidate, dict) else None
+        if digest and writers:
+            import panel_results
+            _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
+            owner_attempt = next((a.get("attempt_id") for a in artifacts
+                                  if a.get("patch_sha256") == digest and a.get("attempt_id") in writers), None)
+            if owner_attempt:
+                return recent, writers[owner_attempt]
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return None, None
-    return recent, writer
+    return recent, next(iter(set(writers.values()))) if len(set(writers.values())) == 1 else None
 
 
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
-                   repo=None, room_id=None, main=None, task_id=None):
+                   repo=None, room_id=None, main=None, task_id=None, candidate=None):
     from terminal_panel import MODEL_IDS, PROVIDERS, allocate, newest_route_model, policy, provider_catalog
     from terminal_panel import route_family, routing_status
     if owner not in PROVIDERS:
@@ -176,7 +188,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         rows = provider_catalog(target or ",".join(sorted({c["provider"] for tier in policy()["tiers"].values()
                                                            for c in tier})))
         readings = routing_status(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), room_id, main) if not target else {}
-        recent, writer = room_history(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), owner, task_id) \
+        recent, writer = room_history(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), owner, task_id, candidate) \
             if not target else (None, None)
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer)
@@ -430,7 +442,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             raise ValueError("--allow-extra-round requires --continue and a reason of 1..1000 bytes")
         _validate_dry_run_inputs(allow_extra_round, None)
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
-                           task_id=task_id)
+                           task_id=task_id, candidate=candidate)
     if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
         print("WARN: write dispatch has neither a verify command nor a declared scope", file=sys.stderr)
     label = safe_label(label)

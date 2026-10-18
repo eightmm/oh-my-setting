@@ -430,6 +430,27 @@ for action in ("native", "council"):
             panel.council(project, "codex", "heartbeat-council", "Inspect source", "Compare options")
         assert status == 0 and not process.terminate.called and not process.kill.called
 
+# The reviewed writer follows recorded linkage, not attempt recency: late telemetry advances an earlier
+# Claude write's updated_at past the Codex write that produced the reviewed patch.
+def history_row(attempt, provider, task="task-a"):
+    return dict(attempt_id=attempt, task_id=task, provider=provider,
+                refs=dict(panel_alias="a", panel_room_id="r", panel_provider=provider, panel_access="write"))
+history_rows = [history_row("att_codex", "codex"), history_row("att_claude", "claude")]  # Claude is last
+patch_rows = [dict(attempt_id="att_codex", patch_sha256="c" * 64), dict(attempt_id="att_claude", patch_sha256="d" * 64)]
+import panel_dispatch
+with patch.object(panel, "events", side_effect=lambda *a, **k: json.dumps(history_rows)), \
+        patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "r"}), \
+        patch.object(panel_dispatch.room, "resolve", return_value="r"), \
+        patch.object(panel_dispatch.room, "same_room", return_value=True), \
+        patch.object(saved, "_records", return_value=([], patch_rows)):
+    _, writer = panel_dispatch.room_history(project, "claude", "task-a", dict(sha256="c" * 64))
+    assert writer == "codex", writer
+    assert allocate("claude", role="reviewer", installed=both, writer=writer)["provider"] == "claude"
+    assert panel_dispatch.room_history(project, "claude", "task-a", dict(sha256="e" * 64))[1] is None
+    assert panel_dispatch.room_history(project, "claude", "task-a")[1] is None  # mixed writers, no linkage
+    history_rows[1] = history_row("att_claude", "codex")
+    assert panel_dispatch.room_history(project, "claude", "task-a")[1] == "codex"  # one writing provider
+
 for owner in panel.PROVIDERS:
     plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                            "--launch", owner, "--resume", "exact-session-id", "--dry-run"]))
