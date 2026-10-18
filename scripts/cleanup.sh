@@ -16,12 +16,10 @@ Clean safe oh-my-setting install leftovers. Default is --dry-run.
 Removes only known oh-my-setting legacy symlinks and backup skill symlinks;
 never removes regular files, third-party plugins, caches, or directories.
 
-Dead harness temp dirs holding work are kept ("kept with work"), except:
-  - a delegate worktree whose uncommitted files equal the patch its run
-    preserved (digest-checked) and whose task has a final owner decision;
-  - a worktree whose .oms/artifacts/index.jsonl rows are already in, or can be
-    appended to, the owning repo's index (--apply merges them first; a row
-    whose evidence file exists only in the worktree keeps it).
+Dead harness temp dirs holding work are kept ("kept with work"), except a
+delegate worktree whose run finished (a failed one needs an owner decision or
+age) and whose uncommitted files equal, byte for byte, the patch the run
+preserved (digest-checked); the proof is read again just before removal.
 Scratch worktrees with uncommitted files and HEADs on no ref stay kept. Every
 kept line names the missing proof.
 EOF

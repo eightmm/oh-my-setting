@@ -181,24 +181,24 @@ EOF
 }
 
 OMS_HARNESS_RESIDUE_KEEP_REASON=""
-OMS_HARNESS_RESIDUE_MERGE_ROWS=0
-OMS_HARNESS_RESIDUE_COPY_FILES=0
+OMS_HARNESS_RESIDUE_PROOF=""
 
-# Evidence that a dead worktree's work is already preserved in the owning repo.
-# Prints one line: "ok [N]" or the reason it is not proven. Only `merge` writes
-# (to the owning repo's canonical artifact index, under the caller's lock).
-#   settled  delegate run: the one attempt recording this worktree finished
-#            (failed/timed_out ones only once decided or aged past
-#            OMS_HARNESS_RESIDUE_AGED_DAYS, default 7, like --settle-review),
-#            and the patch its run preserved reproduces the worktree's tree.
-#   index    worktree .oms/artifacts/index.jsonl rows are in the canonical
-#            index or can be appended, and each evidence file they name is
-#            byte-identical in the owning repo or absent there; prints
-#            "ok ROWS FILES".
-#   merge    copy those absent evidence files, then append those rows.
+# Reads a dead worktree without running anything it controls. MODE status
+# prints "clean", "dirty" or why it cannot tell: `git status` would run the
+# worktree's clean filters on stat-dirty files, so files are compared with HEAD
+# as raw bytes instead. MODE settled is evidence that a dead delegate
+# worktree's work is already preserved in the owning repo. Prints one line:
+# "ok TOKEN" or the reason it is not proven. The run is settled when the one attempt recording this worktree finished
+# (failed/timed_out ones only once decided or aged past
+# OMS_HARNESS_RESIDUE_AGED_DAYS, default 7, like --settle-review) and the patch
+# the run preserved reproduces the worktree's files byte for byte. TOKEN digests
+# everything the proof read, so a later call can detect a change.
+# The worktree is untrusted: no git conversion (filter, ident, eol, textconv)
+# or add -A runs. Plumbing that never reads attributes builds the expected
+# tree, and the worktree is read directly, never through a link.
 oms_harness_residue_evidence() {  # MODE REPO WORKTREE PID
   python3 -B - "$OMS_HARNESS_RESIDUE_LIB_DIR" "$@" <<'PY' 2>/dev/null | tr -d '\r'
-import hashlib, json, os, re, runpy, shutil, subprocess, sys, tempfile
+import hashlib, json, os, re, runpy, shutil, stat, subprocess, sys, tempfile
 lib, mode, repo, wt, pid = sys.argv[1:6]
 aged_days = os.environ.get("OMS_HARNESS_RESIDUE_AGED_DAYS") or "7"
 INDEX = ".oms/artifacts/index.jsonl"
@@ -209,147 +209,171 @@ try:
 
     def rows_of(root):
         body = store["read_index"](root, INDEX, missing_ok=True)
-        return [(line, json.loads(line.decode("utf-8"))) for line in body.splitlines(True)]
+        return [json.loads(line.decode("utf-8")) for line in body.splitlines(True)]
 
     def read(root, rel, limit):
         return durable["read_no_follow"](root, rel, "residue evidence", max_bytes=limit)
 
-    def evidence_gap(row, copies):
-        # Every row, indexed already or not, must find its worktree-held evidence
-        # byte-identical in the owning repo, or absent there so it can be copied;
-        # reads never follow links.
-        for key in ("artifact", "patch", "source"):
-            rel = row.get(key)
-            if not isinstance(rel, str) or not rel:
-                continue
-            if os.path.isabs(rel):
-                # A merged absolute path would still name the removed worktree; no row needs one.
-                return "row %s evidence %s is an absolute path" % (row["event_id"], rel)
-            if not os.path.lexists(os.path.join(wt, rel)):
-                continue
-            if not rel.startswith(".oms/") or ".." in rel.split("/"):
-                return "row %s evidence %s is outside .oms" % (row["event_id"], rel)
-            try:
-                mine = read(wt, rel, 64 * 1024 * 1024)
-            except BaseException:
-                return "row %s evidence %s is not a safe regular file in the worktree" % (row["event_id"], rel)
-            if not os.path.lexists(os.path.join(repo, rel)):
-                if copies.setdefault(rel, mine) != mine:
-                    return "row %s evidence %s has two contents" % (row["event_id"], rel)
-                continue
-            try:
-                theirs = read(repo, rel, 64 * 1024 * 1024)
-            except BaseException:
-                return "row %s evidence %s is not a safe regular file in the owning repo" % (row["event_id"], rel)
-            if mine != theirs:
-                return "row %s evidence %s differs from the owning repo's copy" % (row["event_id"], rel)
-        return ""
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+               GIT_OPTIONAL_LOCKS="0")
+    def git(*args, index=None):
+        return subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
+                               "-C", wt] + list(args), check=True, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env=dict(env, GIT_INDEX_FILE=index) if index else env).stdout
+    def tree_entries(treeish):
+        entries = {}
+        for item in git("ls-tree", "-r", "-z", "--full-tree", treeish).split(b"\0"):
+            if item:
+                meta, path = item.split(b"\t", 1)
+                mode_, _, oid = meta.split(b" ")
+                entries[path] = (mode_, oid)
+        return entries
+    head_commit = git("rev-parse", "HEAD").decode().strip()
+    head_tree = git("rev-parse", "HEAD^{tree}").decode().strip()
+    staged = git("write-tree").decode().strip()
+    head = tree_entries("HEAD")
+    try:
+        algorithm = git("rev-parse", "--show-object-format").decode().strip() or "sha1"
+    except subprocess.CalledProcessError:
+        algorithm = "sha1"
+    untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard").split(b"\0") if p]
+    if any(m == b"160000" for m, _ in head.values()):
+        print("the worktree contains a submodule, which is not compared")
+        raise SystemExit(0)
+    if any(p.endswith(b"/") for p in untracked):
+        print("the worktree holds a nested repository, which is not compared")
+        raise SystemExit(0)
 
-    def missing_rows():
-        have = {}
-        for _, r in rows_of(repo):
-            have.setdefault(r.get("event_id"), []).append(r)
-        todo, copies = [], {}
-        for line, row in rows_of(wt):
-            if not isinstance(row.get("event_id"), str):
-                return None, None, "a row has no event_id"
-            gap = evidence_gap(row, copies)
-            if gap:
-                return None, None, gap
-            if row["event_id"] not in have:
-                todo.append(line)
-            elif row not in have[row["event_id"]]:
-                return None, None, "row %s conflicts with the owning repo's row of that id" % row["event_id"]
-        return todo, copies, ""
-
-    if mode == "index":
-        todo, copies, why = missing_rows()
-        print("ok %d %d" % (len(todo), len(copies)) if todo is not None else why)
-    elif mode == "merge":
-        todo, copies, why = missing_rows()
-        if todo is None:
-            print(why)
-        else:
-            # Evidence first, so no merged row ever names a file the owning repo lacks.
-            for rel, data in sorted(copies.items()):
-                durable["atomic_mutate"](os.path.join(repo, rel), lambda old, data=data: data, repo,
-                                         missing_ok=True, create_parent=True, expected_exists=False,
-                                         label="residue evidence")
-            if todo:
-                store["append_rows"](repo, os.path.join(repo, INDEX), todo)
-            print("ok %d %d" % (len(todo), len(copies)))
-    else:
-        # The run: the one attempt whose recorded location is this worktree.
-        name = "worktree:%s/wt" % os.path.basename(os.path.dirname(os.path.realpath(wt)))
-        listed = subprocess.run(["bash", os.path.join(os.path.dirname(lib), "oms"), "agent-events", "--repo", repo,
-                                 "list", "--json"], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL).stdout
-        runs = [a for a in json.loads(listed.decode("utf-8")) if (a.get("refs") or {}).get("panel_location") == name]
-        if len(runs) != 1:
-            print("%d attempts record this worktree, not one" % len(runs))
-            raise SystemExit(0)
-        run = runs[0]
-        state, task = run.get("state"), run.get("task_id")
-        if state in ("failed", "timed_out"):
-            # A stopped run is the salvage source until its owner decides or it ages out like --settle-review.
-            sys.path.insert(0, lib)
-            import datetime, pathlib
-            import panel_results
-            outcome = panel_results.outcomes(pathlib.Path(repo), [task]).get(task) if isinstance(task, str) else None
-            changed = datetime.datetime.strptime(run["updated_at"], "%Y-%m-%dT%H:%M:%SZ")
-            now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-            aged = now - changed >= datetime.timedelta(days=float(aged_days))
-            if outcome not in DECIDED and not aged:
-                print("run %s is %s with no owner decision and younger than %s days" % (run["attempt_id"], state, aged_days))
-                raise SystemExit(0)
-        elif state not in ("done", "cancelled", "abandoned"):
-            print("run %s is %s, not finished" % (run["attempt_id"], state))
-            raise SystemExit(0)
-        # The patch the run preserved: the one delegate artifact of this pid.
-        stems = [f[:-3] for f in os.listdir(os.path.join(repo, ".oms/artifacts/delegate"))
-                 if re.fullmatch(r".+-[0-9]{8}T[0-9]{6}Z-%s\.md" % re.escape(pid), f)]
-        if len(stems) != 1:
-            print("%d delegate artifacts carry pid %s, not one" % (len(stems), pid))
-            raise SystemExit(0)
-        rel = ".oms/artifacts/delegate/%s.patch" % stems[0]
+    wtb = os.fsencode(wt)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    def disk(path):
+        # (mode, oid) of the raw bytes on disk, as git would record them; None when absent.
+        # A link or file standing where a parent directory belongs makes the path absent.
+        cur = wtb
+        parts = path.split(b"/")
+        for part in parts[:-1]:
+            cur = os.path.join(cur, part)
+            try:
+                if not stat.S_ISDIR(os.lstat(cur).st_mode):
+                    return None
+            except FileNotFoundError:
+                return None
+        full = os.path.join(cur, parts[-1])
         try:
-            patch = read(repo, rel, 64 * 1024 * 1024)
-        except BaseException:
-            print("no preserved patch %s" % rel)
+            st = os.lstat(full)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            mode, data = b"120000", os.fsencode(os.readlink(full))
+        elif stat.S_ISREG(st.st_mode):
+            fd = os.open(full, os.O_RDONLY | nofollow)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return (b"other", b"")
+                with os.fdopen(fd, "rb", closefd=False) as handle:
+                    data = handle.read()
+            finally:
+                os.close(fd)
+            mode = b"100755" if st.st_mode & 0o111 else b"100644"
+        else:
+            return (b"other", b"")
+        digest = hashlib.new(algorithm)
+        digest.update(b"blob %d\0" % len(data))
+        digest.update(data)
+        return (mode, digest.hexdigest().encode())
+
+    # Paths that differ from HEAD on disk.
+    seen, differing = {}, set(untracked)
+    for path in head:
+        seen[path] = disk(path)
+        if seen[path] != head[path]:
+            differing.add(path)
+    if mode == "status":
+        print("dirty" if differing or staged != head_tree else "clean")
+        raise SystemExit(0)
+
+    # The run: the one attempt whose recorded location is this worktree.
+    name = "worktree:%s/wt" % os.path.basename(os.path.dirname(os.path.realpath(wt)))
+    listed = subprocess.run(["bash", os.path.join(os.path.dirname(lib), "oms"), "agent-events", "--repo", repo,
+                             "list", "--json"], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL).stdout
+    runs = [a for a in json.loads(listed.decode("utf-8")) if (a.get("refs") or {}).get("panel_location") == name]
+    if len(runs) != 1:
+        print("%d attempts record this worktree, not one" % len(runs))
+        raise SystemExit(0)
+    run = runs[0]
+    state, task = run.get("state"), run.get("task_id")
+    if state in ("failed", "timed_out"):
+        # A stopped run is the salvage source until its owner decides or it ages out like --settle-review.
+        sys.path.insert(0, lib)
+        import datetime, pathlib
+        import panel_results
+        outcome = panel_results.outcomes(pathlib.Path(repo), [task]).get(task) if isinstance(task, str) else None
+        changed = datetime.datetime.strptime(run["updated_at"], "%Y-%m-%dT%H:%M:%SZ")
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        aged = now - changed >= datetime.timedelta(days=float(aged_days))
+        if outcome not in DECIDED and not aged:
+            print("run %s is %s with no owner decision and younger than %s days" % (run["attempt_id"], state, aged_days))
             raise SystemExit(0)
-        if not patch.strip():
-            print("preserved patch %s is empty while the worktree has changes" % rel)
+    elif state not in ("done", "cancelled", "abandoned"):
+        print("run %s is %s, not finished" % (run["attempt_id"], state))
+        raise SystemExit(0)
+    # The patch the run preserved: the one delegate artifact of this pid.
+    stems = [f[:-3] for f in os.listdir(os.path.join(repo, ".oms/artifacts/delegate"))
+             if re.fullmatch(r".+-[0-9]{8}T[0-9]{6}Z-%s\.md" % re.escape(pid), f)]
+    if len(stems) != 1:
+        print("%d delegate artifacts carry pid %s, not one" % (len(stems), pid))
+        raise SystemExit(0)
+    rel = ".oms/artifacts/delegate/%s.patch" % stems[0]
+    try:
+        patch = read(repo, rel, 64 * 1024 * 1024)
+    except BaseException:
+        print("no preserved patch %s" % rel)
+        raise SystemExit(0)
+    if not patch.strip():
+        print("preserved patch %s is empty while the worktree has changes" % rel)
+        raise SystemExit(0)
+    for row in rows_of(repo):
+        if row.get("patch") == rel and row.get("patch_sha256") not in (None, hashlib.sha256(patch).hexdigest()):
+            print("preserved patch %s no longer matches its indexed digest" % rel)
             raise SystemExit(0)
-        for _, row in rows_of(repo):
-            if row.get("patch") == rel and row.get("patch_sha256") not in (None, hashlib.sha256(patch).hexdigest()):
-                print("preserved patch %s no longer matches its indexed digest" % rel)
-                raise SystemExit(0)
-        # Compare trees, not diff text: abbreviated blob ids in a patch grow with the object count.
+
+    def expected_entries():
         scratch = tempfile.mkdtemp(prefix="oms-residue-index.")
         try:
-            env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
-            def git(*args, index=None):
-                return subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
-                                       "-C", wt] + list(args), check=True, stdin=subprocess.DEVNULL,
-                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                      env=dict(env, GIT_INDEX_FILE=index) if index else env).stdout.decode().strip()
             with open(os.path.join(scratch, "preserved.patch"), "wb") as handle:
                 handle.write(patch)
-            current, patched = os.path.join(scratch, "current"), os.path.join(scratch, "patched")
-            git("read-tree", "HEAD", index=current)
-            git("add", "-A", index=current)
+            patched = os.path.join(scratch, "patched")
             git("read-tree", "HEAD", index=patched)
             git("apply", "--cached", "--binary", os.path.join(scratch, "preserved.patch"), index=patched)
-            trees = git("write-tree", index=current), git("write-tree", index=patched)
-            staged, head = git("write-tree"), git("rev-parse", "HEAD^{tree}")
+            tree = git("write-tree", index=patched).decode().strip()
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
-        if trees[0] != trees[1]:
-            print("preserved patch %s does not reproduce the worktree's files" % rel)
-        elif staged not in (head, trees[1]):
-            print("staged content in the worktree is not reproduced by preserved patch %s" % rel)
-        else:
-            print("ok")
+        return tree, tree_entries(tree)
+
+    expected_tree, expected = expected_entries()
+    if any(m == b"160000" for m, _ in expected.values()):
+        print("the preserved patch involves a submodule, which is not compared")
+        raise SystemExit(0)
+    # Plus those the patch touches.
+    differing.update(p for p in set(head) | set(expected) if head.get(p) != expected.get(p))
+    proof = hashlib.sha256()
+    for field in (head_commit, staged, expected_tree, hashlib.sha256(patch).hexdigest(),
+                  run.get("attempt_id"), run.get("state"), run.get("updated_at")):
+        proof.update(repr(field).encode() + b"\0")
+    mismatch = 0
+    for path in sorted(differing):
+        have = seen[path] if path in seen else disk(path)
+        proof.update(path + b"\0" + repr(have).encode() + b"\0")
+        if have != expected.get(path):
+            mismatch += 1
+    if mismatch:
+        print("preserved patch %s does not reproduce the worktree's files" % rel)
+    elif staged not in (head_tree, expected_tree):
+        print("staged content in the worktree is not reproduced by preserved patch %s" % rel)
+    else:
+        print("ok " + proof.hexdigest())
 except SystemExit:
     raise
 except BaseException as error:
@@ -357,15 +381,35 @@ except BaseException as error:
 PY
 }
 
+# The owning repo must be a checkout that survives the removal: not the
+# worktree, not around or inside it, and not another dead harness worktree.
+oms_harness_owner_survives() {  # REPO WORKTREE
+  local repo=""
+  local wt=""
+  local base=""
+  local physical=""
+
+  repo="$(oms_harness_physical_dir "$1")" || return 1
+  wt="$(oms_harness_physical_dir "$2")" || return 1
+  case "$repo/" in "$wt/"*) return 1 ;; esac
+  case "$wt/" in "$repo/"*) return 1 ;; esac
+  while IFS= read -r base; do
+    physical="$(oms_harness_physical_dir "$base" 2>/dev/null || true)"
+    [ -n "$physical" ] || continue
+    case "$repo/" in "$physical"/oh-my-setting-*) return 1 ;; esac
+  done <<EOF
+$(oms_harness_temp_bases)
+EOF
+  return 0
+}
+
 # A dead owner does not make its worktree disposable: a crashed run can leave
 # the only copy of uncommitted edits, an unreferenced commit, or ignored .oms
 # records there. Sets OMS_HARNESS_RESIDUE_KEEP_REASON when the worktree must be
 # kept; anything git cannot answer is kept too. Never moves or rewrites it.
 # With REPO, KIND and PID (the marker's), a delegate worktree whose finished
-# run and preserved patch prove its work settled, and a worktree whose .oms
-# index rows reach the owning repo's index, are removable; the latter sets
-# OMS_HARNESS_RESIDUE_MERGE_ROWS and OMS_HARNESS_RESIDUE_COPY_FILES for the
-# caller to merge before removal.
+# run and preserved patch prove its work settled is removable; the proof's
+# digest is left in OMS_HARNESS_RESIDUE_PROOF so a caller can recheck it.
 oms_harness_worktree_keep_reason() {  # WORKTREE [REPO KIND PID]
   local wt="$1"
   local repo="${2:-}"
@@ -377,29 +421,33 @@ oms_harness_worktree_keep_reason() {  # WORKTREE [REPO KIND PID]
   local proof=""
 
   OMS_HARNESS_RESIDUE_KEEP_REASON=""
-  OMS_HARNESS_RESIDUE_MERGE_ROWS=0
-  OMS_HARNESS_RESIDUE_COPY_FILES=0
-  if ! status="$(git -c core.fsmonitor=false -C "$wt" --no-optional-locks \
-      status --porcelain --untracked-files=normal 2>/dev/null)"; then
-    OMS_HARNESS_RESIDUE_KEEP_REASON="status is unreadable"
-    return 0
-  fi
-  if [ -n "$status" ]; then
-    OMS_HARNESS_RESIDUE_KEEP_REASON="has uncommitted or untracked files"
-    # Only a delegate run preserves a patch an owner can have decided on; a
-    # scratch worktree is the main's own and nothing proves its edits.
-    if [ "$kind" = delegate ] && [ -n "$repo" ] && [ -n "$pid" ]; then
-      proof="$(oms_harness_residue_evidence settled "$repo" "$wt" "$pid")"
-      if [ "$proof" = ok ]; then
-        OMS_HARNESS_RESIDUE_KEEP_REASON=""
-      else
-        OMS_HARNESS_RESIDUE_KEEP_REASON="$OMS_HARNESS_RESIDUE_KEEP_REASON; not settled: $proof"
+  OMS_HARNESS_RESIDUE_PROOF=""
+  status="$(oms_harness_residue_evidence status "" "$wt" "")"
+  case "$status" in
+    clean) ;;
+    dirty)
+      OMS_HARNESS_RESIDUE_KEEP_REASON="has uncommitted or untracked files"
+      # Only a delegate run preserves a patch an owner can have decided on; a
+      # scratch worktree is the main's own and nothing proves its edits.
+      [ "$kind" = delegate ] && [ -n "$repo" ] && [ -n "$pid" ] || return 0
+      if ! oms_harness_owner_survives "$repo" "$wt"; then
+        OMS_HARNESS_RESIDUE_KEEP_REASON="$OMS_HARNESS_RESIDUE_KEEP_REASON; not settled: the owning repo is the worktree, around or inside it, or another harness temp dir"
         return 0
       fi
-    else
+      proof="$(oms_harness_residue_evidence settled "$repo" "$wt" "$pid")"
+      case "$proof" in
+        "ok "*) OMS_HARNESS_RESIDUE_PROOF="${proof#ok }"; OMS_HARNESS_RESIDUE_KEEP_REASON="" ;;
+        *)
+          OMS_HARNESS_RESIDUE_KEEP_REASON="$OMS_HARNESS_RESIDUE_KEEP_REASON; not settled: $proof"
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      OMS_HARNESS_RESIDUE_KEEP_REASON="status is unreadable${status:+ ($status)}"
       return 0
-    fi
-  fi
+      ;;
+  esac
   head="$(git -C "$wt" rev-parse -q --verify HEAD 2>/dev/null || true)"
   head="${head//$'\r'/}"
   if [ -n "$head" ] && [ -z "$(git -C "$wt" for-each-ref --count=1 \
@@ -413,19 +461,6 @@ oms_harness_worktree_keep_reason() {  # WORKTREE [REPO KIND PID]
   [ -d "$wt/.oms" ] && [ ! -L "$wt/.oms" ] || return 0
   for record in plan/tasks.json failures.jsonl landings.jsonl artifacts/index.jsonl; do
     [ -s "$wt/.oms/$record" ] || continue
-    if [ "$record" = artifacts/index.jsonl ] && [ -n "$repo" ]; then
-      proof="$(oms_harness_residue_evidence index "$repo" "$wt" "$pid")"
-      case "$proof" in
-        "ok "*)
-          proof="${proof#ok }"
-          OMS_HARNESS_RESIDUE_MERGE_ROWS="${proof%% *}"
-          OMS_HARNESS_RESIDUE_COPY_FILES="${proof#* }"
-          continue
-          ;;
-      esac
-      OMS_HARNESS_RESIDUE_KEEP_REASON="holds .oms/$record; not mergeable: $proof"
-      return 0
-    fi
     OMS_HARNESS_RESIDUE_KEEP_REASON="holds .oms/$record"
     return 0
   done
@@ -616,29 +651,22 @@ oms_harness_cleanup_temp_dirs() {
         continue
       fi
       if [ "$dry_run" = "1" ]; then
-        if [ "$OMS_HARNESS_RESIDUE_MERGE_ROWS" -gt 0 ] || [ "$OMS_HARNESS_RESIDUE_COPY_FILES" -gt 0 ]; then
-          printf 'would remove: %s (dead harness temp dir; would merge %s artifact index row(s) and copy %s evidence file(s) first)\n' \
-            "$dir" "$OMS_HARNESS_RESIDUE_MERGE_ROWS" "$OMS_HARNESS_RESIDUE_COPY_FILES"
-        else
-          printf 'would remove: %s (dead harness temp dir)\n' "$dir"
-        fi
+        printf 'would remove: %s (dead harness temp dir)\n' "$dir"
         OMS_HARNESS_RESIDUE_WOULD_REMOVE=$((OMS_HARNESS_RESIDUE_WOULD_REMOVE + 1))
         continue
       fi
 
-      if [ "$safe" = 1 ] && [ -s "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE/.oms/artifacts/index.jsonl" ]; then
-        proof="$(oms_with_file_lock "$OMS_HARNESS_SAFE_RESIDUE_REPO/.oms/artifacts/index.jsonl" \
-          oms_harness_residue_evidence merge "$OMS_HARNESS_SAFE_RESIDUE_REPO" \
-          "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" "" 2>/dev/null || true)"
-        case "$proof" in
-          "ok "*) ;;
-          *)
-            printf 'kept: %s (dead harness temp dir; worktree holds .oms/artifacts/index.jsonl; not mergeable: %s)\n' \
-              "$dir" "${proof:-index merge failed}"
-            OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
-            continue
-            ;;
-        esac
+      if [ "$safe" = 1 ]; then
+        # The proof is recomputed at the point of removal: the owner may have
+        # been dead, but the worktree and its run are read again, not trusted.
+        proof="$OMS_HARNESS_RESIDUE_PROOF"
+        if ! oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
+            [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] ||
+            [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ]; then
+          printf 'kept: %s (dead harness temp dir; worktree changed during cleanup)\n' "$dir"
+          OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
+          continue
+        fi
       fi
       if [ "$safe" = 1 ]; then
         # Both arguments are physical paths established above. In particular,
