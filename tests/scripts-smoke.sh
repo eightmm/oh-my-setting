@@ -13019,6 +13019,15 @@ test_scrubber_tiers_split_secret_from_machine() {
     fi
     [ -z "$(agent_memory_sensitive_report "$f")" ] || fail "fixture scan/report disagreement"
   done
+  for path in '$project/scratch/y.txt' 'relative/scratch/y.txt' \
+    'repository context mentions scratch/y.txt but is not an absolute path'; do
+    printf '%s\n' "$path" > "$f"
+    if agent_memory_file_has_sensitive_content "$f"; then
+      fail "relative or contextual scratch reference must remain clean: $path"
+    fi
+  done
+  printf '/%s/project/y.txt\n' scratch > "$f"
+  agent_memory_file_has_sensitive_content "$f" || fail "absolute scratch path must be blocked"
 
   # Secret tier: a credential assignment matches both.
   printf 'export MY_API_T''OKEN=abc\n' > "$f"

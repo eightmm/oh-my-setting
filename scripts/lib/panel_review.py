@@ -254,6 +254,20 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
                 or candidate["patch_sha256"] != context.get("patch_sha256")):
             raise ValueError("candidate review root is invalid or not linked to the reviewed patch")
         roots.add(root)
+        # Reviewer worktrees may be temporary paths outside the controller's
+        # known roots. Infer their prefix only for a verified candidate and an
+        # in-scope file named by the finding.
+        for path in scope:
+            normalized = path.replace("\\", "/").lstrip("/")
+            if not normalized:
+                continue
+            marker = "/" + normalized
+            offset = finding_text.find(marker)
+            while offset > 0:
+                prefix = finding_text[:offset].rsplit(None, 1)[-1].strip("`'\"([{<>=:")
+                if prefix.startswith("/"):
+                    roots.add(prefix)
+                offset = finding_text.find(marker, offset + len(marker))
     # Only known repository prefixes are relativized; the outbound screen refuses all other private paths.
     for root in sorted(roots, key=len, reverse=True):
         finding_text = finding_text.replace(root.rstrip("/\\") + "/", "")

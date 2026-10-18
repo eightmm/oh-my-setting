@@ -598,6 +598,7 @@ fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the ca
                       "- **P1** Refuse the unsafe path in `%s/scripts/fixture.py:9`.\n"
                       "  ```python\nP0: example within the finding\n  ```" % fix_execution,
                       "### P2 Preserve the verifier in `%s/scripts/fixture.py:11`." % fix_candidate,
+                      "### P2 Keep this temporary checkout path repo-relative: `/tmp/tmp.X/scripts/fixture.py:13`.",
                       "P3: Keep the manual dispatch step.")
 fix_findings = "\n".join(fix_finding_blocks)
 original_fix_notice = panel._review_fix_notice
@@ -709,7 +710,7 @@ for case_number, (case, expected_draft) in enumerate((
         assert fix_task in draft_text and original_fix_brief in draft_text, draft_text
         for finding in fix_finding_blocks:
             relative_finding = (finding.replace(str(project) + "/", "").replace(str(fix_execution) + "/", "")
-                               .replace(str(fix_candidate) + "/", ""))
+                               .replace(str(fix_candidate) + "/", "").replace("/tmp/tmp.X/", ""))
             assert relative_finding in draft_text, relative_finding
         assert "Declared scope: scripts/fixture.py" in draft_text and verifier in draft_text
         assert "Fix every finding; same scope and authority as the previous round." in draft_text
