@@ -939,6 +939,9 @@ transcript.parent.mkdir(parents=True)
 transcript.write_text(json.dumps({"type": "user", "timestamp": "1970-01-01T00:05:01Z",
                                  "message": {"role": "user", "content": "[Request interrupted by user]"}}) + "\n")
 interrupted_row = dict(activity_row, since=300, updated_at=300, origin="user", transcript_path=str(transcript))
+activity_path.write_text(json.dumps(dict(activity_row, turn_edits=4, turn_edit_paths=["private/path.py"])))
+counted_activity = panel.main_activity(activity_repo, [activity_main])["activity-main"]
+assert counted_activity["edits"] == 4 and "private/path.py" not in json.dumps(counted_activity), counted_activity
 activity_path.write_text(json.dumps(interrupted_row))
 assert "[Request interrupted by user]" not in activity_path.read_text(), "transcript text stays out of activity records"
 with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
@@ -1053,6 +1056,8 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
                                       panel_activity=dict(activity_row, attempt="fresh", state="busy"))) == "exited", \
         "terminal attempt state takes precedence over a matching busy activity row"
 for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=280)}, "working · 12m"),
+                      ({"activity-main": dict(activity_row, since=280, edits=3)}, "working · 3 edits · 12m"),
+                      ({"activity-main": dict(activity_row, since=280, edits=1)}, "working · 1 edit · 12m"),
                       ({"activity-main": dict(activity_row, state="quiet", since=280)}, "quiet · 12m"),
                       ({"activity-main": dict(activity_row, state="idle", since=280)}, "idle · 12m"),
                       ({"activity-main": dict(activity_row, origin="user", since=280)}, "manual"),

@@ -182,6 +182,9 @@ def main_words(member, unicode=True):
         since = mapping(member.get("panel_activity")).get("since")
         minutes = int(max(0, time.time() - since) // 60) if type(since) in (int, float) and 0 <= since <= time.time() else 0
         word = {"waiting_approval": "needs approval", "waiting_input": "needs input"}.get(state, state)
+        edits = mapping(member.get("panel_activity")).get("edits")
+        if state == "working" and type(edits) is int and edits > 0:
+            word += (" · " if unicode else " / ") + "%d edit%s" % (edits, "" if edits == 1 else "s")
         return word + ((" · " if unicode else " / ") + "%sm" % minutes if minutes else "")
     return {"working": "working", "live marker": "live"}.get(state, said(state))
 

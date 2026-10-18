@@ -13,6 +13,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1424,6 +1425,184 @@ def is_panel_main() -> bool:
     return bool(os.environ.get("OMS_PANEL_MAIN_ATTEMPT")) and os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-")
 
 
+PRESENCE_TURN = ("turn_edits", "turn_edit_lines", "turn_edit_files", "turn_nudges", "turn_dispatches",
+                 "turn_edit_paths")
+PRESENCE_LAST = ("last_turn_edits", "last_turn_edit_lines", "last_turn_edit_files", "last_turn_dispatches")
+PRESENCE_COUNTERS = PRESENCE_TURN + PRESENCE_LAST + ("edit_lines", "edit_files")
+
+
+def panel_presence(payload: dict[str, Any], repo: Path | None = None):
+    """(repo, relative path, participant, attempt, room) of this main's presence row, or None."""
+    participant = os.environ.get("OMS_ROOM_PARTICIPANT", "")
+    attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT", "")
+    room_id = os.environ.get("OMS_ROOM_ID", "")
+    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", value)
+               for value in (participant, attempt, room_id)):
+        return None
+    # Explicit room binding wins; the local ancestor walk avoids a Git subprocess.
+    bound = os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_HOOK_RESOLVED_REPO")
+    if bound:
+        repo = Path(bound).resolve()
+    elif repo is None:
+        cwd = Path(payload_cwd(payload)).resolve()
+        repo = next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None)
+    if repo is None:
+        return None
+    return repo, ".oms/hooks/panel-activity/" + participant + ".json", participant, attempt, room_id
+
+
+def read_presence(repo: Path, relative: str) -> dict[str, Any]:
+    import thread_live
+    raw = thread_live.DURABLE["read_no_follow"](str(repo), relative, "panel activity",
+                                               missing_ok=True, max_bytes=4096)
+    try:
+        old = json.loads(raw) if raw else {}
+    except (ValueError, UnicodeError, RecursionError):
+        old = {}
+    return old if isinstance(old, dict) else {}
+
+
+def presence_count(row: dict[str, Any], key: str) -> int:
+    value = row.get(key)
+    return value if type(value) is int and 0 <= value <= 10**9 else 0
+
+
+def presence_snapshot(row: dict[str, Any]) -> dict[str, int]:
+    return {"last_" + key: presence_count(row, key)
+            for key in ("turn_edits", "turn_edit_lines", "turn_edit_files", "turn_dispatches")}
+
+
+def update_presence(payload: dict[str, Any], change, repo: Path | None = None):
+    """Read-modify-write this main's presence row with change(row) -> result.
+
+    Counter writes skip the PostToolUse debounce: a dropped edit would hide the nudge.
+    """
+    if (not is_panel_main() or is_harness_child()
+            or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
+        return None
+    with contextlib.suppress(OSError, ValueError, SystemExit):
+        found = panel_presence(payload, repo)
+        if found is None:
+            return None
+        repo, relative, participant, attempt, room_id = found
+        import thread_live
+        path = thread_live.safe_path(repo, relative, True)
+        old = read_presence(repo, relative)
+        now = time.time()
+        if old.get("attempt") == attempt and old.get("room") == room_id:
+            row = dict(old)
+        else:
+            row = {"schema": 1, "participant": participant, "attempt": attempt, "room": room_id,
+                   "state": "busy", "since": now, "updated_at": now}
+        result = change(row)
+        write_json_atomic(path, row)
+        return result
+    return None
+
+
+def note_panel_dispatch(repo: Path | None = None) -> None:
+    """Count one dispatch in the calling main's presence row; a no-op elsewhere."""
+    def bump(row):
+        row["turn_dispatches"] = presence_count(row, "turn_dispatches") + 1
+    update_presence({}, bump, repo)
+
+
+def panel_edit_nudge_lines() -> int:
+    try:
+        return max(1, int(os.environ.get("OMS_PANEL_EDIT_NUDGE_LINES", "6")))
+    except ValueError:
+        return 6
+
+
+PANEL_SCRATCH_PARTS = {".oms", "memory", "tmp", "scratch", "scratchpad"}
+
+
+def panel_countable(cwd: str, path: str) -> str | None:
+    """Repo-relative name of an implementation edit, None for scratch, memory, .oms or foreign paths."""
+    here = Path(cwd).resolve()
+    root = next((p for p in (here, *here.parents) if (p / ".git").exists()), None)
+    if root is None:
+        return None
+    try:
+        relative = Path(os.path.realpath(path)).relative_to(root)
+    except ValueError:
+        return None
+    if PANEL_SCRATCH_PARTS.intersection(relative.parts):
+        return None
+    temporary = os.environ.get("TMPDIR")
+    if temporary:
+        base = Path(temporary).resolve()
+        # Only a TMPDIR nested inside the repository is scratch; a repository under TMPDIR is not.
+        if root in base.parents and base in Path(os.path.realpath(path)).parents:
+            return None
+    return relative.as_posix()
+
+
+def panel_direct_edit_hint(payload: dict[str, Any], edits: list[tuple[str, int]], repo: Path | None = None) -> str:
+    """Count a panel main's own implementation edits; name the dispatch at the first crossing.
+
+    edits is [(repo-relative path, changed lines)] already stripped of scratch,
+    memory and .oms paths. Advisory: PostToolUse cannot undo the write.
+    """
+    if (os.environ.get("OMS_PANEL_EDIT_NUDGE") == "0" or not edits or not is_panel_main()
+            or is_harness_child() or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
+        return ""
+    threshold = panel_edit_nudge_lines()
+
+    def count(row):
+        lines = sum(n for _, n in edits)
+        row["turn_edits"] = presence_count(row, "turn_edits") + 1
+        row["turn_edit_lines"] = presence_count(row, "turn_edit_lines") + lines
+        row["edit_lines"] = presence_count(row, "edit_lines") + lines
+        paths = row.get("turn_edit_paths")
+        paths = [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else []
+        files = presence_count(row, "turn_edit_files")
+        for name, _ in edits:
+            row["edit_files"] = presence_count(row, "edit_files") + 1
+            if name in paths:
+                continue
+            files += 1
+            if len(paths) < 8:
+                paths.append(name[:80])
+        row["turn_edit_files"], row["turn_edit_paths"] = files, paths
+        total = row["turn_edit_lines"]
+        level = 2 if total >= max(40, threshold) else 1 if total >= threshold or files >= 2 else 0
+        if level <= presence_count(row, "turn_nudges"):
+            return None
+        row["turn_nudges"] = level
+        return files, total, paths
+
+    found = update_presence(payload, count, repo)
+    if not found:
+        return ""
+    files, total, paths = found
+    scopes = " ".join("--scope " + shlex.quote(p) for p in paths)
+    return ("[oms panel] direct edit this turn: %d file%s, %d line%s (%s). A panel main dispatches this: "
+            "oms panel --dispatch builder --owner %s --room %s --access write --brief-file PATH %s "
+            "--verify COMMAND --task-id ID --label TITLE. Direct edits stay for admitted-patch integration, "
+            "conflict resolution, or a fix of at most two lines."
+            % (files, "" if files == 1 else "s", total, "" if total == 1 else "s",
+               ", ".join(paths[:4]) + (", ..." if len(paths) > 4 else ""), payload_agent(payload),
+               os.environ.get("OMS_ROOM_ID", "ROOM"), scopes))
+
+
+def panel_turn_line(payload: dict[str, Any]) -> str:
+    """Reflect the finished turn back to the main: the Stop hook has no model-visible channel."""
+    with contextlib.suppress(OSError, ValueError, SystemExit, ImportError):
+        found = panel_presence(payload)
+        if found is None:
+            return ""
+        row = read_presence(found[0], found[1])
+        if row.get("attempt") != found[3] or row.get("room") != found[4]:
+            return ""
+        edits = presence_count(row, "last_turn_edits")
+        if edits:
+            return (" · last turn: %d direct edit%s, %d lines, %d dispatches"
+                    % (edits, "" if edits == 1 else "s", presence_count(row, "last_turn_edit_lines"),
+                       presence_count(row, "last_turn_dispatches")))
+    return ""
+
+
 def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> None:
     """Turn presence only; never copy prompt/tool text or append room events."""
     if not is_panel_main() or is_harness_child():
@@ -1438,32 +1617,14 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
             kind = {"permission_prompt": "approval", "elicitation_dialog": "input"}.get(notification)
         if kind is None:
             return
-    participant = os.environ.get("OMS_ROOM_PARTICIPANT", "")
-    attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT", "")
-    room_id = os.environ.get("OMS_ROOM_ID", "")
-    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", value)
-               for value in (participant, attempt, room_id)):
-        return
     with contextlib.suppress(OSError, ValueError, SystemExit):
-        import thread_live
-        # Explicit room binding wins; the local ancestor walk avoids a Git subprocess.
-        bound = os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_HOOK_RESOLVED_REPO")
-        if bound:
-            repo = Path(bound).resolve()
-        elif repo is None:
-            cwd = Path(payload_cwd(payload)).resolve()
-            repo = next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None)
-        if repo is None:
+        found = panel_presence(payload, repo)
+        if found is None:
             return
-        relative = ".oms/hooks/panel-activity/" + participant + ".json"
+        repo, relative, participant, attempt, room_id = found
+        import thread_live
         path = thread_live.safe_path(repo, relative, True)
-        raw = thread_live.DURABLE["read_no_follow"](str(repo), relative, "panel activity",
-                                                   missing_ok=True, max_bytes=4096)
-        try:
-            old = json.loads(raw) if raw else {}
-        except (ValueError, UnicodeError, RecursionError):
-            old = {}
-        old = old if isinstance(old, dict) else {}
+        old = read_presence(repo, relative)
         now = time.time()
         same = old.get("attempt") == attempt and old.get("room") == room_id
         updated = old.get("updated_at")
@@ -1472,6 +1633,15 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
             return
         prompt = payload.get("prompt")
         origin = old.get("origin") if same else None
+        carried = {k: old[k] for k in PRESENCE_COUNTERS if same and k in old}
+        if event in ("UserPromptSubmit", "Stop") and same:
+            # Stop snapshots the finished turn; a prompt over a turn that never
+            # reached Stop (interrupt) snapshots it too, then opens a fresh one.
+            if event == "Stop" or old.get("state") != "idle":
+                carried.update(presence_snapshot(old))
+            if event == "UserPromptSubmit":
+                for key in PRESENCE_TURN:
+                    carried.pop(key, None)
         if event == "UserPromptSubmit":
             # Claude's first prompt is the panel bootstrap. Later harness wakes
             # have stable prefixes; only an unmarked prompt is user takeover.
@@ -1496,6 +1666,7 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
             row["transcript_path"] = transcript
         if kind:
             row["kind"] = kind
+        row.update(carried)
         write_json_atomic(path, row)
 
 
@@ -1515,7 +1686,7 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
     base = ("[oms panel] control-tower main: delegate via oms panel --dispatch ROLE; "
             "wait per call (one notification); review/admit/re-dispatch on completion; refill configured slots "
             "in the same turn with next ready or --continue. Review fixes: --continue or fresh scoped task at "
-            "rework limit; edit only if shorter than a brief. "
+            "rework limit; edit directly only for admitted-patch integration, conflict resolution, or a fix of at most two lines. "
             "keep review/admission/finalize; full rules in "
             + ("your system prompt." if agent == "claude" else "this context."))
     path = None
@@ -1530,7 +1701,7 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
                 line = panel_resume_line(dict(payload, source=source))
                 if line:
                     base = line + "\n" + base
-    message = base + panel_plan_hint(payload) + panel_status_hint(payload, room)
+    message = base + panel_turn_line(payload) + panel_plan_hint(payload) + panel_status_hint(payload, room)
     if path and not state.get("delivered"):
         write_json_atomic(path, dict(state, schema=1, updated_at=utc_now(), delivered=True))
     return message
@@ -1671,11 +1842,11 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "not all by default. A role is a mandate, not an instance. "
             "Run independent workers in parallel. Keep scope, briefs, review, patch admission, integration and "
             "coordination yourself as the sole panel main; declare your scope with oms room scope --owns PATH before editing shared files "
-            "and pass --scope PATH to write workers. Edit directly only when the brief would take longer than the edit "
-            "or the step needs the main itself. Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch "
+            "and pass --scope PATH to write workers. Edit directly only for admitted-patch integration, "
+            "conflict resolution, or a fix of at most two lines; everything else goes to a worker even when the brief feels longer. Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch "
             "it as soon as it finishes, never batch-wait for a wave. Keep configured parallelism full: start the "
             "next ready plan task or follow-up round in the same turn. Send remaining review findings to a worker "
-            "via --continue, or a fresh scoped task at the rework limit; edit directly only when a brief would take longer. "
+            "via --continue, or a fresh scoped task at the rework limit. "
             "Land your own work only when publication is authorized: oms scratch-worktree add starts detached; create a "
             "local nontracking branch with git checkout --no-track -b oms/<task>, then commit, rebase on the remote target, "
             "and run oms land from that worktree. No upstream is needed; oms land pushes the verified SHA to its target. "

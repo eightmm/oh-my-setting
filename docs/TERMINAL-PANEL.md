@@ -589,10 +589,16 @@ Wait on each dispatched call separately, with one notification per call; review,
 admit or re-dispatch it as soon as it finishes, never batch-wait for a wave.
 Keep configured parallelism full: start the next ready plan task or follow-up
 round in the same turn. Send remaining review findings to a worker with
-`--continue`, or a fresh scoped task at the rework limit; edit directly only
-when writing the brief would take longer than the edit.
-It works directly only when a brief would cost more than the edit or the step
-needs the main itself. Outside the panel, the global rule still requires an
+`--continue`, or a fresh scoped task at the rework limit.
+It edits directly only for admitted-patch integration, conflict resolution, or
+a fix of at most two lines; everything else goes to a worker even when the brief
+feels longer. The syntax-guard PostToolUse hook counts a panel main's own edits
+in its presence row (not scratch, memory or `.oms` paths) and, at 6 lines or 2
+files in a turn, adds a one-line advisory naming the `oms panel --dispatch`
+command (again at 40 lines; `OMS_PANEL_EDIT_NUDGE=0` disables,
+`OMS_PANEL_EDIT_NUDGE_LINES` moves the threshold). The next prompt reflects
+"last turn: N direct edits, L lines, D dispatches" and the board shows
+" · N edits". Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
 
 The sole panel main also lands its own work. `oms scratch-worktree add` starts a detached

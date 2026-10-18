@@ -949,6 +949,8 @@ with patch.object(hook_state, "panel_status_hint", return_value=""):
 assert len(short) <= 450 and "control-tower main" in short and "your system prompt" in short, short
 assert all(token in short for token in ("per call", "same turn", "--continue", "rework limit")), short
 assert "Delegate implementation" not in short and "keep review/admission/finalize" in short, short
+assert "fix of at most two lines" in short and "shorter than a brief" not in short, short
+assert "fix of at most two lines" in tower and "longer than the edit" not in tower, tower
 assert "oms room scope" in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 plan_dir = repo / ".oms" / "plan"
 plan_dir.mkdir(parents=True)
@@ -1469,6 +1471,45 @@ with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", sid
     with patch.object(hook_state.time, "time", return_value=117):
         hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
     assert path.is_symlink() and target.read_text() == "private"
+    path.unlink()
+    target.unlink()
+    # Direct-edit counters ride the presence row: they skip the 10 s debounce, a prompt snapshots
+    # and resets the turn, and the next tower hint reflects the finished turn.
+    edit = [("a.py", 5), ("b.py", 3)]
+    with patch.object(hook_state.time, "time", return_value=200):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
+        note = hook_state.panel_direct_edit_hint(dict(payload, hook_event_name="PostToolUse"), edit[:1])
+        assert not note, note
+        hook_state.record_panel_activity(dict(payload, hook_event_name="PostToolUse"))
+        note = hook_state.panel_direct_edit_hint(dict(payload, hook_event_name="PostToolUse"), edit[1:])
+        assert "2 files, 8 lines (a.py, b.py)" in note and "--scope a.py --scope b.py" in note, note
+        hook_state.note_panel_dispatch(repo)
+    row = json.loads(path.read_text())
+    assert (row["turn_edits"], row["turn_edit_lines"], row["turn_edit_files"], row["turn_nudges"],
+            row["turn_dispatches"], row["edit_lines"]) == (2, 8, 2, 1, 1, 8), row
+    assert path.stat().st_size < 4096 and len(row["turn_edit_paths"]) <= 8
+    with patch.object(hook_state.time, "time", return_value=201):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="Stop"))
+    row = json.loads(path.read_text())
+    assert row["last_turn_edits"] == 2 and row["last_turn_edit_lines"] == 8 and row["turn_edits"] == 2, row
+    line = hook_state.panel_turn_line(payload)
+    assert line == " · last turn: 2 direct edits, 8 lines, 1 dispatches", line
+    with patch.object(hook_state.time, "time", return_value=202):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
+    row = json.loads(path.read_text())
+    assert "turn_edits" not in row and "turn_nudges" not in row and row["last_turn_edit_lines"] == 8 and row["edit_lines"] == 8, row
+    assert hook_state.panel_turn_line(payload) == line
+    with patch.object(hook_state.time, "time", return_value=203):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="Stop"))
+    assert not hook_state.panel_turn_line(payload), "a turn without edits leaves no reminder"
+    for overrides in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_PANEL_EDIT_NUDGE": "0"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"},
+                      {"OMS_PANEL_SESSION": "ordinary"}):
+        before = path.read_bytes()
+        with patch.dict(os.environ, overrides):
+            assert not hook_state.panel_direct_edit_hint(payload, [("big.py", 90)]), overrides
+            if "OMS_PANEL_EDIT_NUDGE" not in overrides:
+                hook_state.note_panel_dispatch(repo)
+        assert path.read_bytes() == before, overrides
 
 # No existing check exercised a Pi extension; reuse the panel-activity fixture.
 import shutil
