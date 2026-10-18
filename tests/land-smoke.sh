@@ -757,6 +757,26 @@ assert sibling_only == 'completion: local Git proof unavailable', sibling_only
 refused = satisfy_receipt(foreign, hashlib.sha256(original).hexdigest())
 assert 'no passed oms land receipt' in refused, refused
 
+# A FIFO swapped in for a checked receipt, right before the leaf open, must be
+# refused instead of blocking the reader.
+if hasattr(os, 'mkfifo'):
+    swapped = tmp / 'swapped-fifo'
+    swapped.write_text('{}\n')
+    probe = (
+        'import importlib.util as u, os, sys\n'
+        'spec = u.spec_from_file_location("durable_jsonl", sys.argv[1])\n'
+        'm = u.module_from_spec(spec); spec.loader.exec_module(m)\n'
+        'check = m.components_unchanged\n'
+        'def swap(*args):\n'
+        '    check(*args)\n'
+        '    os.unlink(sys.argv[3]); os.mkfifo(sys.argv[3])\n'
+        'm.components_unchanged = swap\n'
+        'm.read_no_follow(sys.argv[2], sys.argv[3])\n')
+    done = subprocess.run([sys.executable, '-c', probe, str(root / 'scripts/lib/durable-jsonl.py'),
+                           str(tmp), str(swapped)], capture_output=True, text=True, timeout=30)
+    assert done.returncode != 0 and 'regular' in done.stderr, done
+    swapped.unlink()
+
 # Both lookups read candidates through the durable no-follow reader, so a
 # hard-linked receipt is refused, and the schema must be the integer 1.
 def refusal(call):

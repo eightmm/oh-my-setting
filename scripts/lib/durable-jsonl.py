@@ -265,6 +265,9 @@ def read_no_follow(root, path, label="artifact index", missing_ok=False,
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
+    # A FIFO swapped in after the caller's check would block this open; fstat
+    # below rejects it, and regular-file reads ignore O_NONBLOCK.
+    flags |= getattr(os, "O_NONBLOCK", 0)
     try:
         if directory is None:
             descriptor = os.open(target, flags)
