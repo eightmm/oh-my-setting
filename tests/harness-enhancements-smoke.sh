@@ -659,6 +659,7 @@ esac
 EOF
   chmod +x "$gate/fake-shellcheck"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/codex-hud-config-smoke.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/run-smoke-shard.sh"
   for suite in source-distribution-smoke.sh platform-portability-smoke.sh \
       bsd-portability-smoke.sh functional-evolution-smoke.sh; do
     cat > "$gate/tests/$suite" <<'EOF'
@@ -1113,6 +1114,10 @@ PYTEST
   # The uncapped full plan runs all of scripts-smoke, so the whole-tree
   # invariants must not be staged a second time.
   if grep -Fxq repo-invariants <<< "$out"; then fail "full plan staged repo-invariants twice: $out"; fi
+  # The protected-push gate is standalone --quick, which must carry them too.
+  out="$(cd "$gate" && bash scripts/check.sh --quick --changed-from "$base" \
+    --changed-to "$head" --list-stages 2>/dev/null)" || fail "quick gate rejected the range"
+  [ "$(grep -Fxc repo-invariants <<< "$out")" = 1 ] || fail "quick gate did not stage repo-invariants once: $out"
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)" ||
     fail "affected gate propagated a graph-reader failure"

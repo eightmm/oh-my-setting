@@ -184,7 +184,8 @@ manifest) then the test suites. With no arguments it runs both.
                         would run, one per line, without running anything.
                         (The scripts-smoke shards run outside the stage list
                         and are not included.)
-  --quick               Run a partial changed-file gate for protected pushes.
+  --quick               Run a partial changed-file gate for protected pushes,
+                        plus the whole-tree repo-invariants stage.
   --affected            Check ordinary docs directly; otherwise use the Project
                         Graph for affected tests. Critical or uncertain changes
                         fall back to the complete gate, including lint.
@@ -1255,7 +1256,7 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
 fi
 
 # A plan that already runs all of scripts-smoke (uncapped full) covers these.
-if [ "$RUN_AFFECTED" = 1 ] && [ "$RUN_SMOKE" = 0 ] && [ "$repo_invariants_in_plan" = 0 ]; then
+if { [ "$RUN_QUICK" = 1 ] || [ "$RUN_AFFECTED" = 1 ]; } && [ "$RUN_SMOKE" = 0 ] && [ "$repo_invariants_in_plan" = 0 ]; then
   repo_invariant_args=()
   for repo_invariant_name in "${REPO_INVARIANT_TESTS[@]}"; do
     case "$repo_invariants_selected" in *" $repo_invariant_name "*) continue ;; esac
