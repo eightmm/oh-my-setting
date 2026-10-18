@@ -140,7 +140,7 @@ def _rework_history(rows, task_id, parents):
     return sorted((row for row in rows if row.get("task_id") == task_id
                    and row.get("parent_attempt_id") in parents
                    and row.get("refs", {}).get("panel_role") == "worker"),
-                  key=lambda row: row.get("sequence", 0))
+                  key=lambda row: (row.get("created_at", ""), row.get("attempt_id", "")))
 
 
 def _revision_rounds(repo, history):

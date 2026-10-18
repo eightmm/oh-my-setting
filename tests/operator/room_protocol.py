@@ -40,13 +40,15 @@ assert allocate("codex", installed={"claude"})["model"] == "claude-sonnet-5-5"
 assert allocate("claude", installed={"codex"})["model"] == "gpt-6-luna"
 assert not any("prefer" in rule for rule in policy()["roles"].values()), "default roles carry no provider preference"
 for role, model in (("worker", "claude-sonnet-5-5"), ("builder", "claude-sonnet-5-5"), ("refactorer", "claude-sonnet-5-5"),
-                    ("documenter", "claude-sonnet-5-5"), ("release-engineer", "claude-sonnet-5-5"),
+                    ("release-engineer", "claude-sonnet-5-5"),
                     ("performance-engineer", "claude-opus-5-5"), ("integrator", "claude-opus-5-5")):
     for owner in both:
         expected = model if owner == "codex" else ("gpt-6.1-sol" if role in (
             "performance-engineer", "integrator") else "gpt-6-luna")
         assert allocate(owner, role=role, installed=both)["model"] == expected
     assert allocate("claude", role=role, installed={"codex"})["provider"] == "codex"
+assert allocate("codex", role="documenter", installed=both)["model"] == "claude-haiku-5-5"
+assert allocate("claude", role="documenter", installed={"codex"})["model"] == "gpt-6-luna"
 assert allocate("claude", role="advisor", installed=both)["model"] == "gpt-6-astra"
 assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
 assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-fable-5-1"
@@ -103,7 +105,7 @@ assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly
 # Routing spread follows quota readings except that independent judgments always avoid the owner.
 routing_roles = {
     "researcher": "light",
-    "worker": "routine", "builder": "routine", "documenter": "routine",
+    "worker": "routine", "builder": "routine", "documenter": "light",
     "integrator": "deep", "performance-engineer": "deep",
     "reviewer": "frontier", "verifier": "frontier", "security-auditor": "frontier",
     "critic": "frontier",
@@ -1289,6 +1291,12 @@ hinted = subprocess.run(final_args[:final_args.index("--task-id") + 1] + ["plan-
 assert hinted.returncode == 0 and "agent-plan finish --id plan-link --landed-commit SHA" in hinted.stderr, hinted
 
 _operator_block("continuation-and-lineage")
+
+older_round = {"task_id": "ordered-rounds", "parent_attempt_id": "root", "attempt_id": "older",
+               "created_at": "2026-10-01T00:00:00Z", "sequence": 9, "refs": {"panel_role": "worker"}}
+newer_round = dict(older_round, attempt_id="newer", created_at="2026-10-02T00:00:00Z", sequence=1)
+assert [row["attempt_id"] for row in panel._rework_history(
+    [newer_round, older_round], "ordered-rounds", {"root"})] == ["older", "newer"]
 
 import shutil
 shutil.rmtree(project / ".oms/plan")  # later board fixtures expect a project with no plan

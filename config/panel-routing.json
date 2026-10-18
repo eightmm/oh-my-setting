@@ -23,7 +23,7 @@
     "worker": {"tier": "routine"},
     "builder": {"tier": "routine"},
     "refactorer": {"tier": "routine"},
-    "documenter": {"tier": "routine"},
+    "documenter": {"tier": "light"},
     "release-engineer": {"tier": "routine"},
     "reviewer": {"tier": "frontier"},
     "verifier": {"tier": "frontier"},
