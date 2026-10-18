@@ -48,22 +48,16 @@ sys.path.insert(0, sys.argv[1])
 from hook_repo import native_path, resolve
 
 repo = resolve(row)
-adopted = repo is not None and (repo / ".oms").is_dir()
-# A panel main edits in scratch worktrees that carry no .oms; its direct edits
-# are counted against the room repository instead.
-if not adopted and not os.environ.get("OMS_PANEL_MAIN_ATTEMPT"):
+if repo is None or not (repo / ".oms").is_dir():
     raise SystemExit(0)
-import hook_state
+from hook_state import live_thread_hint
 
-collaboration = hook_state.live_thread_hint(row, repo) if adopted else None
-nudge = ""
+collaboration = live_thread_hint(row, repo)
 findings = []
 
 
 def emit_feedback():
     parts = [collaboration] if collaboration else []
-    if nudge:
-        parts.append(nudge)
     if findings:
         parts.append(("syntax-guard: " + " | ".join(findings))[:MESSAGE_LIMIT])
     if parts:
@@ -98,46 +92,31 @@ def patch_path(name):
     return os.path.join(cwd, normalized)
 
 
-PATCH_LINES = {}
-PATCH_DELETED = []
-
-
 def patch_paths(command):
     names = []
-    counts = []
     update_index = None
-    body_index = None
     for line in command.splitlines():
         if line.startswith("*** Add File: "):
             names.append(line[len("*** Add File: "):])
-            counts.append(0)
             update_index = None
-            body_index = len(names) - 1
         elif line.startswith("*** Update File: "):
             names.append(line[len("*** Update File: "):])
-            counts.append(0)
-            update_index = body_index = len(names) - 1
+            update_index = len(names) - 1
         elif line.startswith("*** Delete File: "):
-            deleted = patch_path(line[len("*** Delete File: "):])
-            if deleted is not None and deleted not in PATCH_DELETED and len(PATCH_DELETED) < MAX_FILES:
-                PATCH_DELETED.append(deleted)
-            update_index = body_index = None
+            update_index = None
         elif line.startswith("*** Move to: ") and update_index is not None:
             names[update_index] = line[len("*** Move to: "):]
             update_index = None
         elif line.startswith("*** "):
-            update_index = body_index = None
-        elif body_index is not None and line[:1] in ("+", "-"):
-            counts[body_index] += 1
+            update_index = None
 
     paths = []
     seen = set()
-    for name, count in zip(names, counts):
+    for name in names:
         path = patch_path(name)
         if path is None:
             continue
         key = os.path.normcase(os.path.normpath(path))
-        PATCH_LINES[path] = PATCH_LINES.get(path, 0) + count
         if key in seen:
             continue
         seen.add(key)
@@ -157,37 +136,7 @@ elif tool_name == PATCH_TOOL:
     paths = patch_paths(command) if isinstance(command, str) else []
 else:
     raise SystemExit(0)
-if not paths and not PATCH_DELETED:
-    raise SystemExit(0)
-
-
-def text_lines(value):
-    return len(value.splitlines()) or (1 if value else 0) if isinstance(value, str) else 0
-
-
-def edit_lines():
-    if tool_name == "Write":
-        return text_lines(tool_input.get("content"))
-    if tool_name == "Edit":
-        return max(text_lines(tool_input.get("old_string")), text_lines(tool_input.get("new_string")), 1)
-    if tool_name == "MultiEdit":
-        edits = tool_input.get("edits")
-        return sum(max(text_lines(e.get("old_string")), text_lines(e.get("new_string")), 1)
-                   for e in edits if isinstance(e, dict)) if isinstance(edits, list) else 1
-    return None
-
-
-if os.environ.get("OMS_PANEL_MAIN_ATTEMPT"):
-    counted = []
-    for counted_path in paths + PATCH_DELETED:
-        name = hook_state.panel_countable(cwd, counted_path)
-        if name is not None:
-            lines = edit_lines()
-            # A deletion counts as a file even though its removed lines are unknown.
-            counted.append((name, PATCH_LINES.get(counted_path, 0) if lines is None else lines))
-    if counted:
-        nudge = hook_state.panel_direct_edit_hint(row, counted)
-if not adopted:
+if not paths:
     raise SystemExit(0)
 
 

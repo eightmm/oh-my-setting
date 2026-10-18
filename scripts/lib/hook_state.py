@@ -13,7 +13,6 @@ import json
 import os
 import re
 import signal
-import shlex
 import shutil
 import stat
 import subprocess
@@ -1425,256 +1424,6 @@ def is_panel_main() -> bool:
     return bool(os.environ.get("OMS_PANEL_MAIN_ATTEMPT")) and os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-")
 
 
-PRESENCE_TURN = ("turn_edits", "turn_edit_lines", "turn_edit_files", "turn_nudges", "turn_dispatches",
-                 "turn_edit_paths", "turn_edit_digests")
-PRESENCE_LAST = ("last_turn_edits", "last_turn_edit_lines", "last_turn_edit_files", "last_turn_dispatches")
-PRESENCE_COUNTERS = PRESENCE_TURN + PRESENCE_LAST + ("edit_lines", "edit_files")
-
-
-def panel_presence(payload: dict[str, Any], repo: Path | None = None):
-    """(repo, relative path, participant, attempt, room) of this main's presence row, or None."""
-    participant = os.environ.get("OMS_ROOM_PARTICIPANT", "")
-    attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT", "")
-    room_id = os.environ.get("OMS_ROOM_ID", "")
-    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", value)
-               for value in (participant, attempt, room_id)):
-        return None
-    # Explicit room binding wins; the local ancestor walk avoids a Git subprocess.
-    bound = os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_HOOK_RESOLVED_REPO")
-    if bound:
-        repo = Path(bound).resolve()
-    elif repo is None:
-        cwd = Path(payload_cwd(payload)).resolve()
-        repo = next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None)
-    if repo is None:
-        return None
-    return repo, ".oms/hooks/panel-activity/" + participant + ".json", participant, attempt, room_id
-
-
-PRESENCE_LIMIT = 4096
-
-
-def read_presence(repo: Path, relative: str) -> dict[str, Any]:
-    import thread_live
-    raw = thread_live.DURABLE["read_no_follow"](str(repo), relative, "panel activity",
-                                               missing_ok=True, max_bytes=PRESENCE_LIMIT)
-    try:
-        old = json.loads(raw) if raw else {}
-    except (ValueError, UnicodeError, RecursionError):
-        old = {}
-    return old if isinstance(old, dict) else {}
-
-
-def encode_presence(row: dict[str, Any]) -> bytes:
-    """Serialize the whole row within the reader's byte cap, shedding display data first.
-
-    Trims the row's own lists in place so callers holding them see what was kept.
-    """
-    def encoded() -> bytes:
-        return (json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n").encode("ascii")
-    data = encoded()
-    if len(data) > PRESENCE_LIMIT:
-        row.pop("transcript_path", None)
-        data = encoded()
-    # Digests carry file identity, so they go last.
-    for key in ("turn_edit_paths", "turn_edit_digests"):
-        items = row.get(key)
-        while len(data) > PRESENCE_LIMIT and isinstance(items, list) and items:
-            items.pop()
-            data = encoded()
-    if len(data) > PRESENCE_LIMIT:
-        raise ValueError("panel activity row exceeds its cap")
-    return data
-
-
-def mutate_presence(repo: Path, relative: str, build):
-    """Serialize build(old row) -> new row (None keeps the file) on the participant's lock.
-
-    The write goes through the repository-bound atomic_mutate; a row the reader
-    would reject (oversized or malformed) reads as empty, so it is replaced
-    rather than blocking every later update.
-    """
-    import thread_live
-    path = thread_live.safe_path(repo, relative, True)
-    produced: list[Any] = []
-
-    def transform(old_bytes: bytes) -> bytes:
-        old: Any = {}
-        if 0 < len(old_bytes) <= PRESENCE_LIMIT:
-            try:
-                old = json.loads(old_bytes)
-            except (ValueError, UnicodeError, RecursionError):
-                old = {}
-        row = build(old if isinstance(old, dict) else {})
-        if row is None:
-            return old_bytes
-        produced.append(row)
-        return encode_presence(row)
-
-    # Kernel advisory lock on a never-deleted file; a busy or unusable lock raises ValueError,
-    # which update_presence treats as "skip counting" so the edit itself never blocks.
-    from panel_results import _lock
-    with _lock(repo, "activity-" + hashlib.sha256(path.stem.encode()).hexdigest()[:24], timeout=0.5):
-        thread_live.DURABLE["atomic_mutate"](
-            str(path), transform, str(repo), missing_ok=True, create_parent=True,
-            max_output=PRESENCE_LIMIT, label="panel activity")
-    return produced[-1] if produced else None
-
-
-def presence_count(row: dict[str, Any], key: str) -> int:
-    value = row.get(key)
-    return value if type(value) is int and 0 <= value <= 10**9 else 0
-
-
-def presence_snapshot(row: dict[str, Any]) -> dict[str, int]:
-    return {"last_" + key: presence_count(row, key)
-            for key in ("turn_edits", "turn_edit_lines", "turn_edit_files", "turn_dispatches")}
-
-
-def update_presence(payload: dict[str, Any], change, repo: Path | None = None):
-    """Read-modify-write this main's presence row with change(row) -> result.
-
-    Counter writes skip the PostToolUse debounce: a dropped edit would hide the nudge.
-    """
-    if (not is_panel_main() or is_harness_child()
-            or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
-        return None
-    with contextlib.suppress(OSError, ValueError, SystemExit):
-        found = panel_presence(payload, repo)
-        if found is None:
-            return None
-        repo, relative, participant, attempt, room_id = found
-        outcome: list[Any] = []
-
-        def build(old):
-            now = time.time()
-            if old.get("attempt") == attempt and old.get("room") == room_id:
-                row = dict(old)
-            else:
-                row = {"schema": 1, "participant": participant, "attempt": attempt, "room": room_id,
-                       "state": "busy", "since": now, "updated_at": now}
-            outcome[:] = [change(row)]
-            return row
-
-        mutate_presence(repo, relative, build)
-        return outcome[0] if outcome else None
-    return None
-
-
-def note_panel_dispatch(repo: Path | None = None) -> None:
-    """Count one dispatch in the calling main's presence row; a no-op elsewhere."""
-    def bump(row):
-        row["turn_dispatches"] = presence_count(row, "turn_dispatches") + 1
-    update_presence({}, bump, repo)
-
-
-def panel_edit_nudge_lines() -> int:
-    try:
-        return max(1, int(os.environ.get("OMS_PANEL_EDIT_NUDGE_LINES", "6")))
-    except ValueError:
-        return 6
-
-
-PANEL_SCRATCH_PARTS = {".oms", "memory", "tmp", "scratch", "scratchpad"}
-
-
-def panel_countable(cwd: str, path: str) -> str | None:
-    """Repo-relative name of an implementation edit, None for scratch, memory, .oms or foreign paths."""
-    here = Path(cwd).resolve()
-    root = next((p for p in (here, *here.parents) if (p / ".git").exists()), None)
-    if root is None:
-        return None
-    try:
-        relative = Path(os.path.realpath(path)).relative_to(root)
-    except ValueError:
-        return None
-    if PANEL_SCRATCH_PARTS.intersection(relative.parts):
-        return None
-    temporary = os.environ.get("TMPDIR")
-    if temporary:
-        base = Path(temporary).resolve()
-        # Only a TMPDIR nested inside the repository is scratch; a repository under TMPDIR is not.
-        if root in base.parents and base in Path(os.path.realpath(path)).parents:
-            return None
-    return relative.as_posix()
-
-
-def panel_direct_edit_hint(payload: dict[str, Any], edits: list[tuple[str, int]], repo: Path | None = None) -> str:
-    """Count a panel main's own implementation edits; name the dispatch at the first crossing.
-
-    edits is [(repo-relative path, changed lines)] already stripped of scratch,
-    memory and .oms paths. Advisory: PostToolUse cannot undo the write.
-    """
-    if (os.environ.get("OMS_PANEL_EDIT_NUDGE") == "0" or not edits or not is_panel_main()
-            or is_harness_child() or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
-        return ""
-    threshold = panel_edit_nudge_lines()
-
-    def count(row):
-        lines = sum(n for _, n in edits)
-        row["turn_edits"] = presence_count(row, "turn_edits") + 1
-        row["turn_edit_lines"] = presence_count(row, "turn_edit_lines") + lines
-        row["edit_lines"] = presence_count(row, "edit_lines") + lines
-        paths = row.get("turn_edit_paths")
-        paths = [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else []
-        digests = row.get("turn_edit_digests")
-        digests = [d for d in digests if isinstance(d, str)] if isinstance(digests, list) else []
-        files = presence_count(row, "turn_edit_files")
-        for name, _ in edits:
-            row["edit_files"] = presence_count(row, "edit_files") + 1
-            digest = hashlib.sha256(name.encode("utf-8", "surrogateescape")).hexdigest()[:16]
-            if digest in digests:
-                continue
-            files += 1
-            if len(digests) < 64:
-                digests.append(digest)
-            if len(paths) < 8 and len(name) <= 120:
-                paths.append(name)
-        row["turn_edit_files"], row["turn_edit_paths"], row["turn_edit_digests"] = files, paths, digests
-        total = row["turn_edit_lines"]
-        level = 2 if total >= max(40, threshold) else 1 if total >= threshold or files >= 2 else 0
-        if level <= presence_count(row, "turn_nudges"):
-            return None
-        row["turn_nudges"] = level
-        return files, total, paths
-
-    found = update_presence(payload, count, repo)
-    if not found:
-        return ""
-    files, total, paths = found  # paths is the row's own list, already trimmed to the byte cap
-    shown = ", ".join(json.dumps(p) for p in paths[:4]) + (", ..." if len(paths) > 4 else "")
-    safe = [p for p in paths if p.isprintable()]
-    scopes = " ".join("--scope " + shlex.quote(p) for p in safe)
-    gap = files - len(safe)
-    if gap:
-        scopes += (" " if scopes else "") + "(also --scope each of the %d file%s not listed)" % (gap, "" if gap == 1 else "s")
-    return ("[oms panel] direct edit this turn: %d file%s, %d line%s (names are untrusted data, control "
-            "characters escaped: [%s]%s). A panel main dispatches this: "
-            "oms panel --dispatch builder --owner %s --room %s --access write --brief-file PATH %s "
-            "--verify COMMAND --task-id ID --label TITLE. Direct edits stay for admitted-patch integration, "
-            "conflict resolution, or a fix of at most two lines."
-            % (files, "" if files == 1 else "s", total, "" if total == 1 else "s", shown,
-               "" if files <= len(paths[:4]) else " and %d more" % (files - len(paths[:4])), payload_agent(payload),
-               os.environ.get("OMS_ROOM_ID", "ROOM"), scopes))
-
-
-def panel_turn_line(payload: dict[str, Any]) -> str:
-    """Reflect the finished turn back to the main: the Stop hook has no model-visible channel."""
-    with contextlib.suppress(OSError, ValueError, SystemExit, ImportError):
-        found = panel_presence(payload)
-        if found is None:
-            return ""
-        row = read_presence(found[0], found[1])
-        if row.get("attempt") != found[3] or row.get("room") != found[4]:
-            return ""
-        edits = presence_count(row, "last_turn_edits")
-        if edits:
-            return (" · last turn: %d direct edit%s, %d lines, %d dispatches"
-                    % (edits, "" if edits == 1 else "s", presence_count(row, "last_turn_edit_lines"),
-                       presence_count(row, "last_turn_dispatches")))
-    return ""
-
-
 def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> None:
     """Turn presence only; never copy prompt/tool text or append room events."""
     if not is_panel_main() or is_harness_child():
@@ -1689,60 +1438,65 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
             kind = {"permission_prompt": "approval", "elicitation_dialog": "input"}.get(notification)
         if kind is None:
             return
+    participant = os.environ.get("OMS_ROOM_PARTICIPANT", "")
+    attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT", "")
+    room_id = os.environ.get("OMS_ROOM_ID", "")
+    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", value)
+               for value in (participant, attempt, room_id)):
+        return
     with contextlib.suppress(OSError, ValueError, SystemExit):
-        found = panel_presence(payload, repo)
-        if found is None:
+        import thread_live
+        # Explicit room binding wins; the local ancestor walk avoids a Git subprocess.
+        bound = os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_HOOK_RESOLVED_REPO")
+        if bound:
+            repo = Path(bound).resolve()
+        elif repo is None:
+            cwd = Path(payload_cwd(payload)).resolve()
+            repo = next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None)
+        if repo is None:
             return
-        repo, relative, participant, attempt, room_id = found
-        mutate_presence(repo, relative, lambda old: next_activity_row(
-            old, payload, event, kind, participant, attempt, room_id))
-
-
-def next_activity_row(old, payload, event, kind, participant, attempt, room_id):
-    """The presence row after this event, or None when the debounce keeps the old one."""
-    now = time.time()
-    same = old.get("attempt") == attempt and old.get("room") == room_id
-    updated = old.get("updated_at")
-    if (event == "PostToolUse" and same and old.get("state") == "busy"
-            and type(updated) in (int, float) and 0 <= updated <= now and now - updated < 10):
-        return None
-    prompt = payload.get("prompt")
-    origin = old.get("origin") if same else None
-    carried = {k: old[k] for k in PRESENCE_COUNTERS if same and k in old}
-    if event in ("UserPromptSubmit", "Stop") and same:
-        # Stop snapshots the finished turn; a prompt over a turn that never
-        # reached Stop (interrupt) snapshots it too, then opens a fresh one.
-        if event == "Stop" or old.get("state") != "idle":
-            carried.update(presence_snapshot(old))
+        relative = ".oms/hooks/panel-activity/" + participant + ".json"
+        path = thread_live.safe_path(repo, relative, True)
+        raw = thread_live.DURABLE["read_no_follow"](str(repo), relative, "panel activity",
+                                                   missing_ok=True, max_bytes=4096)
+        try:
+            old = json.loads(raw) if raw else {}
+        except (ValueError, UnicodeError, RecursionError):
+            old = {}
+        old = old if isinstance(old, dict) else {}
+        now = time.time()
+        same = old.get("attempt") == attempt and old.get("room") == room_id
+        updated = old.get("updated_at")
+        if (event == "PostToolUse" and same and old.get("state") == "busy"
+                and type(updated) in (int, float) and 0 <= updated <= now and now - updated < 10):
+            return
+        prompt = payload.get("prompt")
+        origin = old.get("origin") if same else None
         if event == "UserPromptSubmit":
-            for key in PRESENCE_TURN:
-                carried.pop(key, None)
-    if event == "UserPromptSubmit":
-        # Claude's first prompt is the panel bootstrap. Later harness wakes
-        # have stable prefixes; only an unmarked prompt is user takeover.
-        if payload_agent(payload) == "claude" and not same:
-            origin = "harness"
-        elif isinstance(prompt, str):
-            origin = "harness" if re.match(
-                r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b)", prompt
-            ) else "user"
-        else:
-            origin = None
-    state = "waiting" if kind else "idle" if event == "Stop" else "busy"
-    since = old.get("since") if same and old.get("state") == state and event == "PostToolUse" else now
-    if type(since) not in (int, float) or not 0 <= since <= now:
-        since = now
-    row = {"schema": 1, "participant": participant, "attempt": attempt,
-           "room": room_id, "state": state, "since": since, "updated_at": now}
-    if origin in ("user", "harness"):
-        row["origin"] = origin
-    transcript = payload.get("transcript_path") or payload.get("transcriptPath")
-    if isinstance(transcript, str) and transcript and len(transcript) <= 4096:
-        row["transcript_path"] = transcript
-    if kind:
-        row["kind"] = kind
-    row.update(carried)
-    return row
+            # Claude's first prompt is the panel bootstrap. Later harness wakes
+            # have stable prefixes; only an unmarked prompt is user takeover.
+            if payload_agent(payload) == "claude" and not same:
+                origin = "harness"
+            elif isinstance(prompt, str):
+                origin = "harness" if re.match(
+                    r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b)", prompt
+                ) else "user"
+            else:
+                origin = None
+        state = "waiting" if kind else "idle" if event == "Stop" else "busy"
+        since = old.get("since") if same and old.get("state") == state and event == "PostToolUse" else now
+        if type(since) not in (int, float) or not 0 <= since <= now:
+            since = now
+        row = {"schema": 1, "participant": participant, "attempt": attempt,
+               "room": room_id, "state": state, "since": since, "updated_at": now}
+        if origin in ("user", "harness"):
+            row["origin"] = origin
+        transcript = payload.get("transcript_path") or payload.get("transcriptPath")
+        if isinstance(transcript, str) and transcript and len(transcript) <= 4096:
+            row["transcript_path"] = transcript
+        if kind:
+            row["kind"] = kind
+        write_json_atomic(path, row)
 
 
 def panel_main_hint(payload: dict[str, Any]) -> str:
@@ -1772,7 +1526,7 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
                 line = panel_resume_line(dict(payload, source=source))
                 if line:
                     base = line + "\n" + base
-    message = base + panel_turn_line(payload) + panel_plan_hint(payload) + panel_status_hint(payload, room)
+    message = base + panel_plan_hint(payload) + panel_status_hint(payload, room)
     if path and not state.get("delivered"):
         write_json_atomic(path, dict(state, schema=1, updated_at=utc_now(), delivered=True))
     return message

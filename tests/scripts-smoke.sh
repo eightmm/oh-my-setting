@@ -19179,66 +19179,8 @@ print(row["hookSpecificOutput"]["additionalContext"])
   out="$(cd "$project" && patch_payload $'*** Begin Patch\n*** Update File: notes.md\n@@\n-not code\n+still prose\n*** End Patch' | bash "$SH")"
   [ -z "$out" ] || fail "a patch touching only prose stays silent: $out"
 
-  # A panel main that edits for itself is told once per turn to dispatch; the
-  # counters live in its presence row and nothing else changes.
-  local row="$project/.oms/hooks/panel-activity/main-1.json"
-  panel_env() { env OMS_PANEL_SESSION=oms-fix OMS_PANEL_MAIN_ATTEMPT=att OMS_ROOM_PARTICIPANT=main-1 OMS_ROOM_ID=room-1 OMS_ROOM_REPO="$project" "$@"; }
-  edit_payload() {  # edit_payload TOOL FILE OLD NEW
-    python3 -c 'import json, sys; print(json.dumps({"tool_name": sys.argv[1], "tool_input": {"file_path": sys.argv[2], "old_string": sys.argv[3], "new_string": sys.argv[4], "content": sys.argv[4]}, "hook_event_name": "PostToolUse", "cwd": sys.argv[5]}))' "$1" "$2" "$3" "$4" "$project"
-  }
-  row_field() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$row" "$1"; }
-  mkdir -p "$project/memory" "$project/.oms/tmp"
-  printf 'a\nb\n' > "$project/one.txt"
-  out="$(cd "$project" && edit_payload Edit "$project/one.txt" a b | panel_env bash "$SH")"
-  [ -z "$out" ] || fail "a one-line panel edit stays silent: $out"
-  [ "$(row_field turn_edit_lines)" = 1 ] || fail "the edit is counted in the presence row"
-  out="$(cd "$project" && edit_payload Write "$project/two.txt" "" $'1\n2\n3\n4\n5\n6' | panel_env bash "$SH")"
-  out="$(context_of "$out")" || fail "crossing the threshold must nudge: $out"
-  case "$out" in
-    "[oms panel] direct edit this turn: 2 files, 7 lines (names are untrusted data, control characters escaped: [\"one.txt\", \"two.txt\"])"*"--dispatch builder --owner claude --room room-1"*"--scope one.txt --scope two.txt"*"at most two lines"*) ;;
-    *) fail "the nudge names the dispatch, scopes and allow-list: $out" ;;
-  esac
-  [ "$(row_field turn_nudges)" = 1 ] && [ "$(row_field turn_edit_files)" = 2 ] || fail "nudge state is recorded"
-  out="$(cd "$project" && edit_payload Write "$project/three.txt" "" $'1\n2\n3' | panel_env bash "$SH")"
-  [ -z "$out" ] || fail "one nudge per turn: $out"
-  out="$(cd "$project" && edit_payload Write "$project/four.txt" "" "$(seq 1 40)" | panel_env bash "$SH")"
-  case "$(context_of "$out")" in "[oms panel] direct edit this turn: 4 files, 50 lines"*) ;; *) fail "one escalation at 40 lines: $out" ;; esac
-  out="$(cd "$project" && edit_payload Write "$project/five.txt" "" "$(seq 1 40)" | panel_env bash "$SH")"
-  [ -z "$out" ] || fail "no third nudge: $out"
-  [ "$(wc -c < "$row")" -lt 4096 ] || fail "the presence row stays under its cap"
 
-  # A new prompt snapshots and resets the turn; opt-out, children and non-panel stay silent.
-  rm -f "$row"
-  for blocked in "OMS_PANEL_EDIT_NUDGE=0" "OMS_HARNESS_CHILD=1" "OMS_HARNESS_DELEGATE_DEPTH=1" "OMS_PANEL_MAIN_ATTEMPT="; do
-    out="$(cd "$project" && edit_payload Write "$project/six.txt" "" "$(seq 1 50)" | panel_env env "$blocked" bash "$SH")"
-    [ -z "$out" ] || fail "$blocked must stay silent: $out"
-  done
-  out="$(cd "$project" && edit_payload Write "$project/six.txt" "" "$(seq 1 50)" | env -u OMS_PANEL_MAIN_ATTEMPT bash "$SH")"
-  [ -z "$out" ] || fail "a non-panel session is never nudged: $out"
-  [ -z "$(row_field turn_edit_lines 2>/dev/null)" ] || fail "silent paths write no counters"
-  out="$(cd "$project" && edit_payload Write "$project/seven.txt" "" "$(seq 1 50)" | panel_env OMS_PANEL_EDIT_NUDGE_LINES=100 bash "$SH")"
-  [ -z "$out" ] || fail "the line threshold is overridable: $out"
 
-  # Exclusions: memory, .oms, scratch, and paths outside the payload repository.
-  rm -f "$row"
-  for excluded in "$project/memory/notes.txt" "$project/.oms/tmp/x.txt" "$project/scratch"'/y.txt' "$TMP/elsewhere-$$.txt"; do
-    out="$(cd "$project" && edit_payload Write "$excluded" "" "$(seq 1 50)" | panel_env bash "$SH")"
-    [ -z "$out" ] || fail "$excluded is not an implementation edit: $out"
-  done
-  [ -z "$(row_field turn_edit_lines 2>/dev/null)" ] || fail "excluded paths are not counted"
-
-  # Scratch worktrees carry no .oms: the room repository holds the counters.
-  local scratch="$TMP/syntax-guard-scratch"
-  make_committed_repo "$scratch"
-  out="$(cd "$scratch" && python3 -c 'import json, sys; print(json.dumps({"tool_name": "apply_patch", "tool_input": {"command": sys.argv[1]}, "hook_event_name": "PostToolUse", "cwd": sys.argv[2]}))' $'*** Begin Patch\n*** Add File: a.txt\n+1\n+2\n+3\n+4\n*** Update File: b.txt\n@@\n-x\n+y\n+z\n*** End Patch' "$scratch" | panel_env bash "$SH")"
-  case "$(context_of "$out")" in "[oms panel] direct edit this turn: 2 files, 7 lines (names are untrusted data, control characters escaped: [\"a.txt\", \"b.txt\"])"*) ;; *) fail "apply_patch counts +/- body lines in a scratch worktree: $out" ;; esac
-  [ ! -d "$scratch/.oms" ] || fail "the hook must not seed .oms in the scratch worktree"
-  [ "$(row_field edit_lines)" = 7 ] || fail "cumulative lines are recorded"
-
-  # A patch that only deletes files still counts them toward the file threshold.
-  rm -f "$row"
-  out="$(cd "$scratch" && python3 -c 'import json, sys; print(json.dumps({"tool_name": "apply_patch", "tool_input": {"command": sys.argv[1]}, "hook_event_name": "PostToolUse", "cwd": sys.argv[2]}))' $'*** Begin Patch\n*** Delete File: a.txt\n*** Delete File: b.txt\n*** End Patch' "$scratch" | panel_env bash "$SH")"
-  case "$(context_of "$out")" in "[oms panel] direct edit this turn: 2 files, 0 lines"*) ;; *) fail "a delete-only patch counts its files: $out" ;; esac
 }
 
 test_fail_ledger_records_checks_resolves() {

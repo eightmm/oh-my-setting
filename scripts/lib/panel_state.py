@@ -458,8 +458,6 @@ def main_activity(repo, members, windows=()):
             result[who] = {k: row.get(k) for k in ("state", "since", "updated_at", "attempt", "room")}
             if row.get("origin") in ("user", "harness"):
                 result[who]["origin"] = row["origin"]
-            if type(row.get("turn_edits")) is int and 0 < row["turn_edits"] <= 10**9:
-                result[who]["edits"] = row["turn_edits"]
             if row["state"] == "waiting":
                 result[who]["kind"] = row["kind"]
             if (row["state"] == "busy" and member.get("provider") == "claude"
