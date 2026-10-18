@@ -194,23 +194,94 @@ def read_regular_bytes(filename, label, maximum):
     finally:
         os.close(fd)
 
+def receipt_directories(directory):
+    """The checkout's own receipt directory, then sibling land state directories.
+
+    Siblings belong to other checkouts of the same repository and are only
+    trusted through sibling_receipt_binds_repo."""
+    found = [(directory, False)]
+    parent = os.path.dirname(os.path.abspath(directory))
+    try:
+        names = sorted(os.listdir(parent))
+    except OSError:
+        return found
+    for name in names[:512]:
+        path = os.path.join(parent, name)
+        if (os.path.abspath(path) != os.path.abspath(directory) and not os.path.islink(path) and
+                os.path.isdir(path)):
+            found.append((path, True))
+    return found
+
+def sibling_receipt_binds_repo(receipt, name):
+    """A sibling's request stamp hashes [push URL, remote, target, gate command]
+    exactly as land.sh does; recomputing it from this repository's push URL
+    proves the same destination without trusting the directory name."""
+    remote, target, gate = (receipt.get(key) for key in ("remote", "target", "gate"))
+    command = gate.get("command") if isinstance(gate, dict) else None
+    if (not isinstance(remote, str) or not remote or remote.startswith("-") or
+            not isinstance(target, str) or not target or not isinstance(command, str)):
+        return False
+    try:
+        run = subprocess.run(["git", "-C", env("OMS_REPO"), "remote", "get-url", "--push", remote],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+                             env=dict(os.environ, GIT_ALLOW_PROTOCOL=""))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if run.returncode != 0:
+        return False
+    url = run.stdout.decode("utf-8", "surrogateescape").replace("\r", "").strip()
+    # The stamp hashes the URL as configured, so a relative one (../remote.git)
+    # names different repositories in different checkouts and the receipt does not
+    # record its producer's checkout: fail closed where land_receipts resolves it.
+    try:
+        resolved = _load(os.path.join(os.path.dirname(__file__), "land_receipts.py"))[
+            "destination"](env("OMS_REPO"), remote, push=True)
+    except ValueError:
+        return False
+    if resolved != url:
+        return False
+    digest = hashlib.sha256(json.dumps([url, remote, target, command],
+                                       ensure_ascii=True).encode()).hexdigest()[:24]
+    return (receipt.get("request") == name[:-5] and
+            name[:-5].endswith("-" + digest) and name.startswith(receipt.get("sha", "") + "-"))
+
+def read_sibling_receipt(path):
+    """A sibling directory belongs to another checkout: a candidate that is
+    unreadable, oversized, linked or not a regular file is skipped, not fatal."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        return read_regular_bytes(path, "oms land receipt", 1024 * 1024)
+    except (OSError, ValueError, SystemExit):
+        return None
+
 def commit_landing_proof(sha, expected_receipt_sha256=None):
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
         die("--landed-commit must be a full lowercase commit SHA")
-    directory = env("OMS_LAND_RECEIPTS_DIR")
-    try:
-        candidates = sorted(os.listdir(directory))
-    except FileNotFoundError:
-        candidates = []
-    except OSError as exc:
-        die("cannot read oms land receipts: %s" % exc)
+    primary = env("OMS_LAND_RECEIPTS_DIR")
+    candidates = []
+    for directory, sibling in receipt_directories(primary):
+        try:
+            names = sorted(os.listdir(directory))
+        except FileNotFoundError:
+            names = []
+        except OSError as exc:
+            if not sibling:
+                die("cannot read oms land receipts: %s" % exc)
+            names = []
+        candidates.extend((directory, sibling, n) for n in names
+                          if n.startswith(sha + "-") and n.endswith(".json"))
+    stale = None
     passed = False
     legacy = None
     recorded_base = _load(os.path.join(os.path.dirname(__file__), "land_receipts.py"))["recorded_base"]
-    for name in candidates:
-        if not name.startswith(sha + "-") or not name.endswith(".json"):
-            continue
-        raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
+    for directory, sibling, name in candidates:
+        if sibling:
+            raw = read_sibling_receipt(os.path.join(directory, name))
+            if raw is None:
+                continue
+        else:
+            raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
         if expected_receipt_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_receipt_sha256:
             continue
         try:
@@ -220,6 +291,8 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
         if not isinstance(receipt, dict) or receipt.get("schema") != 1:
             continue
         if receipt.get("sha") != sha or receipt.get("state") != "passed":
+            continue
+        if sibling and not sibling_receipt_binds_repo(receipt, name):
             continue
         gate, push, ci = (receipt.get(key) for key in ("gate", "push", "ci"))
         if not all(isinstance(stage, dict) for stage in (gate, push, ci)):
@@ -255,6 +328,8 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
                     env=git_env, timeout=10).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             reachable = False
+        if not reachable and stale is None:
+            stale = remote
         if reachable:
             proof = {"kind": "commit", "sha": sha,
                      "receipt_sha256": hashlib.sha256(raw).hexdigest()}
@@ -267,7 +342,8 @@ def commit_landing_proof(sha, expected_receipt_sha256=None):
     if legacy is not None:
         return legacy
     if passed:
-        die("landed commit %s is not reachable from a passed receipt's local pushed target ref" % sha)
+        die("landed commit %s is not reachable from a passed receipt's local pushed target ref; "
+            "fetch %s first" % (sha, stale or "its remote"))
     die("no passed oms land receipt for %s with gate/push ok and CI success" % sha)
 
 def landed_range_paths(sha, receipt_sha256):
@@ -288,12 +364,38 @@ def landed_range_paths(sha, receipt_sha256):
             die("cannot list files changed by landed commit %s; retry where its history is local" % sha)
         return run.stdout.decode("utf-8", "surrogateescape")
     receipt = None
-    for name in sorted(os.listdir(directory)):
-        if not name.startswith(sha + "-") or not name.endswith(".json"):
+    # The finish proof already pinned this receipt by digest; sibling land
+    # state directories of the same repository may hold it.
+    primary = directory
+    parent = os.path.dirname(os.path.abspath(directory))
+    try:
+        siblings = [os.path.join(parent, n) for n in sorted(os.listdir(parent))[:512]]
+    except OSError:
+        siblings = []
+    siblings = [d for d in siblings if os.path.abspath(d) != os.path.abspath(directory) and
+                not os.path.islink(d) and os.path.isdir(d)]
+    for directory in [directory] + siblings:
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
             continue
-        raw = read(os.path.join(directory, name))
-        if hashlib.sha256(raw).hexdigest() == receipt_sha256:
-            receipt = json.loads(raw)
+        for name in names:
+            if not name.startswith(sha + "-") or not name.endswith(".json"):
+                continue
+            path = os.path.join(directory, name)
+            if directory != primary:
+                try:
+                    if not stat.S_ISREG(os.lstat(path).st_mode):
+                        continue
+                    raw = read(path)
+                except (OSError, ValueError, SystemExit):
+                    continue
+            else:
+                raw = read(path)
+            if hashlib.sha256(raw).hexdigest() == receipt_sha256:
+                receipt = json.loads(raw)
+                break
+        if receipt is not None:
             break
     if receipt is None:
         die("landed commit receipt changed before range selection")

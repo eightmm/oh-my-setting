@@ -684,6 +684,68 @@ for forged_base in (unrelated, 'HEAD', None):
     else:
         raise AssertionError('range consumer accepted forged push.base')
 receipt.write_bytes(original)
+
+# A landing made from another checkout of the same repository proves a finish
+# recorded in a checkout that never landed. The sibling state directory counts
+# only when the receipt's request stamp binds this checkout's push URL.
+def plan_finish(repo, task, ok, landed=None, allowed='3-a.txt'):
+    landed = landed or sha
+    run(plan, '--repo', repo, 'init', '--goal', 'sibling ' + task)
+    run(plan, '--repo', repo, 'add', '--id', task, '--title', task, '--allowed', allowed)
+    run(plan, '--repo', repo, 'claim', '--id', task, '--provider', 'codex')
+    run(plan, '--repo', repo, 'review', '--id', task, '--artifact', 'result.md', '--patch', 'result.patch')
+    return run(plan, '--repo', repo, 'finish', '--id', task, '--landed-commit', landed, ok=ok)
+sibling = tmp / 'sibling-plan'
+run('git', 'clone', '--quiet', remote, sibling)
+plan_finish(sibling, 'sibling-same-remote', True)
+row = json.loads(run(plan, '--repo', sibling, 'show', '--id', 'sibling-same-remote'))
+assert row['state'] == 'done' and row['landing']['receipt_sha256'] == hashlib.sha256(original).hexdigest(), row
+foreign = tmp / 'foreign-plan'
+run('git', 'clone', '--quiet', '--bare', remote, tmp / 'range-foreign.git')
+run('git', 'clone', '--quiet', tmp / 'range-foreign.git', foreign)
+refused = plan_finish(foreign, 'sibling-other-remote', False)
+assert 'no passed oms land receipt' in refused, refused
+stale = tmp / 'stale-plan'
+run('git', 'clone', '--quiet', remote, stale)
+run('git', '-C', stale, 'update-ref', 'refs/remotes/origin/main', sha + '^')
+refused = plan_finish(stale, 'sibling-stale-ref', False)
+assert 'fetch origin first' in refused, refused
+
+# A sibling candidate that is dangling, oversized or not a regular file belongs
+# to another checkout and must not hide a valid receipt that sorts after it.
+junk = receipt.parent.parent / 'a-junk-0-0'
+junk.mkdir()
+os.symlink(str(junk / 'missing'), str(junk / (sha + '-dangling.json')))
+(junk / (sha + '-big.json')).write_bytes(b' ' * (1024 * 1024 + 1))
+os.mkfifo(str(junk / (sha + '-fifo.json')))
+assert min(p.name for p in receipt.parent.parent.iterdir()) == junk.name
+unblocked = tmp / 'junk-plan'
+run('git', 'clone', '--quiet', remote, unblocked)
+plan_finish(unblocked, 'sibling-junk', True)
+
+# Relative remote URLs name different repositories in different checkouts, so
+# identical request stamps prove nothing: no receipt is shared between them.
+rel = {}
+for label in ('a', 'b'):
+    base_dir = tmp / ('rel-' + label)
+    base_dir.mkdir()
+    if label == 'a':
+        run('git', 'clone', '--quiet', '--bare', remote, base_dir / 'remote.git')
+    else:
+        run('git', 'clone', '--quiet', '--bare', rel['a'].parent / 'remote.git', base_dir / 'remote.git')
+    work = base_dir / 'work'
+    run('git', 'clone', '--quiet', base_dir / 'remote.git', work)
+    run('git', '-C', work, 'remote', 'set-url', 'origin', '../remote.git')
+    rel[label] = work
+    if label == 'a':
+        (work / 'r.txt').write_text('r\n')
+        run('git', '-C', work, 'add', 'r.txt')
+        run('git', '-C', work, 'commit', '-qm', 'r.txt')
+        rsha = run('git', '-C', work, 'rev-parse', 'HEAD')
+        run(land, '--repo', work, '--gate', 'true', '--wait', '--no-update', '--ci-wait', '1')
+        run('git', '-C', work, 'fetch', '--quiet', 'origin')
+refused = plan_finish(rel['b'], 'relative-url', False, landed=rsha, allowed='r.txt')
+assert 'no passed oms land receipt' in refused, refused
 PYRANGE
 # Explicit handoff preserves clone isolation until gate, push and CI pass.
 # The target can remain dirty and behind: only its destination ref is fetched.
