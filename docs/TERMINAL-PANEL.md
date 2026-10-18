@@ -592,13 +592,7 @@ round in the same turn. Send remaining review findings to a worker with
 `--continue`.
 It edits directly only for admitted-patch integration, conflict resolution, or
 a fix of at most two lines; everything else goes to a worker even when the brief
-feels longer. The syntax-guard PostToolUse hook counts a panel main's own edits
-in its presence row (not scratch, memory or `.oms` paths) and, at 6 lines or 2
-files in a turn, adds a one-line advisory naming the `oms panel --dispatch`
-command (again at 40 lines; `OMS_PANEL_EDIT_NUDGE=0` disables,
-`OMS_PANEL_EDIT_NUDGE_LINES` moves the threshold). The next prompt reflects
-"last turn: N direct edits, L lines, D dispatches" and the board shows
-" · N edits". Outside the panel, the global rule still requires an
+feels longer. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
 
 The sole panel main also lands its own work. `oms scratch-worktree add` starts a detached
