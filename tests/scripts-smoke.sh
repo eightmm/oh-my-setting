@@ -31201,7 +31201,7 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     contains "$out" 'source repository protected surfaces: tracked' || fail "linked source content violation was not named: $out"
     # Volatile presence families vanish under a read pass without failing it;
     # authority state still fails and the message names the file.
-    local vol_case vol_file
+    local vol_case
     MA_READ_SOURCE_REPO="$read_source"
     mkdir -p "$project/.oms/hooks/sessions" "$project/.oms/hooks/panel-activity" "$project/.oms/plan"
     printf '{}\n' > "$project/.oms/hooks/sessions/sess-a.json"
