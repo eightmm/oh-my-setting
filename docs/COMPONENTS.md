@@ -276,7 +276,7 @@ oms update
 oms uninstall
 ```
 
-`oms cleanup` dry-runs unless `--apply` is given. It removes a dead delegate worktree with uncommitted work only when exactly one recorded run names it and that run finished (a failed or timed-out run only after an owner decision or `OMS_HARNESS_RESIDUE_AGED_DAYS` days, default 7), its changed files equal the run's preserved patch applied to HEAD byte for byte, its ignored files are Python bytecode only, its `.oms` holds only hook telemetry, caches and empty locks, and the owning repo survives; it repeats that proof just before removal. Scratch worktrees and worktrees holding other `.oms` records stay kept, and every kept item prints its reason.
+`oms cleanup` dry-runs unless `--apply` is given. It removes a dead delegate worktree with uncommitted work only when exactly one recorded run names it and that run finished (a failed or timed-out run only after an owner decision or `OMS_HARNESS_RESIDUE_AGED_DAYS` days, default 7), its changed files equal the run's preserved patch applied to HEAD byte for byte, its ignored files are Python bytecode only, its `.oms` holds only hook telemetry, caches and empty locks, and the owning repo survives; it repeats that proof just before removal. A scratch worktree stays kept while it has uncommitted or untracked files, its HEAD is on no branch, tag or remote ref, or it holds `.oms/plan/tasks.json`, `.oms/failures.jsonl`, `.oms/landings.jsonl` or `.oms/artifacts/index.jsonl`; a clean scratch worktree at a referenced HEAD is removable. Worktrees holding other `.oms` records stay kept, and every kept item prints its reason.
 
 Structured doctor reports adapt the existing checks; they do not create a
 second health engine. Findings carry stable IDs, severity, and content-free
