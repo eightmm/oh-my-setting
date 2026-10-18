@@ -1227,8 +1227,12 @@ PY
   IFS= read -r continuation_base < "$worktree_parent/continuation-base"
   continuation_base="${continuation_base//$'\r'/}"
   # Carrying bytes outside the prompt must retain the same outbound screen.
-  ma_validate_outbound_prompt "$continuation_patch_file" ||
-    fail "previous continuation patch failed outbound validation; no worker ran"
+  # Only added lines are new outbound content; context and removed lines stay
+  # in the repository, so blank them (keeping line numbers) before scanning.
+  continuation_added_file="$worktree_parent/continuation-added.txt"
+  awk '/^\+/ { print; next } { print "" }' "$continuation_patch_file" > "$continuation_added_file"
+  ma_validate_outbound_prompt "$continuation_added_file" ||
+    fail "continuation patch failed outbound validation (added lines); no worker ran"
 fi
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \

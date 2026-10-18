@@ -246,6 +246,38 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                     assert "--salvage round-task --attempt round-2" in str(error), error
                 else:
                     raise AssertionError("stopped write work bypassed salvage")
+            # A review/admit/land tail past the 8-call display slice must not hide the worker's own call,
+            # and a present-but-false guard key is not a guard stop.
+            tail = [{"attempt_id": "later-%d" % i, "exit": 0} for i in range(9)]
+            hidden = [dict(kind="delegate", attempt_id="round-2", task_id="round-task", exit=0, verify_exit=0,
+                           guard=False, event_id="e-round-2")]
+            with patch.object(panel, "results", return_value={"rows": [{"calls": tail}]}), \
+                    patch.object(panel_results, "_records", return_value=([main] + history, hidden)), \
+                    patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
+                continued, _, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
+                                                        round_brief, {}, allow_extra_round="Hidden call stays eligible")
+                continued.unlink()
+                assert "no patch" in note, note
+            # A patch HEAD already contains is not replayed at the old base; any other patch still is.
+            head_patch = b"--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-older\n+old\n"
+            for body, contained in ((head_patch, True), (head_patch.replace(b"-older\n+old", b"-old\n+older"), False)):
+                record = dict(kind="delegate", attempt_id="round-2", patch=".oms/artifacts/p.patch", patch_sha256="a" * 64,
+                              event_id="e-round-2", base_sha="a" * 12)
+                call = dict(attempt_id="round-2", exit=0, patch=".oms/artifacts/p.patch", patch_sha256="a" * 64,
+                            event_id="e-round-2")
+                reference = {}
+                with patch.object(panel, "results", return_value={"rows": [{"calls": [call]}]}), \
+                        patch.object(panel, "verified_patch", return_value=body), \
+                        patch.object(panel_results, "_records", return_value=([main] + history, [record])):
+                    continued, _, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
+                        round_brief, {}, allow_extra_round="Patch placement", patch_reference=reference)
+                text = continued.read_text()
+                continued.unlink()
+                if contained:
+                    assert reference == {} and "already part of the repository at HEAD" in text, (reference, text)
+                else:
+                    assert reference["base"] == "a" * 12
+                    assert "original base, not the current HEAD" in text, text
     override_member = "call-0123456789abcdee"
     panel._prepare_dispatch_call(project, shared, override_member, room_owner, "true", project,
         dict(role="builder", scope=["value.txt"], workload="routine", brief="Bounded correction.",
@@ -332,10 +364,19 @@ CONTINUATION
     digest = hashlib.sha256(bad_patch.read_bytes()).hexdigest()
     sensitive_patch = bad_patch.with_name("continuation-sensitive.patch")
     sensitive_patch.write_bytes(artifact_patch.read_bytes().replace(b"+new\n", b"+-----BE" + b"GIN PRIVATE KEY-----\n"))
+    # Repository context in a continuation patch is not outbound content; only added lines are scanned.
+    scratch_line = "$project/scratc" + "h/y.txt"
+    head_lines = "--- a/value.txt\n+++ b/value.txt\n@@ -1 +1,2 @@\n old\n"
+    context_patch = bad_patch.with_name("continuation-context.patch")
+    context_patch.write_text(head_lines.replace("+1,2", "+1,3") + " " + scratch_line + "\n+new\n")
+    added_patch = bad_patch.with_name("continuation-added.patch")
+    added_patch.write_text(head_lines + "+" + scratch_line + "\n")
     before_workers = Path(room_env["PANEL_TEST_WORKER_LOG"]).read_bytes()
     for previous, sha, message in ((bad_patch, "0" * 64, "could not be verified"),
             (bad_patch, digest, "no longer applies"),
-            (sensitive_patch, hashlib.sha256(sensitive_patch.read_bytes()).hexdigest(), "failed outbound validation")):
+            (sensitive_patch, hashlib.sha256(sensitive_patch.read_bytes()).hexdigest(), "failed outbound validation"),
+            (context_patch, hashlib.sha256(context_patch.read_bytes()).hexdigest(), "no longer applies"),
+            (added_patch, hashlib.sha256(added_patch.read_bytes()).hexdigest(), "continuation patch failed outbound")):
         reference = dict(patch=previous.relative_to(project).as_posix(), sha256=sha, base=original_base)
         refused = subprocess.run(["bash", str(panel.ENTRY), "peer-delegate", "--repo", str(project),
             "--to", "codex", "--model", "gpt-6-luna", "--brief-file", str(round_brief), "--verify", "true"],

@@ -183,6 +183,22 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
     return dict(route, provider=peer["provider"], binary=peer["binary"], model=model, effort=effort)
 
 
+def _patch_in_head(repo, body):
+    """True when reverse-applying the patch to HEAD's tree succeeds, i.e. HEAD already holds its result."""
+    with tempfile.TemporaryDirectory(prefix="oms-head-has-") as scratch:
+        patch_file = Path(scratch) / "previous.patch"
+        patch_file.write_bytes(body)
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(scratch) / "index"), GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        git = ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false", "-C", str(repo)]
+        try:
+            return all(subprocess.run(git + argv, env=env, capture_output=True, check=False,
+                                      stdin=subprocess.DEVNULL, timeout=60).returncode == 0
+                       for argv in (["read-tree", "HEAD"], ["apply", "--check", "-R", "--cached", str(patch_file)]))
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+
 def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, allow_extra_round=None,
                  patch_reference=None):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
@@ -229,6 +245,18 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     found = results(repo, task_id)["rows"]
     call = next((c for c in reversed(found[0].get("calls", []) if found else [])
                  if c.get("attempt_id") == last["attempt_id"]), {})
+    if not call:
+        # The display slice keeps only the newest calls; later review, admit and
+        # land rows must not hide the worker's own row from eligibility.
+        import panel_results
+        try:
+            attempts, indexed = panel_results._records(repo, full=True, task_id=task_id)
+            own = [r for r in indexed if r.get("attempt_id") == last["attempt_id"]]
+            full = panel_results.results(repo, task_id, _records_data=(attempts, own))["rows"]
+            call = next((c for c in reversed(full[0].get("calls", []) if full else [])
+                         if c.get("attempt_id") == last["attempt_id"]), {})
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            call = {}
     head = subprocess.run(["git", "-C", str(head_repo), "rev-parse", "--short=12", "HEAD"], capture_output=True,
                           text=True, check=False, stdin=subprocess.DEVNULL).stdout.strip()
     old = last.get("base_sha") or "an earlier commit"
@@ -243,13 +271,13 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     # proves the checks judged the patch, so they stay salvage-only.
     verified_failure = (linked_call and last.get("reason_code") == "verification_failed"
                         and type(call.get("verify_exit")) is int and 0 < call.get("verify_exit") < 124
-                        and "guard" not in call and bool(call.get("patch")))
+                        and not call.get("guard") and bool(call.get("patch")))
     if verified_failure:
         try:
             verified_patch(repo, call)
         except (OSError, ValueError, TypeError):
             verified_failure = False
-    eligible_result = (linked_call and "guard" not in call
+    eligible_result = (linked_call and not call.get("guard")
                        and call.get("reason_code") != "worker_authority_violation"
                        and (successful_call or verified_failure))
     if (last.get("refs", {}).get("panel_access") == "write" and not eligible_result
@@ -285,9 +313,14 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             base = record.get("base_sha")
             if not re.fullmatch(r"[0-9a-f]{7,64}", str(base)):
                 raise ValueError("previous patch has no recorded base; continuation refused")
-            patch_reference.update(patch=patch, sha256=call.get("patch_sha256"), base=base)
-            where = (" The harness applies your previous patch (%s) at its original base before this round. "
-                     "Continue from the applied changes; do not reapply it." % name)
+            if _patch_in_head(head_repo, body):
+                where = (" Your previous patch (%s) is already part of the repository at HEAD; continue from it."
+                         % name)
+            else:
+                patch_reference.update(patch=patch, sha256=call.get("patch_sha256"), base=base)
+                where = (" The harness applies your previous patch (%s) at its original base before this round. "
+                         "Continue from the applied changes; do not reapply it. The patch you return is against "
+                         "that original base, not the current HEAD." % name)
         elif body:
             excerpt = body.decode("utf-8", errors="replace")
             if len(excerpt.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 > MAX_PROMPT:
