@@ -99,6 +99,7 @@ def patch_path(name):
 
 
 PATCH_LINES = {}
+PATCH_DELETED = []
 
 
 def patch_paths(command):
@@ -117,6 +118,9 @@ def patch_paths(command):
             counts.append(0)
             update_index = body_index = len(names) - 1
         elif line.startswith("*** Delete File: "):
+            deleted = patch_path(line[len("*** Delete File: "):])
+            if deleted is not None and deleted not in PATCH_DELETED and len(PATCH_DELETED) < MAX_FILES:
+                PATCH_DELETED.append(deleted)
             update_index = body_index = None
         elif line.startswith("*** Move to: ") and update_index is not None:
             names[update_index] = line[len("*** Move to: "):]
@@ -153,7 +157,7 @@ elif tool_name == PATCH_TOOL:
     paths = patch_paths(command) if isinstance(command, str) else []
 else:
     raise SystemExit(0)
-if not paths:
+if not paths and not PATCH_DELETED:
     raise SystemExit(0)
 
 
@@ -175,10 +179,11 @@ def edit_lines():
 
 if os.environ.get("OMS_PANEL_MAIN_ATTEMPT"):
     counted = []
-    for counted_path in paths:
+    for counted_path in paths + PATCH_DELETED:
         name = hook_state.panel_countable(cwd, counted_path)
         if name is not None:
             lines = edit_lines()
+            # A deletion counts as a file even though its removed lines are unknown.
             counted.append((name, PATCH_LINES.get(counted_path, 0) if lines is None else lines))
     if counted:
         nudge = hook_state.panel_direct_edit_hint(row, counted)
