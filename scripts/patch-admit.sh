@@ -316,6 +316,7 @@ rm -f "$secret_scan_file"
 changed_files=""
 verify_out=""
 floor_verify_out=""
+floor_hint=""
 if [ "$apply_ok" = 1 ]; then
   oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null 2>&1 || true
   worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")" || fail "mktemp failed"
@@ -857,7 +858,10 @@ EOF
                   FLOOR_CHANGE_USED=true
                   record "verify-floor" "PASS" "owner override: base floor failed (exit $floor_verify_exit); reason: $ALLOW_FLOOR_CHANGE_REASON; $floor_verify (restored from HEAD: $surface_detail)"
                 else
-                  record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)"
+                  floor_hint=""
+                  [ "${OMS_HARNESS_CHILD:-0}" = 1 ] ||
+                    floor_hint=" (intended contract change? owner override: --allow-floor-change REASON)"
+                  record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)$floor_hint"
                 fi
               fi
             else
@@ -889,6 +893,11 @@ fi
 case "$ladder" in
   *"	FAIL	"*) verdict="REJECT" ;;
 esac
+# Parent-only hint, also seen through patch-land (it inherits stderr): the
+# base verifier failed on the candidate and nothing else rejected.
+if [ -n "$floor_hint" ] && [ "$(printf '%s' "$ladder" | grep -c "	FAIL	")" = 1 ]; then
+  echo "patch-admit:$floor_hint" >&2
+fi
 
 # --- Report -----------------------------------------------------------------
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

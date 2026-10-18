@@ -215,6 +215,16 @@ contains "$TMP/common-config.md" "verifier change permitted"
 contains "$TMP/common-config.md" "verify: PASS"
 contains "$TMP/common-config.md" "verify-floor: FAIL"
 contains "$TMP/common-config.md" "pyproject.toml"
+contains "$TMP/common-config.md" "owner override: --allow-floor-change REASON"
+"$ADMIT" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify 'bash scripts/check.sh' --allow-verifier-change \
+  --allow-test-reduction --report "$TMP/hint-parent.md" >/dev/null 2>"$TMP/hint-parent.err" || true
+contains "$TMP/hint-parent.err" "--allow-floor-change REASON"
+OMS_HARNESS_CHILD=1 "$ADMIT" --repo "$repo" --patch "$TMP/common-config.patch" \
+  --verify 'bash scripts/check.sh' --allow-verifier-change \
+  --allow-test-reduction --report "$TMP/hint-child.md" >/dev/null 2>"$TMP/hint-child.err" || true
+! grep -q -- '--allow-floor-change' "$TMP/hint-child.md" "$TMP/hint-child.err" ||
+  fail "worker-facing floor failure must not mention the parent-only override"
 
 # An owner can explicitly accept an intentional contract change, with both the
 # reason and the failed baseline preserved. Candidate verification still runs.
