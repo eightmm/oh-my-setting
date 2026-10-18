@@ -188,6 +188,39 @@ ma_read_guard_assert() {
         hard="${hard:+$hard, }$surface"
       fi
     done
+    case ", ${hard}," in
+      *", files,"*)
+        # Reuse the existing before/after manifests, which retain each path
+        # alongside its stat fingerprint, to name the bounded change list.
+        if [ -f "$MA_READ_GUARD_DIR/$name/files.after" ]; then
+          python3 - "$MA_READ_GUARD_DIR/$name/files" \
+            "$MA_READ_GUARD_DIR/$name/files.after" <<'PY' >&2
+import base64
+import sys
+
+def entries(path):
+    result = {}
+    with open(path, encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            fields = line.rstrip("\n").split(" ")
+            if len(fields) >= 2 and fields[0] != "TRUNCATED":
+                result[fields[0]] = (fields[-1], " ".join(fields[1:-1]))
+    return result
+
+before, after = map(entries, sys.argv[1:])
+changed = set(before) ^ set(after)
+changed.update(key for key in before.keys() & after.keys()
+               if before[key][1] != after[key][1])
+for key in sorted(changed)[:8]:
+    encoded = (after.get(key) or before.get(key))[0]
+    try:
+        print("  " + ascii(base64.b64decode(encoded).decode("utf-8", "backslashreplace")))
+    except Exception:
+        continue
+PY
+        fi
+        ;;
+    esac
     if [ -n "$soft" ]; then
       echo "warning: read pass observed $name repository changes: $soft; not attributable to the provider, review before landing" >&2
     fi

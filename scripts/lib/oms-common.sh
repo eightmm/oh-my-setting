@@ -1352,10 +1352,18 @@ oms_worker_surface_diff() {
   : > "$before_dir/gitmeta-managed-added"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
-    if ! OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
+    if [ "$name" = files ]; then
+      OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
+        OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$before_dir/gitmeta-managed-complete" \
+        oms_worker_surface_capture_one "$repo" "$name" \
+        "$current_worktree_physical" > "$before_dir/files.after" || return 2
+      cmp -s "$before_dir/files.after" "$before_dir/files" && continue
+    elif OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
       OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$before_dir/gitmeta-managed-complete" \
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
+      continue
+    fi
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_settles "$repo" \
         "$before_dir/gitmeta" "$current_worktree_physical"; then
         continue
@@ -1420,7 +1428,6 @@ oms_worker_surface_diff() {
         continue
       fi
       changed="${changed:+$changed, }$name"
-    fi
   done
   # Shared state is compared by contract, not by equality: see above. The detail
   # goes to a file because this function runs in a command substitution, where
@@ -2600,7 +2607,7 @@ oms_worker_surface_capture_one() {
       # in — unscanned. Truncation now only ever drops ignored churn.
       OMS_WG_REPO="$repo" OMS_WG_MAX="${OMS_WORKER_GUARD_MAX_FILES:-20000}" \
       OMS_WG_EXCLUDE="${OMS_WORKER_GUARD_EXCLUDE:-}" python3 - <<'PY'
-import hashlib, os, subprocess, sys
+import base64, hashlib, os, subprocess, sys
 
 root = os.environ["OMS_WG_REPO"]
 try:
@@ -2647,11 +2654,13 @@ for index, rel in enumerate(paths):
     full = os.path.join(root, name)
     try:
         info = os.lstat(full)
-        print("%s %o %d %d" % (
+        print("%s %o %d %d %s" % (
             hashlib.sha256(rel).hexdigest(), info.st_mode, info.st_size,
-            getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))))
+            getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
+            base64.b64encode(rel).decode("ascii")))
     except OSError:
-        print("%s MISSING" % hashlib.sha256(rel).hexdigest())
+        print("%s MISSING %s" % (
+            hashlib.sha256(rel).hexdigest(), base64.b64encode(rel).decode("ascii")))
 PY
       ;;
     omsstate)

@@ -31150,6 +31150,13 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     out="$(ma_read_guard_assert 2>&1)" || rc=$?
     [ "$rc" = 2 ] || fail "linked source tracked mutation must stay hard: $out"
     contains "$out" 'source repository protected surfaces: tracked' || fail "linked source content violation was not named: $out"
+    ma_read_guard_begin "$snap/read-linked-untracked" || fail "linked source untracked snapshot failed"
+    printf 'new linked source file\n' > "$linked_source/read-guard-diagnostic.txt"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "linked source untracked mutation must stay hard: $out"
+    contains "$out" 'source repository protected surfaces: files' || fail "linked source untracked violation was not named: $out"
+    contains "$out" 'read-guard-diagnostic.txt' || fail "linked source files diagnostic omitted changed path: $out"
     # Volatile presence families vanish under a read pass without failing it;
     # authority state still fails and the message names the file.
     local vol_case
