@@ -1758,10 +1758,7 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
     if "prompt" not in payload:
         return panel_main_base(payload, room) + panel_plan_hint(payload) + panel_status_hint(payload, room)
     agent = payload_agent(payload)
-    base = ("[oms panel] control-tower main: delegate via oms panel --dispatch ROLE; "
-            "wait per call (one notification); review/admit/re-dispatch on completion; refill configured slots "
-            "in the same turn with next ready or --continue. Review fixes: --continue; edit directly only for admitted-patch integration, conflict resolution, or a fix of at most two lines. "
-            "keep review/admission/finalize; full rules in "
+    base = ("[oms panel] control-tower main: full rules in "
             + ("your system prompt." if agent == "claude" else "this context."))
     path = None
     state = {}

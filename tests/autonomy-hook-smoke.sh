@@ -946,10 +946,7 @@ assert "[oms plan]" not in tower, tower
 assert "set your status: oms room send" in tower and "--kind status" in tower, tower
 with patch.object(hook_state, "panel_status_hint", return_value=""):
     short = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
-assert len(short) <= 450 and "control-tower main" in short and "your system prompt" in short, short
-assert all(token in short for token in ("per call", "same turn", "--continue")), short
-assert "Delegate implementation" not in short and "keep review/admission/finalize" in short, short
-assert "fix of at most two lines" in short and "shorter than a brief" not in short, short
+assert len(short) < 160 and short.startswith("[oms panel] control-tower main:") and "your system prompt" in short, short
 assert "fix of at most two lines" in tower and "longer than the edit" not in tower, tower
 assert "oms room scope" in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 plan_dir = repo / ".oms" / "plan"

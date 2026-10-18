@@ -123,7 +123,7 @@ def bootstrap(provider, repo):
         "implementer. "
         "Act as the control tower: by default delegate implementation, investigation and test repair to "
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
-        "separable files or steps into as many non-overlapping workers run in parallel as the work allows (there is no call cap), and keep scope, briefs, "
+        "separable files or steps into as many non-overlapping workers run in parallel as the work allows, and keep scope, briefs, "
         "architecture, integration, review and patch admission in the sole main. "
         "Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch it "
         "as soon as it finishes, never batch-wait for a wave. Keep configured parallelism full: start the next "
