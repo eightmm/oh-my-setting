@@ -401,7 +401,7 @@ def aggregate(repo, since=None, now=None):
     Follow-up task IDs are not linked by any producer record; rework therefore
     counts only additional write rounds for the same task ID.
     """
-    from panel_results import _query, _read, _indexed, pending_admissions
+    from panel_results import _query, _read, _indexed, settled_pending_admissions
 
     repo = Path(repo)
     now = time.time() if now is None else now
@@ -701,7 +701,7 @@ def aggregate(repo, since=None, now=None):
     review_tasks = [task for task in tasks if task.get("state") == "review"]
     review_ages = [_stamp(task.get("updated_at") or task.get("claimed_at")) for task in review_tasks]
     try:
-        admission_ids = pending_admissions(repo, [task.get("id") for task in tasks if task.get("id")])
+        admission_ids = settled_pending_admissions(repo, [task.get("id") for task in tasks if task.get("id")])
     except (OSError, ValueError, KeyError, TypeError):
         admission_ids = set()
         incomplete = True

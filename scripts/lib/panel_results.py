@@ -791,6 +791,18 @@ def pending_admissions(repo, task_ids, _tick=None):
         task == ident and (digest is None or done is None or done == digest) for task, done in admitted)}
 
 
+def settled_pending_admissions(repo, task_ids, _tick=None, _outcomes=None):
+    """pending_admissions minus tasks the owner already finalized.
+
+    A main admitting in a clone leaves no patch-admit row here, so the owner's decision settles the hint."""
+    from room_view import DECIDED
+    pending = pending_admissions(repo, task_ids, _tick=_tick)
+    if pending:
+        pending -= {ident for ident, outcome in (_outcomes or outcomes)(repo, pending, _shared=True, _tick=_tick).items()
+                    if outcome in DECIDED | {'failed'}}
+    return pending
+
+
 def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None, _records_data=None,
             include_preflight=False, offset=0, limit=20):
     if task_id and not ID.fullmatch(task_id):

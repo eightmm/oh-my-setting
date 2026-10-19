@@ -769,6 +769,13 @@ assert expected_metrics['pending']['awaiting_review']['count'] == 1, expected_me
 assert expected_metrics['pending']['awaiting_review']['oldest_seconds'] == 80.0, expected_metrics
 assert expected_metrics['pending']['awaiting_admission']['count'] >= 0, expected_metrics
 assert expected_metrics['preflight']['tasks'] == 1, expected_metrics
+# A finalized task leaves the metrics admission queue as it leaves the board hint, with no admission row.
+for decided, waiting in (('completed', 0), ('pending', None)):
+    with patch.object(panel_results, 'pending_admissions', side_effect=lambda repo, ids, _tick=None: {i for i in ids if i}), \
+            patch.object(panel_results, 'outcomes', side_effect=lambda repo, ids, **k: {i: decided for i in ids}):
+        settled_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+    count = settled_metrics['pending']['awaiting_admission']['count']
+    assert count == 0 if waiting == 0 else count > 0, (decided, settled_metrics['pending'])
 assert expected_metrics['interventions'] == {'manual_clears': 1, 'cancels': 1,
                                               'owner_finalized_failures': 1, 'total': 3}, expected_metrics
 metric_text = io.StringIO()

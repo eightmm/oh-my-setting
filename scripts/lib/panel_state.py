@@ -715,16 +715,14 @@ def awaiting_admission(repo, state, _tick=None):
     A task the owner already finalized is not listed: the main may have admitted it in a clone whose records
     this repository never sees, and the owner's decision settles the board hint."""
     from terminal_panel import INBOX_LIMIT, outcomes
-    from room_view import DECIDED, nodes
-    from panel_results import pending_admissions
+    from room_view import nodes
+    from panel_results import settled_pending_admissions
     members = [member for member in nodes(dict(state, awaiting_admission=None))
                if member.get("role") == "worker" and member.get("access") == "write"
                and member["state"] == "done" and member.get("task_id")]
     try:
-        pending = pending_admissions(repo, {member["task_id"] for member in members}, _tick=_tick)
-        if pending:
-            pending -= {ident for ident, outcome in outcomes(repo, pending, _shared=True, _tick=_tick).items()
-                        if outcome in DECIDED | {"failed"}}
+        pending = settled_pending_admissions(repo, {member["task_id"] for member in members}, _tick=_tick,
+                                           _outcomes=outcomes)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
         return []
     return [member["participant"] for member in members if member["task_id"] in pending][:INBOX_LIMIT]
