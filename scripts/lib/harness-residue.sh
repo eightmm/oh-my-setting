@@ -694,6 +694,19 @@ oms_harness_cleanup_dead_locks() {
   done
 }
 
+# classify_dead_residue returns 1 for a dir it cannot verify. Without the
+# expected child that is an empty or planted shell and removable; with it, the
+# worktree may hold the only copy of its work (repo moved, re-cloned or
+# unregistered), so it is kept. The remedy cannot be `oms scratch-worktree
+# remove`: that runs git worktree remove, which fails on exactly these dirs.
+oms_harness_keep_unverifiable_residue() {  # DIR
+  local child=wt
+
+  case "$(basename "$1")" in oh-my-setting-agy-read.*) child=tree ;; esac
+  [ -e "$1/$child" ] || [ -L "$1/$child" ] || return 0
+  OMS_HARNESS_RESIDUE_KEEP_REASON="unverifiable (repo moved, re-cloned or unregistered); inspect it, then remove by hand"
+}
+
 oms_harness_tmp_residue_count() {
   local base
   local dir
@@ -718,7 +731,8 @@ oms_harness_tmp_residue_count() {
       oms_file_lock_pid_alive "$pid" && continue
       # Kept work is not residue: counting it would warn with a remedy that
       # cannot act on it.
-      oms_harness_classify_dead_residue "$base" "$dir" "$marker" || true
+      oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
+        oms_harness_keep_unverifiable_residue "$dir"
       [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] || count=$((count + 1))
     done
   done <<EOF
@@ -754,7 +768,11 @@ oms_harness_cleanup_temp_dirs() {
 
       safe=0
       marker_text="$(cat "$marker" 2>/dev/null)"
-      oms_harness_classify_dead_residue "$base" "$dir" "$marker" && safe=1
+      if oms_harness_classify_dead_residue "$base" "$dir" "$marker"; then
+        safe=1
+      else
+        oms_harness_keep_unverifiable_residue "$dir"
+      fi
       if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
         printf 'kept: %s (dead harness temp dir; worktree %s)\n' \
           "$dir" "$OMS_HARNESS_RESIDUE_KEEP_REASON"

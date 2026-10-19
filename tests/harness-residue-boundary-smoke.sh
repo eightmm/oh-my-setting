@@ -108,6 +108,28 @@ done
 rm -rf "$TMPDIR"/oh-my-setting-scratch.* "$TMPDIR/oh-my-setting-delegate.plan"
 git -C "$repo" worktree prune
 
+# A dead owner whose repository moved cannot be verified, and its worktree may
+# hold the only copy of the edits: keep it, never rm -rf it.
+moved_repo="$TMP/repo-moved"
+dead_residue "$TMPDIR/oh-my-setting-scratch.moved"
+printf 'edit\n' >> "$TMPDIR/oh-my-setting-scratch.moved/wt/file.txt"
+mv "$repo" "$moved_repo"
+[ "$(oms_harness_tmp_residue_count)" = 0 ] ||
+  fail "doctor must not count an unverifiable worktree as removable residue"
+for dry in 1 0; do
+  out="$(oms_harness_cleanup_temp_dirs "$dry")"
+  printf '%s\n' "$out" | grep >/dev/null -Fx "kept: $TMPDIR/oh-my-setting-scratch.moved (dead harness temp dir; worktree unverifiable (repo moved, re-cloned or unregistered); inspect it, then remove by hand)" ||
+    fail "dry=$dry must keep an unverifiable worktree: $out"
+  if printf '%s\n' "$out" | grep >/dev/null -E '(would remove|removed): '; then
+    fail "dry=$dry must not offer an unverifiable worktree for removal: $out"
+  fi
+  [ "$(tail -n 1 "$TMPDIR/oh-my-setting-scratch.moved/wt/file.txt")" = edit ] ||
+    fail "dry=$dry cleanup destroyed an unverifiable worktree"
+done
+rm -rf "$TMPDIR/oh-my-setting-scratch.moved"
+mv "$moved_repo" "$repo"
+git -C "$repo" worktree prune
+
 # A clean worktree at a referenced commit is still removed.
 legitimate="$TMPDIR/oh-my-setting-delegate.legitimate"
 dead_residue "$legitimate"
