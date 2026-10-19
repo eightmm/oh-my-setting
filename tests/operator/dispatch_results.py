@@ -299,17 +299,14 @@ with patch.object(panel, "provider_catalog", side_effect=fixture_provider_catalo
             raise AssertionError("%s resumed a session" % role)
         except ValueError as error:
             assert "only write-capable roles continue" in str(error), error
-    # An explicit verifier reaches every read role's delegate; an advisor has no gate and refuses one.
-    for role in ("verifier", "security-auditor", "critic", "worker"):
-        judge = panel.selected_route("claude", role, None, "read", None)
-        argv = panel.routed_command(panel.ENTRY, project, judge, prompt="Check.", verify="exit 7")
-        assert "--read-only" in argv and argv[argv.index("--verify") + 1] == "exit 7", (role, argv)
-    try:
-        panel.routed_command(panel.ENTRY, project, panel.selected_route("claude", "advisor", None, "read", None),
-                             prompt="Ask.", verify="true")
-        raise AssertionError("advisor dropped an explicit verifier")
-    except ValueError as error:
-        assert "reviewer" in str(error), error
+    # Among read roles only a reviewer runs a verifier; the rest refuse an explicit one and name the reviewer.
+    for role in ("verifier", "security-auditor", "critic", "worker", "advisor"):
+        try:
+            panel.routed_command(panel.ENTRY, project, panel.selected_route("claude", role, None, "read", None),
+                                 prompt="Check.", verify="exit 7")
+            raise AssertionError("%s accepted an explicit verifier" % role)
+        except ValueError as error:
+            assert "reviewer" in str(error), (role, error)
     refactor = panel.selected_route("claude", "refactorer", None, "write", None)
 assert "--resume-session" in panel.routed_command(panel.ENTRY, project, refactor, brief=str(brief), verify="true",
                                                   resume="fixture-session")

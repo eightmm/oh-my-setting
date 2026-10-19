@@ -211,6 +211,8 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
             request = ["--prompt", brief_text]
         return prefix + ["peer-review", "--repo", str(repo), "--providers", target,
                          "--gate", "--verify", verify] + request + effort
+    if verify and route["access"] == "read":
+        raise ValueError("only reviewers run --verify among read roles; dispatch a reviewer to run checks")
     request = ["--brief-file", str(brief)] if brief else ["--prompt", prompt]
     profile = route["role"] if route["role"] != "worker" else (
         "implementation-worker" if route["access"] == "write" else "analysis-worker")

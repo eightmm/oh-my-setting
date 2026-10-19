@@ -13111,6 +13111,15 @@ test_scrubber_tiers_split_secret_from_machine() {
   done
   printf '/%s/project/y.txt\n' scratch > "$f"
   agent_memory_file_has_sensitive_content "$f" || fail "absolute scratch path must be blocked"
+  # A mid-line cluster path is blocked by the regex, so the report must name it too.
+  printf 'write to /%s/project/y.txt\n' scratch > "$f"
+  agent_memory_file_has_sensitive_content "$f" || fail "mid-line scratch path must be blocked"
+  agent_memory_sensitive_report "$f" | grep -F ':scratch-path' >/dev/null ||
+    fail "mid-line scratch path blocked without a report label"
+  printf 'OUT=/%s/p/y\n' lustre > "$f"
+  agent_memory_file_has_sensitive_content "$f" || fail "assigned lustre path must be blocked"
+  agent_memory_sensitive_report "$f" | grep -F ':lustre-path' >/dev/null ||
+    fail "assigned lustre path blocked without a report label"
 
   # Secret tier: a credential assignment matches both.
   printf 'export MY_API_T''OKEN=abc\n' > "$f"

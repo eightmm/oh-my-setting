@@ -39,7 +39,7 @@ additional evidence. Installation health and project integrity remain distinct.
 | Findings on an existing diff | `oms peer-review --gate` | `peer-ask --diff` does not provide the same typed review and mechanical gate. |
 | High-risk decision, repeated failure, or release go/no-go | `oms advise` | Do not spend an advisor on routine completion. |
 | One bounded implementation | `oms peer-delegate --to PROVIDER` | Write workers return a patch, with no commit/push authority. |
-| Inside an OMS panel | `oms panel --dispatch` (worker, advisor or reviewer); mail: `oms room updates/send/ack/scope` | Read: `--prompt`/`--brief-file` (reviewer needs `--verify`); write adds `--verify --scope`. |
+| Inside an OMS panel | `oms panel --dispatch` (worker, advisor or reviewer); mail: `oms room updates/send/ack/scope` | Read: `--prompt`/`--brief-file` (reviewer-only `--verify`, required); write adds `--verify --scope`. |
 | Questions/changes for agents already working together | `oms thread append`, `updates`, `ack` on a scoped live thread | Messages neither spawn providers nor grant authority; see state-memory.md. |
 | Isolated clean-HEAD audit with a worker role | `oms peer-delegate --to PROVIDER --read-only` | Report only, never a patch. |
 

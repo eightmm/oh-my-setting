@@ -3603,12 +3603,18 @@ ma_read_room_mail() {  # capture IDS_FILE REPOSITORY (prints the quoted mail) | 
   fi
   OMS_HARNESS_DELEGATE_DEPTH="$dispatcher_depth" PYTHONDONTWRITEBYTECODE=1 \
     python3 - "$(ma_scripts_dir)/lib" "$1" "$2" "$3" <<'PY'
-import json, os, sys
+import json, os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 import room
 ident, who = os.environ["OMS_ROOM_ID"], os.environ["OMS_ROOM_PARTICIPANT"]
 if sys.argv[2] == "capture":
     turns = room.read_call_mail(sys.argv[4], ident, who)
+    # json.dumps hides a path behind a backslash escape, past the scanner's left anchors; scan the raw text.
+    check = subprocess.run(["bash", "-c", '. "$1"; grep -Eiq "$(agent_memory_sensitive_re)"', "room-mail",
+        os.path.join(sys.argv[1], "agent-memory-common.sh")], input="\n".join(turn["text"] for turn in turns),
+        capture_output=True, text=True, timeout=5)
+    if check.returncode != 1:
+        raise ValueError("room mail contains sensitive-looking content or could not be checked")
     with open(sys.argv[3], "w", encoding="utf-8") as handle:
         json.dump([turn["room_event"]["id"] for turn in turns], handle)
     if turns:

@@ -111,7 +111,7 @@ room.send(repo, "read-mail", "main", "reader", "Assignment ZEBRA-7342", message_
 room.send(repo, "read-mail", "main", "other", "Other assignment", message_id="other-assignment")
 PY
 mail_python="$(command -v python3)"
-for mail_case in failed blocked ack-failed capture-failed "done" delegate; do
+for mail_case in failed blocked ack-failed capture-failed "done" delegate json-path; do
   mail_exit=0 mail_block="" mail_fail_op=complete
   rm -f "$TMP/mail-prompt" "$TMP/mail-prompt.argv"
   mail_script=agent-call
@@ -130,6 +130,22 @@ fi
 exec "$OMS_TEST_REAL_PYTHON" "$@"
 EOF
     chmod +x "$TMP/bin/python3"
+  fi
+  if [ "$mail_case" = json-path ]; then
+    # json.dumps puts a newline-led path behind a backslash, past the scanner's left anchors.
+    # The send gate refuses such a turn, so plant it the way a row written before that gate would sit.
+    python3 - "$ROOT" "$TMP/mail-repo" <<'PY'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+import room
+repo = pathlib.Path(sys.argv[2])
+room.send(repo, "read-mail", "main", "reader", "placeholder", message_id="json-path-assignment")
+thread = repo / ".oms/threads/read-mail.jsonl"
+rows = thread.read_text(encoding="utf-8").splitlines()
+assert '"text": "placeholder"' in rows[-1], rows[-1]
+rows[-1] = rows[-1].replace('"placeholder"', '"note\\n/ho' 'me/u/x"', 1)
+thread.write_text("\n".join(rows) + "\n", encoding="utf-8")
+PY
   fi
   if [ "$mail_case" = delegate ]; then
     mail_script=peer-delegate
@@ -154,6 +170,11 @@ EOF
       fail "mail capture failure did not stop the call"
     [ ! -e "$TMP/mail-prompt" ] || fail "provider ran without its room mail"
   fi
+  if [ "$mail_case" = json-path ]; then
+    [ "$mail_status" != 0 ] && grep -Fq 'room mail capture failed' "$TMP/mail-output" ||
+      fail "sensitive room mail did not stop the call"
+    [ ! -e "$TMP/mail-prompt" ] || fail "provider ran with sensitive room mail"
+  fi
   if [ "$mail_case" = ack-failed ]; then
     [ "$mail_status" = 2 ] && grep -Fq 'forced receipt failure' "$TMP/mail-output" ||
       fail "receipt failure was not propagated"
@@ -167,12 +188,12 @@ states = [row.get("to_state") for row in events if row.get("attempt_id") == atte
 assert "done" not in states and states[-1] == "failed", states
 PY
   fi
-  if { [ "$mail_case" != ack-failed ] && [ "$mail_case" != capture-failed ] && [ "$mail_exit" = 0 ] && [ -z "$mail_block" ] && [ "$mail_status" != 0 ]; } ||
+  if { [ "$mail_case" != ack-failed ] && [ "$mail_case" != capture-failed ] && [ "$mail_case" != json-path ] && [ "$mail_exit" = 0 ] && [ -z "$mail_block" ] && [ "$mail_status" != 0 ]; } ||
     { { [ "$mail_exit" != 0 ] || [ -n "$mail_block" ]; } && [ "$mail_status" = 0 ]; }; then
     cat "$TMP/mail-output" >&2
     fail "read mail exit is incorrect ($mail_case -> $mail_status)"
   fi
-  if [ "$mail_case" != capture-failed ]; then
+  if [ "$mail_case" != capture-failed ] && [ "$mail_case" != json-path ]; then
     grep -Fxq read-only "$TMP/mail-prompt.argv" || fail "read call lost its read-only sandbox"
     if grep -Eq 'oms room (send|ack)' "$TMP/mail-prompt"; then fail "read call was instructed to write mail"; fi
     case "$mail_case" in
@@ -186,9 +207,11 @@ import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
 import room
 mail = {m["id"]: m for m in room.messages(pathlib.Path(sys.argv[2]), "read-mail")}
-assert ("reader" in mail["assignment"]["received_by"]) == (sys.argv[3] in ("done", "delegate")), mail
+assert ("reader" in mail["assignment"]["received_by"]) == (sys.argv[3] in ("done", "delegate", "json-path")), mail
 if sys.argv[3] == "delegate":
     assert mail["delegate-assignment"]["received_by"] == ["reader"], mail
+if sys.argv[3] == "json-path":
+    assert mail["json-path-assignment"]["received_by"] == [], mail
 assert mail["other-assignment"]["received_by"] == [], mail
 PY
 done

@@ -614,7 +614,7 @@ Task complexity and write authority are independent. A write role needs a
 scoped brief file and mechanical verifier. Read workers
 use isolated worktrees too. Write workers return a patch for parent inspection
 and admission; the panel does not apply it. Reviewers require a verifier and
-record a review gate. Other read roles run an explicit `--verify` in their read-only delegate; an advisor refuses one (dispatch a reviewer or verifier to run checks) and a researcher takes no gate. Workers cannot recursively dispatch or open owner sessions.
+record a review gate. Among read roles only reviewers run `--verify`; the others refuse one (dispatch a reviewer to run checks). Workers cannot recursively dispatch or open owner sessions.
 An empty write patch from a panel dispatch or plan task exits 6 (`no changes`).
 Normal native permissions, harness policy and account consent remain in effect.
 

@@ -265,11 +265,13 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
             offset = finding_text.find(marker)
             while offset > 0:
                 prefix = finding_text[:offset].rsplit(None, 1)[-1].strip("`'\"([{<>=:")
-                if prefix.startswith("/"):
+                if prefix.startswith("/") and prefix.rstrip("/\\") and Path(prefix).parent != Path(prefix):
                     roots.add(prefix)
                 offset = finding_text.find(marker, offset + len(marker))
     # Only known repository prefixes are relativized; the outbound screen refuses all other private paths.
     for root in sorted(roots, key=len, reverse=True):
+        if not root.rstrip("/\\"):
+            continue
         finding_text = finding_text.replace(root.rstrip("/\\") + "/", "")
         finding_text = finding_text.replace(root.rstrip("/\\") + "\\", "")
     content = ("# Draft fix brief for task %s\n\n## Scope and authority\n\n"

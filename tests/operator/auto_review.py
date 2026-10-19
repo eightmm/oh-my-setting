@@ -599,6 +599,7 @@ fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the ca
                       "  ```python\nP0: example within the finding\n  ```" % fix_execution,
                       "### P2 Preserve the verifier in `%s/scripts/fixture.py:11`." % fix_candidate,
                       "### P2 Keep this temporary checkout path repo-relative: `/tmp/tmp.X/scripts/fixture.py:13`.",
+                      "### P2 Keep the doubled slash in `//scripts/fixture.py:15` apart from docs/a/b.md and https://x.y/z.",
                       "P3: Keep the manual dispatch step.")
 fix_findings = "\n".join(fix_finding_blocks)
 original_fix_notice = panel._review_fix_notice
