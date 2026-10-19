@@ -140,8 +140,10 @@ out="$(OMS_ROLE_ROUTING=0 role_prepare codex delegate implementation-worker "$TM
   fail "role routing must be switchable off: $out"
 # The fixture catalog lists no medium line, so the seed's second entry is not
 # routable and the next routable rank is taken instead of an unlisted name.
+# The flash seed names no generation, so a newer generation (3.8) needs no code change.
+printf 'gemini-3.8-flash-high\ngemini-3.8-flash-medium\ngemini-3.7-flash-low\ngemini-3.1-pro-high\n' > "$gen/antigravity.models"
 out="$(role_prepare antigravity delegate implementation-worker "$TMP/role5.err")"
-case "$out" in 'gemini-3.7-flash-low|role-default|role:worker|'*) ;; *) fail "the antigravity worker rank skips a seed entry the catalog does not route: $out" ;; esac
+case "$out" in 'gemini-3.8-flash-medium|role-default|role:worker|'*) ;; *) fail "the antigravity worker rank follows the live generation without a pin: $out" ;; esac
 printf 'Gemini 3.7 Flash (High)\nGemini 3.7 Flash (Low)\n' > "$gen/antigravity.models"
 for workload in standard routine; do
   out="$(OMS_MODEL_WORKLOAD="$workload" role_prepare antigravity delegate implementation-worker "$TMP/spaced.err")"

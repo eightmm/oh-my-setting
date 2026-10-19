@@ -2584,10 +2584,15 @@ ma_provider_attempt() {
       # actually closed; parsed back to plain text right after the run
       # (ma_codex_jsonl_to_text), parse-or-passthrough like the claude branch.
       cmd+=(--json)
-      # A judging seat's evidence is the prompt and the repo in front of it;
-      # web search widens the belt for no verdict value (same reasoning as
-      # the claude four-tool belt; config key accepted, probed 2026-08-18).
-      [ "$access" = write ] || cmd+=(-c "tools.web_search=false")
+      # A judging seat's evidence is the prompt and the repo in front of it.
+      # Since codex PR #13675 a boolean tools.web_search is parsed and
+      # discarded and the tool defaults to Cached, so the string form is
+      # needed. codex_apps is a separate web route the sandbox proxy does not
+      # cover; -c features.apps=false is used because older codex hard-errors
+      # on an unknown name passed to --disable but accepts -c silently. User
+      # mcp_servers still load, so this is not parity with Claude's
+      # --strict-mcp-config (probed on codex 0.163.0, 2026-10-19).
+      [ "$access" = write ] || cmd+=(-c 'web_search="disabled"' -c features.apps=false)
       if [ "$access" = write ]; then
         cmd+=(--sandbox workspace-write)
         [ -z "$panel_worker_root" ] || cmd+=(--add-dir "$panel_worker_root")

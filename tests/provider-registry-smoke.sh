@@ -389,6 +389,21 @@ for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid 
   run_write_attempt "$provider" || fail "$provider write transport failed"
 done
 grep -Fxq -- '--force' "$TMP/logs/cursor-agent.argv" || fail 'Cursor write authority missing'
+
+# New path: no codex read-seat argv check existed. A read seat disables the web
+# tool and the apps connector route; a write seat sets neither.
+mkdir -p "$TMP/codexbin"
+ln -s ../bin/provider-fake "$TMP/codexbin/codex"
+for access in read write; do
+  PATH="$TMP/codexbin:$PATH" OMS_TEST_WRITE=1 MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+    MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+    ma_provider_attempt codex "$access" "$prompt_file" "$TMP/logs/codex.$access-output" "$repo" \
+      provider-default '' provider-registry '' "codex-$access" >/dev/null 2>&1 || true
+  cp "$TMP/logs/codex.argv" "$TMP/logs/codex.$access.argv" 2>/dev/null || fail "codex $access seat never reached the CLI"
+done
+grep -Fxq -- 'web_search="disabled"' "$TMP/logs/codex.read.argv" || fail 'codex read seat leaves web_search on'
+grep -Fxq -- 'features.apps=false' "$TMP/logs/codex.read.argv" || fail 'codex read seat leaves apps connectors on'
+if grep -Eq -- 'web_search|features\.apps' "$TMP/logs/codex.write.argv"; then fail 'codex write seat must not carry the read-seat web/apps flags'; fi
 grep -Fxq -- '--always-approve' "$TMP/logs/grok.argv" || fail 'Grok write authority missing'
 grep -Fxq -- 'workspace' "$TMP/logs/grok.argv" || fail 'Grok workspace sandbox missing'
 grep -Fxq -- 'yolo' "$TMP/logs/gemini.argv" || fail 'Gemini write authority missing'

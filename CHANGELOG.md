@@ -102,6 +102,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Codex read seats now disable web search and the apps connectors in effect:
+  `-c tools.web_search=false` was parsed and discarded since codex PR #13675
+  (the tool defaults to Cached), so it is replaced by
+  `-c web_search="disabled" -c features.apps=false`. This corrects the earlier
+  claim that the key was probe-verified. User `mcp_servers` still load.
+- Antigravity role routing seeds the flash line for whichever Gemini
+  generation the catalog lists, so a new generation (3.8) routes without a
+  registry edit.
 - A running worker's guard no longer fails on `gitmeta` when another main's
   residue cleanup unregisters a sibling worktree that was already dead and kept
   at the worker's snapshot: removing that whole entry is reported as soft

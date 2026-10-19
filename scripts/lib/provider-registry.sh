@@ -569,7 +569,9 @@ oms_provider_model_family() {
 # provider has no family of its own (an aggregator), and every family in its
 # catalog stands on its own.
 # Seeds define Codex role-family cost order; routing substitutes the newest
-# exact catalog ID in each known family. Other entries remain generation
+# exact catalog ID in each known family. Antigravity's flash seed carries the
+# generation asked, so it needs no pin per Gemini release (the catalog
+# intersection still drops unlisted IDs); Codex entries remain generation
 # scoped. Claude's CLI lists nothing, so its seed is the model line itself and
 # answers for any generation asked. Its exact IDs preserve the 2026-09-23
 # decision to route only through Fable 5.1 and Opus 5.5.
@@ -580,7 +582,7 @@ oms_provider_price_order() {
     codex:6.1) printf 'gpt-6-astra gpt-6-sol gpt-6-luna\n' ;;
     codex:6.0) printf 'gpt-6-astra gpt-6-sol gpt-6-luna\n' ;;
     codex:5.6) printf 'gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna\n' ;;
-    antigravity:3.7) printf 'gemini-3.7-flash-high gemini-3.7-flash-medium gemini-3.7-flash-low\n' ;;
+    antigravity:?*) printf 'gemini-%s-flash-high gemini-%s-flash-medium gemini-%s-flash-low\n' "$generation" "$generation" "$generation" ;;
     claude:*) printf 'claude-fable-5-1 claude-opus-5-5\n' ;;
     *) return 1 ;;
   esac
