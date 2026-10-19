@@ -201,6 +201,8 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
     effort = ["--reasoning-effort", route["effort"]] if route["effort"] else []
     model = ([] if route["model"] == "provider-default" else ["--model", route["model"]]) + effort
     if route["role"] == "advisor":
+        if verify:
+            raise ValueError("advisors run no verifier; dispatch a reviewer or verifier to run checks")
         return prefix + ["advise", "--repo", str(repo), "--to", route["provider"],
                          "--strategy", "advisor", "--no-failures", "--no-task", "--no-memory"] + request + model
     if route["role"] == "reviewer":
@@ -216,7 +218,7 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
                        "--no-memory", "--no-task"] + request + model
     if route["access"] == "read":
         result += ["--read-only"]
-    else:
+    if verify and verify.strip():
         result += ["--verify", verify]
     if task_id:
         result += ["--task-id", task_id]
