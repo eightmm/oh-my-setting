@@ -661,6 +661,14 @@ cmd_capture() {
     esac
   done
   AGENT="${AGENT:-claude}"
+  # The caller's own thread id beats "newest rollout in this cwd", which drifts
+  # to a sibling (guardian, exec worker, peer session) sharing the worktree.
+  if [ -z "$SESSION" ]; then
+    case "$AGENT" in
+      codex) SESSION="${CODEX_THREAD_ID:-}" ;;
+      claude) SESSION="${CLAUDE_CODE_SESSION_ID:-}" ;;
+    esac
+  fi
   case "$TURNS" in ''|*[!0-9]*) fail "OMS_HANDOFF_TURNS must be an integer from 0 to 50" ;; esac
   [ "${#TURNS}" -le 2 ] && [ "$TURNS" -le 50 ] || fail "OMS_HANDOFF_TURNS must be an integer from 0 to 50"
   CWD="$(cd "$CWD" 2>/dev/null && pwd || printf '%s' "$CWD")"

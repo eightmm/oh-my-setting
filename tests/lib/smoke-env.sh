@@ -2,6 +2,7 @@
 # Fixtures establish their own operator, panel and room identities, even when
 # invoked from a managed terminal or a delegated worker.
 unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID OMS_TASK_ID OMS_ATTEMPT_ID
+unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID
 # An admission or gate verify budget set by the caller is not the fixtures' own.
 unset OMS_PEER_VERIFY_TIMEOUT
 unset NVM_BIN NVM_DIR

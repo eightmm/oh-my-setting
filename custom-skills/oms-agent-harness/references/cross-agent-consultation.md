@@ -97,8 +97,10 @@ any CLI:
 oms advise --session --prompt "Decision: … Evidence: … Planned next: …"
 ```
 
-It digests the newest session matching the repo; when two live sessions share
-one worktree, pin yours with `--session-id ID`. A sensitive-looking digest is
+It digests the caller's own session, taken from `CODEX_THREAD_ID` or
+`CLAUDE_CODE_SESSION_ID` when set and otherwise the newest session matching the
+repo; when two live sessions share one worktree without that variable, pin
+yours with `--session-id ID`. A sensitive-looking digest is
 refused by default because it crosses to another provider; `--allow-sensitive`
 overrides that refusal, though agent-call's outbound scrub still applies and
 can block the call. Any capture miss fails the call instead of silently

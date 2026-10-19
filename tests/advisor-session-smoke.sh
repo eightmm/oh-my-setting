@@ -91,6 +91,15 @@ if grep -q 'unrelated peer session doing docs' "$artifact"; then
   fail "--session-id must exclude the other live session"
 fi
 
+# 2b. The caller's thread id from the environment binds the capture to its own
+#     rollout even when a newer rollout (guardian/exec worker) shares the cwd.
+artifact="$(CODEX_THREAD_ID=cafe0001 advise_session --session)"
+grep -q 'migrate the ledger schema' "$artifact" ||
+  fail "CODEX_THREAD_ID must bind --session to the caller's own rollout"
+if grep -q 'unrelated peer session doing docs' "$artifact"; then
+  fail "CODEX_THREAD_ID must exclude the newer rollout in the same cwd"
+fi
+
 # 3. Without --session the digest section must not appear.
 artifact="$(advise_session)"
 if grep -q '## Caller session history' "$artifact"; then
