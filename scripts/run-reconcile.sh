@@ -81,20 +81,29 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
 PY
 }
 
+TERMINAL_STATES="COMPLETED FAILED CANCELLED TIMEOUT OUT_OF_MEMORY NODE_FAIL BOOT_FAIL DEADLINE PREEMPTED"
+
 # Print: "<state>\t<exit>\t<elapsed>\t<source>" for one job id. Best-effort:
 # sacct first (terminal states survive there), then squeue (still queued/
-# running), else unknown.
+# running), else unknown. Array and hetjob allocations return one row per
+# task: any non-terminal row keeps the job pending, else the first failure
+# wins. sacct prints "CANCELLED by <uid>", so only the first word is the state.
 job_state() {
   local jid="$1"
   local line=""
   if command -v "$SACCT" >/dev/null 2>&1; then
-    line="$("$SACCT" -j "$jid" --format=State,ExitCode,Elapsed -n -P 2>/dev/null \
-      | awk -F'|' 'NF>=1 && $1!="" {print; exit}')"
+    line="$("$SACCT" -X -j "$jid" --format=State,ExitCode,Elapsed -n -P 2>/dev/null \
+      | awk -F'|' -v terminal=" $TERMINAL_STATES " '
+          $1 == "" { next }
+          {
+            split($1, w, " ")
+            if (index(terminal, " " w[1] " ") == 0) { print w[1] "\t" $2 "\t" $3; found = 1; exit }
+            if (w[1] != "COMPLETED" && bad == "") bad = w[1] "\t" $2 "\t" $3
+            if (first == "") first = w[1] "\t" $2 "\t" $3
+          }
+          END { if (!found) { if (bad != "") print bad; else if (first != "") print first } }')"
     if [ -n "$line" ]; then
-      printf '%s\t%s\t%s\tsacct\n' \
-        "$(printf '%s' "$line" | cut -d'|' -f1 | tr -d ' ')" \
-        "$(printf '%s' "$line" | cut -d'|' -f2)" \
-        "$(printf '%s' "$line" | cut -d'|' -f3)"
+      printf '%s\tsacct\n' "$line"
       return 0
     fi
   fi
@@ -110,9 +119,8 @@ job_state() {
 }
 
 is_terminal() {
-  case "$1" in
-    COMPLETED|FAILED|CANCELLED|CANCELLED+|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|DEADLINE|PREEMPTED)
-      return 0 ;;
+  case " $TERMINAL_STATES " in
+    *" $1 "*) return 0 ;;
     *) return 1 ;;
   esac
 }

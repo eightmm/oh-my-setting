@@ -16471,6 +16471,9 @@ for a in "$@"; do [ "$prev" = "-j" ] && jid="$a"; prev="$a"; done
 case "$jid" in
   3001) echo "COMPLETED|0:0|00:10:00" ;;
   3002) echo "FAILED|1:0|00:02:00" ;;
+  3004) echo "CANCELLED by 1000|0:15|00:00:05" ;;
+  3005) printf '%s\n' "COMPLETED|0:0|00:01:00" "RUNNING|0:0|00:02:00" ;;
+  3006) printf '%s\n' "COMPLETED|0:0|00:01:00" "FAILED|1:0|00:02:00" ;;
   *) : ;;
 esac
 EOF
@@ -16520,6 +16523,9 @@ test_run_reconcile_records_terminal_jobs() {
   {
     printf '%s\n' '{"ts":"t","slurm_job_id":"3003","exit":0,"note":"C","cmd":["c"]}'
     printf '%s\n' '{"ts":"t","slurm_job_id":"","exit":0,"note":"local","cmd":["d"]}'
+    printf '%s\n' '{"ts":"t","slurm_job_id":"3004","exit":0,"note":"E","cmd":["e"]}'
+    printf '%s\n' '{"ts":"t","slurm_job_id":"3005","exit":0,"note":"F","cmd":["f"]}'
+    printf '%s\n' '{"ts":"t","slurm_job_id":"3006","exit":0,"note":"G","cmd":["g"]}'
   } >> "$d/ledger.jsonl"
 
   local env_pfx=(
@@ -16536,6 +16542,12 @@ test_run_reconcile_records_terminal_jobs() {
   if grep -Fq '"job_id": "3003"' "$d/.oms/runs/reconcile.jsonl"; then
     fail "running job must not be reconciled"
   fi
+  # "CANCELLED by <uid>" keeps its first word; array rows aggregate.
+  assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"job_id": "3004", "state": "CANCELLED"'
+  if grep -Fq '"job_id": "3005"' "$d/.oms/runs/reconcile.jsonl"; then
+    fail "array job with a running task must not be reconciled"
+  fi
+  assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"job_id": "3006", "state": "FAILED", "exit_code": "1:0"'
 
   # Idempotent: a second apply reconciles nothing new.
   local before after
