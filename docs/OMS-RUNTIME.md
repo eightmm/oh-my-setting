@@ -634,7 +634,11 @@ CAS and never silently auto-applies stable changes.
 one pre-registered host command. Pass `--contract PATH` or the seven fields
 `--question`, `--hypothesis`, `--prediction`, `--baseline`, `--metric`,
 `--success`, `--change`, then `-- COMMAND...`. It streams command output and
-returns the command's exit code. `--metrics` and `--file` select ledger inputs;
+returns the command's exit code. The registration lands in the ledger as a
+`"status": "started"` row before the command runs; the finished row reuses its
+id, so an interrupted launch stays visible. A launched `sbatch` records the job
+id it prints for `oms run-reconcile`, except a cluster-qualified id (`-M`),
+which stays empty because reconcile queries the local cluster. `--metrics` and `--file` select ledger inputs;
 relative paths resolve from `--repo`. The existing run-ledger pre-flight gate
 defaults to `fast`; set `OMS_RUN_LEDGER_CHECK_MODE=ml-smoke` when the project's
 experiment contract requires ML verification. A project implementing only

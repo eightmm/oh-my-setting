@@ -37,6 +37,12 @@ verification contract runs as a pre-flight gate (fast by default) and a
 failing gate aborts the launch. Identical earlier runs
 (same commit, same diff hash, same command) produce a warning.
 
+The row's slurm_job_id is SLURM_JOB_ID, or the id an `sbatch` command prints
+(plain or --parsable; none when it names a cluster), so `run-reconcile` tracks
+a login-node submission. An
+`experiment launch` also appends a "started" row with the same id before the
+command runs, so an interrupted launch stays visible.
+
 Options:
   --note TEXT     Free-text note recorded with the run.
   --file PATH     Ledger path. Default: docs/EXPERIMENTS.jsonl.
@@ -125,8 +131,9 @@ for line in sys.stdin:
         gate = "  gate=%s" % g
     else:
         gate = ""
-    print("%s  exit=%d  %ds%s  sha=%s%s  %s%s%s" % (
-        r["ts"], r["exit"], r["duration_s"], gate, r["git_sha"], dirty,
+    result = "started" if r.get("exit") is None else "exit=%d  %ds" % (r["exit"], r["duration_s"])
+    print("%s  %s%s  sha=%s%s  %s%s%s" % (
+        r["ts"], result, gate, r["git_sha"], dirty,
         " ".join(r["cmd"]), metrics, note))
 if as_json:
     print(json.dumps({"schema": 1, "runs": rows}, ensure_ascii=False))
@@ -341,11 +348,12 @@ fi
 ledger_scan="$(mktemp)" || fail "mktemp failed"
 ms_tmp=""
 row_tmp=""
+submit_out=""
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
-  rm -f "$ledger_scan" ${ms_tmp:+"$ms_tmp"} ${row_tmp:+"$row_tmp"}
+  rm -f "$ledger_scan" ${ms_tmp:+"$ms_tmp"} ${row_tmp:+"$row_tmp"} ${submit_out:+"$submit_out"}
 }
 cleanup_signal() {
   local code="$1"
@@ -363,6 +371,87 @@ if agent_memory_file_has_sensitive_content "$ledger_scan"; then
 fi
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+row_id="$(python3 -c 'import uuid; print("ledger-" + uuid.uuid4().hex)')"
+row_id="${row_id//$'\r'/}"
+row_tmp="$(mktemp)" || fail "mktemp failed"
+effective_run_id="$(oms_effective_run_id "$STATE_ROOT" 2>/dev/null || true)"
+effective_run_id="${effective_run_id//$'\r'/}"
+# A submission's id is what sbatch prints; an inherited SLURM_JOB_ID names the
+# submitting job, so neither the started nor the finished row may carry it.
+case "${1##*/}" in
+  sbatch) slurm_job_id="" ;;
+  *) slurm_job_id="${SLURM_JOB_ID:-}" ;;
+esac
+METRICS_JSON=""
+# One row shape for the started and finished records of a run; both share the
+# run's id. Args: STATUS DURATION CMD... (empty STATUS marks "started").
+run_ledger_write_row() {
+  local row_status="$1" row_duration="$2"
+  shift 2
+  OMS_METRICS_JSON="$METRICS_JSON" OMS_GATE_STATUS="$GATE_STATUS" OMS_GATE_REASON="$REASON" \
+    OMS_LEDGER_RUN_ID="$effective_run_id" \
+    python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "$slurm_job_id" \
+    "$row_status" "$row_duration" "$NOTE" "$row_id" "$@" <<'EOF' > "$row_tmp"
+import json, os, re, sys
+a = sys.argv[1:]
+row = {
+    "schema": 1,
+    "id": a[8],
+    "ts": a[0],
+    "git_sha": a[1],
+    "dirty": int(a[2]),
+    "dirty_hash": a[3],
+    "slurm_job_id": a[4],
+    "exit": int(a[5]) if a[5] else None,
+    "duration_s": int(a[6]) if a[6] else None,
+    "note": a[7],
+    "cmd": a[9:],
+}
+if row["exit"] is None:
+    row["status"] = "started"
+if os.environ.get("OMS_OPERATION_ID"):
+    row["operation_id"] = os.environ["OMS_OPERATION_ID"]
+if os.environ.get("OMS_LEDGER_RUN_ID"):
+    row["run_id"] = os.environ["OMS_LEDGER_RUN_ID"]
+row["gate"] = os.environ.get("OMS_GATE_STATUS", "none")
+reason = os.environ.get("OMS_GATE_REASON", "")
+if row["gate"] == "skipped" and reason:
+    row["gate_reason"] = reason
+mj = os.environ.get("OMS_METRICS_JSON", "")
+if mj:
+    row["metrics"] = json.loads(mj)
+research_file = os.environ.get("OMS_RESEARCH_METADATA_FILE", "")
+if research_file:
+    try:
+        if os.path.getsize(research_file) <= 16384:
+            research = json.load(open(research_file, encoding="utf-8"))
+            allowed = (
+                "question", "hypothesis", "prediction", "baseline",
+                "metric", "success", "change",
+            )
+            if isinstance(research, dict):
+                clean = {
+                    key: str(research[key])[:1000]
+                    for key in allowed
+                    if research.get(key) not in (None, "")
+                }
+                contract_digest = research.get("contract_digest", "")
+                if isinstance(contract_digest, str) and re.fullmatch(r"[0-9a-f]{64}", contract_digest):
+                    clean["contract_digest"] = contract_digest
+                if clean:
+                    row["research"] = clean
+    except (OSError, ValueError, TypeError):
+        pass
+print(json.dumps(row, ensure_ascii=False, allow_nan=False))
+EOF
+}
+
+# A pre-registered experiment is durable before it runs: an interrupted launch
+# leaves its started row instead of nothing.
+if [ -n "${OMS_RESEARCH_METADATA_FILE:-}" ] && [ -z "${OMS_RUN_LEDGER_STATUS_OVERRIDE:-}" ]; then
+  run_ledger_write_row "" "" "$@"
+  oms_with_file_lock "$LEDGER" run_ledger_append_row "$LEDGER" "$row_tmp"
+fi
 start_s="$(date +%s)"
 
 if [ -n "${OMS_RUN_LEDGER_STATUS_OVERRIDE:-}" ]; then
@@ -372,8 +461,21 @@ if [ -n "${OMS_RUN_LEDGER_STATUS_OVERRIDE:-}" ]; then
   status="$OMS_RUN_LEDGER_STATUS_OVERRIDE"
 else
   set +e
-  "$@"
-  status=$?
+  if [ "${1##*/}" = sbatch ]; then
+    # sbatch exits once the job is queued; its stdout names the job id
+    # (`Submitted batch job N`, or `N` with --parsable). A cluster-qualified
+    # id (`... on cluster NAME`, `N;NAME`) is not recorded: run-reconcile
+    # queries sacct without a cluster, so it could match another cluster's job.
+    submit_out="$(mktemp)" || fail "mktemp failed"
+    "$@" | tee "$submit_out"
+    status=${PIPESTATUS[0]}
+    # The recorded id comes only from this output, never an inherited
+    # SLURM_JOB_ID, which would name the submitting job instead.
+    slurm_job_id="$(sed -n 's/^\(Submitted batch job \)\{0,1\}\([0-9][0-9]*\)$/\2/p' "$submit_out" | tail -n 1)"
+  else
+    "$@"
+    status=$?
+  fi
   set -e
 fi
 
@@ -382,7 +484,6 @@ duration_s=$(( $(date +%s) - start_s ))
 # Sanitize metrics BEFORE building the row: finite scalars only, capped
 # count/length, control chars stripped, RFC-valid JSON. The sanitized string
 # is then secret-scrubbed (the ledger is git-tracked) and only attached if clean.
-METRICS_JSON=""
 if [ -n "$METRICS_FILE" ]; then
   metrics_max_bytes="${OMS_METRICS_MAX_BYTES:-65536}"
   if [ ! -f "$METRICS_FILE" ]; then
@@ -436,63 +537,7 @@ EOF
   fi
 fi
 
-row_tmp="$(mktemp)" || fail "mktemp failed"
-effective_run_id="$(oms_effective_run_id "$STATE_ROOT" 2>/dev/null || true)"
-effective_run_id="${effective_run_id//$'\r'/}"
-OMS_METRICS_JSON="$METRICS_JSON" OMS_GATE_STATUS="$GATE_STATUS" OMS_GATE_REASON="$REASON" \
-  OMS_LEDGER_RUN_ID="$effective_run_id" \
-  python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
-  "$status" "$duration_s" "$NOTE" "$@" <<'EOF' > "$row_tmp"
-import json, os, re, sys, uuid
-a = sys.argv[1:]
-row = {
-    "schema": 1,
-    "id": "ledger-" + uuid.uuid4().hex,
-    "ts": a[0],
-    "git_sha": a[1],
-    "dirty": int(a[2]),
-    "dirty_hash": a[3],
-    "slurm_job_id": a[4],
-    "exit": int(a[5]),
-    "duration_s": int(a[6]),
-    "note": a[7],
-    "cmd": a[8:],
-}
-if os.environ.get("OMS_OPERATION_ID"):
-    row["operation_id"] = os.environ["OMS_OPERATION_ID"]
-if os.environ.get("OMS_LEDGER_RUN_ID"):
-    row["run_id"] = os.environ["OMS_LEDGER_RUN_ID"]
-row["gate"] = os.environ.get("OMS_GATE_STATUS", "none")
-reason = os.environ.get("OMS_GATE_REASON", "")
-if row["gate"] == "skipped" and reason:
-    row["gate_reason"] = reason
-mj = os.environ.get("OMS_METRICS_JSON", "")
-if mj:
-    row["metrics"] = json.loads(mj)
-research_file = os.environ.get("OMS_RESEARCH_METADATA_FILE", "")
-if research_file:
-    try:
-        if os.path.getsize(research_file) <= 16384:
-            research = json.load(open(research_file, encoding="utf-8"))
-            allowed = (
-                "question", "hypothesis", "prediction", "baseline",
-                "metric", "success", "change",
-            )
-            if isinstance(research, dict):
-                clean = {
-                    key: str(research[key])[:1000]
-                    for key in allowed
-                    if research.get(key) not in (None, "")
-                }
-                contract_digest = research.get("contract_digest", "")
-                if isinstance(contract_digest, str) and re.fullmatch(r"[0-9a-f]{64}", contract_digest):
-                    clean["contract_digest"] = contract_digest
-                if clean:
-                    row["research"] = clean
-    except (OSError, ValueError, TypeError):
-        pass
-print(json.dumps(row, ensure_ascii=False, allow_nan=False))
-EOF
+run_ledger_write_row "$status" "$duration_s" "$@"
 oms_with_file_lock "$LEDGER" run_ledger_append_row "$LEDGER" "$row_tmp"
 
 # Thin-spine join: link this ledger row to the active run id when set.

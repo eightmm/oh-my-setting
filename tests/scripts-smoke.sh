@@ -2301,12 +2301,39 @@ test_experiment_launch_records_registered_run() {
     --success "+0.01 val_auc over baseline" \
     --change "warmup_ratio 0.05 -> 0.10" \
     --metrics metrics.json \
-    -- bash -c 'exit 0' >/dev/null 2>"$project/error") ||
+    -- bash -c '"$1" list 1 > during' _ "$ROOT/scripts/run-ledger.sh" >/dev/null 2>"$project/error") ||
     fail "registered research run should launch"
 
   assert_file_contains "$project/error" "experiment launch: launching registered experiment"
+  # The registration was durable while the command ran, and list renders it.
+  assert_file_contains "$project/during" "started"
+  assert_file_contains "$project/during" "Warmup 10pct improves"
+  [ "$(grep -c '"status": "started"' "$project/docs/EXPERIMENTS.jsonl")" = 1 ] ||
+    fail "launch must leave exactly one started row before its finished row"
   assert_file_contains "$project/docs/EXPERIMENTS.jsonl" "Warmup 10pct improves"
   assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"val_auc": 0.82'
+
+  # A submission launched inside a job must not record, or hand to
+  # run-reconcile, the parent job id (its own id is cluster-qualified: none).
+  local bin="$project/bin"
+  mkdir -p "$bin"
+  printf '#!/bin/sh\necho "Submitted batch job 5 on cluster c1"\n' > "$bin/sbatch"
+  printf '#!/bin/sh\nfor a in "$@"; do [ "$p" = -j ] && echo "$a" >> "%s/queried"; p=$a; done\n' "$project" > "$bin/sacct"
+  cp "$bin/sacct" "$bin/squeue"
+  chmod +x "$bin/sbatch" "$bin/sacct" "$bin/squeue"
+  (cd "$project" && SLURM_JOB_ID=9000 PATH="$bin:$PATH" "$ROOT/scripts/runtime.sh" experiment launch \
+    --question "Q2" --hypothesis "H2 inside a job" --prediction "P2" --baseline "B2" \
+    --metric "m2" --success "S2" --change "C2" \
+    -- sbatch job.sh >/dev/null 2>&1) || fail "launched sbatch should succeed"
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" "H2 inside a job"
+  if grep -Fq '9000' "$project/docs/EXPERIMENTS.jsonl"; then
+    fail "started and finished rows must not carry the parent SLURM_JOB_ID"
+  fi
+  (cd "$project" && OMS_SACCT_CMD="$bin/sacct" OMS_SQUEUE_CMD="$bin/squeue" \
+    "$ROOT/scripts/run-reconcile.sh" scan --ledger "$project/docs/EXPERIMENTS.jsonl" >/dev/null 2>&1) || true
+  if [ -e "$project/queried" ] && grep -Fq 9000 "$project/queried"; then
+    fail "run-reconcile must not track the parent job id"
+  fi
 }
 
 test_experiment_launch_dry_run_no_ledger() {
@@ -16375,12 +16402,37 @@ test_run_reconcile_records_terminal_jobs() {
 
   mkdir -p "$d"
   write_fake_slurm "$bin"
+  # A login-node submission records the id sbatch printed, plain or --parsable.
+  printf '#!/bin/sh\ncase "$1" in --parsable) echo "3002" ;; -M) echo "Submitted batch job 3101 on cluster c1" ;; -Mp) echo "3102;c1" ;; -S) echo "Submitted batch job 3201"; sleep 2 ;; *) echo "Submitted batch job 3001" ;; esac\n' > "$bin/sbatch"
+  chmod +x "$bin/sbatch"
+  ( cd "$d" && env -u SLURM_JOB_ID PATH="$bin:$PATH" "$ROOT/scripts/run-ledger.sh" --file "$d/ledger.jsonl" -- sbatch job.sh &&
+    env -u SLURM_JOB_ID PATH="$bin:$PATH" "$ROOT/scripts/run-ledger.sh" --file "$d/ledger.jsonl" -- sbatch --parsable job.sh &&
+    env SLURM_JOB_ID=9000 PATH="$bin:$PATH" "$ROOT/scripts/run-ledger.sh" --file "$d/ledger.jsonl" -- sbatch -M job.sh &&
+    env -u SLURM_JOB_ID PATH="$bin:$PATH" "$ROOT/scripts/run-ledger.sh" --file "$d/ledger.jsonl" -- sbatch -Mp job.sh ) >"$d/submit.out" 2>&1 ||
+    fail "ledgered sbatch failed"
+  # A cluster-qualified id could name another cluster's job: record none.
+  assert_file_contains "$d/submit.out" "on cluster c1"
+  [ "$(grep -c '"slurm_job_id": ""' "$d/ledger.jsonl")" = 2 ] ||
+    fail "cluster-qualified sbatch ids must not be recorded"
+  # An inherited SLURM_JOB_ID names the submitting job, not the submission.
+  if grep -Fq '"slurm_job_id": "9000"' "$d/ledger.jsonl"; then
+    fail "a submission must not record the inherited SLURM_JOB_ID"
+  fi
+  # The id streams live while sbatch is still running.
+  ( cd "$d" && PATH="$bin:$PATH" "$ROOT/scripts/run-ledger.sh" --file "$d/live.jsonl" -- sbatch -S job.sh >"$d/live.out" 2>&1 ) &
+  local live_pid=$! live_i=0
+  while ! grep -Fq 3201 "$d/live.out" 2>/dev/null && [ "$live_i" -lt 60 ]; do
+    sleep 0.05
+    live_i=$((live_i + 1))
+  done
+  kill -0 "$live_pid" 2>/dev/null || fail "sbatch output must stream before the command exits"
+  wait "$live_pid" || fail "streamed sbatch failed"
+  assert_file_contains "$d/live.jsonl" '"slurm_job_id": "3201"'
+  assert_file_contains "$d/submit.out" "Submitted batch job 3001"
   {
-    printf '%s\n' '{"ts":"t","slurm_job_id":"3001","exit":0,"note":"A","cmd":["a"]}'
-    printf '%s\n' '{"ts":"t","slurm_job_id":"3002","exit":0,"note":"B","cmd":["b"]}'
     printf '%s\n' '{"ts":"t","slurm_job_id":"3003","exit":0,"note":"C","cmd":["c"]}'
     printf '%s\n' '{"ts":"t","slurm_job_id":"","exit":0,"note":"local","cmd":["d"]}'
-  } > "$d/ledger.jsonl"
+  } >> "$d/ledger.jsonl"
 
   local env_pfx=(
     "OMS_SACCT_CMD=$bin/sacct" "OMS_SQUEUE_CMD=$bin/squeue"
