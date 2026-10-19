@@ -234,7 +234,9 @@ jobs:
   python39:
     needs: affected_plan
     if: needs.affected_plan.outputs.native == 'true'
-    runs-on: ubuntu-latest
+    # Last GitHub image with a setup-python 3.9 build (26.04 has none); move
+    # this lane to a container before 24.04 retires.
+    runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
