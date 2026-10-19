@@ -145,6 +145,21 @@ routes = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(proje
 assert set(routes["tiers"]) == set(panel.TIERS) and set(routes["roles"]) == set(routes["kinds"]) == set(panel.KINDS)
 assert routes["writers"] == sorted(panel.WRITERS) and report["routing"]["roles"] == routes["roles"]
 assert set(routes["chosen"]) == set(panel.KINDS)
+# The routes view feeds allocate() the dispatch inputs: inside the tie band, the explicit room's recent counts
+# (read by the real room_history, no OMS_ROOM_ID inherited) flip the choice.
+import contextlib, io
+tied = {"claude": {"weekly_used": 30}, "codex": {"weekly_used": 35}}
+for ran, provider in (("codex", "claude"), ("claude", "codex")):
+    rows = [dict(attempt_id="att%d" % n, provider=ran, refs=dict(panel_alias="a", panel_room_id="routes-room",
+             panel_provider=ran, panel_access="read")) for n in range(4)]
+    rows.append(dict(attempt_id="other", provider=provider, refs=dict(panel_alias="a", panel_room_id="other-room",
+                     panel_provider=provider, panel_access="read")))
+    with patch.dict(os.environ, {"OMS_AGENT": "none"}), patch.object(panel, "events", return_value=json.dumps(rows)), \
+            patch.object(panel, "routing_status", return_value=tied), contextlib.redirect_stdout(io.StringIO()) as out:
+        os.environ.pop("OMS_ROOM_ID", None)
+        assert panel.main(["--repo", str(project), "--routes", "--room", "routes-room"]) == 0
+    view = json.loads(out.getvalue())
+    assert view["chosen"]["builder"]["provider"] == provider, (ran, view["chosen"]["builder"])
 from panel_view import PURPOSE_NAMES
 assert set(routes["roles"]) <= set(PURPOSE_NAMES), "every role strategy needs a board label"
 for role, rule in routes["roles"].items():

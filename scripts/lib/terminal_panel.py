@@ -65,6 +65,7 @@ from panel_native import main_missing
 from panel_state import ensure_room
 from panel_state import room_instructions
 from panel_dispatch import provider_catalog
+from panel_dispatch import route_inputs
 from panel_dispatch import routing_status
 from panel_dispatch import selected_route
 from panel_render import show_providers
@@ -576,14 +577,12 @@ def main(argv=None):
             routes = policy()
             rows = provider_catalog(",".join(sorted({c["provider"] for tier in routes["tiers"].values() for c in tier})))
             installed = {row["provider"] for row in rows if row["installed"]}
-            try:
-                readings = routing_status(repository(args.repo))
-            except (OSError, ValueError, subprocess.SubprocessError):
-                readings = {}
+            owner = caller_owner()
+            readings, recent, _ = route_inputs(owner, args.repo, args.room)
             chosen = {}
             for role in routes["roles"]:
                 try:
-                    route = allocate(caller_owner(), role, installed=installed, provider_status=readings)
+                    route = allocate(owner, role, installed=installed, provider_status=readings, recent=recent)
                     peer = next(row for row in rows if row["provider"] == route["provider"])
                     route["model"] = newest_route_model(route["provider"], route["model"],
                         peer.get("catalog_models", peer.get("models", [])))
@@ -591,7 +590,7 @@ def main(argv=None):
                 except ValueError as error:
                     chosen[role] = {"error": str(error)}
             print(json.dumps(dict(routes, writers=sorted(WRITERS), kinds=KINDS,
-                                  owner=caller_owner(), chosen=chosen), indent=2))
+                                  owner=owner, chosen=chosen), indent=2))
             return 0
         repo = panel_repository(os.environ.get("OMS_ROOM_REPO") or args.repo) if args.dispatch else panel_repository(args.repo)
         requested_worktree = work_repository(args.repo if args.repo is not None else os.getcwd())

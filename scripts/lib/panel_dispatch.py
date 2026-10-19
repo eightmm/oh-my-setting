@@ -138,16 +138,17 @@ def routing_status(repo, room_id=None, main=None):
         return {}
 
 
-def room_history(repo, owner, task_id=None, candidate=None):
+def room_history(repo, owner, task_id=None, candidate=None, room_id=None):
     """Dispatches per provider in this room and the provider that wrote the reviewed work; empty when unknown.
 
     The writer is bound to linkage, never recency (attempt order follows updated_at, which telemetry advances):
     only the write attempts whose recorded artifact names the candidate's patch path, digest and base. Identical
-    bytes may come from several providers, so ambiguous or missing linkage leaves the writer unknown."""
+    bytes may come from several providers, so ambiguous or missing linkage leaves the writer unknown.
+    room_id names the room explicitly; without it the owner's environment binding decides."""
     from terminal_panel import child_environment, events
     recent, writers, rows = {}, {}, []
     try:
-        room_id = room.resolve(repo, child_environment(owner, repo).get("OMS_ROOM_ID"))
+        room_id = room.resolve(repo, room_id or child_environment(owner, repo).get("OMS_ROOM_ID"))
         if not room_id:
             return None, None
         for attempt in json.loads(events(repo, "list", "--json", output=True)):
@@ -172,6 +173,13 @@ def room_history(repo, owner, task_id=None, candidate=None):
     return recent, next(iter(owners)) if len(owners) == 1 else None
 
 
+def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candidate=None):
+    """Quota readings, per-provider dispatch counts and reviewed writer that dispatch feeds allocate()."""
+    from terminal_panel import routing_status
+    repo = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
+    return (routing_status(repo, room_id, main),) + room_history(repo, owner, task_id, candidate, room_id)
+
+
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
                    repo=None, room_id=None, main=None, task_id=None, candidate=None):
     from terminal_panel import MODEL_IDS, PROVIDERS, allocate, newest_route_model, policy, provider_catalog
@@ -188,9 +196,8 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         # Tier routing reads installed providers from the cached registry; a researcher's --to only narrows it.
         rows = provider_catalog(target or ",".join(sorted({c["provider"] for tier in policy()["tiers"].values()
                                                            for c in tier})))
-        readings = routing_status(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), room_id, main) if not target else {}
-        recent, writer = room_history(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), owner, task_id, candidate) \
-            if not target else (None, None)
+        readings, recent, writer = ({}, None, None) if target else route_inputs(
+            owner, repo, room_id, main, task_id, candidate)
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer)
         peer = next(row for row in rows if row["provider"] == route["provider"])
