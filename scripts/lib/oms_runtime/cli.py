@@ -117,7 +117,7 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
                 if args.receipt:
                     command.extend(['--receipt', str(_path(repo, args.receipt))])
                 if args.dry_run:
-                    command.append('--dry-run')
+                    command.append('--plan')
                 result = subprocess.run(command, cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
                 if result.stderr:
                     print(result.stderr.rstrip(), file=sys.stderr)
