@@ -408,6 +408,34 @@ assert rendered["structuredContent"]["graph"]["nodes"], rendered
 assert rendered["structuredContent"]["graph"]["title"].startswith("OMS Context Graph"), rendered
 PY
 
+  # A Korean Windows console defaults stdio to cp949, which cannot encode the
+  # check mark. Replies must stay strict UTF-8 and the server must survive.
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":"한글✅","method":"ping"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"ping"}' |
+    PYTHONIOENCODING=cp949 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out.cp949"
+  OMS_T_OUT="$out.cp949" python3 - <<'PY' || fail "MCP server reply was not strict UTF-8 under cp949 stdio"
+import json, os
+
+with open(os.environ["OMS_T_OUT"], "rb") as fh:
+    replies = [json.loads(line.decode("utf-8")) for line in fh.read().splitlines()]
+assert [r["id"] for r in replies] == ["한글✅", 2], replies
+PY
+
+  # A Python child inherits the server's cp949 stdio unless the server pins it,
+  # and the server decodes child output as UTF-8.
+  printf 'def 한글_진입(value):\n    return value\n' > "$repo/ko.py"
+  printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oms_project_graph_search","arguments":{"repo":"%s","query":"한글_진입"}}}\n' "$repo" |
+    OMS_MCP_TOOL_PROFILE=full PYTHONIOENCODING=cp949 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out.cp949"
+  OMS_T_OUT="$out.cp949" python3 - <<'PY' || fail "MCP graph child output was not UTF-8 under cp949 stdio"
+import json, os
+
+with open(os.environ["OMS_T_OUT"], "rb") as fh:
+    reply = json.loads(fh.read().decode("utf-8"))["result"]
+assert not reply["isError"], reply
+assert "한글_진입" in reply["content"][0]["text"], reply
+PY
+
   # Compact discovery must preserve calls from older/full clients, the UI
   # resource, and negotiation. A typo must not silently widen the tool list.
   OMS_T_ROOT="$ROOT" OMS_T_REPO="$repo" OMS_T_FULL="$out" python3 - <<'PY' || fail "MCP tool profile contract failed"

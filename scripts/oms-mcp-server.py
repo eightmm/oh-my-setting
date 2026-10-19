@@ -77,6 +77,12 @@ MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
 UI_MODEL_LIMIT = 256 * 1024
 # Discovery is fixed for this process; it is not a permission boundary.
 TOOL_PROFILE = os.environ.get("OMS_MCP_TOOL_PROFILE", "core")
+# Children are decoded as UTF-8; pin Python children to emit it whatever code
+# page (cp949 on Korean Windows) the server inherited.
+def child_env() -> dict:
+    return {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+
+
 CORE_TOOLS = frozenset({
     "oms_inbox", "oms_repo_state", "oms_handoffs", "oms_handoff_show",
     "oms_journal", "oms_peer_start", "oms_peer_result",
@@ -838,6 +844,9 @@ def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
             cwd=str(repo_path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env(),
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -920,6 +929,9 @@ def render_project_graph(arguments: dict) -> tuple[str, bool, dict]:
             cwd=str(repo),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env(),
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -976,6 +988,9 @@ def normalize_peer_provider(provider: str) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env(),
             timeout=3,
             check=False,
         )
@@ -1175,7 +1190,10 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
                 thread_args += ["context", "--require-open"]
             else:
                 thread_args += ["new", "--live", "--topic", "Council"]
-            prepared = subprocess.run(thread_args, capture_output=True, text=True, timeout=5)
+            prepared = subprocess.run(
+                thread_args, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=child_env(), timeout=5,
+            )
             if prepared.returncode:
                 return "error: council thread could not be opened", True
         ensure_oms_ignore(repo)
@@ -1868,7 +1886,10 @@ def thread_exchange(arguments: dict, action: str) -> tuple[str, bool]:
     try:
         if new:
             command = ["new", "--live", "--topic", prompt]
-        proc = subprocess.run(argv + command, capture_output=True, text=True, timeout=5)
+        proc = subprocess.run(
+            argv + command, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=child_env(), timeout=5,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return "error: %s" % exc, True
     if proc.returncode:
@@ -2184,7 +2205,7 @@ def main() -> int:
                 error={"code": -32602, "message": "invalid or oversized request field"},
             )
         if reply is not None:
-            print(json.dumps(reply, ensure_ascii=False), flush=True)
+            print(json.dumps(reply), flush=True)
     return 0
 
 
