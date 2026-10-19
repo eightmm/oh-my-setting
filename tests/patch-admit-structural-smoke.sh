@@ -146,6 +146,17 @@ rc=0
 [ "$rc" = 1 ] || fail "a U+2028 name must not slip past the scope gate, got exit $rc"
 contains "$TMP/r8.md" "scope: FAIL"
 
+# (8) The unscoped floor cannot judge a name git still C-quotes: a new
+# top-level q"new.txt must not look like a nested, already-present path.
+printf 'x\n' > "$repo/q\"new.txt" 2>/dev/null && {
+  capture_patch "$repo" quoted "$TMP/quoted.patch"
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/quoted.patch" --verify true \
+    --report "$TMP/r9.md" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "an unscoped quoted top-level name should be rejected, got exit $rc"
+  contains "$TMP/r9.md" "unquotable path"
+}
+
 # Admission adopts the stored verifier; an explicit mismatch fails before
 # candidate code executes. Structural-only ADMIT remains inconclusive evidence.
 "$ADMIT" --repo "$repo" --patch "$TMP/inplace.patch" \

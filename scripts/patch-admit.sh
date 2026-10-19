@@ -247,6 +247,8 @@ if [ -n "$PLAN_TASK" ]; then
   SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("allowed_paths",[])))')"
   SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
   ACCEPTANCE_FILES="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("project_contract") or {}; print("\n".join(c.get("acceptance_files") or d.get("acceptance_files") or []))')"
+  # Windows Python prints CRLF; the LF-only splitters below would keep the CR.
+  ACCEPTANCE_FILES="${ACCEPTANCE_FILES//$'\r'/}"
   read_task_verify() {
     printf '%s' "$plan_json" | python3 -c '
 import json,sys
@@ -418,11 +420,17 @@ with open(os.environ["OMS_BASE_FILE"], errors="replace") as handle:
     base=set(x for x in handle.read().split("\n") if x)
 wt=os.environ["OMS_WORKTREE"]
 added, removed = [], []
+bad=[]
 for path in changed:
+    # Still C-quoted (control characters, quotes, backslashes): the text is not
+    # a filesystem name, so the layout checks below cannot judge it.
+    if path.startswith('"'):
+        bad.append("unquotable path: " + path)
+        continue
     here=os.path.lexists(os.path.join(wt, path))
     if here and path not in base: added.append(path)
     elif not here and path in base: removed.append(path)
-bad=["new top-level file: " + p for p in added if "/" not in p]
+bad += ["new top-level file: " + p for p in added if "/" not in p]
 for src in removed:
     for dst in added:
         if os.path.basename(src) == os.path.basename(dst) and os.path.dirname(src) != os.path.dirname(dst):

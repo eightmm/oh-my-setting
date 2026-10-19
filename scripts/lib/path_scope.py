@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import functools
+import io
 import os
 import re
 import string
@@ -418,7 +419,16 @@ def main(argv):
             print(",".join(normalize_list(argv[2])))
             return 0
         if action == "classify-many" and len(argv) == 3:
-            classify_many(argv[2], sys.stdin, sys.stdout)
+            # Git emits unquoted UTF-8 and rules are decoded as UTF-8; the
+            # locale encoding must not decide how a path is read back.
+            stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="surrogateescape", newline="\n")
+            stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="surrogateescape", newline="\n")
+            try:
+                classify_many(argv[2], stdin, stdout)
+            finally:
+                stdout.flush()
+                stdin.detach()
+                stdout.detach()
             return 0
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
