@@ -26,7 +26,7 @@ criterion evidence or build a bounded context pack:
 oms runtime envelope show
 oms runtime next
 oms runtime evidence show
-oms runtime context --task "TASK_DESCRIPTION"
+oms runtime context --target PATH
 ```
 
 For capability profiles, backend details, capsules, failures, releases, and
