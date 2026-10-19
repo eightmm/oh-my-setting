@@ -95,7 +95,9 @@ export default function (pi) {
     void enqueue("panel-hook", payload("PostToolUse", ctx, { tool_name: event.toolName }))
       .finally(() => { toolPending = false; });
   });
-  pi.on("agent_end", async (_event, ctx) => {
+  // agent_end closes one low-level run; retries, recovery and queued work can
+  // follow, so Stop waits for agent_settled (Pi 0.80.4+).
+  pi.on("agent_settled", async (_event, ctx) => {
     if (!enabled()) return;
     await enqueue("relay", payload("Stop", ctx));
   });

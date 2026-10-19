@@ -1486,7 +1486,7 @@ for (const overrides of [{ OMS_PANEL_MAIN_ATTEMPT: "" }, { OMS_HARNESS_CHILD: "1
   process.env = original;
 }
 register(pi);
-assert.deepEqual([...handlers.keys()], ["session_start", "session_compact", "before_agent_start", "tool_execution_end", "agent_end"]);
+assert.deepEqual([...handlers.keys()], ["session_start", "session_compact", "before_agent_start", "tool_execution_end", "agent_settled"]);
 const ctx = { cwd: repo };
 const activity = join(repo, ".oms/hooks/panel-activity/pi-main.json");
 const row = () => JSON.parse(readFileSync(activity, "utf8"));
@@ -1536,7 +1536,7 @@ assert.match(afterReload, /Mail after reload/);
 assert.doesNotMatch(afterReload, /You are a control-tower main/);
 // Stop must finish after an outstanding fire-and-forget heartbeat.
 handlers.get("tool_execution_end")({ toolName: "read", result: prompt }, ctx);
-await handlers.get("agent_end")({ messages: [prompt] }, ctx);
+await handlers.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
 assert.equal(row().state, "idle");
 const before = readFileSync(activity, "utf8");
 process.env.OMS_HARNESS_CHILD = "1";
@@ -1544,7 +1544,7 @@ await handlers.get("session_start")({ type: "session_start", reason: "new" }, ct
 await handlers.get("session_compact")({ type: "session_compact", reason: "manual" }, ctx);
 assert.equal(await handlers.get("before_agent_start")({ prompt }, ctx), undefined);
 handlers.get("tool_execution_end")({ toolName: "read" }, ctx);
-await handlers.get("agent_end")({}, ctx);
+await handlers.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
 assert.equal(readFileSync(activity, "utf8"), before);
 delete process.env.OMS_HARNESS_CHILD;
 assert.doesNotMatch((await handlers.get("before_agent_start")({ prompt }, ctx)).message.content, /You are a control-tower main/);
@@ -1559,7 +1559,7 @@ scan(join(repo, ".oms"));
 // Missing Python is fail-open and does not inject an empty message.
 process.env.PATH = "";
 assert.equal(await handlers.get("before_agent_start")({ prompt }, ctx), undefined);
-await handlers.get("agent_end")({}, ctx);
+await handlers.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
 console.log("autonomy-hook-smoke: Pi extension activity/mail/env check ok");
 ''', text=True)
 PYTEST

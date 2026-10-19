@@ -169,7 +169,7 @@ Failed ownership queries preserve the window. SIGTERM/SIGHUP
 at the prompt restore terminal modes before exiting with 143/129.
 Without a terminal, native launch retains its existing exit behavior.
 
-Pi uses the existing `oms harness pi` bridge and requires both Pi and Codex CLI on PATH.
+Pi uses the existing `oms harness pi` bridge and requires both Pi 0.80.4 or newer (its `agent_settled` event marks the main idle) and Codex CLI on PATH.
 Its default model and effort come from the Codex main preset; `--model` selects an exact
 Codex catalog model. Pi owns its tools and UI, while OMS records the inference owner as
 `codex` and the harness as `pi`. Pi history is separate: this initial integration refuses
