@@ -368,6 +368,24 @@ def exercise_observed_worker_leases():
             if child_process.poll() is None:
                 child_process.terminate()
             child_process.communicate(timeout=15)
+    # A route that differs from the reviewed assignment, or an assignment panel cannot express, is refused before the claim.
+    for refused_task, refused_assignment in (
+            ("observed-mismatch", dict(provider="codex", model="gpt-6-luna", reasoning_effort="low")),
+            ("observed-empty-model", dict(provider="codex", model="", reasoning_effort="high")),
+            ("observed-fallback", dict(provider="codex", model="gpt-6-luna", reasoning_effort="high", fallback_model="gpt-6-sol"))):
+        call(plan_api + ["init", "--goal", "Refused assignment fixture"])
+        call(plan_api + ["add", "--id", refused_task, "--title", "Refused route", "--assignment", json.dumps(refused_assignment)])
+        refused_env = dict(environment, OMS_ROOM_ID=test_rooms["claude"], OMS_ROOM_REPO=str(project),
+                           OMS_ROOM_PARTICIPANT=mains["claude"][0], OMS_PANEL_MAIN_ATTEMPT=mains["claude"][1],
+                           OMS_LOCK_DIR=str(temporary / "observed-locks"))
+        refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(source), "--room", test_rooms["claude"],
+                                  "--dispatch", "worker", "--owner", "claude", "--access", "write", "--purpose", "implement",
+                                  "--to", "codex", "--model", "gpt-6-luna", "--reasoning-effort", "high",
+                                  "--brief-file", str(brief), "--verify", ":", "--task-id", refused_task],
+                                 env=refused_env, capture_output=True, text=True, timeout=60)
+        named = "--to codex" + (" --model " + refused_assignment["model"] if refused_assignment["model"] else "")
+        assert refused.returncode != 0 and named + " --reasoning-effort " + refused_assignment["reasoning_effort"] in refused.stderr, refused
+        assert json.loads(call(plan_api + ["evidence-snapshot", "--id", refused_task], refused_env))["state"] == "ready"
     # One cross-repository read regression: dirty state A and a different scratch source B.
     untracked_state = project / "state-only-untracked.txt"
     untracked_state.write_text("owner state stays here\n")

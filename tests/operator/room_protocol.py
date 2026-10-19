@@ -1372,6 +1372,21 @@ assert third.returncode == 0, third
 escalated = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
                           capture_output=True, text=True)
 assert escalated.returncode == 0, escalated
+# A continuation is refused by its plan task's reviewed assignment before any continuation work, claim or enrollment.
+call(plan_cli + ["add", "--id", "continue-assigned", "--title", "Assigned continuation", "--assignment",
+                 json.dumps(dict(provider="claude"))])
+call(plan_cli + ["claim", "--id", "continue-assigned", "--provider", "claude"], room_env)  # no later ready-task hint
+# claim_age_s is a clock reading, not state.
+continue_state = lambda: (listed(), room.records(project, shared),
+                          {k: v for k, v in json.loads(call(plan_cli + ["show", "--id", "continue-assigned"])).items()
+                           if k != "claim_age_s"})
+state_before = continue_state()
+mismatched = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch",
+    "refactorer", "--owner", "claude", "--to", "codex", "--model", "gpt-6-luna", "--access", "write",
+    "--brief-file", str(brief), "--verify", "true", "--continue", "continue-assigned"],
+    env=room_env, capture_output=True, text=True)
+assert mismatched.returncode != 0 and "plan task continue-assigned is reviewed for --to claude" in mismatched.stderr, mismatched
+assert continue_state() == state_before, "a refused continuation changed plan, room or attempt state"
 # Continuation survives retained results that omit the task and never inlines patch bytes it cannot verify.
 import hashlib
 last_round = [a for a in listed() if a["task_id"] == "room-inspection" and a["refs"].get("panel_role") == "worker"][-1]

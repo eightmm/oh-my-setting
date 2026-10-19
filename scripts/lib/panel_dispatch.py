@@ -439,6 +439,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     from terminal_panel import run_dispatch, safe_label, selected_route
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
                            task_id=task_id, candidate=candidate)
+    if access == "write":
+        _require_assigned_route(repo, task_id, route)
     if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
         print("WARN: write dispatch has neither a verify command nor a declared scope", file=sys.stderr)
     label = safe_label(label)
@@ -486,6 +488,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     if continue_task:
         if role not in WRITERS or not brief or prompt or task_id:
             raise ValueError("--continue takes a write-capable role and --brief-file, not --prompt or --task-id")
+        if access == "write":
+            _require_assigned_route(repo, continue_task, route)
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
                                            child_environment(owner, repo), work_repo,
                                            patch_reference=continuation_patch)
@@ -610,6 +614,33 @@ def _plan_task_has_verifier(repo, task_id):
         return isinstance(task, dict) and isinstance(task.get("verify"), str) and bool(task["verify"].strip())
     except (OSError, ValueError, TypeError):
         return False
+
+
+def _require_assigned_route(repo, task_id, route):
+    """Refuse before any claim a route the plan task's reviewed assignment would reject at the worker."""
+    if not task_id:
+        return
+    from terminal_panel import ROOT, _read
+    import runpy
+    try:
+        raw = _read(Path(repo), ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
+        tasks = json.loads(raw, object_pairs_hook=PlanBinding.unique_fields).get("tasks", {}) if raw else {}
+        value = tasks.get(task_id, {}).get("assignment", {}) if isinstance(tasks, dict) else {}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return
+    assignment = runpy.run_path(str(ROOT / "scripts/lib/task-assignment.py"))["validate"](value)
+    if not assignment:
+        return
+    effort = assignment.get("reasoning_effort")
+    flags = "--to %s" % assignment["provider"] + "".join(
+        " --%s %s" % (flag, assignment[key]) for flag, key in (("model", "model"), ("reasoning-effort", "reasoning_effort"))
+        if assignment.get(key))
+    if assignment.get("fallback_model") or effort not in (None, "low", "medium", "high"):
+        raise ValueError("plan task %s has an assignment panel dispatch cannot express (fallback_model, or effort "
+                         "other than low/medium/high); it names %s" % (task_id, flags))
+    if (route["provider"] != assignment["provider"] or "model" in assignment and route["model"] != assignment["model"]
+            or effort and route.get("effort") != effort):
+        raise ValueError("plan task %s is reviewed for %s; dispatch with that route" % (task_id, flags))
 
 
 def _read_suite(path):
