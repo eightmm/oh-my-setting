@@ -185,7 +185,7 @@ EOF
   {
     printf '%s\n' '#!/usr/bin/env bash'
     if [ "$cli" = node ]; then
-      printf '%s\n' 'if [ "${1:-}" = -p ]; then echo 24; elif [ "${1:-}" = --version ]; then echo v24.18.0; else echo node 24.18.0; fi'
+      printf '%s\n' 'if [ "${1:-}" = -p ]; then echo 24; elif [ "${1:-}" = --version ]; then echo v24.22.0; else echo node 24.22.0; fi'
     else
       case "$cli" in
         claude) locked=2.1.226 ;;
@@ -727,7 +727,7 @@ for cli in claude codex agy gh ntn uv uvx node; do
     # ensure_node reads the major version through `node -p`; anything below 22
     # sends the installer to nvm, which is exactly what must not happen here.
     if [ "$cli" = node ]; then
-      printf '%s\n' 'if [ "${1:-}" = -p ]; then echo 24; elif [ "${1:-}" = --version ]; then echo v24.18.0; else echo node 24.18.0; fi'
+      printf '%s\n' 'if [ "${1:-}" = -p ]; then echo 24; elif [ "${1:-}" = --version ]; then echo v24.22.0; else echo node 24.22.0; fi'
     else
       case "$cli" in
         claude) locked=2.1.226 ;;

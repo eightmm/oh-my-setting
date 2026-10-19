@@ -478,7 +478,7 @@ test_tool_upgrade_refreshes_existing_clis() {
 if [ "$cmd" = node ] && [ "\${1:-}" = -p ]; then
   echo 24
 elif [ "$cmd" = node ] && [ "\${1:-}" = --version ]; then
-  echo v24.18.0
+  echo v24.22.0
 elif [ "$cmd" = uv ] || [ "$cmd" = uvx ]; then
   echo 'uv 0.12.3'
 elif [ "$cmd" = agy ]; then
