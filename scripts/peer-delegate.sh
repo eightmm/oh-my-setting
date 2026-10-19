@@ -1916,11 +1916,13 @@ capture_patch() {
   worker_worktree_require_identity "patch capture" || return 1
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
-    -c core.fsmonitor=false -C "$worktree" add -A || return 1
+    -c core.fsmonitor=false -C "$worktree" add -A \
+    || { KEEP_WORKTREE=1; printf '\n- patch capture failed; worktree preserved: %s\n' "$worktree" >> "$artifact"; return 1; }
   if [ "$WORKER_ACCESS" = read ]; then
     changed_paths="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
       GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
-      -C "$worktree" diff --no-ext-diff --no-textconv --cached --name-only)" || return 1
+      -C "$worktree" diff --no-ext-diff --no-textconv --cached --name-only)" \
+      || { KEEP_WORKTREE=1; printf '\n- patch capture failed; worktree preserved: %s\n' "$worktree" >> "$artifact"; return 1; }
     [ -n "$changed_paths" ] || return 0
     while IFS= read -r changed_path; do
       changed_count=$((changed_count + 1))
@@ -1938,7 +1940,8 @@ EOF
     GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
     -c diff.noprefix=false -c diff.mnemonicPrefix=false -C "$worktree" \
     diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached --binary "$repair_replay_base" -- \
-    > "$patch_file"
+    > "$patch_file" \
+    || { KEEP_WORKTREE=1; printf '\n- patch capture failed; worktree preserved: %s\n' "$worktree" >> "$artifact"; return 1; }
 }
 
 # Runs VERIFY_CMD in the worktree; output goes to the artifact and is kept in
@@ -2507,6 +2510,7 @@ if [ "$DRY_RUN" != "1" ]; then
       GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
       -c core.fsmonitor=false -C "$worktree" checkout -- . 2>/dev/null || true
     git -C "$worktree" clean -fdx >/dev/null 2>&1 || true
+    oms_seed_local_agent_files "$DELEGATE_SOURCE_REPO" "$worktree"
     {
       printf '\n\n## Repair %s\n\n### Prompt\n\n' "$repair_used"
       cat "$repair_prompt_file"

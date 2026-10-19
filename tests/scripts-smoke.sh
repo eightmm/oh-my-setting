@@ -17406,6 +17406,7 @@ EOF
 # smoke-weight: 20
 test_delegate_repair_retries_failed_verify() {
   local project="$TMP/delegate-repair"
+  local kept
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
   local home_dir="$project/home"
@@ -17472,6 +17473,7 @@ if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt
   printf '%s' "$prompt" | grep >/dev/null 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
   if printf '%s' "$prompt" | grep >/dev/null 'PRESERVED-PATCH-CONTENT'; then exit 10; fi
   [ "$(git show :large.txt | grep -c PRESERVED-PATCH-CONTENT)" = 1000 ] || exit 11
+  [ -f "$PWD/AGENTS.md" ] || exit 12
   printf 'fixed\n' > delegated.txt
   echo "worker repaired"
 else
@@ -17481,6 +17483,9 @@ else
 fi
 EOF
   chmod +x "$bin_dir/codex"
+  # A local-only rules file must survive the repair round's git clean -fdx.
+  printf 'local rules\n' > "$project/AGENTS.md"
+  printf 'AGENTS.md\n' >> "$project/.git/info/exclude"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
@@ -17497,6 +17502,9 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.md' '## Repair 1'
   assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.md' 'worker repaired'
   assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.patch' 'fixed'
+  if grep -Fq 'AGENTS.md' "$artifact_dir"/codex-create-fixed-file-*.patch; then
+    fail "re-seeded agent files must stay out of the patch"
+  fi
 
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "repair trace not recorded"
 import json, sys
@@ -17571,6 +17579,28 @@ PY
   contains "$out" '--allow-no-change cannot complete a plan task' ||
     fail "plan-task incompatibility should have a clear usage error: $out"
   [ ! -e "$plan_worktree_root" ] || fail "incompatible arguments must fail before worktree setup"
+
+  # A patch-capture failure keeps the worker's only copy of its work.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *--version*|*--help*) exit 0 ;; esac
+cat >/dev/null
+echo "worker wrote a file"
+printf 'precious\n' > precious.txt
+: > "$(git rev-parse --absolute-git-dir)/index.lock"
+EOF
+  chmod +x "$bin_dir/codex"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model \
+    --prompt 'Lock the index' > "$project/capture-fail.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed patch capture must not exit zero"
+  grep -Fq 'worktree kept:' "$project/capture-fail.out" ||
+    fail "a failed patch capture must keep the worktree: $(cat "$project/capture-fail.out")"
+  kept="$(sed -n 's/^worktree kept: //p' "$project/capture-fail.out" | head -1)"
+  kept="${kept%% *}"
+  [ -f "$kept/precious.txt" ] || fail "the kept worktree lost the worker's file: $(cat "$project/capture-fail.out")"
 
   # Seed complete, distinct historical fixture episodes without provider calls.
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY'
