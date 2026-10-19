@@ -340,6 +340,41 @@ CI_SRC="$ROOT/templates/python-ci.yml"
 CI_DIR="$PROJECT_DIR/.github/workflows"
 CI_DST="$CI_DIR/python-ci.yml"
 
+# A symlink at any destination or parent would send a write (or the read-through
+# of an existing rule file) outside the project, dangling or not. Refuse before
+# the first write, dry runs included; PROJECT_DIR itself may be a link.
+refuse_symlinks() {
+  local rel part walk
+  local IFS_SAVE="$IFS"
+  for rel in "$@"; do
+    walk="$PROJECT_DIR"
+    IFS=/
+    set -f
+    for part in $rel; do
+      [ -n "$part" ] || continue
+      walk="$walk/$part"
+      if [ -L "$walk" ]; then
+        set +f; IFS="$IFS_SAVE"
+        echo "error: symlink at ${walk#"$PROJECT_DIR"/}; nothing was changed" >&2
+        exit 2
+      fi
+    done
+    set +f; IFS="$IFS_SAVE"
+  done
+}
+destinations=("${FILES[@]}" PROJECT.md)
+if [ "$BASE_STYLE" = "ml" ]; then
+  destinations+=(.gitignore scripts/ml_smoke.py scripts/check.sh)
+  if [ "$ML_FULL_DOCS" = "1" ] && [ -d "$ROOT/templates/ml-docs" ]; then
+    destinations+=(docs)
+    for src in "$ROOT/templates/ml-docs"/*.md; do
+      [ -e "$src" ] && destinations+=("docs/$(basename "$src")")
+    done
+  fi
+fi
+[ "$PYTHON_CI" != "1" ] || destinations+=(scripts/check.sh .github/workflows/python-ci.yml)
+refuse_symlinks "${destinations[@]}"
+
 # Every --python-ci refusal happens here, before the first write. A foreign
 # checker is compared, never executed or grepped for a contract keyword.
 if [ "$PYTHON_CI" = "1" ]; then
@@ -347,9 +382,6 @@ if [ "$PYTHON_CI" = "1" ]; then
     echo "error: --python-ci: $*; nothing was changed" >&2
     exit 2
   }
-  for target in "$PROJECT_DIR/scripts" "$CHECK_DST" "$PROJECT_DIR/.github" "$CI_DIR" "$CI_DST"; do
-    [ ! -L "$target" ] || refuse_python_ci "symlink at scaffold destination"
-  done
   if [ ! -f "$PROJECT_DIR/pyproject.toml" ] || [ ! -f "$PROJECT_DIR/uv.lock" ]; then
     refuse_python_ci "needs a uv project with pyproject.toml and uv.lock"
   fi

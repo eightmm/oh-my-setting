@@ -927,6 +927,28 @@ test_apply_ml_scaffolds_check_contract() {
   fi
   [ ! -e "$TMP/ci-outside" ] && [ ! -e "$py/AGENTS.md" ] || fail 'symlink refusal wrote files'
   rm "$py/scripts"
+
+  # Every destination and parent is refused, python-ci or not, before any write.
+  mkdir -p "$TMP/sl-a" "$TMP/sl-b" "$TMP/sl-outside"
+  ln -s ../sl-outside/x "$TMP/sl-a/PROJECT.md"
+  if "$ROOT/scripts/apply-project-template.sh" general "$TMP/sl-a" >/dev/null 2>&1; then
+    fail 'a dangling PROJECT.md symlink must be refused'
+  else
+    [ "$?" = 2 ] || fail 'symlink refusal must exit 2'
+  fi
+  [ ! -e "$TMP/sl-outside/x" ] && [ ! -e "$TMP/sl-a/AGENTS.md" ] ||
+    fail 'PROJECT.md symlink refusal wrote files'
+  printf 'secret\n' > "$TMP/sl-outside/secret"
+  ln -s ../sl-outside/secret "$TMP/sl-b/AGENTS.md"
+  if "$ROOT/scripts/apply-project-template.sh" general "$TMP/sl-b" >/dev/null 2>&1; then
+    fail 'an AGENTS.md symlink must be refused'
+  else
+    [ "$?" = 2 ] || fail 'symlink refusal must exit 2'
+  fi
+  [ "$(cat "$TMP/sl-outside/secret")" = secret ] && [ -L "$TMP/sl-b/AGENTS.md" ] ||
+    fail 'AGENTS.md symlink refusal touched the link or its target'
+  rm -r "$TMP/sl-a" "$TMP/sl-b" "$TMP/sl-outside"
+
   before="$(find "$py" | sort)"
   OH_MY_SETTING_DRY_RUN=1 "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null
   [ "$(find "$py" | sort)" = "$before" ] || fail '--python-ci dry run wrote files'
