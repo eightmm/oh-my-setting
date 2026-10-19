@@ -100,10 +100,23 @@ append_index_row() {
 
 # --- capture helpers --------------------------------------------------------
 
+# The project's own interpreter decides python/torch/cuda; OMS's bare python3
+# would misreport any project that keeps its stack in .venv. An activated venv
+# already wins through PATH.
+project_python() {
+  if [ -x "$STATE_ROOT/.venv/bin/python" ]; then
+    printf '%s\n' "$STATE_ROOT/.venv/bin/python"
+  else
+    printf 'python3\n'
+  fi
+}
+
 capture_env_json() {
   # Best-effort environment fingerprint; every probe degrades to null/empty.
-  python3 <<'PY'
-import json, platform, shutil, subprocess
+  local py
+  py="$(project_python)"
+  OMS_PROJECT_PY="$py" "$py" <<'PY'
+import json, os, platform, shutil, subprocess
 
 def run(cmd):
     try:
@@ -113,12 +126,13 @@ def run(cmd):
 
 def probe(code):
     try:
-        out = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=20)
+        out = subprocess.run([os.environ["OMS_PROJECT_PY"], "-c", code], capture_output=True, text=True, timeout=20)
         return out.stdout.strip() or None
     except Exception:
         return None
 
 env = {
+    "interpreter": os.environ["OMS_PROJECT_PY"],
     "python": platform.python_version(),
     "platform": platform.platform(),
     "torch": probe("import torch;print(torch.__version__)"),
@@ -526,7 +540,9 @@ cmd_verify() {
       fi
     fi
   fi
-  OMS_CUR_COMMIT="$cur_commit" OMS_CUR_DIFF="$cur_diff" python3 - "$p" <<'PY'
+  local py
+  py="$(project_python)"
+  OMS_CUR_COMMIT="$cur_commit" OMS_CUR_DIFF="$cur_diff" OMS_PROJECT_PY="$py" "$py" - "$p" <<'PY'
 import json, os, sys
 cap = json.load(open(sys.argv[1]))
 g = cap.get("git", {})
@@ -548,7 +564,7 @@ line((g.get("diff_sha256") or "") == cur_diff, "uncommitted-diff",
 import platform, subprocess
 def probe(code):
     try:
-        out = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=20)
+        out = subprocess.run([os.environ["OMS_PROJECT_PY"], "-c", code], capture_output=True, text=True, timeout=20)
         return out.stdout.strip() or None
     except Exception:
         return None
@@ -557,6 +573,7 @@ cur = {
     "torch": probe("import torch;print(torch.__version__)"),
     "cuda": probe("import torch;print(torch.version.cuda)"),
 }
+print("info env-interpreter: capsule=%s current=%s" % (e.get("interpreter"), os.environ["OMS_PROJECT_PY"]))
 for k in ("python", "torch", "cuda"):
     want, got = e.get(k), cur.get(k)
     tag = "ok   " if want == got else "WARN "

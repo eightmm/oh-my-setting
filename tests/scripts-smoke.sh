@@ -16098,6 +16098,21 @@ test_run_capsule_captures_and_reproduces() {
   printf 'dirty\n' >> "$proj/file.txt"           # make the tree dirty
   printf '{"accuracy": 0.9}\n' > "$proj/metrics.json"
   printf 'seed: 7\n' > "$proj/config.yaml"
+  # Project interpreter stub: reports a distinct python/torch so the capsule
+  # must come from .venv, not OMS's bare python3.
+  mkdir -p "$proj/.venv/bin"
+  cat > "$proj/.venv/bin/python" <<'STUB'
+#!/bin/sh
+if [ "$#" -eq 0 ] || [ "$1" = "-" ]; then
+  [ "$#" -eq 0 ] || shift
+  exec python3 -c 'import platform,sys;platform.python_version=lambda:"9.8.7";sys.argv=["-"]+sys.argv[1:];exec(sys.stdin.read())' "$@"
+fi
+case "$2" in
+  *torch.__version__*) echo 8.8.8 ;;
+  *torch.version.cuda*) echo 7.7 ;;
+esac
+STUB
+  chmod +x "$proj/.venv/bin/python"
 
   id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_AGENT=claude \
     "$ROOT/scripts/run-capsule.sh" run --note cap --config config.yaml \
@@ -16109,6 +16124,10 @@ test_run_capsule_captures_and_reproduces() {
   [ -f "$runs/$id/uncommitted.diff" ] || fail "dirty diff not captured"
   assert_file_contains "$cap" '"schema": 1'
   assert_file_contains "$cap" '"accuracy": 0.9'
+  assert_file_contains "$cap" '"python": "9.8.7"'
+  assert_file_contains "$cap" '"torch": "8.8.8"'
+  assert_file_contains "$cap" '"cuda": "7.7"'
+  assert_file_contains "$cap" '.venv/bin/python"'
   assert_file_contains "$cap" '"seed'
   assert_file_contains "$cap" 'config.yaml'
   assert_file_contains "$runs/$id/output.log" "trained"
@@ -16129,6 +16148,8 @@ test_run_capsule_captures_and_reproduces() {
   vout="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" 2>&1)" ||
     fail "verify should pass on the unchanged tree"
   contains "$vout" "env-python" || fail "verify missing env-drift report"
+  contains "$vout" "ok    env-python: capsule=9.8.7 current=9.8.7" || fail "verify must re-probe with the project interpreter"
+  contains "$vout" "env-interpreter" || fail "verify missing interpreter line"
   printf 'changed\n' >> "$proj/file.txt"
   if ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ); then
     fail "verify should report drift after a change"
