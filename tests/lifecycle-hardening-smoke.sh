@@ -361,6 +361,30 @@ test_machine_snapshot_cli_and_permissions() {
   # render, as availability or an explicit not-detected.
   grep -Eq '^- tsp queue: .+' "$TMP/machine-dry" ||
     fail "machine snapshot must name the tsp queue state"
+  # A read-only snapshot must not make tsp spawn its server: with no socket
+  # the stub must never run.
+  mkdir -p "$TMP/tsp-stub"
+  printf '#!/bin/sh\ntouch "%s/tsp-ran"\n' "$TMP" > "$TMP/tsp-stub/tsp"
+  chmod +x "$TMP/tsp-stub/tsp"
+  PATH="$TMP/tsp-stub:$PATH" TS_SOCKET="$TMP/no-such-tsp-socket" \
+    OH_MY_SETTING_MACHINE_SNAPSHOT="$out" \
+    "$ROOT/scripts/write-machine-snapshot.sh" --dry-run > "$TMP/machine-tsp"
+  [ ! -e "$TMP/tsp-ran" ] || fail "machine snapshot started a tsp server"
+  assert_contains "$TMP/machine-tsp" "- tsp queue: available (server not running)"
+  # A stale socket (bound, then closed with no listener) must not count as a
+  # live server either: tsp -S would unlink it and fork a new one.
+  python3 - "$TMP/stale-tsp-socket" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.close()
+PY
+  [ -S "$TMP/stale-tsp-socket" ] || fail "stale tsp socket fixture was not created"
+  PATH="$TMP/tsp-stub:$PATH" TS_SOCKET="$TMP/stale-tsp-socket" \
+    OH_MY_SETTING_MACHINE_SNAPSHOT="$out" \
+    "$ROOT/scripts/write-machine-snapshot.sh" --dry-run > "$TMP/machine-tsp-stale"
+  [ ! -e "$TMP/tsp-ran" ] || fail "machine snapshot ran tsp against a stale socket"
+  assert_contains "$TMP/machine-tsp-stale" "- tsp queue: available (server not running)"
   OH_MY_SETTING_MACHINE_SNAPSHOT="$out" "$ROOT/scripts/write-machine-snapshot.sh" >/dev/null
   [ "$(stat -c '%a' "$out" 2>/dev/null || stat -f '%Lp' "$out")" = 600 ] ||
     fail "machine snapshot is not private"

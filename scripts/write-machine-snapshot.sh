@@ -201,6 +201,15 @@ slurm_status() {
 tsp_status() {
   local slots
   if command -v tsp >/dev/null 2>&1; then
+    # `tsp -S` forks a server when none answers (it unlinks a stale socket
+    # first), so only call it once a connect proves a live listener.
+    python3 - "${TS_SOCKET:-${TMPDIR:-/tmp}/socket-ts.$(id -u)}" >/dev/null 2>&1 <<'PY' ||
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1)
+s.connect(sys.argv[1])
+PY
+      { printf 'available (server not running)\n'; return 0; }
     slots="$(tsp -S 2>/dev/null | sed -n 1p | tr -d '[:space:]')" || slots=""
     case "$slots" in
       ''|*[!0-9]*) printf 'available\n' ;;
