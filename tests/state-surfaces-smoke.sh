@@ -393,6 +393,7 @@ assert search_body["total_hits"] == 1, search_body
 assert search_body["groups"][0]["id"] == "symbol:a.py::alpha_entry", search_body
 resources = by_id[19]["result"]["resources"]
 assert [row["uri"] for row in resources] == ["ui://oms/project-graph/v1.html"], resources
+assert not {"ttlMs", "cacheScope"} & set(by_id[20]["result"]), by_id[20]
 resource = by_id[20]["result"]["contents"][0]
 assert resource["mimeType"] == "text/html;profile=mcp-app", resource
 assert "Instruction draft" in resource["text"], resource["text"][:500]
@@ -2612,6 +2613,7 @@ test_mcp_server_serves_modern_clients_without_a_handshake() {
     printf '%s\n' '{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
     printf '%s\n' '{"jsonrpc":"2.0","id":10,"method":"tools/list"}'
     printf '{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{%s}}\n' "$meta"
+    printf '{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"ui://oms/project-graph/v1.html",%s}}\n' "$meta"
   } | OMS_MCP_TOOL_PROFILE=full OMS_MCP_TASKS_EXTENSION=1 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "modern MCP client contract failed: $(head -c 800 "$out")"
@@ -2678,6 +2680,12 @@ assert by_id[8]["error"]["code"] == -32601, by_id[8]
 assert by_id[9]["result"]["protocolVersion"] == "2025-03-26", by_id[9]
 assert "resultType" not in by_id[10]["result"], by_id[10]
 assert by_id[11]["result"]["resultType"] == "complete", by_id[11]
+
+# resources/read is a cacheable result too: the 2026-07-28 schema requires both.
+read = by_id[12]["result"]
+assert read["resultType"] == "complete", read
+assert isinstance(read["ttlMs"], int) and read["ttlMs"] >= 0, read
+assert read["cacheScope"] in ("public", "private"), read
 PY
 }
 

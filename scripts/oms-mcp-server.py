@@ -2009,7 +2009,7 @@ def handle(message: dict):
         resource, err = read_project_graph_resource(params.get("uri"))
         if err:
             return response(msg_id, error={"code": -32602, "message": err})
-        return response(msg_id, complete_result(resource, params))
+        return response(msg_id, complete_result(cacheable(resource, params), params))
     if method in ("tasks/get", "tasks/update", "tasks/cancel"):
         if not tasks_feature_enabled() or effective_protocol(params) != TASKS_PROTOCOL:
             return response(
