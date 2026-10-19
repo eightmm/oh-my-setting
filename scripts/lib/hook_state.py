@@ -529,7 +529,7 @@ def env_int(name: str, default: int, minimum: int = 0, maximum: int | None = Non
 
 
 def prompt_excerpt(prompt: str) -> str:
-    limit = env_int("OMS_AUTO_TASK_PROMPT_CHARS", 600, minimum=80, maximum=4000)
+    limit = 600
     text = re.sub(r"\s+", " ", prompt.strip())
     if len(text) > limit:
         return text[: max(0, limit - 3)].rstrip() + "..."
@@ -1111,9 +1111,8 @@ def percent_left_from_cache(payload: dict[str, Any]) -> float | None:
     if not session:
         return None
     path = hud_cache_dir() / ("ctx-%s.json" % sha256_text(session)[:24])
-    ttl = env_int("OMS_CTX_CACHE_TTL", 600, minimum=5, maximum=86400)
     try:
-        if time.time() - path.stat().st_mtime > ttl:
+        if time.time() - path.stat().st_mtime > 600:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:

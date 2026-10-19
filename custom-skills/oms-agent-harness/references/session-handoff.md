@@ -24,7 +24,7 @@ the task ID, HEAD, packet digest and verification observation time. The assistan
 summary remains an unverified claim. Resume prefers the current task over a
 newer unrelated digest, labels changed/unbound snapshots, and sends a pointer
 instead of the transcript. Source and verification must still be rechecked.
-The entire resume block defaults to 4 KiB (`OMS_RESUME_MAX_BYTES`, 512–16384),
+The entire resume block is bounded to 4 KiB,
 including the truncation notice and state pointer; no model call is added.
 Starting inside a Git subdirectory still resumes the repository root's state.
 Capture retains only the first request, bounded recent turns and latest answer,

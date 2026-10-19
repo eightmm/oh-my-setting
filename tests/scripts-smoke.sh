@@ -23044,8 +23044,8 @@ PY
   out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
   contains "$out" 'same task, recheck changed state' || fail "changed packet was treated as current"
   (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --goal "$(python3 -c 'print("긴목표" * 2000)')" >/dev/null)
-  out="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MAX_BYTES=512 "$ROOT/scripts/resume-hook.sh")"
-  [ "$(printf '%s' "$out" | wc -c)" -le 512 ] || fail "resume byte budget exceeded"
+  out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  [ "$(printf '%s' "$out" | wc -c)" -le 4096 ] || fail "resume byte budget exceeded"
   contains "$out" 'resume truncated' || fail "resume truncation was hidden"
   printf '%s' "$out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' || fail "resume split a UTF-8 character"
 }

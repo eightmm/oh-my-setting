@@ -272,10 +272,7 @@ relay_line="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py
 printf '[oms resume] %s\n%s' "$(basename "$cwd")" "$out" |
   python3 -c '
 import os, sys
-try:
-    cap = max(512, min(16384, int(os.environ.get("OMS_RESUME_MAX_BYTES", "4096"))))
-except ValueError:
-    cap = 4096
+cap = 4096
 text = sys.stdin.read().replace("\r", "")
 footer = "- more: oms state\n"
 raw = text.encode("utf-8")
