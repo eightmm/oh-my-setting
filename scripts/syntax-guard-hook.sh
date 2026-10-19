@@ -21,7 +21,7 @@ payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-OMS_SGH_PAYLOAD="$payload" python3 - "$ROOT/scripts/lib" "$BASH" <<'PY' 2>/dev/null || true
+OMS_SGH_PAYLOAD="$payload" python3 -I -B - "$ROOT/scripts/lib" "$BASH" <<'PY' 2>/dev/null || true
 import atexit
 import ast
 import json

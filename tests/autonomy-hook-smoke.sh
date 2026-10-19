@@ -256,6 +256,15 @@ test_fail_ledger_hook_resolves_on_success() {
   [ "$(ledger_rows "$repo")" = "$rows" ] ||
     fail "a failing command on the success event must not write"
 
+  # Hook inline Python runs isolated: a json.py at the cwd root must not execute.
+  printf 'open(%s, "w").close()\n' "'$repo/json-planted'" >"$repo/json.py"
+  (cd "$repo" && printf '%s' "{\"cwd\":\"$repo\",\"tool_name\":\"Write\"}" |
+    bash "$ROOT/scripts/resume-hook.sh") >/dev/null 2>&1
+  (cd "$repo" && printf '%s' "{\"cwd\":\"$repo\",\"tool_name\":\"Write\"}" |
+    bash "$ROOT/scripts/syntax-guard-hook.sh") >/dev/null 2>&1
+  [ ! -e "$repo/json-planted" ] || fail "a hook imported json.py from its cwd"
+  rm -f "$repo/json.py"
+
   # Both opt-outs: the narrow one silences only resolution, the old one the
   # whole script.
   (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null

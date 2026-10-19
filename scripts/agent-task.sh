@@ -451,7 +451,7 @@ case "$ACTION" in
     if [ "$AS_JSON" -eq 1 ]; then
       OMS_AT_ID="$task_id" OMS_AT_STATUS="$task_status" OMS_AT_SOURCE="$task_source" \
       OMS_AT_ACTIVITY="$task_activity" OMS_AT_CLOSED="$task_closed" \
-      OMS_AT_STALE="$task_stale" OMS_AT_VERIFICATION="$task_verification" python3 -c '
+      OMS_AT_STALE="$task_stale" OMS_AT_VERIFICATION="$task_verification" python3 -I -B -c '
 import json, os
 print(json.dumps({
     "schema": 1, "present": True,

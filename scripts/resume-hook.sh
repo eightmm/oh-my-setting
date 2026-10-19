@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v python3 >/dev/null 2>&1 || exit 0
 
 payload="$(cat 2>/dev/null || true)"
-cwd="$(printf '%s' "$payload" | python3 -c '
+cwd="$(printf '%s' "$payload" | python3 -I -B -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -45,7 +45,7 @@ append() { out="${out}${1}
 # step straight from the packet sections. A fresh active task was previously
 # completely silent at session start — that is the gap this closes.
 days_since() {  # days_since ISO8601Z -> whole days when >= 1, else empty
-  python3 - "$1" <<'PY' 2>/dev/null
+  python3 -I -B - "$1" <<'PY' 2>/dev/null
 import datetime, sys
 try:
     then = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
@@ -78,7 +78,7 @@ fi
 # bound by has to outlive the summary that dropped it.
 plan_file="$cwd/.oms/plan/tasks.json"
 if [ -s "$plan_file" ]; then
-  plan_lines="$(python3 - "$plan_file" <<'PY' 2>/dev/null
+  plan_lines="$(python3 -I -B - "$plan_file" <<'PY' 2>/dev/null
 import datetime, json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
@@ -128,7 +128,7 @@ fi
 
 # Prefer the current task over recency. Legacy/other-task digests stay readable,
 # but never silently become the current task's continuation.
-handoff_line="$(python3 - "$cwd" "${task_id:-}" "${task_status:-}" <<'PY'
+handoff_line="$(python3 -I -B - "$cwd" "${task_id:-}" "${task_status:-}" <<'PY'
 import hashlib, pathlib, re, shlex, subprocess, sys, time
 repo = pathlib.Path(sys.argv[1])
 active = sys.argv[2] if sys.argv[3] != 'closed' else ''
@@ -183,7 +183,7 @@ portable_line=""
 if [ -f "$cwd/.oms/portable/imports/LATEST" ] &&
   [ ! -L "$cwd/.oms/portable/imports/LATEST" ]; then
   portable_line="$("$ROOT/scripts/runtime.sh" --repo "$cwd" envelope show 2>/dev/null |
-    python3 -c '
+    python3 -I -B -c '
 import json, sys
 try:
     row = json.load(sys.stdin).get("continuity", {}).get("latest_import", {})
@@ -200,7 +200,7 @@ portable_line="${portable_line//$'\r'/}"
 # Unresolved failures: one line, newest row's summary and suggested next.
 ledger="$cwd/.oms/failures.jsonl"
 if [ -s "$ledger" ]; then
-  fail_line="$("$ROOT/scripts/fail-ledger.sh" --repo "$cwd" list --unresolved --json 2>/dev/null | python3 -c '
+  fail_line="$("$ROOT/scripts/fail-ledger.sh" --repo "$cwd" list --unresolved --json 2>/dev/null | python3 -I -B -c '
 import json, sys
 try:
     rows = json.load(sys.stdin).get("failures", [])
@@ -242,7 +242,7 @@ fi
 # the hook's one write (append-only shadow ledger, ambient to the check
 # gate); the receipt and the claim ledger stay untouched.
 if [ -f "$cwd/.oms/plan/autopilot-run.json" ]; then
-  sid="$(printf '%s' "$payload" | python3 -c '
+  sid="$(printf '%s' "$payload" | python3 -I -B -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -270,7 +270,7 @@ relay_line="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py
 
 [ -n "$out" ] || exit 0
 printf '[oms resume] %s\n%s' "$(basename "$cwd")" "$out" |
-  python3 -c '
+  python3 -I -B -c '
 import os, sys
 cap = 4096
 text = sys.stdin.read().replace("\r", "")

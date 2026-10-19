@@ -29,7 +29,7 @@ command -v python3 >/dev/null 2>&1 || exit 0
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-parsed="$(printf '%s' "$payload" | python3 -c '
+parsed="$(printf '%s' "$payload" | python3 -I -B -c '
 import json, sys
 try:
     data = json.load(sys.stdin)

@@ -53,7 +53,7 @@ state_hint() {
   OMS_SH_TASK="$task" OMS_SH_FAILURES="$failures" \
     OMS_SH_PLAN="$repo/.oms/plan/tasks.json" \
     OMS_SH_PROGRESS="$repo/.oms/plan/progress.jsonl" \
-    python3 - <<'PY' 2>/dev/null || true
+    python3 -I -B - <<'PY' 2>/dev/null || true
 import json, os
 
 def load(name):

@@ -93,7 +93,7 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 # them: a resolve row zeroes the run. Used to decide when a repeat has become a
 # pattern worth an outside read.
 unresolved_fails_for() {
-  OMS_FP="$1" python3 - "$LEDGER" <<'COUNT'
+  OMS_FP="$1" python3 -I -B - "$LEDGER" <<'COUNT'
 import calendar, json, os, sys, time
 fp = os.environ["OMS_FP"]
 ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
@@ -149,7 +149,7 @@ advise_hint_if_repeated() {
 }
 
 fingerprint_of() {
-  OMS_CMD="$1" python3 - <<'PY'
+  OMS_CMD="$1" python3 -I -B - <<'PY'
 import os, re, hashlib
 cmd = os.environ["OMS_CMD"]
 norm = re.sub(r"\s+", " ", cmd).strip()
@@ -270,7 +270,7 @@ EOF
       OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" OMS_NEXT="$NEXT" \
       OMS_STATE_FP="$(state_fingerprint)" \
       OMS_RUNTIME_LIB="$ROOT/scripts/lib" OMS_FAILURE_CODE="${FAILURE_CODE:-}" \
-      python3 - > "$row_tmp" <<'PY'
+      python3 -I -B - > "$row_tmp" <<'PY'
 import json, os, sys
 row = {"schema": int(os.environ["OMS_SCHEMA"]), "event": "fail",
        "ts": os.environ["OMS_TS"], "agent": os.environ["OMS_AGENT_L"],
@@ -321,7 +321,7 @@ PY
     [ -f "$LEDGER" ] || exit 0
     fp="$(fingerprint_of "$CMD")"
     OMS_FP="$fp" OMS_STATE_FP="$(state_fingerprint)" OMS_IGNORE_STATE="$IGNORE_STATE" \
-      python3 - "$LEDGER" <<'PY'
+      python3 -I -B - "$LEDGER" <<'PY'
 import calendar, json, os, sys, time
 fp = os.environ["OMS_FP"]
 current_state = os.environ["OMS_STATE_FP"]
@@ -404,7 +404,7 @@ PY
     mkdir -p "$(dirname "$LEDGER")"
     row_tmp="$(mktemp)" || fail "mktemp failed"
     OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
-      OMS_FP="$FINGERPRINT" OMS_HOW="$HOW" python3 - > "$row_tmp" <<'PY'
+      OMS_FP="$FINGERPRINT" OMS_HOW="$HOW" python3 -I -B - > "$row_tmp" <<'PY'
 import json, os
 row = {"schema": int(os.environ["OMS_SCHEMA"]), "event": "resolved",
        "ts": os.environ["OMS_TS"], "agent": os.environ["OMS_AGENT_L"],
@@ -431,7 +431,7 @@ PY
     OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" OMS_LIMIT="$LIMIT" \
       OMS_SHOW="$([ "$ACTION" = show ] && printf '%s' "$FINGERPRINT")" \
       OMS_HEAD="$(git -c core.fsmonitor=false -C "$STATE_ROOT" rev-parse HEAD 2>/dev/null || printf unborn)" \
-      python3 - "$LEDGER" <<'PY'
+      python3 -I -B - "$LEDGER" <<'PY'
 import calendar, json, os, sys, time
 unresolved_only = os.environ.get("OMS_UNRESOLVED") == "1"
 as_json = os.environ.get("OMS_JSON") == "1"

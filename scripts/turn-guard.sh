@@ -39,7 +39,7 @@ unguarded=""
 if [ "$guard_rc" -ne 0 ]; then
   unguarded="helper exit $guard_rc"
 elif [ -n "$guard_out" ]; then
-  verdict="$(printf '%s' "$guard_out" | python3 -c '
+  verdict="$(printf '%s' "$guard_out" | python3 -I -B -c '
 import json, sys
 raw = sys.stdin.read().strip()
 try:

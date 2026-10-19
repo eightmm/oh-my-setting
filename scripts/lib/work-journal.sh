@@ -201,7 +201,7 @@ work_journal_defer_finish() {
     case "$remote" in *github.com:*|*github.com/*) ci=1 ;; esac
   fi
   [ "$journal" = 1 ] || [ "$ci" = 1 ] || return 0
-  python3 - "$WORK_JOURNAL_LIB_DIR/work-journal.sh" "$repo" "$journal" "$ci" <<'PY' 2>/dev/null || true
+  python3 -I -B - "$WORK_JOURNAL_LIB_DIR/work-journal.sh" "$repo" "$journal" "$ci" <<'PY' 2>/dev/null || true
 import json
 import os
 import subprocess
