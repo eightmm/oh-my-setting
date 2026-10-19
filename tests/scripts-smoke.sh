@@ -12393,6 +12393,18 @@ assert row['provider_usage']['cache_write_tokens'] == 50, row
 assert row['provider_usage']['cache_in_input'] is False, row
 assert row['provider_usage'].get('tool_calls') is None, row  # no stream, no tool count
 PY
+  # A resumed call's total_cost_usd restores the session's earlier spend, so
+  # summing it across attempts would double-count: the cost reads as unreported.
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_RESUME_SESSION=resumed-session \
+    "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt "Envelope resume probe" >/dev/null
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "a resumed claude call must report no cost and unchanged tokens"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+row = [r for r in rows if r.get("provider") == "claude"][-1]
+assert row.get("cost_usd") is None, row
+assert row["tokens"] == 15, row
+PY
   grep -Fxq -- '--output-format' "$home_dir/claude-argv" ||
     fail "claude must be asked for the JSON envelope: $(cat "$home_dir/claude-argv")"
   grep -Fxq -- 'stream-json' "$home_dir/claude-argv" || fail 'read seats need complete assistant messages'

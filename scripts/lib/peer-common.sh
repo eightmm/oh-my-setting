@@ -2176,12 +2176,14 @@ for name in served:
     out.append(name)
 usage = envelope.get("usage")
 usage = usage if isinstance(usage, dict) else {}
-out.extend(usage_footer("claude", [usage], envelope.get("total_cost_usd"),
+import os
+# Claude Code 2.1.277+ resumed results carry the restored session spend.
+cost = None if os.environ.get("OMS_RESUME_SESSION") else envelope.get("total_cost_usd")
+out.extend(usage_footer("claude", [usage], cost,
                         tool_calls=tool_calls if stream_seen else None))
 tmp = path + ".envelope"
 with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")
-import os
 os.replace(tmp, path)
 from peer_artifacts import record_native_session
 record_native_session(session)
