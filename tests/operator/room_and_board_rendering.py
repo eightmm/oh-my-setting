@@ -1435,7 +1435,7 @@ with tempfile.TemporaryDirectory() as slug_root:
             patch.object(panel, "bind_main_keys"), patch.object(panel.subprocess, "run") as adopted, \
             patch.object(panel.subprocess, "call", return_value=0):
         assert panel.split_panel(odd) == 0
-        assert ["tmux", "set-option", "-t", "oms-panel-aaaaaaaaaaaa", "@oms_panel_repo", str(odd)] in \
+        assert ["tmux", "set-option", "-t", "=oms-panel-aaaaaaaaaaaa:", "@oms_panel_repo", str(odd)] in \
             [c.args[0] for c in adopted.call_args_list]
 # Context used rides on the shown main's card in three bands; only the proven main carries it.
 claude_main = next(m for m in flow["room"]["participants"] if m.get("role") == "main" and m.get("provider") == "claude")["participant"]
