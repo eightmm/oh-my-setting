@@ -1173,7 +1173,7 @@ plain_board = graph_view.render_graph(board, 100, 40)
 assert "Fable 5.1" not in plain_board and "Built-in advisor" not in plain_board, plain_board
 advisor_board = graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40)
 assert "Fable 5.1" in advisor_board and "Built-in advisor" in advisor_board, advisor_board
-nav = {"selected": ("result", "native-advisor-adv-main"), "preview": {"target": ("result", "native-advisor-adv-main"), "report": {}}}
+nav = {"tab": "detail", "selected": ("result", "native-advisor-adv-main"), "preview": {"target": ("result", "native-advisor-adv-main"), "report": {}}}
 native_detail = graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=nav)
 assert "answer stays inside the main" in native_detail, native_detail
 assert "Artifact:" not in native_detail and "not recorded" not in native_detail, native_detail
@@ -1181,10 +1181,10 @@ assert "Artifact:" not in native_detail and "not recorded" not in native_detail,
 finished_board = graph_view.render_graph(dict(board, native_advisors=answered_call), 120, 34,
                                          navigation={"dismissed": True})
 assert "Fable 5.1" in finished_board and "Past work" not in finished_board, finished_board
-finished_nav = {"selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
+finished_nav = {"tab": "detail", "selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 finished_detail = graph_view.render_graph(dict(board, native_advisors=answered_call), 100, 40, navigation=finished_nav)
 assert "Built-in advisor: last answered " + answered_call["adv-main"]["finished"] in finished_detail, finished_detail
-running_nav = {"selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
+running_nav = {"tab": "detail", "selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 assert "Built-in advisor: asked " in graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=running_nav)
 # The board's last row starts a main: clickable only in a managed panel, never on a static render.
 starter_board = dict(board, room={"id": "adv-room", "participants": [dict(claude_main, model="claude-opus-5-5"), dict(claude_main, participant="adv-sub",
