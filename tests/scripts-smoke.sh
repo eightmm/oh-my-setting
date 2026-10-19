@@ -21642,14 +21642,14 @@ test_skill_router_separates_consultation_from_delegation() {
 
   make_committed_repo "$project"
   out="$(printf '{"prompt":"codex한테 의견 물어봐","session_id":"ask1","turn_id":"t1","cwd":"%s"}' "$project" |
-    TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
   contains "$out" 'oms-agent-harness' || fail "consultation should route to oms-agent-harness"
   if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "consultation must not expose a retired peer skill"
   fi
 
   out="$(printf '{"prompt":"codex한테 시켜: README 고쳐","session_id":"write1","turn_id":"t1","cwd":"%s"}' "$project" |
-    TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
   contains "$out" 'oms-agent-harness' || fail "write delegation should route to oms-agent-harness"
   if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "write delegation must not expose a retired peer skill"
@@ -21674,7 +21674,7 @@ test_skill_router_routes_trust_boundary_precisely() {
     # a routing miss unless the diagnostic is kept.
     out="$(printf '{"prompt":"%s","session_id":"security-pos-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
-      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh" \
+      TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh" \
         2> "$d/router-stderr.txt")"
     contains "$out" 'oms-trust-boundary' ||
       fail "router should suggest oms-trust-boundary for: $prompt (out: $out; stderr: $(cat "$d/router-stderr.txt" 2>/dev/null))"
@@ -21692,7 +21692,7 @@ EOF
     i=$((i + 1))
     out="$(printf '{"prompt":"%s","session_id":"security-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
-      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+      TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
     if contains "$out" 'oms-trust-boundary'; then
       fail "router must not suggest oms-trust-boundary for: $prompt ($out)"
     fi
@@ -21721,7 +21721,7 @@ test_skill_router_keeps_trace_off_ordinary_test_talk() {
     i=$((i + 1))
     out="$(printf '{"prompt":"%s","session_id":"router-pos-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
-      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+      TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
     contains "$out" 'skill hint: oms-trace' ||
       fail "router should suggest oms-trace for: $prompt ($out)"
   done <<'EOF'
@@ -21737,7 +21737,7 @@ EOF
     i=$((i + 1))
     out="$(printf '{"prompt":"%s","session_id":"router-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
-      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+      TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
     if contains "$out" 'oms-trace'; then
       fail "router must not suggest oms-trace for: $prompt ($out)"
     fi
@@ -21758,13 +21758,13 @@ EOF
     i=$((i + 1))
     out="$(printf '{"prompt":"%s","session_id":"router-near-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
-      PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+      PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
     if printf '%s' "$out" | grep >/dev/null -E 'skill hint:.*oms-(agent-harness|gpu-workstation)'; then
       fail "generic prompt must not force a specialized skill: $prompt ($out)"
     fi
   done
   out="$(printf '{"prompt":"CUDA OOM","session_id":"router-gpu","turn_id":"t1","cwd":"%s"}' "$project" |
-    PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
   contains "$out" 'oms-gpu-workstation' || fail "real OOM must still route to GPU guidance"
 }
 

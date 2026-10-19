@@ -53,11 +53,8 @@ def valid_route(route):
 def policy():
     value = json.loads((ROOT / "config/panel-routing.json").read_text(encoding="utf-8"))
     if (not isinstance(value, dict) or not {"schema", "main", "tiers", "roles"} <= set(value)
-            <= {"schema", "main", "tiers", "roles", "tie_band", "review_backlog_warn", "auto_review"} or value.get("schema") != 2):
+            <= {"schema", "main", "tiers", "roles", "tie_band", "auto_review"} or value.get("schema") != 2):
         raise ValueError("unsupported panel routing policy")
-    if "review_backlog_warn" in value and (type(value["review_backlog_warn"]) is not int
-                                             or value["review_backlog_warn"] < 0):
-        raise ValueError("review backlog warning threshold must be a non-negative integer")
     if "auto_review" in value and type(value["auto_review"]) is not bool:
         raise ValueError("panel auto-review setting must be boolean")
     value.setdefault("auto_review", True)
@@ -82,11 +79,10 @@ def policy():
             raise ValueError("duplicate provider in panel tier: %s" % tier)
     roles = value.get("roles")
     if not isinstance(roles, dict) or set(roles) != set(KINDS):
-        raise ValueError("panel roles must map every role to a tier and optional provider preference")
+        raise ValueError("panel roles must map every role to a tier")
     for role, route in roles.items():
-        if (not isinstance(route, dict) or not {"tier"} <= set(route) <= {"tier", "prefer"}
-                or not isinstance(route.get("tier"), str) or route["tier"] not in TIERS
-                or "prefer" in route and (not isinstance(route["prefer"], str) or route["prefer"] not in MODEL_IDS)):
+        if (not isinstance(route, dict) or set(route) != {"tier"}
+                or not isinstance(route.get("tier"), str) or route["tier"] not in TIERS):
             raise ValueError("invalid panel role: %s" % role)
     return value
 
@@ -100,13 +96,12 @@ def weekly_used(provider_status, provider):
 
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
              recent=None, writer=None):
-    """Availability, quota left, role preference, then independent judgment; explicit targets narrow installed.
+    """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
     recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task."""
     if not owner or role not in KINDS:
         raise ValueError("choose a supported main and role")
     routes = policy()
-    preferred = routes["roles"][role].get("prefer")
     tier = tier or routes["roles"][role]["tier"]
     if tier not in TIERS or access not in ("read", "write"):
         raise ValueError("invalid workload or access")
@@ -154,8 +149,6 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         else:
             available = sorted(available, key=lambda c: c["provider"] == owner)
         usable = available
-    if preferred:
-        usable = sorted(usable, key=lambda c: c["provider"] != preferred)
     if role in INDEPENDENT:
         usable = sorted(usable, key=lambda c: c["provider"] == (writer if writer in MODEL_IDS else owner))
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])

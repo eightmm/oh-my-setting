@@ -3806,15 +3806,7 @@ assert len(backlog_items) == 1 and backlog_items[0]["what"] == backlog_warning(9
 from panel_view import attention_items
 backlog_decisions = [item["row_id"] for item in attention_items(inbox_room) if item["cls"] == "decide"]
 assert backlog_decisions[:1] == [("review-backlog", "m1")], backlog_decisions
-with patch("review_backlog.policy", return_value={"review_backlog_warn": 9}):
-    inbox_room["review_backlog"] = backlog_project(inbox_room)
-    assert not [item for item in inbox_items(inbox_room) if item["row_id"] == ("review-backlog", "m1")]
-with patch("review_backlog.policy", side_effect=OSError("policy unavailable")), \
-        patch("review_backlog.counts", return_value={"m1": 9}):
-    fallback_backlog = backlog_project(inbox_room)
-assert fallback_backlog == {"threshold": 8, "counts": {"m1": 9}}, fallback_backlog
-assert any(item["row_id"] == ("review-backlog", "m1") for item in
-           inbox_items(dict(inbox_room, review_backlog=fallback_backlog)))
+del inbox_room["review_backlog"]
 many_patches = deepcopy(inbox_room)
 many_patches["plan"] = {"tasks": []}
 many_patches["room"] = dict(many_patches["room"], participants=list(many_patches["room"]["participants"]))
@@ -3831,9 +3823,7 @@ for number in range(8):
 many_patches["awaiting_admission"] = awaiting_admission
 assert backlog_counts(many_patches) == {"m1": 9}, backlog_counts(many_patches)
 assert sum(item["what"].startswith("patch awaits admission") for item in inbox_items(many_patches)) == 9
-from review_backlog import policy as backlog_policy
-with patch("review_backlog.policy", wraps=backlog_policy) as policy_reads, \
-        patch("review_backlog.counts", wraps=backlog_counts) as backlog_count_reads:
+with patch("review_backlog.counts", wraps=backlog_counts) as backlog_count_reads:
     many_patches["review_backlog"] = backlog_project(many_patches)
     for board_view in ("graph", "tree"):
         # The warning remains in Attention after the pinned strip becomes one row.
@@ -3844,7 +3834,7 @@ with patch("review_backlog.policy", wraps=backlog_policy) as policy_reads, \
             for item in attention_items(many_patches)), strip
         drawing = render(many_patches, "claude", 160, 50, view=board_view, navigation={"tab": "needs"})
         assert "review first" in drawing, (board_view, drawing)
-    assert policy_reads.call_count == backlog_count_reads.call_count == 1, (policy_reads.call_count, backlog_count_reads.call_count)
+    assert backlog_count_reads.call_count == 1, backlog_count_reads.call_count
 for columns, rows in ((50, 18), (80, 40), (127, 40)):
     for menu_report in (inbox_room, dict(inbox_room, room={"id": "broken", "error": "room unreadable: ValueError: bad room"})):
         screen = render(menu_report, "claude", columns, rows, menu=True, managed=True)

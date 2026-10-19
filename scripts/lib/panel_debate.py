@@ -192,11 +192,6 @@ def signature(report, main):
     return tuple((d["task"], d["state"]) for d in debates(report) if d["main"] == main)
 
 
-def _paragraphs(text, width, limit):
-    return [part for paragraph in text.splitlines()
-            for part in (wrapped(paragraph, width, 50, 8000) if paragraph.strip() else [""])][:limit]
-
-
 def _answer_rows(text, width):
     """Wrap the retained seat answer within its byte bound and a fixed row ceiling."""
     # A newline can consume only one byte while adding a row, so byte count

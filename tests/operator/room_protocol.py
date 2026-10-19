@@ -38,7 +38,6 @@ assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku
 assert allocate("claude", tier="light", installed={"codex"})["model"] == "gpt-6-luna"
 assert allocate("codex", installed={"claude"})["model"] == "claude-sonnet-5-5"
 assert allocate("claude", installed={"codex"})["model"] == "gpt-6-luna"
-assert not any("prefer" in rule for rule in policy()["roles"].values()), "default roles carry no provider preference"
 for role, model in (("worker", "claude-sonnet-5-5"), ("builder", "claude-sonnet-5-5"), ("refactorer", "claude-sonnet-5-5"),
                     ("release-engineer", "claude-sonnet-5-5"),
                     ("performance-engineer", "claude-opus-5-5"), ("integrator", "claude-opus-5-5")):
@@ -149,18 +148,8 @@ for role, rule in routes["roles"].items():
     assert rule["tier"] == expected["workload"]
 from panel_routing import policy
 configured = policy()
-assert configured["review_backlog_warn"] == 8
 assert configured["auto_review"] is True
-for invalid_threshold in (True, -1, "8"):
-    with patch("panel_routing.Path.read_text", return_value=json.dumps(dict(configured, review_backlog_warn=invalid_threshold))):
-        try:
-            policy()
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("invalid review backlog threshold accepted")
-for invalid in ("routine", {"tier": "missing"}, {"tier": "routine", "prefer": "grok"},
-                {"tier": []}, {"tier": "routine", "prefer": None}, {"tier": "routine", "extra": True}):
+for invalid in ("routine", {"tier": "missing"}, {"tier": []}, {"tier": "routine", "extra": True}):
     malformed = deepcopy(policy())
     malformed["roles"]["builder"] = invalid
     with patch("panel_routing.Path.read_text", return_value=json.dumps(malformed)):

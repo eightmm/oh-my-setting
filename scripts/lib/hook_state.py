@@ -886,8 +886,6 @@ def run_agent_task(repo: Path, args: list[str], stdin_text: str | None = None) -
 def should_auto_task(prompt: str) -> bool:
     if is_harness_child():
         return False
-    if os.environ.get("OMS_AUTO_TASK_OFF") == "1":
-        return False
     return os.environ.get("OMS_AUTO_TASK") == "1" and not bool(CHITCHAT_RE.match(prompt.strip()))
 
 
@@ -1064,8 +1062,7 @@ def load_skills(manifest_path: str) -> list[dict[str, Any]]:
 
 
 def fresh_skill_names(payload: dict[str, Any], scored_names: list[str]) -> list[str]:
-    max_n = int(os.environ.get("OMS_ROUTER_MAX", "2") or 2)
-    names = scored_names[:max_n]
+    names = scored_names[:2]
     session = str(payload.get("session_id") or payload.get("sessionId") or "nosession")[:64]
     safe = "".join(c for c in session if c.isalnum() or c in "-_") or "nosession"
     turn = str(payload.get("turn_id") or payload.get("turnId") or "")[:64]

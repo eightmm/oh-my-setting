@@ -570,7 +570,7 @@ the panel; see [Without the panel](#without-the-panel).
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
 security-auditor) in `panel_role`; the strategy itself is the recorded purpose
 (plain workers record explain/investigate/implement). `oms panel --routes`
-prints each role's tier, optional preferred provider and chosen candidate, plus
+prints each role's tier and chosen candidate, plus
 these kinds and the write-capable roles. Dispatch and council owner defaults use
 `OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
 Codex's `CODEX_SANDBOX` marker, otherwise Codex; `--owner` overrides detection.
@@ -1458,7 +1458,7 @@ it. Other transports supporting per-call model selection require an exact
 provider capability checks. With an explicit model or custom route, omitting
 effort retains the front door's native settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
-Preset roles use a capability tier ordered by weekly quota left, with no provider preference (see Roles below).
+Preset roles use a capability tier ordered by weekly quota left, then configured tier order (see Roles below).
 Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
 panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
 configured/catalog numeric version within its existing family and pins the exact ID;
