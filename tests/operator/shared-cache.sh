@@ -982,7 +982,8 @@ with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick
         assert report['finalized'] == {'tick-wait': 'accepted'}, report
         assert report['awaiting_admission'] == ['tick-worker'], report
         assert report['room_attempts']['tick-worker']['state'] == 'done', report
-    assert completed.call_count == outcomes.call_count == pending.call_count == 2
+    # outcomes() runs twice per read: once for waiting calls' decisions, once to settle admission hints.
+    assert completed.call_count == pending.call_count == 2 and outcomes.call_count == 4
     tick = windows.call_args.kwargs['_tick']
     assert windows(project, 'tick-room', tick_room, _tick=tick) == {
         'tick-main': [{'window': '@1', 'pane': '%1', 'session': '$1'}]}
@@ -1012,6 +1013,14 @@ with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick
         assert counts['events'] == 1 and counts['index'] == 0, counts
         assert report['completed_tasks'] == {} and 'room_attempts' not in report, report
         assert report['awaiting_admission'] == [], report
+
+# A finalized task is not listed as awaiting admission even with no admission row; an unfinalized one still is.
+owed = {'role': 'worker', 'access': 'write', 'state': 'done'}
+owed_nodes = [dict(owed, participant='open-w', task_id='task-open'), dict(owed, participant='final-w', task_id='task-final')]
+with patch('room_view.nodes', return_value=owed_nodes), \
+        patch.object(panel_results, 'pending_admissions', side_effect=lambda repo, ids, _tick=None: set(ids)), \
+        patch.object(panel, 'outcomes', side_effect=lambda repo, ids, **k: {'task-final': 'rejected', 'task-open': 'pending'}):
+    assert panel.awaiting_admission(project, {}) == ['open-w']
 
 # An owner decision older than results()' twenty-task window still reaches the board through outcomes().
 many = [{'kind': 'panel-result', 'task_id': 'task-%02d' % n} for n in range(30)]
