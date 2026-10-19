@@ -122,7 +122,10 @@ with open(source, "rb") as handle:
 PY_TOOL_LOCK
 chmod +x "$upstream/scripts/lib/tool-lock.py"
 
-export GIT_CONFIG_GLOBAL=/dev/null
+# Git for Windows ships core.autocrlf=true in its system config; reproduce it
+# so a clone without a pinned eol would hand CRLF scripts to bash.
+printf '[core]\n\tautocrlf = true\n' > "$TMP/gitconfig-autocrlf"
+export GIT_CONFIG_GLOBAL="$TMP/gitconfig-autocrlf"
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=ci
@@ -341,6 +344,10 @@ grep -Fq "note: moved your existing" "$TMP/install-out.txt" ||
   fail "displacing existing rules must be announced at install time"
 dest="$HOME/.oh-my-setting"
 [ -d "$dest/.git" ] || fail "install did not clone the fixture"
+for f in "$dest/install.sh" "$dest/scripts/oms" "$dest"/scripts/*.sh; do
+  ! LC_ALL=C grep -q "$(printf '\r')" "$f" ||
+    fail "checkout under core.autocrlf=true carries CR bytes: $f"
+done
 [ ! -e "$HOME/.oh-my-setting-prompts" ] && [ ! -L "$HOME/.oh-my-setting-prompts" ] ||
   fail "fresh install created a retired prompt target"
 # Same reason as HOME: the checkout is the source side of every ownership
