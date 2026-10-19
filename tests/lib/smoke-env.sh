@@ -2,6 +2,8 @@
 # Fixtures establish their own operator, panel and room identities, even when
 # invoked from a managed terminal or a delegated worker.
 unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID OMS_TASK_ID OMS_ATTEMPT_ID
+# An admission or gate verify budget set by the caller is not the fixtures' own.
+unset OMS_PEER_VERIFY_TIMEOUT
 unset NVM_BIN NVM_DIR
 # Fixtures choose their tools through PATH; runtime activation must not undo it.
 export OMS_TEST_PROVIDER_PATH_ONLY=1
