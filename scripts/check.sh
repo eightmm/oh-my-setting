@@ -1294,7 +1294,10 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   # (operator-tools 447s, goal-drive-recovery-1 209s, autopilot 188s, draft-pr
   # 157s, goal-drive-recovery-2 147s, autonomy-plan-run 125s, graph 119s, the
   # rest under 65s): each CI lane carries about 572s (it was 410-839s) and the
-  # longest local lane is operator-tools' own. Re-derive the order when a heavy
+  # longest local lane is operator-tools' own. Ten CI runs on 2026-10-18..19
+  # measured operator-tools 914s and patch-admit-verifier-floor 281s in lane 2
+  # (1333s against 608-741s); the latter and provider-registry swapped places
+  # with model-doctor and models-surface, predicting lane 2 at about 1014s. Re-derive the order when a heavy
   # suite is added or one changes by minutes: assign by cost to the lightest
   # lane that still has a slot, swap to balance the k/k+4 pairs, then list
   # lane 1..8, 1..8, ... The Linux-only stages close the list, so the other
@@ -1308,7 +1311,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage goal-drive-recovery-2 env OMS_GDR_PART=2 bash tests/goal-drive-recovery-smoke.sh
   stage goal-drive-recovery-1 env OMS_GDR_PART=1 bash tests/goal-drive-recovery-smoke.sh
   stage atomic-state bash tests/atomic-state-smoke.sh
-  stage provider-registry bash tests/provider-registry-smoke.sh
+  stage models-surface bash tests/models-smoke.sh
   stage patch-land-approval bash tests/patch-land-approval-smoke.sh
   stage runtime-core bash tests/runtime-core-smoke.sh
   stage land bash tests/land-smoke.sh
@@ -1316,7 +1319,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage autonomy-hook bash tests/autonomy-hook-smoke.sh
   stage work-journal bash tests/work-journal-smoke.sh
   stage tick bash tests/tick-smoke.sh
-  stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
+  stage model-doctor bash tests/model-doctor-smoke.sh
   stage state-surfaces bash tests/state-surfaces-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
   stage durable-writers bash tests/durable-writers-contract-smoke.sh
@@ -1337,7 +1340,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage autonomy-verification bash tests/autonomy-verification-smoke.sh
   stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   stage failure-attention bash tests/failure-attention-smoke.sh
-  stage model-doctor bash tests/model-doctor-smoke.sh
+  stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
   stage read-time-expiry bash tests/read-time-expiry-smoke.sh
   stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
   stage codex-hud-config bash tests/codex-hud-config-smoke.sh
@@ -1362,7 +1365,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
   stage tool-lock bash tests/tool-lock-smoke.sh
   stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
-  stage models-surface bash tests/models-smoke.sh
+  stage provider-registry bash tests/provider-registry-smoke.sh
   stage seat-reliability bash tests/seat-reliability-smoke.sh
   stage tsp-queue bash tests/tsp-queue-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh
