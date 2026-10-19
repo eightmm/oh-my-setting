@@ -317,8 +317,7 @@ review_verdicts() {
         # No DRY_RUN guard is needed: a dry-run artifact has no exit section and
         # is caught above as incomplete, so it never reaches this branch.
         reason=""
-        [ "${OMS_COUNCIL_QUALITY:-1}" = "0" ] ||
-          [ "$(ma_answer_quality "$f")" != "blocked" ] ||
+        [ "$(ma_answer_quality "$f")" != "blocked" ] ||
           reason="$(ma_answer_block_reason "$f")"
         if [ -n "$reason" ]; then
           [ "$json_stdout" = 1 ] || echo "$seat_provider: no-verdict (blocked: $reason)"

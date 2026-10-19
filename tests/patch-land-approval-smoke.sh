@@ -429,7 +429,7 @@ for tool in peer-delegate plan-run patch-admit patch-land; do
   if "$ROOT/scripts/$tool.sh" --executor retired --repo "$legacy_repo" >"$TMP/legacy-out" 2>&1; then
     fail "$tool accepted a retired executor"
   fi
-  grep -Fq 'Soul executors were removed' "$TMP/legacy-out" || fail "$tool did not explain removal"
+  grep -Eq 'Soul executors were removed|unknown argument: --executor' "$TMP/legacy-out" || fail "$tool did not explain removal"
 done
 for invocation in 'plan-run --to codex --id old --land --dry-run' \
   'peer-delegate --to codex --plan-task old --prompt legacy --dry-run' \

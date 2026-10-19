@@ -4987,7 +4987,7 @@ test_delegate_dry_run() {
   if "$ROOT/scripts/peer-delegate.sh" --workload routine --executor frozen >"$TMP/workload.err" 2>&1; then
     fail "removed Soul route must be rejected"
   fi
-  assert_file_contains "$TMP/workload.err" 'Soul executors were removed'
+  assert_file_contains "$TMP/workload.err" 'unknown argument: --executor'
 
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
@@ -26227,24 +26227,6 @@ test_peer_ask_council_does_not_seat_a_provider_that_never_answered() {
   assert_file_contains "$synth" '_non-answer (blocked): add an allow-rule for the read tool'
   if grep -Fq 'alternatively, re-run with' "$synth"; then
     fail "synthesis must name the non-answer, not paste its banner as one more opinion"
-  fi
-
-  # An operator who hits a classifier false positive needs a way back to the
-  # old accounting that does not involve editing the harness.
-  rc=0
-  OMS_COUNCIL_QUALITY=0 HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
-    PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/peer-ask.sh" \
-    --repo "$project" \
-    --artifact-dir "$project/artifacts-optout" \
-    --providers codex,claude,antigravity \
-    --no-memory --no-task --no-ml-context \
-    --prompt "Council seat quality" >"$project/out2" 2>"$project/err2" || rc=$?
-
-  [ "$rc" = "0" ] || fail "the opt-out run should still exit 0, got $rc"
-  assert_file_contains "$project/out2" 'summary: 3/3 providers succeeded'
-  if grep -Fq 'non-answer' "$project/out2" "$project/err2"; then
-    fail "OMS_COUNCIL_QUALITY=0 must restore exit-status-only accounting"
   fi
 
   make_council_stubs "$bin_dir"

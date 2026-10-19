@@ -92,8 +92,6 @@ strict_artifact="$TMP/deliberation-json.md"
 printf '## Output\n{"tasks": []}\n## Exit\n0\n' > "$strict_artifact"
 MA_DELIBERATION=1
 [ "$(ma_council_nonanswer "$strict_artifact")" = invalid-deliberation ] || fail 'JSON-only seat accepted'
-OMS_COUNCIL_QUALITY=0
-[ "$(ma_council_nonanswer "$strict_artifact")" = invalid-deliberation ] || fail 'strict contract bypassed'
 (
   ma_thread_append() {
     [ "$8" = thin ] && grep -Fq invalid-deliberation "$4" || exit 1
@@ -102,7 +100,7 @@ OMS_COUNCIL_QUALITY=0
   ma_thread_append_nonanswer "$REPO" strict codex invalid-deliberation "$strict_artifact" invalid-deliberation
 ) || fail 'strict deliberation failure could not be recorded'
 [ -f "$TMP/thread-quality-ok" ] || fail 'strict deliberation failure note missing'
-unset OMS_COUNCIL_QUALITY MA_DELIBERATION
+unset MA_DELIBERATION
 [ -z "$(ma_council_nonanswer "$strict_artifact")" ] || fail 'ordinary council contract changed'
 
 # A heading-only failure gets one same-round call; its first answer remains

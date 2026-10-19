@@ -295,7 +295,6 @@ while [ "$#" -gt 0 ]; do
       ROLE="$2"
       shift 2
       ;;
-    --executor) fail "Soul executors were removed; use --brief-file and an explicit plan task" ;;
     --repo)
       [ "$#" -ge 2 ] || fail "--repo requires path"
       REPO="$2"

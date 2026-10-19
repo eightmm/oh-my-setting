@@ -583,22 +583,11 @@ ma_write_harness_context() {
 
 ma_write_ml_context() {
   local repo="$1"
-  local mode="${OMS_AGENT_ML_CONTEXT:-auto}"
   local scripts_dir
-
-  case "$mode" in
-    0|false|off|none) return 0 ;;
-    1|true|on|auto) ;;
-    *) return 0 ;;
-  esac
 
   scripts_dir="$(ma_scripts_dir)"
   [ -x "$scripts_dir/agent-ml-context.sh" ] || return 0
-  if [ "$mode" = "auto" ]; then
-    "$scripts_dir/agent-ml-context.sh" --repo "$repo" || true
-  else
-    "$scripts_dir/agent-ml-context.sh" --repo "$repo" --force || true
-  fi
+  "$scripts_dir/agent-ml-context.sh" --repo "$repo" || true
 }
 
 ma_artifact_relpath() {
@@ -1553,13 +1542,12 @@ ma_safe_status() {
   # or lockfile churn would otherwise put megabytes of file names where the
   # diff itself is bounded. awk (not head) so the writer is drained: SIGPIPE
   # under pipefail was this repo's recurring failure shape.
-  limit="${OMS_PROMPT_STATUS_LINES:-200}"
-  case "$limit" in ''|0|*[!0-9]*) limit=200 ;; esac
+  limit=200
   total="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
   printf '%s\n' "$out" | awk -v n="$limit" 'NR <= n'
   if [ "$total" -gt "$limit" ]; then
-    printf '[status truncated: %s of %s lines shown; OMS_PROMPT_STATUS_LINES=%s]\n' \
-      "$limit" "$total" "$limit"
+    printf '[status truncated: %s of %s lines shown]\n' \
+      "$limit" "$total"
   fi
 }
 
@@ -3894,14 +3882,13 @@ ma_target_budget_check() {
   local count
   local rounds="${DEBATE:-0}"
   local total
-  local budget="${OMS_COUNCIL_MAX_CALLS:-12}"
+  local budget=12
 
   count="$(printf '%s' "$targets" | tr ',' '\n' | grep -c .)"
   total=$((count * (rounds + 1)))
-  case "$budget" in *[!0-9]*|"") budget=12 ;; esac
   if [ "$total" -gt "$budget" ]; then
     echo "error: this council would make $total provider calls ($count targets x $((rounds + 1)) rounds)" >&2
-    echo "error: narrow --providers, or raise OMS_COUNCIL_MAX_CALLS (currently $budget)" >&2
+    echo "error: narrow --providers" >&2
     return 2
   fi
 }
@@ -4136,7 +4123,6 @@ ma_council_nonanswer() {
   local artifact="$1"
   local quality
 
-  [ "${OMS_COUNCIL_QUALITY:-1}" != "0" ] || [ "${MA_DELIBERATION:-0}" = 1 ] || return 0
   [ "${DRY_RUN:-0}" != "1" ] || return 0
   quality="$(ma_answer_quality "$artifact")"
   if [ "$quality" = ok ] && [ "${MA_DELIBERATION:-0}" = 1 ]; then
