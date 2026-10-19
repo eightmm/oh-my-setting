@@ -413,7 +413,7 @@ def main(argv=None):
     parser.add_argument("--brief-file", help="scoped task brief for --dispatch")
     parser.add_argument("--continue", dest="continue_task", metavar="TASK_ID",
                         help="continue this main's earlier worker for TASK_ID with --brief-file (worker dispatch)")
-    parser.add_argument("--verify", help="mechanical verifier the dispatched role runs (required for write and reviewer)")
+    parser.add_argument("--verify", help="mechanical verifier for --finalize or the dispatched role (required for write and reviewer; advisor and researcher refuse it)")
     parser.add_argument("--task-id", help="existing plan/task identifier for the worker")
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--alias", help="short unique room call name (1-8 letters, digits or hyphens)")

@@ -92,6 +92,8 @@ of the worker's recorded base plus its digest-verified patch; both the complete 
 and mechanical gate use that candidate. Missing base objects, digest mismatches or
 patch-application failures require manual review; they never fall back to testing
 the unpatched source. The gate rejects candidate changes by the verifier.
+The automatic review dispatches the reviewer at the deep tier, or at frontier when the patch's changed files are unknown or match a trust-boundary pattern (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins, hooks, install/uninstall, land and patch scripts, workflows, rules, permission/settings/policy files).
+A write call that exits 0 with a digest-verified patch, no failed verify and no guard stop starts this review automatically (`auto_review` in config/panel-routing.json, default true). It reuses the call's `--verify`, else the plan task's, and mails the main for manual review when neither exists. A FAIL verdict drafts a `--continue` fix brief and prints its command without launching it.
 `--room` selects a room without
 changing `OMS_ROOM_REPO`. With no `OMS_ROOM_REPO`, that room resolves in `--repo`.
 An owner result saved with `--finalize --outcome completed --verify COMMAND`
@@ -533,7 +535,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. A tie follows configured tier order. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the main's when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
+Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. A tie follows configured tier order. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
@@ -612,7 +614,7 @@ Task complexity and write authority are independent. A write role needs a
 scoped brief file and mechanical verifier. Read workers
 use isolated worktrees too. Write workers return a patch for parent inspection
 and admission; the panel does not apply it. Reviewers require a verifier and
-record a review gate. Workers cannot recursively dispatch or open owner sessions.
+record a review gate. Other read roles run an explicit `--verify` in their read-only delegate; an advisor refuses one (dispatch a reviewer or verifier to run checks) and a researcher takes no gate. Workers cannot recursively dispatch or open owner sessions.
 An empty write patch from a panel dispatch or plan task exits 6 (`no changes`).
 Normal native permissions, harness policy and account consent remain in effect.
 
