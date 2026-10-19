@@ -937,6 +937,11 @@ with patch.dict(os.environ, activity_env):
                                           "prompt": " \n<task-notification>background complete"}, activity_repo)
     harness_prompt = json.loads(activity_path.read_text())
     assert harness_prompt["origin"] == "harness" and "background complete" not in activity_path.read_text(), harness_prompt
+    with patch.object(hook_state.time, "time", return_value=301):
+        hook_state.record_panel_activity({"hook_event_name": "UserPromptSubmit",
+                                          "prompt": 'Another Claude session sent a message:\n<agent-message from="a1">[Subagent hand-back] handback body'}, activity_repo)
+    handback_prompt = json.loads(activity_path.read_text())
+    assert handback_prompt["origin"] == "harness" and "handback body" not in activity_path.read_text(), handback_prompt
     assert graph_view.main_state(dict(activity_main, attempt="activity-attempt", state="working",
                                       panel_activity=harness_prompt)) == "working"
 

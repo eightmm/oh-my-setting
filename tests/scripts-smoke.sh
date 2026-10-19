@@ -22670,6 +22670,15 @@ PY
     NO_COLOR=1 COLUMNS=200 OMS_HUD_CACHE_DIR="$TMP/hud-cache" python3 "$hud")"
   [ "$out" = 'Claude | claude-hud-git | fast | git hud-test +1 ~1 ?1 | ctx --' ] ||
     fail "Claude HUD git/fast rendering mismatch: $out"
+  # A repo-local core.fsmonitor helper must not run during the status read.
+  printf '#!/bin/sh\ntouch "%s/fsmonitor-ran"\n' "$TMP" > "$TMP/fsmonitor-marker"
+  chmod +x "$TMP/fsmonitor-marker"
+  git -C "$git_repo" config --local core.fsmonitor "$TMP/fsmonitor-marker"
+  out="$(printf '{"model":{},"session_id":"hud-fsmon","workspace":{"current_dir":"%s"},"context_window":{}}' "$git_repo" |
+    NO_COLOR=1 COLUMNS=200 OMS_HUD_CACHE_DIR="$TMP/hud-cache-fsmon" python3 "$hud")"
+  [ ! -e "$TMP/fsmonitor-ran" ] || fail "Claude HUD ran the repo-local core.fsmonitor helper"
+  contains "$out" 'git hud-test' || fail "Claude HUD lost the branch segment under core.fsmonitor: $out"
+  git -C "$git_repo" config --local --unset core.fsmonitor
   out="$(printf '{"model":{},"session_id":"hud-git","workspace":{"current_dir":"%s"},"fast_mode":true,"context_window":{}}' "$git_repo" |
     NO_COLOR=1 COLUMNS=40 OMS_HUD_CACHE_DIR="$TMP/hud-cache" python3 "$hud")"
   python3 - "$out" <<'PY' || fail "Claude HUD narrow Git rendering is not bounded: $out"

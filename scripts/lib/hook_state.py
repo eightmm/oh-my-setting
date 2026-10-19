@@ -1475,7 +1475,9 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
                 origin = "harness"
             elif isinstance(prompt, str):
                 origin = "harness" if re.match(
-                    r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b)", prompt
+                    r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b"
+                    r"|Another Claude session sent a message:"
+                    r"|Your claude\.ai usage limit has reset\b)", prompt
                 ) else "user"
             else:
                 origin = None
