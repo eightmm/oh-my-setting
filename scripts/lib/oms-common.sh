@@ -250,6 +250,10 @@ def unsafe(key):
     option = tail.rsplit(b".", 1)[-1]
     if section in (b"include", b"includeif"):
         return True
+    # Config-defined hooks ([hook "name"] command/event, git >= 2.54) run in
+    # every mode, and core.hooksPath does not disable them.
+    if section == b"hook":
+        return True
     if key == b"core.fsmonitor":
         return True
     if section == b"filter" and option in (b"clean", b"smudge", b"process"):

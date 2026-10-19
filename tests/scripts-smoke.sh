@@ -26625,7 +26625,7 @@ test_delegate_execution_config_guard_runs_before_git_capture() {
   # subsections. Each worker also edits the primary tree: a vulnerable guard
   # would run the planted command while trying to capture that mutation.
   for mode in fsmonitor diff-external diff-driver-escaped diff-driver-tab \
-    filter-quoted filter-dotted filter-tab includeif includeif-tab; do
+    filter-quoted filter-dotted filter-tab includeif includeif-tab hook-config; do
     cat > "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
@@ -26657,6 +26657,9 @@ case "$mode" in
     ;;
   includeif-tab)
     printf '\n[includeIf\t"gitdir:**"]\n\tpath = $project/missing.inc\n' >> "$project/.git/config"
+    ;;
+  hook-config)
+    printf '\n[hook "x"]\n\tcommand = $bin_dir/marker\n\tevent = post-checkout\n' >> "$project/.git/config"
     ;;
 esac
 echo done
