@@ -166,6 +166,24 @@ with patch.dict(os.environ, {}):
             assert "admitted room participant" in str(error), error
         else:
             raise AssertionError("another room's worker wrote through a forwarded id")
+    # Cancelling a running call checks room lineage: launch-time refs to the old id pass, another room's do not.
+    main_attempt, call_attempt = "att_" + "a" * 32, "att_" + "b" * 32
+    main_row = {"tool": "panel-main", "terminal": False, "refs": {"panel_room_id": old, "panel_room_participant": lead}}
+    call_row = {"attempt_id": call_attempt, "terminal": False, "state": "working", "parent_attempt_id": main_attempt,
+                "refs": {"panel_room_id": old, "panel_room_participant": "call-run"}}
+    cancel_state = {"room": {"id": new}, "room_attempts": {"call-run": call_row}}
+    cancel_nav = {"selected": ("result", "call-run"), "cancel_owner": {"participant": lead, "attempt": main_attempt}}
+    with patch.object(panel, "_cancel_watch_authority", return_value=True), \
+            patch.object(panel, "events", side_effect=lambda _repo, *args, **_kw: json.dumps(
+                main_row if args[2] == main_attempt else call_row)), \
+            patch.object(panel, "_dispatch_call_record", return_value={"parent": lead, "backend": "subreaper"}), \
+            patch.object(panel, "_dispatch_supervisor_snapshot", return_value=(
+                {"all_reaped": False, "exit": None}, {"pid": 1, "identity": "fixture", "group": 1})):
+        assert panel.cancel_selected_call(roll, cancel_state, cancel_nav, main_attempt) == "ready"
+        for row in (main_row, call_row):
+            row["refs"]["panel_room_id"] = other
+            assert panel.cancel_selected_call(roll, cancel_state, cancel_nav, main_attempt) != "ready", row
+            row["refs"]["panel_room_id"] = old
     # The old env main acks mail that was settled before the rollover: a quiet no-op, not an error.
     count = len(room.records(roll, new))
     with patch.dict(os.environ, {"OMS_ROOM_ID": old, "OMS_ROOM_PARTICIPANT": lead, "OMS_ROOM_REPO": str(roll)}):

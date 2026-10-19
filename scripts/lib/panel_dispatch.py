@@ -1295,7 +1295,7 @@ def cancel_selected_call(repo, state, navigation, main_attempt, send=False):
         main_row = json.loads(events(repo, "show", "--attempt", main_attempt, "--json", output=True))
         main_refs = main_row.get("refs") or {}
         if (main_row.get("tool") != "panel-main" or main_row.get("terminal")
-                or main_refs.get("panel_room_id", room_id) != room_id
+                or not room.same_room(repo, main_refs.get("panel_room_id", room_id), room_id)
                 or main_refs.get("panel_room_participant", main_attempt) != owner):
             return "Panel main is no longer live"
         attempt = (state.get("room_attempts") or {}).get(member["participant"])
@@ -1306,7 +1306,7 @@ def cancel_selected_call(repo, state, navigation, main_attempt, send=False):
         if (current.get("attempt_id") != attempt.get("attempt_id") or current.get("terminal")
                 or current.get("state") not in {"starting", "working", "verifying"}
                 or current.get("parent_attempt_id") != main_attempt
-                or refs.get("panel_room_id") != room_id
+                or not room.same_room(repo, refs.get("panel_room_id"), room_id)
                 or refs.get("panel_room_participant") != member["participant"]):
             return "Selected call is no longer running"
         call = _dispatch_call_record(repo, room_id, member)
