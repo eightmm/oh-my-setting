@@ -113,9 +113,9 @@ import json, os, sys
 as_json = os.environ.get("OMS_RL_JSON") == "1"
 rows = []
 bad = 0
-for line in sys.stdin:
+for raw in sys.stdin.buffer:
     try:
-        r = json.loads(line)
+        r = json.loads(raw.decode("utf-8"))
     except ValueError:
         r = None
     if not isinstance(r, dict):

@@ -36,10 +36,11 @@ def _run_through_ledger(repo, run_id, command, metrics_path, experiment_id, arm,
         raise CoreError('run-ledger execution failed: %s' % exc)
     ledger_id = ''
     try:
-        for line in ledger_file.read_text(encoding='utf-8', errors='replace').splitlines():
-            if not line.strip():
-                continue
+        for raw in ledger_file.read_bytes().splitlines():
             try:
+                line = raw.decode('utf-8')
+                if not line.strip():
+                    continue
                 row = _json.loads(line)
             except ValueError:
                 continue

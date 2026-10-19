@@ -8,10 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
-from oms_runtime import capsule, context, evidence, experiment, failures, profiles, release
+from oms_runtime import capsule, context, evidence, experiment, experiment_run, failures, profiles, release
 from oms_runtime.benchmark import record_outcome as record_benchmark_outcome
 from oms_runtime.benchmark import compare as compare_benchmark_snapshots
 from oms_runtime.benchmark import snapshot as benchmark_snapshot
@@ -145,8 +146,20 @@ class RuntimeFixture(RuntimeFixtureBase):
         ledger = self.repo / 'docs' / 'EXPERIMENTS.jsonl'
         ledger.parent.mkdir(parents=True, exist_ok=True)
         ledger.write_bytes(b'{"id": "torn", "cmd": ["x\xed\x95\n[1]\n')
-        row, rc = experiment.record_run(self.repo, 'exp-torn-ledger', 'baseline', 0, self.repo / 'missing-metrics.json', [sys.executable, '-c', 'pass'], timeout_seconds=10)
+        # After run-ledger writes the intact row, a row with the same operation_id
+        # but a cut multibyte id lands last; only the intact row may match.
+        real_run = experiment_run._subprocess.run
+
+        def run_then_corrupt(argv, **kwargs):
+            proc = real_run(argv, **kwargs)
+            with open(str(ledger), 'ab') as handle:
+                handle.write(b'{"operation_id": "' + kwargs['env']['OMS_OPERATION_ID'].encode() + b'", "id": "run-\xed\x95"}\n')
+            return proc
+
+        with mock.patch.object(experiment_run._subprocess, 'run', run_then_corrupt):
+            row, rc = experiment.record_run(self.repo, 'exp-torn-ledger', 'baseline', 0, self.repo / 'missing-metrics.json', [sys.executable, '-c', 'pass'], timeout_seconds=10)
         self.assertEqual(row['command_exit'], 0)
+        self.assertNotIn('\ufffd', row['ledger_id'])
 
     def test_required_invariant_results_control_experiment_verdict(self) -> None:
         contract = self._experiment()
