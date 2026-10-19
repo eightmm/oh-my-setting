@@ -8,6 +8,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-functional-evolution.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+# Run from a panel main's shell, the suite must not act as that main or room member.
+unset OMS_PANEL_MAIN_ATTEMPT OMS_PANEL_SESSION OMS_PANEL_REPO OMS_PANEL_HOST \
+  OMS_PANEL_ENTRYPOINT OMS_PANEL_RESULTS OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO
 
 fail() {
   echo "FAIL: $*" >&2
