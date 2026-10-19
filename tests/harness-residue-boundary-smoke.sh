@@ -332,8 +332,10 @@ git -C "$repo" config --unset filter.sentinel.clean
 git -C "$repo" config --unset filter.sentinel.smudge
 
 # The proof is read again at removal: a change after classification keeps it.
+# The scan lists runs once for classification; the recheck lists them afresh.
 eval "real_$(declare -f oms_harness_classify_dead_residue)"
 mutate_after=""
+relist_after=""
 # shellcheck disable=SC2317
 oms_harness_classify_dead_residue() {
   real_oms_harness_classify_dead_residue "$@" || return 1
@@ -341,10 +343,19 @@ oms_harness_classify_dead_residue() {
     printf 'raced\n' >> "$mutate_after"
     mutate_after=""
   fi
+  if [ -n "$relist_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+    events start --provider claude --tool peer-delegate --task-id "task-$relist_after" \
+      --ref "panel_location=worktree:oh-my-setting-delegate.$relist_after/wt" --then starting >/dev/null
+    relist_after=""
+  fi
 }
 delegate_run raced task-raced "done"
 mutate_after="$TMPDIR/oh-my-setting-delegate.raced/wt/new-raced.txt"
 kept_with raced "worktree changed during cleanup" "content changed between classification and removal must keep the worktree"
+mutate_after=""  # kept_with consumed it in a pipeline subshell
+delegate_run relisted task-relisted "done"
+relist_after=relisted
+kept_with relisted "worktree changed during cleanup" "a run recorded between classification and removal must keep the worktree"
 unset -f oms_harness_classify_dead_residue
 eval "$(declare -f real_oms_harness_classify_dead_residue | sed '1s/^real_//')"
 

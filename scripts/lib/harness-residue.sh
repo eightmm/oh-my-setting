@@ -182,6 +182,10 @@ EOF
 
 OMS_HARNESS_RESIDUE_KEEP_REASON=""
 OMS_HARNESS_RESIDUE_PROOF=""
+# A scan sets this only for its first classification of each candidate, so
+# every proof in it reuses one run listing per repo; the recheck before removal
+# runs without it and lists afresh.
+OMS_HARNESS_RESIDUE_LISTING_DIR=""
 
 # Reads a dead worktree without running anything it controls. MODE status
 # prints "clean", "dirty" or why it cannot tell: `git status` would run the
@@ -197,7 +201,8 @@ OMS_HARNESS_RESIDUE_PROOF=""
 # or add -A runs. Plumbing that never reads attributes builds the expected
 # tree, and the worktree is read directly, never through a link.
 oms_harness_residue_evidence() {  # MODE REPO WORKTREE PID
-  python3 -B - "$OMS_HARNESS_RESIDUE_LIB_DIR" "$@" <<'PY' 2>/dev/null | tr -d '\r'
+  OMS_HARNESS_RESIDUE_LISTING_DIR="$OMS_HARNESS_RESIDUE_LISTING_DIR" \
+    python3 -B - "$OMS_HARNESS_RESIDUE_LIB_DIR" "$@" <<'PY' 2>/dev/null | tr -d '\r'
 import hashlib, json, os, re, runpy, shutil, stat, subprocess, sys, tempfile
 lib, mode, repo, wt, pid = sys.argv[1:6]
 aged_days = os.environ.get("OMS_HARNESS_RESIDUE_AGED_DAYS") or "7"
@@ -395,10 +400,28 @@ try:
 
     # The run: the one attempt whose recorded location is this worktree.
     name = "worktree:%s/wt" % os.path.basename(os.path.dirname(os.path.realpath(wt)))
-    listed = subprocess.run(["bash", os.path.join(os.path.dirname(lib), "oms"), "agent-events", "--repo", repo,
-                             "list", "--json"], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL).stdout
-    runs = [a for a in json.loads(listed.decode("utf-8")) if (a.get("refs") or {}).get("panel_location") == name]
+    # Each listing reads the whole lifecycle log, so a scan that sets
+    # OMS_HARNESS_RESIDUE_LISTING_DIR lists each owning repo once and reuses it.
+    cache = os.environ.get("OMS_HARNESS_RESIDUE_LISTING_DIR") or ""
+    cached = cache and os.path.join(cache, hashlib.sha256(os.fsencode(os.path.realpath(repo))).hexdigest() + ".json")
+    if cached and os.path.isfile(cached):
+        with open(cached, "rb") as handle:
+            listed = handle.read()
+        attempts = json.loads(listed.decode("utf-8"))
+    else:
+        listed = subprocess.run(["bash", os.path.join(os.path.dirname(lib), "oms"), "agent-events", "--repo", repo,
+                                 "list", "--json"], check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL).stdout
+        attempts = json.loads(listed.decode("utf-8"))
+        if cached:
+            try:
+                fd, partial = tempfile.mkstemp(dir=cache)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(listed)
+                os.replace(partial, cached)
+            except OSError:
+                pass
+    runs = [a for a in attempts if (a.get("refs") or {}).get("panel_location") == name]
     if len(runs) != 1:
         print("%d attempts record this worktree, not one" % len(runs))
         raise SystemExit(0)
@@ -409,7 +432,12 @@ try:
         sys.path.insert(0, lib)
         import datetime, pathlib
         import panel_results
-        outcome = panel_results.outcomes(pathlib.Path(repo), [task]).get(task) if isinstance(task, str) else None
+        class Listed:
+            # The owner's outcome is read from the index against the listing above, not a second listing.
+            def records(self):
+                return panel_results._records(pathlib.Path(repo), _attempts=attempts)
+        outcome = (panel_results.outcomes(pathlib.Path(repo), [task], _tick=Listed()).get(task)
+                   if isinstance(task, str) else None)
         changed = datetime.datetime.strptime(run["updated_at"], "%Y-%m-%dT%H:%M:%SZ")
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         aged = now - changed >= datetime.timedelta(days=float(aged_days))
@@ -713,8 +741,10 @@ oms_harness_tmp_residue_count() {
   local marker
   local pid
   local temporary
+  local listings=""
   local count=0
 
+  listings="$(mktemp -d "$(oms_harness_tmp_base)/oms-residue-listing.XXXXXX" 2>/dev/null)" || listings=""
   while IFS= read -r base; do
     [ -d "$base" ] || continue
     for dir in "$base"/oh-my-setting-*; do
@@ -731,13 +761,14 @@ oms_harness_tmp_residue_count() {
       oms_file_lock_pid_alive "$pid" && continue
       # Kept work is not residue: counting it would warn with a remedy that
       # cannot act on it.
-      oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
+      OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
         oms_harness_keep_unverifiable_residue "$dir"
       [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] || count=$((count + 1))
     done
   done <<EOF
 $(oms_harness_temp_bases)
 EOF
+  [ -z "$listings" ] || rm -rf "$listings"
   printf '%s\n' "$count"
 }
 
@@ -751,7 +782,9 @@ oms_harness_cleanup_temp_dirs() {
   local temporary
   local proof
   local marker_text
+  local listings=""
 
+  listings="$(mktemp -d "$(oms_harness_tmp_base)/oms-residue-listing.XXXXXX" 2>/dev/null)" || listings=""
   while IFS= read -r base; do
     [ -d "$base" ] || continue
     for dir in "$base"/oh-my-setting-*; do
@@ -768,7 +801,7 @@ oms_harness_cleanup_temp_dirs() {
 
       safe=0
       marker_text="$(cat "$marker" 2>/dev/null)"
-      if oms_harness_classify_dead_residue "$base" "$dir" "$marker"; then
+      if OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_classify_dead_residue "$base" "$dir" "$marker"; then
         safe=1
       else
         oms_harness_keep_unverifiable_residue "$dir"
@@ -820,6 +853,7 @@ oms_harness_cleanup_temp_dirs() {
   done <<EOF
 $(oms_harness_temp_bases)
 EOF
+  [ -z "$listings" ] || rm -rf "$listings"
 }
 
 oms_harness_cleanup_residue() {
