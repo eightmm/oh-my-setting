@@ -36,16 +36,17 @@ background advisor or require another model call for routine completion.
 
 ## Existing router contract
 
-Panel dispatch uses each role's capability tier and the configured tier order;
-the current configuration sets no role-specific provider preferences. Installed
+Panel dispatch uses each role's capability tier and the configured tier order,
+ordering candidates by weekly quota left. Readings within the 15-point tie band
+go to fewer room dispatches, then away from the main. Installed
 candidates with recorded weekly usage at 90% or above are skipped when another
 is installed; unknown readings remain available,
 a sole installed candidate is retained, and all saturated alternatives fail.
 Reviewer/verifier/security-auditor/critic routes prefer a provider other than the
-main's when both providers are available. `--to codex|claude`
+reviewed patch's writer (automatic review), else the main's, when one remains. `--to codex|claude`
 without `--model` pins that provider's tier candidate and effort; explicit models
 remain exact, and other model-selecting transports still require `--model`.
-`--routes` shows tiers, preferences and chosen candidates; owner detection follows
+`--routes` shows tiers and chosen candidates; owner detection follows
 `OMS_AGENT`, Claude markers, Codex markers, then Codex. Usage comes from existing
 board readings without invoking a provider CLI.
 

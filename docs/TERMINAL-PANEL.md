@@ -535,7 +535,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. A tie follows configured tier order. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
+Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
@@ -550,7 +550,7 @@ Routing is provider-neutral within the configured light, routine, deep and front
 | `worker` | routine | read or scoped write | `oms panel --dispatch worker` | `peer-delegate --role` |
 | `builder` | routine | read or scoped write | `oms panel --dispatch builder` | `peer-delegate --role` |
 | `refactorer` | routine | read or scoped write | `oms panel --dispatch refactorer` | `peer-delegate --role` |
-| `documenter` | routine | read or scoped write | `oms panel --dispatch documenter` | `peer-delegate --role` |
+| `documenter` | light | read or scoped write | `oms panel --dispatch documenter` | `peer-delegate --role` |
 | `release-engineer` | routine | read | `oms panel --dispatch release-engineer` | `peer-delegate --role release-engineer` |
 | `integrator` | deep | read or scoped write | `oms panel --dispatch integrator` | `peer-delegate --role` |
 | `performance-engineer` | deep | read or scoped write | `oms panel --dispatch performance-engineer` | `peer-delegate --role` |
@@ -1460,7 +1460,7 @@ it. Other transports supporting per-call model selection require an exact
 provider capability checks. With an explicit model or custom route, omitting
 effort retains the front door's native settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
-Preset roles use a capability tier ordered by weekly quota left, then configured tier order (see Roles below).
+Preset roles use a capability tier ordered by weekly quota left, with readings within the 15-point tie band going to fewer room dispatches, then away from the main (see Roles below).
 Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
 panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
 configured/catalog numeric version within its existing family and pins the exact ID;

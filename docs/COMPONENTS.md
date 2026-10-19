@@ -799,8 +799,8 @@ reconstructing readiness from stored task states.
 
 For reviewed tasks integrated together by commit, use `oms agent-plan finish
 --id ID --landed-commit SHA [--repo PATH]`. This requires review
-artifact/patch evidence, retained from `review` or given here with `--artifact`
-and `--patch`, an exact-SHA `oms land` receipt with state `passed`,
+artifact evidence, retained from `review` or given here with `--artifact` (a
+`--patch` is recorded when supplied, never required), an exact-SHA `oms land` receipt with state `passed`,
 successful gate/push/CI, and SHA reachable from the receipt's recorded local
 remote/target ref; it performs no fetch. A task's current lease must match
 when one is given, and a task with allowed paths needs the landed range, from
@@ -1336,8 +1336,9 @@ intentionally limited to these invariants and does not replace affected checks
 or the full landing gate.
 For committed ranges, `--affected --changed-from BASE --changed-to HEAD` checks
 ordinary README/docs changes directly, otherwise selects existing tests from
-positive graph evidence. Skill/template Markdown uses the direct skill validator
-(including project skill templates and their local references), not runtime
+positive graph evidence. Skill/template Markdown uses the direct skill validator (including
+project skill templates and their local references); `roles/*.md` relies on
+the repo invariants' role-injection check; neither runs runtime
 prompt/GC/lifecycle suites;
 install/permission/state,
 executable templates, selector changes, dirty trees, or uncertain graphs retain
