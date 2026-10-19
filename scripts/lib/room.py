@@ -646,7 +646,7 @@ def validate_event(rows, event, text, repo=None):
             member = participant(state, target[7:])
             if member["provider"] != "claude" or member["role"] != "main" or not member.get("consumer"):
                 raise ValueError("Claude app delivery needs an enrolled native main")
-        prior = state["publications"].get(target)
+        prior = _prior_publication(repo, state, target)
         if event["status"] == "pending":
             if prior and not event.get("retry") and (prior["status"] == "pending" or prior["delivery_unknown"]
                     or prior["digest"] == event["digest"] and prior["status"] == "persisted"):
@@ -1252,7 +1252,9 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
     if result.returncode:
         raise ValueError("join needs a registered provider or adapter")
     provider = result.stdout.strip()
-    if provider == "claude" and native_session == "current":
+    if native_session == "current":
+        if provider != "claude":
+            raise ValueError("current shortcut is for the calling Claude session")
         from claude_app_notify import current_session
         native_session = current_session()
     event = {"kind": "join", "participant": identifier(who, "participant"), "provider": provider,
@@ -1990,6 +1992,16 @@ def lineage(repo, state):
     return found
 
 
+def _prior_publication(repo, state, target):
+    """The target's latest receipt here, else the nearest sealed room's: a rollover does not carry receipts."""
+    prior = state["publications"].get(target)
+    if prior is None and repo is not None and state.get("predecessor"):
+        for _, _, published, _ in lineage(repo, state):
+            if published.get(target):
+                return published[target]
+    return prior
+
+
 def predecessor_calls(repo, state, chain=None):
     """Settled calls of the rooms this one continues, shaped like board call nodes; a call's nearest room wins."""
     here = {p["participant"] for p in state.get("participants", [])}
@@ -2026,7 +2038,7 @@ def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=
     lines += ["Consumption is not approval; call exits are not acceptance."]
     text = "\n".join(lines)
     digest = hashlib.sha256((text + (consumer or "")).encode("utf-8")).hexdigest()
-    prior = state["publications"].get(target)
+    prior = _prior_publication(repo, state, target)
     if prior and not retry and (prior["status"] == "pending" or prior["delivery_unknown"]
             or prior["digest"] == digest and prior["status"] == "persisted"):
         return {"room": ident, "target": target, "receipt": prior, "deduplicated": True}

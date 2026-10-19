@@ -310,6 +310,13 @@ with patch.object(claude_app_notify, "current_session", return_value="fixture-cu
     bound = legacy_main_join(project, shared, "current-app", "claude", native_session="current")
 assert bound["consumer"] == hashlib.sha256(b"fixture-current-app").hexdigest()[:32]
 assert "socket" not in bound and "token" not in bound
+try:
+    legacy_main_join(project, shared, "current-codex", "codex", native_session="current")
+except ValueError as error:
+    assert "current shortcut is for the calling Claude session" in str(error), error
+else:
+    raise AssertionError("a non-Claude join bound the literal current")
+assert all(p["participant"] != "current-codex" for p in room.status(project, shared)["participants"])
 room_view["room"] = room.status(project, shared)
 for view in ("graph", "compact"):
     drawn = render(room_view, "claude", 100, 48, view=view)

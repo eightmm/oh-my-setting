@@ -914,3 +914,32 @@ with patch.object(panel, "recorded_room", return_value=old), patch.object(panel.
     panel._adopt_successor(roll, "roll-session")
 assert [c[-3:] for c in tmux_calls if "list-windows" not in c] == [
     ["=roll-session", "OMS_ROOM_ID", third], ["@1", "@oms_panel_room", third]], tmux_calls
+# Publication receipts outlive a rollover: an uncertain send needs --retry from the successor too, and a
+# receipt landing after the seal still matches the intent the sealed room holds.
+import codex_app_notify
+pub = temporary / "publication rollover repo"
+pub.mkdir()
+subprocess.run(["git", "init", "-q", str(pub)], check=True)
+with patch.dict(os.environ, {}):
+    for name in [n for n in os.environ if n.startswith(("OMS_ROOM_", "OMS_PANEL_")) or n in (
+            "OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "TMUX", "TMUX_PANE")]:
+        del os.environ[name]
+    first = room.create(pub, title="Publication room")
+    room.join(pub, first, "pub-main", "codex", "main")
+    sent = []
+    def unknown(repo, text):
+        sent.append(text)
+        return {"status": "submitted", "delivery_unknown": True}
+    with patch.object(codex_app_notify, "deliver", unknown):
+        assert room.publish(pub, first)["deduplicated"] is False
+        room.rollover(pub, first)
+        assert room.publish(pub, first)["deduplicated"] is True and len(sent) == 1, sent
+        assert room.publish(pub, first, retry=True)["deduplicated"] is False and len(sent) == 2, sent
+    second = room.create(pub, title="Late receipt room")
+    room.join(pub, second, "pub-main", "codex", "main")
+    def seals_first(repo, text):
+        room.rollover(repo, second)
+        return {"status": "persisted", "delivery_unknown": False}
+    with patch.object(codex_app_notify, "deliver", seals_first):
+        room.publish(pub, second)
+    assert room.status(pub, room.successor_id(second))["publications"]["codex"]["status"] == "persisted"
