@@ -739,16 +739,6 @@ def description(member, frame, unicode, width):
                     "id: " + member["participant"]]
 
 
-def joint(line, column, glyph):
-    """Attach a wire at the first free edge cell from column; titles are never displaced."""
-    used = 0
-    for index, char in enumerate(line):
-        if used >= column and char in "─-" and index < len(line) - 1:
-            return line[:index] + glyph + line[index + 1:], used
-        used += display_width(char)
-    return line, column
-
-
 def padded(text, width):
     text = clipped(text, width)
     return text + " " * max(0, width - display_width(text))

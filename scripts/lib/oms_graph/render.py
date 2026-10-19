@@ -331,52 +331,6 @@ def render_project_map_text(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_project_mermaid(nodes: Sequence[Mapping[str, Any]], edges: Sequence[Mapping[str, Any]], *, limit: int = 200) -> str:
-    """At most `limit` nodes, highest degree first with ties by id; only edges
-    whose endpoints both survive that cut are drawn."""
-    counts = _evidence_degrees(nodes, edges)
-    index = {}  # type: Dict[str, Mapping[str, Any]]
-    for node in nodes:
-        if isinstance(node, dict) and isinstance(node.get("id"), str) and node["id"] not in index:
-            index[node["id"]] = node
-    ranked = sorted(index, key=lambda node_id: (-counts[node_id]["total"], node_id))
-    selected = ranked[:limit] if limit >= 0 else ranked
-    kept = set(selected)
-    ids = _mermaid_ids(selected)
-    lines = ["flowchart LR"]
-    for node_id in sorted(kept):
-        node = index[node_id]
-        name = node.get("name")
-        name = name if isinstance(name, str) and name else node_id
-        lines.append('    %s["%s"]' % (ids[node_id], _label(name)))
-    drawn = set()
-    rows = []
-    for edge in edges:
-        if not isinstance(edge, dict):
-            continue
-        source = edge.get("source")
-        target = edge.get("target")
-        if source not in kept or target not in kept:
-            continue
-        relation = edge.get("relation")
-        relation = relation if isinstance(relation, str) and relation else "related"
-        confidence = str(edge.get("confidence", "AMBIGUOUS") or "AMBIGUOUS")
-        key = (source, target, relation, confidence)
-        if key in drawn:
-            continue
-        drawn.add(key)
-        rows.append(key)
-    confidence_rank = {"EXTRACTED": 0, "INFERRED": 1, "AMBIGUOUS": 2}
-    for source, target, relation, confidence in sorted(
-            rows, key=lambda row: (confidence_rank.get(row[3], 3), row)):
-        if confidence == "EXTRACTED":
-            arrow, label = "-->", relation
-        else:
-            arrow, label = "-.->", "%s (%s)" % (relation, confidence.lower())
-        lines.append('    %s %s|"%s"| %s' % (ids[source], arrow, _label(label), ids[target]))
-    return "\n".join(lines) + "\n"
-
-
 def _project_visual_model(
     nodes: Sequence[Mapping[str, Any]],
     edges: Sequence[Mapping[str, Any]],

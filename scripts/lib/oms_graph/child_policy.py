@@ -11,7 +11,7 @@ CHILD_GRAPH_ERROR = "a harness child may only use read-only graph actions"
 # brief owns, so it stays parent-only alongside every exec writer.
 CHILD_PROJECT_ACTIONS = (
     "build", "ensure", "check", "map", "find", "api", "search",
-    "neighbors", "trace", "blast", "affected", "analyze", "coupling",
+    "neighbors", "trace", "blast", "affected", "coupling",
 )
 CHILD_EXEC_ACTIONS = ("validate", "render", "route", "status", "events", "test")
 

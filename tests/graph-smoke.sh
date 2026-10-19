@@ -135,20 +135,6 @@ assert not summary["counts"]["kind"].get("test"), summary["counts"]
 assert summary["hubs"] and set(summary["hubs"][0]) == {"id", "kind", "degree"}, summary["hubs"]
 PY
 
-run_graph "$work/analyze.json" project analyze --hubs 3 --cycles --communities --path 'file:beta.py' 'file:alpha.py' --json
-[ "$graph_rc" -eq 0 ] || fail "analyze --json exited $graph_rc: $(cat "$work/analyze.json")"
-python3 - "$work/analyze.json" <<'PY'
-import json
-import sys
-row = json.load(open(sys.argv[1]))
-assert 0 < len(row["hubs"]) <= 3, row["hubs"]
-assert set(row["hubs"][0]) == {"id", "kind", "degree"}, row["hubs"][0]
-assert row["components"] and row["components"][0]["size"] >= 2, row["components"]
-assert isinstance(row["cycles"], list), row
-assert row["communities"] and row["communities"][0]["members"], row["communities"]
-assert row["path"] and row["path"][0] == "file:beta.py", row["path"]
-PY
-
 run_graph "$work/map-tests.json" project map --json --include-tests
 [ "$graph_rc" -eq 0 ] || fail "map --include-tests exited $graph_rc: $(cat "$work/map-tests.json")"
 python3 - "$work/map-tests.json" <<'PY'

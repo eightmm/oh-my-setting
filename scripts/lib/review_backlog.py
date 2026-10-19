@@ -58,7 +58,3 @@ def warning_for(report, participant):
     projection = mapping(report.get("review_backlog"))
     total = mapping(projection.get("counts")).get(participant, 0)
     return warning(total) if total > projection.get("threshold", THRESHOLD) else None
-
-
-def needs_review_hint(report, participant):
-    return warning_for(report, participant) is not None

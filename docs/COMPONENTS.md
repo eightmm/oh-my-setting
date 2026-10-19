@@ -1031,7 +1031,7 @@ oms gc
 inspectable graphs above the plane described in the previous section; the
 contract is `docs/GRAPH-ENGINEERING.md`.
 
-The **Project Graph** (`oms graph project build|check|map|find|api|search|neighbors|trace|blast|affected|analyze|context`)
+The **Project Graph** (`oms graph project build|check|map|find|api|search|neighbors|trace|blast|affected|context`)
 is a deterministic structural graph of the repository — file, module,
 class/function/method, test, config, and document nodes with `contains`,
 `imports`, `calls`, `references`, and `tests` edges — extracted by

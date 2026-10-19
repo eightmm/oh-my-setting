@@ -206,7 +206,7 @@ scripts/lib/oms_graph/
         cache.py           content-addressed extraction cache
         build.py           incremental build, cross-file resolution, freshness
         query.py           Graph index, find/neighbors/trace/map
-        analytics.py       degrees, hubs, components, cycles, paths, communities
+        analytics.py       evidence degrees, structural assurance
         blast.py           changed paths -> transitive dependents
         context.py         task-specific context pack (+ optional bundle)
         parsers/
@@ -817,17 +817,15 @@ CamelCase before scoring name, path, qualname, and summary matches;
 `search(repo, query)` exhaustively scans indexed files for a case-insensitive
 literal, groups hits by enclosing symbol, and ranks them by incoming coupling.
 Search previews are bounded, secret-shaped lines are withheld, and source
-previews are labelled untrusted data. The overview verbs (`map`, `find`, `analyze`)
+previews are labelled untrusted data. The overview verbs (`map`, `find`)
 drop test files and their edges by default because tests name many paths and
-otherwise dominate hubs and communities — `--include-tests` (or `--kind test`)
+otherwise dominate hubs — `--include-tests` (or `--kind test`)
 brings them back, while `blast` and `context` always keep them; `neighbors(id, relation, direction)`;
 `trace(id, direction, depth, relations, confidences)` returns at most 128 nodes
 and 160 slim edges by default, with `limits`, `truncated`, and omitted-edge
 metadata instead of a broken partial JSON value; `map_summary()` returns counts by
-kind and language, top hubs, module groups, and communities. Analytics
-(`analytics.py`) are stdlib: degrees, hubs, connected components,
-bounded simple cycles, shortest path, deterministic label-propagation
-communities labelled by their dominant top-level directory.
+kind and language, top hubs, and module groups. Analytics
+(`analytics.py`) are stdlib: evidence degrees and structural assurance.
 
 Blast radius (`blast.py`): `changed_paths(repo, base)` compares the working
 tree with `merge-base(base, HEAD)` plus untracked files. Without a base it
@@ -922,7 +920,7 @@ has no graph-build/runtime dependency on JavaScript.
 
 `oms graph` is one public verb (`scripts/graph.sh` → `oms_graph_core.py`
 → `oms_graph.cli.main`). Text is the default output; `--json` is available
-everywhere; `--mermaid` where a static diagram makes sense. The selected
+everywhere; `--mermaid` on `exec render`/`exec status`. The selected
 readers also accept `--html-fragment ABSOLUTE_PATH`; the explicit file write
 is parent-owned and produces an inline agent-UI fragment, not a standalone
 website. `project map`, `project context`, and `exec status` can return JSON
@@ -934,7 +932,7 @@ one graph revision.
 oms graph project build  [--force] [--include GLOB]... [--exclude GLOB]... [--max-bytes N]
 oms graph project ensure [--max-files N]
 oms graph project check
-oms graph project map    [--json] [--mermaid|--html-fragment ABS|--ui-model] [--limit 1..200] [--depth 0..4]
+oms graph project map    [--json] [--html-fragment ABS|--ui-model] [--limit 1..200] [--depth 0..4]
 oms graph project find   QUERY [--kind KIND] [--limit N]
 oms graph project api    PATH [--limit 1..2000]
 oms graph project search TEXT [--limit 1..500]
@@ -943,7 +941,6 @@ oms graph project trace  NODE [--direction in|out] [--depth N]
 oms graph project blast  [--base REF] [--path P]... [--depth N] [--limit N]   # --limit bounds every JSON list; `truncated`/`omitted` report the cut
 oms graph project coupling [--path P]... [--commits N] [--max-changeset N] [--min-shared N] [--min-degree PCT] [--limit N]
 oms graph project affected --base REF [--head REF] [--depth N]  # 0 = complete closure
-oms graph project analyze [--hubs N] [--cycles] [--communities] [--path FROM TO]
 oms graph project context --task TEXT [--max-files N] [--bundle] [--base REF] [--json] [--html-fragment ABS|--ui-model]
 oms graph exec validate  SPEC
 oms graph exec render    SPEC [--mermaid|--html-fragment ABS]
@@ -972,7 +969,7 @@ The graph exists wherever it is read. `project ensure` runs `check` and then
 builds when the graph is absent, refreshes it through the cache when the
 working tree moved, and writes nothing when it is current; it prints `graph:
 fresh revision=...` or the `build` summary line with `built`/`refreshed`.
-Every reader (`map find api search neighbors trace blast affected analyze coupling context`) calls it
+Every reader (`map find api search neighbors trace blast affected coupling context`) calls it
 before loading the graph and sends that summary to **stderr**, so `--json`
 stdout stays parsable. `--no-refresh` on any reader, or `OMS_GRAPH_AUTOBUILD=0`
 globally, reads the graph as it stands — an absent one then fails with the
@@ -983,7 +980,7 @@ it with the verb to run; the explicit `build` (which bounds bytes, not files)
 has no such bound, and a refresh of an existing graph is never refused.
 
 Harness children (`OMS_HARNESS_CHILD=1`) may run `project
-build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|analyze|coupling`
+build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling`
 and `exec validate|render|route|status|events|test`. `build`/`ensure` are the exception
 to the runtime core's `context` precedent: the project graph is a regenerable
 cache that carries no authority, and a delegated worker in an isolated
@@ -1066,8 +1063,8 @@ a value may never start with `-`. Output stays under the server's
   current → no write at all (graph.json mtime), the first-build file bound
   refused and an existing graph's refresh never refused, and a refresh that
   keeps the discovery options the graph was built with.
-- `tests/test_oms_graph_analytics.py`: degrees, hubs, components, cycles,
-  shortest path, communities, renderers.
+- `tests/test_oms_graph_analytics.py`: evidence degrees, structural assurance,
+  renderers.
 - `tests/test_oms_graph_parsers.py`: what a call can and cannot be linked to —
   shell command words never reach Python functions, attribute calls on
   parameters/locals/module variables yield no edge, builtin names resolve

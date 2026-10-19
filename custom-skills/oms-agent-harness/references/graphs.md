@@ -28,8 +28,8 @@ it through the cache when the working tree moved, printing one summary line
 to stderr so `--json` stdout stays clean. `ensure` is the explicit form and
 `check` the report; `--no-refresh` (or `OMS_GRAPH_AUTOBUILD=0`) reads the
 graph as it stands. Edges carry `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
-confidence: treat only `EXTRACTED` edges as facts. `map`, `find`, and
-`analyze` hide test files by default (`--include-tests` to see them); `blast`
+confidence: treat only `EXTRACTED` edges as facts. `map` and `find`
+hide test files by default (`--include-tests` to see them); `blast`
 and `context` always report the tests a change touches.
 
 Read `map.coverage` before trusting an empty or sparse graph. It distinguishes
@@ -186,7 +186,7 @@ plan/autopilot hierarchy without this extra layer.
 
 ## Boundaries
 
-- Harness children may run `project build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|analyze|coupling`
+- Harness children may run `project build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling`
   and `exec validate|render|route|status|events|test` — the project graph is a
   regenerable cache carrying no authority, and an isolated worktree has no
   other way to get one.

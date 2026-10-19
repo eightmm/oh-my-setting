@@ -30,7 +30,7 @@ HTML_FRAGMENT_MAX_BYTES = 1024 * 1024
 # `build` is the explicit form: neither may refresh behind the caller's back.
 AUTO_REFRESH_ACTIONS = (
     "map", "find", "api", "search", "neighbors", "trace", "blast",
-    "affected", "analyze", "coupling", "context",
+    "affected", "coupling", "context",
 )
 
 
@@ -77,7 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
     show_map.add_argument("--depth", type=int, default=2, help="neighbor depth in the HTML overview (0-4)")
     show_map.add_argument("--json", action="store_true")
     map_visual = show_map.add_mutually_exclusive_group()
-    map_visual.add_argument("--mermaid", action="store_true")
     map_visual.add_argument("--html-fragment", default="", metavar="ABSOLUTE_PATH",
                             help="write a bounded interactive HTML fragment for an agent UI")
     map_visual.add_argument("--ui-model", action="store_true",
@@ -128,13 +127,6 @@ def build_parser() -> argparse.ArgumentParser:
                           help="reverse dependency depth; 0 follows the complete closure")
     affected.add_argument("--guard", action="append", default=[], help="additional always-full path glob")
     affected.add_argument("--json", action="store_true")
-    analyze = project_sub.add_parser("analyze")
-    analyze.add_argument("--hubs", type=int, default=10)
-    analyze.add_argument("--cycles", action="store_true")
-    analyze.add_argument("--communities", action="store_true")
-    analyze.add_argument("--path", nargs=2, default=None, metavar=("FROM", "TO"))
-    analyze.add_argument("--include-tests", action="store_true", help="keep test files in hubs, cycles, and communities")
-    analyze.add_argument("--json", action="store_true")
     context = project_sub.add_parser("context")
     context.add_argument("--task", required=True)
     context.add_argument("--entry-path", action="append", default=[], metavar="PATH",
@@ -150,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="emit the bounded task graph data consumed by an MCP Apps renderer")
     for reader in (
         show_map, find, api, search, neighbors, trace, blast, affected,
-        analyze, coupling, context,
+        coupling, context,
     ):
         reader.add_argument("--no-refresh", action="store_true", help="read the graph as it stands; never build or refresh it")
     execution = groups.add_parser("exec", help="advanced opt-in execution graph; ordinary work uses existing plans/autopilot")
@@ -282,7 +274,7 @@ def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
         raise GraphError("project map --limit must be between 1 and 200")
     if args.depth < 0 or args.depth > 4:
         raise GraphError("project map --depth must be between 0 and 4")
-    if args.json and (args.mermaid or args.ui_model):
+    if args.json and args.ui_model:
         raise GraphError("project map cannot combine --json with a visual output")
     full_graph, index = _index(repo, state)
     graph = full_graph
@@ -327,8 +319,6 @@ def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
         if fragment:
             payload["html_fragment"] = str(fragment)
         emit(payload, args.pretty)
-    elif args.mermaid:
-        print(render.render_project_mermaid(graph.get("nodes", []), graph.get("edges", []), limit=args.limit))
     elif not fragment:
         print(render.render_project_map_text(summary))
     return 0
@@ -566,47 +556,11 @@ def _project_coupling(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
-def _project_analyze(args: argparse.Namespace, repo: Path, state: Path) -> int:
-    graph, index = _index(repo, state)
-    if not args.include_tests:
-        graph = index.without_tests().graph
-    nodes = graph.get("nodes", [])
-    edges = graph.get("edges", [])
-    result: Dict[str, Any] = {
-        "schema": 1,
-        "hubs": analytics.hubs(nodes, edges, limit=args.hubs),
-        "components": [{"size": len(members), "members": members} for members in analytics.connected_components(nodes, edges)],
-    }
-    if args.cycles:
-        result["cycles"] = analytics.cycles(nodes, edges)
-    if args.communities:
-        result["communities"] = analytics.communities(nodes, edges)
-    if args.path:
-        result["path"] = analytics.shortest_path(nodes, edges, args.path[0], args.path[1])
-    if args.json:
-        emit(result, args.pretty)
-        return 0
-    print("hubs:")
-    for position, row in enumerate(result["hubs"], 1):
-        print("  %2d. %s  (%s)  degree %d" % (position, row["id"], row["kind"], row["degree"]))
-    sizes = [row["size"] for row in result["components"]]
-    print("components: %d (largest %d)" % (len(sizes), sizes[0] if sizes else 0))
-    for cycle in result.get("cycles", []):
-        print("cycle: %s" % " -> ".join(cycle))
-    for community in result.get("communities", []):
-        print("community %s (%s): %d nodes" % (community["id"], community["label"], len(community["members"])))
-    if args.path:
-        path = result.get("path")
-        print("path: %s" % (" -> ".join(path) if path else "none"))
-    return 0
-
-
 PROJECT_ACTIONS = {"build": _project_build, "ensure": _project_ensure, "check": _project_check, "map": _project_map,
                    "find": _project_find, "api": _project_api, "search": _project_search,
                    "neighbors": _project_neighbors, "trace": _project_trace,
                    "blast": _project_blast, "affected": _project_affected,
-                   "analyze": _project_analyze, "coupling": _project_coupling,
-                   "context": _project_context}
+                   "coupling": _project_coupling, "context": _project_context}
 
 STOP_STATUSES = ("gate", "blocked", "exhausted", "waiting", "invalid")
 
