@@ -187,14 +187,17 @@ Constraint: preserve API"
   [ "$after" -eq $((before + 1)) ] || fail "ordinary continuation was not appended"
 }
 
-hook_payload() {  # COMMAND EXIT EVENT
+hook_payload() {  # COMMAND EXIT EVENT [INTERRUPTED] — documented Claude Code shapes
   python3 - "$@" <<'PY'
 import json, sys
-print(json.dumps({
-    "hook_event_name": sys.argv[3], "tool_name": "Bash",
-    "tool_input": {"command": sys.argv[1]},
-    "tool_response": {"exit_code": int(sys.argv[2])},
-}))
+row = {"hook_event_name": sys.argv[3], "tool_name": "Bash",
+       "tool_input": {"command": sys.argv[1]}}
+if sys.argv[3] == "PostToolUse":
+    row["tool_response"] = {"stdout": "", "stderr": "", "isImage": False,
+                            "interrupted": sys.argv[4:5] == ["interrupted"]}
+else:
+    row["error"] = "Exit code %s\nboom" % sys.argv[2]
+print(json.dumps(row))
 PY
 }
 
@@ -250,11 +253,16 @@ test_fail_ledger_hook_resolves_on_success() {
   [ "$(ledger_rows "$repo")" = "$rows" ] ||
     fail "a success with no open failure must append nothing"
 
-  # A nonzero exit on the success event belongs to the failure event, which
-  # already recorded it — neither side may act on it here.
-  (cd "$repo" && printf '%s' "$(hook_payload "$cmd" 7 PostToolUse)" | bash "$hook") >/dev/null
+  # An interrupted or backgrounded run "succeeds" without having passed:
+  # it must not resolve an open failure.
+  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null
+  rows="$(ledger_rows "$repo")"
+  (cd "$repo" && printf '%s' "$(hook_payload "$cmd" 0 PostToolUse interrupted)" | bash "$hook") >/dev/null
+  (cd "$repo" && printf '%s' "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$cmd\",\"run_in_background\":true},\"tool_response\":{\"stdout\":\"\"}}" | bash "$hook") >/dev/null
+  (cd "$repo" && printf '%s' "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$cmd\"},\"tool_response\":{\"stdout\":\"\",\"interrupted\":false,\"backgroundTaskId\":\"bg1\"}}" | bash "$hook") >/dev/null
   [ "$(ledger_rows "$repo")" = "$rows" ] ||
-    fail "a failing command on the success event must not write"
+    fail "an interrupted or backgrounded run must not resolve (run_in_background or backgroundTaskId)"
+  (cd "$repo" && printf '%s' "$passed" | bash "$hook") >/dev/null
 
   # Hook inline Python runs isolated: a json.py at the cwd root must not execute.
   printf 'open(%s, "w").close()\n' "'$repo/json-planted'" >"$repo/json.py"
@@ -1396,7 +1404,8 @@ with patch.dict(os.environ, dict(env, OMS_TELEMETRY_DEBUG="1")):
         result = subprocess.run(["bash", str(root / "scripts/fail-ledger-hook.sh")],
                                 input=json.dumps(dict(payload, cwd=str(repo if kind == "approval" else unadopted),
                                                       hook_event_name="PostToolUse", tool_name="Bash",
-                                                      tool_input={"command": "true"}, tool_response={"exit_code": 0})),
+                                                      tool_input={"command": "true"},
+                                                      tool_response={"stdout": "", "stderr": "", "interrupted": False})),
                                 text=True, capture_output=True, timeout=5)
         assert result.returncode == 0 and not result.stdout and not result.stderr, result
         row = json.loads(path.read_text())

@@ -29,8 +29,8 @@ git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$repo/.oms"
 
 payload() {
-  # $1 = command, $2 = exit code, optional $3 = cwd
-  OMS_P_CMD="$1" OMS_P_EXIT="$2" OMS_P_CWD="${3:-}" python3 - <<'PY'
+  # $1 = command, $2 = exit code, optional $3 = cwd, $4 = is_interrupt (1/0)
+  OMS_P_CMD="$1" OMS_P_EXIT="$2" OMS_P_CWD="${3:-}" OMS_P_INT="${4:-0}" python3 - <<'PY'
 import json
 import os
 print(json.dumps({
@@ -38,7 +38,8 @@ print(json.dumps({
     "hook_event_name": "PostToolUseFailure",
     "cwd": os.environ.get("OMS_P_CWD") or None,
     "tool_input": {"command": os.environ["OMS_P_CMD"]},
-    "tool_response": {"exit_code": int(os.environ["OMS_P_EXIT"])},
+    "error": "Exit code %s\nboom" % os.environ["OMS_P_EXIT"],
+    "is_interrupt": os.environ["OMS_P_INT"] == "1",
 }))
 PY
 }
@@ -52,12 +53,25 @@ if [ -s "$ledger" ]; then
   fail "session-scratch-path failure must not reach the ledger: $(cat "$ledger")"
 fi
 
-# An ordinary failure still records.
+# Interrupts are not failures: is_interrupt, and a documented "Exit code 130".
+payload "sleep 999" 1 "" 1 |
+  OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh"
+payload "sleep 998" 130 |
+  OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh"
+if [ -s "$ledger" ]; then
+  fail "an interrupt must not reach the ledger: $(cat "$ledger")"
+fi
+
+# An ordinary failure still records, with the exit code the error text names.
 payload "python3 -m nope_such_module" 1 |
   OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh"
 [ -s "$ledger" ] || fail "an ordinary hook failure should record a row"
 grep -Fq nope_such_module "$ledger" ||
   fail "the recorded row should carry the failing command"
+payload "python3 -m code_two_only" 2 |
+  OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh"
+grep -F code_two_only "$ledger" | grep -Eq '"exit": ?2' ||
+  fail "the row should carry the exit code parsed from the error text"
 
 # The deliberate record verb is not gated by the hook filter.
 "$ROOT/scripts/fail-ledger.sh" --repo "$repo" record \
@@ -91,7 +105,7 @@ print(json.dumps({
     "tool_name": "Bash", "hook_event_name": "PostToolUseFailure",
     "currentWorkingDirectory": os.environ["OMS_P_CWD"],
     "tool_input": {"command": os.environ["OMS_P_CMD"]},
-    "tool_response": {"exit_code": int(os.environ["OMS_P_EXIT"])},
+    "error": "Exit code %s\nboom" % os.environ["OMS_P_EXIT"],
 }))
 PY
   ( cd "$other" && env -u OMS_STATE_REPO bash "$ROOT/scripts/fail-ledger-hook.sh" )

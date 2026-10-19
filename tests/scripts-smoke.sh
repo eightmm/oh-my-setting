@@ -19209,7 +19209,7 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
 test_fail_ledger_hook_gives_failed_commands_a_memory() {
   local project="$TMP/fail-ledger-hook"
   local SH="$ROOT/scripts/fail-ledger-hook.sh"
-  local payload='{"tool_name":"Bash","tool_input":{"command":"uv run pytest tests/broken.py"},"tool_response":{"exit_code":2}}'
+  local payload='{"tool_name":"Bash","hook_event_name":"PostToolUseFailure","tool_input":{"command":"uv run pytest tests/broken.py"},"error":"Exit code 2\nboom"}'
   local out
 
   # The ledger only ever spoke when something called it, and the primary agent
@@ -19242,7 +19242,7 @@ test_fail_ledger_hook_gives_failed_commands_a_memory() {
   out="$(cd "$project" && printf '%s' '{"tool_name":"Edit","tool_input":{}}' | bash "$SH")"
   [ -z "$out" ] || fail "non-Bash failures are not ledger material: $out"
   out="$(cd "$project" && printf '%s' \
-    '{"tool_name":"Bash","tool_input":{"command":"sleep 999"},"tool_response":{"exit_code":130}}' |
+    '{"tool_name":"Bash","hook_event_name":"PostToolUseFailure","tool_input":{"command":"sleep 999"},"error":"Exit code 130\n","is_interrupt":true}' |
     bash "$SH")"
   [ -z "$out" ] || fail "an interrupt is not a failure worth remembering: $out"
   [ "$(wc -l < "$project/.oms/failures.jsonl" | tr -d ' ')" = 2 ] ||

@@ -121,16 +121,29 @@ try:
 except Exception:
     pass
 
-response = row.get("tool_response")
-exit_code = None
-if isinstance(response, dict):
-    for key in ("exit_code", "exitCode", "code"):
-        value = response.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            exit_code = value
-            break
 event = row.get("hook_event_name")
 event = event if isinstance(event, str) else ""
+
+# Claude Code sends no Bash exit code. PostToolUse fires only on success;
+# PostToolUseFailure carries `error` ("Exit code N\n...") and is_interrupt.
+exit_code = None
+response = row.get("tool_response")
+if event == "PostToolUse":
+    exit_code = 0
+    # An interrupted or backgrounded command has not passed; Claude Code can
+    # also background a running command mid-flight, which only the response
+    # (backgroundTaskId) reveals.
+    if (isinstance(response, dict) and (
+            response.get("interrupted") is True or response.get("backgroundTaskId"))) or (
+            isinstance(tool_input, dict) and tool_input.get("run_in_background") is True):
+        raise SystemExit(0)
+elif event == "PostToolUseFailure":
+    if row.get("is_interrupt") is True:
+        exit_code = 0
+    else:
+        error = row.get("error")
+        match = re.match(r"Exit code (\d+)", error.split("\n", 1)[0]) if isinstance(error, str) else None
+        exit_code = int(match.group(1)) if match else None
 
 
 def fingerprint(cmd):
@@ -150,12 +163,10 @@ def fingerprint(cmd):
     return hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-# The success event fires on every Bash call; only an explicit exit 0 is a
-# pass, and a nonzero one belongs to the failure event, which records it —
-# deciding here keeps one failed command from being filed twice. A payload
-# with no event name and an explicit 0 is a success too: 0 is not a failure.
-if event == "PostToolUse" or (not event and exit_code == 0):
-    if exit_code != 0 or not ledger:
+# The success event fires on every Bash call and means the command passed;
+# failures arrive on their own event, which records them.
+if event == "PostToolUse":
+    if not ledger:
         raise SystemExit(0)
     fp = fingerprint(command)
     fails = 0
@@ -187,8 +198,10 @@ if event == "PostToolUse" or (not event and exit_code == 0):
     print(command)
     raise SystemExit(0)
 
-if exit_code is None or exit_code == 0:
-    # A failure event without a readable exit code is still a failure.
+if exit_code == 0:
+    raise SystemExit(0)  # is_interrupt: not a failure worth remembering
+if exit_code is None:
+    # A failure event without a parseable exit code is still a failure.
     exit_code = 1
 if exit_code in (130, 141, 143):
     # Interrupts and closed pipes are not failures worth remembering.

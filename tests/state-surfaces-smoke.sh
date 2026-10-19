@@ -1980,17 +1980,17 @@ test_usage_tracking_is_opt_in_without_forge_hints() {
   make_repo "$repo"
   payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
 
-  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
+  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false},"hook_event_name":"PostToolUse"}' |
     env -u OMS_USAGE_TRACK OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   [ ! -e "$repo/.oms/usage.jsonl" ] || fail "usage collection must default off"
 
   # Explicit telemetry still records content-free {family, day} rows.
-  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
+  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false},"hook_event_name":"PostToolUse"}' |
     OMS_USAGE_TRACK=1 OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   grep -q '"family": "chem"' "$repo/.oms/usage.jsonl" ||
     fail "the hook should append a chem usage row"
   # A read-only command that merely mentions a family token is not use.
-  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"grep -rn rdkit src/"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
+  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"grep -rn rdkit src/"},"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false},"hook_event_name":"PostToolUse"}' |
     OMS_USAGE_TRACK=1 OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   [ "$(grep -c '"family": "chem"' "$repo/.oms/usage.jsonl")" = 1 ] ||
     fail "a grep mentioning rdkit must not count as chem usage"
