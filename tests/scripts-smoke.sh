@@ -22712,6 +22712,17 @@ PY
   [ ! -e "$TMP/fsmonitor-ran" ] || fail "Claude HUD ran the repo-local core.fsmonitor helper"
   contains "$out" 'git hud-test' || fail "Claude HUD lost the branch segment under core.fsmonitor: $out"
   git -C "$git_repo" config --local --unset core.fsmonitor
+  # status must not refresh the index: that write fires post-index-change.
+  mkdir "$TMP/hud-hooks"
+  printf '#!/bin/sh\ntouch "%s/index-hook-ran"\n' "$TMP" > "$TMP/hud-hooks/post-index-change"
+  chmod +x "$TMP/hud-hooks/post-index-change"
+  git -C "$git_repo" config --local core.hooksPath "$TMP/hud-hooks"
+  python3 -c 'import os, sys, time; t = time.time() + 3600; os.utime(sys.argv[1], (t, t))' "$git_repo/file.txt"
+  out="$(printf '{"model":{},"session_id":"hud-idx","workspace":{"current_dir":"%s"},"context_window":{}}' "$git_repo" |
+    NO_COLOR=1 COLUMNS=200 OMS_HUD_CACHE_DIR="$TMP/hud-cache-idx" python3 "$hud")"
+  [ ! -e "$TMP/index-hook-ran" ] || fail "Claude HUD status wrote the index and fired post-index-change"
+  contains "$out" 'git hud-test' || fail "Claude HUD lost the branch segment under core.hooksPath: $out"
+  git -C "$git_repo" config --local --unset core.hooksPath
   out="$(printf '{"model":{},"session_id":"hud-git","workspace":{"current_dir":"%s"},"fast_mode":true,"context_window":{}}' "$git_repo" |
     NO_COLOR=1 COLUMNS=40 OMS_HUD_CACHE_DIR="$TMP/hud-cache" python3 "$hud")"
   python3 - "$out" <<'PY' || fail "Claude HUD narrow Git rendering is not bounded: $out"

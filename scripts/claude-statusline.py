@@ -170,6 +170,7 @@ def read_git_status(payload: Dict[str, Any], current_dir: Any) -> Dict[str, Any]
         proc = subprocess.run(
             [
                 "git",
+                "--no-optional-locks",
                 "-c",
                 "core.fsmonitor=false",
                 "status",
