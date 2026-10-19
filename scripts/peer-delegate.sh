@@ -1946,7 +1946,11 @@ EOF
 # The verify command is a check, not a worker: it must reach the verdict a
 # top-level run would. Drop the worker's routing, panel, room, index and
 # state pointers (nested fixtures otherwise record into the live room ledger
-# under this task); keep OMS_HARNESS_* so the recursion guard still holds.
+# under this task) and the dispatcher's provider wall clock (the verify has its
+# own, OMS_PEER_VERIFY_TIMEOUT). The verify keeps the dispatcher's delegation
+# depth, not the worker's, so a direct test run is not capped as a nested
+# delegation while a verify started from a nested worker still is; the rest of
+# OMS_HARNESS_* stays so the recursion guard still holds.
 # Call only inside the verify subshell.
 verify_clean_env() {
   local name
@@ -1954,9 +1958,11 @@ verify_clean_env() {
     case "$name" in
       OMS_PANEL_*|OMS_ROOM_*|OMS_MODEL_*|OMS_REASONING_*|OMS_INDEX_*|OMS_STATE_REPO|\
       OMS_ATTEMPT_ID|OMS_PLAN_LEASE_ID|OMS_EXECUTOR_ID|OMS_TASK_ID|OMS_SOUL_SHA256|\
-      OMS_WORKER_AUTHORITY_EXCLUSIVE|OMS_OPERATION_ID|OMS_DELEGATION_ID) unset "$name" ;;
+      OMS_WORKER_AUTHORITY_EXCLUSIVE|OMS_OPERATION_ID|OMS_DELEGATION_ID|\
+      OMS_PEER_TIMEOUT) unset "$name" ;;
     esac
   done
+  export OMS_HARNESS_DELEGATE_DEPTH="$DELEGATE_DEPTH"
 }
 
 run_verify() {

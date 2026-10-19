@@ -66,6 +66,12 @@ for directory, prefix in directories:
             if name:
                 rows.append("refs " + prefix + name)
 
+if "shared-state" in surfaces:
+    # Producer lines read "<rel> <phrase>"; only the path and a plain phrase survive.
+    for line in sorted(read(os.path.join(root, "state-detail"))):
+        rel, _, rest = line.partition(" ")
+        rows.append(("shared-state " + safe_name(rel) + " " + re.sub(r"[^A-Za-z0-9 ()>-]", "", rest)[:80]).rstrip())
+
 unique = sorted(set(rows))
 if not unique:
     print("no path/ref detail available in the preserved manifests")

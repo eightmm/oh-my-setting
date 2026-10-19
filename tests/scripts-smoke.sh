@@ -29686,6 +29686,21 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
     done
     rm -f "$panel_records/.oms/artifacts/$panel_record"
   done
+  # Concurrent mode is the guard-stop path: the ledger row and the relayed
+  # Output are what a later triage reads, so they name the changed record
+  # instead of the generic no-detail line.
+  local guard_artifact
+  guard_artifact="$(ls -t "$panel_records"/.oms/artifacts/delegate/*.md 2>/dev/null | head -1)"
+  python3 - "$panel_records/.oms/failures.jsonl" "$guard_artifact" <<'PY' || fail "guard stop lost the shared-state path"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+rows = [row for row in rows if row.get("cmd", "").endswith("worker-authority")]
+assert rows, rows
+summary = rows[-1]["summary"]
+assert "panel-call-eeeeeeeeeeeeeeee-pending.json" in summary and "no path/ref detail" not in summary, summary
+output = open(sys.argv[2], encoding="utf-8").read().split("## Output", 1)[1]
+assert "shared-state artifacts/panel-call-eeeeeeeeeeeeeeee-pending.json" in output, output
+PY
 
   local removed="$TMP/guard-state-deleted"
   make_guard_repo "$removed"
@@ -31152,6 +31167,17 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     rc=0
     out="$(ma_read_guard_assert 2>&1)" || rc=$?
     [ "$rc" = 2 ] || fail "read guard softened a branch write without foreign HEAD evidence: $out"
+    contains "$out" 'ref refs/heads/oms/other-main' ||
+      fail "a read-guard refs stop should name the changed ref: $out"
+    ma_read_guard_begin "$snap/read-gitmeta" || fail "read gitmeta snapshot failed"
+    mkdir -p "$project/.git/worktrees/planted"
+    printf 'x\n' > "$project/.git/worktrees/planted/gitdir"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    rm -rf "$project/.git/worktrees/planted"
+    [ "$rc" = 2 ] || fail "read guard accepted a planted worktree entry: $out"
+    contains "$out" 'gitmeta worktrees/' ||
+      fail "a read-guard gitmeta stop should name the changed entry: $out"
     ma_read_guard_begin "$snap/read-source" || fail "read source protection snapshot failed"
     printf 'source mutation\n' >> "$read_source/file.txt"
     rc=0

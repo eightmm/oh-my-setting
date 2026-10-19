@@ -146,7 +146,7 @@ ma_read_guard_rebaseline_source() {
 
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
-  local root name digest changed surface hard soft execution
+  local root name digest changed surface hard soft execution named
   # A linked source's HEAD also appears in the state's Git metadata. Diagnose
   # source protection first so that shared surface cannot mask the cause.
   for name in source state; do
@@ -219,6 +219,24 @@ for key in sorted(changed)[:8]:
         continue
 PY
         fi
+        ;;
+    esac
+    case ", ${hard}," in
+      *", gitmeta,"*|*", refs,"*)
+        # Name the changed paths/refs from the manifests the diff left. The
+        # early admin-unsafe exit leaves no "now" side, so capture one then.
+        named=""
+        for surface in gitmeta refs; do
+          case ", ${hard}," in *", $surface,"*) ;; *) continue ;; esac
+          named="${named:+$named, }$surface"
+          if [ ! -s "$MA_READ_GUARD_DIR/$name/$surface-now" ] &&
+            [ ! -s "$MA_READ_GUARD_DIR/$name/$surface-admin-now" ]; then
+            oms_worker_surface_capture_one "$root" "$surface" \
+              > "$MA_READ_GUARD_DIR/$name/guard-report-$surface-now" 2>/dev/null || true
+          fi
+        done
+        python3 "$MA_LIB_DIR/worker-guard-details.py" \
+          "$MA_READ_GUARD_DIR/$name" "$named" | head -n 8 | sed 's/^/  /' >&2 || true
         ;;
     esac
     if [ -n "$soft" ]; then
