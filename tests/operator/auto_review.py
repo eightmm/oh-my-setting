@@ -683,7 +683,7 @@ for case_number, (case, expected_draft) in enumerate((
             patch.object(panel, "_review_fix_notice", side_effect=notice_at_limit), \
             patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": projected_answer,
                 "answer_truncated": case == "truncated-summary"}]}]}), \
-            patch.object(panel, "dispatch") as draft_dispatch, patch.dict(os.environ, room_env, clear=True):
+            patch.object(panel, "dispatch") as draft_dispatch, patch.dict(os.environ, dict(room_env, OMS_AGENT="claude"), clear=True):
         assert panel.deliver_result(project, shared, fix_reviewer, room_owner, fix_task, outcome_index["exit"])
         assert panel.deliver_result(project, shared, fix_reviewer, room_owner, fix_task, outcome_index["exit"])
         draft_dispatch.assert_not_called()
@@ -730,7 +730,16 @@ for case_number, (case, expected_draft) in enumerate((
     if case == "passed-gate":
         completion = project / (".oms/artifacts/panel-results/completion-%s.md" % fix_reviewer)
         assert completion.is_file() and verifier in completion.read_text()
-        assert "--summary-file" in draft_mail[0]["text"] and "After admission" in draft_mail[0]["text"]
+        assert "After admission" in draft_mail[0]["text"]
+        owner_command = draft_mail[0]["text"].split("owner command: ", 1)[1].split(" Read findings: ", 1)[0]
+        capture = subprocess.run(["bash", "-c", "oms() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; }; " + owner_command],
+                                 capture_output=True, text=True, check=True)
+        owner_argv = json.loads(capture.stdout)
+        assert owner_argv[:5] == ["panel", "--finalize", "--owner", "claude", "--task-id"], owner_argv
+        assert owner_argv[5:] == [fix_task, "--summary-file", str(completion.relative_to(project)),
+                                  "--outcome", "accepted", "--verify", verifier,
+                                  "--evidence", owner_argv[-1]], owner_argv
+        assert owner_argv[-1].startswith(".oms/artifacts/"), owner_argv
 # Draft writes preserve existing evidence and reject links just like the call artifacts.
 try:
     panel._write_brief_artifact(project, ".oms/artifacts/fixture/review-failed-gate.fix-brief.md",

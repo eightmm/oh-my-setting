@@ -836,6 +836,18 @@ test_apply_ml_scaffolds_docs() {
   (cd "$cwd_full" && "$ROOT/scripts/apply-project-template.sh" ml --full-docs >/dev/null)
   [ -f "$cwd_full/docs/TRAINING.md" ] ||
     fail "--full-docs should use cwd when project_dir is omitted"
+
+  local lead_full="$TMP/ml-docs-full-lead"
+  mkdir -p "$lead_full"
+  "$ROOT/scripts/apply-project-template.sh" ml --full-docs "$lead_full" >/dev/null ||
+    fail "a --full-docs before project_dir must not be taken as the path"
+  [ -f "$lead_full/AGENTS.md" ] && [ -f "$lead_full/docs/TRAINING.md" ] ||
+    fail "a --full-docs before project_dir must scaffold into project_dir"
+  if compgen -G "$lead_full/tmp.*" >/dev/null || compgen -G "$lead_full/*/tmp.*" >/dev/null; then
+    fail "a misordered --full-docs must leave no tempfile"
+  fi
+  "$ROOT/scripts/apply-project-template.sh" general --help | grep -Fq "Usage:" ||
+    fail "--help after the style must print usage and exit 0"
 }
 
 test_apply_ml_scaffolds_gitignore() {
@@ -6916,6 +6928,9 @@ if os.name == 'posix' and Path('/proc/self').is_dir():
            '--expected-completion-bundle-sha256', h((repo / bundle_path).read_bytes())]
     approve_argv = ['scripts/oms', 'agent-plan', 'approve-main-research', *cas, '--approve-reviewed-bundle']
     approve_command = shlex.join(approve_argv)
+    usage = subprocess.run(['scripts/oms', 'agent-plan', '--help'], cwd=repo, env=desktop_env,
+                           stdout=subprocess.PIPE, timeout=60).stdout.decode()
+    assert '--approve-reviewed-bundle' in usage and '--main-review-approval' in usage, usage
     unchanged = plan_path.read_bytes()
     native_path = native_store / ('rollout-2026-10-10T00-00-00-' + sid + '.jsonl')
     native_rows = [
@@ -17015,6 +17030,15 @@ test_agent_plan_reclaim_requeues_stale_claim() {
     fail "non-numeric reclaim --ttl must be rejected"
   fi
   assert_file_contains "$d/err" "must be an integer"
+  local bad_ttl="$d-bad-ttl"
+  mkdir -p "$bad_ttl"
+  "$SH" --repo "$bad_ttl" init --goal "ttl test" >/dev/null
+  "$SH" --repo "$bad_ttl" add --id t2 --title "bad ttl" >/dev/null
+  if "$SH" --repo "$bad_ttl" claim --id t2 --provider codex --ttl 30m >/dev/null 2>"$d/err"; then
+    fail "non-numeric claim --ttl must be rejected"
+  fi
+  assert_file_contains "$d/err" "must be an integer"
+  "$SH" --repo "$bad_ttl" show --id t2 | grep -Fq '"state": "ready"' || fail "a rejected --ttl must leave the task ready"
 
   python3 - "$SH" "$d" <<'PY' || fail "worker evidence must fence TTL reuse consistently"
 import json

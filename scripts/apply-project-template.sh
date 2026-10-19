@@ -8,22 +8,6 @@ PRIVATE="${OH_MY_SETTING_PRIVATE_AGENT_FILES:-1}"
 ADD_SLURM=0
 PYTHON_CI=0
 
-# --private/--no-private/--python-ci may appear anywhere, so strip them before
-# the positional style/dir/files parse below.
-KEPT_ARGS=()
-for arg in "$@"; do
-  case "$arg" in
-    --no-private) PRIVATE=0 ;;
-    --private) PRIVATE=1 ;;
-    --python-ci) PYTHON_CI=1 ;;
-    *) KEPT_ARGS+=("$arg") ;;
-  esac
-done
-set -- ${KEPT_ARGS+"${KEPT_ARGS[@]}"}
-
-STYLE="${1:-general}"
-BASE_STYLE="$STYLE"
-
 usage() {
   cat <<'EOF'
 Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir]
@@ -44,12 +28,23 @@ The agent-facing files are hidden from git locally (see project-private.sh);
 EOF
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
+# --private/--no-private/--python-ci/--full-docs/--help may appear anywhere, so
+# strip them before the positional style/dir/files parse below.
+KEPT_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-private) PRIVATE=0 ;;
+    --private) PRIVATE=1 ;;
+    --python-ci) PYTHON_CI=1 ;;
+    --full-docs) ML_FULL_DOCS=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) KEPT_ARGS+=("$arg") ;;
+  esac
+done
+set -- ${KEPT_ARGS+"${KEPT_ARGS[@]}"}
+
+STYLE="${1:-general}"
+BASE_STYLE="$STYLE"
 
 case "$BASE_STYLE" in
   auto|general|ml|slurm) ;;
@@ -61,12 +56,8 @@ esac
 
 [ "$#" -eq 0 ] || shift
 PROJECT_DIR="$PWD"
-if [ "$#" -gt 0 ] && [ "$1" != "--full-docs" ]; then
+if [ "$#" -gt 0 ]; then
   PROJECT_DIR="$1"
-  shift
-fi
-if [ "${1:-}" = "--full-docs" ]; then
-  ML_FULL_DOCS=1
   shift
 fi
 case "$ML_FULL_DOCS" in
@@ -257,6 +248,7 @@ apply_one() {
   local style="$2"
   local template="$3"
   local target="$PROJECT_DIR/$rel"
+  [ ! -d "$target" ] || { echo "error: $rel is a directory, not a rule file" >&2; return 1; }
   local dir
   local begin="<!-- oh-my-setting:${style}:begin -->"
   local end="<!-- oh-my-setting:${style}:end -->"

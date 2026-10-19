@@ -313,7 +313,7 @@ def _dispatch_execution_repository(repo, room_id, member, caller):
 
 def _completion_inputs(repo, room_id, member, caller, task_id, record, context):
     from terminal_panel import _review_verifier, _safe_patch_path, _validate_dry_run_inputs
-    from terminal_panel import _write_brief_artifact
+    from terminal_panel import _write_brief_artifact, caller_owner
     artifact = record.get("artifact")
     worker = context.get("call_id")
     if not worker or not _safe_patch_path(artifact) or not artifact.startswith(".oms/artifacts/"):
@@ -327,7 +327,8 @@ def _completion_inputs(repo, room_id, member, caller, task_id, record, context):
                "and edit this summary before accepting.\n" % (task_id, artifact, verifier))
     _validate_dry_run_inputs(content, None)
     _write_brief_artifact(repo, relative, content)
-    arguments = ["oms", "panel", "--finalize", "--task-id", task_id, "--summary-file", relative,
+    arguments = ["oms", "panel", "--finalize", "--owner",
+                 os.environ.get("OMS_AGENT") or caller_owner(), "--task-id", task_id, "--summary-file", relative,
                  "--outcome", "accepted", "--verify", verifier, "--evidence", artifact]
     return " After admission and editing the summary, owner command: " + " ".join(shlex.quote(p) for p in arguments)
 

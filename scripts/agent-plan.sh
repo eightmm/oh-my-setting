@@ -132,7 +132,7 @@ Commands:
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
          [--assignment '{"provider":"claude","workload":"routine"}']
          [--verify CMD] [--role NAME]
-  claim  --id ID --provider NAME [--ttl TEXT]   Claim a ready task for a worker.
+  claim  --id ID --provider NAME [--ttl SECONDS]   Claim a ready task for a worker.
   start  --id ID [--lease-id TOKEN]  Mark a claimed task running.
   touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
                                      claimed_at so a live worker is not reclaimed.
@@ -178,6 +178,11 @@ Commands:
          --expected-plan-sha256 SHA256 --expected-task-sha256 SHA256
          --completion-bundle REPO_RELATIVE_FILE
          --expected-completion-bundle-sha256 SHA256
+         approve-main-research also requires --approve-reviewed-bundle (desktop
+         main step 1; prints an approval path and SHA-256)
+         accept-main-research [--main-review-approval PATH
+         --expected-main-review-approval-sha256 SHA256] (both together; required
+         for desktop mains, omitted by a native panel main bound to its room)
                                      Parent-reviewed local completion with exact
                                      owner, obligations, immutable provenance,
                                      source and executed verifier bindings.
@@ -240,7 +245,7 @@ Commands:
                                      one row to .oms/plan/progress.jsonl, and
                                      exit 0 on pass / 3 on fail.
   brief  --id ID                     Print a paste-able work brief for a task.
-  next   [--provider NAME] [--claim] [--ttl TEXT]
+  next   [--provider NAME] [--claim] [--ttl SECONDS]
                                      Print the brief for the next actionable
                                      task; with --claim --provider, atomically
                                      claim it first (pull-work primitive).
@@ -287,7 +292,9 @@ while [ "$#" -gt 0 ]; do
     --title) [ "$#" -ge 2 ] || fail "--title requires text"; TITLE="$2"; shift 2 ;;
     --goal) [ "$#" -ge 2 ] || fail "--goal requires text"; GOAL="$2"; shift 2 ;;
     --provider) [ "$#" -ge 2 ] || fail "--provider requires name"; PROVIDER="$2"; shift 2 ;;
-    --ttl) [ "$#" -ge 2 ] || fail "--ttl requires text"; TTL="$2"; shift 2 ;;
+    --ttl) [ "$#" -ge 2 ] || fail "--ttl requires seconds"
+           case "$2" in ''|*[!0-9]*) fail "--ttl must be an integer number of seconds" ;; esac
+           TTL="$2"; shift 2 ;;
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
     --artifact) [ "$#" -ge 2 ] || fail "--artifact requires path"; ARTIFACT="$2"; shift 2 ;;
     --patch) [ "$#" -ge 2 ] || fail "--patch requires path"; PATCH="$2"; shift 2 ;;

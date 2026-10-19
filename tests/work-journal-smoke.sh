@@ -1010,6 +1010,15 @@ rc=0
 rc=0
 "$ROOT/scripts/journal.sh" sync --repo "$unadopted" --nope >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "an unknown sync argument must still be refused (rc=$rc)"
+help_repo="$TMP/sync-help-repo"
+mkdir -p "$help_repo"
+help_out="$("$ROOT/scripts/journal.sh" sync --repo "$help_repo" --help)" ||
+  fail "sync --help must exit 0"
+case "$help_out" in
+  *--max-per-tick*--recent-days*|*--recent-days*--max-per-tick*) ;;
+  *) fail "sync --help must list the sync flags" ;;
+esac
+[ ! -e "$help_repo/.oms/work-journal" ] || fail "asking for sync help must create no journal state"
 # Accepting a flag and dropping it is the failure this passes through to catch:
 # a fractional tick count is valid to this wrapper's numeric check and invalid
 # to the entry that has to receive it, so only a real passthrough refuses it.

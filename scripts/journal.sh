@@ -114,6 +114,7 @@ case "${1:-}" in
             bound_args="${bound_args:+$bound_args }$1 $2"
             shift 2
             ;;
+          -h|--help) exec python3 "$PYTHON_ENTRY" sync --help ;;
           *)
             echo "error: unrecognized sync argument: $1" >&2
             exit 2
