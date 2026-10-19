@@ -319,7 +319,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if boxed and budget - len(head) < 3:
         head = head[:pinned]
     head = head[:budget]
-    from room_view import tab_box, dock_body_rows, session_log
+    from room_view import tab_box, dock_body_rows
     main_rows = {}
     for i, row in enumerate(rows):
         if row.get("action") and row["action"][0] == "chat":
@@ -336,7 +336,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
     main_action = next((r["action"] for r in rows if r.get("action") and r["action"][0] == "chat"), None)
     target = mapping(navigation.get("preview")).get("target") or selected or main_action
-    if navigation.get("tab", "detail") == "detail" and reader_target and height < 28:
+    if navigation.get("tab", "log") == "detail" and reader_target and height < 28:
         detail_body = 0 if reader_target == target else 1
     desired_dock = detail_body + 2 if detail_body else 1
     everyone = {m["participant"]: [c for c in calls if c.get("parent") in
@@ -360,12 +360,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     activity_head = boxed and budget - len(head) - dock_rows >= 2
     boxed = boxed and budget - len(head) - dock_rows >= 5
-    event_count = len(listing(mapping(report.get("room")).get("messages")))
-    log_reserve = min(7, event_count + 2) if height >= 28 and event_count >= 5 else 0
-    # The log reserve never takes the activity tree's minimum rows.
-    log_reserve = min(log_reserve, max(0, budget - len(head) - dock_rows - activity_floor))
-    log_reserve = log_reserve if log_reserve >= 3 else 0
-    room_budget = max(0, budget - len(head) - dock_rows - (2 if boxed else int(activity_head)) - log_reserve)
+    room_budget = max(0, budget - len(head) - dock_rows - (2 if boxed else int(activity_head)))
     body = rows
     unique = list(dict.fromkeys([row["action"] for row in head if row.get("action") and row["action"][0] != "tab"] + items))
     # Keep the repository task tail reachable while the longer room tree scrolls.
@@ -455,17 +450,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             hits.append({"y": y + 1, "x1": 1, "x2": width, "action": row["action"], "fold": row.get("fold", False)})
     while output and not output[-1].strip():
         output.pop()
+    # The dock takes every row the activity tree leaves.
     spare = max(0, budget - dock_rows - len(output))
-    navigation.pop("log_box", None)
-    log_rows = min(spare, max(3, event_count + 2))
-    log_lines = session_log(report, width, log_rows, unicode, navigation if interactive else None) if height >= 28 else []
-    if log_lines:
-        output += [""] * (spare - len(log_lines))
-        if interactive:
-            navigation["log_box"] = {"y1": len(output) + 1, "y2": len(output) + len(log_lines)}
-        for text, actor, style_key in log_lines:
-            styled = paint(actor or text, style_key, color=color, colors=color_count(), light=light_theme())
-            output.append(text.replace(actor, styled) if actor else styled)
+    if height >= 28 and dock_rows > 1:
+        dock_rows += spare
     else:
         output += [""] * spare
     dock_top = len(output)
@@ -481,6 +469,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         navigation["box"] = {**navigation["box"], "y1": navigation["box"]["y1"] + dock_top,
                              "y2": navigation["box"]["y2"] + dock_top}
         bands.append(dict(navigation["box"], name="detail", x1=1, x2=width, step=3))
+    if navigation.get("log_box"):
+        navigation["log_box"] = {"y1": navigation["log_box"]["y1"] + dock_top, "y2": navigation["log_box"]["y2"] + dock_top}
     # Refit hints after the dock has supplied its actual visibility and preview state.
     if not menu:
         chosen = next((m for m in members if member_action(m) == selected), None)

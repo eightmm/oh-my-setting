@@ -1031,9 +1031,7 @@ FINISHED = {"done", "cancelled"}
 
 
 def session_log(report, width, rows, unicode=True, navigation=None):
-    """Recorded events only, deduplicated by message identity, in spare rows."""
-    if rows < 3:
-        return []
+    """Recorded events only, deduplicated by message identity: (text, actor, style) rows for the Log tab body."""
     room = mapping(report.get("room"))
     events, seen = [], set()
     people = {m["participant"]: m for m in nodes(report)}
@@ -1047,9 +1045,8 @@ def session_log(report, width, rows, unicode=True, navigation=None):
         if navigation is not None:
             navigation["log_offset"] = 0
             navigation.pop("log_latest_id", None)
-            navigation.pop("log_box", None)
         return []
-    count = min(rows - 2, len(events))
+    count = max(1, min(rows, len(events)))
     offset = max(0, int((navigation or {}).get("log_offset", 0)))
     if navigation is not None:
         latest = events[-1].get("id")
@@ -1061,9 +1058,7 @@ def session_log(report, width, rows, unicode=True, navigation=None):
         offset = min(offset, max(0, len(events) - count))
         navigation.update(log_offset=offset, log_latest_id=latest)
     visible_end = len(events) - offset
-    older = (" older ↑" if unicode else " older ^") if offset else ""
-    title = "Session log" + ((" · %s" % offset) + older if offset else "")
-    output = [(box_edge(title, width, unicode), None, "border")]
+    output = []
     for message in events[max(0, visible_end - count):visible_end]:
         member = people.get(message.get("sender"), {"role": "unknown"})
         identity = member_identity(member, False)
@@ -1084,8 +1079,7 @@ def session_log(report, width, rows, unicode=True, navigation=None):
             source_text = re.sub(r"^Call exit=\d+; parent acceptance pending\.?", words + ".", source_text)
         text = clipped(readable(source_text, " ") or "(empty)", max(1, width - 6 - display_width(left + outcome)))
         plain = left + text + " " * max(2, width - 4 - display_width(left + text + outcome)) + outcome
-        output.append((box_row(plain, width, unicode), actor, role_style(member.get("role"), member.get("purpose"))))
-    output.append((box_edge("", width, unicode, "bottom"), None, "border"))
+        output.append((plain, actor, role_style(member.get("role"), member.get("purpose"))))
     return output
 
 
@@ -1224,7 +1218,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     help_rows = len(footer_hints(navigation, width, managed, unicode, selected_member, True)) if navigation.get("keys_help") and not menu else 1
     total_rows = max(0, height - int(menu) - 1 - help_rows - len(footer_extra))
     # Compact Detail releases its body when the right reader owns that call.
-    active = navigation.get("tab", "detail")
+    active = navigation.get("tab", "log")
     reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
     same_reader = reader_target and previewed and reader_target == action(previewed)
     dock_body = dock_body_rows(height)
@@ -1241,8 +1235,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         dock_rows = len(dock_lines)
     main_rows = 5 if height >= 28 else 4 if height >= 20 else 3
     minimum_tree = min(2, len(gates)) + min(2, len(counsel)) + min(2, len(workers)) or int(bool(folded_calls))
-    event_count = len(listing(room.get("messages")))
-    log_reserve = 0
     goal_rows = goal_box(report, width, unicode)
     goal_reserve = dock_rows if height >= 28 else min(dock_rows, 4)
     if height >= 28:
@@ -1269,15 +1261,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     strip = "! State unavailable" + (" / " + clean(room.get("error"), 120) if room.get("error") else "") + " / u Refresh" if unavailable else attention_header(ranked, width, unicode)
     add(strip, "bad" if unavailable else "alert" if ranked else "metadata")
     hits.append({"y": len(lines), "x1": 1, "x2": width, "action": ("tab", "needs")})
-    if height >= 28 and event_count >= 5:
-        tree_space = max(0, total_rows - len(lines) - dock_rows - main_rows - minimum_tree)
-        if tree_space >= 7:
-            log_reserve = min(7, event_count + 2)
-    if total_rows - len(lines) - dock_rows - main_rows - log_reserve < minimum_tree:
-        dock_rows = max(1, total_rows - len(lines) - main_rows - minimum_tree - log_reserve)
+    if total_rows - len(lines) - dock_rows - main_rows < minimum_tree:
+        dock_rows = max(1, total_rows - len(lines) - main_rows - minimum_tree)
         if dock_rows == 2:
             dock_rows = 1
-    remaining = max(0, total_rows - len(lines) - dock_rows - main_rows - log_reserve)
+    remaining = max(0, total_rows - len(lines) - dock_rows - main_rows)
     expansion = 3 if selected_member and selected_member in children and remaining >= minimum_tree + 3 else 0
     remaining -= expansion
     groups = (("gate", gates), ("counsel", counsel), ("calls", workers))
@@ -1449,23 +1437,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     spare = max(0, total_rows - dock_rows - len(lines))
     if warnings and spare:
         add(" / ".join(warnings), "alert")
-        spare -= 1
-    log_top = len(lines)
-    navigation.pop("log_box", None)
-    log_rows = min(spare, max(3, event_count + 2)) if height >= 28 else spare
-    log_lines = session_log(report, width, log_rows, unicode, navigation if interactive else None)
-    if log_lines and height >= 28:
-        lines += [""] * (spare - len(log_lines))
-        log_top = len(lines)
-    if log_lines and interactive:
-        navigation["log_box"] = {"y1": log_top + 1, "y2": log_top + len(log_lines)}
-    for text, actor, style_key in log_lines:
-        lines.append(text.replace(actor, styled(actor, style_key)) if actor else styled(text, style_key))
     navigation["band_offsets"] = offsets
-    dock_rows = min(dock_rows, max(0, total_rows - len(lines)))
-    # With no recorded events, the calls tree keeps the rest of the viewport.
-    filler = ""
-    lines += [filler] * max(0, total_rows - len(lines) - dock_rows)
+    # The dock takes every row the tree and warnings leave.
+    free = max(0, total_rows - len(lines))
+    dock_rows = free if dock_rows > 1 else min(dock_rows, free)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     if dock_rows:
         top = len(lines)
@@ -1476,6 +1451,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         if navigation.get("box"):
             navigation["box"] = {**navigation["box"], "y1": navigation["box"]["y1"] + top, "y2": navigation["box"]["y2"] + top}
             bands.append(dict(navigation["box"], name="detail", x1=1, x2=width, step=3))
+        if navigation.get("log_box"):
+            navigation["log_box"] = {"y1": navigation["log_box"]["y1"] + top, "y2": navigation["log_box"]["y2"] + top}
     lines += [""] * max(0, total_rows - len(lines))
     footer = "Workers %s/%s / Judges %s/%s / Mail %s" % (
         sum(c["state"] in LIVE_STATES for c in all_calls if role_style(c.get("role"), c.get("purpose")) == "worker"),
@@ -1622,7 +1599,7 @@ def summary_card(member, preview, width, room=None, unicode=True, *, report=None
 
 
 def dock_body_rows(height):
-    """Maximum reading body height, shared by all bottom tabs."""
+    """Minimum reading body height reserved for the bottom dock; the dock takes any rows the tree leaves."""
     return 12 if height >= 56 else 8 if height >= 40 else 5 if height >= 28 else 2
 
 
@@ -1634,6 +1611,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     navigation["full_mail"] = None
     navigation.update(tab_strip_visible=bool(rows_high), tab_body_visible=rows_high >= 3)
     navigation.pop("box", None)
+    navigation.pop("log_box", None)
     if not rows_high:
         navigation.pop("full_result", None)
         return [], []
@@ -1680,7 +1658,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     from panel_view import attention_items
     attention = attention_items(report, unicode) if attention is None else attention
     tabs = [tab for tab in TABS if tab[0] != "debate" or debates(report)]
-    active = navigation.get("tab") if navigation.get("tab") in dict(tabs) else "detail"
+    active = navigation.get("tab") if navigation.get("tab") in dict(tabs) else "log"
     navigation["tab"] = active
     if active == "detail" and rows_high >= 3 and previewed and previewed.get("role") == "main":
         from panel_messages import main_mail
@@ -1710,13 +1688,15 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     if active == "debate":
         seen[shown_main] = digest
     needed = len(needs_main(report))
-    marks = {"messages": (" %s" % needed + ("+" if room.get("pending_messages_truncated") else "")) if needed else "", "debate": " %s" % len(debates(report)),
+    log_rows = session_log(report, width, capacity, unicode, navigation) if active == "log" and not strip_only else []
+    log_offset = int(navigation.get("log_offset", 0)) if log_rows else 0
+    marks = {"log": (" ↑%s" if unicode else " ^%s") % log_offset if log_offset else "", "messages": (" %s" % needed + ("+" if room.get("pending_messages_truncated") else "")) if needed else "", "debate": " %s" % len(debates(report)),
              "past": " %s" % len(past), "needs": " %s" % len(attention)}
     navigation["visible_tabs"] = [key for key, unused in tabs]
-    abbreviations = {"detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "past": "Past", "needs": "Attn"}
+    abbreviations = {"log": "Log", "detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "past": "Past", "needs": "Attn"}
     for short in (0, 1, 2):
         gap = " " if short == 2 else "  "
-        tiny = {"detail": "D", "plan": "P", "debate": "B", "messages": "M", "past": "H", "needs": "A"}
+        tiny = {"log": "L", "detail": "D", "plan": "P", "debate": "B", "messages": "M", "past": "H", "needs": "A"}
         texts = [(("[%s]") if key == active else "%s") % (
             (name if short == 0 else abbreviations[key] if short == 1 else tiny[key]) +
             marks.get(key, ""))
@@ -1773,6 +1753,9 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 first = min(scrolled.get("detail", 0), max(0, len(plan) - capacity))
                 scrolled_now["detail"] = first
                 rows = [(text, target, target == navigation.get("plan_pick")) for text, target in plan[first:first + capacity]]
+            elif active == "log":
+                rows = [(text, None, False, (actor, style)) for text, actor, style in log_rows] or \
+                       [("No session events recorded yet", None, False)]
             elif active == "debate":
                 rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
             elif active == "past":
@@ -1784,23 +1767,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 rows = summary + messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
             return rows, first, plain
 
-        fitting = height is not None and height >= 28 and capacity >= 3
-        # Measuring must not consume a reader's reveal or change its scroll before the fitted page renders.
-        if fitting:
-            from copy import deepcopy
-        rows, first, plain = body_rows(capacity, deepcopy(navigation) if fitting else navigation)
+        rows, first, plain = body_rows(capacity, navigation)
         navigation["dock_content_rows"] = len(rows)
-        if fitting:
-            sizes = navigation.setdefault("dock_sizes", {})
-            key = active
-            count, fitted = sizes.get(key, (len(rows), min(capacity, max(3, len(rows)))))
-            if abs(len(rows) - count) >= 2:
-                count, fitted = len(rows), min(capacity, max(3, len(rows)))
-            sizes[key] = (count, fitted)
-            if fitted != capacity:
-                capacity = min(capacity, fitted)
-                rows_high = capacity + 2
-            rows, first, plain = body_rows(capacity, navigation)
         previous_target = None
         for n in range(capacity):
             row = rows[n] if n < len(rows) else ("", None, False)
@@ -1831,6 +1799,9 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                     if ended_call:
                         tag = execution_tag(ended_call, unicode)
                         line = line.replace(tag, paint(tag, call_tone(ended_call), color=color, colors=colors, light=light), 1)
+            elif active == "log" and len(row) > 3:
+                actor, style_key = row[3]
+                line = line.replace(actor, paint(actor, style_key, color=color, colors=colors, light=light), 1)
             elif active == "needs" and len(row) > 3:
                 item = next((item for item in attention if item["row_id"] == row[3]), None)
                 if item:
@@ -1845,6 +1816,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
         lines.append(paint(box_edge("", width, unicode, "bottom"), style, color=color, colors=colors, light=light))
         navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
+        if log_rows:
+            navigation["log_box"] = {"y1": top + 1, "y2": top + capacity}
     navigation["band_offsets"] = scrolled_now
     offsets[offset_key] = scrolled_now.get("detail", 0)
     if not unicode:
@@ -1852,7 +1825,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     return lines, hits
 
 
-TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("past", "Past"),
+TABS = (("log", "Log"), ("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("past", "Past"),
         ("needs", "Attention"))
 
 
@@ -2138,7 +2111,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                       and member.get("state") in {"starting", "working", "verifying"}
                       and cancel_owner.get("participant") and cancel_owner.get("attempt")
                       and member.get("parent") == cancel_owner.get("participant"))
-    mail = bool(navigation.get("full_mail") and navigation.get("tab", "detail") == "detail"
+    mail = bool(navigation.get("full_mail") and navigation.get("tab", "log") == "detail"
                 and navigation.get("tab_body_visible") and not navigation.get("detail"))
     mail_hint = ("f Open right" if managed else "f Full text") if mail else ""
     message_call = tabs and navigation.get("tab") == "messages" and navigation.get("message_has_call")

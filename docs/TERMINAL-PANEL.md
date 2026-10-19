@@ -22,7 +22,7 @@ The sidebar reads OMS state; it does not replace the providers' native conversat
 
 1. Run `oms` in a terminal. The control window is the inbox; the panel starts at most one live main, using Claude by default. Pi is the explicit alternative (`OMS_PANEL_MAIN=pi` or the Pi start key).
 2. The main window keeps the board on the left whenever the window is wide enough (above the CLI only when it is too narrow); the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
-3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The bottom box contains Detail, Plan, Messages, Past and Attention tabs (Past and Attention stay even when empty), plus Debate while a debate exists. The pinned **Needs you** attention strip stays above activity when the inbox has items.
+3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The bottom box contains Log, Detail, Plan, Messages, Past and Attention tabs (Past and Attention stay even when empty), plus Debate while a debate exists. The pinned **Needs you** attention strip stays above activity when the inbox has items.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
 5. `Tab` cycles visible tabs; arrows move within the current surface; Enter opens or expands. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
 6. At a main's exit prompt, `r` resumes or restarts in that pane and Enter closes the window. `F9` switches between chat and board; `F5` opens the control window, and from that window returns to the previous one; `F12` shows panel-wide keys.
@@ -190,9 +190,9 @@ already stores it.
 
 When the window has room, the board stays on the left, with the native
 conversation beside it and a right-side reader for selected calls and results.
-The board's bottom dock has Detail, Plan, Messages, Past and Attention tabs,
+The board's bottom dock has Log, Detail, Plan, Messages, Past and Attention tabs,
 plus Debate while a debate exists. Needs you is an attention strip above activity. The
-session log sits below the activity tree when the layout has enough height.
+dock opens on Log (the recorded session events) and takes every row the activity tree leaves.
 
 ### Keys
 
@@ -217,7 +217,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `a` / `w` / `c` | Ask advisor / open selected worker worktree / request selected call cancellation | — |
 | `k` / `u` | Capacity / refresh | — |
 | `m` | Cycle Work / Overview / Focus in a managed panel | — |
-| `[` / `]` / `o` | `[` / `]` scroll the session log older / newer when no dock tab has focus; wheel scrolls over the log | Previous / next section / outline |
+| `[` / `]` / `o` | `[` / `]` scroll the Log tab older / newer while it is active; the wheel scrolls over its body | Previous / next section / outline |
 | `/` | — | Search result text |
 | `z` | — | Zoom the tmux reader pane when width is under 120 columns or it is already zoomed |
 | `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader |
@@ -708,13 +708,13 @@ selected seat must complete to report council success; failed seats remain
 visible and the owner still decides the outcome. All seats are read-only. There
 is no model fallback or additional synthesis-model call.
 
-The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
+The board's bottom is one box whose top edge is a tab strip: Log, Detail, Plan,
 Messages, Past and Attention, which stay even when empty, plus Debate while a debate exists. The selected tab is bracketed; a `•` after Debate marks a
 debate running or finished since the tab was last opened, a number after
 Messages counts the unread mail for live participants and one after Past counts its calls. A click on a tab name or
 Tab (through the visible tabs in that order, then around) switches; a tab never changes
 by itself, and the box stays after Esc. The box is reserved before the upper
-layout is drawn, with spare padding above it. It persists when empty or dismissed.
+layout is drawn, and it takes every row the tree and warnings leave. It persists when empty or dismissed.
 On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
 as calls come and go. Physically short terminals adapt the readable body, strip,
 or tree fallback to available space. The tabs stay clickable when only the strip fits.
@@ -968,7 +968,7 @@ retain the existing control-menu chat/result selection.
 The board shows one live main per panel. In graph view its order is the header
 and legend, the wrapping Goal box, attention strip, judges (reviewer, verifier,
 security-auditor, critic, advisor and architect), a dashed MAIN card, writer
-calls below the main, the session log and footer. The tree groups calls under
+calls below the main, the dock (opening on the session log) and footer. The tree groups calls under
 their recorded role and parent. Calls appear as one-line rows; selecting one
 expands it into a dashed card. Status tags are bracketed and role colours
 distinguish judges, the main and writers. A finished write call awaiting patch
@@ -1071,7 +1071,7 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-The bottom box has Detail, Plan, Messages, Past and Attention tabs, which stay even when empty,
+The bottom box has Log, Detail, Plan, Messages, Past and Attention tabs, which stay even when empty,
 plus Debate while a debate exists; the Messages tab is a
 filtered room log. A main without an advisor or reviewer shows one dim
 `◇ Advisors: none active · a asks one` row above its card. The pinned usage line
@@ -1097,7 +1097,7 @@ the `--release-main` proof holds (expired heartbeat, host and native process gon
 an unverifiable main still refuses the start. The control window's board shows the room's live main. PageUp/PageDown scroll the detail
 when one is shown, otherwise every call band by one page. Graphs of different
 rooms are never merged, and `o Rooms` in the control window switches rooms.
-The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is ignored, and a target that does not name a participant in the current room is not applied. Changes reach every board on refresh, and entering a window does not reset the selection. At heights of 28 rows or more, the dock gets the rows its selected tab needs up to the height-band cap, and the session log uses only rows needed for retained events, leaving spare rows blank between the activity tree and log; it scrolls with the wheel or `[` / `]` when no dock tab has focus. The dock keeps its height until its content changes by at least two rows. A finished goal banner names `superseded` (instant) and `completed-external` (which reruns acceptance, about 9 minutes), with the `oms agent-plan --repo . retire --check` and `retire --apply` command forms; the check prints the SHA-256 CAS token required by apply. Narrow banners retain the completion ratio.
+The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is ignored, and a target that does not name a participant in the current room is not applied. Changes reach every board on refresh, and entering a window does not reset the selection. The dock opens on the Log tab unless a tab was chosen or stored. At heights of 28 rows or more, it reserves at least its height-band body (12, 8 or 5 rows) and takes every row left under the activity tree and warnings, with no blank padding. The Log tab lists the recorded events (one line says so when there are none); the strip shows how many events it is scrolled past, and `[` / `]` or the wheel scroll it. A finished goal banner names `superseded` (instant) and `completed-external` (which reruns acceptance, about 9 minutes), with the `oms agent-plan --repo . retire --check` and `retire --apply` command forms; the check prints the SHA-256 CAS token required by apply. Narrow banners retain the completion ratio.
 Terminals attached to the same panel session share its current window, so
 navigating from one client also moves the other. The wheel scrolls only the band or detail under the
 pointer.
@@ -1129,8 +1129,8 @@ patch. Outside tmux the board shows the path.
 The board is an overview above and a detail area below. Cards keep only the
 rows their content needs (an unrecorded location stays in the detail), and a
 provider without a reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where model-use data exists). On a
-board of 24 rows or more, the bottom Detail box is reserved before the upper
-layout is sized, so blank spare rows stay above it. When the main preview is
+board of 24 rows or more, the bottom dock is reserved before the upper
+layout is sized and then grows to the rows left under the tree. When the main preview is
 automatic, it is marked `auto` and does not replace a chosen preview. Esc
 dismisses the preview while preserving the box. Choosing a block replaces the
 Detail content without resizing the reserved box; it shows the selected content,

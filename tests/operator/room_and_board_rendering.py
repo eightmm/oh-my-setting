@@ -281,7 +281,7 @@ from room_view import main_names, nodes
 twin_names = main_names(nodes(twin))
 assert twin_names["twin-main-9f3c"] == "Opus 5.5 #9f3c" and twin_names["flow-other"] == "Opus 5.5", twin_names
 twin_detail = render(twin, "codex", 157, 40, view="graph", navigation={"selected": ("result", "foreign-child"),
-    "preview": {"target": ("result", "foreign-child"), "report": {}}})
+    "tab": "detail", "preview": {"target": ("result", "foreign-child"), "report": {}}})
 assert "MAIN Opus 5.5" in twin_detail and "ONLY OTHER OWNER" in twin_detail, twin_detail
 # Wheel input scrolls only the band under the pointer: the folded call tree, not the detail box.
 crowded = deepcopy(flow)
@@ -289,7 +289,7 @@ crowded["room"]["participants"] += [{"participant": "extra-%s" % n, "role": "wor
     "joined": True, "parent": "flow-attempt", "label": "EXTRA WORKER %s" % n} for n in range(3)]
 crowded["attempts"]["active_recent"] += [{"attempt_id": "extra-%s" % n, "state": "working", "panel": {
     "room_id": "flow-room", "room_participant": "extra-%s" % n, "role": "worker"}} for n in range(3)]
-nav = {}
+nav = {"tab": "detail"}
 render(crowded, "codex", 110, 22, view="graph", main_attempt="flow-attempt", navigation=nav)
 lower = next(b for b in nav["bands"] if b["name"] == "calls")
 assert "more workers" in render(crowded, "codex", 110, 22, view="graph", main_attempt="flow-attempt", navigation=nav)
@@ -308,11 +308,11 @@ for unused in range(2):
 mailed = deepcopy(flow)
 mailed["room"]["messages"] = [{"sender": "advisor", "targets": ["flow-main"], "text": "MAIL FOR MAIN"}]
 mail_before = json.dumps(mailed, sort_keys=True)
-detail_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
+detail_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
 picture = render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=detail_nav)
 assert "[Detail]" in picture and "MAIN Sol 6" in picture and "Team:" not in picture, picture
 mail_last = render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt",
-                   navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 99}})
+                   navigation={"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 99}})
 assert "MAIL FOR MAIN" not in mail_last and "Workers running:" in mail_last, mail_last
 assert "ADVISOR Astra" in picture and len(picture.splitlines()) <= 30, picture
 assert json.dumps(mailed, sort_keys=True) == mail_before, "reading main detail changed room mail"
@@ -400,7 +400,7 @@ for bad in (dict(patch_row, patch_sha256="0" * 64), dict(patch_row, patch="../ou
         pass
     else:
         raise AssertionError("unverified patch evidence was summarized")
-changed_nav = {"preview": {"target": ("result", "builder"), "report": {"rows": [{"calls": [
+changed_nav = {"tab": "detail", "preview": {"target": ("result", "builder"), "report": {"rows": [{"calls": [
     {"attempt_id": "builder", "patch": patch_row["patch"], "answer": "Patched the parser.", "changes": stat}]}]}}}
 picture = render(flow, "codex", 100, 34, view="graph", main_attempt="flow-attempt", navigation=changed_nav)
 changed_nav["band_offsets"]["detail"] = 99
@@ -1196,7 +1196,7 @@ for current_room in ("old-room", "new-room"):
         except RoomFrameReceived:
             pass
 # Tree calls can open the reader; graph clicks and Enter stay in the board's detail area.
-chosen_nav = {"preview": {"target": ("result", "w1")}, "selected": ("result", "w1"),
+chosen_nav = {"tab": "detail", "preview": {"target": ("result", "w1")}, "selected": ("result", "w1"),
               "hits": [{"y": 3, "x1": 1, "x2": 9, "action": ("result", "w1")}, {"y": 4, "x1": 1, "x2": 9, "action": ("group", "g")}]}
 assert panel_reader.picked(("enter",), chosen_nav) == ("result", "w1") == panel_reader.picked(("click", 2, 3), chosen_nav)
 assert panel_reader.picked(("click", 2, 4), chosen_nav) is None and panel_reader.picked(("down",), chosen_nav) is None
@@ -1484,7 +1484,7 @@ except SystemExit as error:
 else:
     raise AssertionError("an invalid --main was accepted")
 # Each snapshot refreshes an open preview; another room resets the view.
-kept_nav = {"room_id": "flow-room", "preview": {"target": ("result", "builder"), "report": {}}}
+kept_nav = {"room_id": "flow-room", "tab": "detail", "preview": {"target": ("result", "builder"), "report": {}}}
 assert panel.refreshed_navigation(kept_nav, flow)["preview"]["refresh"] is True
 assert "preview" not in panel.refreshed_navigation(dict(kept_nav, room_id="other"), flow)
 # The bottom box is one panel-session state: a tab, target or scroll changed on one board reaches the others.
@@ -1570,11 +1570,11 @@ for view_name in ("graph", "tree"):
         launched = render(flow, "codex", 120, 24, view="graph", main_attempt="flow-attempt",
                           navigation={"control_window": control}, managed=True).splitlines()[-1]
         assert "F5 Control" not in launched and launched.endswith("F12 Keys"), launched
-    open_nav = {"preview": {"target": ("chat", "flow-main")}}
+    open_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main")}}
     assert "Esc Close" in render(flow, "codex", 157, 24, view=view_name, main_attempt="flow-attempt",
                                  navigation=open_nav, managed=True).splitlines()[-1]
     for rows_high in (24, 30):
-        open_nav = {"preview": {"target": ("chat", "flow-main")}}
+        open_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main")}}
         open_board = render(flow, "codex", 157, rows_high, view=view_name, main_attempt="flow-attempt",
                             navigation=open_nav, managed=True)
         assert "Esc Close" in open_board.splitlines()[-1], open_board
@@ -1608,26 +1608,26 @@ assert "WORKER Sonnet" not in finished_picture and "Past work" not in finished_p
 lines_of = finished_picture.splitlines()
 assert next(i for i, l in enumerate(lines_of) if "ADVISOR Astra" in l) < next(i for i, l in enumerate(lines_of) if "MAIN Sol 6" in l) \
     < next(i for i, l in enumerate(lines_of) if "WORKER Luna" in l), finished_picture
-ordered = render(flow, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation={"preview": {
+ordered = render(flow, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation={"tab": "detail", "preview": {
     "target": ("result", "builder"), "report": {"rows": [{"outcome": "accepted", "calls": [{"answer": "DONE TEXT"}]}]}}})
 assert "DONE TEXT" not in ordered and "Main decision: admitted" not in ordered, ordered
-auto_nav = {}
+auto_nav = {"tab": "detail"}
 auto_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation=auto_nav)
 assert "[Detail]" in auto_board and "MAIN Sol 6" in auto_board.splitlines()[auto_nav["box"]["y1"]], auto_board
-roomy_nav = {}
+roomy_nav = {"tab": "detail"}
 roomy = render(flow, "codex", 100, 60, view="graph", main_attempt="flow-attempt", navigation=roomy_nav)
 roomy_lines = roomy.splitlines()
 detail_top = next(i for i, line in enumerate(roomy_lines) if "[Detail]" in line)
 detail_end = next(i for i in range(detail_top + 1, len(roomy_lines)) if roomy_lines[i].startswith("╰"))
-# The board fills the pane with pinned key hints and a dock fitted to its rendered content.
-assert detail_end - detail_top - 1 == min(dock_body_rows(60), max(3, roomy_nav["dock_content_rows"])) and len(roomy_lines) == 60, roomy
+# The board fills the pane with pinned key hints and a dock that takes every row the tree leaves.
+assert detail_end - detail_top - 1 >= dock_body_rows(60) and len(roomy_lines) == 60, roomy
 assert not any(line.strip() for line in roomy_lines[detail_end + 1:-3]) or roomy_lines[detail_end + 1].strip(), roomy
-closed_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
+closed_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation={"tab": "detail", "dismissed": True})
 assert "Latest statement:" not in closed_board and "No call selected" in closed_board, closed_board
 # A board too short for the full overview still keeps a feasible box, auto or dismissed, and its warning row above it.
 for rows_high in (26, 28, 30, 34, 60, 90):
     kept = {}
-    for label, nav in (("auto", {}), ("closed", {"dismissed": True})):
+    for label, nav in (("auto", {"tab": "detail"}), ("closed", {"tab": "detail", "dismissed": True})):
         shown = render(flow, "codex", 100, rows_high, view="graph", main_attempt="flow-attempt", navigation=nav)
         kept[label] = (nav["box"]["y1"], nav["box"]["y2"])
         lines_shown = shown.splitlines()
@@ -1665,17 +1665,17 @@ for variant in ("plain", "unlinked"):
                     text = render(report, "codex", 157, rows_high, view="graph", navigation=nav, main_attempt="a1")
                     assert len(text.splitlines()) == rows_high, text
                     assert ("no known main" in text) == (variant == "unlinked"), text
-                    assert nav["box"]["y2"] - nav["box"]["y1"] - 1 == min(dock_body_rows(rows_high), max(3, nav["dock_content_rows"])), nav
+                    assert nav["box"]["y2"] - nav["box"]["y1"] - 1 >= min(dock_body_rows(rows_high), max(3, nav["dock_content_rows"])), nav
                     kept.add((nav["box"]["y1"], nav["box"]["y2"]))
         assert all(y2 == rows_high - 2 and y2 - y1 + 1 >= 5 for y1, y2 in kept), (variant, rows_high, kept)
 # A short board keeps the compact main card and one row per call, so its box takes every row they leave;
 # neither size keeps the previous box, and open-in-full follows the box this frame draws.
 for rows_high in (19, 16):
-    nav = {"preview": {"target": ("result", "builder"), "report": {}}, "box": {"y1": 1, "y2": 2}, "full_result": ("result", "builder")}
+    nav = {"tab": "detail", "preview": {"target": ("result", "builder"), "report": {}}, "box": {"y1": 1, "y2": 2}, "full_result": ("result", "builder")}
     shown = render(flow, "codex", 100, rows_high, view="graph", main_attempt="flow-attempt", navigation=nav)
     assert nav["surface"] == "graph" and nav["tab_strip_visible"] and len(shown.splitlines()) == rows_high, nav
     strip_y = next(h["y"] for h in nav["hits"] if h["action"] == ("tab", "detail"))
-    assert shown.splitlines()[strip_y - 1].startswith("╭─ [Detail]  Plan"), shown
+    assert shown.splitlines()[strip_y - 1].startswith("╭─ Log  [Detail]  Plan"), shown
     if nav.get("box"):
         assert nav["box"]["y2"] == rows_high - 2 and nav.get("full_result") == ("result", "builder"), nav
     else:
@@ -1936,7 +1936,7 @@ def header_window_fixture(local_values, reader=False, fail_capture=False,
     with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
             patch.object(panel.subprocess, "run", side_effect=fake_tmux), \
             patch.object(panel.panel_reader, "find", return_value="%9" if reader else None):
-        navigation = {"preview": {"target": ("result", "header-main")},
+        navigation = {"tab": "detail", "preview": {"target": ("result", "header-main")},
                       "reader_target": reader_target}
         panel.update_context_header(header_state, "header-main", Path("repo"), navigation)
         panel.update_context_header(header_state, "header-main", Path("repo"), navigation)
@@ -2016,7 +2016,7 @@ same_model["room"]["participants"].append({"participant": "sol-worker", "role": 
                                            "joined": True, "parent": "flow-attempt", "label": "Same model worker"})
 same_model["room"]["messages"] = [{"sender": "sol-worker", "targets": ["flow-main"], "text": "Call exit=1; parent acceptance pending."}]
 picture = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
-                 navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 99}})
+                 navigation={"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 99}})
 assert "From Sol 6 worker:" not in picture and "Mail" in picture, picture
 sent_board = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                     navigation={"dismissed": True, "tab": "messages"})
@@ -2121,7 +2121,7 @@ for surface in ("graph", "tree"):
     empty_mail = deepcopy(mail_flow)
     empty_mail["room"]["messages"] = [mail_flow["room"]["messages"][1]]
     mail_nav = {"tab": "detail", "full_mail": ("mail", "flow-main"),
-                "preview": {"target": ("chat", "flow-main"), "report": {}}}
+                "tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
     empty_screen = render(empty_mail, "codex", 120, 44, view=surface, navigation=mail_nav, managed=True, unicode=False)
     assert not mail_nav.get("full_mail") and "f Open right" not in empty_screen and choose(("f",), mail_nav) is None
 mail_page = panel.panel_messages.mail_page(mail_flow["room"], "flow-main", 120)
@@ -2224,7 +2224,7 @@ with patch.object(panel, "BackgroundRead", ImmediateRead), \
         patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((120, 44))), \
         patch.object(panel.sys, "stdout", io.StringIO()), \
         patch.dict(os.environ, {"TMUX_PANE": "%1"}, clear=True), \
-        patch("panel_input.TerminalInput", return_value=BatchInput([[("f",)], [("eof",)]])):
+        patch("panel_input.TerminalInput", return_value=BatchInput([[("tab",)], [("f",)], [("eof",)]])):
     assert panel.watch(project, "codex", view="graph", no_animation=True) == 0
 opened.assert_called_once()
 assert opened.call_args.args[0] == "%1" and shlex.split(opened.call_args.args[1])[-4:] == [
@@ -2273,7 +2273,7 @@ assert json.dumps(recorded, sort_keys=True) == kept
 assert TerminalInput().decode(b"f") == [("f",)]
 full_recorded = deepcopy(recorded)
 full_recorded["rows"][0]["calls"][0]["answer"] = "\n".join("full line %s" % i for i in range(80)) + "\nFINAL RETAINED LINE"
-full_nav = {"selected": ("result", "builder"), "preview": {"target": ("result", "builder"), "report": full_recorded}}
+full_nav = {"selected": ("result", "builder"), "tab": "detail", "preview": {"target": ("result", "builder"), "report": full_recorded}}
 preview_screen = render(done_flow, "codex", 110, 40, view="graph", navigation=full_nav, managed=True)
 assert "FINAL RETAINED LINE" not in preview_screen and "Enter Open right" in preview_screen, preview_screen
 full_action = choose(("f",), full_nav)
@@ -2283,7 +2283,7 @@ for surface in ("graph", "tree"):
     assert choose(("f",), {"surface": surface, "items": [debate_target], "full_result": debate_target,
                            "preview": {"target": debate_target}}) == debate_target
 tree_full_nav = {"selected": ("result", "builder"),
-                 "preview": {"target": ("result", "builder"), "report": full_recorded}}
+                 "tab": "detail", "preview": {"target": ("result", "builder"), "report": full_recorded}}
 tree_preview = render(done_flow, "codex", 110, 40, view="tree", navigation=tree_full_nav)
 assert tree_full_nav["tab_body_visible"] and "f Full result" in tree_preview, tree_preview
 assert "FINAL RETAINED LINE" not in tree_preview, tree_preview
@@ -2327,7 +2327,7 @@ def with_calls(report, count):
 short_detail_cases = []
 short_flows = (done_flow, with_calls(done_flow, 1))
 for columns, rows, short_flow in [(c, r, f) for c in (76, 100) for r in range(16, 28) for f in short_flows]:
-    nav = {"preview": {"target": ("result", "builder"), "report": full_recorded}, "band_offsets": {"detail": 5}}
+    nav = {"tab": "detail", "preview": {"target": ("result", "builder"), "report": full_recorded}, "band_offsets": {"detail": 5}}
     screen = render(short_flow, "codex", columns, rows, view="graph", navigation=nav)
     band = next((b for b in nav.get("bands", []) if b["name"] == "detail"), None)
     if band and band["y2"] - band["y1"] == 2:
@@ -2352,7 +2352,7 @@ long_dock_flow = deepcopy(done_flow)
 next(m for m in long_dock_flow["room"]["participants"] if m["participant"] == "builder")["joined_at"] = "2026-10-14T00:00:00Z"
 for columns, rows in ((76, 24), (100, 30), (160, 42)):
     for ascii_only in (False, True):
-        nav = {"preview": {"target": ("result", "builder"), "report": long_dock_recorded}}
+        nav = {"tab": "detail", "preview": {"target": ("result", "builder"), "report": long_dock_recorded}}
         screen = render(long_dock_flow, "codex", columns, rows, view="graph", unicode=not ascii_only, navigation=nav)
         assert len(screen.splitlines()) <= rows and all(display_width(line) <= columns for line in screen.splitlines())
         band = next(b for b in nav["bands"] if b["name"] == "detail")
@@ -2442,13 +2442,13 @@ claim_detail = graph_text.detail(dict(main, title="Native task not recorded"), {
 assert "Task: Current claim" in claim_detail, claim_detail
 declared_board["plan"] = deepcopy(counted.get("plan", {}))
 working_picture = render(working_board, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
-                 navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}})
+                 navigation={"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}})
 assert re.search(r"Now: Fixing the parser \(\d\d:\d\d\) \(stale\)", working_picture), working_picture
 # A board too small for the box keeps the one-row tab strip: its names switch tabs, and no hint names a closed box.
 for glyphs in (True, False):
     strips = 0
     for rows_high, small_report in ((rows_high, report) for rows_high in range(16, 33) for report in (counted, with_calls(counted, 3))):
-        small_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
+        small_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
         small = render(small_report, "codex", 80, rows_high, view="graph", main_attempt="flow-attempt", navigation=small_nav, unicode=glyphs)
         tab_hits = [h for h in small_nav["hits"] if h["action"][0] == "tab"]
         tab_hits = [h for h in tab_hits if h["y"] == max(t["y"] for t in tab_hits)]
@@ -2460,7 +2460,7 @@ for glyphs in (True, False):
         assert [h["action"][1] for h in tab_hits] == [key for key, _ in graph_text.TABS if key != "debate"], (rows_high, tab_hits)
         for h in tab_hits:
             assert small_rows[strip_y - 1][h["x1"] - 1:h["x2"]].strip("[] ").startswith(
-                {"detail": "Detail", "plan": "Plan", "debate": "Debate", "messages": "Messages", "past": "Past", "needs": "Attention"}[h["action"][1]]), small
+                {"log": "Log", "detail": "Detail", "plan": "Plan", "debate": "Debate", "messages": "Messages", "past": "Past", "needs": "Attention"}[h["action"][1]]), small
         if not small_rows[strip_y].startswith(("│", "|")):
             strips += 1
             assert "Esc Close" not in small_rows[-1] and "f Full" not in small_rows[-1] and (glyphs or not any(c in small for c in "╭╮╰╯│─")), small
@@ -2983,7 +2983,7 @@ for team_report, expected_team in ((flow, "5 active"),
                                    (closed_failure, "5 active · 13 finished · 1 unrecorded"),
                                    (admission_team, "4 active · 1 awaiting decision"),
                                    (empty_team, "no calls yet")):
-    detail_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
+    detail_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
     detail_team = graph_text.render_graph(team_report, 127, 120, navigation=detail_nav).splitlines()
     team_card = graph_text.render_graph(team_report, 127, 50, navigation={"dismissed": True})
     member = next(m for m in graph_text.nodes(team_report) if m["participant"] == "flow-main")
@@ -3187,7 +3187,7 @@ for columns, rows_high, surface in ((36, 50, "tree"), (50, 50, "tree"), (80, 50,
     if (columns, rows_high) == (127, 90):
         upper_end = max(b["y2"] for b in nav["bands"] if b["name"] != "detail")
         assert upper_end < nav["box"]["y1"] and nav["box"]["y2"] == rows_high - 2, shown
-        assert nav["box"]["y2"] - nav["box"]["y1"] - 1 == min(dock_body_rows(rows_high), max(3, nav["dock_content_rows"])), nav
+        assert nav["box"]["y2"] - nav["box"]["y1"] - 1 >= min(dock_body_rows(rows_high), max(3, nav["dock_content_rows"])), nav
 many_needs = deepcopy(geometry_flow)
 for attempt in many_needs["attempts"]["active_recent"]:
     if attempt["panel"]["role"] != "main":
@@ -4294,7 +4294,7 @@ for key, expected in (("k", "k"), ("u", "9")):
     assert "detail" not in reader_nav and reader_nav["offset"] == 0
 
 # A rendered graph preview: a click on plain Detail text repaints nothing; a card click and the wheel still do.
-graph_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
+graph_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
 render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=graph_nav)
 text_hit = next(h for h in graph_nav["hits"] if h.get("passive"))
 card_hit = next(h for h in graph_nav["hits"] if h["action"] == ("chat", "flow-main") and not h.get("passive") and h.get("preview"))
@@ -4510,7 +4510,7 @@ with patch.object(panel, "menu_input", return_value=DockInput([[('x',)]])), \
     assert panel.read_choice(Path("."), "codex", "ready", "auto", False, dock_nav, {}) == "x"
 # Empty and blank Detail body rows have no hit, but still must not trigger a redraw.
 empty_graph = {"room": {"id": "empty-graph", "participants": []}}
-empty_graph_nav = {"dismissed": True}
+empty_graph_nav = {"tab": "detail", "dismissed": True}
 empty_graph_frame = render_graph(empty_graph, 100, 30, navigation=empty_graph_nav)
 hint_graph = deepcopy(flow)
 hint_graph["room"]["participants"] = [p for p in hint_graph["room"]["participants"] if p.get("role") == "main"]
@@ -4579,7 +4579,7 @@ assert panel.refreshed_navigation(dict(held), transient, None) == held
 assert panel.refreshed_navigation(dict(held), {"room": {"id": "flow-room"}}, None) == held
 assert panel.refreshed_navigation(dict(held), {"room": {"id": "other-room"}}, None) == {"collapsed": set(), "offset": 0}
 # An open preview re-reads evidence only when the room moved.
-previewed_nav = {"room_id": "flow-room", "preview": {"target": ("result", "c1"), "report": {}}}
+previewed_nav = {"room_id": "flow-room", "tab": "detail", "preview": {"target": ("result", "c1"), "report": {}}}
 moved = {"room": {"id": "flow-room", "message_count": 1}}
 assert panel.refreshed_navigation(previewed_nav, moved, None)["preview"].pop("refresh") is True
 assert "refresh" not in panel.refreshed_navigation(previewed_nav, moved, None)["preview"]

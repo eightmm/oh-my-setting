@@ -465,16 +465,16 @@ for width, height in ((40, 90), (60, 80), (120, 20), (127, 50)):
     assert any(hit["action"] == ("tab", "messages") for hit in nav["hits"]), (width, height)
     dock_body = 12 if height >= 56 else 8 if height >= 40 else 5 if height >= 28 else 2
     expected_dock = (min(dock_body, max(3, nav["dock_content_rows"])) if height >= 28 else dock_body) + 2
-    assert nav["box"]["y2"] - nav["box"]["y1"] + 1 == expected_dock, (width, height, nav["box"])
+    assert nav["box"]["y2"] - nav["box"]["y1"] + 1 >= expected_dock, (width, height, nav["box"])
 
-# Every rendered tab places the session log's bottom edge directly beside the strip.
+# Every rendered tab keeps the dock on the bottom rows; the Log tab alone owns the wheel's log range.
 for surface in ("graph", "tree"):
     for tab, _ in room_view.TABS:
         for height in (45, 60):
             nav = {"selected": ("chat", "m2"), "tab": tab}
             text = render(msg_report, "codex", 127, height, view=surface, navigation=nav, main_attempt="a2")
-            assert nav["tab"] == tab and nav["log_box"]["y2"] + 1 == nav["box"]["y1"], (surface, tab, height, text)
-            assert text.splitlines()[nav["log_box"]["y2"] - 1].startswith("╰"), (surface, tab, height, text)
+            assert nav["tab"] == tab and bool(nav.get("log_box")) == (tab == "log"), (surface, tab, height, text)
+            assert "Session log" not in text, (surface, tab, height, text)
             assert nav["box"]["y2"] == height - (2 if surface == "graph" else 1), (surface, tab, height, nav)
             previous = dict(nav["box"])
             render(msg_report, "codex", 127, height, view=surface, navigation=nav, main_attempt="a2")
@@ -484,15 +484,12 @@ narrow_nav = {"selected": ("chat", "m2"), "tab": "plan"}
 render(msg_report, "codex", 127, 60, view="tree", navigation=narrow_nav, main_attempt="a2")
 render(msg_report, "codex", 19, 60, view="tree", navigation=narrow_nav, main_attempt="a2")
 assert "box" not in narrow_nav and not narrow_nav.get("tab_strip_visible"), narrow_nav
-# One-row changes accumulate against the last fitted content count, including across tab switches.
+# The dock fills the rows it is given, whatever its content.
 fit_nav = {"tab": "detail"}
-for count, expected in ((3, 3), (4, 3), (5, 5), (4, 5), (3, 3)):
+for count in (3, 5, 4):
     with patch.object(room_view, "summary_card", return_value=(["row"] * count, {})):
-        fitted, _ = room_view.tab_box(msg_report, 127, 14, fit_nav, height=60)
-    assert len(fitted) - 2 == expected, (count, expected, fitted)
-    fit_nav["tab"] = "plan"
-    room_view.tab_box(msg_report, 127, 14, fit_nav, height=60)
-    fit_nav["tab"] = "detail"
+        filled, _ = room_view.tab_box(msg_report, 127, 14, fit_nav, height=60)
+    assert len(filled) == 14, (count, filled)
 # Measurement cannot consume the newest message's reveal before the fitted page draws it.
 new_message_report = deepcopy(msg_report)
 new_message_report["room"]["messages"] = msg_log[:1]
@@ -500,14 +497,14 @@ new_message_nav = {"tab": "messages", "messages_view": {"filter": 2, "selected":
 first_message_box, _ = room_view.tab_box(new_message_report, 127, 14, new_message_nav, height=60)
 new_message_report["room"]["messages"].append(msg_log[1])
 next_message_box, _ = room_view.tab_box(new_message_report, 127, 14, new_message_nav, height=60)
-assert len(first_message_box) == len(next_message_box) == 5 and "line 1" in "\n".join(next_message_box), next_message_box
-# Empty logs leave plain blank rows before the dock and never create a log box.
+assert len(first_message_box) == len(next_message_box) == 14 and "line 1" in "\n".join(next_message_box), next_message_box
+# An empty log says so in one line and never creates a log range.
 empty_log_report = deepcopy(msg_report)
 empty_log_report["room"]["messages"] = []
 for surface in ("graph", "tree"):
-    empty_nav = {"tab": "plan"}
+    empty_nav = {}
     empty_text = render(empty_log_report, "codex", 127, 60, view=surface, navigation=empty_nav, main_attempt="a2")
-    assert not empty_nav.get("log_box") and not empty_text.splitlines()[empty_nav["box"]["y1"] - 2].strip(), (surface, empty_text)
+    assert not empty_nav.get("log_box") and empty_nav["tab"] == "log" and empty_text.count("No session events recorded yet") == 1, (surface, empty_text)
 # Opt-in captures use the same canonical report as the layout assertions.
 if os.environ.get("OMS_OPERATOR_CAPTURE_DIR"):
     capture_dir = Path(os.environ["OMS_OPERATOR_CAPTURE_DIR"])
@@ -562,7 +559,7 @@ no_debate["room"]["messages"] = [
     {"id": "worker-mail", "sender": "m1", "recipient": "call", "targets": ["call"], "pending_for": ["call"], "message_kind": "question", "text": "worker only"}]
 no_debate_nav = {"tab": "debate"}
 no_debate_lines, _ = room_view.tab_box(no_debate, 120, 10, no_debate_nav)
-assert "debate" not in no_debate_nav["visible_tabs"] and no_debate_nav["tab"] == "detail", no_debate_nav
+assert "debate" not in no_debate_nav["visible_tabs"] and no_debate_nav["tab"] == "log", no_debate_nav
 assert "Debate" not in no_debate_lines[0] and "Messages 0" not in no_debate_lines[0], no_debate_lines
 no_debate_nav["surface"] = "graph"
 no_debate_nav["tab"] = "plan"
@@ -584,13 +581,13 @@ judgment_badge["room"]["messages"] = [{"id": "judgment-call", "sender": "call", 
 assert len(panel.panel_messages.needs_main(judgment_badge)) == 1
 judgment_body = panel.panel_messages.tab_body(judgment_badge, 100, 8, {})
 assert any("Review passed" in text for text, _, _ in judgment_body), judgment_body
-# Tab cycles Detail > Plan > Debate > Messages and never moves by itself; clicks on a tab name select it.
+# Tab cycles Log > Detail > Plan > Debate > Messages and never moves by itself; clicks on a tab name select it.
 nav, text = board("detail")
 seen = []
-for unused in range(6):
+for unused in range(7):
     assert tab_event(("tab",), nav)
     seen.append(nav["tab"])
-assert seen == ["plan", "debate", "messages", "past", "needs", "detail"], seen
+assert seen == ["plan", "debate", "messages", "past", "needs", "log", "detail"], seen
 nav, text = board("plan")
 render(msg_report, "codex", 80, 60, view="graph", navigation=nav, main_attempt="a2")
 assert nav["tab"] == "plan"
@@ -1162,7 +1159,7 @@ for columns, rows_high in ((42, 24), (50, 50)):
     assert any(hit["action"] == ("task", "t-rev") for hit in last_nav["hits"]), last_picture
     assert last_nav["tab_strip_visible"] and len(last_picture.splitlines()) <= rows_high - 1, last_picture
     if rows_high == 50:
-        assert last_nav["tab_body_visible"] and last_nav["box"]["y2"] - last_nav["box"]["y1"] - 1 == min(dock_body_rows(rows_high), max(3, last_nav["dock_content_rows"])), last_nav
+        assert last_nav["tab_body_visible"] and last_nav["box"]["y2"] - last_nav["box"]["y1"] - 1 >= min(dock_body_rows(rows_high), max(3, last_nav["dock_content_rows"])), last_nav
 use_unicode(True)
 # Tree and graph share tab navigation; a separate detail screen consumes its own keys.
 assert tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
@@ -1320,13 +1317,13 @@ for width, height in ((80, 40), (157, 60), (126, 90)):
                                 assert (detail_band["y1"], detail_band["y2"]) == (y1, y2), (where, detail_band, nav["box"])
                                 strip = {h["action"][1]: h["y"] for h in nav["hits"] if h["action"][0] == "tab"}
                                 assert strip == {key: y1 for key, _ in visible_tabs}, (where, strip)
-                                assert y2 - y1 - 1 == min(dock_body_rows(height), max(3, nav["dock_content_rows"])), (where, nav)
+                                assert y2 - y1 - 1 >= min(dock_body_rows(height), max(3, nav["dock_content_rows"])), (where, nav)
                                 baseline.add((tab, y1, y2))
-    # Each tab fits its content within the cap and retains the bottom edge.
+    # Each tab retains the bottom edge and takes at least the minimum dock.
     for tab, _ in room_view.TABS:
         positions = {(y1, y2) for key, y1, y2 in baseline if key == tab}
-        assert all(y2 == height - 2 and 5 <= y2 - y1 + 1 <= dock_body_rows(height) + 2 for y1, y2 in positions), (width, height, tab, positions)
-# Compact Messages keeps its fixed compact dock at the bottom and readable body.
+        assert all(y2 == height - 2 and 5 <= y2 - y1 + 1 for y1, y2 in positions), (width, height, tab, positions)
+# Compact Messages keeps its dock at the bottom and a readable body.
 compact_docks = set()
 for worker_count in (0, 3):
     for phase in ("working", "done"):
@@ -1339,7 +1336,7 @@ for worker_count in (0, 3):
         compact_docks.add((compact_nav["box"]["y1"], compact_nav["box"]["y2"]))
         assert "Messages: 2 unread for live participants" in compact_text and "line 29" in compact_text, compact_text
         assert len(compact_text.splitlines()) == 24 and all(display_width(line) <= 110 for line in compact_text.splitlines()), compact_text
-assert all((y1, y2) == (19, 22) for y1, y2 in compact_docks), compact_docks
+assert all(y2 == 22 and y2 - y1 + 1 >= 4 for y1, y2 in compact_docks), compact_docks
 # A main with an unanswered question shows "? N open" on its card; the person sees it in "Needs you" from 20 minutes.
 import panel_view as question_view
 import time as question_time
@@ -1381,7 +1378,7 @@ for columns, rows_high in ((157, 61), (110, 30), (80, 24)):
         assert [h["action"][1] for h in strip] == visual_nav["visible_tabs"], strip
         assert "more counsel" in visual or sum(h.get("tree", False) and h["action"][1].startswith("board-advisor") for h in visual_nav["hits"]) == 4, visual
         if rows_high == 61:
-            assert "GOAL END" in visual and "Session log" in visual, visual
+            assert "GOAL END" in visual and "Session log" not in visual and visual_nav["tab"] == "log", visual
             assert visual.count("Recorded check finished") == 1 and "[main Opus 5.5]" in visual, visual
         if rows_high == 24:
             assert "Session log" not in visual and ("GOAL END" in visual or "Goal lines" in visual), visual
@@ -1408,13 +1405,15 @@ for height in (28, 30, 45, 60):
         dense_nav = {"tab": tab, "dismissed": True}
         render_graph(dense_goal, 127, height, navigation=dense_nav, main_attempt="a2")
         assert dense_nav["box"]["y2"] - dense_nav["box"]["y1"] - 1 >= 3, (height, tab, dense_nav)
-# The session log fills all spare board rows and keeps an older view anchored as new events arrive.
+# The Log tab fills the dock and keeps an older view anchored as new events arrive.
 log_board = deepcopy(board_fixture)
 log_board["room"]["messages"] = [dict(board_fixture["room"]["messages"][-1], id="log-%02d" % index,
     text="Session event %02d" % index, ts="2026-10-13T12:00:%02dZ" % index) for index in range(40)]
 log_nav = {"dismissed": True}
 log_tall = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
-assert log_nav["log_box"]["y2"] - log_nav["log_box"]["y1"] + 1 > 7, log_nav
+assert log_nav["tab"] == "log" and "[Log]" in log_tall and "Session log" not in log_tall, log_tall
+assert log_nav["log_box"]["y2"] - log_nav["log_box"]["y1"] + 1 > 12, log_nav
+assert log_nav["log_box"]["y1"] == log_nav["box"]["y1"] + 1 and log_nav["log_box"]["y2"] == log_nav["box"]["y2"] - 1, log_nav
 assert "Session event 39" in log_tall and "Session event 00" not in log_tall, log_tall
 (temporary / "session-log-tall.txt").write_text(log_tall + "\n")
 log_board["room"]["messages"].append(dict(log_board["room"]["messages"][-1], id="log-40",
@@ -1423,7 +1422,7 @@ log_live_board = render_graph(log_board, 120, 61, navigation=log_nav, main_attem
 assert log_nav["log_offset"] == 0 and "Session event 40" in log_live_board and "Session event 05" not in log_live_board, log_live_board
 assert tab_event(("[",), log_nav) and log_nav["log_offset"] == 3
 log_scrolled = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
-assert "Session log / 3 older ^" in log_scrolled and "Session event 37" in log_scrolled and "Session event 40" not in log_scrolled, log_scrolled
+assert "[Log ^3]" in log_scrolled and "Session event 37" in log_scrolled and "Session event 40" not in log_scrolled, log_scrolled
 (temporary / "session-log-scrolled.txt").write_text(log_scrolled + "\n")
 log_board["room"]["messages"].append(dict(log_board["room"]["messages"][-1], id="log-41",
     text="Session event 41", ts="2026-10-13T12:00:19Z"))
@@ -1433,35 +1432,33 @@ box = log_nav["log_box"]
 assert tab_event(("scroll", -2, 20, box["y1"],), log_nav) and log_nav["log_offset"] == 6
 log_nav["log_offset"] = 3
 log_nav["tab"] = "messages"
+assert not tab_event(("[",), log_nav) and log_nav["log_offset"] == 3
 assert tab_event(("scroll", -2, 20, box["y2"]), log_nav) and log_nav["log_offset"] == 5
-assert not tab_event(("scroll", -2, 20, box["y1"] - 1), log_nav) and log_nav["log_offset"] == 5
-log_nav["tab"] = "detail"
+assert not tab_event(("scroll", -2, 20, log_nav["box"]["y1"] - 1), log_nav) and log_nav["log_offset"] == 5
+log_nav["tab"] = "log"
 log_nav["log_offset"] = 3
 assert tab_event(("]",), log_nav) and log_nav["log_offset"] == 0
 log_nav["log_offset"] = 999
 clamped = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
-visible_events = log_nav["log_box"]["y2"] - log_nav["log_box"]["y1"] - 1
+visible_events = log_nav["log_box"]["y2"] - log_nav["log_box"]["y1"] + 1
 assert log_nav["log_offset"] == len(log_board["room"]["messages"]) - visible_events, log_nav
 assert "Session event %02d" % (visible_events - 1) in clamped and "Session event 40" not in clamped, clamped
-# Tall layouts size the dock and log to their content, leaving spare rows between the tree and log.
+# A 157x58 board has no blank gap between the tree and the dock, and the Log tab is first and active by default.
+for surface in ("tree", "graph"):
+    gap_nav = {}
+    gap_screen = render(board_fixture, "codex", 157, 58, view=surface, navigation=gap_nav, main_attempt="a2")
+    gap_lines = gap_screen.splitlines()
+    assert gap_nav["tab"] == "log" and gap_nav["visible_tabs"][0] == "log" and "[Log]" in gap_lines[gap_nav["box"]["y1"] - 1], (surface, gap_screen)
+    assert "Session log" not in gap_screen and gap_nav["box"]["y2"] >= 58 - 3, (surface, gap_nav, gap_screen)
+    blank_run = longest = 0
+    for line in gap_lines[:gap_nav["box"]["y1"] - 1]:
+        blank_run = 0 if line.strip() else blank_run + 1
+        longest = max(longest, blank_run)
+    assert longest <= 2, (surface, longest, gap_screen)
+# A 28-row tree keeps its activity rows; the dock only takes what is left after them.
 fit_board = deepcopy(board_fixture)
 fit_board["room"]["messages"] = [dict(board_fixture["room"]["messages"][-1], id="fit-%02d" % index,
     text="Fit event %02d" % index, ts="2026-10-13T12:00:%02dZ" % index) for index in range(11)]
-for fit_height in (74, 40):
-    fit_nav = {"tab": "detail"}
-    fit_screen = render_graph(fit_board, 157, fit_height, navigation=fit_nav, main_attempt="a2")
-    fit_lines = fit_screen.splitlines()
-    assert fit_nav.get("log_box"), (fit_height, fit_nav, fit_screen)
-    fit_log_rows = fit_nav["log_box"]["y2"] - fit_nav["log_box"]["y1"] + 1
-    fit_detail_rows = fit_nav["box"]["y2"] - fit_nav["box"]["y1"] - 1
-    expected_log_rows = 13 if fit_height == 74 else 7
-    assert fit_detail_rows == 5 and fit_log_rows == expected_log_rows, (fit_height, fit_nav, fit_screen)
-    visible_start = 0 if fit_height == 74 else 6
-    assert all("Fit event %02d" % index in fit_screen for index in range(visible_start, 11)), fit_screen
-    log_top = fit_nav["log_box"]["y1"]
-    assert all(not line.strip() for line in fit_lines[fit_nav["box"]["y2"]:log_top - 1]), fit_screen
-    assert not any(not line.strip() for line in fit_lines[log_top - 1:fit_nav["log_box"]["y2"]]), fit_screen
-# A 28-row tree keeps its activity rows; the log reserve only takes what is left after them.
 for tight_height in (28, 30):
     tight_screen = render(fit_board, "codex", 157, tight_height, view="tree", navigation={"tab": "detail"}, main_attempt="a2")
     assert "MAIN" in tight_screen, (tight_height, tight_screen)
@@ -1504,19 +1501,19 @@ assert "Task: main-task · Main fix" in main_lines and "Now: Implementing dock" 
 assert "Workers running: 1 · Awaiting decision: 1" in main_lines and "Context used: 40%" in main_lines, main_lines
 assert "Land: 123456789 · gate" in main_lines and "Last owner decision: Keep fixed height" in main_lines, main_lines
 assert not any(line.startswith(("Verify:", "Review:", "Main decision:", "Author-reported", "Changes:", "Route:")) for line in main_lines), main_lines
-# Detail keeps the fitted three-row minimum while the right reader owns a call.
+# Detail keeps its three-row minimum while the right reader owns a call.
 reader_call = ("result", "board-worker-0")
 for surface in ("graph", "tree"):
     renderer = render_graph if surface == "graph" else render_tree
-    reader_nav = {"selected": reader_call, "preview": {"target": reader_call, "report": {"rows": []}},
+    reader_nav = {"tab": "detail", "selected": reader_call, "preview": {"target": reader_call, "report": {"rows": []}},
                   "reader_open": True, "reader_target": reader_call}
     same = renderer(board_fixture, 157, 61, navigation=reader_nav, main_attempt="a2")
-    assert reader_nav["tab_strip_visible"] and reader_nav["tab_body_visible"] and reader_nav["box"]["y2"] - reader_nav["box"]["y1"] - 1 == min(dock_body_rows(61), max(3, reader_nav["dock_content_rows"])), (surface, reader_nav)
+    assert reader_nav["tab_strip_visible"] and reader_nav["tab_body_visible"] and reader_nav["box"]["y2"] - reader_nav["box"]["y1"] - 1 >= min(dock_body_rows(61), max(3, reader_nav["dock_content_rows"])), (surface, reader_nav)
     assert [h["action"][1] for h in reader_nav["hits"] if h["action"][0] == "tab" and h["y"] == max(
         t["y"] for t in reader_nav["hits"] if t["action"][0] == "tab")] == reader_nav["visible_tabs"], reader_nav
     reader_nav["reader_target"] = ("result", "board-worker-1")
     different = renderer(board_fixture, 157, 61, navigation=reader_nav, main_attempt="a2")
-    assert reader_nav["box"]["y2"] - reader_nav["box"]["y1"] - 1 == 3 and "reader: board-worker-1 ≠ selected" in different and "Next: check selected evidence" in different, (surface, different)
+    assert reader_nav["box"]["y2"] - reader_nav["box"]["y1"] - 1 >= 3 and "reader: board-worker-1 ≠ selected" in different and "Next: check selected evidence" in different, (surface, different)
 # Per-tab/per-call scroll is local presentation state and survives tab switches.
 scroll_nav = {"tab": "plan", "preview": {"target": reader_call, "report": summary_result}, "band_offsets": {"detail": 2}}
 render_graph(board_fixture, 157, 61, navigation=scroll_nav, main_attempt="a2")

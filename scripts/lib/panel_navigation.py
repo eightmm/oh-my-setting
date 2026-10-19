@@ -525,7 +525,7 @@ def tab_event(event, navigation):
     """The bottom box's own keys and clicks; True when the event was consumed. Tabs never switch by themselves."""
     from room_view import TABS
     names = navigation.get("visible_tabs", [key for key, unused in TABS if key != "needs"])
-    tab = navigation.get("tab") if navigation.get("tab") in names else "detail"
+    tab = navigation.get("tab") if navigation.get("tab") in names else "log"
     kind = event[0]
     if navigation.get("surface") not in {"graph", "tree"} or navigation.get("detail"):
         return False
@@ -534,7 +534,7 @@ def tab_event(event, navigation):
     if kind == "scroll" and log_y in range(log_box.get("y1", -1), log_box.get("y2", -2) + 1):
         navigation["log_offset"] = max(0, navigation.get("log_offset", 0) - event[1])
         return True
-    if tab == "detail" and kind in {"[", "]"}:
+    if tab == "log" and kind in {"[", "]"}:
         navigation["log_offset"] = max(0, navigation.get("log_offset", 0) + (3 if kind == "[" else -3))
         return True
     if kind == "tab":
@@ -707,7 +707,7 @@ def bottom_state(navigation):
     """The bottom box as this board shows it: tab, previewed target and detail scroll."""
     from terminal_panel import BOTTOM_KINDS
     from room_view import TABS
-    tab = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
+    tab = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "log"
     target = (navigation.get("preview") or {}).get("target")
     if not (isinstance(target, tuple) and len(target) == 2 and target[0] in BOTTOM_KINDS):
         target = None
