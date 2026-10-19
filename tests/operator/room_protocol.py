@@ -230,7 +230,7 @@ for owner in panel.PROVIDERS:
         "ordered by more weekly quota left" in panel.bootstrap(owner, project)
     assert all(trigger in panel.bootstrap(owner, project) for trigger in (
         "authentication, permissions, secrets, signals, install", "architect for structural decisions",
-        "release-engineer when deploying", "never all concurrently by default"))
+        "one at a time when the trigger applies"))
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert all(token in panel.bootstrap(owner, project) for token in (
         "one notification per call", "configured parallelism", "same turn", "--continue"))
