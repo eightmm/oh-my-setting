@@ -22859,6 +22859,7 @@ subagent = d["subagentStatusLine"]
 assert subagent["type"] == "command"
 assert "claude-subagent-statusline.py" in subagent["command"]
 assert d["modelSettings"] == {"claude-opus-5-5": {"effortLevel": "high"}}, d["modelSettings"]
+assert d["attribution"] == {"commit": "", "pr": "", "sessionUrl": False}, d.get("attribution")
 PY
   [ -f "$s.oms-bak" ] || fail "installer should back up settings before the first change"
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
@@ -22875,6 +22876,7 @@ for event in ("SessionStart", "PostToolUse", "SubagentStop", "SessionEnd"):
 assert "statusLine" not in d
 assert "subagentStatusLine" not in d
 assert "modelSettings" not in d
+assert "attribution" not in d
 PY
   # A status line the user already owns must survive install and remove.
   python3 - "$s" <<'PY'
@@ -22893,6 +22895,7 @@ d["modelSettings"] = {
     "claude-opus-5-5": {"effortLevel": "medium"},
     "claude-opus-5": {"effortLevel": "high"},
 }
+d["attribution"] = {"commit": "mine", "pr": "", "sessionUrl": True}
 json.dump(d, open(path, "w"))
 PY
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
@@ -22912,6 +22915,7 @@ assert d["modelSettings"] == {
     "claude-opus-5-5": {"effortLevel": "medium"},
     "claude-opus-5": {"effortLevel": "high"},
 }, d["modelSettings"]
+assert d["attribution"] == {"commit": "mine", "pr": "", "sessionUrl": True}, d["attribution"]
 PY
   # A user hook sharing an entry with ours keeps that entry, its metadata and
   # its place on remove; a same-named script outside an OMS checkout and a

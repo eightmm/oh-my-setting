@@ -111,9 +111,11 @@ hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
 edit-time syntax-guard hook, PreCompact/SessionEnd handoff-snapshot hooks,
 SessionStart resume hook, SessionStart/SessionEnd telemetry hooks, main usage
 HUD, compact subagent HUD, and the per-model effort default for the Claude
-models OMS routes (Opus 5.5: high) in Claude Code's settings.json. The merge
-is additive: user hooks, user-owned statusLine/subagentStatusLine entries
-and user-set modelSettings effort are preserved, and repeated installs
+models OMS routes (Opus 5.5: high), and an empty-trailer `attribution`
+object (never `false`: Claude Code before 2.1.281 skips a settings file
+containing it) in Claude Code's settings.json. The merge
+is additive: user hooks, user-owned statusLine/subagentStatusLine entries,
+user-set modelSettings effort and a user-set attribution are preserved, and repeated installs
 converge OMS hook commands, timeouts and matchers and drop duplicates.
 --remove deletes only oh-my-setting hooks, keeping user siblings in place.
 
@@ -255,6 +257,7 @@ subagent_status_cmd = "python3 %s" % shlex.quote(
 # 2026-09-23). A value the user already set wins, and --remove deletes only a
 # value still equal to ours.
 MODEL_EFFORT = {"claude-opus-5-5": "high"}
+ATTRIBUTION = {"commit": "", "pr": "", "sessionUrl": False}
 
 settings = {}
 if os.path.isfile(path):
@@ -322,6 +325,8 @@ if remove:
                     del model_settings[model]
         if not model_settings:
             del settings["modelSettings"]
+    if settings.get("attribution") == ATTRIBUTION:
+        del settings["attribution"]
     action = "removed"
 else:
     try:
@@ -356,6 +361,7 @@ else:
             row = model_settings.setdefault(model, {})
             if isinstance(row, dict):
                 row.setdefault("effortLevel", effort)
+    settings.setdefault("attribution", dict(ATTRIBUTION))
     action = "installed"
 
 if json.dumps(settings, sort_keys=True) == before:
