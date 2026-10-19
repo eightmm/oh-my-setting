@@ -12144,7 +12144,7 @@ case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
 [ -z "${PANEL_RUNS:-}" ] || printf '%s\n' codex >> "$PANEL_RUNS"
 printf '%s\n' "$@" > "$PANEL_ARGV"
 printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
-  "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" > "$PANEL_ENV"
+  "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX:-}" "${TMUX_PANE:-}" > "$PANEL_ENV"
 [ "${PANEL_FAIL:-0}" != 1 ] || {
   [ -z "${PANEL_ERROR:-}" ] || printf '%s\n' "$PANEL_ERROR" >&2
   [ -z "${PANEL_SPOOF:-}" ] || printf '%s\n' "$PANEL_SPOOF"
@@ -12158,7 +12158,7 @@ case "${1:-}" in --version|--help) exit 0 ;; esac
 [ -z "${PANEL_RUNS:-}" ] || printf '%s\n' claude >> "$PANEL_RUNS"
 printf '%s\n' "$@" > "$PANEL_ARGV"
 printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
-  "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" > "$PANEL_ENV"
+  "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX:-}" "${TMUX_PANE:-}" > "$PANEL_ENV"
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"ok"}'
 EOF
   chmod +x "$fixture/bin/codex" "$fixture/bin/claude"
@@ -12190,7 +12190,7 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
       OMS_ROOM_ID=room-one OMS_ROOM_PARTICIPANT=worker-one OMS_ROOM_ADMITTED_PARTICIPANT=worker-one \
       OMS_ROOM_REPO="$root/room repo" OMS_ROOM_RELAY_QUEUE="$root/relay queue" OMS_ROOM_RELAY_ALLOWED=1 \
       OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" \
-      XDG_CACHE_HOME="$fixture_cache" TMUX_TMPDIR="$original_tmux" \
+      XDG_CACHE_HOME="$fixture_cache" TMUX_TMPDIR="$original_tmux" TMUX=/tmp/other,1,0 TMUX_PANE=%9 \
       bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$4"; ma_provider_attempt "$2" write "$3/prompt" "$3/output" "$4" provider-default "" delegate "" ""' \
       _ "$ROOT" "$provider" "$fixture" "$root/parent/worktree" || fail "$provider panel write fixture failed"
     local writable_root
@@ -12202,6 +12202,8 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     [ "$(sed -n '3p' "$root/env")" = "$fixture_lock" ] || fail "$provider worker OMS_LOCK_DIR changed"
     [ "$(sed -n '4p' "$root/env")" = "$fixture_state" ] || fail "$provider worker XDG_STATE_HOME changed"
     [ "$(sed -n '5p' "$root/env")" = "$fixture_cache" ] || fail "$provider worker XDG_CACHE_HOME changed"
+    [ -z "$(sed -n '6p' "$root/env")" ] || fail "$provider worker kept the inherited TMUX socket"
+    [ -z "$(sed -n '7p' "$root/env")" ] || fail "$provider worker kept the inherited TMUX_PANE"
     [ "$provider" != codex ] || grep -Fxq -- 'workspace-write' "$root/argv" || fail 'Codex workspace-write sandbox changed'
     if [ "$provider" = codex ]; then
       for room_value in 'OMS_ROOM_ID="room-one"' 'OMS_ROOM_PARTICIPANT="worker-one"' \

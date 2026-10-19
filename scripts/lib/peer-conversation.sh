@@ -44,6 +44,7 @@ ma_conversation_run() {
       if [ -n "${panel_worker_root:-}" ]; then
         export OMS_FIXTURE_ROOT="$panel_worker_root"
         export TMUX_TMPDIR="$panel_worker_root/tmux"
+        unset TMUX TMUX_PANE
       fi
       cd "$workdir" || exit 1
       run_with_timeout "${cmd[@]}" < "$prompt"
