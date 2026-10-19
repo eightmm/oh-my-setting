@@ -141,7 +141,7 @@ environment = dict(os.environ, HOME=str(home), NVM_DIR=str(home / ".nvm"),
                    PANEL_TEST_WORKER_LOG=str(worker_log), OMS_CAPABILITY_SKIP_MODELS="1",
                    OMS_PEER_TIMEOUT="30", OMS_ROLE_ROUTING="0")
 os.environ["CODEX_HOME"] = str(home / ".codex")
-for key in ("OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "OMS_PANEL_SESSION", "TMUX",
+for key in ("OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "OMS_PANEL_SESSION", "TMUX", "TMUX_TMPDIR",
             "OMS_PANEL_MAIN_ATTEMPT", "OMS_PANEL_DISPATCH", "OMS_ATTEMPT_ID",
             "OH_MY_SETTING_CALL_DRY_RUN", "OH_MY_SETTING_REVIEW_DRY_RUN"):
     environment.pop(key, None)

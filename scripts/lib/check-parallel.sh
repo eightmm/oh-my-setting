@@ -105,9 +105,9 @@ oms_check_queued_lane() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  export XDG_CACHE_HOME="${OMS_CHECK_CACHE_HOME:-$CHECK_RUNTIME/cache}"
-  export XDG_CONFIG_HOME="${OMS_CHECK_CONFIG_HOME:-$CHECK_RUNTIME/config}"
-  export OMS_LOCK_DIR="${OMS_CHECK_LOCK_DIR:-$CHECK_RUNTIME/locks}"
+  export XDG_CACHE_HOME="$CHECK_RUNTIME/cache"
+  export XDG_CONFIG_HOME="$CHECK_RUNTIME/config"
+  export OMS_LOCK_DIR="$CHECK_RUNTIME/locks"
   mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$OMS_LOCK_DIR"
   count="$(cat "$queued/count")"
   for ((index=1; index<=count; index++)); do

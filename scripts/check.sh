@@ -114,15 +114,15 @@ trap cleanup_check_runtime EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-export XDG_CACHE_HOME="${OMS_CHECK_CACHE_HOME:-$CHECK_RUNTIME/cache}"
+export XDG_CACHE_HOME="$CHECK_RUNTIME/cache"
 # Config gets the same treatment: the install receipt resolves through
 # XDG_CONFIG_HOME before HOME, and GitHub runners export it globally — so a
 # fixture's HOME override never hid the runner-global receipt an earlier
 # suite had written, and uninstall fixtures failed the canonical-owner check
 # only in CI. Redirecting it also keeps suites from reading or writing the
 # invoking user's real config.
-export XDG_CONFIG_HOME="${OMS_CHECK_CONFIG_HOME:-$CHECK_RUNTIME/config}"
-export OMS_LOCK_DIR="${OMS_CHECK_LOCK_DIR:-$CHECK_RUNTIME/locks}"
+export XDG_CONFIG_HOME="$CHECK_RUNTIME/config"
+export OMS_LOCK_DIR="$CHECK_RUNTIME/locks"
 # Fixture Stop hooks must never reach the developer's live Codex app.
 export OMS_CODEX_NOTIFY=0
 mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$OMS_LOCK_DIR"
@@ -855,7 +855,7 @@ prepare_affected_gate() {
     esac
     case "$path" in
       README.md|README.ko.md|docs/*.md) ;;
-      custom-skills/*.md|templates/*.md) ;;
+      custom-skills/*.md|templates/*.md|roles/*.md) ;;
       config/models.json) models=1 ;;
       *) scoped_only=0 ;;
     esac
@@ -1196,6 +1196,7 @@ REPO_INVARIANT_TESTS=(
   test_large_skills_use_progressive_disclosure
   test_generated_project_contracts_stay_compact
   test_apply_loader_allows_clear_bounded_changes
+  test_agent_role_and_delegate_injection
 )
 repo_invariants_in_plan=0
 repo_invariants_selected=" "
