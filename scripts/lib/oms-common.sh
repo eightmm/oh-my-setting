@@ -865,8 +865,8 @@ oms_worker_state_violations() {
   local before="$2"
 
   [ -f "$before" ] || return 0
-  OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" python3 - <<'PY'
-import hashlib, json, os, re, stat
+  OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" OMS_WG_LIB="$OMS_COMMON_LIB_DIR" python3 - <<'PY'
+import hashlib, json, os, re, runpy, stat
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 problems = []
@@ -874,9 +874,12 @@ problems = []
 # The artifact index store compacts by design (artifact-index-store.py keeps the
 # newest lineage groups once the row count passes its high-water mark), so a
 # shrink or changed prefix there is accepted only when it has that shape: every
-# surviving row is byte-identical and in order, new rows follow them, all
-# dropped rows are older than the oldest survivor that is not a retained
-# resolution target, and the row count had passed the keep floor.
+# surviving row is byte-identical and in order, new rows follow them, the row
+# count had passed the keep floor, no resolution points at a dropped row, and
+# no dropped row is one retention never drops (unresolved failures and pinned
+# lineage). Which ordinary rows go is retention's choice and is not judged: a
+# worker may append rows or run the store itself, so the index is tamper
+# evidence for those protected rows, not a trust boundary.
 def index_compacted(path, size, expected):
     try:
         with open(os.environ["OMS_WG_BEFORE"] + ".artifact-index", "rb") as fh:
@@ -930,6 +933,8 @@ def index_compacted(path, size, expected):
         for _event_id, _line, row in new
         if row.get("kind") == "artifact-resolution"
     }
+    if dropped & targets:
+        return False
     # The store also keeps rows pinned by plan completion receipts. Only pins recorded with the
     # baseline count, so a receipt written during the run cannot excuse a deletion.
     try:
@@ -937,8 +942,19 @@ def index_compacted(path, size, expected):
             pins = {pin for pin in json.load(handle) if isinstance(pin, str)}
     except (OSError, ValueError, TypeError):
         pins = set()
-    anchors = [i for i in retained if i not in targets and old[i][0] not in pins]
-    return max(dropped) < min(anchors, default=len(old))
+    # Ask retention what it never drops. A synthetic newest row absorbs the one
+    # keep=1 slot, so the answer is exactly the protected set under retention's
+    # own settlement predicate and pin handling, with no second copy of either.
+    try:
+        retention = runpy.run_path(os.path.join(os.environ["OMS_WG_LIB"], "artifact-index-retention.py"))
+        kept = retention["retained_lines"](
+            [line for _event_id, line, _row in old] + [b'{"event_id":"\\u0000guard"}\n'],
+            1, pinned_event_ids=sorted(pins))
+    except Exception:
+        return False
+    protected = {position[event_id] for event_id in (json.loads(line).get("event_id") for line in kept)
+                 if event_id in position}
+    return not (dropped & protected)
 
 with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
     for line in f:

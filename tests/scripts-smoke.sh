@@ -31217,24 +31217,15 @@ test_worker_guard_accepts_only_artifact_index_compaction() {
   [ "$changed" = shared-state ] ||
     fail "dropping rows below the keep floor must stay a violation, got: ${changed:-<none>}"
 
-  # A middle row erased, or a survivor rewritten, is not compaction.
-  { sed -n '1p;3,6p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index"
-  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
-    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
-  [ "$changed" = shared-state ] ||
-    fail "erasing a middle row must stay a violation, got: ${changed:-<none>}"
+  # A rewritten survivor is not compaction.
   { sed -n '3,5p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e6","kind":"fixed"}\n'; } > "$index"
   changed="$( . "$ROOT/scripts/lib/oms-common.sh"
     OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
   [ "$changed" = shared-state ] ||
     fail "rewriting a surviving row must stay a violation, got: ${changed:-<none>}"
 
-  # The store keeps a row a plan completion receipt pins ahead of the dropped ones.
-  { sed -n '1p;4,6p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index"
-  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
-    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
-  [ "$changed" = shared-state ] ||
-    fail "an unpinned survivor ahead of dropped rows must stay a violation, got: ${changed:-<none>}"
+  # Retention never drops a row a plan completion receipt pinned when the
+  # baseline was taken, so dropping one is erasure; keeping it is compaction.
   mkdir -p "$project/.oms/plan/completions"
   python3 - "$project/.oms/plan/completions" <<'PY'
 import hashlib, json, os, sys
@@ -31243,18 +31234,120 @@ raw = json.dumps({"bundle": {"research": {"classification": "research-only", "in
 with open(os.path.join(sys.argv[1], hashlib.sha256(raw).hexdigest() + ".json"), "wb") as handle:
     handle.write(raw)
 PY
-  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
-    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
-  [ "$changed" = shared-state ] ||
-    fail "a receipt written during the run must not excuse a deletion, got: ${changed:-<none>}"
-  # A pin that existed when the baseline was taken does.
   cp "$snap/omsstate.artifact-index" "$index"
   ( . "$ROOT/scripts/lib/oms-common.sh"
     oms_worker_surface_snapshot "$project" "$snap" ) || fail "pinned index snapshot failed"
+  { sed -n '4,6p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = shared-state ] ||
+    fail "dropping a baseline-pinned row must stay a violation, got: ${changed:-<none>}"
   { sed -n '1p;4,6p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index"
   changed="$( . "$ROOT/scripts/lib/oms-common.sh"
     OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
   [ -z "$changed" ] || fail "compaction keeping a baseline-pinned row must not be a violation, got: $changed"
+
+  # Fixtures come from the store's own retention, so the guard is judged against
+  # what compaction really produces. Only unresolved failures, pinned lineage
+  # and a resolution's target are never dropped; which ordinary rows go is
+  # retention's choice and the guard does not reconstruct it.
+  local cases="$TMP/guard-index-cases"
+  local name
+  local keep
+  local want
+  rm -rf "$cases" "$project/.oms/plan/completions"
+  mkdir -p "$cases"
+  python3 - "$ROOT/scripts/lib/artifact-index-retention.py" "$cases" <<'PY'
+import json, os, runpy, sys
+retained = runpy.run_path(sys.argv[1])["retained_lines"]
+out = sys.argv[2]
+
+def row(event_id, exit_code=None, **extra):
+    base = {"schema": 1, "event_id": event_id, "operation_id": "op-" + event_id,
+            "artifact_id": "art-" + event_id, "ts": "2026-10-19T00:00:00Z", "kind": "ask",
+            "provider": "codex"}
+    if exit_code is not None:
+        base["exit"] = exit_code
+    base.update(extra)
+    return (json.dumps(base, sort_keys=True) + "\n").encode()
+
+def resolution(event_id, target):
+    return (json.dumps({"schema": 1, "event_id": event_id, "operation_id": "op-" + target,
+                        "artifact_id": "art-" + target, "ts": "2026-10-19T00:01:00Z",
+                        "kind": "artifact-resolution", "provider": "codex", "exit": 0,
+                        "resolution": "resolved", "resolves_event_id": target,
+                        "parent_event_id": target}, sort_keys=True) + "\n").encode()
+
+def case(name, keep, want, base, final):
+    with open(os.path.join(out, name + ".case"), "w") as handle:
+        handle.write("%d %s\n" % (keep, want))
+    with open(os.path.join(out, name + ".base"), "wb") as handle:
+        handle.write(b"".join(base))
+    with open(os.path.join(out, name + ".final"), "wb") as handle:
+        handle.write(b"".join(final))
+
+a = [row("a%d" % i) for i in range(1, 7)]
+f = row("f", 1)
+r = resolution("r", "f")
+n = [row("n%d" % i) for i in range(1, 5)]
+
+# Production shape: unresolved failures spread over rows 5-200 and a store
+# compaction at keep=1000 that drops the ordinary rows between them.
+prod = [row("p%d" % i, 1 if 5 <= i <= 200 and i % 3 == 2 else None) for i in range(1, 1201)]
+new = row("pnew")
+case("production", 1000, "ok", prod, retained(prod, 1000) + [new])
+case("production-erase-first-failure", 1000, "violation", prod,
+     [line for line in retained(prod, 1000) if b'"p5"' not in line] + [new])
+
+# A forged resolution cannot excuse erasing the failure it names.
+base = [f] + a[:5]
+case("p1-forged", 4, "violation", base, a[1:5] + [r])
+case("p1-store", 5, "ok", base, retained(base + [r], 5))
+
+# Ordinary rows ahead of a settled failure may go, with nothing added.
+base = a[:2] + [f, r]
+case("p2b", 2, "ok", base, retained(base, 2))
+# The documented strict outcome: an unresolved failure is never dropped by
+# retention, so a final index without it is erasure whatever else survives.
+base = [f] + a[:5]
+case("p2a", 5, "violation", base, [a[4]] + n)
+
+# Two unresolved failures between ordinary rows.
+fa, fb = row("fA", 2), row("fB", 3)
+base = [a[0], fa, a[1], a[2], fb, a[3], a[4], a[5]]
+newest = row("z")
+case("round1-real", 3, "ok", base, retained(base, 3) + [newest])
+case("round1-erase-fA", 3, "violation", base,
+     [line for line in retained(base, 3) if b'"fA"' not in line] + [newest])
+case("round1-erase-fB", 3, "violation", base,
+     [line for line in retained(base, 3) if b'"fB"' not in line] + [newest])
+settled = [a[0], fa, resolution("rA", "fA"), a[1], a[2], a[3], a[4], a[5]]
+case("settled", 3, "ok", settled, retained(settled, 3) + [newest])
+# A resolution that retention does not accept as settling (foreign exit) leaves
+# the failure protected, so erasing it behind that resolution stays a violation.
+foreign = resolution("rF", "fA").replace(b'"exit": 0', b'"exit": 7')
+base = [a[0], fa, foreign, a[1], a[2], a[3], a[4], a[5]]
+case("foreign-then-erase", 3, "violation", base,
+     [line for line in retained(base, 3) if b'"fA"' not in line and b'"rF"' not in line] + [newest])
+
+# A resolution may not outlive its target.
+base = a[:2] + [f, r]
+case("orphan-resolution", 2, "violation", base, [r, row("n")])
+case("orphan-failure", 2, "ok", base, [f, row("n")])
+PY
+  for name in $(cd "$cases" && ls *.case | sed 's/\.case$//'); do
+    read -r keep want < "$cases/$name.case"
+    cp "$cases/$name.base" "$index"
+    ( . "$ROOT/scripts/lib/oms-common.sh"
+      oms_worker_surface_snapshot "$project" "$snap" ) || fail "$name snapshot failed"
+    cp "$cases/$name.final" "$index"
+    changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+      OMS_ARTIFACT_INDEX_KEEP="$keep" oms_worker_surface_diff "$project" "$snap" )"
+    case "$want" in
+      ok) [ -z "$changed" ] || fail "$name: store-shaped compaction must not be a violation, got: $changed" ;;
+      *) [ "$changed" = shared-state ] || fail "$name: must stay a violation, got: ${changed:-<none>}" ;;
+    esac
+  done
 }
 
 test_worker_guard_keeps_local_branch_refs_hard() {
