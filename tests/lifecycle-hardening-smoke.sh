@@ -484,7 +484,7 @@ elif [ "$cmd" = uv ] || [ "$cmd" = uvx ]; then
 elif [ "$cmd" = agy ]; then
   echo 'agy 1.1.11'
 elif [ "$cmd" = gh ]; then
-  echo 'gh version 2.97.0'
+  echo 'gh version 2.102.0'
 else
   echo '$cmd 1.0'
 fi

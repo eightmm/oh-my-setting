@@ -191,7 +191,7 @@ EOF
         claude) locked=2.1.226 ;;
         codex) locked=0.147.0 ;;
         agy) locked=1.1.11 ;;
-        gh) locked=2.97.0 ;;
+        gh) locked=2.102.0 ;;
         ntn) locked=0.21.9 ;;
         uv|uvx) locked=0.12.3 ;;
       esac
@@ -733,7 +733,7 @@ for cli in claude codex agy gh ntn uv uvx node; do
         claude) locked=2.1.226 ;;
         codex) locked=0.147.0 ;;
         agy) locked=1.1.11 ;;
-        gh) locked=2.97.0 ;;
+        gh) locked=2.102.0 ;;
         ntn) locked=0.21.9 ;;
         uv|uvx) locked=0.12.3 ;;
       esac
