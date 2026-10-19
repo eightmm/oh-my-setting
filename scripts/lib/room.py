@@ -1438,8 +1438,9 @@ def unread_messages(state, who):
 def read_call_mail(repo, ident, who, consumed=None):
     """Parent-only capture/receipt for a read call, never a new worker capability.
 
-    Capture before dispatch and acknowledge only those IDs after a successful
-    return. Later arrivals and mail from a superseded enrollment stay pending.
+    Capture returns the bounded unread turns the prompt quotes; completion
+    acknowledges only those IDs after a successful return. Mail beyond the
+    bound, later arrivals and mail from a superseded enrollment stay pending.
     """
     if (_child() or who != os.environ.get("OMS_ROOM_PARTICIPANT")
             or who != os.environ.get("OMS_ROOM_ADMITTED_PARTICIPANT")):
@@ -1453,24 +1454,16 @@ def read_call_mail(repo, ident, who, consumed=None):
     member = participant(state, who)
     if member["role"] == "main" or not member.get("parent"):
         raise ValueError("read-call mail requires an admitted child participant")
-    pending = [message["id"] for message in unread_messages(state, who)]
     if consumed is None:
-        return pending
+        return updates(repo, ident, who, state=state)["turns"]
+    pending = [message["id"] for message in unread_messages(state, who)]
     if not isinstance(consumed, list) or len(consumed) > MAX_MESSAGES:
         raise ValueError("read-call consumption requires bounded captured message ids")
     captured = {identifier(mid, "message") for mid in consumed}
     selected = [mid for mid in pending if mid in captured]
-    batch = []
-    for mid in selected:
-        candidate = batch + [mid]
-        metadata = json.dumps({"kind": "received", "participant": who, "messages": candidate}, ensure_ascii=False)
-        if batch and (len(candidate) > 200 or len(metadata.encode("utf-8")) > MAX_METADATA_BYTES):
-            acknowledge(repo, ident, who, batch)
-            batch = [mid]
-        else:
-            batch = candidate
-    if batch:
-        acknowledge(repo, ident, who, batch)
+    if selected:
+        # Captured turns fit the 8192-byte updates bound, so their IDs fit one receipt.
+        acknowledge(repo, ident, who, selected)
     return len(selected)
 
 

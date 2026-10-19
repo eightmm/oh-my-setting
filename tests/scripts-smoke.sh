@@ -4127,6 +4127,41 @@ test_peer_review_synthesize_provider_override() {
     --prompt "Review synthesize override" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-override-*.md' '## Synthesis (codex)'
+
+  # Synthesis sends a derived prompt that never quotes the room mail, so its
+  # success must not acknowledge mail the failed seats never delivered.
+  local mail_repo="$project/mail-repo" bin="$project/mail-bin"
+  mkdir -p "$mail_repo" "$bin"
+  git -C "$mail_repo" init -q
+  git -C "$mail_repo" -c user.name=test -c user.email=test@example.com commit --allow-empty -qm base
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 7\n' > "$bin/codex"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "synthesis answer\\n"\n' > "$bin/claude"
+  chmod +x "$bin/codex" "$bin/claude"
+  python3 - "$ROOT" "$mail_repo" <<'PY'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+import room
+repo = pathlib.Path(sys.argv[2])
+room.create(repo, "synth-mail", "Synthesis mail fixture")
+room.join(repo, "synth-mail", "main", "codex")
+room.join(repo, "synth-mail", "reader", "codex", "reviewer", parent="main")
+room.send(repo, "synth-mail", "main", "reader", "Assignment ZEBRA-7342", message_id="assignment")
+PY
+  env -u NVM_BIN -u NVM_DIR HOME="$project/home" XDG_STATE_HOME="$project/state" \
+    OMS_LOCK_DIR="$project/locks" PATH="$bin:/usr/bin:/bin" \
+    OMS_ROOM_ID=synth-mail OMS_ROOM_PARTICIPANT=reader OMS_ROOM_ADMITTED_PARTICIPANT=reader \
+    OMS_ROOM_REPO="$mail_repo" "$ROOT/scripts/peer-review.sh" --repo "$mail_repo" \
+    --artifact-dir "$project/mail-artifacts" --providers codex --no-diff --synthesize claude \
+    --prompt "Review synthesis mail" > "$project/mail-output" 2>&1 || true
+  grep -Fq 'ok: synthesis (claude)' "$project/mail-output" ||
+    fail "synthesis did not succeed after the failed seat: $(cat "$project/mail-output")"
+  python3 - "$ROOT" "$mail_repo" <<'PY' || fail "synthesis acknowledged mail its prompt never quoted"
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+import room
+mail = {m["id"]: m for m in room.messages(pathlib.Path(sys.argv[2]), "synth-mail")}
+assert mail["assignment"]["received_by"] == [], mail
+PY
 }
 
 test_peer_debate_prompt_fences_external_output() {
@@ -12447,6 +12482,7 @@ test_agent_call_context_is_opt_in() {
   for room_case in call:read ask:read review:read delegate:read delegate:write panel-write; do
     (
       . "$ROOT/scripts/lib/peer-common.sh"
+      ma_read_room_mail() { :; }  # this case checks prompt wording; capture has its own fixture
       MA_KIND="${room_case%:*}" WORKER_ACCESS="${room_case#*:}"
       OMS_ROOM_ID=room OMS_ROOM_PARTICIPANT=reader OMS_ROOM_ADMITTED_PARTICIPANT=reader
       if [ "$room_case" = panel-write ]; then

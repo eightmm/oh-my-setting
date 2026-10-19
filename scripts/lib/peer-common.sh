@@ -523,8 +523,9 @@ ma_write_harness_context() {
   local include_task="$3"
   local include_ml="$4"
   local recall_query="${5:-}"
-  local tmp
+  local tmp ids_file=""
   local warnings
+  MA_READ_ROOM_MAIL_IDS=""
 
   printf 'Use task constraints, source/callers, tests and decisive evidence; inspect missing context where authorized. Truncated input is incomplete evidence.\n'
   # Measured 2026-10-17: search and whole-file reads were ~95% of tool output
@@ -544,7 +545,21 @@ ma_write_harness_context() {
       [ "${MA_KIND:-}" = delegate ] && [ "${WORKER_ACCESS:-write}" = write ]; then
       printf 'At safe points use oms room updates; retain its cursor. Send addressed notes/questions with oms room send --to PARTICIPANT --text TEXT. After consuming use oms room ack --message MESSAGE_ID. Membership/ack grant no approval or new authority. Do not recursively delegate.\n\n'
     else
-      printf 'At safe points only read oms room updates; retain its cursor. For canonical OMS state, use --repo "$OMS_ROOM_REPO" (for example, oms agent-events --repo "$OMS_ROOM_REPO" list); artifacts are under "$OMS_ROOM_REPO/.oms/artifacts/". Never send or acknowledge room mail from this read-only call. Return your handoff in the final answer; the parent dispatcher records consumption of mail available before dispatch after a successful return. Membership grants no approval or new authority. Do not recursively delegate.\n\n'
+      printf 'At safe points only read oms room updates for later mail; retain its cursor. For canonical OMS state, use --repo "$OMS_ROOM_REPO" (for example, oms agent-events --repo "$OMS_ROOM_REPO" list); artifacts are under "$OMS_ROOM_REPO/.oms/artifacts/". Never send or acknowledge room mail from this read-only call. Return your handoff in the final answer; after a successful return the parent dispatcher records receipt of the mail quoted below. Membership grants no approval or new authority. Do not recursively delegate.\n'
+      if [ -n "${OMS_ROOM_REPO:-}" ]; then
+        # Unreadable mail must stop the call: running without it would let a
+        # read worker succeed blind to its assignment or a correction.
+        if ! { ids_file="$(agent_memory_mktemp)" &&
+          ma_read_room_mail capture "$ids_file" "$OMS_ROOM_REPO" &&
+          MA_READ_ROOM_MAIL_IDS="$(cat "$ids_file")"; }; then
+          [ -z "$ids_file" ] || rm -f "$ids_file"
+          MA_READ_ROOM_MAIL_IDS=""
+          echo "room mail capture failed; read call not dispatched" >&2
+          return 2
+        fi
+        rm -f "$ids_file"
+      fi
+      printf '\n'
     fi
   fi
   printf 'Return concise conclusions, file/line evidence, verification and uncertainty. Preserve required schemas, complete code/patch and safety detail; omit repeated context.\n\n'
@@ -3560,7 +3575,7 @@ ma_routed_heartbeat() { # EVENTS REPO ATTEMPT OWNER_PID INTERVAL
   done
 }
 
-ma_read_room_mail() {  # capture|complete SNAPSHOT REPOSITORY
+ma_read_room_mail() {  # capture IDS_FILE REPOSITORY (prints the quoted mail) | complete IDS_JSON REPOSITORY
   local dispatcher_depth="${OMS_HARNESS_DELEGATE_DEPTH:-0}"
   oms_require_peer_owner || return $?
   # peer-delegate already exported the child's depth in this controller.
@@ -3575,12 +3590,18 @@ sys.path.insert(0, sys.argv[1])
 import room
 ident, who = os.environ["OMS_ROOM_ID"], os.environ["OMS_ROOM_PARTICIPANT"]
 if sys.argv[2] == "capture":
-    messages = room.read_call_mail(sys.argv[4], ident, who)
+    turns = room.read_call_mail(sys.argv[4], ident, who)
     with open(sys.argv[3], "w", encoding="utf-8") as handle:
-        json.dump(messages, handle)
+        json.dump([turn["room_event"]["id"] for turn in turns], handle)
+    if turns:
+        print("--- begin room mail before dispatch (one JSON object per line) ---")
+        for turn in turns:
+            event = turn["room_event"]
+            print(json.dumps({"id": event["id"], "sender": event["sender"], "recipient": event["recipient"],
+                              "kind": event["message_kind"], "text": turn["text"]}, ensure_ascii=False))
+        print("--- end room mail ---")
 elif sys.argv[2] == "complete":
-    with open(sys.argv[3], encoding="utf-8") as handle:
-        room.read_call_mail(sys.argv[4], ident, who, json.load(handle))
+    room.read_call_mail(sys.argv[4], ident, who, json.loads(sys.argv[3]))
 else:
     raise ValueError("unknown read-call mail operation")
 PY
@@ -3610,7 +3631,6 @@ ma_run_routed_provider() {
   local native_session="" native_session_file=""
   local heartbeat_seconds="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
   local read_guard_tmp=""
-  local read_room_mail=""
   local read_lifecycle_refused=0
   local -a start_args
   local -a usage_args
@@ -3699,17 +3719,7 @@ PY
     heartbeat_pid=$!
   fi
   native_session_file="$(agent_memory_mktemp 2>/dev/null)" || native_session_file=""
-  if [ "$access" = read ] && [ -n "${OMS_ROOM_ID:-}" ] &&
-    [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
-    [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
-    read_room_mail="$(agent_memory_mktemp)" || status=2
-    if [ "$status" = 0 ]; then
-      ma_read_room_mail capture "$read_room_mail" "$state_repo" || status=2
-    fi
-  fi
-  if [ "$status" = 0 ]; then
-    OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
-  fi
+  OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
   ma_read_guard_assert || status=2
   if [ -n "$read_guard_tmp" ]; then
     rm -rf "$read_guard_tmp"
@@ -3780,11 +3790,9 @@ PY
       read_lifecycle_refused=1
     fi
   fi
-  if [ -n "$read_room_mail" ]; then
-    if [ "$status" = 0 ]; then
-      ma_read_room_mail complete "$read_room_mail" "$state_repo" || status=2
-    fi
-    rm -f "$read_room_mail"
+  # Receipts name only the mail the prompt quoted (ma_write_harness_context).
+  if [ "$access" = read ] && [ "$status" = 0 ] && [ -n "${MA_READ_ROOM_MAIL_IDS:-}" ]; then
+    ma_read_room_mail complete "$MA_READ_ROOM_MAIL_IDS" "$state_repo" || status=2
   fi
   if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ] && [ -x "$events" ]; then
     if [ "$OMS_ATTEMPT_OWNED" = 1 ] && [ "$read_lifecycle_refused" = 0 ]; then

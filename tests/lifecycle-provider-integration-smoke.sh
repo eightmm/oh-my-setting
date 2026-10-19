@@ -107,20 +107,22 @@ room.create(repo, "read-mail", "Read call fixture")
 room.join(repo, "read-mail", "main", "codex")
 room.join(repo, "read-mail", "reader", "codex", "reviewer", parent="main")
 room.join(repo, "read-mail", "other", "claude", "researcher", parent="main")
-room.send(repo, "read-mail", "main", "reader", "Assignment", message_id="assignment")
+room.send(repo, "read-mail", "main", "reader", "Assignment ZEBRA-7342", message_id="assignment")
 room.send(repo, "read-mail", "main", "other", "Other assignment", message_id="other-assignment")
 PY
 mail_python="$(command -v python3)"
-for mail_case in failed blocked ack-failed "done" delegate; do
-  mail_exit=0 mail_block=""
+for mail_case in failed blocked ack-failed capture-failed "done" delegate; do
+  mail_exit=0 mail_block="" mail_fail_op=complete
+  rm -f "$TMP/mail-prompt" "$TMP/mail-prompt.argv"
   mail_script=agent-call
   mail_options=()
   [ "$mail_case" != failed ] || mail_exit=7
   [ "$mail_case" != blocked ] || mail_block="$TMP/mail-repo"
-  if [ "$mail_case" = ack-failed ]; then
+  [ "$mail_case" != capture-failed ] || mail_fail_op=capture
+  if [ "$mail_case" = ack-failed ] || [ "$mail_case" = capture-failed ]; then
     cat > "$TMP/bin/python3" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = - ] && [ "${3:-}" = complete ]; then
+if [ "${1:-}" = - ] && [ "${3:-}" = "$OMS_TEST_MAIL_FAIL_OP" ]; then
   cat >/dev/null
   echo 'forced receipt failure' >&2
   exit 2
@@ -133,7 +135,7 @@ EOF
     mail_script=peer-delegate
     mail_options=(--read-only --no-verify)
     "$ROOT/scripts/room.sh" send --repo "$TMP/mail-repo" --id read-mail --participant main \
-      --to reader --text 'Delegate assignment' --message-id delegate-assignment >/dev/null
+      --to reader --text 'Delegate assignment KOALA-19' --message-id delegate-assignment >/dev/null
   fi
   mail_status=0
   env -u NVM_BIN -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
@@ -141,11 +143,17 @@ EOF
     OMS_ROOM_ID=read-mail OMS_ROOM_PARTICIPANT=reader OMS_ROOM_ADMITTED_PARTICIPANT=reader \
     OMS_ROOM_RELAY_QUEUE="$TMP/inherited-relay" OMS_ROOM_RELAY_ALLOWED=1 \
     OMS_TEST_OPERATOR_BLOCK="$mail_block" OMS_TEST_ROOT="$ROOT" \
-    OMS_TEST_REAL_PYTHON="$mail_python" \
+    OMS_TEST_REAL_PYTHON="$mail_python" OMS_TEST_MAIL_FAIL_OP="$mail_fail_op" \
     OMS_ROOM_REPO="$TMP/mail-repo" OMS_TEST_MAIL_PROMPT="$TMP/mail-prompt" OMS_TEST_MAIL_EXIT="$mail_exit" \
     "$ROOT/scripts/$mail_script.sh" --repo "$TMP/mail-repo" --to codex ${mail_options[@]+"${mail_options[@]}"} \
     --prompt 'read mail completion' > "$TMP/mail-output" 2>&1 || mail_status=$?
   rm -f "$TMP/bin/python3"
+  if [ "$mail_case" = capture-failed ]; then
+    # Unreadable mail must stop the call before the provider runs.
+    [ "$mail_status" != 0 ] && grep -Fq 'forced receipt failure' "$TMP/mail-output" ||
+      fail "mail capture failure did not stop the call"
+    [ ! -e "$TMP/mail-prompt" ] || fail "provider ran without its room mail"
+  fi
   if [ "$mail_case" = ack-failed ]; then
     [ "$mail_status" = 2 ] && grep -Fq 'forced receipt failure' "$TMP/mail-output" ||
       fail "receipt failure was not propagated"
@@ -159,13 +167,20 @@ states = [row.get("to_state") for row in events if row.get("attempt_id") == atte
 assert "done" not in states and states[-1] == "failed", states
 PY
   fi
-  if { [ "$mail_case" != ack-failed ] && [ "$mail_exit" = 0 ] && [ -z "$mail_block" ] && [ "$mail_status" != 0 ]; } ||
+  if { [ "$mail_case" != ack-failed ] && [ "$mail_case" != capture-failed ] && [ "$mail_exit" = 0 ] && [ -z "$mail_block" ] && [ "$mail_status" != 0 ]; } ||
     { { [ "$mail_exit" != 0 ] || [ -n "$mail_block" ]; } && [ "$mail_status" = 0 ]; }; then
     cat "$TMP/mail-output" >&2
     fail "read mail exit is incorrect ($mail_case -> $mail_status)"
   fi
-  grep -Fxq read-only "$TMP/mail-prompt.argv" || fail "read call lost its read-only sandbox"
-  if grep -Eq 'oms room (send|ack)' "$TMP/mail-prompt"; then fail "read call was instructed to write mail"; fi
+  if [ "$mail_case" != capture-failed ]; then
+    grep -Fxq read-only "$TMP/mail-prompt.argv" || fail "read call lost its read-only sandbox"
+    if grep -Eq 'oms room (send|ack)' "$TMP/mail-prompt"; then fail "read call was instructed to write mail"; fi
+    case "$mail_case" in
+      done) grep -Fq 'ZEBRA-7342' "$TMP/mail-prompt" || fail "read call receipt names mail its prompt never carried" ;;
+      delegate) grep -Fq 'KOALA-19' "$TMP/mail-prompt" || fail "read delegate receipt names mail its prompt never carried" ;;
+    esac
+    if grep -Fq 'Other assignment' "$TMP/mail-prompt"; then fail "read call carried another participant's mail"; fi
+  fi
   python3 - "$ROOT" "$TMP/mail-repo" "$mail_case" <<'PY' || fail "read call receipt is missing or overbroad"
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))

@@ -208,7 +208,7 @@ with patch.dict(os.environ, {"OMS_ROOM_ID": "enrollment-mail", "OMS_ROOM_PARTICI
     room.send(repo, "enrollment-mail", "sender", "reader", "Current enrollment", message_id="current")
     assert pending_room_mail(repo)["pending"] == len(room.updates(repo, "enrollment-mail", "reader")["turns"]) == 1
     with patch.dict(os.environ, {"OMS_ROOM_ADMITTED_PARTICIPANT": "reader"}):
-        captured = room.read_call_mail(repo, "enrollment-mail", "reader")
+        captured = [turn["room_event"]["id"] for turn in room.read_call_mail(repo, "enrollment-mail", "reader")]
         for child in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
             with patch.dict(os.environ, child):
                 try:
@@ -221,19 +221,19 @@ with patch.dict(os.environ, {"OMS_ROOM_ID": "enrollment-mail", "OMS_ROOM_PARTICI
         assert room.read_call_mail(repo, "enrollment-mail", "reader", captured) == 1
         assert room.read_call_mail(repo, "enrollment-mail", "reader", captured) == 0, "completion is idempotent"
         assert [m["id"] for m in room.unread_messages(room.project(room.records(repo, "enrollment-mail")), "reader")] == ["late"]
-        # Legal long IDs exceed the metadata cap well before 200 messages.
+        # Capture is the bounded prompt quote: mail past the updates byte bound stays pending, unreceipted.
         for index in range(60):
             room.send(repo, "enrollment-mail", "sender", "reader", "Long ID assignment",
                       message_id=("long-%03d-" % index).ljust(160, "x"))
-        captured = room.read_call_mail(repo, "enrollment-mail", "reader")
+        turns = room.read_call_mail(repo, "enrollment-mail", "reader")
+        captured = [turn["room_event"]["id"] for turn in turns]
+        assert captured[0] == "late" and 1 < len(captured) < 61, len(captured)
+        assert all(turn["text"] for turn in turns), "capture must carry message bodies"
         before = len(room.records(repo, "enrollment-mail"))
-        assert room.read_call_mail(repo, "enrollment-mail", "reader", captured) == 61
+        assert room.read_call_mail(repo, "enrollment-mail", "reader", captured) == len(captured)
         receipts = [row["room_event"] for row in room.records(repo, "enrollment-mail")[before:]]
-        assert len(receipts) == 2, receipts
-        assert [mid for event in receipts for mid in event["messages"]] == captured
-        assert all(1 <= len(event["messages"]) <= 200 and
-                   len(json.dumps(event, ensure_ascii=False).encode("utf-8")) <= 8192 for event in receipts)
-        assert pending_room_mail(repo)["pending"] == len(room.updates(repo, "enrollment-mail", "reader")["turns"]) == 0
+        assert [event["messages"] for event in receipts] == [captured], receipts
+        assert pending_room_mail(repo)["pending"] == 61 - len(captured)
 if os.name != "nt":
     # A leaf can change after path validation. Opening a replacement FIFO must
     # reject it promptly rather than suspend the hook or mailbox reader.

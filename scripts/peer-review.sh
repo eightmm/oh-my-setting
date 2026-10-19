@@ -1036,6 +1036,9 @@ elif [ -n "$SYNTHESIZE" ]; then
       printf 'SKIPPED: command not found: %s\n' "$synth_binary" >> "$synth_file"
       echo "warning: synthesis provider missing: $synth_binary" >&2
     else
+      # The synthesis prompt is derived from seat answers and never quotes the
+      # room mail, so its success acknowledges nothing.
+      MA_READ_ROOM_MAIL_IDS=""
       export OMS_MODEL_OPERATION=review-synthesis
       synth_status=0
       ma_run_routed_provider "$SYNTHESIZE" read "$synth_prompt_file" "$synth_file" "$MA_READ_SOURCE_REPO" \
