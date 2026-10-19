@@ -248,7 +248,9 @@ for owner in panel.PROVIDERS:
         "one at a time when the trigger applies"))
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert all(token in panel.bootstrap(owner, project) for token in (
-        "one notification per call", "configured parallelism", "same turn", "--continue"))
+        "one notification per call", "a new write dispatch is refused", "same turn", "--continue"))
+    assert all(phrase in panel.bootstrap(owner, project) for phrase in (
+        "consumers in the worker brief", "drives the public entry point"))
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project)
     assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
@@ -1965,36 +1967,59 @@ with patch.dict(os.environ, control_env, clear=True), \
     control_write_command = [sys.executable, "-c", "pass", "--repo", str(project),
                              "--verify", "true", "--task-id", "backlog-warning"]
     from contextlib import redirect_stderr
-    warning_output = io.StringIO()
-    with patch.dict(os.environ, control_env, clear=True), \
-            patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
-            patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
-            patch.object(panel, "routed_command", return_value=control_write_command), \
-            patch.object(panel, "snapshot", return_value=(warning_report, 0)), \
-            patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
-            redirect_stderr(warning_output):
-        warning_status = panel.dispatch(project, "claude", "worker", "light", "write", "implement",
-                                        brief=brief, verify="true", task_id="backlog-warning",
-                                        label="Backlog warning")
-    assert warning_status == 0, (warning_status, warning_output.getvalue(), control_launch)
-    assert warning_output.getvalue().splitlines() == [
-        "plan backlog-warning has no recorded task; panel left it unchanged; plan protection is absent",
-        "9 results await review/admission; review first"], warning_output.getvalue()
-    warning_output = io.StringIO()
-    with patch.dict(os.environ, control_env, clear=True), \
-            patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
-            patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
-            patch.object(panel, "routed_command", return_value=control_write_command), \
-            patch.object(panel, "snapshot", return_value=(dict(warning_report, review_backlog={
-                "threshold": 9, "counts": {room_owner: 9}}), 0)), \
-            patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
-            redirect_stderr(warning_output):
-        assert panel.dispatch(project, "claude", "worker", "light", "write", "implement",
-                              brief=os.path.relpath(brief, project), verify="true", task_id="backlog-at-threshold",
-                              label="Backlog at threshold") == 0
-    assert warning_output.getvalue().splitlines() == [
+    def backlog_dispatch(report, task, access="write", **options):
+        output = io.StringIO()
+        if access == "write":
+            options.update(brief=options.get("brief", brief), verify="true")
+        with patch.dict(os.environ, control_env, clear=True), \
+                patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
+                patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
+                patch.object(panel, "routed_command", return_value=control_write_command), \
+                patch.object(panel, "snapshot", return_value=(report, 0)), \
+                patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
+                redirect_stderr(output):
+            status = panel.dispatch(project, "claude", "worker", "light", access,
+                                    "implement" if access == "write" else "investigate", task_id=task, label=task, **options)
+        return status, output.getvalue()
+    # Over the threshold a new write dispatch is refused before the worker spawns or the plan is touched.
+    def stored_state():
+        return {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted((project / ".oms").rglob("*")) if path.is_file()}
+    control_launch.clear()
+    refused = io.StringIO()
+    state_before, records_before = stored_state(), room.records(project, shared)
+    try:
+        # The room is past its rollover mark and may hold a deferred result; a refusal still mutates neither.
+        with redirect_stderr(refused), patch.object(room, "ROLLOVER_MESSAGES", -1), \
+                patch.object(panel, "_rollover_if_needed", wraps=panel._rollover_if_needed) as rolled, \
+                patch.object(panel, "_reconcile_dispatch", wraps=panel._reconcile_dispatch) as reconciled:
+            backlog_dispatch(warning_report, "backlog-warning")
+    except ValueError as error:
+        assert str(error).startswith("9 results await review/admission; review first"), error
+        assert "--finalize" in str(error) and "--continue" in str(error), error
+    else:
+        raise AssertionError("a write dispatch over the review backlog threshold was not refused")
+    assert "env" not in control_launch and "has no recorded task" not in refused.getvalue(), \
+        (control_launch, refused.getvalue())
+    assert not rolled.called and not reconciled.called, (rolled.call_args_list, reconciled.call_args_list)
+    assert room.records(project, shared) == records_before and room.resolve(project, shared) == shared
+    assert stored_state() == state_before, "a refused dispatch changed stored room or result state"
+    # Sending findings back with --continue is how the backlog drains.
+    continued_brief = project / "continued-brief.md"
+    continued_brief.write_text(brief.read_text())
+    with patch.object(panel, "continuation", return_value=(continued_brief, None, "continuing")):
+        status, text = backlog_dispatch(warning_report, None, continue_task="backlog-continue", brief=brief)
+    assert status == 0 and "env" in control_launch, (status, text, control_launch)
+    assert "results await review" not in text, text
+    # Read dispatches never add unreviewed write results.
+    status, text = backlog_dispatch(warning_report, "backlog-read", access="read", prompt="Inspect the bounded source")
+    assert status == 0 and "results await review" not in text, (status, text)
+    status, warning_text = backlog_dispatch(dict(warning_report, review_backlog={
+        "threshold": 9, "counts": {room_owner: 9}}), "backlog-at-threshold", brief=os.path.relpath(brief, project))
+    assert status == 0, (status, warning_text)
+    assert warning_text.splitlines() == [
         "plan backlog-at-threshold has no recorded task; panel left it unchanged; plan protection is absent"], \
-        warning_output.getvalue()
+        warning_text
     for owner in ("codex",):
         try:
             panel.dispatch(project, owner, "worker", "light", "read", "investigate", prompt="Inspect source")

@@ -510,7 +510,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         options = {}
         if candidate is not None:
             options["candidate"] = candidate
-        if continuation_patch:
+        if continuation_patch is not None:
             options["continuation_patch"] = continuation_patch
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                             dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias, **options)
@@ -1708,6 +1708,16 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             raise ValueError("panel main and room caller identities disagree")
         if parent and not room.same_room(repo, record.get("refs", {}).get("panel_room_id", room_id), room_id):
             raise ValueError("panel main and selected room identities disagree")
+        # Refuse before rollover or reconciliation can seal a room or deliver results.
+        if not dry_run and access == "write" and continuation_patch is None:
+            from review_backlog import warning_for
+            try:
+                notice = warning_for(snapshot(repo, room_id)[0], caller)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+                notice = None  # throughput policy fails open; an unreadable backlog never blocks work
+            if notice:
+                raise ValueError(notice + "; admit or reject each result, or settle it with oms panel --finalize "
+                                 "--owner %s --task-id ID, or send findings back with --continue" % owner)
         if not dry_run and parent:
             moved_to = _rollover_if_needed(repo, room_id, state, caller)
             if moved_to:
@@ -1856,15 +1866,6 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                     if supervisor and supervisor["group"] == process.pid:
                         binding.update(identity=supervisor["identity"], group=supervisor["group"])
                 dispatch_store.write(repo, control_member + "-process.json", binding, exclusive=True)
-            if access == "write" and caller:
-                try:
-                    from review_backlog import warning_for
-                    backlog_report, _ = snapshot(repo, room_id)
-                    notice = warning_for(backlog_report, caller)
-                    if notice:
-                        print(notice, file=sys.stderr)
-                except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
-                    pass
         except (OSError, ValueError):
             spawn_failed = process is None
             if process is None and "output_fd" in locals():
