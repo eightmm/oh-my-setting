@@ -947,7 +947,18 @@ test_apply_ml_scaffolds_check_contract() {
   fi
   [ "$(cat "$TMP/sl-outside/secret")" = secret ] && [ -L "$TMP/sl-b/AGENTS.md" ] ||
     fail 'AGENTS.md symlink refusal touched the link or its target'
-  rm -r "$TMP/sl-a" "$TMP/sl-b" "$TMP/sl-outside"
+  # ml skill installs land under .oms/.agents/.claude; a linked root is refused too.
+  mkdir -p "$TMP/sl-c"
+  ln -s ../sl-outside "$TMP/sl-c/.oms"
+  if "$ROOT/scripts/apply-project-template.sh" ml "$TMP/sl-c" >/dev/null 2>&1; then
+    fail 'a symlinked .oms skill root must be refused'
+  else
+    [ "$?" = 2 ] || fail 'skill root refusal must exit 2'
+  fi
+  [ -z "$(ls -A "$TMP/sl-outside")" ] || [ "$(ls "$TMP/sl-outside")" = secret ] ||
+    fail 'skill root refusal wrote outside the project'
+  [ ! -e "$TMP/sl-c/AGENTS.md" ] || fail 'skill root refusal wrote AGENTS.md'
+  rm -r "$TMP/sl-a" "$TMP/sl-b" "$TMP/sl-c" "$TMP/sl-outside"
 
   before="$(find "$py" | sort)"
   OH_MY_SETTING_DRY_RUN=1 "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null

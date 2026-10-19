@@ -344,27 +344,29 @@ CI_DST="$CI_DIR/python-ci.yml"
 # of an existing rule file) outside the project, dangling or not. Refuse before
 # the first write, dry runs included; PROJECT_DIR itself may be a link.
 refuse_symlinks() {
-  local rel part walk
-  local IFS_SAVE="$IFS"
-  for rel in "$@"; do
-    walk="$PROJECT_DIR"
-    IFS=/
+  # A subshell keeps the caller's IFS and noglob untouched.
+  (
     set -f
-    for part in $rel; do
-      [ -n "$part" ] || continue
-      walk="$walk/$part"
-      if [ -L "$walk" ]; then
-        set +f; IFS="$IFS_SAVE"
-        echo "error: symlink at ${walk#"$PROJECT_DIR"/}; nothing was changed" >&2
-        exit 2
-      fi
+    for rel in "$@"; do
+      walk="$PROJECT_DIR"
+      IFS=/
+      for part in $rel; do
+        [ -n "$part" ] || continue
+        walk="$walk/$part"
+        if [ -L "$walk" ]; then
+          echo "error: symlink at ${walk#"$PROJECT_DIR"/}; nothing was changed" >&2
+          exit 2
+        fi
+      done
     done
-    set +f; IFS="$IFS_SAVE"
-  done
+  ) || exit 2
 }
 destinations=("${FILES[@]}" PROJECT.md)
 if [ "$BASE_STYLE" = "ml" ]; then
   destinations+=(.gitignore scripts/ml_smoke.py scripts/check.sh)
+  # skill-forge stores under .oms/skills and links into both CLI skill roots;
+  # the per-skill leaves are its own owned links, so only the roots are walked.
+  destinations+=(.oms/skills .agents/skills .claude/skills)
   if [ "$ML_FULL_DOCS" = "1" ] && [ -d "$ROOT/templates/ml-docs" ]; then
     destinations+=(docs)
     for src in "$ROOT/templates/ml-docs"/*.md; do
