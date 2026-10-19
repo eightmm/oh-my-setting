@@ -33,9 +33,11 @@ oms_platform_is_windows() {
 # The managed `python3` shim, recognized by its exact shape. Lives on the
 # platform boundary because both the installer that writes it and the
 # uninstaller that removes it must agree on what "ours" means — anything else
-# at that path is a user's launcher and is never touched. The uv variant
-# resolves the interpreter at call time, so the shim survives uv relocating
-# or upgrading its managed CPython.
+# at that path is a user's launcher and is never touched. The `uv python find`
+# variant is legacy, recognized read-only so reinstall and uninstall still own
+# it: uv resolves from the caller's cwd (.python-version, .venv), so inside an
+# unrelated project it picks that project's interpreter or fails. New shims
+# name the OMS runtime's version-free bin/python3 instead.
 oms_install_python_shim_owned() {
   local target="$1"
   local command
@@ -46,10 +48,43 @@ oms_install_python_shim_owned() {
   command="$(sed -n '3p' "$target")"
   case "$command" in
     'exec python "$@"'|'exec py -3 "$@"'|'exec "$(uv python find)" "$@"') ;;
-    'exec "'*'/bin/python3" "$@"') ;;  # the OMS runtime, on a host without Python
+    'exec "'*'/bin/python3" "$@"') ;;  # the OMS runtime, written before it was quoted
+    "exec '"*"/bin/python3' \"\$@\"") ;;  # the OMS runtime, on a host without Python
     *) return 1 ;;
   esac
   [ -z "$(sed -n '4p' "$target")" ]
+}
+
+# The shim's runtime line. The root is single-quoted, with embedded quotes
+# escaped, so a `$`, backtick or quote in the path stays literal when the shim
+# runs; sed keeps this Bash 3.2-safe where ${var//} quoting is not.
+oms_install_python_shim_runtime_line() {  # RUNTIME_ROOT
+  local quoted
+  quoted="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" || return 1
+  printf "exec '%s/bin/python3' \"\$@\"\n" "$quoted"
+}
+
+# Converge a legacy `uv python find` shim onto the OMS runtime launcher, so
+# existing hosts are repaired too (ensure_python3 returns early once a working
+# python3 exists). Rewrites only a shim that is byte-for-byte the legacy form,
+# and only when the launcher it will name is executable. Returns 0 when it rewrote.
+oms_install_python_shim_repoint() {  # SHIM RUNTIME_ROOT
+  local shim="$1" root="$2" stage
+
+  # Whole-file comparison: the ownership test above stops at line 4, so a
+  # legacy shim followed by a blank line and the user's own commands would
+  # pass it and lose that content to the rewrite.
+  oms_install_python_shim_owned "$shim" || return 1
+  printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+    'exec "$(uv python find)" "$@"' | cmp -s - "$shim" || return 1
+  [ -x "$root/bin/python3" ] && [ ! -L "$root/bin" ] || return 1
+  stage="$(mktemp "$shim.XXXXXX")" || return 1
+  {
+    printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting'
+    oms_install_python_shim_runtime_line "$root"
+  } > "$stage" &&
+    chmod +x "$stage" &&
+    mv -f "$stage" "$shim" || { rm -f "$stage"; return 1; }
 }
 
 oms_install_link_mode() {

@@ -142,6 +142,99 @@ out="$(PATH="$uv_stub_bin:$PATH" "$uv_shim" -c 'print("uv-shim-ok")')" ||
   fail "uv-backed shim did not exec the resolved interpreter"
 [ "$out" = "uv-shim-ok" ] || fail "uv-backed shim ran the wrong interpreter: $out"
 
+# `uv python find` honors the caller's cwd (.python-version, .venv), so that
+# legacy shim breaks inside an unrelated project. Repointing it at the OMS
+# runtime's version-free bin/python3 must make it cwd-independent, while
+# anything that is not exactly the legacy shape stays untouched.
+cwd_uv_bin="$TMP/uv-cwd-bin"
+mkdir -p "$cwd_uv_bin"
+cat > "$cwd_uv_bin/uv" <<EOF
+#!/usr/bin/env bash
+[ "\$1:\$2" = "python:find" ] || exit 2
+[ ! -e .python-version ] || { echo "No interpreter found for Python 3.99" >&2; exit 2; }
+printf '%s\n' "$real_python3"
+EOF
+chmod +x "$cwd_uv_bin/uv"
+cwd_project="$TMP/uv-cwd-project"
+mkdir -p "$cwd_project/.venv"
+printf '3.99\n' > "$cwd_project/.python-version"
+if (cd "$cwd_project" && PATH="$cwd_uv_bin:$PATH" "$uv_shim" -c 'print(1)') >/dev/null 2>&1; then
+  fail "legacy uv shim unexpectedly survived a project pinning another Python"
+fi
+bash -c ". '$ROOT/scripts/lib/platform.sh'; command -v oms_install_python_shim_repoint >/dev/null" ||
+  fail "platform.sh must define the managed Python shim repoint"
+repoint_root="$TMP/uv-runtime-root"
+mkdir -p "$repoint_root/bin"
+if oms_install_python_shim_repoint "$uv_shim" "$repoint_root"; then
+  fail "shim was repointed at a runtime without an executable bin/python3"
+fi
+[ "$(sed -n '3p' "$uv_shim")" = 'exec "$(uv python find)" "$@"' ] ||
+  fail "a missing runtime launcher must leave the legacy shim as it was"
+printf '%s\n' '#!/usr/bin/env bash' "exec \"$real_python3\" -c 'print(\"runtime-ok\")'" > "$repoint_root/bin/python3"
+chmod +x "$repoint_root/bin/python3"
+oms_install_python_shim_repoint "$uv_shim" "$repoint_root" ||
+  fail "legacy uv shim was not repointed at the runtime"
+[ "$(sed -n '3p' "$uv_shim")" = "exec '$repoint_root/bin/python3' \"\$@\"" ] ||
+  fail "repointed shim does not exec the runtime bin/python3"
+oms_install_python_shim_owned "$uv_shim" || fail "repointed shim is no longer owned"
+[ -x "$uv_shim" ] || fail "repointed shim lost its executable bit"
+out="$(cd "$cwd_project" && PATH="$cwd_uv_bin:$PATH" "$uv_shim")" ||
+  fail "repointed shim failed in a project pinning another Python"
+[ "$out" = runtime-ok ] || fail "repointed shim ran the wrong interpreter: $out"
+before="$(cat "$uv_shim")"
+if oms_install_python_shim_repoint "$uv_shim" "$repoint_root"; then
+  fail "an already-runtime shim must not report a repoint"
+fi
+[ "$(cat "$uv_shim")" = "$before" ] || fail "repoint rewrote a shim that was not the legacy uv shape"
+foreign_shim="$TMP/foreign-uv-python3"
+printf '%s\n' '#!/usr/bin/env bash' 'exec "$(uv python find)" "$@"' > "$foreign_shim"
+before="$(cat "$foreign_shim")"
+if oms_install_python_shim_repoint "$foreign_shim" "$repoint_root"; then
+  fail "repoint rewrote a launcher that lacks the OMS marker"
+fi
+[ "$(cat "$foreign_shim")" = "$before" ] || fail "repoint modified a foreign launcher"
+
+# Ownership only checks that line 4 is blank, so a legacy shim followed by a
+# blank line and the user's own commands passes it; the rewrite must still
+# leave such a file byte-identical rather than drop what the user added.
+extended_shim="$TMP/extended-uv-python3"
+printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+  'exec "$(uv python find)" "$@"' '' 'echo user-added-after-the-shim' > "$extended_shim"
+chmod +x "$extended_shim"
+cp "$extended_shim" "$TMP/extended-uv-python3.expected"
+oms_install_python_shim_owned "$extended_shim" ||
+  fail "fixture precondition: the extended shim must pass the line-based ownership test"
+if oms_install_python_shim_repoint "$extended_shim" "$repoint_root"; then
+  fail "repoint migrated a legacy shim that carries user content"
+fi
+cmp -s "$extended_shim" "$TMP/extended-uv-python3.expected" ||
+  fail "repoint modified a legacy shim that carries user content"
+printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+  'exec "$(uv python find)" "$@"' '' > "$extended_shim"
+cp "$extended_shim" "$TMP/extended-uv-python3.expected"
+if oms_install_python_shim_repoint "$extended_shim" "$repoint_root"; then
+  fail "repoint migrated a legacy shim with a trailing blank line"
+fi
+cmp -s "$extended_shim" "$TMP/extended-uv-python3.expected" ||
+  fail "repoint modified a legacy shim with a trailing blank line"
+
+# The runtime root is written into executable text: a `$` or a single quote in
+# it must stay literal, not expand or end the quoting.
+odd_root="$TMP/odd\$root'q"
+odd_shim="$TMP/odd-uv-python3"
+mkdir -p "$odd_root/bin"
+cp "$repoint_root/bin/python3" "$odd_root/bin/python3"
+printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+  'exec "$(uv python find)" "$@"' > "$odd_shim"
+chmod +x "$odd_shim"
+oms_install_python_shim_repoint "$odd_shim" "$odd_root" ||
+  fail "legacy uv shim was not repointed at a runtime root with \$ and a quote"
+oms_install_python_shim_owned "$odd_shim" ||
+  fail "shim naming a runtime root with \$ and a quote is not recognized as owned"
+out="$(cd "$cwd_project" && "$odd_shim")" ||
+  fail "shim naming a runtime root with \$ and a quote did not run"
+[ "$out" = runtime-ok ] || fail "odd-root shim ran the wrong interpreter: $out"
+
 # The timer's private runtime is version-scoped and never replaces user data.
 runtime_repo="$TMP/runtime-repo"
 runtime_source="$ROOT"

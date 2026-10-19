@@ -102,6 +102,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The managed `python3` shim no longer resolves its interpreter from the
+  caller's cwd. A uv-adopted shim (`exec "$(uv python find)" "$@"`) picked the
+  `.venv` or `.python-version` of whatever project it ran in, or failed when
+  that pinned version was absent. `install.sh` and the managed `update.sh`
+  reconcile now repoint an owned shim of exactly that shape at the OMS
+  runtime's version-free `bin/python3` (`oms_install_python_shim_repoint`), so
+  existing hosts converge too. The legacy line stays recognized, so reinstall
+  and uninstall still own it; a launcher that differs from that form by even
+  one byte (user lines appended, a trailing blank line) is never touched. The
+  runtime path is single-quoted in the shim, so a `$`, backtick or quote in it
+  stays literal.
+
 - Codex read seats now disable web search and the apps connectors in effect:
   `-c tools.web_search=false` was parsed and discarded since codex PR #13675
   (the tool defaults to Cached), so it is replaced by

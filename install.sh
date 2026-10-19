@@ -816,8 +816,8 @@ ensure_python3() {
   fi
   # uv-only machines (fresh workstations, cluster accounts) carry a managed
   # CPython without exposing any python3 command. Adopt it through a managed
-  # shim that resolves `uv python find` at call time, so the shim survives uv
-  # relocating or upgrading its interpreters.
+  # shim only as the bootstrap interpreter: once the OMS runtime exists the
+  # shim is repointed at it, because `uv python find` depends on the cwd.
   if [ -z "$candidate" ] && command -v uv >/dev/null 2>&1; then
     uv_interp="$(uv python find 2>/dev/null || true)"
     if [ -z "$uv_interp" ]; then
@@ -874,8 +874,10 @@ ensure_python3() {
         'exec "$(uv python find)" "$@"' > "$shim"
       ;;
     runtime)
-      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
-        "exec \"$(oms_python_runtime_root)/bin/python3\" \"\$@\"" > "$shim"
+      {
+        printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting'
+        oms_install_python_shim_runtime_line "$(oms_python_runtime_root)"
+      } > "$shim"
       ;;
     *)
       printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
@@ -984,6 +986,11 @@ ensure_python3
 # shellcheck disable=SC1091
 . "$DEST/scripts/lib/python-runtime.sh"
 oms_python_runtime_activate "$DEST"
+# A shim written by an earlier install (or by the uv adoption above) resolves
+# `uv python find` from the caller's cwd; converge it onto the runtime launcher.
+if oms_install_python_shim_repoint "$HOME/.local/bin/python3" "$(oms_python_runtime_root)"; then
+  echo "python3 shim: $HOME/.local/bin/python3 -> runtime"
+fi
 
 if [ "$TOOLS_FULL" -eq 1 ]; then
   # Explicit compatibility: the historical all-tools council footprint.

@@ -500,6 +500,11 @@ reconcile_core() {
     . "$ROOT/scripts/lib/python-runtime.sh"
     "$ROOT/scripts/python-runtime.sh" ensure || return 1
     oms_python_runtime_activate || return 1
+    # python-runtime.sh only sources platform.sh when it is absent, so an update
+    # from an older checkout would otherwise lack the repoint helper.
+    # shellcheck source=scripts/lib/platform.sh
+    . "$ROOT/scripts/lib/platform.sh"
+    oms_install_python_shim_repoint "$HOME/.local/bin/python3" "$(oms_python_runtime_root)" || true
   fi
   if [ "$ROLLBACK" != 1 ] && [ "$current" = "$target" ]; then
     export OMS_INSTALL_PREVIOUS_COMMIT="$RECEIPT_PREVIOUS_COMMIT"
