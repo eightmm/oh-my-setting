@@ -417,6 +417,8 @@ def call_span(call, arrow="->"):
     """Recorded start/end clocks and consistent state words; live calls include elapsed time."""
     state = call["state"]
     if call.get("_native"):
+        if call.get("_kind") != "advisor":
+            return "active"
         return "answered " + call["_finished"] if call.get("_finished") else "asked %s %s running" % (call["_native"], arrow)
     words = end_words(call, said(state))
     if state in LIVE_STATES:
@@ -708,17 +710,46 @@ def ago(ts):
         "%dh ago" % (seconds // 3600) if seconds < 86400 else "%dd ago" % (seconds // 86400)
 
 
+def native_subagents(report, members):
+    """Claude Code's own subagents and Workflow runs as read-only rows below their main; never room participants.
+
+    No lifecycle is claimed: a row only says its file was written lately."""
+    found = mapping(report.get("native_subagents"))
+    rows = []
+    for m in members:
+        if not (m.get("role") == "main" and m.get("provider") == "claude" and m.get("state") not in FINISHED):
+            continue
+        for kind, key in (("agent", "agents"), ("workflow", "workflows")):
+            for entry in listing(mapping(found.get(m["participant"])).get(key)):
+                entry = mapping(entry)
+                if isinstance(entry.get("id"), str) and clean(entry.get("title")):
+                    since = ago(entry.get("active")).replace("just now", "<1m ago")
+                    rows.append({"participant": "native-%s-%s-%s" % (kind, m["participant"], entry["id"]),
+                                 "role": "subagent", "parent": m["participant"], "provider": "claude", "joined": True,
+                                 "seq": 0, "state": "unknown", "_kind": kind, "_native": "active",
+                                 "title": clean(entry["title"]) + (" - active " + since if since else ""),
+                                 "model": "Claude Code " + kind})
+    return rows
+
+
 def native_advisors(report, members):
     """Claude Code's built-in advisor as a card, running or just answered; it never enters the room."""
     calls = mapping(report.get("native_advisors"))
-    return [{"participant": "native-advisor-" + m["participant"], "role": "advisor", "parent": m["participant"],
-             "provider": "claude", "joined": True, "seq": 0, "title": "Built-in advisor",
+    return native_subagents(report, members) + [{"participant": "native-advisor-" + m["participant"], "role": "advisor", "parent": m["participant"],
+             "provider": "claude", "joined": True, "seq": 0, "title": "Built-in advisor", "_kind": "advisor",
              "state": "working" if mapping(calls.get(m["participant"])).get("running", True) else "done",
              "model": clean(mapping(calls.get(m["participant"])).get("model")) or "Advisor",
              "_native": clean(mapping(calls.get(m["participant"])).get("started")) or "earlier",
              "_finished": clean(mapping(calls.get(m["participant"])).get("finished")) or None}
             for m in members if m.get("role") == "main" and m.get("provider") == "claude"
             and m.get("state") not in FINISHED and isinstance(calls.get(m["participant"]), dict)]
+
+
+def native_running(calls):
+    """One owner-context line for Claude Code's own agents and Workflow runs shown under a main."""
+    shown = [c for c in calls if c.get("_kind") in {"agent", "workflow"}]
+    return ["Native agents active: %s · workflows active: %s" % (sum(c["_kind"] == "agent" for c in shown),
+                                                                sum(c["_kind"] == "workflow" for c in shown))] if shown else []
 
 
 def card(title, content, width, height, unicode):
@@ -754,7 +785,8 @@ WORDS = {"working": "running", "live marker": "running", "verifying": "checking"
          "timed_out": "timed out", "orphaned": "lost", "waiting_input": "needs input",
          "waiting_approval": "needs approval", "review": "awaiting decision", "presence unknown": "status unknown"}
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker", "researcher": "Researcher"}
+ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker", "researcher": "Researcher",
+         "subagent": "Subagent"}
 MACHINE = re.compile(r"^(stop-reason:|model-route:|model-result:|usage detail:|tokens used|served model|cost usd|"
                      r"##\s*(output|exit|verify)\b|---\s*(begin|end) )", re.I)
 
@@ -896,11 +928,12 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
                           key=lambda c: (str(c.get("ended") or c.get("joined_at") or ""), c.get("seq", 0)), reverse=True)
         unknown = [c for c in calls if c not in attention + deciding + active + finished]
         lines.append("Team: " + (" · ".join(team_counts(calls, classify)) or "no calls yet"))
-        native = next((c for c in calls if c.get("_native")), None)
+        native = next((c for c in calls if c.get("_kind") == "advisor"), None)
         if native:
             # A summary of the main's advisor state belongs beside the team counts, not below the call log.
             lines.append("Built-in advisor: " + ("asked %s · running" % native["_native"] if native["state"] != "done"
                                                  else "last answered %s" % (native.get("_finished") or native["_native"])))
+        lines += native_running(calls)
 
         def team_rows(heading, group):
             if group:
@@ -951,6 +984,9 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
             lines.append("  No messages received")
         lines += ["", "Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else "")]
         return lines + ["Click a team row to open it · click the main for its chat"], targets
+    if member.get("_kind") in {"agent", "workflow"}:
+        return wrapped(clean(member.get("title")), width, 3) + [
+            "Claude Code's own %s · read-only: not a panel worker" % member["_kind"]], targets
     if member.get("_native"):
         done = member["state"] == "done"
         return ["%s advisor · %s" % (member.get("model"), "answered" if done else "running"),
@@ -1515,7 +1551,9 @@ def summary_card(member, preview, width, room=None, unicode=True, *, report=None
     identity = member_identity(member).replace(" model unknown", "")
     tag = judgment_tag(member, report, unicode, execution_tag(member, unicode)) if member.get("state") not in {None, "unknown", "presence unknown"} else ""
     lines = [identity + (" " + tag if tag else "")]
-    if member.get("_native"):
+    if member.get("_kind") in {"agent", "workflow"}:
+        lines.append("Claude Code's own %s: read-only, not a panel worker" % member["_kind"])
+    elif member.get("_native"):
         lines.append("Built-in advisor: answer stays inside the main's chat")
     if member.get("role") == "main":
         held = (claims if claims is not None else claims_by_main(report)).get(member["participant"], [])
@@ -1526,10 +1564,11 @@ def summary_card(member, preview, width, room=None, unicode=True, *, report=None
             lines.append("Task: " + " · ".join(clean(task.get(k)) for k in ("id", "title") if task.get(k)))
         lines += declared_status(room, member["participant"], width)
         calls = (everyone or {}).get(member["participant"], [])
-        native = next((c for c in calls if c.get("_native")), None)
+        native = next((c for c in calls if c.get("_kind") == "advisor"), None)
         if native:
             lines.append("Built-in advisor: " + ("last answered %s" % native["_finished"]
                          if native.get("_finished") else "asked %s · running" % native["_native"]))
+        lines += native_running(calls)
         classify = classify or call_classifier(report)
         lines.append("Workers running: %s · Awaiting decision: %s" % (
             sum(c.get("state") in LIVE_STATES and not judge_band(c.get("role"), c.get("purpose")) for c in calls),

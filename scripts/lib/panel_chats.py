@@ -25,6 +25,10 @@ MAX_ENTRIES = 8192
 MAX_FILES = 4096
 TAIL_BYTES = 512 * 1024
 ADVISOR_MAX_AGE = 1800
+NATIVE_ACTIVE = 600          # a subagent or workflow row lasts this long after its file was last written
+NATIVE_MAX = 32              # newest rows per kind and session
+NATIVE_META_BYTES = 4096
+WORKFLOW_BYTES = 256 * 1024  # journal tail read for display counts
 ADVISOR_MODELS = (("fable", "Fable 5.1"), ("opus", "Opus 5.5"), ("sonnet", "Sonnet 5.5"))
 _transcripts = {}
 
@@ -131,14 +135,33 @@ def _advisor_label(home):
     return next((label for key, label in ADVISOR_MODELS if key in value), "Advisor")
 
 
+def _claude_mains(members):
+    return {m["consumer"]: m["participant"] for m in members
+            if m.get("provider") == "claude" and m.get("role") == "main" and m.get("joined")
+            and isinstance(m.get("consumer"), str) and len(m["consumer"]) == 32}
+
+
+def _main_transcript(home, consumer):
+    """The main's own transcript, resolved once per consumer."""
+    path = _transcripts.get(consumer)
+    if path is None:
+        sids = native_index({consumer})["claude"].get(consumer) or ()
+        for sid in sorted(sids)[:1]:
+            with os.scandir(home / "projects") as slugs:
+                for slug in list(slugs)[:MAX_FILES]:
+                    candidate = Path(slug.path) / (sid + ".jsonl")
+                    if slug.is_dir(follow_symlinks=False) and candidate.is_file() and not candidate.is_symlink():
+                        path = _transcripts[consumer] = candidate
+                        break
+    return path
+
+
 def native_advisors(members):
     """Claude Code's built-in advisor per main participant: the call still unanswered, else the newest
     one answered within ADVISOR_MAX_AGE; in memory only.
 
     Reads only tool names, ids and timestamps from the tail of each main's own transcript."""
-    mains = {m["consumer"]: m["participant"] for m in members
-             if m.get("provider") == "claude" and m.get("role") == "main" and m.get("joined")
-             and isinstance(m.get("consumer"), str) and len(m["consumer"]) == 32}
+    mains = _claude_mains(members)
     found = {}
     if not mains:
         return found
@@ -146,18 +169,9 @@ def native_advisors(members):
     label = None
     for consumer, participant in list(mains.items())[:8]:
         try:
-            path = _transcripts.get(consumer)
+            path = _main_transcript(home, consumer)
             if path is None:
-                sids = native_index({consumer})["claude"].get(consumer) or ()
-                for sid in sorted(sids)[:1]:
-                    with os.scandir(home / "projects") as slugs:
-                        for slug in list(slugs)[:MAX_FILES]:
-                            candidate = Path(slug.path) / (sid + ".jsonl")
-                            if slug.is_dir(follow_symlinks=False) and candidate.is_file() and not candidate.is_symlink():
-                                path = _transcripts[consumer] = candidate
-                                break
-                if path is None:
-                    continue
+                continue
             calls, answered = [], {}
             try:
                 data = _read_owned(path, TAIL_BYTES, tail=True)
@@ -193,6 +207,104 @@ def native_advisors(members):
             if finished:
                 found[participant]["finished"] = finished.strftime("%H:%M")
         except (OSError, ValueError, TypeError, RecursionError):
+            continue
+    return found
+
+
+def _active(folder, prefix, suffix, now, inner=None):
+    """(ISO mtime, name) of own regular files `prefix*suffix` (or `inner` within such directories) written
+    within NATIVE_ACTIVE seconds, newest first."""
+    recent = []
+    try:
+        with os.scandir(folder) as entries:
+            for number, entry in enumerate(entries):
+                name = entry.name
+                if number >= MAX_ENTRIES:
+                    break
+                if not (name.startswith(prefix) and name.endswith(suffix) and SESSION.fullmatch(name[len(prefix):len(name) - len(suffix)])):
+                    continue
+                try:
+                    info = os.lstat(os.path.join(entry.path, inner)) if inner else entry.stat(follow_symlinks=False)
+                    if inner and not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                if (stat.S_ISREG(info.st_mode) and 0 <= now - info.st_mtime <= NATIVE_ACTIVE
+                        and not (hasattr(os, "getuid") and info.st_uid != os.getuid())):
+                    recent.append((info.st_mtime, name[len(prefix):len(name) - len(suffix)]))
+    except OSError:
+        pass
+    return [(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime)), name)
+            for mtime, name in sorted(recent, reverse=True)[:NATIVE_MAX]]
+
+
+def _native_agents(folder, now):
+    """Agent-tool subagents whose own transcript was written lately; the row never claims more than that."""
+    found = []
+    for mtime, agent in _active(folder / "subagents", "agent-", ".jsonl", now):
+        title = "Claude Code agent"
+        try:
+            meta = json.loads(_read_owned(folder / "subagents" / ("agent-%s.meta.json" % agent), NATIVE_META_BYTES))
+            title = next((clean(meta[k], 80) for k in ("description", "name", "agentType")
+                          if isinstance(meta.get(k), str) and meta[k].strip()), title)
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+            pass
+        found.append({"id": agent, "title": title, "active": mtime})
+    return found
+
+
+def _native_workflows(folder, now):
+    """Workflow runs whose journal was written lately, with approximate phase and counts when its tail parses."""
+    found = []
+    for mtime, name in _active(folder / "subagents" / "workflows", "wf_", "", now, "journal.jsonl"):
+        run = "wf_" + name
+        started = answered = 0
+        phase = None
+        try:
+            for line in _read_owned(folder / "subagents" / "workflows" / run / "journal.jsonl", WORKFLOW_BYTES, tail=True).split(b"\n"):
+                try:
+                    row = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                kind = row.get("type") if isinstance(row, dict) else None
+                answered += kind == "result"
+                if kind == "started":
+                    started += 1
+                    phase = clean(row["phase"], 24) if isinstance(row.get("phase"), str) else phase
+        except OSError:
+            pass
+        title = "Workflow " + run
+        if started or answered:
+            title += "%s · agents ~%s started · ~%s done" % (" · phase " + phase if phase else "", started, answered)
+        found.append({"id": run, "title": title, "active": mtime})
+    return found
+
+
+def native_subagents(members):
+    """Claude Code's own subagents and Workflow runs per main participant, for read-only board rows.
+
+    {main participant: {"agents": [...], "workflows": [...]}}, in memory only; every failure drops the one
+    main, file or row it touches."""
+    mains = _claude_mains(members)
+    found = {}
+    if not mains:
+        return found
+    home, now = _claude_home(), time.time()
+    for consumer, participant in list(mains.items())[:8]:
+        try:
+            path = _main_transcript(home, consumer)
+            folder = path.with_suffix("") if path else None
+            if folder is None or not UUID.fullmatch(path.stem) or folder.is_symlink() or not folder.is_dir():
+                continue
+            row = {"agents": [], "workflows": []}
+            for key, read in (("agents", _native_agents), ("workflows", _native_workflows)):
+                try:
+                    row[key] = read(folder, now)
+                except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                    continue
+            if row["agents"] or row["workflows"]:
+                found[participant] = row
+        except Exception:  # best-effort board extra: a surprise must never reach the panel tick
             continue
     return found
 

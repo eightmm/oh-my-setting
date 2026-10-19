@@ -1193,6 +1193,94 @@ finished_detail = graph_view.render_graph(dict(board, native_advisors=answered_c
 assert "Built-in advisor: last answered " + answered_call["adv-main"]["finished"] in finished_detail, finished_detail
 running_nav = {"tab": "detail", "selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 assert "Built-in advisor: asked " in graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=running_nav)
+# Claude Code's own subagents and Workflow runs: read-only rows that show only what the session files prove.
+session_dir = advisor_home / "projects" / "slug" / advisor_sid
+agents_dir = session_dir / "subagents"
+runs_dir = agents_dir / "workflows"
+(session_dir / "workflows").mkdir(parents=True)
+runs_dir.mkdir(parents=True)
+
+
+def write_agent(ident, age=0, **meta):
+    (agents_dir / ("agent-%s.meta.json" % ident)).write_text(json.dumps(meta))
+    log = agents_dir / ("agent-%s.jsonl" % ident)
+    log.write_text("")
+    os.utime(log, (time.time() - age,) * 2)
+
+
+def write_journal(run, rows, age=0):
+    (runs_dir / run).mkdir(exist_ok=True)
+    journal = runs_dir / run / "journal.jsonl"
+    journal.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    os.utime(journal, (time.time() - age,) * 2)
+    return journal
+
+
+def sub_board(found, tab="log", selected=None):
+    preview = {"target": selected, "report": {}} if selected else {}
+    nav = {"group_tree": True, "tab": tab, "selected": selected, "preview": preview}
+    return graph_view.render_graph(dict(board, native_subagents=found), 110, 44, navigation=nav), nav
+
+
+def shown(found):
+    return {kind: {row["id"]: row for row in found.get("adv-main", {}).get(kind, [])} for kind in ("agents", "workflows")}
+
+
+started = [{"type": "launched", "key": "k1"}, {"type": "started", "key": "k1", "agentId": "w1", "phase": "Find"},
+           {"type": "started", "key": "k2", "agentId": "w2", "phase": "Review"}, {"type": "result", "key": "k1"}]
+stale = panel_chats.NATIVE_ACTIVE + 60
+with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
+    # One rule for agents and workflows: a row lasts while its own file was written lately, and claims nothing more.
+    write_agent("a1", description="Audit the parser", agentType="general-purpose")
+    write_agent("a2", age=stale, name="stale")
+    write_agent("a3", description="no meta file")
+    (agents_dir / "agent-a3.meta.json").unlink()
+    write_agent("a4")
+    (agents_dir / "agent-a4.meta.json").write_text("{not json")
+    (agents_dir / "agent-a5.jsonl").symlink_to(agents_dir / "agent-a1.jsonl")
+    found = panel_chats.native_subagents([claude_main])
+    agents = shown(found)["agents"]
+    assert set(agents) == {"a1", "a3", "a4"} and found["adv-main"]["workflows"] == [], found
+    assert agents["a1"]["title"] == "Audit the parser" and agents["a3"]["title"] == "Claude Code agent", agents
+    with patch.object(panel_chats.os, "getuid", return_value=os.getuid() + 1):
+        assert panel_chats.native_subagents([claude_main]) == {}, "a foreign-owned file must not be read"
+    assert panel_chats.native_subagents([dict(claude_main, provider="codex")]) == {}
+    text, nav = sub_board(found, "detail", ("chat", "adv-main"))
+    assert "SUBAGENTS (3)" in text and "Audit the parser · active " in text and "[? status unknown]" in text, text
+    assert "[⟳ running]" not in text and "not a panel worker" in text, text
+    assert "Native agents active: 3 · workflows active: 0" in text, text
+    assert ("result", "native-agent-adv-main-a1") not in nav["items"], nav
+    assert "Past 0" in sub_board(found, "past")[0]
+    for number in range(40):
+        write_agent("b%02d" % number, description="bulk")
+    assert len(shown(panel_chats.native_subagents([claude_main]))["agents"]) == panel_chats.NATIVE_MAX
+    for leftover in agents_dir.glob("agent-*"):
+        leftover.unlink()
+    # A workflow row adds phase and approximate counts when its journal tail parses, and only its name otherwise.
+    write_journal("wf_r1", started + [{"type": "future-kind"}])
+    with (runs_dir / "wf_r1" / "journal.jsonl").open("a") as handle:
+        handle.write('{"type": "resu')
+    (runs_dir / "wf_r2").mkdir()
+    (runs_dir / "wf_r2" / "journal.jsonl").write_text("not json at all\n")
+    write_journal("wf_old", started, age=stale)
+    (runs_dir / "wf_empty").mkdir()
+    (session_dir / "workflows" / "wf_r1.json").write_text("{}")  # a completion file changes nothing
+    found = panel_chats.native_subagents([claude_main])
+    flows = shown(found)["workflows"]
+    assert set(flows) == {"wf_r1", "wf_r2"} and flows["wf_r2"]["title"] == "Workflow wf_r2", flows
+    assert flows["wf_r1"]["title"] == "Workflow wf_r1 · phase Review · agents ~2 started · ~1 done", flows
+    text, nav = sub_board(found, "detail", ("chat", "adv-main"))
+    assert "SUBAGENTS (2)" in text and "Native agents active: 0 · workflows active: 2" in text, text
+    write_journal("wf_r1", started, age=3 * 3600)
+    assert "wf_r1" not in shown(panel_chats.native_subagents([claude_main]))["workflows"]
+    # No session directory, or an unreadable transcript index, leaves the board as it was.
+    shutil.rmtree(session_dir)
+    assert panel_chats.native_subagents([claude_main]) == {}
+    panel_chats._transcripts.clear()
+    with patch.object(panel_chats, "native_index", side_effect=RuntimeError("scan failed")):
+        unreadable = panel_chats.native_subagents([claude_main])
+    assert unreadable == {} and "SUBAGENT" not in sub_board(unreadable)[0]
+    panel_chats._transcripts.clear()
 # The board's last row starts a main: clickable only in a managed panel, never on a static render.
 starter_board = dict(board, room={"id": "adv-room", "participants": [dict(claude_main, model="claude-opus-5-5"), dict(claude_main, participant="adv-sub",
                      provider="codex", seq=2, consumer=None, model="gpt-6-sol")]}, collection={"ok": True},

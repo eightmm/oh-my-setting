@@ -50,10 +50,25 @@ compact_dashboard["acceptance"] = {"available": True, "complete": False, "total"
 compact_dashboard["room"].update({"title": "Visual team", "pending_count": 3, "received_count": 8, "answered_count": 5})
 for columns in (19, 22, 27):
     board = render(compact_dashboard, "claude", columns, 30, view="graph")
-    assert "Graph needs" not in board and "Finished is not accepted" not in board and "Some native subagents" not in board, board
+    assert "Graph needs" not in board and "Finished is not accepted" not in board and "Native agents are read-only" not in board, board
     assert all(fact in board for fact in ("Room: Visual team", "Main Sol 6", "Unread 3", "Next: Claude",
                                           "Goal: Keep", "Accept 2/4")), board
     assert len(board.splitlines()) <= 30 and all(display_width(line) <= columns for line in board.splitlines()), board
+# Claude Code's own subagents render as read-only rows that fit narrow and wide boards in both glyph sets.
+native_report = deepcopy(main_states)
+native_report["room"]["participants"] = [{"participant": "main-claude", "provider": "claude", "model": "opus",
+                                          "role": "main", "label": "Claude main", "joined": True, "seq": 1}]
+native_report["attempts"].update(active_recent=[{"attempt_id": "claude-attempt", "state": "working", "panel": {
+    "role": "main", "room_id": native_report["room"]["id"], "room_participant": "main-claude"}}], recent=[])
+active = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
+native_report["native_subagents"] = {"main-claude": {
+    "agents": [{"id": "r1", "title": "Audit the parser with a very long description that must clip", "active": active}],
+    "workflows": [{"id": "wf_x", "title": "Workflow wf_x · phase Find · agents ~4 started · ~1 done", "active": active}]}}
+for columns, rows in ((76, 30), (110, 44)):
+    for glyphs in (True, False):
+        native_screen = render(native_report, "claude", columns, rows, view="tree", unicode=glyphs)
+        assert "SUBAGENTS (2)" in native_screen, native_screen
+        assert all(display_width(line) <= columns for line in native_screen.splitlines()), native_screen
 boundary_dashboard = render(compact_dashboard, "claude", 28, 30, view="graph")
 board = render(dict(compact_dashboard, room=dict(compact_dashboard["room"], predecessor="room-earlier")), "claude", 60, 30, view="graph")
 assert "ROOM / Visual team (continues room-earlier)" in board, board

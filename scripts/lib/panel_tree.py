@@ -138,7 +138,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 notes.append("ctx %s%% used" % context[0])
             if extra:
                 notes.append(extra)
-            if call.get("_native"):
+            if call.get("_kind") in {"agent", "workflow"}:
+                notes.append("Claude Code's own %s - not a panel worker: no admission, review or finalize" % call["_kind"])
+            elif call.get("_native"):
                 notes.append("answer stays in the main transcript")
             for note in notes:
                 add(lead + box_row(note, card_width, unicode, dashed=True), None, action)

@@ -1144,10 +1144,10 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         if managed:
             footer.append("F5 control / F12 keys / Ctrl-b d detach")
     sep = " · " if unicode else " / "
-    wide = "A finished call is not accepted until its main records it" + sep + "native subagents other than the built-in advisor are not shown"
+    wide = "A finished call is not accepted until its main records it" + sep + "Claude Code's own agents are shown read-only"
     if width >= 28:
-        footer.extend([wide if display_width(wide) <= width else "Finished is not accepted" + sep + "some subagents not shown"]
-                      if width >= 54 else ["Finished is not accepted", "Some native subagents not shown"])
+        footer.extend([wide if display_width(wide) <= width else "Finished is not accepted" + sep + "native agents are read-only"]
+                      if width >= 54 else ["Finished is not accepted", "Native agents are read-only"])
     if height < 20 and width >= 28:
         footer = (footer[:1] if menu else []) + ["Finished is not accepted"]
     alerts = status_alerts(report)

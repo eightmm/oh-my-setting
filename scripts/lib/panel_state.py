@@ -609,6 +609,7 @@ def snapshot(repo, room_id=None, _tick=None):
             if state["room"].get("participants"):
                 # Board-only extras, kept in memory; any failure leaves the board as the room alone draws it.
                 state.pop("native_advisors", None)
+                state.pop("native_subagents", None)
                 state.pop("finalized", None)
                 state.pop("room_attempts", None)
                 attempt_rows = []
@@ -659,6 +660,7 @@ def snapshot(repo, room_id=None, _tick=None):
                 try:
                     import panel_chats
                     state["native_advisors"] = panel_chats.native_advisors(state["room"]["participants"])
+                    state["native_subagents"] = panel_chats.native_subagents(state["room"]["participants"])
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
                     pass
                 try:
