@@ -24741,20 +24741,20 @@ test_project_doctor_flags_exposed_agent_files() {
 
 test_local_agent_files_reach_a_delegate_worktree() {
   local project="$TMP/private-worktree"
-  local worktree="$TMP/private-worktree-wt"
+  local worktree
 
   make_committed_repo "$project"
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
-  git -C "$project" worktree add --quiet --detach "$worktree" HEAD >/dev/null 2>&1 ||
-    fail "worktree add failed"
-
-  # Fresh checkout of HEAD: the local-only files are absent until seeded.
-  assert_not_exists "$worktree/AGENTS.md"
-  (
-    # shellcheck source=scripts/lib/oms-common.sh
-    . "$ROOT/scripts/lib/oms-common.sh"
-    oms_seed_local_agent_files "$project" "$worktree"
-  )
+  # The read-seat worktree is a fresh checkout of HEAD; the git-excluded
+  # loader files must arrive through ma_agy_read_dir itself.
+  worktree="$(
+    . "$ROOT/scripts/lib/peer-common.sh"
+    ma_agy_read_dir "$project"
+  )"
+  case "$worktree" in
+    */tree) ;;
+    *) fail "ma_agy_read_dir should build a git worktree: $worktree" ;;
+  esac
   assert_file_contains "$worktree/AGENTS.md" "oh-my-setting:general:begin"
   assert_file_contains "$worktree/PROJECT.md" "# PROJECT.md"
   # Seeded copies stay ignored, so they cannot leak into a delegated patch.
@@ -24762,7 +24762,10 @@ test_local_agent_files_reach_a_delegate_worktree() {
   if git -C "$worktree" diff --cached --name-only | grep -Fq 'AGENTS.md'; then
     fail "seeded agent files must stay out of the patch"
   fi
-  git -C "$project" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    ma_agy_read_cleanup "$project" "$worktree"
+  )
 }
 
 test_oms_init_reports_missing_project_rules() {

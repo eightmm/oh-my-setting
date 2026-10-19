@@ -442,6 +442,7 @@ ma_agy_read_dir() {
        GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
        -c core.fsmonitor=false -C "$repo" \
        worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
+    oms_seed_local_agent_files "$repo" "$base/tree"
     printf '%s/tree\n' "$base"
   else
     oms_harness_mark_tmpdir "$base" "$repo" "" 2>/dev/null || true
