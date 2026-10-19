@@ -1246,7 +1246,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
         assert panel_chats.native_subagents([claude_main]) == {}, "a foreign-owned file must not be read"
     assert panel_chats.native_subagents([dict(claude_main, provider="codex")]) == {}
     text, nav = sub_board(found, "detail", ("chat", "adv-main"))
-    assert "SUBAGENTS (3)" in text and "Audit the parser · active " in text and "[? status unknown]" in text, text
+    assert "SUBAGENTS (3)" in text and "Audit the parser - active " in text and "[? status unknown]" in text, text
     assert "[⟳ running]" not in text and "not a panel worker" in text, text
     assert "Native agents active: 3 · workflows active: 0" in text, text
     assert ("result", "native-agent-adv-main-a1") not in nav["items"], nav
