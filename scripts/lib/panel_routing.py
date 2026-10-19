@@ -17,8 +17,8 @@ WRITERS = {"worker", "builder", "refactorer", "documenter", "integrator", "perfo
 # Judges of another context's work prefer the provider other than the main's when the tier offers it.
 INDEPENDENT = {"reviewer", "verifier", "security-auditor", "critic"}
 RESEARCH_FAMILIES = {"luna", "haiku"}
-# Weekly readings are ratios of unlike limits: both under `under` percent, or within `gap` points, count as equal.
-TIE_BAND_DEFAULTS = {"under": 50, "gap": 15}
+# Weekly readings are ratios of unlike limits: within `gap` points count as equal.
+TIE_BAND_DEFAULTS = {"gap": 15}
 
 
 def route_family(provider, model):
@@ -139,8 +139,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         # Without a full set of readings, spread load away from the provider the main itself consumes.
         if None not in used_by.values():
             band = routes["tie_band"]
-            tied = (max(used_by.values()) < band["under"]
-                    or max(used_by.values()) - min(used_by.values()) < band["gap"])
+            tied = max(used_by.values()) - min(used_by.values()) < band["gap"]
             if tied:
                 available = sorted(available, key=lambda c: ((recent or {}).get(c["provider"], 0),
                                                               c["provider"] == owner))

@@ -67,9 +67,9 @@ for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude"))
     readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
     assert allocate("claude", role="builder", installed=both, provider_status=readings)["provider"] == expected, readings
     assert allocate("codex", role="integrator", installed=both, provider_status=readings)["provider"] == expected, readings
-# Readings inside the tie band (both under 50%, or within 15 points) are equal: fewer recent dispatches
+# Readings inside the tie band (within 15 points) are equal: fewer recent dispatches
 # win, else the provider opposite the main.
-for claude_used, codex_used in ((2, 11), (40, 40), (11, 2), (70, 60), (49, 5)):
+for claude_used, codex_used in ((2, 11), (40, 40), (11, 2), (70, 60), (49, 35)):
     readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
     for owner in both:
         other = "codex" if owner == "claude" else "claude"
@@ -84,7 +84,12 @@ for claude_used, codex_used in ((2, 11), (40, 40), (11, 2), (70, 60), (49, 5)):
 outside = {"claude": {"weekly_used": 20}, "codex": {"weekly_used": 60}}
 assert allocate("claude", role="builder", installed=both, provider_status=outside,
                 recent={"claude": 9})["provider"] == "claude"
-assert policy()["tie_band"] == {"under": 50, "gap": 15}
+# Low usage on both sides is no tie: claude 6% vs codex 37% goes to claude even for a claude-main writer.
+low = {"claude": {"weekly_used": 6}, "codex": {"weekly_used": 37}}
+for recent in (None, {"claude": 3, "codex": 3}, {"codex": 1}):
+    assert allocate("claude", role="builder", installed=both, provider_status=low,
+                    recent=recent)["provider"] == "claude", recent
+assert policy()["tie_band"] == {"gap": 15}
 # Independent judges avoid the reviewed task's writer; without a known writer the main's opposite decides.
 for role in ("reviewer", "verifier", "security-auditor", "critic"):
     for owner in both:
