@@ -110,6 +110,42 @@ contains "$TMP/r5.md" "structure: SKIP"
 lacks "$TMP/r5.md" "structure: FAIL"
 contains "$TMP/r5.md" "verify: SKIP"
 
+# (6) Non-ASCII names: git C-quotes them by default ("\353\271..."), which no
+# scope prefix matches, so a forbidden Korean directory used to pass the gate.
+mkdir -p "$repo/비밀" "$repo/문서"
+printf 'x\n' > "$repo/비밀/k.txt"
+capture_patch "$repo" secret "$TMP/secret.patch"
+printf 'x\n' > "$repo/문서/a.md"
+capture_patch "$repo" docs "$TMP/docs.patch"
+"$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id t3 --title forbid-kr \
+  --allowed '.' --forbidden '비밀/' --verify true >/dev/null
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/secret.patch" --verify true \
+  --plan-task t3 --report "$TMP/r6.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "a patch into a forbidden non-ASCII directory should be rejected, got exit $rc"
+contains "$TMP/r6.md" "scope: FAIL"
+contains "$TMP/r6.md" "forbidden: 비밀/k.txt"
+"$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id t4 --title allow-kr \
+  --allowed '문서/' --verify true >/dev/null
+"$ADMIT" --repo "$repo" --patch "$TMP/docs.patch" --verify true \
+  --plan-task t4 --report "$TMP/r7.md" >/dev/null 2>&1 ||
+  fail "a patch into an allowed non-ASCII directory should be admitted"
+contains "$TMP/r7.md" "scope: PASS"
+
+# (7) U+2028 inside a name must not split it into two allowed-looking paths.
+"$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id t5 --title ls-split \
+  --allowed 'docs/' --forbidden 'docs/*/private.md' --verify true >/dev/null
+mkdir -p "$repo/docs"
+ls_name="$(printf 'docs/a\xe2\x80\xa8docs/private.md')"
+mkdir -p "$repo/docs/a"$'\xe2\x80\xa8'"docs"
+printf 'x\n' > "$repo/$ls_name"
+capture_patch "$repo" ls-split "$TMP/ls.patch"
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/ls.patch" --verify true \
+  --plan-task t5 --report "$TMP/r8.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "a U+2028 name must not slip past the scope gate, got exit $rc"
+contains "$TMP/r8.md" "scope: FAIL"
+
 # Admission adopts the stored verifier; an explicit mismatch fails before
 # candidate code executes. Structural-only ADMIT remains inconclusive evidence.
 "$ADMIT" --repo "$repo" --patch "$TMP/inplace.patch" \

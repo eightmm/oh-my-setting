@@ -100,13 +100,13 @@ parse_task_paths() {
 
 changed_paths() {
   {
-    git -C "$REPO" diff --name-only HEAD -- 2>/dev/null || git -C "$REPO" diff --name-only -- 2>/dev/null || true
-    git -C "$REPO" ls-files --others --exclude-standard 2>/dev/null || true
+    git -C "$REPO" -c core.quotePath=false diff --name-only HEAD -- 2>/dev/null || git -C "$REPO" -c core.quotePath=false diff --name-only -- 2>/dev/null || true
+    git -C "$REPO" -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null || true
     # Committed changes since begin: an agent that commits mid-guard must not
     # escape the allow/deny scope check by moving its edits out of the diff.
     if [ -n "$BEGIN_HEAD" ] && [ "$BEGIN_HEAD" != "no-head" ] &&
        git -C "$REPO" rev-parse --verify --quiet "$BEGIN_HEAD" >/dev/null 2>&1; then
-      git -C "$REPO" diff --name-only "$BEGIN_HEAD" HEAD -- 2>/dev/null || true
+      git -C "$REPO" -c core.quotePath=false diff --name-only "$BEGIN_HEAD" HEAD -- 2>/dev/null || true
     fi
   } |
     sed '/^\.oms\//d' |
@@ -114,7 +114,7 @@ changed_paths() {
 }
 
 dirty_paths() {
-  git -C "$REPO" status --porcelain=v1 --untracked-files=all -- 2>/dev/null |
+  git -C "$REPO" -c core.quotePath=false status --porcelain=v1 --untracked-files=all -- 2>/dev/null |
     sed '/^.. \.oms\//d' |
     sed -E 's/^.. //; s/^.* -> //'
 }
@@ -210,6 +210,18 @@ cmd_check() {
   fi
   while IFS=$'\t' read -r verdict path; do
     [ -n "$path" ] || continue
+    # quotePath=false leaves only control characters, quotes and backslashes
+    # C-quoted; no scope pattern can match that spelling, so a declared scope
+    # cannot vouch for the path.
+    case "$path" in
+      '"'*)
+        if [ "${#ALLOW_PATHS[@]}" -gt 0 ] || [ "${#DENY_PATHS[@]}" -gt 0 ]; then
+          printf 'warning: changed path cannot be scope-checked (unquotable): %s\n' "$path"
+          warnings=$((warnings + 1))
+          continue
+        fi
+        ;;
+    esac
     case "$verdict" in
       forbidden)
         printf 'warning: changed path in forbidden scope: %s\n' "$path"

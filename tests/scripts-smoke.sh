@@ -9623,6 +9623,25 @@ test_change_guard_forbidden_paths_deny_beats_allow() {
     fail "allowed non-denied path must not warn"
   fi
   "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" end >/dev/null
+
+  # git C-quotes non-ASCII names by default, which no scope prefix matches; a
+  # path git still quotes (a double quote here) cannot be checked at all.
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" \
+    --allow "scripts/" --deny "scripts/lib/" --deny "비밀/" begin >/dev/null
+  mkdir -p "$project/비밀"
+  printf 'protected\n' > "$project/비밀/k.txt"
+  if "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" --strict check >"$project/out"; then
+    fail "strict check must fail on a forbidden non-ASCII path"
+  fi
+  assert_file_contains "$project/out" "changed path in forbidden scope: 비밀/k.txt"
+  rm -rf "$project/비밀"
+  if printf 'x\n' > "$project/scripts/q\"x.txt" 2>/dev/null; then
+    if "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" --strict check >"$project/out"; then
+      fail "strict check must fail on a path git still C-quotes"
+    fi
+    assert_file_contains "$project/out" "cannot be scope-checked (unquotable)"
+  fi
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" end >/dev/null
 }
 
 test_change_guard_preserves_bash_bracket_scope_grammar() {

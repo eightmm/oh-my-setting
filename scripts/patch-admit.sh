@@ -355,10 +355,10 @@ if [ "$apply_ok" = 1 ]; then
     # Union both so moving a forbidden file into an allowed path cannot hide
     # the forbidden source side of the patch.
     changed_files="$({
-      git -C "$REPO" apply --numstat "$PATCH" 2>/dev/null | awk -F '\t' '{print $3}'
+      git -C "$REPO" -c core.quotePath=false apply --numstat "$PATCH" 2>/dev/null | awk -F '\t' '{print $3}'
       GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
         GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
-        -C "$worktree" diff --no-ext-diff --no-textconv --name-only \
+        -c core.quotePath=false -C "$worktree" diff --no-ext-diff --no-textconv --name-only \
         --no-renames HEAD -- 2>/dev/null
     } | LC_ALL=C sort -u)"
 
@@ -369,12 +369,19 @@ import os, re, runpy
 scope = runpy.run_path(os.environ["OMS_PATH_SCOPE_HELPER"])
 classify = scope["classify"]
 normalize = scope["normalize"]
-changed=[x for x in os.environ.get("OMS_CHANGED","").splitlines() if x]
+# Split on LF only: str.splitlines() also breaks on U+2028/U+0085, which
+# unquoted git paths may contain, turning one name into two scope-clean ones.
+changed=[x for x in os.environ.get("OMS_CHANGED","").split("\n") if x]
 def split(v): return [x for x in re.split(r"[,\s]+",v) if x]
 allowed = [normalize(x) for x in split(os.environ.get("OMS_ALLOWED", ""))]
 forbidden = [normalize(x) for x in split(os.environ.get("OMS_FORBIDDEN", ""))]
 bad=[]
 for path in changed:
+    # quotePath=false leaves only control characters, quotes and backslashes
+    # C-quoted, a spelling no scope pattern matches: fail closed.
+    if path.startswith('"') and (allowed or forbidden):
+        bad.append("unquotable path: " + path)
+        continue
     verdict = classify(path, allowed, forbidden)
     if verdict == "forbidden": bad.append("forbidden: " + path)
     elif verdict == "outside": bad.append("outside allowed paths: " + path)
@@ -403,12 +410,12 @@ PY
       # by file: --repo is arbitrary, and a few thousand paths would exceed the
       # per-string environment limit the other gates never approach.
       base_files="$worktree_parent/base-files.txt"
-      git -C "$worktree" ls-tree -r --name-only HEAD > "$base_files" 2>/dev/null || true
+      git -C "$worktree" -c core.quotePath=false ls-tree -r --name-only HEAD > "$base_files" 2>/dev/null || true
       structure_detail="$(OMS_CHANGED="$changed_files" OMS_BASE_FILE="$base_files" OMS_WORKTREE="$worktree" python3 - <<'PY'
 import os
-changed=[x for x in os.environ.get("OMS_CHANGED","").splitlines() if x]
+changed=[x for x in os.environ.get("OMS_CHANGED","").split("\n") if x]
 with open(os.environ["OMS_BASE_FILE"], errors="replace") as handle:
-    base=set(x for x in handle.read().splitlines() if x)
+    base=set(x for x in handle.read().split("\n") if x)
 wt=os.environ["OMS_WORKTREE"]
 added, removed = [], []
 for path in changed:
@@ -629,7 +636,7 @@ def commands(command, cwd="", candidate_eligible=True):
                     and base(path) is None and os.path.isfile(os.path.join(wt, path))):
                 new_only.append(path)
 commands(os.environ["OMS_VERIFY"])
-reviewed = set(x for x in os.environ.get("OMS_ACCEPTANCE_FILES", "").splitlines() if x)
+reviewed = set(x for x in os.environ.get("OMS_ACCEPTANCE_FILES", "").split("\n") if x)
 ENTRY = {"check.sh", "Makefile", "makefile", "GNUmakefile", "package.json",
          "pyproject.toml", "tox.ini", "noxfile.py", "conftest.py",
          "setup.py", "setup.cfg", "justfile", "Justfile"}
@@ -639,7 +646,7 @@ HELPER_PATH = re.compile(
 TEST_PATH = re.compile(
     r"(^|/)(tests?|spec)(/|$)|(^|/)test_[^/]+$|"
     r"[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$")
-for f in os.environ["OMS_CHANGED"].splitlines():
+for f in os.environ["OMS_CHANGED"].split("\n"):
     if not f:
         continue
     direct = f in named
