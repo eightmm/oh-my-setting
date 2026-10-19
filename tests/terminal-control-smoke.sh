@@ -2,6 +2,8 @@
 set -euo pipefail
 # A new canonical suite: operator-tools does not exercise managed shells/jobs.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-terminal-control.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 OMS_TERMINAL_TEST_ROOT="$ROOT" OMS_TERMINAL_TEST_TMP="$TMP" python3 - <<'PY'

@@ -17,9 +17,6 @@ export OMS_CODEX_NOTIFY=0
 # OMS_WORKER_GUARD_STRICT=1 for its own workers (autopilot acceptance does)
 # must not turn the soft-surface cases strict.
 unset OMS_WORKER_GUARD_STRICT OMS_WORKER_GUARD_OFF
-# Run from a panel main's shell, the suite must not act as that main or room member.
-unset OMS_PANEL_MAIN_ATTEMPT OMS_PANEL_SESSION OMS_PANEL_REPO OMS_PANEL_HOST \
-  OMS_PANEL_ENTRYPOINT OMS_PANEL_RESULTS OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO
 
 source_oms_fingerprint() {
   if [ ! -d "$ROOT/.oms" ]; then
@@ -12089,6 +12086,14 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
   [ "${OMS_LOCK_DIR-}" = "$original_lock" ] || fail 'suite fixture mapping changed the caller lock path'
   [ "${XDG_STATE_HOME-}" = "$original_state" ] || fail 'suite fixture mapping changed the caller XDG state path'
   [ "${XDG_CACHE_HOME-}" = "$original_cache" ] || fail 'suite fixture mapping changed the caller XDG cache path'
+
+  # Every smoke suite runs from a worker shell too, so each must source the
+  # helper that clears the inherited harness state before its first fixture.
+  local smoke_suite
+  for smoke_suite in "$ROOT"/tests/*-smoke.sh; do
+    grep -Fq 'lib/smoke-env.sh' "$smoke_suite" ||
+      fail "$(basename "$smoke_suite") must source tests/lib/smoke-env.sh"
+  done
 
   for provider in codex claude; do
     root="$fixture/$provider"

@@ -8,6 +8,8 @@ set -euo pipefail
 # remove. The fallback must announce itself on stderr, and only then.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-self-advice.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/home" "$TMP/bin" "$TMP/repo/.oms" "$TMP/locks"
@@ -63,7 +65,7 @@ run "$ROOT/scripts/consult.sh" --prompt "self-advice probe" --dry-run --quiet > 
 [ "$rc" -eq 0 ] || fail "consult self-fallback should still succeed (exit $rc): $(cat "$TMP/err")"
 grep -Fq "$NOTE" "$TMP/err" ||
   fail "consult self-fallback did not disclose self-advice: $(cat "$TMP/err")"
-grep -Eq '(^|/)claude-' "$TMP/out" ||
+grep -q '^dry-run: claude ' "$TMP/out" ||
   fail "consult stdout contract changed: $(cat "$TMP/out")"
 grep -Fq "$NOTE" "$TMP/out" &&
   fail "the disclosure must stay off stdout: $(cat "$TMP/out")"
@@ -91,7 +93,7 @@ run "$ROOT/scripts/consult.sh" --prompt "independent probe" --dry-run --quiet > 
 [ "$rc" -eq 0 ] || fail "consult with a peer failed (exit $rc): $(cat "$TMP/err")"
 grep -Fq "$NOTE" "$TMP/err" &&
   fail "consult disclosed self-advice while codex was installed: $(cat "$TMP/err")"
-grep -Eq '(^|/)codex-' "$TMP/out" ||
+grep -q '^dry-run: codex ' "$TMP/out" ||
   fail "consult should have picked codex: $(cat "$TMP/out")"
 
 # 3. An explicit --to is the caller's own choice, not a silent fallback, so it

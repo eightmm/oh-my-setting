@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" != 1 ]; then
   OMS_SMOKE_SUITE="$ROOT/tests/autonomy-plan-run-smoke.sh" exec "$ROOT/tests/run-smoke-shard.sh" "$@"
 fi

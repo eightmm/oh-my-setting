@@ -6,6 +6,8 @@ set -euo pipefail
 # the second, base-owned verification run that closes that indirect bypass.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 ADMIT="$ROOT/scripts/patch-admit.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-admit-verifier-floor.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM

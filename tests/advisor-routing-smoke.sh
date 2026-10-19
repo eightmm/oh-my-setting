@@ -7,6 +7,8 @@ set -euo pipefail
 # no-op — a Claude session asking for independent advice got Claude.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-advisor-routing.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/home" "$TMP/bin" "$TMP/repo/.oms" "$TMP/locks"
@@ -60,10 +62,10 @@ out="$(
       bash "$ROOT/scripts/consult.sh" --prompt "routing probe" \
       --dry-run --quiet 2>&1
 )" || fail "consult dry-run failed: $out"
-if printf '%s' "$out" | grep >/dev/null -E '(^|/)claude-'; then
+if printf '%s' "$out" | grep >/dev/null -E '^dry-run: claude '; then
   fail "a claude session's automatic consult picked claude: $out"
 fi
-printf '%s' "$out" | grep >/dev/null -E '(^|/)(codex|antigravity)-' ||
+printf '%s' "$out" | grep >/dev/null -E '^dry-run: (codex|antigravity) ' ||
   fail "consult dry-run should have picked a non-claude peer: $out"
 
 # The documented preference participates only in automatic single-seat
@@ -75,7 +77,7 @@ out="$(
       bash "$ROOT/scripts/consult.sh" --prompt "preferred routing probe" \
       --new-thread --dry-run --quiet 2>&1
 )" || fail "preferred consult dry-run failed: $out"
-printf '%s\n' "$out" | sed -n '1p' | grep -Eq '(^|/)antigravity-' ||
+printf '%s\n' "$out" | sed -n '1p' | grep -Eq '^dry-run: antigravity ' ||
   fail "OMS_CONSULT_PROVIDER was not selected before the automatic peer order: $out"
 
 out="$(
@@ -85,9 +87,9 @@ out="$(
       bash "$ROOT/scripts/consult.sh" --prompt "explicit routing probe" \
       --to codex --new-thread --dry-run --quiet 2>&1
 )" || fail "explicit consult dry-run failed: $out"
-printf '%s\n' "$out" | sed -n '1p' | grep -Eq '(^|/)codex-' ||
+printf '%s\n' "$out" | sed -n '1p' | grep -Eq '^dry-run: codex ' ||
   fail "explicit --to did not override OMS_CONSULT_PROVIDER: $out"
-if printf '%s' "$out" | grep >/dev/null -E '(^|/)antigravity-'; then
+if printf '%s' "$out" | grep >/dev/null -E '^dry-run: antigravity '; then
   fail "environment preference leaked into an explicit consult: $out"
 fi
 

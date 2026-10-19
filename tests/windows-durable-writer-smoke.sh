@@ -6,6 +6,8 @@ set -euo pipefail
 # helper remains covered by the local focused gate.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-windows-durable.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-tool-lock.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 fail() { echo "tool-lock-smoke: $*" >&2; exit 1; }

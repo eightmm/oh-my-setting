@@ -10,6 +10,8 @@ set -euo pipefail
 # claim a context it does not have.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-advisor-session.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/home" "$TMP/bin" "$TMP/repo/.oms" "$TMP/locks" "$TMP/codex-home"

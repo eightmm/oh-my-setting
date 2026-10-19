@@ -10,6 +10,8 @@ set -euo pipefail
 # Run here on every platform, and on macOS in CI, where the difference is real.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-bsd.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 # Normalize away the "//" a trailing-slash TMPDIR leaves in the template.

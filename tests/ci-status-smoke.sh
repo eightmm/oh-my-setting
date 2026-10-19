@@ -8,6 +8,8 @@ set -euo pipefail
 # the actionable truth (the commits were never pushed) went unsaid.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-ci-status.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 

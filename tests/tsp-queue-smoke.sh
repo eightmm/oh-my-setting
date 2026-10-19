@@ -9,6 +9,8 @@ set -euo pipefail
 # Gone or zombie is finished; only a runnable monitor is a live job.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TSP="$ROOT/scripts/tsp-queue.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-tsp-queue.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM

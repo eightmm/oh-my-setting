@@ -5,6 +5,8 @@ set -euo pipefail
 PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test_codex_harness.py"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-provider-registry.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 

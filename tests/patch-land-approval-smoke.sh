@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-land-approval.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 fail() { echo "patch-land-approval: $*" >&2; exit 1; }

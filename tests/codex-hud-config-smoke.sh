@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/codex_hud_config_test.py"
 # Same config.toml writer and the same gate: one stage owns both helpers.
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/codex_usage_config_test.py"

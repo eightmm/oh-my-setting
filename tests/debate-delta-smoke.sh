@@ -12,6 +12,8 @@ set -euo pipefail
 # first-occurrence match would quote the instructions as the answer.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-debate-delta.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 

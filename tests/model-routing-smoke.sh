@@ -4,6 +4,8 @@ set -euo pipefail
 # operation or opt-out switch into generic provider-default assertions.
 unset OMS_MODEL_OPERATION OMS_MODEL_WORKLOAD OMS_MODEL_ROLE OMS_ROLE_ROUTING || true
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-routing.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }

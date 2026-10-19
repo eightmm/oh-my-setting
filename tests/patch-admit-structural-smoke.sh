@@ -7,6 +7,8 @@ set -euo pipefail
 # not rearrange it, and a declared scope still outranks the floor.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 ADMIT="$ROOT/scripts/patch-admit.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-admit-structural.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
