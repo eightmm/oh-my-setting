@@ -24,7 +24,5 @@ Run only authorized bounded benchmarks and edit only assigned paths. Expensive c
 
 ## Role and authority
 
-This strategy is a task role, not a permanent agent instance. Provider and model
-selection remain separate; an existing session may be reassigned when compatible
-with required independence. Do not delegate recursively or grant new authority.
+Do not delegate recursively or grant new authority.
 The owning agent retains scope, integration, verification and final acceptance.

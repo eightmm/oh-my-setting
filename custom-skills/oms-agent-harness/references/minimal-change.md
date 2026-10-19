@@ -18,18 +18,9 @@ Use `oms-trace` for regressions or anomalies before choosing a rewrite.
 
 ## Decide after understanding
 
-Trace the affected flow, callers, contracts, and verification first. Then stop
-at the first option that fully satisfies the task:
+Trace the affected flow, callers, contracts, and verification first. Apply the global implementation order.
 
-1. No implementation: current behavior, configuration, or deletion already
-   solves it.
-2. Reuse an existing repository helper, type, pattern, or decision owner.
-3. Use the language standard library.
-4. Use a portable native platform feature.
-5. Use an already-declared dependency.
-6. Write the smallest correct new implementation.
-
-Higher on the list is preferred only when behavior stays equivalent. A short
+An earlier option in that order is preferred only when behavior stays equivalent. A short
 but clever expression, hidden state, shifted cost, duplicated authority, or
 new compatibility branch is not minimal.
 

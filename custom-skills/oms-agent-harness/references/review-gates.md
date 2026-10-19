@@ -33,11 +33,7 @@ successful stages are not rerun. One repository lock prevents concurrent gates
 (exit 75 means another landing is active). CI query failures stop with a logged
 error; each query and the polling loop have deadlines.
 
-In OMS itself, `oms land` defaults to the CI-parity affected selection against
-the destination and leaves full lanes to CI. It installs only on full proof for
-the SHA: a CI run whose jobs executed the full selection, or a full local gate
-(`--gate 'bash scripts/check.sh --parallel'`, also valid for a SHA already
-pushed by an affected land); do not assemble background jobs manually.
+OMS defaults to CI-parity affected checks against the destination. Explicit full local gate: `--gate 'bash scripts/check.sh --parallel'`.
 
 Before calling reviewers, inspect `git status --short`, the relevant diff or
 explicit base, and any existing verification result. Send the goal, contract,

@@ -9,8 +9,8 @@ agent, a Grok/GLM route, or a custom adapter.
 ## Separate judgment from execution
 
 The parent owns the plan, unresolved tradeoffs, patch admission and final
-acceptance. A role describes work; it does not select a model or authorize a
-call. Keep the current registry and explicit user model choices.
+acceptance. A role describes work; it does not authorize a call. Keep the
+current registry and explicit user model choices.
 
 Before an authorized delegation, choose from repository evidence:
 

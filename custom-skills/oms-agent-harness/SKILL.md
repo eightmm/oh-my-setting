@@ -51,8 +51,7 @@ Only for an explicitly requested FSD-style automatic run, read
 [autonomy-loop.md](references/autonomy-loop.md) (`oms autopilot`).
 
 For skill evaluation/import, load
-[skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks or Codex
-app-server, load
+[skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks, load
 [interoperability.md](references/interoperability.md); all are optional
 projections, not authority.
 
