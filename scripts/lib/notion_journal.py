@@ -45,7 +45,7 @@ NOTION_MAX_DEFER_DELAY = 86400.0
 _DEFAULT_TITLE_PROPERTY = "Name"
 _DEFAULT_KEY_PROPERTY = "Work Journal Key"
 _DEFAULT_HASH_PROPERTY = "Content Hash"
-_RETRYABLE_HTTP_STATUS = frozenset((500, 502, 503, 504))
+_RETRYABLE_HTTP_STATUS = frozenset((500, 502, 503, 504, 529))
 _WORK_JOURNAL_SCHEMA = {
     "Name": "title",
     "Work Journal Key": "rich_text",

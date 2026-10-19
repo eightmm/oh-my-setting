@@ -535,21 +535,23 @@ class NotionJournalTest(unittest.TestCase):
         self.assertEqual(1, len(transport.calls))
 
     def test_long_retry_after_is_deferred_to_a_later_lifecycle(self):
-        sleeps = []
-        transport = FakeTransport(
-            [
-                notion.NotionHTTPError(429, retry_after="999"),
-                {"results": []},
-                {"id": "page"},
-            ]
-        )
-        with self.assertRaises(notion.NotionDeferredError) as raised:
-            self.exporter(transport, sleep=sleeps.append).upsert(
-                "key", "title", "hash", "content"
-            )
-        self.assertEqual(999.0, raised.exception.retry_after_seconds)
-        self.assertEqual([], sleeps)
-        self.assertEqual(1, len(transport.calls))
+        for status in (429, 529):
+            with self.subTest(status=status):
+                sleeps = []
+                transport = FakeTransport(
+                    [
+                        notion.NotionHTTPError(status, retry_after="999"),
+                        {"results": []},
+                        {"id": "page"},
+                    ]
+                )
+                with self.assertRaises(notion.NotionDeferredError) as raised:
+                    self.exporter(transport, sleep=sleeps.append).upsert(
+                        "key", "title", "hash", "content"
+                    )
+                self.assertEqual(999.0, raised.exception.retry_after_seconds)
+                self.assertEqual([], sleeps)
+                self.assertEqual(1, len(transport.calls))
 
     def test_retryable_5xx_is_bounded(self):
         transport = FakeTransport(
