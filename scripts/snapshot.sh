@@ -30,7 +30,7 @@ case "${1:-}" in
     usage
     exit 0
     ;;
-  --cluster|cluster)
+  --cluster)
     shift
     exec "$ROOT/scripts/generate-slurm-reference.sh" "$@"
     ;;

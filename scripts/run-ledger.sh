@@ -63,7 +63,6 @@ Environment:
   OMS_RUN_LEDGER_GATE=0          Same as --no-gate.
   OMS_RUN_LEDGER_CHECK_MODE=ml-smoke  Opt into the heavier ML pre-flight.
   OMS_RUN_LEDGER_GATE_REASON=..  Reason for an unsafe skip (same as --reason).
-  OMS_RUN_LEDGER_DUP=0           Disable the duplicate-run warning.
 
 The command line is recorded verbatim -- do not put secrets in arguments.
 EOF
@@ -264,7 +263,7 @@ fi
 
 # Duplicate-run warning: the ledger is agent memory, so surface "this exact
 # experiment already ran" before spending compute on it again.
-if [ "${OMS_RUN_LEDGER_DUP:-1}" = "1" ] && [ -s "$LEDGER" ]; then
+if [ -s "$LEDGER" ]; then
   dup="$(python3 - "$LEDGER" "$git_sha" "$dirty_hash" "$@" <<'EOF'
 import json, sys
 ledger, sha, dhash = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -403,8 +402,8 @@ except Exception as e:
 if not isinstance(data, dict):
     sys.stderr.write("ledger: metrics file is not a JSON object; ignored\n")
     sys.exit(0)
-MAX_KEYS = int(os.environ.get("OMS_METRICS_MAX_KEYS", "50"))
-MAX_STR = int(os.environ.get("OMS_METRICS_MAX_STR", "200"))
+MAX_KEYS = 50
+MAX_STR = 200
 out = {}
 for k, v in data.items():
     if len(out) >= MAX_KEYS:

@@ -16348,11 +16348,10 @@ test_run_reconcile_records_terminal_jobs() {
 
   local env_pfx=(
     "OMS_SACCT_CMD=$bin/sacct" "OMS_SQUEUE_CMD=$bin/squeue"
-    "OMS_RECONCILE_LEDGER=$d/ledger.jsonl"
     "OMS_RECONCILE_FILE=$d/.oms/runs/reconcile.jsonl"
     "OMS_RECONCILE_DIGEST_DIR=$d/dg"
   )
-  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply >"$d/out" 2>&1 ) || fail "apply failed"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --ledger "$d/ledger.jsonl" >"$d/out" 2>&1 ) || fail "apply failed"
   assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"job_id": "3001"'
   assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"state": "COMPLETED"'
   assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"job_id": "3002"'
@@ -16365,7 +16364,7 @@ test_run_reconcile_records_terminal_jobs() {
   # Idempotent: a second apply reconciles nothing new.
   local before after
   before="$(wc -l < "$d/.oms/runs/reconcile.jsonl")"
-  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply >/dev/null 2>&1 ) || fail "second apply failed"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --ledger "$d/ledger.jsonl" >/dev/null 2>&1 ) || fail "second apply failed"
   after="$(wc -l < "$d/.oms/runs/reconcile.jsonl")"
   [ "$before" = "$after" ] || fail "reconcile is not idempotent"
 }

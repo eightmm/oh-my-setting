@@ -24,7 +24,6 @@ PRUNE_FILES=0
 PRUNE_STALE=0
 DRY_RUN=0
 APPLY=0
-REVIEW_UPTAKE=0
 TARGET_EVENTS=()
 # Counted separately because Bash 3.2 rejects ${arr[@]} on an empty array
 # under `set -u`, and every non-resolve action has to test emptiness.
@@ -52,8 +51,7 @@ Commands:
                  annotations are advisory — nothing is resolved for you.
   telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
                  over the retained window (default 1000). This does not infer
-                 semantic task success. Add --review-uptake to also split
-                 delegations into review-fed and direct cohorts.
+                 semantic task success.
   resolve        Resolve the failed outcomes selected by --event-id, which may
                  be repeated to clear a triaged batch in one locked call.
   resolve-superseded
@@ -97,13 +95,6 @@ Options:
                  it would append.
   --apply        With salvage, explicitly apply the planned recovery. Agent-only;
                  normal views and writers remain strict on corrupt input.
-  --review-uptake With telemetry, partition kind=delegate rows in the same
-                 window into review-fed (a recorded source artifact, internal
-                 or external) and direct cohorts, and report each cohort's
-                 size, lineage/hash coverage, recorded exit-zero rate, and
-                 verifier coverage. Observational and mechanical-only: a
-                 cohort below the minimum sample reports insufficient-data
-                 with counts instead of rates, and no difference is causal.
   -h, --help     Show help.
 EOF
 }
@@ -221,10 +212,6 @@ while [ "$#" -gt 0 ]; do
       APPLY=1
       shift
       ;;
-    --review-uptake)
-      REVIEW_UPTAKE=1
-      shift
-      ;;
     --json)
       AS_JSON=1
       shift
@@ -282,9 +269,6 @@ fi
 if [ "$APPLY" -eq 1 ] && [ "$ACTION" != "salvage" ]; then
   fail "--apply is only valid with salvage"
 fi
-if [ "$REVIEW_UPTAKE" -eq 1 ] && [ "$ACTION" != "telemetry" ]; then
-  fail "--review-uptake is only valid with telemetry"
-fi
 if [ "$LIMIT_SET" -eq 0 ]; then
   case "$ACTION" in
     prune|telemetry) LIMIT="1000" ;;
@@ -335,7 +319,6 @@ runpy.run_path(store_helper)["read_index"](repo, index, missing_ok=True)
 PY
   set -- --repo "$PY_REPO" --index "$PY_INDEX_FILE" --limit "$LIMIT"
   [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
-  [ "$REVIEW_UPTAKE" -eq 0 ] || set -- "$@" --review-uptake
   MSYS2_ARG_CONV_EXCL='*' python3 "$PY_TELEMETRY_HELPER" "$@"
 }
 

@@ -18,7 +18,7 @@ ROOT_LIB="$ROOT/scripts/lib"
 # Anchored to the git worktree root so reconcile state does not fork per
 # subdirectory. Env overrides stay verbatim.
 STATE_ROOT="$(oms_repo_root "$PWD")"
-LEDGER="${OMS_RECONCILE_LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
+LEDGER="$STATE_ROOT/docs/EXPERIMENTS.jsonl"
 RECONCILE_FILE="${OMS_RECONCILE_FILE:-$STATE_ROOT/.oms/runs/reconcile.jsonl}"
 DIGEST_DIR="${OMS_RECONCILE_DIGEST_DIR:-$STATE_ROOT/.oms/runs/reconcile}"
 SACCT="${OMS_SACCT_CMD:-sacct}"
