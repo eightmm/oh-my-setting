@@ -140,6 +140,14 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertFalse(row['metrics_valid'])
         self.assertIn('missing', row['metric_error'])
 
+    def test_experiment_run_finds_its_ledger_row_past_a_torn_row(self) -> None:
+        experiment.register(self.repo, self._experiment(), 'exp-torn-ledger')
+        ledger = self.repo / 'docs' / 'EXPERIMENTS.jsonl'
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_bytes(b'{"id": "torn", "cmd": ["x\xed\x95\n[1]\n')
+        row, rc = experiment.record_run(self.repo, 'exp-torn-ledger', 'baseline', 0, self.repo / 'missing-metrics.json', [sys.executable, '-c', 'pass'], timeout_seconds=10)
+        self.assertEqual(row['command_exit'], 0)
+
     def test_required_invariant_results_control_experiment_verdict(self) -> None:
         contract = self._experiment()
         contract['invariant_pack'] = [{'name': 'equivariance', 'command': [sys.executable, '-c', 'raise SystemExit(0)'], 'required': True}]

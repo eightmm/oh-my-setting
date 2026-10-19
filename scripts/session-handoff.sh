@@ -148,7 +148,7 @@ import json, os, sys
 want = os.environ["OMS_MATCH_CWD"]
 path = sys.argv[1]
 try:
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
                 obj = json.loads(line)
@@ -224,7 +224,7 @@ def clean(txt):
     txt = re.sub(r"<local-command-[^>]*>.*?</local-command-[^>]*>", " ", txt, flags=re.S)
     return txt.strip()
 
-with open(path, encoding="utf-8") as fh:
+with open(path, encoding="utf-8", errors="replace") as fh:
     for line in fh:
         try:
             obj = json.loads(line)
@@ -293,7 +293,7 @@ def trim(s, n=1200):
     room = n - len(marker)
     return s[:room // 2] + marker + s[-(room - room // 2):]
 
-with open(path, encoding="utf-8") as fh:
+with open(path, encoding="utf-8", errors="replace") as fh:
     for line in fh:
         try:
             obj = json.loads(line)
@@ -361,7 +361,7 @@ def trim(s, n=400):
 
 users = deque(maxlen=turns)
 goal, count, conv = "", 0, want_id
-with open(path, encoding="utf-8") as fh:
+with open(path, encoding="utf-8", errors="replace") as fh:
     if not want_id:
         # Select the latest conversation without retaining every transcript.
         for row in matching(fh):

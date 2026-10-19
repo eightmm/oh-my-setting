@@ -78,6 +78,18 @@ if grep -Fq "$MPATH" "$TMP/d2.md"; then
   fail "raw home path leaked into the digest body"
 fi
 
+# A transcript row cut mid-multibyte (\xed\x95) with the next record glued on
+# must not hide the valid rows after it.
+{ printf '{"type":"user","message":{"role":"user","content":"before the torn row"}}\n'
+  printf '{"type":"user","message":{"role":"user","content":"cut\xed\x95'
+  printf '{"type":"user","message":{"role":"user","content":"glued"}}\n'
+  printf '{"type":"user","message":{"role":"user","content":"after the torn row"}}\n'
+} > "$proj/s1.jsonl"
+OMS_CLAUDE_HOME="$ch" bash "$ROOT/scripts/session-handoff.sh" capture \
+    --agent claude --cwd /proj/contract --out "$TMP/d3.md" >/dev/null 2>&1 ||
+  fail "handoff capture must survive a cut multibyte row"
+grep -Fq 'after the torn row' "$TMP/d3.md" || fail "digest must keep rows after a torn row"
+
 # --- agent-memory append: the shared store stays strict on both tiers -----
 repo="$TMP/memory"; mk_repo "$repo"
 if ( cd "$repo" && bash "$ROOT/scripts/agent-memory.sh" append --agent t \

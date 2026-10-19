@@ -2122,6 +2122,15 @@ test_run_ledger_records_and_lists() {
     fail "successful command should exit 0"
   out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5)"
   contains "$out" 'exit=3' || fail "ledger list missing failed run"
+
+  # A torn row (cut multibyte, non-dict) must not hide the valid rows after it.
+  printf '{"id": "torn\xed\x95\n[1]\n' >> "$project/docs/EXPERIMENTS.jsonl"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --note after-torn -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "run after a torn row should exit 0"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5 >"$project/list.out" 2>"$project/list.err") ||
+    fail "ledger list must exit 0 past a torn row"
+  assert_file_contains "$project/list.out" 'after-torn'
+  assert_file_contains "$project/list.err" 'invalid row(s) in the last 5 lines'
 }
 
 test_run_ledger_gate_skip_requires_reason() {

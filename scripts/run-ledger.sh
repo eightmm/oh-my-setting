@@ -108,12 +108,19 @@ if [ "$MODE" = "list" ]; then
   LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
   tail -n "$N" "$LEDGER" |
-    OMS_RL_JSON="$AS_JSON" python3 -c '
+    OMS_RL_JSON="$AS_JSON" OMS_RL_N="$N" python3 -c '
 import json, os, sys
 as_json = os.environ.get("OMS_RL_JSON") == "1"
 rows = []
+bad = 0
 for line in sys.stdin:
-    r = json.loads(line)
+    try:
+        r = json.loads(line)
+    except ValueError:
+        r = None
+    if not isinstance(r, dict):
+        bad += 1
+        continue
     if as_json:
         rows.append(r)
         continue
@@ -137,6 +144,8 @@ for line in sys.stdin:
         " ".join(r["cmd"]), metrics, note))
 if as_json:
     print(json.dumps({"schema": 1, "runs": rows}, ensure_ascii=False))
+if bad:
+    sys.stderr.write("warning: run ledger contains %d invalid row(s) in the last %s lines; valid rows still shown\n" % (bad, os.environ["OMS_RL_N"]))
 '
   exit 0
 fi
@@ -276,7 +285,7 @@ import json, sys
 ledger, sha, dhash = sys.argv[1], sys.argv[2], sys.argv[3]
 cmd = list(sys.argv[4:])
 last = None
-with open(ledger) as f:
+with open(ledger, encoding="utf-8", errors="replace") as f:
     for line in f:
         try:
             r = json.loads(line)

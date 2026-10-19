@@ -36,13 +36,16 @@ def _run_through_ledger(repo, run_id, command, metrics_path, experiment_id, arm,
         raise CoreError('run-ledger execution failed: %s' % exc)
     ledger_id = ''
     try:
-        for line in ledger_file.read_text(encoding='utf-8').splitlines():
+        for line in ledger_file.read_text(encoding='utf-8', errors='replace').splitlines():
             if not line.strip():
                 continue
-            row = _json.loads(line)
-            if row.get('operation_id') == run_id:
+            try:
+                row = _json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get('operation_id') == run_id:
                 ledger_id = str(row.get('id', ''))
-    except (OSError, ValueError):
+    except OSError:
         ledger_id = ''
     if not ledger_id:
         raise CoreError('the run ledger did not record this run; refusing an unrecorded experiment result')
