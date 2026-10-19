@@ -442,7 +442,6 @@ def aggregate(repo, since=None, now=None):
             continue
         valid_tasks.append(task)
     tasks = valid_tasks
-    plan_task_ids = {task.get("id") for task in tasks if isinstance(task.get("id"), str)}
     attempts, incomplete_attempts = _attempt_history(repo)
     artifacts = _query(repo, "artifact-index", "list", "1000").get("rows", [])
     artifacts = [row for row in artifacts if isinstance(row, dict)]
@@ -613,13 +612,8 @@ def aggregate(repo, since=None, now=None):
     for call in write_calls:
         if call.get("task_id"):
             write_groups.setdefault(call.get("task_id"), []).append(call)
-    reworked = set()
-    for task_id, rows in write_groups.items():
-        ordered = sorted(rows, key=lambda row: (_stamp(row.get("created_at")) is None,
-                                                _stamp(row.get("created_at")) or 0))
-        if (task_id in plan_task_ids and len(ordered) > 1
-                and any(in_window(row.get("created_at")) for row in ordered[1:])):
-            reworked.add(task_id)
+    # Same cohort as completion: tasks first started in the window.
+    reworked = {task_id for task_id in first_start if len(write_groups.get(task_id, [])) > 1}
 
     def has_write_successor(call, transition):
         if call.get("refs", {}).get("panel_role") != "worker" or call.get("refs", {}).get("panel_access") != "write":

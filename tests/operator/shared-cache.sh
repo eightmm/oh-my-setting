@@ -63,11 +63,12 @@ draft_artifact.write_text('Answer is ready.\n', encoding='utf-8')
 draft_path = panel_results.write_summary_draft(project, {
     'task_id': 'draft-task', 'next_action': 'record main decision',
     'stages': {'implement': {'state': 'passed'}, 'verify': {'state': 'failed'}},
-    'calls': [{'artifact': '.oms/artifacts/answer.md'}]})
+    'calls': [{'artifact': '.oms/artifacts/answer.md'}]}, 'kept the parser fix; review X open')
 draft_bytes = (project / draft_path).read_bytes()
 assert draft_path.startswith('.oms/artifacts/panel-results/summary-draft-task-')
 assert len(draft_bytes) <= 4096 and b'Task: draft-task' in draft_bytes
-assert b'Next action: record main decision' in draft_bytes and b'verify: failed' in draft_bytes
+assert b'## Decision\nkept the parser fix; review X open' in draft_bytes and b'Next action' not in draft_bytes and b'main_decision' not in draft_bytes
+assert b'verify: failed' in draft_bytes
 assert b'.oms/artifacts/answer.md' in draft_bytes
 large_refs = []
 for number in range(80):
@@ -78,6 +79,7 @@ large_draft = panel_results.write_summary_draft(project, {'task_id': 'draft-larg
 large_bytes = (project / large_draft).read_bytes()
 assert len(large_bytes) <= 4096 and large_bytes.endswith(b'\n'), len(large_bytes)
 assert '문서' in large_bytes.decode('utf-8')
+assert b'No reason recorded.' in large_bytes
 selected_row = {'task_id': 'selected-task', 'stages': {'implement': {'state': 'passed'}},
                 'next_action': 'record main decision', 'calls': [{'attempt_id': 'selected-attempt',
                 'artifact': '.oms/artifacts/answer.md'}]}
@@ -113,6 +115,8 @@ assert any('[selected-task]' in label for label in selected_labels), selected_la
 assert any('[completed]' in label for label in selected_labels), selected_labels
 assert any('[python3 -m unittest]' in label for label in selected_labels), selected_labels
 assert any('[.oms/artifacts/answer.md]' in label for label in selected_labels), selected_labels
+assert 'Decision reason: ' in selected_labels, selected_labels
+assert b'## Decision' in (project / selected_finalize.call_args.args[3]).read_bytes()
 selected_calls[0] = 0
 selected_labels.clear()
 def attention_menu(repo, provider, previous, view, attention_only, navigation, cache):
@@ -796,7 +800,8 @@ outside_window_metrics = panel_metrics.aggregate(metric_repo, since='1s', now=no
 assert outside_window_metrics['write_attempts']['total'] == 0, outside_window_metrics
 assert recent_metrics['completion'] == {'finished': 1, 'started': 3, 'rate': 0.3333}, recent_metrics
 assert recent_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, recent_metrics
-assert recent_metrics['rework'] == {'tasks': 1, 'started': 3, 'rate': 0.3333}, recent_metrics
+# 'continued' started before the window, so its in-window rework is outside the cohort.
+assert recent_metrics['rework'] == {'tasks': 0, 'started': 3, 'rate': 0.0}, recent_metrics
 assert recent_metrics['abandoned_calls'] == 1, recent_metrics
 assert recent_metrics['interventions'] == {'manual_clears': 1, 'cancels': 0,
                                             'owner_finalized_failures': 1, 'total': 2}, recent_metrics
@@ -826,6 +831,7 @@ lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for r
 same_second_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
 assert same_second_metrics['abandoned_calls'] == 1, same_second_metrics
 assert same_second_metrics['rework']['tasks'] == 2, same_second_metrics
+assert panel_metrics.aggregate(metric_repo, since='1m', now=now_metric)['rework']['tasks'] == 1
 
 # Existing but corrupt plan evidence is incomplete and exposes a concise reason
 # through both output formats.

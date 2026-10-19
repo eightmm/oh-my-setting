@@ -316,14 +316,14 @@ def _write(repo, relative, payload, maximum=MAX_RESULT):
         raise ValueError('panel artifact write refused') from error
 
 
-def write_summary_draft(repo, row):
+def write_summary_draft(repo, row, decision=''):
     """Write a bounded owner-editable summary beside existing panel result artifacts."""
     if not isinstance(row, dict) or not isinstance(row.get('task_id'), str) or not ID.fullmatch(row['task_id']):
         raise ValueError('invalid result row for summary draft')
     stages = row.get('stages') if isinstance(row.get('stages'), dict) else {}
-    lines = ['# Panel result draft', '', '- Task: ' + clean(row['task_id'], 160),
-             '- Next action: ' + clean(row.get('next_action') or 'unknown', 160), '', '## Stages']
-    for name in ('implement', 'verify', 'review', 'main_decision'):
+    lines = ['# Panel result draft', '', '- Task: ' + clean(row['task_id'], 160), '',
+             '## Decision', clean(decision, 1000) or 'No reason recorded.', '', '## Stages']
+    for name in ('implement', 'verify', 'review'):
         stage = stages.get(name) if isinstance(stages.get(name), dict) else {}
         lines.append('- %s: %s' % (name, clean(stage.get('state') or 'unknown', 80)))
     refs = []

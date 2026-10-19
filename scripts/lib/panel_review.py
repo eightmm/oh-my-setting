@@ -820,7 +820,7 @@ def finalize_selection(repo, provider, navigation, state):
         if not summary:
             if row is None:
                 raise ValueError("selected task result is unavailable for a summary draft")
-            summary = write_summary_draft(repo, row)
+            summary = write_summary_draft(repo, row, read_field("Decision reason: ", required=False))
             print("Summary draft: " + summary)
         if selected_call is None and row and (not selected or selected[0] != "result" or task_id != selected_task):
             selected_call = next((call for call in reversed(row.get("calls", []))
