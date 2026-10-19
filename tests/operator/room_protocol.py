@@ -1270,7 +1270,9 @@ for refused_id in ("plan-blocked", "plan-held", "plan-ownerless"):
     before_thread, before_provider = thread.read_bytes(), worker_log.read_bytes()
     refused = subprocess.run(write_plan_dispatch + ["--task-id", refused_id, "--label", "Refused write"],
                              env=room_env, capture_output=True, text=True)
-    assert refused.returncode != 0 and "reopen or claim it before dispatching a write worker" in refused.stderr, refused
+    tail = ("run `oms agent-plan reopen --id plan-blocked` first" if refused_id == "plan-blocked" else
+            "inspect it with `oms agent-plan show --id %s`" % refused_id)
+    assert refused.returncode != 0 and "is not this main's to run;" in refused.stderr and tail in refused.stderr, refused
     assert thread.read_bytes() == before_thread, "a refused write dispatch must not join the room"
     assert worker_log.read_bytes() == before_provider, "a refused write dispatch must not call a provider"
 # Known unclaimable tasks keep informational read dispatch compatibility.
@@ -1302,7 +1304,7 @@ assert closed.returncode == 0 and plan_task()["state"] == "review" and "plan pla
 before_thread, before_provider = thread.read_bytes(), worker_log.read_bytes()
 review_write = subprocess.run(write_plan_dispatch + ["--task-id", "plan-link", "--label", "Refused review write"],
                               env=room_env, capture_output=True, text=True)
-assert review_write.returncode != 0 and "reopen or claim it before dispatching a write worker" in review_write.stderr, review_write
+assert review_write.returncode != 0 and "is not this main's to run; finish or release it first" in review_write.stderr, review_write
 assert thread.read_bytes() == before_thread and worker_log.read_bytes() == before_provider, review_write
 (project / "write-brief.md").unlink()  # The later blocking reviewer must see only its source fixture.
 hinted = subprocess.run(final_args[:final_args.index("--task-id") + 1] + ["plan-link"] + final_args[final_args.index("--task-id") + 2:],

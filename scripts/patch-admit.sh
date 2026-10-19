@@ -821,7 +821,7 @@ PY
       record "verify-floor" "SKIP" "pre-verification policy or integrity gate failed"
     elif [ -n "$candidate_only" ] && [ -z "$floor_verify" ]; then
       if [ -n "$existing_surface" ]; then
-        record "verify-floor" "FAIL" "candidate-only command cannot verify changed baseline surfaces; supply an unchanged base verifier"
+        record "verify-floor" "FAIL" "candidate-only command cannot verify changed baseline surfaces; and HEAD scripts/check.sh exposes no fast/ml-smoke floor; add one at HEAD, or rerun with --verify naming an existing suite that covers them"
       else
         record "verify-floor" "SKIP" "candidate-only test; no changed baseline verification surface"
       fi

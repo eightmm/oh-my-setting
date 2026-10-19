@@ -720,22 +720,27 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
     if state not in ("ready", "claimed", "running"):
         unprotected("is %s; panel left it unchanged" % state)
         if access == "write":
-            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
-                             "dispatching a write worker" % task_id)
+            raise ValueError(
+                "plan task %s is not this main's to run; %s" % (task_id, (
+                    "run `oms agent-plan reopen --id %s` first" % task_id if state == "blocked" else
+                    "create a new task to continue" if state == "done" else
+                    "finish or release it first")))
         return None
     if state != "ready" and holder != caller:
         unprotected("is %s by another claimant; panel left it unchanged" % state if holder else
                     "has an ownerless claim (another claimant); panel left it unchanged")
         if access == "write":
-            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
-                             "dispatching a write worker" % task_id)
+            raise ValueError(
+                "plan task %s is not this main's to run; it is claimed by %s; inspect it with "
+                "`oms agent-plan show --id %s` (or `recover-lease --check ...`), and release or "
+                "recover it only if that claimant is gone" % (task_id, holder or "no owner", task_id))
         return None
     ident, attempt = env.get("OMS_ROOM_ID"), env.get("OMS_PANEL_MAIN_ATTEMPT")
     if not caller or not ident or not attempt:
         unprotected("has no owned main relationship; panel left it unchanged")
         if access == "write":
-            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
-                             "dispatching a write worker" % task_id)
+            raise ValueError("plan task %s is not this main's to run; dispatch it from the current room main"
+                             % task_id)
         return None
     main = active_mains(repo, ident, room.project(room.records(repo, ident)), owner,
                         caller=caller, attempt=attempt).get(caller)
