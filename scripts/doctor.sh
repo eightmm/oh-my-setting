@@ -249,7 +249,6 @@ fi
 # expected list is the stale one, so it certifies itself. The whole value of
 # the report is that it runs from a newer source against the live settings.
 if [ "$SURFACES" = "0" ] && [ "$TOOL_LOCK_ONLY" = "0" ] &&
-   [ "${OMS_DOCTOR_REPORT_CHILD:-0}" != 1 ] &&
    [ "$RECEIPT_STATE" = "valid" ] &&
    [ "$ROOT" != "$INSTALL_ROOT" ] &&
    [ -x "$INSTALL_ROOT/scripts/doctor.sh" ]; then

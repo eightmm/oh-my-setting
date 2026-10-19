@@ -109,7 +109,8 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
                 command = ['bash', str(install_root() / 'scripts' / 'install-profile.sh')]
                 for name in args.profiles:
                     command.extend(['--profile', name])
-                command.extend(['--primary-provider', args.primary_provider])
+                if args.primary_provider:
+                    command.extend(['--primary-provider', args.primary_provider])
                 if args.upgrade:
                     command.append('--upgrade')
                 if args.allow_missing:
@@ -127,10 +128,12 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
                         installer_result = json.loads(result.stdout)
                     except ValueError:
                         installer_result = {'output': result.stdout[-4000:]}
+                chosen = installer_result.get('primary_provider') if isinstance(installer_result, dict) else None
+                plan = install_plan(args.profiles, chosen) if chosen else None
                 configured = None
                 if result.returncode == 0 and (not args.dry_run):
                     configured = apply_profiles(repo, args.profiles, allow_missing=args.allow_missing)
-                value = {'schema': 1, 'exit': result.returncode, 'installed': result.returncode == 0, 'plan': install_plan(args.profiles, args.primary_provider), 'installer': installer_result, 'configured': configured}
+                value = {'schema': 1, 'exit': result.returncode, 'installed': result.returncode == 0, 'plan': plan, 'installer': installer_result, 'configured': configured}
                 emit(value, args.pretty)
                 return result.returncode
             emit(value, args.pretty)

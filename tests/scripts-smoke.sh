@@ -33548,6 +33548,42 @@ assert "raw_output" not in row, row
       >/dev/null 2>&1; then
     fail "structured doctor accepted a mutating repair"
   fi
+
+  # From a checkout that is not the receipt owner the structured report must
+  # judge the owner's tree, as plain doctor.sh does.
+  local owner="$TMP/doctor-structured-owner"
+  local owner_home="$TMP/doctor-structured-owner-home"
+  local receipt="$owner_home/receipt.json"
+  setup_doctor_home "$owner_home"
+  mkdir -p "$owner/scripts"
+  printf '#!/usr/bin/env bash\necho "ok: owner-marker"\nexit 0\n' > "$owner/scripts/doctor.sh"
+  chmod +x "$owner/scripts/doctor.sh"
+  python3 - "$receipt" "$owner" <<'PY'
+import json, os, sys
+json.dump({"schema": 1, "source_root": os.path.realpath(sys.argv[2]), "commit": "a" * 40,
+           "channel": "main", "version": "0.0.0", "installed_at": "2026-01-01T00:00:00Z",
+           "plugin": {"name": "oh-my-setting", "version": "0.0.0", "sha256": "b" * 64}},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
+  rc=0
+  json="$(cd "$other" && HOME="$owner_home" XDG_CACHE_HOME="$owner_home/.cache" \
+    XDG_RUNTIME_DIR="$owner_home/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OMS_INSTALL_RECEIPT="$receipt" \
+    "$ROOT/scripts/doctor.sh" --repo "$project" --json --no-model-doctor)" || rc=$?
+  [ "$rc" = 0 ] || fail "structured doctor did not delegate to the receipt owner: $json"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["status"] == "ok" and row["exit"] == 0, row
+assert any("owner-marker" in item["message"] for item in row["findings"]), row
+' || fail "structured doctor omitted the owner verdict: $json"
+  plan="$(cd "$other" && HOME="$owner_home" XDG_CACHE_HOME="$owner_home/.cache" \
+    XDG_RUNTIME_DIR="$owner_home/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OMS_INSTALL_RECEIPT="$receipt" \
+    "$ROOT/scripts/doctor.sh" --repo "$project" --remediation-plan --no-model-doctor)" ||
+    fail "owner-delegated remediation plan failed: $plan"
+  contains "$plan" 'owner-marker' && fail "owner plan listed an ok finding: $plan"
+  return 0
 }
 
 # Every hook the Codex plugin registers must reach a script the dispatcher

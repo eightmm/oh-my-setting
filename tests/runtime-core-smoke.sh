@@ -88,6 +88,53 @@ OMS_HARNESS_CHILD=1 "$ROOT/scripts/runtime.sh" --repo "$tmp" \
 OMS_HARNESS_CHILD=1 "$ROOT/scripts/runtime.sh" --help >/dev/null
 OMS_HARNESS_CHILD=1 "$ROOT/scripts/runtime.sh" --version >/dev/null
 
+# Without --primary-provider the installer's own detection (host providers,
+# then OH_MY_SETTING_PRIMARY_PROVIDER) decides; the plan must agree with it.
+auto_bin="$tmp/auto-bin"
+mkdir -p "$auto_bin" "$tmp/auto-home"
+printf '#!/bin/sh\nexit 0\n' > "$auto_bin/claude"
+chmod +x "$auto_bin/claude"
+assert_auto_primary() {
+  expected="$1"
+  shift
+  env HOME="$tmp/auto-home" PATH="$auto_bin:/usr/bin:/bin" \
+    OH_MY_SETTING_PRIMARY_PROVIDER=auto "$@" \
+    OMS_HARNESS_CHILD=1 "$ROOT/scripts/runtime.sh" --repo "$tmp" \
+    profile install core --dry-run | EXPECTED="$expected" python3 -c '
+import json, os, sys
+row = json.load(sys.stdin)
+want = os.environ["EXPECTED"]
+got = (row["installer"]["primary_provider"], row["plan"]["primary_provider"])
+assert got == (want, want), got'
+}
+assert_auto_primary claude
+assert_auto_primary agy OH_MY_SETTING_PRIMARY_PROVIDER=agy
+
+# The wrapper forwards --primary-provider only when the user gave one, verbatim.
+PYTHONPATH="$ROOT/scripts/lib" python3 - "$tmp" <<'PY'
+import contextlib, io, subprocess, sys
+from unittest import mock
+from oms_runtime import cli
+
+real_run = subprocess.run
+
+def forwarded(*extra):
+    seen = []
+    def fake(command, **kwargs):
+        if command[:1] != ['bash']:
+            return real_run(command, **kwargs)
+        seen.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout='{}', stderr='')
+    with mock.patch.object(cli.subprocess, 'run', fake), contextlib.redirect_stdout(io.StringIO()):
+        cli.main(['--repo', sys.argv[1], 'profile', 'install', 'core', '--dry-run', *extra])
+    return seen[0]
+
+assert '--primary-provider' not in forwarded(), forwarded()
+for value in ('auto', 'claude'):
+    argv = forwarded('--primary-provider', value)
+    assert argv[argv.index('--primary-provider') + 1] == value, argv
+PY
+
 assert_child_host_refused() {
   label="$1"
   shift

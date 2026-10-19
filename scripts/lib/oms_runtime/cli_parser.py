@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_profile.add_argument('--primary-provider', default='codex', choices=('codex', 'claude', 'agy'))
     install_apply = profile_sub.add_parser('install')
     install_apply.add_argument('profiles', nargs='+', choices=sorted(PROFILE_DEFS))
-    install_apply.add_argument('--primary-provider', default='codex', choices=('codex', 'claude', 'agy'))
+    install_apply.add_argument('--primary-provider', default=None, choices=('auto', 'codex', 'claude', 'agy'))
     install_apply.add_argument('--upgrade', action='store_true')
     install_apply.add_argument('--allow-missing', action='store_true')
     install_apply.add_argument('--receipt', default='')
