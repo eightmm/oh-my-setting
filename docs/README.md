@@ -20,11 +20,6 @@ Use this map to choose an OMS guide by task. Each entry names its subject and in
 - [OMS runtime](OMS-RUNTIME.md) — typed runtime contracts, backends, evidence and adapters; for integrators.
 - [Graph engineering](GRAPH-ENGINEERING.md) — graph schemas, lifecycle, validation and CLI; for contributors.
 
-## History and analysis
-
-- [Strands harness analysis](STRANDS-HARNESS-ANALYSIS.md) — dated comparison and follow-up decisions; for maintainers reviewing design history.
-- [Autopilot gap audit](AUTOPILOT-GAP-AUDIT.md) — dated security and reliability findings with later resolution status; for maintainers.
-
 ## Migration notes
 
 - [MIGRATION-0.4.md](MIGRATION-0.4.md) — 0.4 upgrade and removed compatibility surfaces; for operators upgrading older installs.

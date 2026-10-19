@@ -12690,7 +12690,7 @@ test_scrubber_passes_harness_sources() {
 
   mkdir -p "$dir"
   # Self-review regression gate: anything that can enter diff/prompt context
-  # must pass the outbound scrubber. Env examples and generated cluster refs
+  # must pass the outbound scrubber. Env files and generated cluster refs
   # are excluded here exactly like MA_SAFE_PATHS excludes them from diffs.
   # .github/ is CI config, not agent payload, and its `${{ secrets.* }}` /
   # GH_TOKEN references are indirections, not literal secrets — excluded too.

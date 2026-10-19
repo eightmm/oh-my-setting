@@ -47,7 +47,7 @@ Windows에서 기본 Codex 설치나 Node 기반 도구를 고른 프로필은 �
 그대로 쓰고, 요청한 프로필을 비공개 receipt에 기록해 업데이트 때 그 도구
 묶음만 다시 적용한다. capability receipt가 없는 기존 설치는 agent가 명시적으로
 옮기기 전까지 예전의 전체 도구 업데이트 경로를 유지한다.
-[OMS-RUNTIME.md](OMS-RUNTIME.md)를 참고한다.
+[MIGRATION-0.5.md](MIGRATION-0.5.md#capability-profiles)를 참고한다.
 `oms install-profile --apply --add --profile github`은 기존 프로필, provider,
 누락 허용 정책을 유지하며 capability를 추가한다. `--add` 없는 `--profile`은
 기록된 선택을 대체하고, `--reapply`는 그대로 다시 적용한다. `--plan`으로

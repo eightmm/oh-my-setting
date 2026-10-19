@@ -1286,7 +1286,7 @@ EOF
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error bash scripts/check.sh --affected \
     --print-affected-mode --changed-from "$base" --changed-to "$head" 2>/dev/null)"
   [ "$out" = full ] || fail "renamed code was treated as ordinary docs"
-  for policy_path in custom-skills/example/SKILL.md templates/project-skills/example/SKILL.md templates/project-example.md config/models.json; do
+  for policy_path in custom-skills/example/SKILL.md templates/project-skills/example/SKILL.md templates/project-example.md; do
     base="$head"
     mkdir -p "$(dirname "$gate/$policy_path")"
     printf '{}\n' > "$gate/$policy_path"
@@ -1296,7 +1296,6 @@ EOF
     out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error bash scripts/check.sh --affected \
       --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)"
     case "$policy_path" in
-      config/*) grep -Fxq model-routing <<< "$out" || fail "model checks missing" ;;
       *)
         grep -Fxq skill-manifest <<< "$out" || fail "direct guidance checks missing: $out"
         if grep -Eq 'prompt-budget|skill-lifecycle|functional-evolution' <<< "$out"; then

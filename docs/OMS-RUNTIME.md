@@ -15,7 +15,7 @@ standard-library only and does not rewrite `peer-delegate`, `patch-admit`,
 - [Context and capabilities](#contextmanifest)
 - [Backends, capsules, and failures](#execution-backends)
 - [Updates, experiments, and telemetry](#stable-and-edge-update-channels)
-- [Adapters, migration, and verification](#optional-interoperability-adapters)
+- [Adapters, migration policy, and verification](#optional-interoperability-adapters)
 
 ## Quick start
 
@@ -535,14 +535,8 @@ property.
 
 ## Migrating an existing install to capability profiles
 
-No migration is forced. An install with no capability receipt keeps the
-legacy full-tool update path unchanged. Opting in is one explicit apply —
-`oms install-profile --apply --profile core --profile github` (choose your
-own set) — which writes the private receipt; from then on `oms update`
-refreshes exactly that selection. Rolling back is deleting the receipt
-(`~/.config/oh-my-setting/capabilities.json`), which restores legacy
-full-tool behavior on the next update. Uninstall removes the receipt with
-the install it belongs to.
+Existing installs change nothing until opted in; see
+[MIGRATION-0.5.md](MIGRATION-0.5.md#capability-profiles).
 
 ## Portable continuity capsule
 
@@ -617,14 +611,14 @@ oms runtime release resolve stable
 oms runtime release apply stable
 oms runtime release promote \
   --commit <full-commit> \
-  --version 0.5.0 \
+  --version <version> \
   --expected-manifest-digest <reviewed-digest>
 ```
 
 `config/update-channels.json` distinguishes a pinned reviewed `stable` commit
-from a clean-fast-forward `edge` channel. The initial stable pin deliberately
-remains the last reviewed v0.4.0 base until a maintainer promotes a later full
-CI-green commit with an exact manifest digest. Applying a channel delegates to the
+from a clean-fast-forward `edge` channel. The stable pin stays on the last
+reviewed commit until a maintainer promotes a later full CI-green commit with
+an exact manifest digest. Applying a channel delegates to the
 existing transactional `scripts/update.sh`. Promotion uses an exact manifest
 CAS and never silently auto-applies stable changes.
 
@@ -815,26 +809,14 @@ existing CLI and MCP tools without a separate HTTP bridge.
 Model routing should remain simple until this evidence exists. The core does
 not turn provider names into an unvalidated learned scheduler.
 
-## Migration strategy
+## Migration policy
 
-1. Add the runtime core and keep every existing writer unchanged.
-2. Route `state`, `inbox`, and `state-verify` through shadow projections and
-   compare normalized output.
-3. Centralize common schema, hashing, atomic write, and failure vocabulary.
-4. Add criterion-linked evidence and context manifests to delegated calls.
-5. Installation now defaults to `core`; `full` remains the explicit
-   compatibility profile, and receipt-less existing installs keep their legacy
-   full-tool update path until migrated.
-6. The runtime provides actual trusted-local, container, and typed remote
-   backends; provider call sites can adopt them incrementally without replacing
-   the established patch transaction.
-7. Move simple state reducers to the core only after differential and crash
-   tests pass.
-8. Leave patch admission, landing, commit publication, and Draft PR intent as
-   the final migration candidates.
+Simple state reducers move to the core only after differential and crash tests
+pass. Patch admission, landing, commit publication, and Draft PR intent remain
+the final migration candidates.
 
-No standing daemon, new authoritative database, micro-DAG for every tool call,
-or always-on multi-agent swarm is introduced.
+Non-goals: a standing daemon, a new authoritative database, a micro-DAG for
+every tool call, and an always-on multi-agent swarm.
 
 ## Verification
 

@@ -55,7 +55,7 @@ existing locked download transactions, records the exact requested profile in a
 private receipt, and reapplies only that tool set during updates. Existing
 installs without a capability receipt retain the legacy full-tool update path
 until an agent explicitly migrates them. See
-[OMS-RUNTIME.md](OMS-RUNTIME.md). `oms install-profile --apply --add --profile github`
+[MIGRATION-0.5.md](MIGRATION-0.5.md#capability-profiles). `oms install-profile --apply --add --profile github`
 adds a capability while retaining the recorded profiles, provider, and degraded
 policy. Without `--add`, `--profile` replaces the recorded selection; `--reapply`
 reuses it exactly. `--plan` previews either operation without changing it.

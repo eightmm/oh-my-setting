@@ -829,7 +829,7 @@ prepare_affected_gate() {
   local plan_rows="$CHECK_RUNTIME/affected-plan.rows"
   local graph_err="$CHECK_RUNTIME/affected-graph.err"
   local selector_changes="$CHECK_RUNTIME/affected-selector-changes"
-  local kind first second third path docs_only=1 scoped_only=1 models=0
+  local kind first second third path docs_only=1 scoped_only=1
 
   AFFECTED_NATIVE=false
   # Read the complete path set separately: the mode selector can stop at its
@@ -856,7 +856,6 @@ prepare_affected_gate() {
     case "$path" in
       README.md|README.ko.md|docs/*.md) ;;
       custom-skills/*.md|templates/*.md|roles/*.md) ;;
-      config/models.json) models=1 ;;
       *) scoped_only=0 ;;
     esac
     case "$path" in
@@ -870,7 +869,7 @@ prepare_affected_gate() {
         AFFECTED_REASONS="contract-boundary:$path"
         break
         ;;
-      custom-skills/*.md|templates/*.md|config/models.json) ;;
+      custom-skills/*.md|templates/*.md) ;;
       install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/doctor.sh|\
       scripts/python-runtime.sh|scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
       scripts/lib/oms-common.sh|\
@@ -901,9 +900,6 @@ prepare_affected_gate() {
     AFFECTED_REASONS=scoped-contracts
     # Prose is checked directly by skill-manifest and documentation references.
     # Runtime prompt/GC/lifecycle suites do not validate the changed guidance.
-    if [ "$models" = 1 ]; then
-      AFFECTED_TESTS+=(tests/model-routing-smoke.sh tests/provider-registry-smoke.sh tests/models-smoke.sh)
-    fi
   elif ! bash scripts/graph.sh project affected \
       --base "$QUICK_FROM" --head "$QUICK_TO" \
       --guard 'scripts/graph.sh' --guard 'scripts/lib/oms_graph/**' \
@@ -1114,7 +1110,7 @@ if [ "$RUN_QUICK" = 1 ]; then
         ;;
     esac
     case "$path" in
-      config/models.json|scripts/agent-call.sh|scripts/peer-ask.sh|scripts/lib/model-routing.sh|scripts/lib/provider-registry.sh|scripts/lib/peer-common.sh|tests/model-routing-smoke.sh|tests/provider-registry-smoke.sh)
+      scripts/agent-call.sh|scripts/peer-ask.sh|scripts/lib/model-routing.sh|scripts/lib/provider-registry.sh|scripts/lib/peer-common.sh|tests/model-routing-smoke.sh|tests/provider-registry-smoke.sh)
         quick_models=1
         ;;
     esac
@@ -1126,7 +1122,7 @@ if [ "$RUN_QUICK" = 1 ]; then
     # Tier routing picks among installed providers, so these are the inputs
     # that let a fixture pass only where a provider CLI exists (f698ac9).
     case "$path" in
-      config/panel-routing.json|config/models.json|scripts/lib/provider-registry.sh|scripts/lib/panel_routing.py|scripts/lib/panel_view.py|scripts/lib/terminal_panel.py|tests/operator-tools-smoke.sh|tests/operator/*)
+      config/panel-routing.json|scripts/lib/provider-registry.sh|scripts/lib/panel_routing.py|scripts/lib/panel_view.py|scripts/lib/terminal_panel.py|tests/operator-tools-smoke.sh|tests/operator/*)
         quick_routing=1
         ;;
     esac

@@ -1339,7 +1339,7 @@ ordinary README/docs changes directly, otherwise selects existing tests from
 positive graph evidence. Skill/template Markdown uses the direct skill validator
 (including project skill templates and their local references), not runtime
 prompt/GC/lifecycle suites;
-`config/models.json` uses routing/registry suites. Install/permission/state,
+install/permission/state,
 executable templates, selector changes, dirty trees, or uncertain graphs retain
 full coverage. `source-distribution-smoke.sh --docs-only` checks documentation
 references without its CI orchestration, installation or CLI-help probes.

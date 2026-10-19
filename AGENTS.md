@@ -30,8 +30,8 @@
   edit or local commit. For committed ranges use `scripts/check.sh --affected`
   with `--changed-from BASE --changed-to HEAD`: ordinary docs use reference
   checks; positive graph evidence selects tests; critical/uncertain changes
-  use full coverage. Skill/template prose and the model registry use their
-  bounded contract suites; executable templates and permission policy stay broad.
+  use full coverage. Skill/template prose uses its bounded contract
+  suite; executable templates and permission policy stay broad.
 - Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
   and pushes only while HEAD and the tracked tree remain unchanged, without a
   duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`:
