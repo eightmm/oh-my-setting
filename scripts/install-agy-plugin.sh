@@ -29,7 +29,7 @@ AGY_BIN="${OMS_AGY_BIN:-agy}"
 # What this probe checks. A probe that learns to check more invalidates the
 # verdicts of the one that checked less, without waiting for the binary to
 # change.
-PROBE_SCHEMA=1
+PROBE_SCHEMA=2
 
 # shellcheck source=scripts/lib/model-capability.sh
 . "$ROOT/scripts/lib/model-capability.sh"
@@ -231,17 +231,22 @@ EOF
   } > "$fixture/probe-slow.sh"
   chmod +x "$fixture/probe-hook.sh" "$fixture/probe-slow.sh"
 
-  # 1. Schema acceptance. A hooks.json agy cannot parse is reported as
-  #    "skipped (not found)", so "processed" is the discovery signal — and the
-  #    only thing validate proves. Delivery is checked by running the CLI.
+  # 1. Schema acceptance. `plugin validate --json` reports the component
+  #    counts agy discovered; a malformed hooks.json counts as hooks 0. A binary
+  #    that rejects --json or prints something unparsable lands in unverified,
+  #    the MCP-only default. Delivery is checked by running the CLI.
   rc=0
-  agy_probe_run 60 "$PROBE_WORK" "$PROBE_WORK/validate.log" "$AGY_BIN" plugin validate "$fixture" || rc=$?
-  if [ "$rc" -ne 0 ]; then
+  agy_probe_run 60 "$PROBE_WORK" "$PROBE_WORK/validate.log" "$AGY_BIN" plugin validate "$fixture" --json || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    hooks="$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["components"]["hooks"]))' \
+      "$PROBE_WORK/validate.log" 2>/dev/null | tr -d '\r')" || hooks=
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "${hooks:-}" ]; then
     agy_surface_record unverified validate no no no no no || true
-    agy_probe_report unverified "agy plugin validate failed; see nothing installed"
+    agy_probe_report unverified "agy plugin validate --json failed or was unparsable; see nothing installed"
     return 0
   fi
-  if grep -Eq 'hooks[[:space:]]*:.*processed' "$PROBE_WORK/validate.log"; then
+  if [ "$hooks" -ge 1 ]; then
     schema=yes
   else
     agy_surface_record unsupported schema no no no no no || true

@@ -1583,9 +1583,9 @@ esac
 case "${1:-} ${2:-}" in
   "plugin validate")
     if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$3/hooks.json" 2>/dev/null; then
-      printf '          hooks       : 1 processed\n'
+      printf '{"components":{"hooks":1},"findings":[]}\n'
     else
-      printf '          hooks       : skipped (not found)\n'
+      printf '{"components":{"hooks":0},"findings":[]}\n'
     fi
     exit 0
     ;;
