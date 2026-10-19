@@ -61,7 +61,7 @@ usage() {
   cat <<'EOF_USAGE'
 Usage: oms <tool> [args...]
        oms                         # terminal control panel (interactive TTY)
-       oms list [--frontdoor|--all]
+       oms list [--all]
        oms help
 
 Dispatch to an oh-my-setting harness tool by name. `list` prints the compact
@@ -271,9 +271,9 @@ case "${1:-}" in
     ;;
   list)
     case "${2:-}" in
-      ""|--frontdoor) cmd_list "$OMS_FRONTDOOR_TOOLS" ;;
+      "") cmd_list "$OMS_FRONTDOOR_TOOLS" ;;
       --all) cmd_list "$OMS_PUBLIC_TOOLS" ;;
-      *) echo "error: oms list accepts --frontdoor or --all" >&2; exit 2 ;;
+      *) echo "error: oms list accepts --all" >&2; exit 2 ;;
     esac
     exit 0
     ;;

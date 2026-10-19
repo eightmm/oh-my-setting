@@ -2,7 +2,7 @@
 
 Choose the narrowest front door; retain primitives.
 
-`oms list` (also `--frontdoor`) exposes entrypoints;
+`oms list` exposes entrypoints;
 `oms list --all` exposes primitives. Start with SKILL.md's six work families;
 this resolves intent variants, not extra steps.
 

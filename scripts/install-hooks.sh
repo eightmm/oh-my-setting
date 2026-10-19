@@ -9,11 +9,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'EOF'
-usage: install-hooks.sh [--full | --quick]
+usage: install-hooks.sh [--quick]
 
 Install this repository's pre-push hook.
 
-  --full   Run scripts/check.sh before every push (default).
+  (default) Run scripts/check.sh before every push.
   --quick  Run partial changed-file checks locally; requires the risk-based
            GitHub Actions gate to be a protected-branch requirement.
 EOF
@@ -22,7 +22,6 @@ EOF
 mode=full
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --full) mode=full ;;
     --quick) mode=quick ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;

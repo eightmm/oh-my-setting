@@ -79,7 +79,7 @@ assert_child_install_refused default --profile hpc --primary-provider codex \
   --allow-missing --receipt "$child_receipt"
 assert_child_install_refused explicit --apply --profile hpc \
   --primary-provider codex --allow-missing --receipt "$child_receipt"
-assert_child_install_refused final-apply --dry-run --apply --profile hpc \
+assert_child_install_refused final-apply --plan --apply --profile hpc \
   --primary-provider codex --allow-missing --receipt "$child_receipt"
 assert_child_install_refused reapply --reapply --receipt \
   "$TMP/child-capabilities.json"
@@ -89,12 +89,12 @@ assert_child_install_refused reapply --reapply --receipt \
 }
 
 # The final parsed action is authoritative: plans/checks stay observable, and
-# an explicit dry-run after --apply must not be misclassified as a mutation.
+# an explicit --plan after --apply must not be misclassified as a mutation.
 OMS_HARNESS_CHILD=1 "$ROOT/scripts/install-profile.sh" --plan --profile core \
   --primary-provider codex >/dev/null
 OMS_HARNESS_CHILD=1 PATH="$TMP/bin:$PATH" "$ROOT/scripts/install-profile.sh" \
   --check --profile core --primary-provider codex >/dev/null
-OMS_HARNESS_CHILD=1 "$ROOT/scripts/install-profile.sh" --apply --dry-run \
+OMS_HARNESS_CHILD=1 "$ROOT/scripts/install-profile.sh" --apply --plan \
   --profile core --primary-provider codex >/dev/null
 
 echo "install-profile-smoke: ok"

@@ -260,7 +260,7 @@ EOF
   # 2. Delivery. One bounded headless turn with the cheapest prompt that still
   #    makes the CLI run its loop.
   rc=0
-  agy_probe_run "${OMS_AGY_PROBE_TIMEOUT:-120}" "$PROBE_WORK/workspace" "$PROBE_WORK/run.log" \
+  agy_probe_run "120" "$PROBE_WORK/workspace" "$PROBE_WORK/run.log" \
     "$AGY_BIN" -p "Reply with the single word: ok" --output-format text || rc=$?
   if [ "$rc" -ne 0 ]; then
     if grep -Eqi 'authentication (required|failed|interrupted)' "$PROBE_WORK/run.log"; then

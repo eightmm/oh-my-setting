@@ -96,7 +96,7 @@ PLUGIN_CACHE="$CODEX_HOME_DIR/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME/$PLUG
 # nonzero status.
 provider_cmd() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${OMS_PROVIDER_CMD_TIMEOUT:-120}" "$@" </dev/null
+    timeout 120 "$@" </dev/null
   else
     "$@" </dev/null
   fi

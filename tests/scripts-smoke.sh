@@ -15402,7 +15402,7 @@ test_install_hooks_writes_pre_push() {
   git -C "$repo" add scripts
   git -C "$repo" -c user.email=test@example.com -c user.name=Test commit -qm fixture
   git -C "$repo" worktree add --detach "$TMP/install-hooks-linked" >/dev/null
-  (cd "$TMP/install-hooks-linked" && bash scripts/install-hooks.sh --full >/dev/null) ||
+  (cd "$TMP/install-hooks-linked" && bash scripts/install-hooks.sh >/dev/null) ||
     fail "install-hooks must work from a linked worktree"
   grep -Fq 'scripts/check.sh' "$repo/.git/hooks/pre-push" ||
     fail "linked checkout must install the shared full hook"
@@ -17810,7 +17810,7 @@ test_oms_dispatcher_lists_and_dispatches() {
   # Capture first: grep -q on a live pipe SIGPIPEs the dispatcher under
   # pipefail as soon as the match is found.
   out="$("$bin/oms" list)" || fail "oms list should succeed"
-  [ "$out" = "$("$bin/oms" list --frontdoor)" ] || fail "default catalog must be compact"
+  [ "$out" = "$("$bin/oms" list)" ] || fail "default catalog must be compact"
   printf '%s' "$out" | grep >/dev/null -E '^inbox ' || fail "compact catalog needs inbox"
   if printf '%s' "$out" | grep >/dev/null -E '^agent-run |^herdr-adapter '; then
     fail "default catalog leaked primitive, optional or retired tools"
@@ -17880,7 +17880,7 @@ test_oms_frontdoor_routes_primary_subsystems() {
   mkdir -p "$bin"
   ln -sfn "$ROOT/scripts/oms" "$bin/oms"
 
-  frontdoors="$("$bin/oms" list --frontdoor)" || fail "oms list --frontdoor should succeed"
+  frontdoors="$("$bin/oms" list)" || fail "oms list should succeed"
   all_tools="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   help_text="$("$bin/oms" --help)" || fail "oms --help should succeed"
   review_help="$("$bin/oms" peer-review --help)" || fail "peer-review --help should succeed"

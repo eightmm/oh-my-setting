@@ -46,7 +46,6 @@ Options:
   --allow-missing         Permit a degraded apply receipt when external or
                           optional capabilities remain unavailable.
   --receipt PATH          Private user-local receipt path.
-  --dry-run               Alias for --plan.
   -h, --help              Show this help.
 USAGE
 }
@@ -71,7 +70,6 @@ while [ "$#" -gt 0 ]; do
     --receipt)
       [ "$#" -ge 2 ] || fail "--receipt requires a path"
       RECEIPT="$2"; shift 2 ;;
-    --dry-run) ACTION=plan; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
