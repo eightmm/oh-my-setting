@@ -229,10 +229,15 @@ if [ -s "$LEDGER" ]; then
     tail -n "${OMS_AGENT_ML_LEDGER_ROWS:-8}" "$LEDGER" |
       python3 -c '
 import json, sys
+rows = []
 for line in sys.stdin:
     try:
-        r = json.loads(line)
+        rows.append(json.loads(line))
     except Exception:
+        continue
+done = set(r.get("id") for r in rows if r.get("exit") is not None and r.get("id"))
+for r in rows:
+    if r.get("exit") is None and r.get("id") in done:
         continue
     cmd = " ".join(r.get("cmd", []))
     if len(cmd) > 120:
@@ -241,9 +246,10 @@ for line in sys.stdin:
     if len(note) > 100:
         note = note[:97] + "..."
     dirty = "+dirty" if r.get("dirty") else ""
-    row = "- {} exit={} {}s sha={}{} cmd={}".format(
-        r.get("ts", "unknown"), r.get("exit", "?"),
-        r.get("duration_s", "?"), r.get("git_sha", "?"), dirty, cmd)
+    result = "started" if r.get("exit", "?") is None else "exit={} {}s".format(
+        r.get("exit", "?"), r.get("duration_s", "?"))
+    row = "- {} {} sha={}{} cmd={}".format(
+        r.get("ts", "unknown"), result, r.get("git_sha", "?"), dirty, cmd)
     if note:
         row += " note={}".format(note)
     print(row)

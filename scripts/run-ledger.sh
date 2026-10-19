@@ -286,7 +286,8 @@ with open(ledger) as f:
             last = r
 if last:
     note = " note=%s" % last["note"] if last.get("note") else ""
-    print("%s exit=%s %ss%s" % (last.get("ts"), last.get("exit"), last.get("duration_s"), note))
+    result = "started (unfinished)" if last.get("exit") is None else "exit=%s %ss" % (last.get("exit"), last.get("duration_s"))
+    print("%s %s%s" % (last.get("ts"), result, note))
 EOF
 )" || dup=""
   if [ -n "$dup" ]; then

@@ -2322,6 +2322,32 @@ test_experiment_launch_records_registered_run() {
   assert_file_contains "$project/docs/EXPERIMENTS.jsonl" "Warmup 10pct improves"
   assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"val_auc": 0.82'
 
+  # Readers show a started row as unfinished and fold it into its finished row.
+  # (The launched ledger's cmd holds absolute paths, which the digest omits
+  # as sensitive, so the digest cases use a hand-built started+finished pair.)
+  local seeded="$project/seeded-repo" sha
+  make_committed_repo "$seeded"
+  mkdir -p "$seeded/docs"
+  sha="$(git -C "$seeded" rev-parse --short HEAD)"
+  printf '{"ts": "2026-10-19T00:00:00Z", "id": "r1", "cmd": ["true"], "git_sha": "%s", "dirty_hash": "", "exit": null, "duration_s": null, "status": "started"}\n' \
+    "$sha" > "$seeded/docs/EXPERIMENTS.jsonl"
+  "$ROOT/scripts/agent-ml-context.sh" --repo "$seeded" --force >"$project/digest-started" 2>&1 ||
+    fail "agent-ml-context should render a started-only ledger"
+  assert_file_contains "$project/digest-started" "started sha="
+  if grep -q "exit=None" "$project/digest-started"; then
+    fail "digest must show an unfinished started row as started"
+  fi
+  (cd "$seeded" && "$ROOT/scripts/run-ledger.sh" --no-gate --reason probe -- true >/dev/null 2>"$project/dup-started") || true
+  assert_file_contains "$project/dup-started" "identical run already in ledger"
+  assert_file_contains "$project/dup-started" "started (unfinished)"
+  printf '{"ts": "2026-10-19T00:00:00Z", "id": "r1", "cmd": ["true"], "git_sha": "%s", "dirty_hash": "", "exit": null, "duration_s": null, "status": "started"}\n{"ts": "2026-10-19T00:00:01Z", "id": "r1", "cmd": ["true"], "git_sha": "%s", "dirty_hash": "", "exit": 0, "duration_s": 1, "status": "finished"}\n' \
+    "$sha" "$sha" > "$seeded/docs/EXPERIMENTS.jsonl"
+  "$ROOT/scripts/agent-ml-context.sh" --repo "$seeded" --force >"$project/digest-done" 2>&1 ||
+    fail "agent-ml-context should render a finished ledger"
+  [ "$(grep -c 'cmd=true' "$project/digest-done")" = 1 ] ||
+    fail "digest must list a finished run once, not as started plus finished"
+  assert_file_contains "$project/digest-done" "exit=0 1s"
+
   # A submission launched inside a job must not record, or hand to
   # run-reconcile, the parent job id (its own id is cluster-qualified: none).
   local bin="$project/bin"
