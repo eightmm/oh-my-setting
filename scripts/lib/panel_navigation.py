@@ -164,8 +164,8 @@ def session_option(name):
     if not session:
         return ""
     try:
-        # tmux 3.4 option commands reject "=name"; the panel session name is exact and OMS-owned.
-        result = subprocess.run(tmux_command("show-options", "-v", "-t", session, name),
+        # Option commands take a target-pane; "=name:" is the exact-session form.
+        result = subprocess.run(tmux_command("show-options", "-v", "-t", "=" + session + ":", name),
                                 capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -781,7 +781,7 @@ def publish_bottom(navigation, before):
         return
     navigation["bottom_seen"] = state
     if managed_session():
-        subprocess.run(tmux_command("set-option", "-t", os.environ.get("OMS_PANEL_SESSION", ""),
+        subprocess.run(tmux_command("set-option", "-t", "=" + os.environ.get("OMS_PANEL_SESSION", "") + ":",
                                     BOTTOM_OPTION, bottom_text(state)),
                        check=False, timeout=2, stdin=subprocess.DEVNULL)
 

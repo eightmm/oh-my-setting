@@ -210,7 +210,7 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
         command += [instructions]
     elif provider == "claude":
         if resume:
-            command += ["--resume", resume]
+            command += ["--resume", resume, "--system-prompt-snapshot", "off"]
         else:
             command += ["--session-id", session_id or str(uuid.uuid4())]
         if model:
@@ -1229,7 +1229,7 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
     legacy = legacy_session(repo) if owner is None else None
     if legacy and session_owner(legacy) in ("", str(repo)):
         session, owner = legacy, str(repo)
-        subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_repo", owner), check=True)
+        subprocess.run(tmux_command("set-option", "-t", "=" + session + ":", "@oms_panel_repo", owner), check=True)
     if owner is not None and owner != str(repo):
         raise ValueError("tmux session %s is not this checkout's OMS panel; close it or use --layout inline" % session)
     env = os.environ.copy()
@@ -1305,7 +1305,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                 subprocess.run(tmux_command("set-environment", "-t", "=" + session, "OMS_ROOM_ID",
                                             os.environ["OMS_ROOM_ID"]), check=True)
             # The owner marker is written last: a racing launch joins only a fully recorded panel.
-            subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_repo", str(repo)), check=True)
+            subprocess.run(tmux_command("set-option", "-t", "=" + session + ":", "@oms_panel_repo", str(repo)), check=True)
             if launch:
                 bind_window(pane, launch, view, attention_only)
             board_split(pane, repo, watch_shell(repo, launch), main_watch=bool(launch))

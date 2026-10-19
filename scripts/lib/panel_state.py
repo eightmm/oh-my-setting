@@ -290,8 +290,8 @@ def session_owner(session):
     quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
     if subprocess.run(tmux_command("has-session", "-t", "=" + session), **quiet).returncode:
         return None
-    # tmux 3.4 option commands reject "=name"; has-session above proved the exact session.
-    owner = subprocess.run(tmux_command("show-options", "-v", "-t", session, "@oms_panel_repo"), **quiet)
+    # Option commands take a target-pane; "=name:" is the exact-session form.
+    owner = subprocess.run(tmux_command("show-options", "-v", "-t", "=" + session + ":", "@oms_panel_repo"), **quiet)
     return owner.stdout.strip() if owner.returncode == 0 else ""
 
 

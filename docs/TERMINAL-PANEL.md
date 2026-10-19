@@ -149,6 +149,8 @@ confirms the previous main ended. Unknown window/lifecycle state refuses replace
 Fresh Claude mains receive a panel-generated UUID via `--session-id`, retained as
 the attempt's `native_session` reference. Resumed Claude mains keep `--resume`
 and that reference, so restarting keeps the same room participant and unread mail.
+Resumed Claude mains pass `--system-prompt-snapshot off` so they rebuild their appended
+prompt instead of reusing the stored one; that needs Claude Code 2.1.257 or later.
 After `/clear`, restart and explicit resume follow the participant's current
 bound session; the original join boundary and mailbox remain intact.
 Codex starts with its existing flags; a recorded native session can be resumed.

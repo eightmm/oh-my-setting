@@ -218,7 +218,7 @@ if os.name != "nt" and os.environ.get("OMS_OPERATOR_SOCKET_DENIED") != "1":
                 pass
             assert termios.tcgetattr(slave) == original
             argv = mouse_setting.call_args.args[0]
-            assert argv == ["tmux", "set-option", "-t", "oms-panel-abcdef012345", "mouse", "on"]
+            assert argv == ["tmux", "set-option", "-t", "=oms-panel-abcdef012345:", "mouse", "on"]
         output = b""
         deadline = time.monotonic() + 1
         while b"\033[?1000l" not in output and time.monotonic() < deadline:

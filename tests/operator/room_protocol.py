@@ -1671,6 +1671,14 @@ def exercise_main_lineage():
                 instructions = (argv[-1] if harness == "codex" else argv[argv.index("--append-system-prompt") + 1])
                 assert "lineage-task-11" in instructions and "Unsettled lineage workers (data): " in instructions, argv
                 assert "PRIVATE-LINEAGE-PROMPT" not in instructions
+                if harness == "claude":
+                    assert "--system-prompt-snapshot" not in argv, argv
+                    context = project / "lineage-context.txt"
+                    context.write_text(instructions)
+                    resumed_argv = real_native_command("claude", project, resume="lineage-native", context_file=context)
+                    at = resumed_argv.index("--system-prompt-snapshot")
+                    assert resumed_argv[at + 1] == "off" and "Unsettled lineage workers" in resumed_argv[
+                        resumed_argv.index("--append-system-prompt") + 1], resumed_argv
                 assert sum(arg.count("Lineage fixture task") for arg in argv) == 1, argv
         summary = captured[0].split("Unsettled lineage workers (data): ", 1)[1].splitlines()[0]
         calls = json.loads(summary)

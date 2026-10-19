@@ -41,7 +41,7 @@ class TerminalInput:
                 if re.fullmatch(PANEL_SESSION, session):
                     try:
                         # Best effort: keyboard input works without tmux mouse reporting.
-                        subprocess.run(["tmux", "set-option", "-t", session, "mouse", "on"],
+                        subprocess.run(["tmux", "set-option", "-t", "=" + session + ":", "mouse", "on"],
                                        capture_output=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
                     except (OSError, subprocess.SubprocessError):
                         pass
