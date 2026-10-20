@@ -305,7 +305,6 @@ oms_python_runtime_activate() {
     export PATH="$HOME/.local/bin:$PATH"
   fi
   export OMS_PYTHON="$python"
-  export OMS_PYTHON_RUNTIME_ACTIVE=1
   export PATH="$root/launchers/$version:$PATH"
   hash -r 2>/dev/null || true
 }

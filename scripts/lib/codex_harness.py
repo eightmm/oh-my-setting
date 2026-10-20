@@ -28,8 +28,6 @@ def cli_command(host, model, tail, effort=None):
 
 def harness_env(host, gateway, model, window):
     env = subscription_env()
-    env["OMS_MODEL_PROVIDER"] = "codex"
-    env["OMS_MODEL_AUTH"] = "chatgpt-subscription"
     env["OMS_AGENT"] = host
     if host == "pi" and env.get("OMS_PANEL_MAIN_ATTEMPT") and env.get("OMS_PANEL_OWNER") == "codex":
         env["OMS_AGENT"] = "codex"

@@ -1212,8 +1212,6 @@ def runner(repo: Path, attempt_id: str) -> int:
             # owner. Without this marker both layers report the same elapsed
             # interval and projected duration is double-counted.
             "OMS_ATTEMPT_SUPERVISED": "1",
-            "OMS_OPS_REPO": str(repo),
-            "OMS_OPS_USAGE_BIN": str(Path(__file__).resolve().parents[1] / "agent-events.sh"),
             "OMS_EXECUTION_PROFILE": job.get("profile", "trusted-local"),
         })
         process, windows_job = launch_supervised_process(
