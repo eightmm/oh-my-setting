@@ -9,6 +9,9 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 export HOME="$TMP/home"
 export XDG_CACHE_HOME="$TMP/cache"
 export TMPDIR="$TMP/runtime"
+# Auto-task appends run under a 2 s default timeout; a loaded full gate
+# exceeds it and silently drops the bullet these cases count.
+export OMS_AUTO_TASK_TIMEOUT=10
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$TMPDIR"
 
 # Every fixture here assumes operator-shell semantics: a harness child's
