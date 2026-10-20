@@ -761,13 +761,13 @@ EOF
   make_repo "$repo" "$bare"
   : > "$repo/git.log"; : > "$repo/gh.log"
   local topology_started topology_finished topology_elapsed
-  # Each probe injects a 10s TERM-ignoring delay behind a 1s timeout. Finishing
+  # Each probe injects a 30s TERM-ignoring delay behind a 1s timeout. Finishing
   # under that delay proves the kill; a tighter wall only measures host load
   # (a parallel gate alone pushes process start-up past 4s).
   "$REAL_GIT" -C "$repo" config oms.test.mergeBaseDelay true
   topology_started="$(date +%s)"
   rc=0
-  OMS_T_SCAN_DELAY=10 OMS_MA_TIMEOUT_HAS_KILL_AFTER=0 OMS_PEER_KILL_AFTER=30 \
+  OMS_T_SCAN_DELAY=30 OMS_MA_TIMEOUT_HAS_KILL_AFTER=0 OMS_PEER_KILL_AFTER=30 \
     OMS_DRAFT_SCAN_TIMEOUT_S=1 run_draft_pr "$repo" prepare \
     --remote origin --base main --verify true > "$repo/merge-base-timeout.out" 2>&1 || rc=$?
   topology_finished="$(date +%s)"
@@ -778,14 +778,14 @@ EOF
   [ -f "$repo/.git/merge-base-delay-started" ] &&
     [ ! -f "$repo/.git/merge-base-delay-completed" ] ||
     fail "merge-base timeout did not kill the TERM-ignoring traversal"
-  [ "$topology_elapsed" -lt 10 ] ||
+  [ "$topology_elapsed" -le 20 ] ||
     fail "merge-base traversal exceeded hard wall: ${topology_elapsed}s"
   "$REAL_GIT" -C "$repo" config --unset oms.test.mergeBaseDelay
 
   "$REAL_GIT" -C "$repo" config oms.test.countDelay true
   topology_started="$(date +%s)"
   rc=0
-  OMS_T_SCAN_DELAY=10 OMS_MA_TIMEOUT_HAS_KILL_AFTER=0 OMS_PEER_KILL_AFTER=30 \
+  OMS_T_SCAN_DELAY=30 OMS_MA_TIMEOUT_HAS_KILL_AFTER=0 OMS_PEER_KILL_AFTER=30 \
     OMS_DRAFT_SCAN_TIMEOUT_S=1 run_draft_pr "$repo" prepare \
     --remote origin --base main --verify true > "$repo/rev-count-timeout.out" 2>&1 || rc=$?
   topology_finished="$(date +%s)"
@@ -796,7 +796,7 @@ EOF
   [ -f "$repo/.git/rev-count-delay-started" ] &&
     [ ! -f "$repo/.git/rev-count-delay-completed" ] ||
     fail "rev-list count timeout did not kill the TERM-ignoring traversal"
-  [ "$topology_elapsed" -lt 10 ] ||
+  [ "$topology_elapsed" -le 20 ] ||
     fail "rev-list count traversal exceeded hard wall: ${topology_elapsed}s"
   "$REAL_GIT" -C "$repo" config --unset oms.test.countDelay
 
@@ -812,7 +812,7 @@ EOF
   OMS_MA_TIMEOUT_HAS_KILL_AFTER=0 OMS_PEER_KILL_AFTER=30 \
     OMS_DRAFT_VERIFY_TIMEOUT=1 run_draft_pr "$repo" prepare \
     --remote origin --base main \
-    --verify ': > .git/verifier-delay-started; trap "" TERM; sleep 10; : > .git/verifier-delay-completed' \
+    --verify ': > .git/verifier-delay-started; trap "" TERM; sleep 30; : > .git/verifier-delay-completed' \
     > "$repo/verifier-timeout.out" 2>&1 || rc=$?
   topology_finished="$(date +%s)"
   topology_elapsed="$((topology_finished - topology_started))"
@@ -822,7 +822,7 @@ EOF
   [ -f "$repo/.git/verifier-delay-started" ] &&
     [ ! -f "$repo/.git/verifier-delay-completed" ] ||
     fail "TERM-ignoring verifier was allowed to finish"
-  [ "$topology_elapsed" -lt 10 ] ||
+  [ "$topology_elapsed" -le 20 ] ||
     fail "TERM-ignoring verifier exceeded hard wall: ${topology_elapsed}s"
 
   rc=0
@@ -897,7 +897,7 @@ EOF
   "$REAL_GIT" -C "$repo" config oms.test.scanDelay true
   scan_started="$(date +%s)"
   rc=0
-  TMPDIR="$scan_tmp" OMS_T_SCAN_DELAY=10 \
+  TMPDIR="$scan_tmp" OMS_T_SCAN_DELAY=30 \
     OMS_MA_TIMEOUT_HAS_KILL_AFTER=0 OMS_PEER_KILL_AFTER=30 \
     OMS_DRAFT_SCAN_TIMEOUT_S=3 run_draft_pr "$repo" prepare \
     --remote origin --base main --verify true > "$repo/scan-timeout.out" 2>&1 || rc=$?
@@ -912,9 +912,10 @@ EOF
     fail "TERM-ignoring payload scanner was allowed to finish"
   # The 3s scan wall plus 1s forced-kill grace is wrapped by bounded Git
   # setup/cleanup, and integer-second wall-clock samples can add nearly two
-  # boundary seconds. Keep this below the fixture's 10s completion while
-  # avoiding a one-tick full-gate flake on a loaded runner.
-  [ "$scan_elapsed" -le 8 ] ||
+  # boundary seconds. The bound only has to stay below the fixture's 30s
+  # completion, which is what waiting for the scanner would take; a full gate
+  # at load 20-46 measured 10s here.
+  [ "$scan_elapsed" -le 20 ] ||
     fail "TERM-ignoring payload scan exceeded hard wall: ${scan_elapsed}s"
   [ -z "$(find "$scan_tmp" -type f -print -quit)" ] ||
     fail "payload scan timeout left temporary payload files"

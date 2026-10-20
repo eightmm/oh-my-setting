@@ -257,11 +257,13 @@ def exercise_observed_worker_leases():
         argv += ["--task-id", task_id]
         child_process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            deadline = time.monotonic() + 30
+            # Patience, not a contract: the fixture's own peer timeout is 90 s, and a loaded full gate
+            # took longer than 30 s to start the child.
+            deadline = time.monotonic() + 90
             while not entered.exists() and child_process.poll() is None and time.monotonic() < deadline:
                 time.sleep(.05)
             if not entered.exists():
-                output, errors = child_process.communicate(timeout=10)
+                output, errors = child_process.communicate(timeout=60)
                 raise AssertionError((argv, child_process.returncode, output, errors))
             observed = json.loads(entered.read_text())
             row = json.loads(call(plan_api + ["evidence-snapshot", "--id", task_id], env))
