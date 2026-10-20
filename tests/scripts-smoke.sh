@@ -13785,9 +13785,36 @@ test_link_and_unlink_with_home_override() {
   ln -s "$ROOT/custom-skills/peer-review" \
     "$home_dir/.pi/agent/skills/peer-review"
   ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
+  # agy 1.4 reads ~/.gemini/config/skills only: an earlier install's owned
+  # links in the old root migrate away while user entries there stay.
+  mkdir -p "$home_dir/.gemini/antigravity/skills/user-skill" \
+    "$home_dir/.gemini/antigravity/skills/oms-trace.backup.20260101000000"
+  echo "user trace" > \
+    "$home_dir/.gemini/antigravity/skills/oms-trace.backup.20260101000000/USER.txt"
+  ln -s "$ROOT/custom-skills/oms-trace" "$home_dir/.gemini/antigravity/skills/oms-trace"
+  ln -s "$home_dir/old-skills/foreign" "$home_dir/.gemini/antigravity/skills/foreign"
 
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+
+  [ ! -L "$home_dir/.gemini/antigravity/skills/oms-trace" ] ||
+    fail "owned link in the retired antigravity skills root not migrated"
+  # The skill an earlier install displaced there comes back, or uninstall
+  # would later skip the missing target and never restore it.
+  assert_file_contains "$home_dir/.gemini/antigravity/skills/oms-trace/USER.txt" "user trace"
+  [ ! -e "$home_dir/.gemini/antigravity/skills/oms-trace.backup.20260101000000" ] ||
+    fail "migration left the displaced skill backup behind"
+  [ -d "$home_dir/.gemini/antigravity/skills/user-skill" ] &&
+    [ -L "$home_dir/.gemini/antigravity/skills/foreign" ] ||
+    fail "user entries in the retired antigravity skills root must stay"
+  # A legacy root aliased to the active one is the active root; reruns must
+  # not retire the links they just installed through it.
+  local alias_home="$TMP/link-home-alias"
+  mkdir -p "$alias_home/.gemini/antigravity/skills" "$alias_home/.gemini/config"
+  ln -s "$alias_home/.gemini/antigravity/skills" "$alias_home/.gemini/config/skills"
+  HOME="$alias_home" "$ROOT/scripts/link.sh" >/dev/null
+  HOME="$alias_home" "$ROOT/scripts/link.sh" >/dev/null
+  assert_symlink_to "$alias_home/.gemini/config/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
 
   assert_symlink_to "$home_dir/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
   assert_symlink_to "$home_dir/.claude/CLAUDE.md" "$ROOT/rules/global-AGENTS.md"
@@ -13798,7 +13825,7 @@ test_link_and_unlink_with_home_override() {
   cmp -s "$home_dir/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md" || fail "Antigravity global policy drift"
   assert_symlink_to "$home_dir/.codex/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
   assert_symlink_to "$home_dir/.claude/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
-  assert_symlink_to "$home_dir/.gemini/antigravity/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
+  assert_symlink_to "$home_dir/.gemini/config/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
   assert_symlink_to "$home_dir/.codex/skills/peer-ask" "$home_dir/old-skills/peer-ask"
   if find "$home_dir/.codex/skills" -maxdepth 1 -name 'peer-ask.backup.*' | grep -q .; then
     fail "retired peer skill must not replace or back up a foreign skill"
@@ -13812,12 +13839,19 @@ test_link_and_unlink_with_home_override() {
   [ ! -e "$home_dir/.gemini/GEMINI.md" ] ||
     fail "legacy gemini file not removed"
 
+  # An install that predates the move still has links in the old root.
+  ln -s "$ROOT/custom-skills/oms-ops" "$home_dir/.gemini/antigravity/skills/oms-ops"
+
   HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
 
   assert_symlink_to "$home_dir/.codex/skills/peer-ask" "$home_dir/old-skills/peer-ask"
   [ ! -e "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not unlinked"
-  [ ! -e "$home_dir/.gemini/antigravity/skills/oms-spec-interview" ] ||
+  [ ! -e "$home_dir/.gemini/config/skills/oms-spec-interview" ] ||
     fail "antigravity skills not unlinked"
+  [ ! -L "$home_dir/.gemini/antigravity/skills/oms-ops" ] ||
+    fail "uninstall left an owned link in the retired antigravity root"
+  [ -d "$home_dir/.gemini/antigravity/skills/user-skill" ] ||
+    fail "uninstall removed a user entry from the retired antigravity root"
 }
 
 
@@ -13838,6 +13872,7 @@ test_link_removes_dangling_owned_skill_links() {
 
 test_skill_doctor_detects_duplicate_names() {
   local home_dir="$TMP/skill-doctor-dup"
+  local root
   mkdir -p "$home_dir/.codex/skills/a" "$home_dir/.codex/skills/b"
 
   cat > "$home_dir/.codex/skills/a/SKILL.md" <<'EOF'
@@ -13854,6 +13889,21 @@ EOF
   if HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/out" 2>&1; then
     fail "skill-doctor should fail on duplicate names"
   fi
+  assert_file_contains "$home_dir/out" "duplicate skill name: duplicate-skill"
+
+  # The active Antigravity root is scanned; the retired one is migration-only.
+  home_dir="$TMP/skill-doctor-dup-agy"
+  for root in antigravity config; do
+    mkdir -p "$home_dir/.gemini/$root/skills/a" "$home_dir/.gemini/$root/skills/b"
+    printf -- '---\nname: duplicate-skill\n---\n' > "$home_dir/.gemini/$root/skills/a/SKILL.md"
+    printf -- '---\nname: duplicate-skill\n---\n' > "$home_dir/.gemini/$root/skills/b/SKILL.md"
+    if [ "$root" = antigravity ]; then
+      HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/out" 2>&1 ||
+        fail "skill-doctor must ignore the retired antigravity skills root"
+    elif HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/out" 2>&1; then
+      fail "skill-doctor should fail on duplicates in the active antigravity root"
+    fi
+  done
   assert_file_contains "$home_dir/out" "duplicate skill name: duplicate-skill"
 }
 
@@ -13892,7 +13942,7 @@ test_link_installs_namespaced_skill_names() {
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
 
   for root in "$home_dir/.codex/skills" "$home_dir/.claude/skills" \
-    "$home_dir/.gemini/antigravity/skills"; do
+    "$home_dir/.gemini/config/skills"; do
     for name in oms-agent-harness oms-ops oms-spec-interview oms-trace \
       oms-trust-boundary; do
       assert_symlink_to "$root/$name" "$ROOT/custom-skills/$name"

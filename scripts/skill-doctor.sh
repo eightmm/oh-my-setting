@@ -41,7 +41,7 @@ oms_ops_check_skill_root "Shared agent skills" "$HOME/.agents/skills"
 oms_ops_check_skill_overlay "Codex effective skill overlay" \
   "$HOME/.codex/skills" "$HOME/.agents/skills"
 oms_ops_check_skill_root "Claude skills" "$HOME/.claude/skills"
-oms_ops_check_skill_root "Antigravity skills" "$HOME/.gemini/antigravity/skills"
+oms_ops_check_skill_root "Antigravity skills" "$HOME/.gemini/config/skills"
 
 # A skill renamed into the `oms-` namespace leaves the old directory installed,
 # and the name check cannot see it: the two names differ, so nothing is
@@ -52,7 +52,7 @@ oms_ops_check_skill_root "Antigravity skills" "$HOME/.gemini/antigravity/skills"
 printf '\n## Legacy skill names\n\n'
 legacy_found=0
 for skill_root in "$HOME/.codex/skills" "$HOME/.agents/skills" \
-  "$HOME/.claude/skills" "$HOME/.gemini/antigravity/skills"; do
+  "$HOME/.claude/skills" "$HOME/.gemini/config/skills"; do
   [ -d "$skill_root" ] || continue
   while IFS= read -r rename_row; do
     [ -n "$rename_row" ] || continue

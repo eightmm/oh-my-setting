@@ -16,7 +16,7 @@ project="$TMP/project"
 mkdir -p "$fixture/scripts/lib" "$fixture/rules" "$fixture/.agents/plugins" \
   "$fixture/plugins/oh-my-setting/.codex-plugin" "$fixture/plugins/oh-my-setting" \
   "$fixture/prompts" "$home/.codex/skills" "$home/.claude/skills" \
-  "$home/.gemini/antigravity/skills" "$home/.local/bin" "$bin" "$project"
+  "$home/.gemini/config/skills" "$home/.local/bin" "$bin" "$project"
 cp "$ROOT/scripts/doctor.sh" "$fixture/scripts/doctor.sh"
 cp "$ROOT/scripts/lib/tool-lock.py" "$ROOT/scripts/lib/doctor-probe-memo.sh" "$ROOT/scripts/lib/platform.sh" \
   "$ROOT/scripts/lib/doctor-probe-memo.py" "$ROOT/scripts/lib/run-bounded.py" "$fixture/scripts/lib/"

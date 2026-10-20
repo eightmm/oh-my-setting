@@ -164,6 +164,37 @@ PY
   done
 }
 
+# agy 1.4.2 loads global skills from ~/.gemini/config/skills and no longer
+# reads the pre-1.0 ~/.gemini/antigravity/skills root. Drop only the entries
+# this checkout owns there, so user skills and foreign links stay put. A user
+# skill an earlier install displaced to *.backup.<stamp> is restored in place,
+# the way unlink.sh does: nothing else would ever look for it again.
+retire_skills() {
+  local target_root="$1" active_root="$2"
+  local link backup
+
+  # A legacy root aliased to the active one is the active root: retiring it
+  # would remove the links just installed.
+  [ -d "$target_root" ] || return 0
+  if [ -d "$active_root" ] &&
+     [ "$(cd "$target_root" && pwd -P)" = "$(cd "$active_root" && pwd -P)" ]; then
+    return 0
+  fi
+  for link in "$target_root"/*; do
+    [ -L "$link" ] || [ -e "$link" ] || continue
+    oms_install_target_owned_source_under "$ROOT/custom-skills" "$link" \
+      >/dev/null || continue
+    backup="$(oms_ops_latest_backup "$link")"
+    oms_install_remove_managed_target "$link"
+    echo "unlinked retired skill $link"
+    if [ -n "$backup" ]; then
+      mv "$backup" "$link"
+      echo "restored $link from $backup"
+    fi
+  done
+  rmdir "$target_root" 2>/dev/null || true
+}
+
 link_all() {
   local skill_validation
   local receipt
@@ -178,11 +209,12 @@ link_all() {
   link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.codex/AGENTS.md"
   link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.claude/CLAUDE.md"
   # Antigravity global customizations root: rules at ~/.gemini/AGENTS.md,
-  # skills under ~/.gemini/antigravity/skills.
+  # skills under ~/.gemini/config/skills.
   link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.gemini/AGENTS.md"
   link_skills "$HOME/.codex/skills"
   link_skills "$HOME/.claude/skills"
-  link_skills "$HOME/.gemini/antigravity/skills"
+  link_skills "$HOME/.gemini/config/skills"
+  retire_skills "$HOME/.gemini/antigravity/skills" "$HOME/.gemini/config/skills"
   # This Claude style preserves native coding instructions and scopes its
   # language guidance to final replies;
   # codex/antigravity have no equivalent surface, and their human-read

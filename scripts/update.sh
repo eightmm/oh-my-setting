@@ -426,7 +426,8 @@ restore_managed_targets() {
 CODEX_CONFIG_PATH="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 for managed_path in \
   "$HOME/.codex/AGENTS.md" "$HOME/.claude/CLAUDE.md" "$HOME/.gemini/AGENTS.md" \
-  "$HOME/.codex/skills" "$HOME/.claude/skills" "$HOME/.gemini/antigravity/skills" \
+  "$HOME/.codex/skills" "$HOME/.claude/skills" "$HOME/.gemini/config/skills" \
+  "$HOME/.gemini/antigravity/skills" \
   "$HOME/.oh-my-setting-prompts" "$HOME/.oh-my-setting-workflows" \
   "$HOME/.local/bin/oms" "$HOME/.claude/settings.json" \
   "$HOME/.claude.json" "$HOME/.gemini/config/plugins/oh-my-setting" \

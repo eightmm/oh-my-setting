@@ -426,7 +426,7 @@ for pair in \
   "$HOME/.gemini/AGENTS.md:$dest/rules/global-AGENTS.md" \
   "$HOME/.codex/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
   "$HOME/.claude/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
-  "$HOME/.gemini/antigravity/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
+  "$HOME/.gemini/config/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
   "$HOME/.claude/output-styles/oms-korean.md:$dest/output-styles/oms-korean.md"; do
   path="${pair%%:*}"
   source="${pair#*:}"
@@ -437,6 +437,12 @@ done
 expected_mode="$(oms_install_link_mode)"
 [ "$(oms_install_receipt_field link_mode)" = "$expected_mode" ] ||
   fail "receipt did not persist $expected_mode mode"
+# The receipt lists the root agy loads, and the retired one uninstall cleans.
+python3 - "$(oms_install_receipt_path)" <<'PY' || fail "receipt omits the Antigravity skill roots"
+import json, sys
+targets = json.load(open(sys.argv[1]))["managed_targets"]
+assert ".gemini/config/skills" in targets and ".gemini/antigravity/skills" in targets
+PY
 backup="$(find "$HOME/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' -print -quit)"
 [ -n "$backup" ] && [ "$(sed -n '1p' "$backup")" = "user rules" ] ||
   fail "install did not preserve the existing Codex rules"

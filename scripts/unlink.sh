@@ -106,6 +106,8 @@ unlink_all() {
   unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
   unlink_skills "$HOME/.codex/skills"
   unlink_skills "$HOME/.claude/skills"
+  unlink_skills "$HOME/.gemini/config/skills"
+  # Pre-1.4 installs linked here; uninstall must still reach them.
   unlink_skills "$HOME/.gemini/antigravity/skills"
   # Legacy cleanup: pi support was removed from defaults; still unlink old installs.
   unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"

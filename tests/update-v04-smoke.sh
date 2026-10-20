@@ -151,6 +151,10 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   rm -f "$home/.codex/AGENTS.md"
   printf 'user rules\n' > "$home/.codex/AGENTS.md"
   printf 'older backup\n' > "$home/.codex/AGENTS.md.backup.20260701000000"
+  # The Antigravity skill root is part of the snapshot too: relinking would
+  # restore the missing link, so a rolled-back update must leave it missing.
+  rm -f "$home/.gemini/config/skills/oms-agent-harness"
+  printf 'user skill\n' > "$home/.gemini/config/skills/USER.txt"
 
   printf '#!/usr/bin/env bash\nexit 41\n' > "$source/scripts/doctor.sh"
   chmod +x "$source/scripts/doctor.sh"
@@ -172,6 +176,10 @@ test_update_rolls_back_and_supports_explicit_rollback() {
     fail "failed update changed the pre-existing backup set"
   grep -Fxq 'older backup' "$home/.codex/AGENTS.md.backup.20260701000000" ||
     fail "failed update changed the pre-existing backup"
+  [ ! -e "$home/.gemini/config/skills/oms-agent-harness" ] &&
+    [ ! -L "$home/.gemini/config/skills/oms-agent-harness" ] &&
+    grep -Fxq 'user skill' "$home/.gemini/config/skills/USER.txt" ||
+    fail "failed update did not restore the Antigravity skill root"
   [ "$failed" != "$first" ] || fail "fixture did not create a failing target"
 
   rm -f "$home/.codex/AGENTS.md" "$home/.codex/AGENTS.md.backup.20260701000000"

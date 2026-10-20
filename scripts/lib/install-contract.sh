@@ -547,6 +547,7 @@ row = {
         ".gemini/AGENTS.md",
         ".codex/skills",
         ".claude/skills",
+        ".gemini/config/skills",
         ".gemini/antigravity/skills",
         ".local/bin/oms",
     ],
