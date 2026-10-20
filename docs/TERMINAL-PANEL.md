@@ -857,6 +857,8 @@ oms panel --results --task-id ID
 oms panel --retry-delivery --task-id ID
 ```
 
+Accepted results also require a passing automatic reviewer gate for each landed write patch.
+
 Results lists the latest twenty retained tasks from at most 300 lifecycle
 attempts and 1000 artifact events. Selecting a task shows up to eight recent
 call records. Participant browsing selects that participant's tasks before

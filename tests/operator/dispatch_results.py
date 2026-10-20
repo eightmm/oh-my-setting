@@ -1359,6 +1359,22 @@ call(["bash", str(panel.ENTRY), "patch-land", "--repo", str(project), "--patch",
       "--verify", "test \"$(tail -1 value.txt)\" = new"])
 write_finalize[write_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
 whole_finalize[whole_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
+unreviewed_finalize = subprocess.run(write_finalize, cwd=project, env=environment, capture_output=True, text=True)
+assert unreviewed_finalize.returncode != 0 and "att_" in unreviewed_finalize.stderr \
+    and "lack a passing review gate" in unreviewed_finalize.stderr, unreviewed_finalize.stderr
+write_rows = saved._records(project)[1]
+write_event = next(row for row in write_rows if row.get("kind") == "delegate"
+                   and row.get("task_id") == "panel-route-3" and row.get("patch_sha256"))
+review_artifact = project / ".oms/artifacts/fixture/panel-route-3-review.md"
+review_artifact.parent.mkdir(parents=True, exist_ok=True)
+review_artifact.write_text("## Output\nGATE: pass\n## Exit\n0\n", encoding="utf-8")
+review_payload = json.dumps({"gate_verify_exit": 0,
+                             "candidate": {"patch_sha256": write_event["patch_sha256"]},
+                             "seats": [{"verdict": "pass", "artifact": review_artifact.name}]})
+call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 0 "$3"',
+      "panel-review-fixture", str(root / "scripts/lib/peer-common.sh"), str(project), str(review_artifact)],
+     dict(environment, OMS_TASK_ID="panel-route-3", OMS_ATTEMPT_ID="att_panel_route_3_review",
+          OMS_INDEX_REVIEW_OUTCOME_JSON=review_payload))
 assert json.loads(call(write_finalize))["outcome"] == "accepted"
 # Finalize does not hold the shared results lock while a verifier runs.
 import threading
@@ -1420,12 +1436,17 @@ scope_worker = {"attempt_id": "att_scope_write", "task_id": "scope-result", "par
                 "refs": {"panel_role": "worker", "panel_access": "write", "panel_room_id": "scope-room",
                          "panel_room_participant": "scope-worker"}}
 
-def scope_evidence(body):
+def scope_evidence(body, reviewed=True):
     scope_patch.write_bytes(body)
     digest = hashlib.sha256(body).hexdigest()
-    return [{"kind": "delegate", "task_id": "scope-result", "attempt_id": "att_scope_write",
+    rows = [{"kind": "delegate", "task_id": "scope-result", "attempt_id": "att_scope_write",
              "patch": ".oms/artifacts/scope-result.patch", "patch_sha256": digest, "exit": 0},
             {"kind": "patch-land", "task_id": "scope-result", "patch_sha256": digest, "exit": 0}]
+    if reviewed:
+        rows.append({"kind": "review-outcome", "task_id": "scope-result", "exit": 0,
+                     "review": {"gate_verify_exit": 0, "candidate": {"patch_sha256": digest},
+                                "seats": [{"verdict": "pass"}]}})
+    return rows
 
 extra_patch = (b"diff --git a/value.txt b/value.txt\n--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-old\n+new\n"
                b"diff --git a/other.txt b/other.txt\n--- /dev/null\n+++ b/other.txt\n@@ -0,0 +1 @@\n+extra\n")
@@ -1434,6 +1455,19 @@ with patch.dict(os.environ, environment, clear=True), \
         patch.object(saved, "_plan_bindings", return_value={}), \
         patch.object(saved, "_register"), patch.object(saved, "_plan_hint"), \
         patch.object(saved.room, "status", return_value=scope_member):
+    simple_patch = extra_patch.split(b"diff --git a/other.txt")[0]
+    unreviewed_rows = scope_evidence(simple_patch, reviewed=False)
+    with patch.object(saved, "_records", return_value=([scope_worker], unreviewed_rows)):
+        try:
+            saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+            raise AssertionError("unreviewed landed write patch accepted")
+        except ValueError as error:
+            assert "att_scope_write" in str(error) and "run the review" in str(error) \
+                and "finalize completed" in str(error), error
+        assert saved.finalize(project, "codex", "scope-result", str(summary), "completed")["outcome"] == "completed"
+    with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(simple_patch))):
+        assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
+                              ["value.txt"])["outcome"] == "accepted"
     with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(extra_patch))):
         changes = saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]
         assert changes["out_of_scope"] == {"count": 1, "paths": ["other.txt"]}, changes

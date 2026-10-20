@@ -644,6 +644,31 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                                          % (len(drift), ', '.join(drift[:8])))
         if outcome == 'accepted' and any(not item for item in admissions):
             raise ValueError('write worker needs matching landed patch evidence')
+        if outcome == 'accepted':
+            missing_reviews = []
+            for worker, admission in zip(workers, admissions):
+                if not admission:
+                    continue
+                digest = admission.get('patch_sha256')
+                passing = any(
+                    row.get('kind') == 'review-outcome'
+                    and (row.get('task_id') == task_id
+                         or (not worker.get('task_id') and not row.get('task_id')))
+                    and row.get('exit') == 0
+                    and isinstance(row.get('review'), dict)
+                    and row['review'].get('gate_verify_exit') == 0
+                    and isinstance(row['review'].get('candidate'), dict)
+                    and row['review']['candidate'].get('patch_sha256') == digest
+                    and isinstance(row['review'].get('seats'), list)
+                    and bool(row['review']['seats'])
+                    and all(isinstance(seat, dict) and seat.get('verdict') == 'pass'
+                            for seat in row['review']['seats'])
+                    for row in rows)
+                if not passing:
+                    missing_reviews.append(worker.get('attempt_id', 'unknown'))
+            if missing_reviews:
+                raise ValueError('write worker call(s) lack a passing review gate: %s; run the review or finalize completed instead'
+                                 % ', '.join(missing_reviews))
         if outcome == 'accepted' and (not verify or not refs):
             raise ValueError('accepted requires an evidence reference and a passing verifier')
     verification = {'status': 'not_run'}
