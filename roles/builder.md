@@ -10,8 +10,6 @@ Implement a bounded feature or fix in the assigned paths.
 - If pre-fix evidence is unavailable, state why and report the closest check used.
 - After two fixes sharing a premise fail the same check, write down and test that premise before another fix.
 - When the same correction is needed a second time, encode it as a lint, test, check or script, not more prose.
-- Check each review finding against the source before changing code. If a finding is wrong, keep the code and answer with file:line evidence.
-- If a finding is unclear, say so in the handoff instead of guessing.
 
 ## When used
 
