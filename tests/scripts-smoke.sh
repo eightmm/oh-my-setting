@@ -29649,28 +29649,6 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
     fail "a live sibling mid-removal should not be reported as a change: $result"
   fi
 
-  local rewritten="$TMP/guard-sibling-gitdir-rewrite"
-  local rewritten_root="$TMP/guard-sibling-gitdir-rewrite-root"
-  local rewritten_sibling="$rewritten_root/oh-my-setting-delegate.sibling"
-  make_guard_repo "$rewritten"
-  make_live_managed_sibling "$rewritten" "$rewritten_sibling"
-  local rewritten_body
-  rewritten_body="metadata=\$(git -C '$rewritten_sibling/wt' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$rewritten/'\$metadata ;; esac; content=\$(cat \"\$metadata/gitdir\"); printf '%s\\r\\n' \"\$content\" > \"\$metadata/gitdir\""
-  result="$(run_delegate_beside_sibling "$rewritten" "$rewritten_root" "$rewritten_body")"
-  [ "${result%%	*}" = 0 ] ||
-    fail "rewriting a validated managed sibling gitdir must not stop the worker: $result"
-
-  local same_checkout="$TMP/guard-sibling-gitdir-same-checkout"
-  local same_checkout_root="$TMP/guard-sibling-gitdir-same-checkout-root"
-  local same_checkout_sibling="$same_checkout_root/oh-my-setting-delegate.sibling"
-  make_guard_repo "$same_checkout"
-  make_live_managed_sibling "$same_checkout" "$same_checkout_sibling"
-  local same_checkout_body
-  same_checkout_body="metadata=\$(git -C '$same_checkout_sibling/wt' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$same_checkout/'\$metadata ;; esac; printf '%s/../%s/wt/.git\\n' '$same_checkout_sibling' 'oh-my-setting-delegate.sibling' > \"\$metadata/gitdir\""
-  result="$(run_delegate_beside_sibling "$same_checkout" "$same_checkout_root" "$same_checkout_body")"
-  [ "${result%%	*}" = 0 ] ||
-    fail "a sibling gitdir resolving to the same physical checkout must remain exempt: $result"
-
   local same_common="$TMP/guard-sibling-commondir-same-common"
   local same_common_root="$TMP/guard-sibling-commondir-same-common-root"
   local same_common_sibling="$same_common_root/oh-my-setting-delegate.sibling"

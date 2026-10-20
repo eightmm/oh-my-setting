@@ -2080,11 +2080,11 @@ PY
       if oms_worker_gitmeta_is_live_managed_worktree "$repo" \
         "$common/worktrees/$entry/gitdir" "$worker"; then
         # The liveness validator proves this checkout still belongs to a
-        # managed sibling. Keep its common-dir and executable config fixed to
-        # the baseline; a changed gitdir may only spell the same physical path.
+        # managed sibling. Keep its registration and executable config bytes
+        # fixed to the baseline; a changed gitdir must use the receipt proof.
         in_place_safe=1
         metadata_complete=1
-        for field in commondir config.worktree; do
+        for field in gitdir commondir config.worktree; do
           if ! baseline_identity="$(awk -F '\t' -v e="$entry" -v f="$field" \
             '$1 == e && $2 == f { print $3; found = 1; exit } END { if (!found) exit 1 }' \
             "$before/gitmeta-managed-metadata" 2>/dev/null)" ||
@@ -2095,34 +2095,15 @@ PY
           current_identity="$(oms_worker_gitmeta_admin_file_identity \
             "$common/worktrees/$entry/$field")" || current_identity=""
           case "$baseline_identity:$current_identity" in *unreadable*) return 1 ;; esac
-          [ "$baseline_identity" = "$current_identity" ] || return 1
-        done
-        if ! baseline_gitdir_identity="$(awk -F '\t' -v e="$entry" \
-          '$1 == e && $2 == "gitdir" { print $3; found = 1; exit } END { if (!found) exit 1 }' \
-          "$before/gitmeta-managed-metadata" 2>/dev/null)" ||
-          [ -z "$baseline_gitdir_identity" ]; then
-          metadata_complete=0
-        fi
-        baseline_path="$(awk -F '\t' -v e="$entry" \
-          '$1 == e { print $2; found = 1; exit } END { if (!found) exit 1 }' \
-          "$before/gitmeta-managed-paths" 2>/dev/null || true)"
-        baseline_path="${baseline_path//$'\r'/}"
-        [ -n "$baseline_path" ] || metadata_complete=0
-        if [ "$metadata_complete" = 1 ]; then
-          current_gitdir_identity="$(oms_worker_gitmeta_admin_file_identity \
-            "$common/worktrees/$entry/gitdir")" || current_gitdir_identity=""
-          if [ "$baseline_gitdir_identity" != "$current_gitdir_identity" ]; then
-            gitfile="$(sed -n '1p' "$common/worktrees/$entry/gitdir" 2>/dev/null || true)"
-            gitfile="${gitfile//$'\r'/}"
-            case "$gitfile" in */.git) current_path="${gitfile%/.git}" ;; *) current_path="" ;; esac
-            current_path="$(oms_harness_physical_dir "$current_path" 2>/dev/null || true)"
-            if [ -z "$current_path" ] || [ "$baseline_path" != "$current_path" ]; then
+          if [ "$baseline_identity" != "$current_identity" ]; then
+            if [ "$field" = gitdir ]; then
               in_place_safe=0
+            else
+              return 1
             fi
           fi
-        else
-          in_place_safe=0
-        fi
+        done
+        [ "$metadata_complete" = 1 ] || in_place_safe=0
         if [ "$in_place_safe" = 1 ]; then
           printf 'worktrees/%s\n' "$entry" >> "$before/gitmeta-managed-replaced"
           continue
