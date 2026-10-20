@@ -8,6 +8,8 @@ script_dir="${BASH_SOURCE[0]%/*}"
 [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
 ROOT="$(cd "$script_dir/.." && pwd -P)"
 STAMP="$(date +%Y%m%d%H%M%S)"
+# Owner root of the install being replaced; set once per link_all.
+PREVIOUS_OWNER=""
 
 usage() {
   cat <<'EOF'
@@ -42,6 +44,7 @@ backup_if_needed() {
   local source="$2"
   local state="$3"
   local backup
+  local previous_source
 
   case "$state" in
     symlink-current|symlink-owned|copy-current|copy-owned)
@@ -49,6 +52,22 @@ backup_if_needed() {
       return 0
       ;;
   esac
+
+  # Relinking from another checkout: what the previous owner installed at this
+  # exact path is its managed target, not user data. Only the exact source the
+  # previous owner would have recorded qualifies (no link-shape guessing), so
+  # user links and modified copies still take the backup path below.
+  if [ -n "$PREVIOUS_OWNER" ] && [ "$PREVIOUS_OWNER" != "$ROOT" ]; then
+    case "$source" in
+      "$ROOT"/*)
+        previous_source="$PREVIOUS_OWNER/${source#"$ROOT"/}"
+        if oms_install_target_owned "$previous_source" "$target"; then
+          oms_install_remove_managed_target "$target"
+          return 0
+        fi
+        ;;
+    esac
+  fi
 
   # Pre-split installs pointed at the repository overlay. It is an old managed
   # target, not user data, so migrate it without manufacturing a backup.
@@ -182,6 +201,7 @@ retire_skills() {
 link_all() {
   local skill_validation
   local receipt
+  local physical_owner
   local retired_prompts="$HOME/.oh-my-setting-prompts" backup
 
   if ! skill_validation="$("$ROOT/scripts/install-skills.sh" 2>&1)"; then
@@ -189,6 +209,15 @@ link_all() {
     return 1
   fi
   oms_ops_cleanup_legacy_links 0
+
+  # A missing or invalid receipt yields no owner: relinking then behaves as a
+  # first install.
+  PREVIOUS_OWNER="$(oms_install_receipt_owner 2>/dev/null)" || PREVIOUS_OWNER=""
+  if [ -n "$PREVIOUS_OWNER" ]; then
+    # A vanished previous checkout keeps its recorded spelling.
+    physical_owner="$(oms_install_physical_root "$PREVIOUS_OWNER")" &&
+      PREVIOUS_OWNER="$physical_owner"
+  fi
 
   link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.codex/AGENTS.md"
   link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.claude/CLAUDE.md"

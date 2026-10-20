@@ -722,6 +722,108 @@ if grep -Fq 'oh-my-setting autoupdate' "$TMP/autoupdate.cron" 2>/dev/null; then
   fail "uninstall left the auto-update trigger"
 fi
 
+# Relinking from a second checkout replaces the first checkout's managed
+# targets without archiving them as user backups, so uninstall restores the
+# user's original. User links that merely resemble the old install (an absolute
+# link into the old tree at another path, a relative link) and a modified copy
+# are still user data.
+relink_run() {
+  # The first argument is a checkout; HOME and the receipt are the sandbox's.
+  # This fixture sits outside the lifecycle the path-tool budget measures.
+  (
+    PATH=":$PATH:"
+    PATH="${PATH//:$path_tool_bin:/:}"
+    PATH="${PATH#:}"
+    PATH="${PATH%:}"
+    export HOME="$relink_home" CODEX_HOME="$relink_home/.codex"
+    export XDG_CONFIG_HOME="$relink_home/.config" XDG_CACHE_HOME="$relink_home/.cache"
+    export OMS_LOCK_DIR="$relink_home/.cache/oh-my-setting/locks"
+    cd "$relink_home" && bash "$1/scripts/$2" "${@:3}"
+  )
+}
+relink_home="$TMP/home-relink"
+relink_a="$TMP/relink-a"
+relink_b="$TMP/relink-b"
+mkdir -p "$relink_home/.codex"
+relink_home="$(cd "$relink_home" && pwd -P)"
+git clone -q "$upstream" "$relink_a"
+git clone -q "$upstream" "$relink_b"
+relink_a="$(cd "$relink_a" && pwd -P)"
+relink_b="$(cd "$relink_b" && pwd -P)"
+printf 'user rules\n' > "$relink_home/.codex/AGENTS.md"
+relink_run "$relink_a" link.sh > "$TMP/relink-a.out" 2>&1 ||
+  fail "link from the first checkout failed: $(cat "$TMP/relink-a.out")"
+# Replace two of A's targets with user links, as a user who repointed them would.
+# Git Bash without native symlinks makes ln -s a copy; those cases need real links.
+relink_symlinks=0
+ln -s "$relink_a/README.md" "$TMP/relink-probe" 2>/dev/null && [ -L "$TMP/relink-probe" ] && relink_symlinks=1
+rm -f "$TMP/relink-probe"
+if [ "$relink_symlinks" = 1 ]; then
+  rm -f "$relink_home/.claude/CLAUDE.md" "$relink_home/.gemini/AGENTS.md"
+  ln -s "$relink_a/README.md" "$relink_home/.claude/CLAUDE.md"
+  printf 'relative user rules\n' > "$relink_home/.gemini/user-gemini.md"
+  ln -s user-gemini.md "$relink_home/.gemini/AGENTS.md"
+fi
+relink_style="$relink_home/.claude/output-styles/oms-korean.md"
+if [ "$(oms_install_link_mode)" = copy ]; then
+  printf 'user edit\n' >> "$relink_style"
+fi
+relink_run "$relink_b" link.sh > "$TMP/relink-b.out" 2>&1 ||
+  fail "relink from the second checkout failed: $(cat "$TMP/relink-b.out")"
+
+# No backup of the first checkout's managed targets, anywhere under HOME.
+relink_stale="$(find "$relink_home" -name '*.backup.*' -type l 2>/dev/null |
+  while IFS= read -r relink_backup; do
+    case "$(readlink "$relink_backup")" in
+      "$relink_a"/custom-skills/*|"$relink_a"/rules/*|"$relink_a"/scripts/*|"$relink_a"/output-styles/*)
+        printf '%s\n' "$relink_backup" ;;
+    esac
+  done)"
+[ -z "$relink_stale" ] || fail "relink archived the first checkout's links as backups: $relink_stale"
+[ "$(find "$relink_home/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' | wc -l | tr -d ' ')" = 1 ] ||
+  fail "relink must leave exactly the user's original Codex backup"
+relink_match() { (. "$relink_b/scripts/lib/install-contract.sh" && oms_install_target_matches "$@"); }
+relink_match "$relink_b/rules/global-AGENTS.md" "$relink_home/.codex/AGENTS.md" ||
+  fail "relink did not take over the Codex rules"
+# The user links are displaced to backups with their exact link text.
+if [ "$relink_symlinks" = 1 ]; then
+  relink_claude_backup="$(find "$relink_home/.claude" -maxdepth 1 -name 'CLAUDE.md.backup.*' -type l)"
+  [ -n "$relink_claude_backup" ] && [ "$(readlink "$relink_claude_backup")" = "$relink_a/README.md" ] ||
+    fail "relink did not back up a user link into the first checkout at another path"
+  relink_gemini_backup="$(find "$relink_home/.gemini" -maxdepth 1 -name 'AGENTS.md.backup.*' -type l)"
+  [ -n "$relink_gemini_backup" ] && [ "$(readlink "$relink_gemini_backup")" = user-gemini.md ] ||
+    fail "relink did not back up a relative user link"
+fi
+if [ "$(oms_install_link_mode)" = copy ]; then
+  relink_style_backup="$(find "$relink_home/.claude/output-styles" -maxdepth 1 -name 'oms-korean.md.backup.*')"
+  [ -n "$relink_style_backup" ] && grep -Fxq 'user edit' "$relink_style_backup" ||
+    fail "relink did not back up a modified copy"
+else
+  [ -z "$(find "$relink_home/.claude/output-styles" -maxdepth 1 -name 'oms-korean.md.backup.*')" ] ||
+    fail "relink backed up the first checkout's output style link"
+fi
+
+relink_run "$relink_b" uninstall.sh --yes > "$TMP/relink-uninstall.out" 2>&1 ||
+  fail "uninstall from the second checkout failed: $(cat "$TMP/relink-uninstall.out")"
+[ "$(sed -n '1p' "$relink_home/.codex/AGENTS.md")" = "user rules" ] ||
+  fail "uninstall did not restore the user's Codex rules after a relink"
+if [ "$relink_symlinks" = 1 ]; then
+  [ -L "$relink_home/.claude/CLAUDE.md" ] &&
+    [ "$(readlink "$relink_home/.claude/CLAUDE.md")" = "$relink_a/README.md" ] ||
+    fail "uninstall did not restore the user link into the first checkout"
+  [ -L "$relink_home/.gemini/AGENTS.md" ] &&
+    [ "$(readlink "$relink_home/.gemini/AGENTS.md")" = user-gemini.md ] ||
+    fail "uninstall did not restore the relative user link"
+fi
+if [ "$(oms_install_link_mode)" = copy ]; then
+  grep -Fxq 'user edit' "$relink_style" ||
+    fail "uninstall did not restore the modified copy"
+else
+  [ ! -e "$relink_style" ] || fail "uninstall left the output style"
+fi
+[ -z "$(find "$relink_home" -name '*.backup.*' 2>/dev/null)" ] ||
+  fail "uninstall left backups after a relink: $(find "$relink_home" -name '*.backup.*')"
+
 # The default install — tools enabled — was the one path CI never ran, and it is
 # the path most users take. It is also what turned CI red for three commits:
 # install-tools persists a PATH line into .bashrc, and the assertion left over
