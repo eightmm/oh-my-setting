@@ -106,8 +106,11 @@ if [ -f "$repo/.oms/memory/shared.md" ] &&
 fi
 
 # --- journal distill: a refused lesson skips, never crashes ---------------
+# The journal already redacts secret shapes, so the refused lesson carries a
+# machine-tier detail the journal keeps but the shared memory store refuses.
 repo="$TMP/distill"; mk_repo "$repo"
-python3 - "$ROOT/scripts/lib" "$repo" "$LEAK" <<'PY'
+MACHINE="partiti""on=gpu-sentinel"
+python3 - "$ROOT/scripts/lib" "$repo" "$MACHINE" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 import work_journal as wj
@@ -129,8 +132,8 @@ out="$(bash "$ROOT/scripts/journal.sh" distill --repo "$repo" 2>&1)" ||
 printf '%s\n' "$out" | grep >/dev/null -F 'refused by the memory writer' ||
   fail "distill must report the skipped lesson: $out"
 if [ -f "$repo/.oms/memory/shared.md" ] &&
-  grep -Fq "$LEAK" "$repo/.oms/memory/shared.md"; then
-  fail "secret leaked through distill into shared memory"
+  grep -Fq "gpu-sentinel" "$repo/.oms/memory/shared.md"; then
+  fail "machine detail leaked through distill into shared memory"
 fi
 second="$(bash "$ROOT/scripts/journal.sh" distill --repo "$repo" 2>&1)"
 printf '%s\n' "$second" | grep >/dev/null -F 'nothing to promote' ||
