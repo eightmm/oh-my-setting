@@ -111,23 +111,7 @@ link_skills() {
   # so a Slurm skill never reaches a workstation. A requires-failed skill is
   # simply absent from this list, which makes the disabled-link sweep below
   # remove it — a machine that lost the command converges on the next link.
-  enabled_sources="$(python3 - "$ROOT/skills.manifest.json" <<'PY'
-import json
-import shutil
-import sys
-for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
-    source = str(skill.get("source", ""))
-    if skill.get("enabled") is not True or not source.startswith("custom-skills/"):
-        continue
-    requires = skill.get("requires") or []
-    if any(shutil.which(str(req)) is None for req in requires):
-        continue
-    print(source)
-PY
-)"
-  # Windows Python writes CRLF. Normalize the captured list once: both the loop
-  # and the later membership check consume this same value.
-  enabled_sources="${enabled_sources//$'\r'/}"
+  enabled_sources="$(oms_ops_linkable_skill_sources)"
   while IFS= read -r source; do
     [ -n "$source" ] || continue
     skill="$ROOT/$source"

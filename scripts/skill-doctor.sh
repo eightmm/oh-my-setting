@@ -21,7 +21,8 @@ usage: skill-doctor.sh
 Report duplicate or missing skill entries across the Codex, shared ~/.agents,
 Claude Code, and Antigravity skill roots, including names duplicated across
 Codex's effective overlay, and skills a previous install left under a
-superseded name. Flag any SKILL.md over the load budget
+superseded name. When agy is on PATH, report each enabled oms-* skill its
+loaded-skill list lacks. Flag any SKILL.md over the load budget
 (OMS_SKILL_WORDS, default 900) or holding references/ nothing links to.
 Read-only; takes no arguments.
 EOF
@@ -42,6 +43,7 @@ oms_ops_check_skill_overlay "Codex effective skill overlay" \
   "$HOME/.codex/skills" "$HOME/.agents/skills"
 oms_ops_check_skill_root "Claude skills" "$HOME/.claude/skills"
 oms_ops_check_skill_root "Antigravity skills" "$HOME/.gemini/config/skills"
+oms_ops_check_agy_loaded_skills
 
 # A skill renamed into the `oms-` namespace leaves the old directory installed,
 # and the name check cannot see it: the two names differ, so nothing is

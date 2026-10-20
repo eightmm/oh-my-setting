@@ -206,6 +206,105 @@ oms_ops_extract_skill_name() {
   ' "$file"
 }
 
+# The custom-skills sources linking installs: enabled, and every `requires`
+# command present, so a Slurm skill never reaches a workstation. Linking and
+# the loaded-skill check share this selection.
+oms_ops_linkable_skill_sources() {
+  local sources
+  sources="$(python3 - "$ROOT/skills.manifest.json" <<'PY'
+import json
+import shutil
+import sys
+for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
+    source = str(skill.get("source", ""))
+    if skill.get("enabled") is not True or not source.startswith("custom-skills/"):
+        continue
+    requires = skill.get("requires") or []
+    if any(shutil.which(str(req)) is None for req in requires):
+        continue
+    print(source)
+PY
+)" || return 1
+  # Windows Python writes CRLF.
+  printf '%s\n' "${sources//$'\r'/}"
+}
+
+# agy can list the skills it actually loaded without a model turn. A root that
+# exists on disk can still load nothing (agy moved its root once already), so
+# compare what agy reports with the enabled oms-* manifest entries. Read-only;
+# any failure to ask agy skips rather than fails, since CI and the portability
+# lanes have no provider CLI.
+oms_ops_check_agy_loaded_skills() {
+  local wanted=()
+  local source
+  local bounder=""
+  local agy_out
+  local parsed
+  local checked=0
+  local missing=0
+  local row
+
+  printf '## Antigravity loaded skills\n\n'
+
+  if ! command -v agy >/dev/null 2>&1; then
+    printf 'skip: agy is not on PATH; loaded-skill check skipped\n\n'
+    return 0
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    bounder=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    bounder=gtimeout
+  fi
+  if [ -z "$bounder" ] || ! command -v python3 >/dev/null 2>&1; then
+    printf 'skip: no timeout or python3 to bound agy /skills; loaded-skill check skipped\n\n'
+    return 0
+  fi
+
+  while IFS= read -r source; do
+    case "${source##*/}" in oms-*) wanted+=("${source##*/}") ;; esac
+  done <<< "$(oms_ops_linkable_skill_sources)"
+  if [ "${#wanted[@]}" -eq 0 ]; then
+    printf 'skip: no installable oms-* skills in the manifest; loaded-skill check skipped\n\n'
+    return 0
+  fi
+
+  # agy blocks on login when it has no credentials, so the wall bounds the probe.
+  agy_out="$("$bounder" -k 5 20 agy -p "/skills" --output-format json </dev/null 2>/dev/null)" ||
+    { printf 'skip: agy /skills did not finish cleanly; loaded-skill check skipped\n\n'; return 0; }
+
+  parsed="$(printf '%s' "$agy_out" | python3 -I -c '
+import json
+import sys
+
+try:
+    loaded = {s["name"] for s in json.load(sys.stdin)["command"]["data"]["skills"]}
+except (ValueError, KeyError, TypeError):
+    sys.exit(3)
+want = sys.argv[1:]
+print("checked %d" % len(want))
+for name in want:
+    if name not in loaded:
+        print("missing " + name)
+' "${wanted[@]}" 2>/dev/null)" ||
+    { printf 'skip: agy /skills output is not the expected JSON; loaded-skill check skipped\n\n'; return 0; }
+  parsed="${parsed//$'\r'/}"
+
+  while IFS= read -r row; do
+    case "$row" in
+      "checked "*) checked="${row#checked }" ;;
+      "missing "*)
+        printf 'fail: agy did not load enabled skill %s\n' "${row#missing }"
+        missing=$((missing + 1))
+        OMS_OPS_FAILED=1
+        ;;
+    esac
+  done <<< "$parsed"
+  if [ "$missing" -eq 0 ]; then
+    printf 'ok: agy loaded all %s enabled oms-* skills\n' "$checked"
+  fi
+  printf '\n'
+}
+
 oms_ops_check_skill_root() {
   local label="$1"
   local root="$2"

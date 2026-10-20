@@ -14009,6 +14009,69 @@ EOF
   assert_file_contains "$home_dir/clean" "no skills installed under a superseded name"
 }
 
+test_skill_doctor_checks_agy_loaded_skills() {
+  local home_dir="$TMP/skill-doctor-agy"
+  local stub_dir="$home_dir/stub-bin"
+  local fx_path="$stub_dir:/usr/bin:/bin"
+
+  mkdir -p "$home_dir" "$stub_dir"
+  # A stub timeout keeps the case independent of the host's timeout tool; it
+  # drops "-k 5 20" and runs the command.
+  printf '#!/usr/bin/env bash\nshift 3\nexec "$@"\n' > "$stub_dir/timeout"
+  chmod +x "$stub_dir/timeout"
+  # A stub agy prints the loaded-skill JSON shape agy 1.4 reports for /skills:
+  # every enabled oms-* manifest skill whose `requires` commands exist on the
+  # fixture PATH (the selection link.sh installs), except the one named in $1.
+  write_agy_stub() {
+    PATH="$fx_path" python3 -I - "$ROOT/skills.manifest.json" "$home_dir/loaded.json" "$1" <<'PY'
+import json
+import shutil
+import sys
+
+manifest, out, omit = sys.argv[1:4]
+names = [s["name"] for s in json.load(open(manifest))["skills"]
+         if s.get("enabled") and s["name"].startswith("oms-")
+         and all(shutil.which(r) for r in s.get("requires") or [])]
+loaded = [{"name": n} for n in names if n != omit] + [{"name": "automation"}]
+json.dump({"status": "SUCCESS", "command": {"data": {"skills": loaded}}}, open(out, "w"))
+PY
+    printf '#!/usr/bin/env bash\ncat "%s"\n' "$home_dir/loaded.json" > "$stub_dir/agy"
+    chmod +x "$stub_dir/agy"
+  }
+
+  write_agy_stub oms-ops
+  if PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/missing" 2>&1; then
+    fail "skill-doctor should fail when agy does not load an enabled oms-* skill"
+  fi
+  assert_file_contains "$home_dir/missing" "fail: agy did not load enabled skill oms-ops"
+  assert_file_contains "$home_dir/missing" "skill-doctor: failed"
+
+  write_agy_stub ""
+  PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/complete" 2>&1 ||
+    fail "skill-doctor should pass when agy loads every enabled oms-* skill: $(cat "$home_dir/complete")"
+  assert_file_contains "$home_dir/complete" "ok: agy loaded all"
+
+  # link.sh skips a skill whose `requires` command is absent, so agy not
+  # loading it is correct; once the command exists, the skill is expected.
+  if ! PATH="$fx_path" command -v sinfo >/dev/null 2>&1; then
+    write_agy_stub oms-slurm
+    PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/unmet" 2>&1 ||
+      fail "a skill whose requires are unmet must not be expected from agy: $(cat "$home_dir/unmet")"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_dir/sinfo"
+    chmod +x "$stub_dir/sinfo"
+    if PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/met" 2>&1; then
+      fail "a skill whose requires are met must be loaded by agy"
+    fi
+    assert_file_contains "$home_dir/met" "fail: agy did not load enabled skill oms-slurm"
+  fi
+
+  # No agy on PATH: the check skips with a note and never fails the doctor.
+  rm -f "$stub_dir/agy"
+  PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/absent" 2>&1 ||
+    fail "skill-doctor must skip, not fail, when agy is absent: $(cat "$home_dir/absent")"
+  assert_file_contains "$home_dir/absent" "skip: agy is not on PATH"
+}
+
 test_global_skill_names_are_namespaced() {
   local renames
 
