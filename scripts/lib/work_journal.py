@@ -231,6 +231,11 @@ _TOKEN_RE = re.compile(
     r"xox[bap]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{20,})"
 )
 _CREDENTIAL_URL_RE = re.compile(
+    # The lookbehind anchors each run of scheme characters once; without it the
+    # scheme is retried from every letter and a long run is quadratic. The
+    # prefix keeps leading non-letters (e.g. "9https://") outside the scheme,
+    # as the unanchored pattern did.
+    r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*)"
     r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)"
     r"(?P<userinfo>[^/\s@]+@)(?P<host>[^/\s]+)"
 )
@@ -415,7 +420,11 @@ def sanitize_text(value: str, maximum: int = MAX_TEXT_BYTES) -> str:
     )
     clean = _TOKEN_RE.sub("[REDACTED]", clean)
     clean = _CREDENTIAL_URL_RE.sub(
-        lambda match: match.group("scheme") + "[REDACTED]@" + match.group("host"), clean
+        lambda match: match.group("prefix")
+        + match.group("scheme")
+        + "[REDACTED]@"
+        + match.group("host"),
+        clean,
     )
     clean = _POSIX_PRIVATE_PATH_RE.sub("<private-path>", clean)
     clean = _WINDOWS_PRIVATE_PATH_RE.sub("<private-path>", clean)

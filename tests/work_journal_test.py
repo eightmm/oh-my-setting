@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -916,6 +917,19 @@ class JournalTestCase(unittest.TestCase):
             self.assertNotIn(secret, raw)
         self.assertIn("[REDACTED]", raw)
         self.assertNotIn("environment", event.get("provenance", {}))
+        userinfo = "alice" + ":" + "hunter4"
+        embedded = "abcdefghhttps://" + userinfo + "@example.com/x"
+        self.assertEqual(
+            wj.sanitize_text("see " + embedded),
+            "see abcdefghhttps://[REDACTED]@example.com/x",
+        )
+        self.assertEqual(
+            wj.sanitize_text("9https://" + userinfo + "@example.com/x"),
+            "9https://[REDACTED]@example.com/x",
+        )
+        started = time.perf_counter()
+        wj.sanitize_text("a" * 200000)
+        self.assertLess(time.perf_counter() - started, 1.0)
 
     def test_bounded_large_values(self):
         payload = base_event("large")
