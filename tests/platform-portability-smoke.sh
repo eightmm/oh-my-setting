@@ -262,7 +262,7 @@ printf '%s\n' "\$*" >> "$runtime_uv_log"
 printf 'env downloads=%s preference=%s managed=%s certs=%s\n' "\${UV_PYTHON_DOWNLOADS:-}" \
   "\${UV_PYTHON_PREFERENCE:-}" "\${UV_NO_MANAGED_PYTHON:-}" "\${UV_SYSTEM_CERTS:-}" >> "$runtime_uv_log"
 case "\${1:-}" in
-  --version) echo 'uv 0.12.3' ;;
+  --version) echo 'uv 0.12.24' ;;
   python) [ "\${OMS_TEST_UV_FAIL:-0}" != 1 ] ;;
   venv)
     for target in "\$@"; do :; done

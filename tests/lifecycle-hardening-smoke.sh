@@ -504,7 +504,7 @@ if [ "$cmd" = node ] && [ "\${1:-}" = -p ]; then
 elif [ "$cmd" = node ] && [ "\${1:-}" = --version ]; then
   echo v24.22.0
 elif [ "$cmd" = uv ] || [ "$cmd" = uvx ]; then
-  echo 'uv 0.12.3'
+  echo 'uv 0.12.24'
 elif [ "$cmd" = agy ]; then
   echo 'agy 1.1.11'
 elif [ "$cmd" = gh ]; then

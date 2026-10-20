@@ -196,7 +196,7 @@ EOF
         agy) locked=1.1.11 ;;
         gh) locked=2.102.0 ;;
         ntn) locked=0.21.9 ;;
-        uv|uvx) locked=0.12.3 ;;
+        uv|uvx) locked=0.12.24 ;;
       esac
       printf '%s\n' "echo '$cli $locked'"
     fi
@@ -207,7 +207,7 @@ cat > "$bin/uv" <<'EOF_UV'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
-  --version) echo 'uv 0.12.3' ;;
+  --version) echo 'uv 0.12.24' ;;
   python) exit 0 ;;
   venv)
     target=""
@@ -748,7 +748,7 @@ for cli in claude codex agy gh ntn uv uvx node; do
         agy) locked=1.1.11 ;;
         gh) locked=2.102.0 ;;
         ntn) locked=0.21.9 ;;
-        uv|uvx) locked=0.12.3 ;;
+        uv|uvx) locked=0.12.24 ;;
       esac
       printf '%s\n' "echo '$cli $locked'"
     fi
@@ -759,7 +759,7 @@ cat > "$tools_bin/uv" <<'EOF_UV'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
-  --version) echo 'uv 0.12.3' ;;
+  --version) echo 'uv 0.12.24' ;;
   python) exit 0 ;;
   venv)
     target=""
