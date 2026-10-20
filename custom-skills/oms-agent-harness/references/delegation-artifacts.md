@@ -46,6 +46,23 @@ or full history only when requested or necessary, explaining why a brief is
 insufficient. Preserve applicable instructions, not unrelated conversation.
 Let the worker inspect referenced source; add missing context selectively.
 Repair calls remain fresh: retain the original brief and required evidence.
+
+### Write a brief
+
+- Cite observed evidence with file and line, and say how it was checked.
+- Define the smallest change and explicit non-goals, including no new flags.
+- List every call site of the changed identifier, found with `rg`.
+- State applicable portability constraints: Bash 3.2, BSD userland, and
+  Windows Git Bash; strip CR from Python output and resolve paths with `pwd -P`.
+- Name the existing test to extend and its cases, including one that fails
+  without the fix.
+- Give exact writable paths and an existing `--verify` command checked to exist;
+  put any `--only` names space-separated in one argument.
+- Tell the worker to leave changes uncommitted; the parent owns commit and landing.
+- Describe sensitive-looking shapes in words; construct fixtures by concatenation.
+- Before dispatching a writer, confirm the shared checkout is not behind origin.
+- State the return contract: changed paths, evidence, verification and gaps.
+
 Large previous patches are referenced through the preserved worktree/index,
 not replayed in full; the verifier failure remains inline. Conversation views
 omit only an exactly repeated final question already supplied in the new brief,
