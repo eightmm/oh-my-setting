@@ -130,7 +130,10 @@ Options:
                           Required whenever a proposal may be generated.
   --base BRANCH           Review/PR base branch. Required for propose and run.
   --remote NAME           Git remote for base resolution and Draft PR (origin).
-  --max-cycles N          goal-drive cycle cap, 1..10 (default: 10).
+  --max-cycles N          goal-drive iteration cap, 1..10 (default: 10),
+                          counted across resumes of one autopilot contract.
+                          It bounds iterations, not provider cost; retire an
+                          exhausted contract with oms autopilot abandon.
   --initial-tasks N       Initial proposal cap, 1..12 (default: 6).
   --replan-tasks N        Sole r1- proposal cap, 1..2 (default: 2).
   --auto-repair           Allow goal-drive's one same-lease landing repair.

@@ -773,8 +773,11 @@ The detailed operating contract is in the harness state-memory reference.
 `oms plan-from-spec` proposes tasks from an active `PROJECT.md`; it refuses a
 draft spec and does not alter the plan until the proposal is explicitly
 applied. `oms plan-run` claims and executes at most one ready task. `oms
-goal-drive` repeats within a cycle cap and acceptance command; it is not an
-unbounded autonomous loop. Before landing, `goal-drive` freezes the reviewed
+goal-drive` repeats within a cycle cap and acceptance command; the cap counts
+iterations across resumes of one autopilot contract, bounds iterations rather
+than provider cost, and an exhausted contract is retired with `oms autopilot
+abandon`. It is not an unbounded autonomous loop. Before landing,
+`goal-drive` freezes the reviewed
 patch and appends a commit intent. A restart reconciles an unapplied, applied,
 or already committed intent without calling the provider again. Publication
 builds the frozen tree in a private index, creates the commit without repository

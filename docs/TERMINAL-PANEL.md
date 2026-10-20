@@ -88,7 +88,8 @@ For a goal bounded by `PROJECT.md`, the main reads the user's request scope,
 `oms plan-from-spec`, reviews the proposal, and applies the reviewed bytes with
 `--apply` and `--expected-proposal-sha256`. Applied proposal tasks are ordinary
 shared-plan tasks and use the same lifecycle as every other plan task: claim a
-ready task, dispatch it with `--task-id`, verify and inspect the work, integrate
+ready task in the confirmed `PROJECT.md` plan's order (dependencies first),
+dispatch it with `--task-id`, verify and inspect the work, integrate
 it with the required checks, run `oms agent-plan review` after acceptance, and
 record the owner result with `oms panel --finalize`. Choose the role from the
 task's scope and source, rely on the automatic reviewer gate, and add a critic
@@ -809,7 +810,10 @@ of at most 1 MiB each to SHA-256. The summary is
 bounded to 8 KiB, rejects sensitive-looking text and private absolute paths,
 and is cleaned of terminal controls. New result revisions are immutable artifacts
 registered in the existing artifact index, rather than a second task database.
-Finalization checks the full lifecycle projection, independently of the display
+For each landed write patch, `accepted` also requires a passing automatic review
+gate. If review is missing or ends without a verdict, finalize `completed` (not
+`accepted`) and explain why in the summary. Finalization checks the full lifecycle
+projection, independently of the display
 window. Missing retained patch or landing evidence refuses acceptance. A failed,
 abandoned or rejected write worker under the same main also refuses `accepted`;
 the owner can record `completed` or `failed` with its actual summary instead.

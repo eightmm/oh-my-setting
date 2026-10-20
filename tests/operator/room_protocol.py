@@ -269,6 +269,7 @@ for owner in panel.PROVIDERS:
     assert "after patch-land, use finish with its expected landing receipt" in guidance
     assert "oms agent-plan accept-main-research" in guidance
     assert "Owner --finalize records the result but does not itself mark a plan task done" in guidance
+    assert "For each landed write patch, accepted also requires a passing automatic review gate" in guidance
     assert "do not manually release dependencies" in guidance
     assert "For tasks not covered by a PROJECT.md plan" not in guidance
     assert "call oms goal-drive" not in guidance

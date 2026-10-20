@@ -648,18 +648,18 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                   "End with exactly one final line: GATE: pass or GATE: fail, then concise findings before it.")
         verifier = _review_verifier(repo, room_id, member, caller, task_id)
         manual_notice = False
-        unconfirmed = ("Task %s has a write patch that could not launch automatic review; manual review is needed."
+        unconfirmed = ("Task %s has a write patch that could not launch automatic review; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                        % task_id)
         try:
             if not verifier:
                 manual_notice = _judgment_mail(repo, room_id, member, caller, task_id,
-                               "Task %s has a write patch but no recorded verifier; manual review is needed."
+                               "Task %s has a write patch but no recorded verifier; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                                % task_id)
                 raise LookupError("no verifier is available for automatic review")
             work_repo = _dispatch_execution_repository(repo, room_id, member, caller)
             if work_repo is None:
                 manual_notice = _judgment_mail(repo, room_id, member, caller, task_id,
-                               "Task %s execution repository is unknown or no longer available; manual review is needed."
+                               "Task %s execution repository is unknown or no longer available; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                                % task_id)
                 raise LookupError("execution repository is unknown or unavailable")
             _validate_dry_run_inputs(prompt, None)
