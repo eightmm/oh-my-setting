@@ -152,6 +152,15 @@ def project_attempts(state, rows, error):
     return block
 
 
+def project_usage(value):
+    usage = mapping(value)
+    if not usage:
+        return None
+    return {**{key: count(usage.get(key)) for key in (
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")},
+        "cache_in_input": usage.get("cache_in_input") if isinstance(usage.get("cache_in_input"), bool) else None}
+
+
 def project_operations(rows, error):
     block = {"available": error is None, "recent": [], "omitted": 0}
     reviews = {"outcomes": 0, "passed": 0, "failed": 0, "unknown": 0, "seat_answers": 0}
@@ -193,6 +202,7 @@ def project_operations(rows, error):
             "fallback_used": row.get("fallback_used") is True,
             "fallback_reason": (enum(reason, FALLBACK_REASONS) or "other") if reason else None,
             "tokens": count(row.get("tokens")),
+            "provider_usage": project_usage(row.get("provider_usage")),
             "cost_usd": number(row.get("cost_usd")),
         })
     return block, reviews

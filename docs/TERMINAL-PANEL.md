@@ -490,8 +490,31 @@ Active attempts have a separate bounded window so newer outcomes cannot hide
 them. Overflow is reported; Details retains the bounded active and recent
 records. `REPO ACCEPT` and repo attention belong to shared repository state,
 including earlier work. Recent outcomes and successful native process exit do
-not establish acceptance of a task. Native subagents that do not write OMS
-records remain unobserved.
+not establish acceptance of a task.
+
+Each worker and reviewer row ends with its tokens: `48.2k tok (out 9149)` when
+the provider reported a breakdown (input, cache and output summed, so Claude
+and Codex compare), plain `12.3k tok` when only a total exists,
+`tokens pending` while the call runs and `tokens unreported` when a finished
+call recorded none; missing data is never shown as 0. Narrow panes keep the
+short form or drop it before clipping the call's name.
+
+A Claude main's own subagents (Agent tool and workflow runs) appear as
+read-only rows under it while their files were written in the last 10 minutes;
+they are not panel workers. The panel reads Claude's transcripts under
+`.claude/projects/<project>/<session>/subagents/`, matching the session by the
+room's stored hash, so no session id is kept. An Agent-tool row shows its
+transcript's total and output tokens (`2465 tok (out 450)`); a workflow row
+shows the summed tokens of the agent transcripts under its run directory and
+how many of them are live (`3/5 agents live · 120.0k+ tok (out 20.0k)`). Only
+the main this window shows has rows. Reads are bounded: only assistant records
+holding a usage object are parsed, one entry per message id; a refresh reads
+appended bytes (at most 8 MiB per transcript and 16 MiB per refresh, marked
+`+` until a large file is read through, and also while any agent or record
+of the total is unread or unreadable; a record over 256 KiB is read from its
+first and last bytes), a replaced transcript is read again, and a missing,
+torn or malformed file is skipped. A Codex or Pi main has no
+such rows.
 
 | Menu action | Behavior |
 | --- | --- |

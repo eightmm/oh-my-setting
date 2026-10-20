@@ -29,8 +29,19 @@ NATIVE_ACTIVE = 600          # a subagent or workflow row lasts this long after 
 NATIVE_MAX = 32              # newest rows per kind and session
 NATIVE_META_BYTES = 4096
 WORKFLOW_BYTES = 256 * 1024  # journal tail read for display counts
+USAGE_FILE_BYTES = 8 * 1024 * 1024      # appended transcript bytes read per file per refresh
+USAGE_REFRESH_BYTES = 16 * 1024 * 1024  # ... and per refresh across every transcript
+USAGE_LINE_BYTES = 256 * 1024           # a longer line is an api-request blob, not a message
+USAGE_MESSAGES = 50000                  # distinct messages remembered per transcript
+RUN_AGENTS = 64                         # newest agent transcripts summed per workflow run
+OVERSIZED_ROLE = re.compile(rb'"(?:role|type)"\s*:\s*"assistant"')
+OVERSIZED_USAGE = re.compile(rb'"usage"\s*:\s*')
+OVERSIZED_ID = re.compile(rb'"id"\s*:\s*"(msg_[A-Za-z0-9_-]{1,120})"')
+USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 ADVISOR_MODELS = (("fable", "Fable 5.1"), ("opus", "Opus 5.5"), ("sonnet", "Sonnet 5.5"))
 _transcripts = {}
+_usage = {}  # transcript path -> read offset, file identity and per-message token totals
+_refresh = [0]  # counts native_subagents() calls, so entries not shown in the latest one are dropped
 
 
 def parent_only():
@@ -108,20 +119,23 @@ def _claude_home():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
 
-def _read_owned(path, limit, tail=False):
-    """Bytes from an own-uid regular file without following links; the last `limit` bytes when `tail`."""
+def _read_owned(path, limit, tail=False, start=0, expect=None):
+    """Bytes from an own-uid regular file without following links; the last `limit` bytes when `tail`, else
+    `limit` bytes from `start`. `expect` is a (device, inode) the file must still be."""
     info = os.lstat(path)
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise OSError("unsafe native file")
     fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(fd, "rb") as handle:
         actual = os.fstat(handle.fileno())
-        if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
+        if (not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino)
+                or expect and (actual.st_dev, actual.st_ino) != expect):
             raise OSError("native file changed")
-        start = max(0, actual.st_size - limit) if tail else 0
+        if tail:
+            start = max(0, actual.st_size - limit)
         handle.seek(start)
         data = handle.read(limit)
-    if start and b"\n" in data:
+    if tail and start and b"\n" in data:
         data = data.split(b"\n", 1)[1]  # the cut may land mid-line
     return data
 
@@ -238,7 +252,110 @@ def _active(folder, prefix, suffix, now, inner=None):
             for mtime, name in sorted(recent, reverse=True)[:NATIVE_MAX]]
 
 
-def _native_agents(folder, now):
+def _oversized_usage(line):
+    """(message id, usage counts) of an assistant record too big to parse whole, read from its two ends: the id
+    sits in the first bytes, the usage object near the end (after the content). None when it is not an assistant
+    record; False when it is one but the ends do not yield a clean id and usage."""
+    head, tail = line[:2048], line[-8192:]
+    if not (OVERSIZED_ROLE.search(head) or OVERSIZED_ROLE.search(tail)):
+        return None
+    marks = list(OVERSIZED_USAGE.finditer(tail))
+    found = OVERSIZED_ID.search(head)
+    if not marks or not found:
+        return False
+    try:
+        usage, _ = json.JSONDecoder().raw_decode(tail[marks[-1].end():].decode("utf-8", "ignore"))
+        # An absent field (Claude omits zero cache counts) is zero, not damage.
+        counts = tuple(usage.get(key, 0) for key in USAGE_KEYS)
+    except (ValueError, AttributeError, RecursionError):
+        return False
+    if not all(type(count) is int and count >= 0 for count in counts):
+        return False
+    return found.group(1).decode("ascii"), counts
+
+
+def _transcript_usage(path, budget):
+    """(total tokens, output tokens, partial, counted) from one subagent transcript, or None when it cannot be
+    examined at all (callers treat that as unread).
+
+    Only assistant records holding a usage object are counted, one entry per message id (each streamed content
+    block repeats its message's usage); a record over USAGE_LINE_BYTES is read from its two ends instead of parsed
+    whole. A refresh reads appended bytes only, within USAGE_FILE_BYTES and the shared `budget`; a replaced
+    (inode), truncated or older file is read again from the start. Partial means bytes or records are
+    uncounted: the caps stopped the read, the file was unreadable, or a record's usage could not be read.
+    `counted` says whether any message was counted."""
+    path = str(path)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        _usage.pop(path, None)
+        return None
+    ident = (info.st_dev, info.st_ino)
+    entry = _usage.get(path)
+    if entry and (entry["id"] != ident or info.st_size < entry["offset"] or info.st_mtime_ns < entry["mtime"]):
+        entry = None
+    if entry is None:
+        entry = _usage[path] = {"id": ident, "mtime": 0, "offset": 0, "messages": {}, "anon": 0, "capped": False,
+                                "over": False, "total": 0, "output": 0}
+    entry["mtime"], entry["refresh"] = info.st_mtime_ns, _refresh[0]
+    if entry["offset"] < info.st_size:
+        limit = min(USAGE_FILE_BYTES, budget[0])
+        data = b""
+        if limit > 0:
+            try:
+                data = _read_owned(path, limit, start=entry["offset"], expect=ident)
+            except OSError:
+                data = None  # unsafe or replaced mid-read: keep what was counted, try again next refresh
+                entry["capped"] = True
+        if data is not None:
+            budget[0] -= len(data)
+            entry["capped"] = entry["offset"] + len(data) < info.st_size
+            end = data.rfind(b"\n") + 1
+            if not end and len(data) >= USAGE_FILE_BYTES:
+                end = len(data)  # one line longer than the read cap: skipped, and the total says so
+                entry["over"] = True
+            for line in data[:end].split(b"\n"):
+                if b'"usage"' not in line:
+                    continue
+                if len(line) > USAGE_LINE_BYTES:
+                    big = _oversized_usage(line)
+                    if big is None:
+                        continue
+                    if big is False:
+                        entry["over"] = True
+                        continue
+                    key, counts = big
+                else:
+                    try:
+                        record = json.loads(line)
+                        message = record["message"]
+                        usage = message["usage"]
+                        if record.get("type") != "assistant":
+                            continue
+                        counts = tuple(usage.get(name, 0) for name in USAGE_KEYS)
+                        if not all(type(count) is int and count >= 0 for count in counts):
+                            # A malformed count leaves the total incomplete.
+                            entry["over"] = True
+                            continue
+                        key = message.get("id")
+                    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                        continue
+                    if isinstance(key, str) and key:
+                        key = key[:128]
+                    else:
+                        entry["anon"] += 1
+                        key = ("line", entry["anon"])
+                if key not in entry["messages"] and len(entry["messages"]) >= USAGE_MESSAGES:
+                    entry["over"] = True
+                    continue
+                entry["messages"][key] = counts
+            entry["offset"] += end
+            entry["total"] = sum(sum(counts) for counts in entry["messages"].values())
+            entry["output"] = sum(counts[3] for counts in entry["messages"].values())
+    return entry["total"], entry["output"], entry["capped"] or entry["over"], bool(entry["messages"])
+
+
+def _native_agents(folder, now, budget):
     """Agent-tool subagents whose own transcript was written lately; the row never claims more than that."""
     found = []
     for mtime, agent in _active(folder / "subagents", "agent-", ".jsonl", now):
@@ -248,12 +365,48 @@ def _native_agents(folder, now):
             title = next((clean(meta[k], 80) for k in ("description", "name", "agentType")
                           if isinstance(meta.get(k), str) and meta[k].strip()), title)
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
-            pass
-        found.append({"id": agent, "title": title, "active": mtime})
+            pass  # the file is read again on every refresh, so a missing or half-written meta fills in later
+        row = {"id": agent, "title": title, "active": mtime}
+        used = _transcript_usage(folder / "subagents" / ("agent-%s.jsonl" % agent), budget)
+        if used and used[3]:
+            row.update(tokens=used[0], output=used[1], partial=used[2])
+        found.append(row)
     return found
 
 
-def _native_workflows(folder, now):
+def _run_agents(run, now, budget):
+    """Token totals and live/total counts over the agent transcripts under one workflow run directory."""
+    files = []
+    try:
+        with os.scandir(run) as entries:
+            for number, entry in enumerate(entries):
+                name = entry.name
+                if number >= MAX_ENTRIES:
+                    break
+                if not (name.startswith("agent-") and name.endswith(".jsonl") and SESSION.fullmatch(name[6:-6])):
+                    continue
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and not (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+                    files.append((info.st_mtime, entry.path))
+    except OSError:
+        return {}
+    if not files:
+        return {}
+    files.sort(reverse=True)
+    found = {"agents": len(files), "live": sum(0 <= now - mtime <= NATIVE_ACTIVE for mtime, _ in files)}
+    reads = [_transcript_usage(path, budget) for _, path in files[:RUN_AGENTS]]
+    counted = [used for used in reads if used and used[3]]
+    if counted:
+        # An agent left unread or partly read (budget, caps, unreadable) keeps the run's total marked partial.
+        found.update(tokens=sum(u[0] for u in counted), output=sum(u[1] for u in counted),
+                     partial=len(files) > RUN_AGENTS or any(used is None or used[2] for used in reads))
+    return found
+
+
+def _native_workflows(folder, now, budget):
     """Workflow runs whose journal was written lately, with approximate phase and counts when its tail parses."""
     found = []
     for mtime, name in _active(folder / "subagents" / "workflows", "wf_", "", now, "journal.jsonl"):
@@ -276,7 +429,8 @@ def _native_workflows(folder, now):
         title = "Workflow " + run
         if started or answered:
             title += "%s · agents ~%s started · ~%s done" % (" · phase " + phase if phase else "", started, answered)
-        found.append({"id": run, "title": title, "active": mtime})
+        found.append(dict(_run_agents(folder / "subagents" / "workflows" / run, now, budget),
+                          id=run, title=title, active=mtime))
     return found
 
 
@@ -290,6 +444,8 @@ def native_subagents(members):
     if not mains:
         return found
     home, now = _claude_home(), time.time()
+    budget = [USAGE_REFRESH_BYTES]
+    _refresh[0] += 1
     for consumer, participant in list(mains.items())[:8]:
         try:
             path = _main_transcript(home, consumer)
@@ -299,13 +455,15 @@ def native_subagents(members):
             row = {"agents": [], "workflows": []}
             for key, read in (("agents", _native_agents), ("workflows", _native_workflows)):
                 try:
-                    row[key] = read(folder, now)
+                    row[key] = read(folder, now, budget)
                 except (OSError, ValueError, TypeError, KeyError, RecursionError):
                     continue
             if row["agents"] or row["workflows"]:
                 found[participant] = row
         except Exception:  # best-effort board extra: a surprise must never reach the panel tick
             continue
+    for path in [path for path, entry in _usage.items() if entry["refresh"] != _refresh[0]]:
+        del _usage[path]
     return found
 
 

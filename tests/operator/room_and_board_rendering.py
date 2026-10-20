@@ -62,13 +62,25 @@ native_report["attempts"].update(active_recent=[{"attempt_id": "claude-attempt",
     "role": "main", "room_id": native_report["room"]["id"], "room_participant": "main-claude"}}], recent=[])
 active = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
 native_report["native_subagents"] = {"main-claude": {
-    "agents": [{"id": "r1", "title": "Audit the parser with a very long description that must clip", "active": active}],
-    "workflows": [{"id": "wf_x", "title": "Workflow wf_x · phase Find · agents ~4 started · ~1 done", "active": active}]}}
+    "agents": [{"id": "r1", "title": "Audit the parser with a very long description that must clip", "active": active,
+                "tokens": 2465, "output": 450, "partial": False}],
+    "workflows": [{"id": "wf_x", "title": "Workflow wf_x · phase Find · agents ~4 started · ~1 done", "active": active,
+                   "agents": 5, "live": 3, "tokens": 120000, "output": 20000, "partial": True}]}}
 for columns, rows in ((76, 30), (110, 44)):
     for glyphs in (True, False):
         native_screen = render(native_report, "claude", columns, rows, view="tree", unicode=glyphs)
         assert "SUBAGENTS (2)" in native_screen, native_screen
+        assert "2465 tok (out 450)" in native_screen and "3/5 agents live" in native_screen, native_screen
+        assert "120.0k+ tok (out 20.0k)" in native_screen, native_screen
         assert all(display_width(line) <= columns for line in native_screen.splitlines()), native_screen
+# A window whose main is not the Claude main shows none of that main's agents (not even as unlinked calls).
+cross_report = deepcopy(native_report)
+cross_report["room"]["participants"].append({"participant": "main-codex", "provider": "codex", "model": "gpt-6-sol",
+                                             "role": "main", "label": "Codex main", "joined": True, "seq": 2})
+cross_report["attempts"]["active_recent"].append({"attempt_id": "codex-attempt", "state": "working", "panel": {
+    "role": "main", "room_id": native_report["room"]["id"], "room_participant": "main-codex"}})
+assert "SUBAGENTS" not in render(cross_report, "codex", 110, 44, view="tree", main_attempt="codex-attempt")
+assert "SUBAGENTS (2)" in render(cross_report, "claude", 110, 44, view="tree", main_attempt="claude-attempt")
 boundary_dashboard = render(compact_dashboard, "claude", 28, 30, view="graph")
 board = render(dict(compact_dashboard, room=dict(compact_dashboard["room"], predecessor="room-earlier")), "claude", 60, 30, view="graph")
 assert "ROOM / Visual team (continues room-earlier)" in board, board

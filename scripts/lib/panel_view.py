@@ -484,6 +484,7 @@ def worker_rows(report):
                      "name": MODEL_NAMES.get(model_id, model_id) or "model unknown",
                      "role": "council" if key in councils else metadata.get("role") or "worker",
                      "purpose": metadata.get("purpose"), "attempt": row.get("attempt_id"),
+                     "tokens": call_tokens(report, row.get("attempt_id"), row.get("state")),
                      "joined_at": row.get("started_at") or row.get("created_at"), "exit": row.get("exit_code"),
                      "source": "attempt",
                      "parent": row.get("parent_attempt_id") if metadata.get("role") else None,
@@ -564,10 +565,36 @@ def model_usage(report):
     return list(groups.values())
 
 
+def amount(value):
+    return (str(value // 1000000) + "." + str(value % 1000000 // 100000) + "m" if value >= 1000000 else
+            str(value // 1000) + "." + str(value % 1000 // 100) + "k" if value >= 10000 else str(value))
+
+
+def call_tokens(report, attempt_id, state, short=False):
+    """One call's tokens: providers differ on cache, so a breakdown is summed to the same total."""
+    if state in LIVE_STATES:
+        return "tok pending" if short else "tokens pending"
+    operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
+                      if attempt_id and item.get("attempt_id") == attempt_id), {})
+    usage = mapping(operation.get("provider_usage"))
+    parts = [count(usage.get(key)) for key in ("input_tokens", "output_tokens")]
+    if usage.get("cache_in_input") is False:
+        parts += [count(usage.get(key)) for key in ("cache_read_tokens", "cache_write_tokens")]
+    elif usage.get("cache_in_input") is not True:
+        parts.append(None)
+    if None not in parts:
+        text = amount(sum(parts)) + " tok"
+        return text if short else text + " (out %s)" % amount(parts[1])
+    tokens = count(operation.get("tokens"))
+    if tokens is None:
+        tokens = next((count(item.get("tokens")) for item in listing(mapping(report.get("attempts")).get("recent"))
+                       if attempt_id and item.get("attempt_id") == attempt_id), None)
+    if tokens is None:
+        return "tok n/a" if short else "tokens unreported"
+    return amount(tokens) + " tok"
+
+
 def usage_labels(report, costs=False):
-    def amount(value):
-        return (str(value // 1000000) + "." + str(value % 1000000 // 100000) + "m" if value >= 1000000 else
-                str(value // 1000) + "." + str(value % 1000 // 100) + "k" if value >= 10000 else str(value))
     labels = []
     for row in model_usage(report):
         tokens = amount(row["tokens"]) if row["token_reports"] else "?"
@@ -1199,7 +1226,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         if used < len(labels):
             strip += " / +%s models" % (len(labels) - used)
         elif not labels:
-            strip += "Usage unavailable" if mapping(report.get("operations")).get("available") is False else "unreported; native unobserved"
+            strip += "Usage unavailable" if mapping(report.get("operations")).get("available") is False else "unreported"
         add(strip, "dim")
     elif width >= 28 and height >= 24:
         add(box_edge(usage_title, width, unicode), "dim")
@@ -1216,7 +1243,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             used += 1
         if not packed:
             packed = ["Usage unavailable" if mapping(report.get("operations")).get("available") is False
-                      else "No reported usage; native unobserved"]
+                      else "No reported usage"]
         if used < len(labels):
             # Keep the model count visible rather than clipping it after a subtotal.
             tail = "+%s models / recent 8 records" % (len(labels) - used)
@@ -1294,13 +1321,17 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     shown = 0
     selected = (navigation or {}).get("selected")
 
-    def list_row(identity, state, style, action=None, age="unknown", details=None, exit_code=None, connector="", call=None):
+    def list_row(identity, state, style, action=None, age="unknown", details=None, exit_code=None, connector="", call=None,
+                 extras=()):
         nonlocal space
         if space <= 0:
             return
         tag = judgment_tag(call, report, unicode, ending_tag(call, unicode)) if call else status_tag(state, exit_code=exit_code, unicode=unicode)
         tag_tone = judgment_tone(tag, call_ending(call) or state) if call else tone(state)
         tail = clipped(tag + "  " + age, max(0, width - display_width(connector) - 8))
+        # Token text joins the identity only whole: it never clips the call's own name.
+        identity = next((identity + sep + extra for extra in extras
+                         if display_width(identity + sep + extra) <= width - display_width(connector + tail) - 4), identity)
         identity = clipped(identity, max(0, width - display_width(connector + tail) - 4))
         gutter = glyph("selected", unicode) + " " if action and action == selected else "  "
         lead = gutter + connector + identity
@@ -1345,10 +1376,12 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             if frame is not None and row["state"] in LIVE_STATES:
                 point = 1 + frame % 2
                 connector = connector[:point] + glyph("dot", unicode) + connector[point + 1:]
+            tokens = row.get("tokens")
             list_row(call_identity(role, row["name"], row["work"]), row["state"], band_style(row["role"], row.get("purpose")),
                      ("result", row.get("attempt")), age_label(row.get("joined_at")) or "unknown",
-                     [row["work"], location_label(row.get("location")), row["model"]], row.get("exit"),
-                     connector, call=projected_calls.get(row.get("attempt")))
+                     [row["work"], location_label(row.get("location")), row["model"]] + ([tokens] if tokens else []), row.get("exit"),
+                     connector, call=projected_calls.get(row.get("attempt")),
+                     extras=[tokens, call_tokens(report, row.get("attempt"), row["state"], True)] if tokens else [])
         for row in judges[:judge_count]:
             child(row)
             shown += 1

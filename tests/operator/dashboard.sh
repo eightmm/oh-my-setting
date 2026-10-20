@@ -54,6 +54,8 @@ rows = [
         "fallback_reason": "SECRET FALLBACK CONTENT",
         "duration_s": 5.0,
         "tokens": 120,
+        "provider_usage": {"input_tokens": 5, "output_tokens": 2, "cache_read_tokens": 7, "cache_write_tokens": 1,
+                           "cache_in_input": False, "PRIVATE-USAGE-KEY": "x", "output_tokens_detail": 9},
         "trace_id": "a" * 32,
         "span_id": "b" * 16,
         "parent_span_id": "c" * 16,
@@ -297,7 +299,7 @@ inbox = json.load(open(sys.argv[3], encoding="utf-8"))
 raw = open(sys.argv[1], encoding="utf-8").read() + open(sys.argv[2], encoding="utf-8").read()
 for forbidden in ("PRIVATE GOAL", "SECRET FALLBACK CONTENT", "PRIVATE-VERIFY-EXIT",
                   "PRIVATE LIFECYCLE CONTENT", "PRIVATE APPROVAL SUMMARY",
-                  "PRIVATE PATCH PATH", "change.patch", sys.argv[4]):
+                  "PRIVATE PATCH PATH", "change.patch", "PRIVATE-USAGE-KEY", sys.argv[4]):
     assert forbidden not in raw, forbidden
 assert report["schema"] == 1 and report["kind"] == "oms-dashboard", report
 assert report["collection"] == {"ok": True, "sources": {"state": "ok", "artifacts": "ok", "attempts": "ok"}}
@@ -314,8 +316,10 @@ assert (call["selected_model"], call["served_model"], call["route_class"]) == (
 assert (call["model_attribution"], call["fallback_reason"], call["tokens"], call["cost_usd"]) == (
     "transport", "other", 120, 0.25), call
 assert call["verify_exit"] is None and subject["verify_exit"] == 0, (call, subject)
+assert call["provider_usage"] == {"input_tokens": 5, "output_tokens": 2, "cache_read_tokens": 7,
+                                  "cache_write_tokens": 1, "cache_in_input": False}, call
 # Unknown model, tokens and cost stay unknown rather than turning into zero.
-for key in ("selected_model", "served_model", "route_class", "tokens", "cost_usd"):
+for key in ("selected_model", "served_model", "route_class", "tokens", "cost_usd", "provider_usage"):
     assert subject[key] is None, (key, subject)
 assert subject["model_attribution"] == "unknown", subject
 assert (review["exit"], review["status"], review["tokens"]) == (1, "unresolved", None), review
@@ -428,6 +432,8 @@ rows[-4]["model_attribution"] = ["bad"]
 rows[-5]["fallback_reason"] = {"bad": 1}
 rows[-6]["model_class"] = []
 rows[-7]["status"] = {}
+rows[-8]["provider_usage"] = {"input_tokens": -1, "output_tokens": "9", "cache_read_tokens": True, "cache_in_input": "yes"}
+rows[-7]["provider_usage"] = ["not", "a", "mapping"]
 json.dump({"schema": 1, "action": "list", "rows": rows}, open(sys.argv[1], "w"))
 PY
 rc=0
@@ -449,6 +455,10 @@ assert report["operations"]["recent"][3]["model_attribution"] == "unknown"
 assert report["operations"]["recent"][4]["fallback_reason"] == "other"
 assert report["operations"]["recent"][5]["route_class"] is None
 assert report["operations"]["recent"][6]["status"] == "success"
+# Malformed usage counts degrade to null instead of a made-up zero; a non-mapping usage is absent.
+assert report["operations"]["recent"][7]["provider_usage"] == dict.fromkeys(
+    ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cache_in_input")), report["operations"]["recent"][7]
+assert report["operations"]["recent"][6]["provider_usage"] is None
 json.dumps(report, allow_nan=False)
 assert report["task"] is None and report["attention"] is None and report["acceptance"] is None, report
 assert report["attempts"]["available"] is False, report["attempts"]

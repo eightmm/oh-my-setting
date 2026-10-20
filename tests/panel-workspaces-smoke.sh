@@ -57,6 +57,27 @@ check(baseline_menu == [
     '│ OTHER  [o] Rooms [k] Capacity [9] Refresh [?] More [q] Quit                            │',
     '╰────────────────────────────────────────────────────────────────────────────────────────╯'],
       'nonexpanded menu changed')
+# A call's tokens: summed breakdown, plain total, attempt fallback; pending while running, never a made-up zero.
+usage_report = {'repo': {'name': 'r', 'path': '/tmp/r'}, 'collection': {'ok': True}, 'operations': {'available': True, 'recent': [
+    {'attempt_id': 'att_rev', 'kind': 'delegate', 'event_id': 'e1', 'provider': 'claude', 'served_model': 'claude-opus-5-5',
+     'tokens': 9175, 'provider_usage': {'input_tokens': 26, 'output_tokens': 9149, 'cache_read_tokens': 38000,
+                                        'cache_write_tokens': 1025, 'cache_in_input': False}},
+    {'attempt_id': 'att_codex', 'kind': 'delegate', 'event_id': 'e2', 'provider': 'codex', 'tokens': 12300}]},
+    'attempts': {'available': True, 'active_recent': [
+        {'attempt_id': 'att_run', 'state': 'working', 'task_id': 't1', 'tool': 'delegate', 'provider': 'claude',
+         'panel': {'role': 'worker', 'purpose': 'implement', 'label': 'Fix parser', 'model': 'claude-opus-5-5'}}],
+     'recent': [{'attempt_id': attempt, 'state': 'review', 'task_id': 't-' + attempt, 'tool': 'delegate', 'provider': 'codex',
+                 'tokens': tokens, 'panel': {'role': role, 'purpose': purpose, 'label': label, 'model': 'gpt-6-sol'}}
+                for attempt, tokens, role, purpose, label in (
+                    ('att_rev', None, 'reviewer', 'review', 'Check diff'), ('att_codex', None, 'worker', 'implement', 'Plain total'),
+                    ('att_late', 700, 'worker', 'implement', 'Attempt total'), ('att_none', None, 'worker', 'implement', 'No report'))]}}
+usage_board = panel_view.render(usage_report, 'claude', 110, 40)
+for text in ('Check diff · 48.2k tok (out 9149)', 'Plain total · 12.3k tok', 'Attempt total · 700 tok',
+             'Fix parser · tokens pending', 'No report · tokens unreported'):
+    check(text in usage_board, 'row tokens missing: ' + text + usage_board)
+check(' 0 tok' not in usage_board and 'tokens 0' not in usage_board, 'missing tokens rendered as zero')
+check(all(panel_view.display_width(line) <= 44 for line in panel_view.render(usage_report, 'claude', 44, 40).splitlines()),
+      'narrow token rows overflow')
 expanded_menu = panel_view.menu_rows(90, 24, True, True, False)
 check('[j] Terminals and jobs' in '\n'.join(expanded_menu), 'expanded terminal command missing')
 expected_keys = [workspaces._key_command(repo, 'term-' + 'a' * 32, str(tmp / r'dollar $ literal \$ ${x} $_y $1 $$z end$'), action)

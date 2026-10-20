@@ -5,7 +5,7 @@ import re
 import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
-from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
+from panel_view import (amount, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
                         clipped, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
@@ -105,6 +105,8 @@ def nodes(report):
         decided = state == "review" and finalized.get(attempt.get("task_id")) in DECIDED
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
                            panel_activity=mapping(mapping(report.get("main_activity")).get(member.get("participant"))),
+                           tokens=(call_tokens(report, attempt["attempt_id"], state)
+                                   if attempt.get("attempt_id") and member.get("role") != "main" else None),
                            ended=result.get("ts"), exit=code if type(code) is int else None,
                            artifact=result.get("artifact") or attempt.get("artifact") or member.get("artifact"),
                            reason_code=reason, guard=member.get("guard") is True or reason == "worker_authority_violation",
@@ -710,6 +712,17 @@ def ago(ts):
         "%dh ago" % (seconds // 3600) if seconds < 86400 else "%dd ago" % (seconds // 86400)
 
 
+def native_tokens(entry):
+    """Token words for a native agent or workflow row; '+' marks a read stopped by its byte caps."""
+    total, output, live, agents = (valid_count(entry.get(key)) for key in ("tokens", "output", "live", "agents"))
+    spent = ""
+    if total is not None:
+        spent = amount(total) + ("+" if entry.get("partial") is True else "") + " tok"
+        spent += " (out %s)" % amount(output) if output is not None else ""
+    crowd = "%s/%s agents live" % (live, agents) if live is not None and agents else ""
+    return " · ".join(part for part in (crowd, spent) if part)
+
+
 def native_subagents(report, members):
     """Claude Code's own subagents and Workflow runs as read-only rows below their main; never room participants.
 
@@ -728,7 +741,7 @@ def native_subagents(report, members):
                                  "role": "subagent", "parent": m["participant"], "provider": "claude", "joined": True,
                                  "seq": 0, "state": "unknown", "_kind": kind, "_native": "active",
                                  "title": clean(entry["title"]) + (" - active " + since if since else ""),
-                                 "model": "Claude Code " + kind})
+                                 "model": "Claude Code " + kind, "tokens": native_tokens(entry) or None})
     return rows
 
 
@@ -985,7 +998,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         lines += ["", "Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else "")]
         return lines + ["Click a team row to open it · click the main for its chat"], targets
     if member.get("_kind") in {"agent", "workflow"}:
-        return wrapped(clean(member.get("title")), width, 3) + [
+        return wrapped(clean(member.get("title")), width, 3) + wrapped(member.get("tokens") or "", width, 2) + [
             "Claude Code's own %s · read-only: not a panel worker" % member["_kind"]], targets
     if member.get("_native"):
         done = member["state"] == "done"
@@ -1552,6 +1565,7 @@ def summary_card(member, preview, width, room=None, unicode=True, *, report=None
     tag = judgment_tag(member, report, unicode, execution_tag(member, unicode)) if member.get("state") not in {None, "unknown", "presence unknown"} else ""
     lines = [identity + (" " + tag if tag else "")]
     if member.get("_kind") in {"agent", "workflow"}:
+        lines += [member["tokens"]] if member.get("tokens") else []
         lines.append("Claude Code's own %s: read-only, not a panel worker" % member["_kind"])
     elif member.get("_native"):
         lines.append("Built-in advisor: answer stays inside the main's chat")

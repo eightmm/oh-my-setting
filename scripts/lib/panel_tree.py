@@ -6,7 +6,7 @@ from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_ed
                         main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped,
                         role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
                         JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
-                        judgment_tag, judgment_tone, call_ending, ending_tag)
+                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
 from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
@@ -48,7 +48,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         (m for m in live_mains if m["state"] in LIVE_STATES), next(iter(live_mains), None)) or next(
         (m for m in all_mains if m["participant"] == current), next(iter(all_mains), None))
     mains = [live_main] if live_main else []
-    calls = [m for m in members if m.get("role") != "main"] + native_advisors(report, members)
+    window_mains = {live_main["participant"], live_main.get("attempt")} if live_main else set()
+    # Claude Code's own agents belong to the main this window shows, never to another main of the room.
+    calls = [m for m in members if m.get("role") != "main"] + [
+        m for m in native_advisors(report, members) if m.get("_kind") not in {"agent", "workflow"} or m["parent"] in window_mains]
     owners = {ident: m for m in all_mains for ident in (m["participant"], m.get("attempt")) if ident}
     for row in worker_rows(report):
         if row["source"] == "council" and row["parent"] in owners:
@@ -104,6 +107,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         available = max(0, content_width - 2 - display_width(connector))
         # Fit identity and state separately, before any ANSI spans or hit geometry.
         tail = clipped(tail, max(0, available - 4))
+        if call.get("tokens") and not call.get("_native"):
+            identity = next((identity + sep + text for text in (call["tokens"], call_tokens(
+                report, call.get("attempt"), call["state"], True))
+                if display_width(identity + sep + text) <= available - display_width(tail) - 2), identity)
         room_for_identity = max(0, available - display_width(tail) - 2)
         identity = clipped(identity, room_for_identity)
         gutter = glyph("selected", unicode) + " " if action and selected == action else "  "
@@ -138,7 +145,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 notes.append("ctx %s%% used" % context[0])
             if extra:
                 notes.append(extra)
+            if call.get("tokens") and not call.get("_native"):
+                # The selected card replaces the row, so it keeps the row's token count.
+                notes += wrapped(call["tokens"], max(1, card_width - 4), 2)
             if call.get("_kind") in {"agent", "workflow"}:
+                notes += wrapped(call.get("tokens") or "", max(1, card_width - 4), 2)
                 notes.append("Claude Code's own %s - not a panel worker: no admission, review or finalize" % call["_kind"])
             elif call.get("_native"):
                 notes.append("answer stays in the main transcript")

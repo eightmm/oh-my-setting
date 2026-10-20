@@ -136,7 +136,7 @@ one requires a schema bump.
 | `attempts.active_recent[]` | object | Up to eight current attempts, newest update first: `attempt_id, state, provider, tool, task_id, reason_code, updated_at`. Independent of the recent outcome window. |
 | `delegations` | array or `null` | Up to five markers, live first: `id, provider, role, task_id, requested_model, reasoning_effort, live, started_at, location`. Location is a relative worker worktree token. Requested model is marker configuration, not proof of the served model. |
 | `operations` | object | `available, recent[], omitted`, plus `error` when unavailable |
-| `operations.recent[]` | object | `event_id, ts, kind, provider, task_id, attempt_id, exit, status, verify_exit, route_class, requested_model, selected_model, served_model, model_attribution, fallback_used, fallback_reason, tokens, cost_usd` |
+| `operations.recent[]` | object | `event_id, ts, kind, provider, task_id, attempt_id, exit, status, verify_exit, route_class, requested_model, selected_model, served_model, model_attribution, fallback_used, fallback_reason, tokens, provider_usage, cost_usd`; `provider_usage` is `null` or `{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_in_input}`, counts only |
 | `reviews` | object or `null` | `outcomes, passed, failed, unknown, seat_answers` over the listed window |
 | `acceptance` | object or `null` | `available, total, counts, complete, criteria[] {id, status, source, text}, omitted, note` |
 | `attention` | object or `null` | `actionable, items[] {priority, code, summary, command}, omitted, next[] {id, authority, command}` |

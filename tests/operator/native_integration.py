@@ -1206,11 +1206,17 @@ runs_dir = agents_dir / "workflows"
 runs_dir.mkdir(parents=True)
 
 
-def write_agent(ident, age=0, **meta):
+def write_agent(ident, age=0, lines=(), **meta):
     (agents_dir / ("agent-%s.meta.json" % ident)).write_text(json.dumps(meta))
     log = agents_dir / ("agent-%s.jsonl" % ident)
-    log.write_text("")
+    log.write_text("".join(line + "\n" for line in lines))
     os.utime(log, (time.time() - age,) * 2)
+    return log
+
+
+def usage_line(mid, *counts, kind="assistant"):
+    return json.dumps({"type": kind, "message": {"id": mid, "model": "claude-opus-5-5",
+                                                  "usage": dict(zip(panel_chats.USAGE_KEYS, counts))}})
 
 
 def write_journal(run, rows, age=0):
@@ -1261,6 +1267,100 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     assert len(shown(panel_chats.native_subagents([claude_main]))["agents"]) == panel_chats.NATIVE_MAX
     for leftover in agents_dir.glob("agent-*"):
         leftover.unlink()
+    # An agent row adds its transcript's total and output tokens: assistant records only, one entry per message id,
+    # a list or dict id never raises, a torn last line waits until it completes.
+    repeat = usage_line("m1", 2, 1000, 0, 50)
+    tokens_log = write_agent("t1", description="Count tokens", lines=[
+        repeat, repeat, usage_line("m2", 3, 10, 1000, 400), "not json but usage",
+        json.dumps({"type": "user", "message": {"usage": dict.fromkeys(panel_chats.USAGE_KEYS, 9)}}),
+        usage_line(["m3"], 1, 0, 0, 5), usage_line({"id": 1}, 1, 1, 1, 4)])
+    torn = usage_line("m5", 1, 0, 0, 7)
+    with tokens_log.open("a") as handle:
+        handle.write(torn[:40])
+    agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["t1"]
+    assert (agent["tokens"], agent["output"], agent["partial"]) == (1052 + 1413 + 6 + 7, 459, False), agent
+    with tokens_log.open("a") as handle:
+        handle.write(torn[40:] + "\n")
+    agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["t1"]
+    assert panel_chats._usage[str(tokens_log)]["offset"] == tokens_log.stat().st_size
+    assert (agent["tokens"], agent["output"]) == (2478 + 8, 466), agent
+    text, nav = sub_board(panel_chats.native_subagents([claude_main]), "log")
+    assert "2486 tok (out 466)" in text, text
+    # Absent cache counts are zero; a malformed count leaves the total partial instead of looking complete.
+    sparse = json.dumps({"type": "assistant", "message": {"id": "s1", "usage": {"input_tokens": 100, "output_tokens": 5}}})
+    sparse_log = write_agent("t3", description="Sparse", lines=[sparse])
+    agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["t3"]
+    assert (agent["tokens"], agent["output"], agent["partial"]) == (105, 5, False), agent
+    with sparse_log.open("a") as handle:
+        handle.write(usage_line("s2", 1, 0, 0, -1) + "\n")
+    agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["t3"]
+    assert (agent["tokens"], agent["partial"]) == (105, True), agent
+    # A replaced transcript of the same size and mtime is read again (new inode); a shorter one too.
+    swap_log = write_agent("t2", description="Swap", lines=[usage_line("m1", 2, 1000, 0, 50)])
+    assert shown(panel_chats.native_subagents([claude_main]))["agents"]["t2"]["tokens"] == 1052
+    before = swap_log.stat()
+    replacement = agents_dir / "swap.tmp"
+    replacement.write_text(usage_line("m1", 2, 1000, 0, 51) + "\n")
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, swap_log)
+    assert swap_log.stat().st_size == before.st_size and swap_log.stat().st_mtime_ns == before.st_mtime_ns
+    assert shown(panel_chats.native_subagents([claude_main]))["agents"]["t2"]["tokens"] == 1053
+    swap_log.write_text(usage_line("m", 1, 0, 0, 1) + "\n")
+    assert shown(panel_chats.native_subagents([claude_main]))["agents"]["t2"]["tokens"] == 2
+    # meta.json is retried while missing or half written, and a symlink is never followed.
+    meta_path = agents_dir / "agent-t2.meta.json"
+    meta_path.write_text('{"description": "Sw')
+    assert shown(panel_chats.native_subagents([claude_main]))["agents"]["t2"]["title"] == "Claude Code agent"
+    meta_path.write_text(json.dumps({"description": "Swap back"}))
+    assert shown(panel_chats.native_subagents([claude_main]))["agents"]["t2"]["title"] == "Swap back"
+    meta_path.unlink()
+    (agents_dir / "elsewhere.json").write_text(json.dumps({"description": "linked"}))
+    meta_path.symlink_to(agents_dir / "elsewhere.json")
+    assert shown(panel_chats.native_subagents([claude_main]))["agents"]["t2"]["title"] == "Claude Code agent"
+    # The per-file cap reads a big transcript over several refreshes (partial until the end); the per-refresh cap
+    # is shared by every transcript, so the file that did not fit waits one refresh.
+    for leftover in agents_dir.glob("agent-*"):
+        leftover.unlink()
+    big_lines = [usage_line("b%d" % number, 1, 0, 0, 2) for number in range(30)]
+    big_log = write_agent("big", description="Big", lines=big_lines)
+    with patch.object(panel_chats, "USAGE_FILE_BYTES", 400):
+        steps = []
+        for _ in range(40):
+            agent = shown(panel_chats.native_subagents([claude_main]))["agents"].get("big", {})
+            steps.append((agent.get("tokens", 0), agent.get("partial")))
+            if agent.get("partial") is False:
+                break
+    assert steps[0][1] is True and steps[0][0] < 90 and steps[-1] == (90, False) and steps == sorted(steps, key=lambda x: x[0]), steps
+    one = write_agent("one", age=5, description="One", lines=big_lines[:3])
+    with patch.object(panel_chats, "USAGE_REFRESH_BYTES", big_log.stat().st_size):
+        panel_chats._usage.clear()
+        first = shown(panel_chats.native_subagents([claude_main]))["agents"]
+        second = shown(panel_chats.native_subagents([claude_main]))["agents"]
+    assert first["big"]["tokens"] == 90 and "tokens" not in first["one"], first
+    assert second["one"]["tokens"] == 9 and second["big"]["tokens"] == 90, second
+    for leftover in agents_dir.glob("agent-*"):
+        leftover.unlink()
+    # A record over the line cap is read from its two ends, once per message id; a user record is ignored, and one
+    # whose usage cannot be read leaves the total marked partial instead of reporting it as complete.
+    pad = "x" * (panel_chats.USAGE_LINE_BYTES + 10)
+
+    def huge_line(mid, *counts, role="assistant", spaced=False):
+        record = {"parentUuid": "p", "message": {"model": "claude-opus-5-5", "id": mid, "type": "message", "role": role,
+                  "content": [{"type": "text", "text": pad}], "stop_reason": None,
+                  "usage": dict(zip(panel_chats.USAGE_KEYS, counts))}, "requestId": "req", "type": role, "cwd": "/work"}
+        return json.dumps(record, **({} if spaced else {"separators": (",", ":")}))
+
+    write_agent("huge", description="Huge", lines=[usage_line("m1", 1, 0, 0, 5), huge_line("msg_a", 2, 0, 0, 10),
+        huge_line("msg_a", 2, 0, 1, 10), huge_line("msg_b", 1, 1, 1, 3, spaced=True),
+        huge_line("msg_u", 9, 9, 9, 9, role="user"), usage_line("m2", 1, 0, 0, 1)])
+    agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["huge"]
+    assert (agent["tokens"], agent["output"], agent["partial"]) == (6 + 13 + 6 + 2, 5 + 10 + 3 + 1, False), agent
+    write_agent("huge", description="Huge", lines=[usage_line("m1", 1, 0, 0, 5), huge_line("no id", 2, 0, 0, 10)])
+    agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["huge"]
+    assert (agent["tokens"], agent["partial"]) == (6, True), agent
+    assert "6+ tok" in sub_board(panel_chats.native_subagents([claude_main]), "log")[0]
+    for leftover in agents_dir.glob("agent-*"):
+        leftover.unlink()
     # A workflow row adds phase and approximate counts when its journal tail parses, and only its name otherwise.
     write_journal("wf_r1", started + [{"type": "future-kind"}])
     with (runs_dir / "wf_r1" / "journal.jsonl").open("a") as handle:
@@ -1270,12 +1370,27 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     write_journal("wf_old", started, age=stale)
     (runs_dir / "wf_empty").mkdir()
     (session_dir / "workflows" / "wf_r1.json").write_text("{}")  # a completion file changes nothing
+    for name, age, lines in (("w1", 0, [usage_line("x", 1, 0, 0, 7), usage_line("y", 1, 5, 0, 3)]),
+                             ("w2", stale, [usage_line("x", 4, 0, 0, 6)])):
+        log = runs_dir / "wf_r1" / ("agent-%s.jsonl" % name)
+        log.write_text("".join(line + "\n" for line in lines))
+        os.utime(log, (time.time() - age,) * 2)
     found = panel_chats.native_subagents([claude_main])
     flows = shown(found)["workflows"]
+    assert (flows["wf_r1"]["agents"], flows["wf_r1"]["live"], flows["wf_r1"]["tokens"], flows["wf_r1"]["output"]) == (2, 1, 27, 16), flows
+    assert "agents" not in flows["wf_r2"] and "tokens" not in flows["wf_r2"], flows
+    # An agent the per-refresh budget leaves unread keeps the run's total partial until it has been read.
+    newest = runs_dir / "wf_r1" / "agent-w1.jsonl"
+    with patch.object(panel_chats, "USAGE_REFRESH_BYTES", newest.stat().st_size):
+        panel_chats._usage.clear()
+        first = shown(panel_chats.native_subagents([claude_main]))["workflows"]["wf_r1"]
+        second = shown(panel_chats.native_subagents([claude_main]))["workflows"]["wf_r1"]
+    assert (first["tokens"], first["partial"], second["tokens"], second["partial"]) == (17, True, 27, False), (first, second)
     assert set(flows) == {"wf_r1", "wf_r2"} and flows["wf_r2"]["title"] == "Workflow wf_r2", flows
     assert flows["wf_r1"]["title"] == "Workflow wf_r1 · phase Review · agents ~2 started · ~1 done", flows
     text, nav = sub_board(found, "detail", ("chat", "adv-main"))
     assert "SUBAGENTS (2)" in text and "Native agents active: 0 · workflows active: 2" in text, text
+    assert "1/2 agents live · 27 tok (out 16)" in text, text
     write_journal("wf_r1", started, age=3 * 3600)
     assert "wf_r1" not in shown(panel_chats.native_subagents([claude_main]))["workflows"]
     # No session directory, or an unreadable transcript index, leaves the board as it was.
