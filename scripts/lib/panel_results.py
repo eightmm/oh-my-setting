@@ -96,7 +96,7 @@ def _safe_summary(path, repo):
     screen = subprocess.run(['bash', '-c', '. "$1"; grep -Eiq "$(agent_memory_sensitive_re)"',
                              'panel-result', str(ROOT / 'scripts/lib/agent-memory-common.sh')],
                             input=text, capture_output=True, text=True, timeout=5, check=False)
-    if screen.returncode != 1 or re.search(r'(?<![\w:])/(?:[^\s/]+/)*[^\s/]+|[A-Za-z]:\\', text):
+    if screen.returncode != 1 or re.search(r'(?<![\w:/.])/(?:[^\s/]+/)+[^\s/]+|[A-Za-z]:\\', text):
         raise ValueError('summary contains sensitive-looking content or a private path')
     return sanitize_multiline(text, MAX_SUMMARY).strip()
 

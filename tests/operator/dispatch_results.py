@@ -1825,13 +1825,17 @@ with patch.dict(os.environ, environment, clear=True):
             raise AssertionError("unsafe evidence accepted")
         except ValueError:
             pass
-    for text in ("/private/absolute", "".join(("api", "_key", "=", "fixture-value"))):
+    for text in ("/private/absolute", "/etc/passwd", "C:\\private\\file",
+                 "".join(("api", "_key", "=", "fixture-value"))):
         summary.write_text(text)
         try:
             saved.finalize(project, "codex", "bad-result", str(summary), "completed")
             raise AssertionError("unsafe summary accepted")
         except ValueError:
             pass
+    for text in ("Run ./scripts/check.sh", "Inspect ../x/y", "See https://host/path"):
+        summary.write_text(text)
+        assert saved.finalize(project, "codex", "relative-summary", str(summary), "completed")["outcome"] == "completed"
     summary.write_text("Safe result.\n")
     link = temporary / "panel-result-linked.txt"
     try:
