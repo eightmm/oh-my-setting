@@ -5,6 +5,7 @@ shared = room.create(project, "auto-review-room", "Automatic review fixtures")
 room.join(project, shared, room_owner, "claude", "main", model="claude-opus-5-5")
 room_env = dict(room_env, OMS_ROOM_ID=shared)
 import panel_results as panel_result_store
+import panel_review as panel_review_impl
 auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
@@ -15,6 +16,24 @@ for boundary in ("hooks/pre-commit", "plugins/oh-my-setting/hooks.json", "instal
     assert panel._automatic_review_workload({"changed_files": ["docs/x.md", boundary]}) == "frontier", boundary
 assert panel._automatic_review_workload({"changed_files": []}) == "frontier"
 assert panel._automatic_review_workload({"changed_files": ["../escape"]}) == "frontier"
+assert panel_review_impl._security_audit_paths(["scripts/permissions.sh"], None) == ["scripts/permissions.sh"]
+assert panel_review_impl._security_audit_paths(["docs/permissions.md"], None) == ["docs/permissions.md"]
+assert panel_review_impl._security_audit_paths(["docs/readme.md"], None) == []
+assert panel_review_impl._security_audit_paths(["rules/x.md"], None) == ["rules/x.md"]
+assert panel_review_impl._security_audit_paths(["docs/cleanup.md"], b"+++ b/docs/cleanup.md\n+rm -rf old\n") == []
+assert panel_review_impl._security_audit_paths(["src/x.py"], b"diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1,2 +1,2 @@\n--- note\n+kept\n") == []
+assert panel_review_impl._security_audit_paths(["src/x.py"], b"diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1 +1,2 @@\n old\n+os.unlink(path)\n") == ["src/x.py"]
+assert panel_review_impl._security_audit_paths(["src/café.py"], b'diff --git "a/src/caf\\303\\251.py" "b/src/caf\\303\\251.py"\n--- "a/src/caf\\303\\251.py"\n+++ "b/src/caf\\303\\251.py"\n@@ -1 +1,2 @@\n old\n+os.unlink(path)\n') == ["src/café.py"]
+assert panel_review_impl._security_audit_paths(["src/gone.py"], b"deleted file mode 100644\n--- a/src/gone.py\n+++ /dev/null\n") == ["src/gone.py"]
+assert panel_review_impl._security_audit_paths(["src/café.py"], b'deleted file mode 100644\n--- "a/src/caf\\303\\251.py"\n+++ /dev/null\n') == ["src/café.py"]
+assert panel_review_impl._security_audit_paths(["docs/obsolete.md"], b"deleted file mode 100644\n--- a/docs/obsolete.md\n+++ /dev/null\n") == []
+plain_unified = (b"--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1,2 @@\n old\n+kept\n"
+                 b"--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1,2 @@\n old\n+os.remove(path)\n")
+assert panel_review_impl._security_audit_paths(["src/a.py", "src/b.py"], plain_unified) == ["src/b.py"]
+for deletion_call in ("Path(path).unlink()", "rm -f old", "rm -r old", "find . -delete"):
+    deletion_patch = (b"diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n"
+                      b"@@ -1 +1,2 @@\n old\n+" + deletion_call.encode("ascii") + b"\n")
+    assert panel_review_impl._security_audit_paths(["src/x.py"], deletion_patch) == ["src/x.py"], deletion_call
 auto_artifact = ".oms/artifacts/fixture/result.json"
 auto_patch_path = ".oms/artifacts/fixture/change.patch"
 auto_artifact_file = project / auto_artifact
@@ -26,7 +45,8 @@ for fixture_call in (auto_call, "call-auto-review-off", "call-auto-review-read",
                      "call-auto-review-timeout",
                      "call-0000000000000004", "call-0000000000000005",
                      "call-auto-review-preflight",
-                     "call-review-gate-fail", "call-review-gate-pass", "call-review-gate-nonzero",
+                     "call-review-gate-fail", "call-review-gate-pass",
+                     "call-review-gate-nonzero",
                      "call-review-gate-timeout", "call-review-gate-last-fail",
                      "call-review-gate-fenced-suffix",
                      "call-review-gate-guard-stop", "call-review-gate-missing"):

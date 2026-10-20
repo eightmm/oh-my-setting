@@ -47,6 +47,57 @@ def _automatic_review_workload(result_event):
     return "deep"
 
 
+def _security_audit_paths(changed_files, patch_bytes, frontier_paths=None):
+    """Select paths for security-advisor admission guidance."""
+    from panel_results import _patch_name, _patch_paths
+
+    paths = set()
+
+    def documentation(path):
+        return path.endswith((".md", ".rst")) or path.startswith("docs/")
+
+    deletion = re.compile(
+        r"\bos\.(?:remove|unlink)\s*\(|\bshutil\.rmtree\s*\(|\.unlink\s*\(|"
+        r"\brm\s+-[^\s]*[rf][^\s]*(?:\s|$)|\bfind\b[^\n]*\s-delete\b"
+    )
+    patterns = tuple(frontier_paths if frontier_paths is not None else _AUTO_REVIEW_FRONTIER_PATHS)
+    patterns += ("*secret*", "*scanner*", "*credential*")
+    touched = set()
+    for path in changed_files if isinstance(changed_files, (list, tuple)) else ():
+        if isinstance(path, str):
+            touched.add(path)
+    if isinstance(patch_bytes, bytes):
+        touched.update(_patch_paths(patch_bytes))
+        current, deletion_file, hunk_remaining = None, False, 0
+        for line in patch_bytes.decode("utf-8", "surrogateescape").split("\n"):
+            if line.endswith("\r"):
+                line = line[:-1]
+            if line.startswith("diff --git "):
+                current, deletion_file, hunk_remaining = None, False, 0
+            elif not hunk_remaining and line.startswith("deleted file mode "):
+                deletion_file = True
+            elif not hunk_remaining and line.startswith("--- "):
+                current = _patch_name(line[4:].split("\t", 1)[0])
+                if deletion_file and current and not documentation(current):
+                    paths.add(current)
+            elif not hunk_remaining and line.startswith("+++ "):
+                current = _patch_name(line[4:].split("\t", 1)[0]) or current
+            elif line.startswith("@@ "):
+                hunk = re.match(r"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@", line)
+                if hunk:
+                    hunk_remaining = sum(int(count) if count is not None else 1 for count in hunk.groups())
+            elif hunk_remaining:
+                if (line.startswith("+") and current and not documentation(current)
+                        and deletion.search(line[1:])):
+                    paths.add(current)
+                hunk_remaining = max(0, hunk_remaining - (2 if line.startswith(" ") else 1
+                                      if line.startswith(("+", "-")) else 0))
+    for path in touched:
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns):
+            paths.add(path)
+    return sorted(paths)
+
+
 def _call_result_event(repo, room_id, member, task_id, status):
     from terminal_panel import _review_dispatch_context, _safe_patch_path
     import panel_results

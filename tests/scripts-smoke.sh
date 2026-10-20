@@ -17066,14 +17066,60 @@ make_patch_repo() {
 test_patch_admit_admits_clean_patch() {
   local repo="$TMP/admit-clean"
   local SH="$ROOT/scripts/patch-admit.sh"
+  local admission_stderr="$repo/admission.stderr"
   make_patch_repo "$repo" $'base\nmore\n'
-  ( "$SH" --patch "$repo/change.patch" --repo "$repo" >/dev/null 2>&1 ) ||
+  ( "$SH" --patch "$repo/change.patch" --repo "$repo" >/dev/null 2>"$admission_stderr" ) ||
     fail "clean patch should be admitted (exit 0)"
+  # The final patch-admit status line is its established stderr contract.
+  [ "$(wc -l < "$admission_stderr" | tr -d '[:space:]')" = "1" ] &&
+    grep -Eq '^patch-admit: ADMIT [(].+[)]$' "$admission_stderr" ||
+    fail "clean patch admission wrote unexpected stderr"
   local r
   r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
   [ -n "$r" ] || fail "no admission report written"
   assert_file_contains "$r" "Patch admission: ADMIT"
   assert_file_contains "$r" "apply: PASS"
+  grep -Fqx -- "- security: SKIP — no risk paths" "$r" ||
+    fail "clean patch security ladder line is not exact"
+
+  local risk_repo="$TMP/admit-risky"
+  local risk_report="$risk_repo/security-advice.md"
+  make_committed_repo "$risk_repo"
+  mkdir -p "$risk_repo/src"
+  printf 'import os\n\ndef cleanup(path):\n    return path\n' > "$risk_repo/src/café.py"
+  git -C "$risk_repo" add src/café.py
+  git -C "$risk_repo" commit -qm 'add cleanup fixture'
+  git -C "$risk_repo" checkout -q -b feat
+  printf 'import os\n\ndef cleanup(path):\n    os.unlink(path)\n' > "$risk_repo/src/café.py"
+  git -C "$risk_repo" add src/café.py
+  git -C "$risk_repo" commit -qm 'remove a path'
+  git -C "$risk_repo" diff main feat > "$risk_repo/change.patch"
+  git -C "$risk_repo" checkout -q main
+  git -C "$risk_repo" branch -q -D feat
+  "$SH" --patch "$risk_repo/change.patch" --repo "$risk_repo" --report "$risk_report" >/dev/null ||
+    fail "risky patch should remain admitted"
+  assert_file_contains "$risk_report" "Patch admission: ADMIT"
+  assert_file_contains "$risk_report" "security: ADVISE"
+  assert_file_contains "$risk_report" 'caf\u00e9.py'
+
+  local docs_repo="$TMP/admit-docs"
+  local docs_report="$docs_repo/security-advice.md"
+  make_committed_repo "$docs_repo"
+  mkdir -p "$docs_repo/docs"
+  printf 'Cleanup examples mention os.unlink(path).\n' > "$docs_repo/docs/obsolete.md"
+  git -C "$docs_repo" add docs/obsolete.md
+  git -C "$docs_repo" commit -qm 'add documentation fixture'
+  git -C "$docs_repo" checkout -q -b feat
+  git -C "$docs_repo" rm -q docs/obsolete.md
+  git -C "$docs_repo" commit -qm 'remove documentation fixture'
+  git -C "$docs_repo" diff main feat > "$docs_repo/change.patch"
+  git -C "$docs_repo" checkout -q main
+  git -C "$docs_repo" branch -q -D feat
+  "$SH" --patch "$docs_repo/change.patch" --repo "$docs_repo" --report "$docs_report" >/dev/null ||
+    fail "docs-only patch should remain admitted"
+  assert_file_contains "$docs_report" "Patch admission: ADMIT"
+  assert_file_contains "$docs_report" "security: SKIP"
+  assert_file_contains "$docs_report" "no risk paths"
 
   # A project check without fast must not silently become a full-suite gate.
   mkdir -p "$repo/scripts"

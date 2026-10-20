@@ -908,6 +908,37 @@ EOF
   fi
 fi
 
+# --- Security advice: informational only; it cannot alter admission ---------
+security_scan="$(
+  OMS_PATCH_ADMIT_LIB="$ROOT_LIB" OMS_PATCH_ADMIT_CHANGED="$changed_files" \
+    OMS_PATCH_ADMIT_PATCH="$PATCH" python3 - 2>/dev/null <<'PY_SECURITY_ADVICE'
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["OMS_PATCH_ADMIT_LIB"])
+from panel_review import _AUTO_REVIEW_FRONTIER_PATHS, _security_audit_paths
+
+changed = [path for path in os.environ.get("OMS_PATCH_ADMIT_CHANGED", "").split("\n") if path]
+patch = Path(os.environ["OMS_PATCH_ADMIT_PATCH"]).read_bytes()
+paths = _security_audit_paths(changed, patch, _AUTO_REVIEW_FRONTIER_PATHS)
+if paths:
+    shown = ", ".join(json.dumps(path, ensure_ascii=True) for path in paths[:5])
+    more = " (+%d more)" % (len(paths) - 5) if len(paths) > 5 else ""
+    print("ADVISE\ttouches risk paths %s%s; run a security-auditor before landing" % (shown, more))
+else:
+    print("SKIP\tno risk paths")
+PY_SECURITY_ADVICE
+)" || security_scan=""
+security_status="${security_scan%%$'\t'*}"
+security_detail="${security_scan#*$'\t'}"
+if [ "$security_status" != "ADVISE" ] && [ "$security_status" != "SKIP" ]; then
+  security_status="ADVISE"
+  security_detail="risk path scan unavailable; run a security-auditor before landing"
+fi
+record "security" "$security_status" "$security_detail"
+
 # REJECT if any gate failed (SKIP does not reject).
 case "$ladder" in
   *"	FAIL	"*) verdict="REJECT" ;;
