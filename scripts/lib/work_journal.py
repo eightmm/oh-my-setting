@@ -222,13 +222,25 @@ _RAW_KEY_RE = re.compile(
 _AUTH_RE = re.compile(r"(?i)\b(authorization\s*[:=]\s*).*$")
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _SECRET_ASSIGN_RE = re.compile(
-    r"(?i)\b(?P<key>api[\s_-]?key|token|secret|password|passwd|credential)"
+    r"(?i)(?<![A-Za-z0-9])(?P<key>api[\s_-]?key|token|secret|password|passwd|credential)"
     r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
+_PEM_PATTERN = (
+    r"-----BE[G]IN [A-Z ]*PRIVATE KEY-----[\s\S]*?"
+    r"(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"
+)
+_PEM_RE = re.compile(_PEM_PATTERN)
 _TOKEN_RE = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    # Literals use the bracket idiom so this definition never matches the
+    # outbound scrubber's own detectors when harness sources are self-reviewed.
+    r"(?:gh[pousr]_[A-Za-z0-9_.-]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"sk-(?:live|test)?[_-]?[A-Za-z0-9_-]{10,}|"
-    r"xox[bap]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{20,})"
+    r"xox[bap]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{20,}|"
+    r"\bn[t]n_[0-9]{11}[A-Za-z0-9]{35}\b|"
+    r"AK[I]A[0-9A-Z]{16}|AI[z]a[0-9A-Za-z_-]{35}|"
+    r"glpa[t]-[A-Za-z0-9_-]{20,}|np[m]_[A-Za-z0-9]{36,}|"
+    r"\bey[J][A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|"
+    + _PEM_PATTERN + ")"
 )
 _CREDENTIAL_URL_RE = re.compile(
     # The lookbehind anchors each run of scheme characters once; without it the
@@ -444,7 +456,8 @@ def sanitize_multiline(value: str, maximum: int = MAX_EXPORT_BYTES,
     """
 
     lines = []
-    for line in str(value).splitlines():
+    # A key block spans lines; redact it whole before the per-line split.
+    for line in _PEM_RE.sub("[REDACTED]", str(value)).splitlines():
         leading = re.match(r"^[ \t]*", line)
         prefix = (leading.group(0) if leading else "")[:8]
         clean = sanitize_text(line[len(leading.group(0)) :] if leading else line, line_maximum)

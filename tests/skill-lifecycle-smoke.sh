@@ -346,6 +346,17 @@ test_skill_bundle_preview_import_update_and_rollback() {
     --source "$source" --json 2>&1)" && fail "preview accepted a credential file: $out"
   printf '%s' "$out" | grep >/dev/null -F 'sensitive' ||
     fail "credential bundle refusal was not explicit: $out"
+
+  # GitHub installation tokens carry an app id then a JWT, so the body holds
+  # `_` and `.`; a plain content file (not a sensitive path) must still be
+  # refused for its secret-shaped content.
+  rm "$source/.env"
+  printf '%s%s%s\n' 'gh' 's_' '1234567_eyJhbGciOiJIUzI1NiJ9.payload0123456789.signature0123456789' \
+    > "$source/references/notes.md"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
+    --source "$source" --json 2>&1)" && fail "preview accepted an installation-token bundle: $out"
+  printf '%s' "$out" | grep >/dev/null -F 'secret-shaped' ||
+    fail "installation token refusal was not explicit: $out"
 }
 
 test_corrupt_lock_hides_only_its_own_skill() {

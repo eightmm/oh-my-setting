@@ -13278,6 +13278,10 @@ test_scrubber_blocks_outbound_secret_shapes() {
   bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
     fail "scrubber should block GCP API key"
 
+  printf '%s%s%s%s\n' 'n' 'tn_' '12345678901' 'abcdefghijklmnopqrstuvwxyzABCDEFGHI' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block Notion integration token"
+
   printf '%s%s%s\n' 'https://hoo' 'ks.slack.com/services/' 'T000/B000/abcdefghijklmnopqrstuvwxyz' > "$f"
   bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
     fail "scrubber should block Slack webhook"

@@ -931,6 +931,53 @@ class JournalTestCase(unittest.TestCase):
         wj.sanitize_text("a" * 200000)
         self.assertLess(time.perf_counter() - started, 1.0)
 
+        # Provider token shapes are assembled at runtime so no literal here
+        # is a credential; each must be redacted, the near miss must not.
+        alnum = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+        shapes = {
+            "notion": "n" + "tn_" + "12345678901" + alnum[:35],
+            "aws": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+            "google": "AI" + "za" + alnum[:35],
+            "gitlab": "glp" + "at-" + alnum[:24],
+            "npm": "np" + "m_" + alnum[:36],
+            "jwt": "ey" + "J" + "hbGciOiJIUzI1" + "." + alnum[:24] + "." + alnum[:24],
+        }
+        for name, secret in shapes.items():
+            self.assertEqual(
+                wj.sanitize_text("value " + secret + " end"),
+                "value [REDACTED] end",
+                name,
+            )
+        pem = "-----BE" + "GIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY-----"
+        self.assertEqual(wj.sanitize_text("k " + pem + " tail"), "k [REDACTED] tail")
+        self.assertEqual(
+            wj.sanitize_text("-----BE" + "GIN PRIVATE KEY-----\nMIIEabc"), "[REDACTED]"
+        )
+        begin = "-----BE" + "GIN PRIVATE KEY-----"
+        end = "-----END PRIVATE KEY-----"
+        self.assertEqual(
+            wj.sanitize_multiline("keep\n" + begin + "\nMIIEbody\n" + end + "\ntail"),
+            "keep\n[REDACTED]\ntail",
+        )
+        self.assertEqual(
+            wj.sanitize_multiline("keep\n" + begin + "\nMIIEbody\nmore"), "keep\n[REDACTED]"
+        )
+        near_miss = "AK" + "IA" + "ABCDEFGHIJKLMNO"
+        self.assertEqual(wj.sanitize_text(near_miss), near_miss)
+        env_key = "GITHUB_" + "TOKEN"
+        self.assertEqual(
+            wj.sanitize_text(env_key + "=abc123"), env_key + "=[REDACTED]"
+        )
+
+        # GitHub variable-length installation tokens carry an app id and a
+        # JWT, so the body holds `_`, `.` and `-`; no fragment may survive.
+        installation = (
+            "gh" + "s_" + "1234567" + "_" + "ey" + "Jhbgcioijiuzi1nir"
+            + "." + "payload-part_0123456789" + "." + "signature-part_0123456789"
+        )
+        clean = wj.sanitize_text("use " + installation + " now")
+        self.assertEqual(clean, "use [REDACTED] now")
+
     def test_bounded_large_values(self):
         payload = base_event("large")
         payload["outcome"]["summary"] = "x" * 100000

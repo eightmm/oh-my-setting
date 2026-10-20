@@ -322,6 +322,12 @@ class CodexAppNotifyTest(unittest.TestCase):
         self.assertIn("SAFE_RESULT_TAIL", local)
         self.assertNotIn(sample, local)
         self.assertLessEqual(len(local.encode("utf-8")), 32769)
+        armor = "-----BE" + "GIN PRIVATE KEY-----"
+        for body in ("\nPEMBODY\n-----END PRIVATE KEY-----", "\nPEMBODY"):
+            text = codex_app_notify._safe_message("before\n" + armor + body + "\nafter", self.repo)
+            self.assertNotIn("PEMBODY", text)
+            self.assertNotIn("-----END", text)
+            self.assertIn("before", text)
         long_line = sample + " " + "x" * 9000 + " SAFE_RESULT_TAIL"
         local = codex_app_notify._safe_message(long_line, self.repo, maximum=32768)
         self.assertIn("SAFE_RESULT_TAIL", local)
