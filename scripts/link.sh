@@ -214,9 +214,14 @@ link_all() {
   # first install.
   PREVIOUS_OWNER="$(oms_install_receipt_owner 2>/dev/null)" || PREVIOUS_OWNER=""
   if [ -n "$PREVIOUS_OWNER" ]; then
-    # A vanished previous checkout keeps its recorded spelling.
     physical_owner="$(oms_install_physical_root "$PREVIOUS_OWNER")" &&
       PREVIOUS_OWNER="$physical_owner"
+  fi
+  # The receipt is only a claim: trust it to skip backups only when it names a
+  # live OMS checkout. A vanished or unexpected owner falls back to backing up.
+  if [ -n "$PREVIOUS_OWNER" ] &&
+     { [ ! -f "$PREVIOUS_OWNER/scripts/link.sh" ] || [ ! -f "$PREVIOUS_OWNER/rules/global-AGENTS.md" ]; }; then
+    PREVIOUS_OWNER=""
   fi
 
   link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.codex/AGENTS.md"

@@ -823,6 +823,32 @@ else
 fi
 [ -z "$(find "$relink_home" -name '*.backup.*' 2>/dev/null)" ] ||
   fail "uninstall left backups after a relink: $(find "$relink_home" -name '*.backup.*')"
+# A receipt is only a claim: one naming a directory that is not an OMS
+# checkout must not let a user link into it be replaced without a backup.
+relink_run "$relink_a" link.sh > "$TMP/relink-c.out" 2>&1 ||
+  fail "link before the receipt edit failed: $(cat "$TMP/relink-c.out")"
+relink_other="$TMP/not-oms"
+mkdir -p "$relink_other/rules"
+printf 'not oms\n' > "$relink_other/rules/global-AGENTS.md"
+relink_other="$(cd "$relink_other" && pwd -P)"
+python3 - "$relink_home/.config/oh-my-setting/install.json" "$relink_other" <<'PY' || fail "receipt edit failed"
+import json, sys
+path, owner = sys.argv[1], sys.argv[2]
+receipt = json.load(open(path, encoding="utf-8"))
+receipt["source_root"] = owner
+json.dump(receipt, open(path, "w", encoding="utf-8"))
+PY
+if [ "$relink_symlinks" = 1 ]; then
+  rm -f "$relink_home/.codex/AGENTS.md"
+  ln -s "$relink_other/rules/global-AGENTS.md" "$relink_home/.codex/AGENTS.md"
+  relink_run "$relink_b" link.sh > "$TMP/relink-d.out" 2>&1 ||
+    fail "relink after the receipt edit failed: $(cat "$TMP/relink-d.out")"
+  relink_kept="$(find "$relink_home/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' -type l)"
+  [ -n "$relink_kept" ] && [ "$(readlink "$relink_kept")" = "$relink_other/rules/global-AGENTS.md" ] ||
+    fail "a receipt naming a non-OMS directory let a user link be replaced without a backup"
+fi
+relink_run "$relink_b" uninstall.sh --yes > "$TMP/relink-uninstall2.out" 2>&1 ||
+  fail "second uninstall failed: $(cat "$TMP/relink-uninstall2.out")"
 
 # The default install — tools enabled — was the one path CI never ran, and it is
 # the path most users take. It is also what turned CI red for three commits:
