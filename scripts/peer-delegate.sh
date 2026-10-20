@@ -2048,12 +2048,14 @@ run_verify() {
     route_retry_terminal=1
     KEEP_WORKTREE=1
     cat "$verify_out" >> "$artifact"
-    printf '\n- verify exit: %s\n- post-verify protected boundary: blocked\n' \
-      "$verify_child_status" >> "$artifact"
+    timeout_note="$(ma_verify_timeout_note "$verify_child_status")"
+    printf '\n- verify exit: %s%s\n- post-verify protected boundary: blocked\n' \
+      "$verify_child_status" "${timeout_note:+ — $timeout_note}" >> "$artifact"
     return 0
   fi
   cat "$verify_out" >> "$artifact"
-  printf '\n- verify exit: %s\n' "$verify_status" >> "$artifact"
+  timeout_note="$(ma_verify_timeout_note "$verify_status")"
+  printf '\n- verify exit: %s%s\n' "$verify_status" "${timeout_note:+ — $timeout_note}" >> "$artifact"
   if [ "$worker_status" -eq 0 ]; then
     if [ "$verify_status" -eq 0 ]; then
       if ! delegate_attempt_transition review "" delegate-review; then
@@ -2113,7 +2115,8 @@ write_repair_prompt() {
       printf 'Inspect current files and git diff --cached --no-ext-diff --no-textconv --stat, then the relevant path-scoped diff. Preserve unrelated changes.\n'
     fi
     if [ -n "$VERIFY_CMD" ] && [ "$verify_status" -ne 0 ]; then
-      printf '\n## Failing Verification\n\n- command: %s\n- exit: %s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status"
+      timeout_note="$(ma_verify_timeout_note "$verify_status")"
+      printf '\n## Failing Verification\n\n- command: %s\n- exit: %s%s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status" "${timeout_note:+ — $timeout_note}"
       quote_tail "$verify_out" 4000 "verification output"
       printf '\n'
     fi

@@ -882,6 +882,9 @@ EOF
     ) >> "$gate_verify_temp" 2>&1
     gate_verify_exit=$?
     set -e
+    if [ "$gate_verify_exit" -eq 124 ]; then
+      printf '\n\n## Timeout\n\n%s\n' "$(ma_verify_timeout_note "$gate_verify_exit")" >> "$gate_verify_temp"
+    fi
     printf '\n\n## Exit\n\n%s\n' "$gate_verify_exit" >> "$gate_verify_temp"
   fi
 fi
@@ -1155,7 +1158,8 @@ print(json.dumps({
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass"
       else
-        echo "gate verify: fail (exit $gate_verify_exit) -> $gate_verify_artifact"
+        timeout_note="$(ma_verify_timeout_note "$gate_verify_exit")"
+        echo "gate verify: fail (exit $gate_verify_exit${timeout_note:+; $timeout_note}) -> $gate_verify_artifact"
       fi
   fi
   verdict_rc=0

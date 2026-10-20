@@ -809,7 +809,8 @@ PY
       else
         VERIFY_EXIT=$?
         VERIFICATION="command"
-        record "verify" "FAIL" "$VERIFY"
+        timeout_note="$(ma_verify_timeout_note "$VERIFY_EXIT")"
+        record "verify" "FAIL" "$VERIFY${timeout_note:+ — $timeout_note}"
       fi
     else
       record "verify" "SKIP" "no --verify and no base scripts/check.sh"
@@ -871,14 +872,15 @@ EOF
                 record "verify-floor" "PASS" "$floor_verify (restored from HEAD: $surface_detail)"
               else
                 floor_verify_exit=$?
+                floor_timeout_note="$(ma_verify_timeout_note "$floor_verify_exit")"
                 if [ -n "$ALLOW_FLOOR_CHANGE_REASON" ] && [ "$VERIFY_EXIT" = 0 ] && [ "$VERIFICATION" = command ]; then
                   FLOOR_CHANGE_USED=true
-                  record "verify-floor" "PASS" "owner override: base floor failed (exit $floor_verify_exit); reason: $ALLOW_FLOOR_CHANGE_REASON; $floor_verify (restored from HEAD: $surface_detail)"
+                  record "verify-floor" "PASS" "owner override: base floor failed (exit $floor_verify_exit); reason: $ALLOW_FLOOR_CHANGE_REASON; $floor_verify (restored from HEAD: $surface_detail)${floor_timeout_note:+ — $floor_timeout_note}"
                 else
                   floor_hint=""
                   [ "${OMS_HARNESS_CHILD:-0}" = 1 ] ||
                     floor_hint=" (intended contract change? owner override: --allow-floor-change REASON)"
-                  record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)$floor_hint"
+                  record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)$floor_hint${floor_timeout_note:+ — $floor_timeout_note}"
                 fi
               fi
             else

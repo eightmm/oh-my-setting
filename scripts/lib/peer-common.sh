@@ -475,6 +475,11 @@ run_verify_with_timeout() {
   ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$@"
 }
 
+ma_verify_timeout_note() {
+  [ "${1:-}" = 124 ] || return 0
+  printf 'timed out after %s (raise OMS_PEER_VERIFY_TIMEOUT)' "${OMS_PEER_VERIFY_TIMEOUT:-10m}"
+}
+
 ma_git_diff_base() {
   local repo="$1"
   if [ -n "${BASE_REF:-}" ]; then

@@ -17166,9 +17166,15 @@ test_patch_admit_rejects_failed_verify() {
   local repo="$TMP/admit-verify"
   local SH="$ROOT/scripts/patch-admit.sh"
   make_patch_repo "$repo" $'base\nmore\n'
-  if ( "$SH" --patch "$repo/change.patch" --repo "$repo" --verify 'exit 5' >/dev/null 2>&1 ); then
+  if ( OMS_PEER_VERIFY_TIMEOUT=1s "$SH" --patch "$repo/change.patch" --repo "$repo" --verify 'echo verifier-started; sleep 30' >/dev/null 2>&1 ); then
     fail "failed verify should reject the patch"
   fi
+  local report
+  report="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
+  [ -n "$report" ] || fail "no admission report written for timed-out verify"
+  assert_file_contains "$report" "verify: FAIL"
+  assert_file_contains "$report" "timed out after 1s (raise OMS_PEER_VERIFY_TIMEOUT)"
+  assert_file_contains "$report" "verifier-started"
 }
 
 test_patch_admit_rejects_secret_in_patch() {
