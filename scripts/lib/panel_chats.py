@@ -28,6 +28,7 @@ ADVISOR_MAX_AGE = 1800
 NATIVE_ACTIVE = 600          # a subagent or workflow row lasts this long after its file was last written
 NATIVE_MAX = 32              # newest rows per kind and session
 NATIVE_META_BYTES = 4096
+CODEX_META_BYTES = 65537     # Codex session_meta may include base_instructions; matches native_index's header bound
 WORKFLOW_BYTES = 256 * 1024  # journal tail read for display counts
 USAGE_FILE_BYTES = 8 * 1024 * 1024      # appended transcript bytes read per file per refresh
 USAGE_REFRESH_BYTES = 16 * 1024 * 1024  # ... and per refresh across every transcript
@@ -39,6 +40,7 @@ USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_t
 ADVISOR_MODELS = (("fable", "Fable 5.1"), ("opus", "Opus 5.5"), ("sonnet", "Sonnet 5.5"))
 _transcripts = {}
 _usage = {}  # transcript path -> read offset, file identity and per-message token totals
+_codex_usage_cache = {}  # Codex rollout path -> read offset, file identity and last token_count total
 _refresh = [0]  # counts native_subagents() calls, so entries not shown in the latest one are dropped
 
 
@@ -372,6 +374,115 @@ def _native_agents(folder, now, budget):
     return found
 
 
+def _codex_rollouts(home):
+    """Yield bounded, non-symlink Codex rollout paths under sessions and archived_sessions."""
+    scanned = files = 0
+    pending = [(home / "sessions", 0), (home / "archived_sessions", 0)]
+    while pending and scanned < MAX_ENTRIES and files < MAX_FILES:
+        folder, level = pending.pop()
+        try:
+            if folder.is_symlink() or not folder.is_dir():
+                continue
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > MAX_ENTRIES or files >= MAX_FILES:
+                        break
+                    if entry.is_dir(follow_symlinks=False) and level < 3:
+                        pending.append((Path(entry.path), level + 1))
+                    elif entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False):
+                        files += 1
+                        yield Path(entry.path)
+        except OSError:
+            continue
+
+
+def _codex_usage(path, budget):
+    """Last total_token_usage.total_tokens in a Codex token_count event, cached by rollout identity."""
+    path = str(path)
+    try:
+        info = os.lstat(path)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            raise OSError("unsafe Codex rollout")
+    except OSError:
+        _codex_usage_cache.pop(path, None)
+        return None
+    ident = (info.st_dev, info.st_ino)
+    entry = _codex_usage_cache.get(path)
+    if entry and (entry["id"] != ident or info.st_size < entry["offset"] or info.st_mtime_ns < entry["mtime"]):
+        entry = None
+    if entry is None:
+        entry = _codex_usage_cache[path] = {"id": ident, "mtime": 0, "offset": 0, "tokens": None}
+    entry["mtime"], entry["refresh"] = info.st_mtime_ns, _refresh[0]
+    if entry["offset"] < info.st_size and budget[0] > 0:
+        limit = min(USAGE_FILE_BYTES, budget[0])
+        try:
+            data = _read_owned(path, limit, start=entry["offset"], expect=ident)
+        except OSError:
+            return entry["tokens"]
+        budget[0] -= len(data)
+        end = data.rfind(b"\n") + 1
+        for line in data[:end].split(b"\n"):
+            try:
+                record = json.loads(line)
+                if record.get("type") != "event_msg":
+                    continue
+                payload = record["payload"]
+                if payload.get("type") != "token_count":
+                    continue
+                usage = payload["info"]["total_token_usage"]
+                count = usage["total_tokens"]
+                if type(count) is int and count >= 0:
+                    entry["tokens"] = count
+            except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                continue
+        entry["offset"] += end
+    return entry["tokens"]
+
+
+def _codex_native_agents(home, consumer, now, budget):
+    """Codex subagent rollouts whose metadata names this main thread as their parent."""
+    sessions = native_index({consumer}).get("codex", {}).get(consumer) or ()
+    if len(sessions) != 1:
+        return []
+    main_id = next(iter(sessions))
+    found = []
+    for path in _codex_rollouts(home):
+        try:
+            info = path.lstat()
+            if not (0 <= now - info.st_mtime <= NATIVE_ACTIVE) or budget[0] <= 0:
+                continue
+            # session_meta is the first record; its size is bounded like native_index's metadata read.
+            first = _read_owned(path, min(CODEX_META_BYTES, budget[0]))
+            budget[0] -= len(first)
+            if b"\n" not in first:
+                continue
+            metadata = json.loads(first.split(b"\n", 1)[0])
+            if metadata.get("type") != "session_meta":
+                continue
+            meta = metadata["payload"]
+            source = meta.get("source") if isinstance(meta.get("source"), dict) else {}
+            spawned = source.get("subagent")
+            if (meta.get("parent_thread_id") != main_id or not isinstance(spawned, dict)
+                    or not isinstance(spawned.get("thread_spawn"), dict)):
+                continue
+            label = meta.get("agent_nickname") or meta.get("agent_path") or "Codex subagent"
+            title = clean(label, 80) if isinstance(label, str) else "Codex subagent"
+            agent_id = meta.get("id")
+            if not isinstance(agent_id, str) or not agent_id:
+                agent_id = path.stem
+            row = {"id": agent_id, "title": title,
+                   "active": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(info.st_mtime))}
+            tokens = _codex_usage(path, budget)
+            if tokens is not None:
+                row["tokens"] = tokens
+            found.append(row)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            continue
+    return sorted(found, key=lambda row: row["active"], reverse=True)[:NATIVE_MAX]
+
+
 def _run_agents(run, now, budget):
     """Token totals and live/total counts over the agent transcripts under one workflow run directory."""
     files = []
@@ -440,14 +551,25 @@ def native_subagents(members):
     {main participant: {"agents": [...], "workflows": [...]}}, in memory only; every failure drops the one
     main, file or row it touches."""
     mains = _claude_mains(members)
+    codex_mains = {m["consumer"]: m["participant"] for m in members
+                   if m.get("provider") == "codex" and m.get("role") == "main" and m.get("joined")
+                   and isinstance(m.get("consumer"), str) and len(m["consumer"]) == 32}
+    all_mains = [("claude", key, value) for key, value in mains.items()]
+    all_mains.extend(("codex", key, value) for key, value in codex_mains.items())
     found = {}
-    if not mains:
+    if not all_mains:
         return found
     home, now = _claude_home(), time.time()
+    codex_home = Path(os.environ.get("CODEX_HOME") or os.environ.get("OMS_CODEX_HOME") or Path.home() / ".codex")
     budget = [USAGE_REFRESH_BYTES]
     _refresh[0] += 1
-    for consumer, participant in list(mains.items())[:8]:
+    for provider, consumer, participant in all_mains[:8]:
         try:
+            if provider == "codex":
+                agents = _codex_native_agents(codex_home, consumer, now, budget)
+                if agents:
+                    found[participant] = {"agents": agents, "workflows": []}
+                continue
             path = _main_transcript(home, consumer)
             folder = path.with_suffix("") if path else None
             if folder is None or not UUID.fullmatch(path.stem) or folder.is_symlink() or not folder.is_dir():
@@ -462,8 +584,16 @@ def native_subagents(members):
                 found[participant] = row
         except Exception:  # best-effort board extra: a surprise must never reach the panel tick
             continue
-    for path in [path for path, entry in _usage.items() if entry["refresh"] != _refresh[0]]:
-        del _usage[path]
+    for cache in (_usage, _codex_usage_cache):
+        try:
+            for path, entry in list(cache.items()):
+                try:
+                    if entry.get("refresh") != _refresh[0]:
+                        del cache[path]
+                except Exception:
+                    continue
+        except Exception:
+            continue
     return found
 
 

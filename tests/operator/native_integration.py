@@ -1167,6 +1167,38 @@ advisor_use = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:
 advisor_log.write_text("partial{\n" + json.dumps(advisor_use) + "\nnot json advisor\n")
 claude_main = {"participant": "adv-main", "provider": "claude", "role": "main", "joined": True, "label": "Claude",
                "consumer": advisor_consumer, "seq": 1}
+# Codex native subagents are linked through the child rollout's session_meta parent_thread_id.
+codex_home = temporary / "native-codex"
+codex_sessions = codex_home / "sessions" / "2026" / "10" / "21"
+codex_sessions.mkdir(parents=True)
+codex_sid = "1b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+codex_consumer = hashlib.sha256(codex_sid.encode()).hexdigest()[:32]
+codex_main = {"participant": "codex-main", "provider": "codex", "role": "main", "joined": True,
+              "consumer": codex_consumer, "seq": 2}
+codex_parent = codex_sessions / ("rollout-2026-10-21T04-00-00-" + codex_sid + ".jsonl")
+codex_parent.write_text(json.dumps({"type": "session_meta", "payload": {"id": codex_sid}}) + "\n" +
+                        json.dumps({"type": "response_item", "payload": {"type": "function_call", "name": "spawn_agent",
+                                                                            "arguments": {"task_name": "inspect"}}}) + "\n")
+codex_child_id = "2b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+codex_child = codex_sessions / ("rollout-2026-10-21T04-01-00-" + codex_child_id + ".jsonl")
+codex_child.write_text(json.dumps({"type": "session_meta", "payload": {"id": [codex_child_id], "base_instructions": "x" * 5000,
+    "parent_thread_id": codex_sid, "source": {"subagent": {"thread_spawn": {"parent_thread_id": codex_sid,
+    "agent_path": "/root/inspect", "agent_nickname": "Inspect"}}}, "agent_nickname": "Inspect"}}) + "\n" +
+    json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}) + "\n")
+codex_bad = codex_sessions / ("rollout-2026-10-21T04-02-00-3b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d.jsonl")
+codex_bad.write_text("{malformed metadata\n")
+os.utime(codex_parent, (time.time(),) * 2)
+os.utime(codex_child, (time.time(),) * 2)
+os.utime(codex_bad, (time.time(),) * 2)
+panel_chats._codex_usage_cache["malformed-fixture-entry"] = None
+with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+    try:
+        native = panel_chats.native_subagents([codex_main])
+        rows = {row["id"]: row for row in native["codex-main"]["agents"]}
+        assert set(rows) == {codex_child.stem} and rows[codex_child.stem]["tokens"] == 1234, native
+        assert rows[codex_child.stem]["title"] == "Inspect", rows
+    finally:
+        panel_chats._codex_usage_cache.pop("malformed-fixture-entry", None)
 with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     open_call = panel_chats.native_advisors([claude_main])
     assert open_call["adv-main"]["model"] == "Fable 5.1" and len(open_call["adv-main"]["started"]) == 5, open_call
@@ -1250,6 +1282,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     (agents_dir / "agent-a4.meta.json").write_text("{not json")
     (agents_dir / "agent-a5.jsonl").symlink_to(agents_dir / "agent-a1.jsonl")
     found = panel_chats.native_subagents([claude_main])
+    assert set(found) == {"adv-main"} and found["adv-main"]["agents"], found
     agents = shown(found)["agents"]
     assert set(agents) == {"a1", "a3", "a4"} and found["adv-main"]["workflows"] == [], found
     assert agents["a1"]["title"] == "Audit the parser" and agents["a3"]["title"] == "Claude Code agent", agents
