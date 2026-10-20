@@ -572,7 +572,14 @@ def _validate_dispatch_verifier(repo, verify):
             else:
                 cursor += 2
                 continue
-            requested = selector.split(",") if option == "--section" else [selector]
+            # run-smoke-shard.sh matches one --only argument by literal spaces; a tab, newline or
+            # comma would select nothing and exit 0, so those stay part of an (unknown) name.
+            if option == "--section":
+                requested = selector.split(",")
+            elif selector.startswith("test_"):
+                requested = [name for name in selector.split(" ") if name]
+            else:
+                requested = [selector]
             unknown = [name for name in requested if name not in valid]
             if unknown:
                 raise ValueError("unknown %s value(s): %s; valid names: %s" %

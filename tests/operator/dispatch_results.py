@@ -60,6 +60,23 @@ except ValueError as error:
     assert "valid names" in str(error), error
 panel._validate_dispatch_verifier(root, "bash tests/run-smoke-shard.sh --only test_oms_allowlist_stays_in_sync_with_scripts")
 panel._validate_dispatch_verifier(root, "bash tests/autonomy-plan-run-smoke.sh --only test_context_pack")
+# The runner word-splits one --only argument, so a space-separated pair passes; a comma is not a separator.
+panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only 'test_poll_interval_adapts_to_elapsed_and_remaining test_file_lock_missing_poll_helper_falls_back'")
+try:
+    panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only 'test_poll_interval_adapts_to_elapsed_and_remaining test_missing_smoke_case'")
+    raise AssertionError("pair with an unknown smoke test was accepted")
+except ValueError as error:
+    assert str(error).startswith("unknown --only value(s): test_missing_smoke_case; "), error
+try:
+    panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only 'test_poll_interval_adapts_to_elapsed_and_remaining,test_file_lock_missing_poll_helper_falls_back'")
+    raise AssertionError("comma-separated smoke tests were accepted")
+except ValueError as error:
+    assert str(error).startswith("unknown --only value(s): test_poll_interval_adapts_to_elapsed_and_remaining,test_file_lock_missing_poll_helper_falls_back; "), error
+try:
+    panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only 'test_poll_interval_adapts_to_elapsed_and_remaining\ttest_file_lock_missing_poll_helper_falls_back'")
+    raise AssertionError("tab-separated smoke tests were accepted")
+except ValueError as error:
+    assert str(error).startswith("unknown --only value(s): "), error
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
     peer = "claude" if owner == "codex" else "codex"
