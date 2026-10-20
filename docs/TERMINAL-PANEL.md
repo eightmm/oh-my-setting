@@ -101,7 +101,19 @@ automatically once every prerequisite is `done`: after an authorized land, use
 completion uses `oms agent-plan accept-main-research`. Owner `--finalize` records
 the result but does not itself mark the plan task done; the plan makes dependents
 ready automatically, so do not manually release them. `oms autopilot run`
-remains the headless workflow.
+remains the headless workflow. When the user asks the panel main to complete a
+project, or this repository already has an autopilot contract, the main
+supervises that campaign instead of starting a competing panel plan driver: it
+checks autopilot status and the receipt before acting, reviews the exact
+proposal digest before running, and uses only `oms autopilot propose`, `run
+--review-mode gate`, `status`, or validated receipt re-entry. It does not dispatch
+panel write workers for campaign tasks, release or reclaim them, reset cycle
+exhaustion, or override a parked receipt. Read-only reviewer, critic, or
+security-auditor judgment can inform proposals, parks, and final changes. Accept
+only after gated whole-change review and fresh acceptance. Without a campaign,
+ordinary panel plan execution above is unchanged. To start without a panel, run
+`oms autopilot propose`, review its exact proposal and digest, then run with
+`--review-mode gate` and `--expected-proposal-sha256`.
 
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,

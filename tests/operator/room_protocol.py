@@ -272,7 +272,16 @@ for owner in panel.PROVIDERS:
     assert "For each landed write patch, accepted also requires a passing automatic review gate" in guidance
     assert "do not manually release dependencies" in guidance
     assert "For tasks not covered by a PROJECT.md plan" not in guidance
-    assert "call oms goal-drive" not in guidance
+    assert "if the user asks you to complete this project or an autopilot contract exists" in guidance
+    assert "Before any action inspect oms autopilot status and its receipt" in guidance
+    assert "before run, review the exact proposal bytes and digest" in guidance
+    assert "oms autopilot propose, run with --review-mode gate" in guidance
+    assert "Never dispatch panel write workers for campaign-owned tasks" in guidance
+    assert "release or reclaim their tasks" in guidance
+    assert "reset a contract to evade cycle exhaustion" in guidance
+    assert "override a parked receipt" in guidance
+    assert "gated whole-change review and fresh acceptance pass" in guidance
+    assert "Without a campaign, ordinary panel plan execution above is unchanged" in guidance
     assert "only when publication is authorized" in panel.bootstrap(owner, project)
     assert "git checkout --no-track -b oms/<task>" in panel.bootstrap(owner, project)
     assert "No upstream is needed" in panel.bootstrap(owner, project)

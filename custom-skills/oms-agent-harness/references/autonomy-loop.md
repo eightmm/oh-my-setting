@@ -18,6 +18,21 @@ review to an `r1-` proposal and use `status` plus its validated continuation
 after an interruption. Never mechanically chain planner output into `run`.
 Ordinary bounded edits need no proposal or autonomous runner.
 
+When a panel main is asked to complete a project, or an autopilot contract
+already exists for its repository, the main supervises the same campaign rather
+than starting a competing panel plan driver. It inspects autopilot status and
+the receipt before acting, reviews the exact proposal bytes and digest before
+run, and uses only `oms autopilot propose`, `run --review-mode gate`, `status`,
+or validated receipt re-entry. It never dispatches panel write workers for
+campaign-owned tasks, releases or reclaims them, resets cycle exhaustion, or
+overrides a parked receipt. Read-only reviewer, critic, or security-auditor
+judgment may inform proposals, parks, and final changes. Acceptance requires
+the gated whole-change review and fresh acceptance. Without a campaign, the
+ordinary panel plan lifecycle remains unchanged. To start with a panel, ask the
+panel main to complete the project; without a panel, use `oms autopilot propose`
+and then run the exact reviewed proposal with `--review-mode gate` and its
+`--expected-proposal-sha256`.
+
 An analysis request does not authorize writes. Local implementation and commits
 may follow a clear implementation request; a Draft PR requires explicit current
 or standing repo authority. Existing-branch updates, push, merge, ready, tag,
