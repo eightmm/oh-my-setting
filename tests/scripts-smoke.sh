@@ -30971,10 +30971,41 @@ import os, stat, sys
 assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o700
 PY
 
+  case "$out" in *"commits behind"*) fail "current HEAD must not warn: $out" ;; esac
+
   worktree_parent="$(dirname "$worktree")"
   git -C "$project" worktree remove --force "$worktree" >/dev/null 2>&1 ||
     fail "could not clean the kept delegate worktree"
   rm -rf "$worktree_parent"
+
+  # A shared checkout two commits behind the known remote default is a strict
+  # ancestor: warn on stderr and in the artifact, without moving any ref.
+  local base_sha artifact
+  base_sha="$(git -C "$project" rev-parse HEAD)"
+  printf 'two\n' >> "$project/file.txt"
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' commit -qam two
+  printf 'three\n' >> "$project/file.txt"
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' commit -qam three
+  git -C "$project" update-ref refs/remotes/origin/main HEAD
+  git -C "$project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  git -C "$project" reset -q --hard "$base_sha"
+  out="$(HOME="$home_dir" XDG_CACHE_HOME="$cache_dir" \
+    OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --repo "$project" --to codex --prompt 'stale base regression' \
+      --no-verify 2>&1)" || fail "stale-base dry-run failed: $out"
+  case "$out" in *"2 commits behind origin/main (strict ancestor)"*) ;; *) fail "stale base must warn: $out" ;; esac
+  artifact="$(printf '%s\n' "$out" | sed -n 's/^dry-run: codex -> //p' | tail -n 1)"
+  grep -q '2 commits behind origin/main' "$artifact" || fail "stale-base warning missing from artifact"
+  grep '2 commits behind origin/main' "$artifact" | grep -q "$project" &&
+    fail "stale-base artifact line must not embed the repository path"
+  [ "$(git -C "$project" rev-parse HEAD)" = "$base_sha" ] || fail "warning must not move HEAD"
+  # Without upstream or origin/HEAD, origin/main still names the default.
+  git -C "$project" symbolic-ref --delete refs/remotes/origin/HEAD
+  out="$(HOME="$home_dir" XDG_CACHE_HOME="$cache_dir" \
+    OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --repo "$project" --to codex --prompt 'stale base without origin HEAD' \
+      --no-verify 2>&1)" || fail "stale-base dry-run without origin/HEAD failed: $out"
+  case "$out" in *"2 commits behind origin/main (strict ancestor)"*) ;; *) fail "stale base without origin/HEAD must warn: $out" ;; esac
 }
 
 test_provider_permissions_apply_preserves_a_concurrent_settings_edit() {

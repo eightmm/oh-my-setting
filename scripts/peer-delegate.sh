@@ -1488,6 +1488,34 @@ if [ "${dirty_count:-0}" -gt 0 ]; then
   echo "note: $dirty_count file(s) differ from HEAD here; the worker sees HEAD, not your working tree" >&2
 fi
 
+# A shared checkout left on an old commit silently hands every worker old code.
+# Compare the worker base with the remote default already known locally (no
+# fetch): upstream if set, else origin/HEAD. Warn only for a strict ancestor.
+stale_base_note=""
+if [ "$WORKER_ACCESS" = write ]; then
+  stale_ref="$(git -C "$DELEGATE_SOURCE_REPO" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+  [ -n "$stale_ref" ] || stale_ref="$(git -C "$DELEGATE_SOURCE_REPO" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  # A clone made before origin/HEAD existed, or a branch without upstream,
+  # still knows origin/main or origin/master.
+  for stale_guess in origin/main origin/master; do
+    [ -z "$stale_ref" ] || break
+    git -C "$DELEGATE_SOURCE_REPO" show-ref --verify --quiet "refs/remotes/$stale_guess" && stale_ref="$stale_guess"
+  done
+  stale_ref="${stale_ref//$'\r'/}"
+  # The commit the worker's worktree actually checked out, not the live HEAD.
+  stale_base="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  stale_base="${stale_base//$'\r'/}"
+  if [ -n "$stale_ref" ] && [ -n "$stale_base" ]; then
+    stale_behind="$(git -C "$DELEGATE_SOURCE_REPO" rev-list --count "$stale_base..$stale_ref" 2>/dev/null || true)"
+    stale_behind="${stale_behind//$'\r'/}"
+    if [ "${stale_behind:-0}" -gt 0 ] &&
+        git -C "$DELEGATE_SOURCE_REPO" merge-base --is-ancestor "$stale_base" "$stale_ref" 2>/dev/null; then
+      stale_base_note="warning: worker base HEAD is $stale_behind commits behind $stale_ref (strict ancestor); the worker sees old code. Fast-forward the shared checkout before dispatching."
+      echo "$stale_base_note Recovery: git -C $DELEGATE_SOURCE_REPO merge --ff-only $stale_ref" >&2
+    fi
+  fi
+fi
+
 # Liveness marker so another agent (or `oms state`) can see this worker is
 # in flight, not hung or dead. The launching process is the only writer;
 # cleanup removes it on normal exit, so a leftover file with a dead pid is a
@@ -1621,6 +1649,7 @@ fi
   [ "${dirty_count:-0}" -eq 0 ] ||
     printf -- '- base: HEAD (%s file(s) uncommitted in the caller tree were NOT visible to the worker)\n' \
       "$dirty_count"
+  [ -z "$stale_base_note" ] || printf -- '- %s\n' "$stale_base_note"
   if [ "$KEEP_WORKTREE" = 1 ]; then
     printf -- '- worktree: %s\n\n' "$worktree"
   else
