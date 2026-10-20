@@ -1993,7 +1993,7 @@ oms_worker_gitmeta_admin_file_identity() {  # PATH
 oms_worker_gitmeta_admin_changes_are_safe() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local repo="$1" before="$2" worker="${3:-}"
   local common entry receipt physical line side head current_path gitfile baseline_path
-  local field baseline_identity current_identity baseline_gitdir_identity current_gitdir_identity
+  local field baseline_identity current_identity
   local in_place_safe metadata_complete
   OMS_WG_GITMETA_ADMIN_QUIET=0
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
