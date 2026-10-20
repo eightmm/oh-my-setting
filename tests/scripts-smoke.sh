@@ -10833,6 +10833,17 @@ EOF
 
   assert_file_contains "$capture" "No third-party dependency may enter src/"
   assert_file_contains "$capture" "CLI: greet NAME prints a greeting"
+  assert_file_contains "$capture" 'assignment: {"provider": "codex", "workload": "routine"}'
+
+  rm -f "$capture"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PANEL_MAIN_ATTEMPT=panel-main \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/panel-out" 2>&1 ||
+    fail "panel-owned decomposition should propose: $(tail -4 "$project/panel-out")"
+  assert_file_contains "$capture" "This plan is owned by a live panel main"
+  if grep -Fq 'assignment: {"provider": "codex", "workload": "routine"}' "$capture"; then
+    fail "panel-owned plan must not recommend a default provider assignment"
+  fi
 
   # Over budget, the run refuses instead of truncating: a cut keeps the early
   # decisions and drops the later ones that revised them. One enormous line

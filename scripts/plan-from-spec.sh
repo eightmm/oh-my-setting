@@ -886,9 +886,16 @@ for shared interfaces and actual prerequisites. Resolve design uncertainty from
 the confirmed contract rather than inventing architecture. The parent may be
 Codex, Claude Code, Antigravity, or another agent; parent and worker transports
 are independent. Do not infer a provider hierarchy from this planner call.
-For substantial routine work with known scope and verification, add optional
-assignment: {\"provider\": \"$WORKER_PROVIDER\", \"workload\": \"routine\"}.
-Otherwise omit assignment to preserve the run's explicit model/defaults.
+$(if [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ]; then
+  cat <<'PANEL_ASSIGNMENT'
+This plan is owned by a live panel main. Do not add default worker-provider
+assignments: ordinary panel role dispatch must remain free to apply tier
+routing. Keep an assignment only when it is an explicit task-level proposal
+that the parent review elects to retain.
+PANEL_ASSIGNMENT
+else
+  printf 'For substantial routine work with known scope and verification, add optional\nassignment: {"provider": "%s", "workload": "routine"}.\nOtherwise omit assignment to preserve the run\047s explicit model/defaults.\n' "$WORKER_PROVIDER"
+fi)
 An assignment owns the complete task route, not a partial overlay. Parent review
 may select an already-authorized registered transport and optional model,
 fallback_model, reasoning_effort, workload (standard or routine). Do not invent

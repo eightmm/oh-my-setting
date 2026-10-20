@@ -83,6 +83,25 @@ OMS does not restore Pi; it reports no verified replacement main and retains
 the handoff file and room claims for recovery. `--model`
 selects an exact installed catalog model; swap has no dry-run and requires tmux.
 
+For a goal bounded by `PROJECT.md`, the main reads the user's request scope,
+`PROJECT.md` and its References before planning. It proposes bounded tasks with
+`oms plan-from-spec`, reviews the proposal, and applies the reviewed bytes with
+`--apply` and `--expected-proposal-sha256`. Applied proposal tasks are ordinary
+shared-plan tasks and use the same lifecycle as every other plan task: claim a
+ready task, dispatch it with `--task-id`, verify and inspect the work, integrate
+it with the required checks, run `oms agent-plan review` after acceptance, and
+record the owner result with `oms panel --finalize`. Choose the role from the
+task's scope and source, rely on the automatic reviewer gate, and add a critic
+or security-auditor when the change warrants one. Use `oms agent-plan add` only
+for bounded gaps outside the reviewed proposal. Dependencies become ready
+automatically once every prerequisite is `done`: after an authorized land, use
+`oms agent-plan finish --id ID --landed-commit SHA`; after patch-land, use
+`finish` with its expected landing receipt. Eligible verified local research
+completion uses `oms agent-plan accept-main-research`. Owner `--finalize` records
+the result but does not itself mark the plan task done; the plan makes dependents
+ready automatically, so do not manually release them. `oms autopilot run`
+remains the headless workflow.
+
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,
 and call results; `--repo` still selects the source and execution repository

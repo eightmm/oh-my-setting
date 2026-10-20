@@ -254,6 +254,22 @@ for owner in panel.PROVIDERS:
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project)
     assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
+    guidance = panel.bootstrap(owner, project)
+    assert "PROJECT.md and its References" in guidance and "oms plan-from-spec" in guidance
+    assert "--expected-proposal-sha256" in guidance and "--finalize" in guidance
+    assert "Tasks from an applied proposal are ordinary shared-plan tasks" in guidance
+    assert "claim a ready task" in guidance and "delegate it (--task-id moves it" in guidance
+    assert "oms agent-plan review after acceptance" in guidance
+    assert "record the owner result with oms panel --finalize" in guidance
+    assert "oms agent-plan add only" in guidance
+    assert "Dependent tasks become ready automatically" in guidance
+    assert "oms agent-plan finish --id ID --landed-commit SHA" in guidance
+    assert "after patch-land, use finish with its expected landing receipt" in guidance
+    assert "oms agent-plan accept-main-research" in guidance
+    assert "Owner --finalize records the result but does not itself mark a plan task done" in guidance
+    assert "do not manually release dependencies" in guidance
+    assert "For tasks not covered by a PROJECT.md plan" not in guidance
+    assert "call oms goal-drive" not in guidance
     assert "only when publication is authorized" in panel.bootstrap(owner, project)
     assert "git checkout --no-track -b oms/<task>" in panel.bootstrap(owner, project)
     assert "No upstream is needed" in panel.bootstrap(owner, project)
