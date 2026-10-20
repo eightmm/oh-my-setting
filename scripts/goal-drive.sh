@@ -30,6 +30,7 @@ PROVIDER="codex"
 MAX_CYCLES=3
 AUTO_REPAIR=0
 RUN_ID_OVERRIDE=""
+CONTRACT_ID=""
 RETRY_KNOWN=0
 ALLOW_VERIFIER_CHANGE=0
 # Empty when not allowed; carries the literal flag when it is. Every landing
@@ -50,6 +51,7 @@ COMMIT_RECEIPT_SHA=""
 usage() {
   cat <<'EOF'
 Usage: goal-drive.sh [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID]
+                     [--contract-id OWNER_ID]
                      [--auto-repair] [--retry-known] [--model MODEL]
                      [--fallback-model MODEL] [--reasoning-effort E]
                      [--provider-timeout DUR] [--expected-ref REF]
@@ -70,6 +72,7 @@ it parked; a later run whose acceptance passes resolves those park rows.
   --to PROVIDER   Default worker for tasks without an assignment (default: codex).
   --max-cycles N  Hard cycle cap (default 3, max 10).
   --run-id ID      Optional caller correlation receipt (1..64 safe characters).
+  --contract-id OWNER_ID  Internal autopilot lifetime-cycle identity.
   --auto-repair   Run one same-lease repair delegation after a failed landing,
                   then retry landing once before parking.
   --retry-known   Forward the explicit unchanged-failure retry to plan-run.
@@ -103,6 +106,9 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--run-id requires an id"
       [ -n "$2" ] || fail "--run-id requires a non-empty id"
       RUN_ID_OVERRIDE="$2"; shift 2 ;;
+    --contract-id)
+      [ "$#" -ge 2 ] || fail "--contract-id requires an id"
+      CONTRACT_ID="$2"; shift 2 ;;
     --auto-repair) AUTO_REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; AVC_FLAG="--allow-verifier-change"; shift ;;
@@ -117,6 +123,14 @@ while [ "$#" -gt 0 ]; do
     *) fail "unknown argument: $1" ;;
   esac
 done
+
+case "$CONTRACT_ID" in
+  "") ;;
+  owner_*)
+    case "${CONTRACT_ID#owner_}" in *[!0-9a-f]*|"") fail "--contract-id is invalid" ;; esac
+    [ "${#CONTRACT_ID}" -eq 38 ] || fail "--contract-id is invalid" ;;
+  *) fail "--contract-id is invalid" ;;
+esac
 
 [ -n "$COMMIT_TASK" ] || [ -z "$COMMIT_MESSAGE" ] || fail "--commit-message requires --commit-task"
 [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
@@ -271,6 +285,29 @@ TERMINAL_RECEIPT="$(python3 -c 'import os; print(os.urandom(32).hex())' | tr -d 
 case "$TERMINAL_RECEIPT" in *[!0-9a-f]*|"") fail "invalid terminal receipt" ;; esac
 [ "${#TERMINAL_RECEIPT}" -eq 64 ] || fail "invalid terminal receipt"
 CYCLE=0
+CONTRACT_CYCLES=0
+if [ -n "$CONTRACT_ID" ]; then
+  CONTRACT_CYCLES="$(OMS_GD_CONTRACT="$CONTRACT_ID" python3 -c '
+import json, os, sys
+count = 0
+try:
+    handle = open(sys.argv[1], encoding="utf-8")
+except OSError:
+    print(0)
+    raise SystemExit
+with handle:
+    for line in handle:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, dict) and row.get("kind") == "autopilot-cycle"
+                and row.get("contract_id") == os.environ["OMS_GD_CONTRACT"]):
+            count += 1
+print(count)
+' "$PROGRESS" | tr -d '\r')" || fail "cannot count autopilot contract cycles"
+  case "$CONTRACT_CYCLES" in *[!0-9]*|"") fail "invalid autopilot cycle count" ;; esac
+fi
 INTENT_ID=""
 INTENT_TASK=""
 INTENT_BASE=""
@@ -2169,8 +2206,21 @@ print(found)
   fi
   prev_tree="$tree"; prev_accept_out="$accept_digest"
 
+  if [ -n "$CONTRACT_ID" ] && [ "$CONTRACT_CYCLES" -ge "$MAX_CYCLES" ]; then
+    park "cycles-exhausted" "autopilot contract already used $CONTRACT_CYCLES of $MAX_CYCLES cycle(s) across resumes; review progress.jsonl before starting a fresh contract"
+  fi
   if [ "$CYCLE" -gt "$MAX_CYCLES" ]; then
     park "cycles-exhausted" "acceptance still failing after $MAX_CYCLES cycle(s); review progress.jsonl, then extend the plan or raise --max-cycles"
+  fi
+  if [ -n "$CONTRACT_ID" ]; then
+    OMS_GD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_GD_CONTRACT="$CONTRACT_ID" \
+      OMS_GD_RUN="$RUN_ID" OMS_GD_CYCLE="$CYCLE" python3 -c '
+import json, os
+print(json.dumps({"schema": 1, "kind": "autopilot-cycle",
+    "ts": os.environ["OMS_GD_TS"], "contract_id": os.environ["OMS_GD_CONTRACT"],
+    "run_id": os.environ["OMS_GD_RUN"], "cycle": int(os.environ["OMS_GD_CYCLE"])}))
+' | progress_append || fail "cannot durably record autopilot contract cycle"
+    CONTRACT_CYCLES=$((CONTRACT_CYCLES + 1))
   fi
 
   head_before="$(git -C "$REPO" rev-parse HEAD)"

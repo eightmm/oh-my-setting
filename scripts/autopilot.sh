@@ -1581,6 +1581,7 @@ accept_sha="$(printf '%s' "$accept_cmd" | oms_sha256_stream)" || fail "cannot ha
 
 drive_run_id="ap-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
+  --contract-id "$AUTOPILOT_OWNER_ID" \
   --run-id "$drive_run_id" --provider-timeout "$WORKER_TIMEOUT" \
   --reasoning-effort "$WORKER_REASONING_EFFORT" \
   --expected-ref "refs/heads/$work_branch")

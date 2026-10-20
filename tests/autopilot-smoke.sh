@@ -2036,6 +2036,7 @@ PY
   OMS_WORKER_GUARD_STRICT=0 OMS_WORKER_GUARD_OFF=1 OMS_T_GOAL_RESULT=success \
     run_autopilot "$routing_repo" run --worker codex --reviewer claude \
       --allowed 'src,tests' --base main --provider-timeout 23s --retry-known \
+      --max-cycles 2 \
       --worker-model worker-model-y --worker-reasoning-effort high \
       --reviewer-model reviewer-model-y --reviewer-reasoning-effort low \
       --review-mode gate > "$routing_repo/routing.out" 2>&1 ||
@@ -2044,6 +2045,15 @@ PY
     fail "goal-drive did not receive the forced strict guard and timeout"
   grep -Fq -- '--retry-known' "$routing_repo/calls/goal-drive" ||
     fail "goal-drive did not receive retry-known"
+  contract_id="$(python3 - "$routing_repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["owner_id"])
+PY
+)"
+  grep -Fq -- "--contract-id $contract_id" "$routing_repo/calls/goal-drive" ||
+    fail "goal-drive did not receive the durable autopilot contract identity"
+  grep -Fq -- '--max-cycles 2' "$routing_repo/calls/goal-drive" ||
+    fail "fresh autopilot contract did not receive its full cycle budget"
   grep -Fq -- '--model worker-model-y' "$routing_repo/calls/goal-drive" ||
     fail "goal-drive did not receive the worker model"
   grep -Fq -- '--reasoning-effort high' "$routing_repo/calls/goal-drive" ||
@@ -2054,6 +2064,35 @@ PY
     fail "peer-review did not receive the reviewer reasoning effort"
   grep -Fq 'timeout=23s' "$routing_repo/calls/peer-review-env" ||
     fail "peer-review did not receive the provider timeout"
+
+  # The real goal driver reconstructs prior contract use from durable rows.
+  # A resumed invocation at the cap must park before entering task execution.
+  local cycle_repo="$TMP/lifetime-cycle-cap"
+  local cycle_contract=owner_22222222222222222222222222222222
+  make_repo "$cycle_repo"
+  write_done_plan "$cycle_repo" false
+  mkdir -p "$cycle_repo/.oms/plan"
+  python3 - "$cycle_repo/.oms/plan/progress.jsonl" "$cycle_contract" <<'PY'
+import json, sys
+path, contract = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as handle:
+    for cycle in (1, 2):
+        handle.write(json.dumps({"schema": 1, "kind": "autopilot-cycle",
+            "contract_id": contract, "run_id": "interrupted", "cycle": cycle}) + "\n")
+PY
+  rc=0
+  "$ROOT/scripts/goal-drive.sh" --repo "$cycle_repo" --max-cycles 2 \
+    --contract-id "$cycle_contract" --run-id resumed \
+    > "$cycle_repo/resume.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] ||
+    fail "a contract at its lifetime cycle cap should park, got $rc: $(tail -5 "$cycle_repo/resume.out")"
+  grep -Fq 'reason=cycles-exhausted' "$cycle_repo/resume.out" ||
+    fail "a capped resume did not park as cycles-exhausted"
+  grep -Fq 'already used 2 of 2 cycle(s) across resumes' "$cycle_repo/resume.out" ||
+    fail "the exhaustion message omitted lifetime cycle usage"
+  if grep -Eiq 'plan-run|provider' "$cycle_repo/resume.out"; then
+    fail "a capped resume reached task execution or provider launch"
+  fi
 
   # A process may stop immediately after persisting a downstream stage. The
   # exact status continuation safely replays through approved/driving instead
@@ -2072,7 +2111,7 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
     OMS_T_GOAL_RESULT=success run_autopilot "$routing_repo" run \
       --worker codex --reviewer claude --allowed 'src,tests' --base main \
-      --provider-timeout 23s --retry-known \
+      --provider-timeout 23s --retry-known --max-cycles 2 \
       --worker-model worker-model-y --worker-reasoning-effort high \
       --reviewer-model reviewer-model-y --reviewer-reasoning-effort low \
       --review-mode gate > "$routing_repo/resume-$interrupted_stage.out" 2>&1 ||
@@ -2080,6 +2119,32 @@ PY
     grep -Fq 'autopilot: done' "$routing_repo/resume-$interrupted_stage.out" ||
       fail "$interrupted_stage replay did not reach a new done receipt"
   done
+
+  # A completed receipt archives before a new invocation; the next contract
+  # therefore receives a new durable identity and its own full cycle budget.
+  prior_contract_id="$(python3 - "$routing_repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["owner_id"])
+PY
+)"
+  OMS_T_GOAL_RESULT=success run_autopilot "$routing_repo" run \
+    --worker codex --reviewer claude --allowed 'src,tests' --base main \
+    --provider-timeout 23s --retry-known --max-cycles 2 \
+    --worker-model worker-model-y --worker-reasoning-effort high \
+    --reviewer-model reviewer-model-y --reviewer-reasoning-effort low \
+    --review-mode gate > "$routing_repo/fresh-contract.out" 2>&1 ||
+    fail "a fresh contract after completion should run with a new budget"
+  fresh_contract_id="$(python3 - "$routing_repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["owner_id"])
+PY
+)"
+  [ "$fresh_contract_id" != "$prior_contract_id" ] ||
+    fail "a fresh autopilot contract reused the previous contract identity"
+  grep -Fq -- "--contract-id $fresh_contract_id" "$routing_repo/calls/goal-drive" ||
+    fail "fresh contract identity did not reach goal-drive"
+  grep -Fq -- '--max-cycles 2' "$routing_repo/calls/goal-drive" ||
+    fail "fresh contract did not receive its full cycle budget"
 
   # Recheck the hidden-index surface after every provider boundary. A child
   # cannot earn completion by hiding a tracked mutation after startup.
