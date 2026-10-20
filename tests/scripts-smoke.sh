@@ -9995,11 +9995,21 @@ test_agent_call_missing_cli_writes_exit_and_index() {
 
 
 test_plan_from_spec_rejects_delegating_verify() {
-  local project="$TMP/plan-from-spec-delegating" bin_dir out
+  local project="$TMP/plan-from-spec-delegating" allow_project="$TMP/plan-from-spec-project-check" bin_dir out
   bin_dir="$project/bin"
   make_committed_repo "$project"
-  mkdir -p "$bin_dir" "$project/home" "$project/tests"
+  mkdir -p "$bin_dir" "$project/home" "$project/tests" "$project/scripts"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"; chmod +x "$project/tests/run.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/check.sh"; chmod +x "$project/check.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"; chmod +x "$project/scripts/check.sh"
+  local suite
+  for suite in tests/goal-drive-recovery-smoke.sh tests/autopilot-smoke.sh \
+    tests/autonomy-plan-run-smoke.sh tests/lifecycle-provider-integration-smoke.sh \
+    tests/model-routing-smoke.sh tests/read-time-expiry-smoke.sh \
+    tests/patch-land-approval-smoke.sh tests/scripts-smoke.sh; do
+    mkdir -p "$project/$(dirname "$suite")"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$project/$suite"
+  done
   printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash tests/run.sh\n\n## Verification\n\n- Required checks: bash tests/run.sh\n' > "$project/PROJECT.md"
   fake_planner() {  # fake_planner VERIFY -> a codex stub proposing one task with that verify
     local proposal proposal_quoted
@@ -10023,6 +10033,8 @@ EOF
   for verify in 'tests/autopilot-smoke.sh' 'bash tests/autopilot-smoke.sh' \
     'sh tests/autopilot-smoke.sh' 'source tests/autopilot-smoke.sh' \
     '. tests/autopilot-smoke.sh' 'bash scripts/check.sh' \
+    'cd tests && bash autopilot-smoke.sh' \
+    'bash "$PWD/tests/autopilot-smoke.sh"' \
     "bash -c 'bash tests/autopilot-smoke.sh'"; do
     fake_planner "$verify"
     out="$(HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex 2>&1)" &&
@@ -10040,6 +10052,15 @@ EOF
   HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/out" 2>&1 ||
     fail "a plain verify must still be proposed: $(tail -3 "$project/out")"
   assert_file_contains "$project/out" "proposed 1 task(s)"
+  make_committed_repo "$allow_project"
+  bin_dir="$allow_project/bin"
+  mkdir -p "$bin_dir" "$allow_project/home"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$allow_project/check.sh"; chmod +x "$allow_project/check.sh"
+  printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash check.sh\n\n## Verification\n\n- Required checks: bash check.sh\n- Required check files: check.sh\n' > "$allow_project/PROJECT.md"
+  fake_planner 'bash check.sh'
+  HOME="$allow_project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$allow_project" --to codex >"$allow_project/out" 2>&1 ||
+    fail "a project check.sh must be proposed when scripts/check.sh is absent from the target repository: $(tail -3 "$allow_project/out")"
+  assert_file_contains "$allow_project/out" "proposed 1 task(s)"
 }
 
 test_plan_from_spec_proposes_then_applies() {

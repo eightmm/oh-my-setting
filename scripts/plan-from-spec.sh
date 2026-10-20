@@ -213,9 +213,9 @@ plan_path = sys.argv[5]
 apply_mode = sys.argv[6] == "1"
 repo = sys.argv[8]
 
-# These suites create worker delegations themselves. A task verify already
-# executes under a worker, so invoking one would exceed the depth cap only
-# after the task has consumed its worker budget.
+# These are OMS-repository suites. Apply the basename guard only when the
+# same repo-relative file exists in the target repository. A task creating a
+# suite is not guarded here, but the runtime depth cap still applies.
 DELEGATING_SUITES = (
     "tests/goal-drive-recovery-smoke.sh",
     "tests/autopilot-smoke.sh",
@@ -439,7 +439,8 @@ def smoke_test_delegates(name):
 
 def delegating_verifier(verify):
     for suite in DELEGATING_SUITES + FULL_SUITE_VERIFIERS:
-        if any(script_invocations(verify, basename(suite))):
+        if (os.path.isfile(os.path.join(repo, suite)) and
+                any(script_invocations(verify, basename(suite)))):
             return suite
     for names in smoke_shard_invocations(verify):
         if names is None:
