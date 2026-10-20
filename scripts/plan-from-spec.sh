@@ -557,8 +557,22 @@ print("ok %d" % len(tasks))
 PY
 }
 
-spec_field() {  # BULLET-PREFIX -> first bullet value
-  sed -n "s/^- $1:[[:space:]]*//p" "$SPEC" | sed -n 1p | tr -d '\r'
+spec_field() {  # BULLET-PREFIX -> bullet value and indented continuations
+  awk -v prefix="- $1:" '
+    { sub(/\r$/, "", $0) }
+    !found && index($0, prefix) == 1 {
+      value = substr($0, length(prefix) + 1)
+      sub(/^[[:space:]]+/, "", value)
+      print value
+      found = 1
+      next
+    }
+    found {
+      if ($0 == "" || $0 ~ /^## / || $0 ~ /^- /) exit
+      if ($0 ~ /^[[:space:]]+/) print
+      else exit
+    }
+  ' "$SPEC"
 }
 
 spec_section() {  # HEADER -> section body
@@ -871,6 +885,7 @@ Interface and Data:
 $(spec_section 'Interface and Data')
 Decisions:
 $(spec_section Decisions)
+If Decisions names References, read those repository documents before decomposing; if one does not exist, say so in the affected task title.
 Existing plan (id | state | title | scope):
 $plan_context
 --- end contract ---"
@@ -886,7 +901,7 @@ for shared interfaces and actual prerequisites. Resolve design uncertainty from
 the confirmed contract rather than inventing architecture. The parent may be
 Codex, Claude Code, Antigravity, or another agent; parent and worker transports
 are independent. Do not infer a provider hierarchy from this planner call.
-$(if [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ]; then
+$(if [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ] && [ "${OMS_AUTOPILOT:-0}" != 1 ]; then
   cat <<'PANEL_ASSIGNMENT'
 This plan is owned by a live panel main. Do not add default worker-provider
 assignments: ordinary panel role dispatch must remain free to apply tier

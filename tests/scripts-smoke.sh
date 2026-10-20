@@ -10812,6 +10812,7 @@ test_plan_from_spec_prompt_carries_contract_decisions() {
   {
     printf '%s\n' '# PROJECT.md' '' '## Status' '' '- State: confirmed' ''
     printf '%s\n' '## Project' '' '- Goal: ship the greeting' '- Scope: src/' \
+      '  plus supporting tests/' \
       '- Non-goals: release' ''
     printf '%s\n' '## Interface and Data' '' '- CLI: greet NAME prints a greeting' ''
     printf '%s\n' '## Commands' '' '- Test: bash tests/run.sh' ''
@@ -10827,12 +10828,14 @@ printf '{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"v
 EOF
   chmod +x "$bin_dir/codex"
 
-  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  env -u OMS_PANEL_MAIN_ATTEMPT HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex \
     > "$project/out" 2>&1 || fail "decomposition should propose: $(cat "$project/out")"
 
   assert_file_contains "$capture" "No third-party dependency may enter src/"
   assert_file_contains "$capture" "CLI: greet NAME prints a greeting"
+  assert_file_contains "$capture" 'plus supporting tests/'
+  assert_file_contains "$capture" 'If Decisions names References, read those repository documents before decomposing; if one does not exist, say so in the affected task title.'
   assert_file_contains "$capture" 'assignment: {"provider": "codex", "workload": "routine"}'
 
   rm -f "$capture"
@@ -10843,6 +10846,16 @@ EOF
   assert_file_contains "$capture" "This plan is owned by a live panel main"
   if grep -Fq 'assignment: {"provider": "codex", "workload": "routine"}' "$capture"; then
     fail "panel-owned plan must not recommend a default provider assignment"
+  fi
+
+  rm -f "$capture"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_AUTOPILOT=1 OMS_PANEL_MAIN_ATTEMPT=panel-main \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/autopilot-out" 2>&1 ||
+    fail "autopilot decomposition should propose: $(tail -4 "$project/autopilot-out")"
+  assert_file_contains "$capture" 'assignment: {"provider": "codex", "workload": "routine"}'
+  if grep -Fq 'This plan is owned by a live panel main' "$capture"; then
+    fail "autopilot plan must not take the panel-main assignment branch"
   fi
 
   # Over budget, the run refuses instead of truncating: a cut keeps the early
