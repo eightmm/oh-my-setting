@@ -20,6 +20,24 @@ PRINT_EXPECTED=0
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
+# shellcheck source=scripts/lib/provider-registry.sh
+. "$ROOT/scripts/lib/provider-registry.sh"
+
+claude_auto_compact_supported() {
+  local binary help
+
+  # type -P ignores shell functions and resolves an executable from PATH.
+  binary="$(type -P claude 2>/dev/null)" || return 1
+  [ -n "$binary" ] && [ -f "$binary" ] && [ -x "$binary" ] || return 1
+  help="$(oms_provider_run_bounded 3 /dev/stdout bash -c '
+    set +e +o pipefail
+    "$1" --help 2>/dev/null | head -c 32768
+    status=("${PIPESTATUS[@]}")
+    [ "${status[0]}" -eq 0 ] && [ "${status[1]}" -eq 0 ]
+  ' oms-claude-help "$binary" </dev/null)" || return 1
+  case "$help" in *'--autocompact <auto|tokens>'*) return 0 ;; esac
+  return 1
+}
 
 # --- expected hook surfaces --------------------------------------------------
 #
@@ -92,13 +110,35 @@ Notification|telemetry-hook.sh|permission_prompt|elicitation_dialog|5
 # the install lock and before the canonical-owner check on purpose: the doctor
 # that needs the list is usually running from a workspace that does not own the
 # install, and that is exactly the case worth reporting on.
-case " $* " in
-  *" --print-expected "*) PRINT_EXPECTED=1 ;;
-esac
+REQUESTED_REMOVE=0
+REQUESTED_HELP=0
+skip_settings=0
+for arg in "$@"; do
+  if [ "$skip_settings" = 1 ]; then skip_settings=0; continue; fi
+  case "$arg" in
+    --settings) skip_settings=1 ;;
+    --print-expected) PRINT_EXPECTED=1 ;;
+    --remove) REQUESTED_REMOVE=1 ;;
+    -h|--help) REQUESTED_HELP=1 ;;
+  esac
+done
+
+AUTO_COMPACT_SUPPORTED=0
+if [ "$PRINT_EXPECTED" = 0 ] && [ "$REQUESTED_REMOVE" = 0 ] && [ "$REQUESTED_HELP" = 0 ]; then
+  if [ "${OMS_INSTALL_LOCK_HELD:-0}" = 1 ]; then
+    if [ "${OMS_INSTALL_CLAUDE_AUTO_COMPACT_SUPPORTED:-0}" = 1 ]; then
+      AUTO_COMPACT_SUPPORTED=1
+    fi
+  elif claude_auto_compact_supported; then
+    AUTO_COMPACT_SUPPORTED=1
+  fi
+fi
 
 if [ "$PRINT_EXPECTED" = "0" ] && [ "${OMS_INSTALL_LOCK_HELD:-0}" != "1" ]; then
   oms_with_file_lock "$(oms_install_receipt_path)" \
-    env OMS_INSTALL_LOCK_HELD=1 bash "$ROOT/scripts/install-claude-hooks.sh" "$@"
+    env OMS_INSTALL_LOCK_HELD=1 \
+      OMS_INSTALL_CLAUDE_AUTO_COMPACT_SUPPORTED="$AUTO_COMPACT_SUPPORTED" \
+      bash "$ROOT/scripts/install-claude-hooks.sh" "$@"
   exit $?
 fi
 
@@ -232,7 +272,8 @@ mkdir -p "$(dirname "$SETTINGS")"
 
 EXPECTED_JSON="$(print_expected_json)"
 
-OMS_CH_SETTINGS="$SETTINGS" OMS_CH_REMOVE="$REMOVE" \
+OMS_CH_SETTINGS="$SETTINGS" \
+  OMS_CH_REMOVE="$REMOVE" OMS_CH_AUTO_COMPACT_SUPPORTED="$AUTO_COMPACT_SUPPORTED" \
   OMS_CH_EXPECTED="$EXPECTED_JSON" OMS_CH_ROOT="$ROOT" \
   OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" \
   OMS_CH_SUBAGENT_STATUS_PATH="$ROOT/scripts/claude-subagent-statusline.py" python3 <<'PY'
@@ -240,6 +281,7 @@ import importlib.util, json, os, shlex, sys, tempfile
 
 path = os.environ["OMS_CH_SETTINGS"]
 remove = os.environ["OMS_CH_REMOVE"] == "1"
+auto_compact_supported = os.environ["OMS_CH_AUTO_COMPACT_SUPPORTED"] == "1"
 root = os.environ["OMS_CH_ROOT"]
 expected = json.loads(os.environ["OMS_CH_EXPECTED"])["surfaces"]
 sys.dont_write_bytecode = True
@@ -255,8 +297,10 @@ subagent_status_cmd = "python3 %s" % shlex.quote(
 # defaults to medium and thinks more per level than Opus 5, so a top-level
 # xhigh would otherwise carry over; high is the chosen default (user decision
 # 2026-09-23). A value the user already set wins, and --remove deletes only a
-# value still equal to ours.
+# value still equal to ours. As with effort, a user value identical to ours is
+# indistinguishable and is treated as ours during removal.
 MODEL_EFFORT = {"claude-opus-5-5": "high"}
+MODEL_AUTO_COMPACT_WINDOW = {"claude-opus-5-5": 300000}
 ATTRIBUTION = {"commit": "", "pr": "", "sessionUrl": False}
 
 settings = {}
@@ -323,6 +367,12 @@ if remove:
                 del row["effortLevel"]
                 if not row:
                     del model_settings[model]
+        for model, window in MODEL_AUTO_COMPACT_WINDOW.items():
+            row = model_settings.get(model)
+            if isinstance(row, dict) and row.get("autoCompactWindow") == window:
+                del row["autoCompactWindow"]
+                if not row:
+                    del model_settings[model]
         if not model_settings:
             del settings["modelSettings"]
     if settings.get("attribution") == ATTRIBUTION:
@@ -361,6 +411,11 @@ else:
             row = model_settings.setdefault(model, {})
             if isinstance(row, dict):
                 row.setdefault("effortLevel", effort)
+        if auto_compact_supported:
+            for model, window in MODEL_AUTO_COMPACT_WINDOW.items():
+                row = model_settings.setdefault(model, {})
+                if isinstance(row, dict):
+                    row.setdefault("autoCompactWindow", window)
     settings.setdefault("attribution", dict(ATTRIBUTION))
     action = "installed"
 

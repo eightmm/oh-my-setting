@@ -23206,8 +23206,16 @@ PY
 test_install_claude_hooks_merge_and_remove() {
   local d="$TMP/claude-hooks"
   local s="$d/settings.json"
+  local old_path="$PATH"
 
-  mkdir -p "$d"
+  mkdir -p "$d/bin"
+  cat > "$d/bin/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' '  --autocompact <auto|tokens>  Auto-compact window size (100k–1M tokens)'
+EOF
+  chmod +x "$d/bin/claude"
+  PATH="$d/bin:$PATH"
+  export PATH
   cat > "$s" <<'EOF'
 {"model": "x", "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "echo user-router"}]}]}}
 EOF
@@ -23278,10 +23286,16 @@ assert "claude-statusline.py" in status["command"]
 subagent = d["subagentStatusLine"]
 assert subagent["type"] == "command"
 assert "claude-subagent-statusline.py" in subagent["command"]
-assert d["modelSettings"] == {"claude-opus-5-5": {"effortLevel": "high"}}, d["modelSettings"]
+assert d["modelSettings"] == {"claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300000}}, d["modelSettings"]
 assert d["attribution"] == {"commit": "", "pr": "", "sessionUrl": False}, d.get("attribution")
 PY
   [ -f "$s.oms-bak" ] || fail "installer should back up settings before the first change"
+  cat > "$d/bin/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'Claude Code without the auto-compact window option'
+exit 1
+EOF
+  chmod +x "$d/bin/claude"
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
   python3 - "$s" <<'PY' || fail "remove should delete only the oh-my-setting entry"
 import json, sys
@@ -23298,6 +23312,18 @@ assert "subagentStatusLine" not in d
 assert "modelSettings" not in d
 assert "attribution" not in d
 PY
+  printf '{}\n' > "$s"
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
+  python3 - "$s" <<'PY' || fail "unsupported Claude CLI must not receive the auto-compact setting"
+import json, sys
+assert "autoCompactWindow" not in json.load(open(sys.argv[1])).get("modelSettings", {}).get("claude-opus-5-5", {})
+PY
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
+  cat > "$d/bin/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' '  --autocompact <auto|tokens>  Auto-compact window size (100k–1M tokens)'
+EOF
+  chmod +x "$d/bin/claude"
   # A status line the user already owns must survive install and remove.
   python3 - "$s" <<'PY'
 import json, sys
@@ -23312,7 +23338,7 @@ d["subagentStatusLine"] = {
     "command": "python3 /tmp/claude-subagent-statusline.py",
 }
 d["modelSettings"] = {
-    "claude-opus-5-5": {"effortLevel": "medium"},
+    "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": "auto"},
     "claude-opus-5": {"effortLevel": "high"},
 }
 d["attribution"] = {"commit": "mine", "pr": "", "sessionUrl": True}
@@ -23320,7 +23346,7 @@ json.dump(d, open(path, "w"))
 PY
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
-  python3 - "$s" <<'PY' || fail "installer should preserve a user-owned status line and model effort"
+  python3 - "$s" <<'PY' || fail "installer should preserve user-owned status and model settings"
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["statusLine"] == {
@@ -23332,7 +23358,7 @@ assert d["subagentStatusLine"] == {
     "command": "python3 /tmp/claude-subagent-statusline.py",
 }
 assert d["modelSettings"] == {
-    "claude-opus-5-5": {"effortLevel": "medium"},
+    "claude-opus-5-5": {"effortLevel": "medium", "autoCompactWindow": "auto"},
     "claude-opus-5": {"effortLevel": "high"},
 }, d["modelSettings"]
 assert d["attribution"] == {"commit": "mine", "pr": "", "sessionUrl": True}, d["attribution"]
@@ -23373,6 +23399,8 @@ PY
     fail "installer must refuse to touch invalid settings JSON"
   fi
   grep -Fq '{broken' "$s" || fail "installer must not modify a file it refused"
+  PATH="$old_path"
+  export PATH
 }
 
 test_precompact_handoff_guards() {

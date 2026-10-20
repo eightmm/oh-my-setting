@@ -1211,8 +1211,12 @@ chooses a connector or tracked summary.
 - Claude Code: skill hints, turn guard, failure memory, edit-time syntax guard
   (a file that does not parse after Edit/Write is reported in the same turn as
   feedback, never a block), session capture, handoff, and compact main/subagent
-  HUDs. Model routing stays explicit in delegate/run commands; direct edits do
-  not pay for a separate policy hook. Reinstalling converges each OMS hook's
+  HUDs. When supported by the CLI, OMS sets the Opus 5.5 per-model
+  `modelSettings.<model>.autoCompactWindow` to 300000 and removes equal values;
+  as with effort, an identical user value is treated as OMS-owned on removal.
+  Model routing stays explicit in
+  delegate/run commands; direct edits do not pay for a separate policy hook.
+  Reinstalling converges each OMS hook's
   command, timeout and matcher and drops duplicates. A hook is OMS-owned only
   when its exact `bash <root>/scripts/<script>` command points at this or a
   verified earlier OMS checkout, so wrappers and same-named user scripts stay
