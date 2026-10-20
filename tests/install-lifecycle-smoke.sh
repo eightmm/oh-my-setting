@@ -772,13 +772,17 @@ relink_run "$relink_b" link.sh > "$TMP/relink-b.out" 2>&1 ||
   fail "relink from the second checkout failed: $(cat "$TMP/relink-b.out")"
 
 # No backup of the first checkout's managed targets, anywhere under HOME.
-relink_stale="$(find "$relink_home" -name '*.backup.*' -type l 2>/dev/null |
-  while IFS= read -r relink_backup; do
-    case "$(readlink "$relink_backup")" in
-      "$relink_a"/custom-skills/*|"$relink_a"/rules/*|"$relink_a"/scripts/*|"$relink_a"/output-styles/*)
-        printf '%s\n' "$relink_backup" ;;
-    esac
-  done)"
+# A function, not case inside $(...): Bash 3.2 misparses the pattern's ")".
+relink_stale_backups() {
+  find "$relink_home" -name '*.backup.*' -type l 2>/dev/null |
+    while IFS= read -r relink_backup; do
+      case "$(readlink "$relink_backup")" in
+        "$relink_a"/custom-skills/*|"$relink_a"/rules/*|"$relink_a"/scripts/*|"$relink_a"/output-styles/*)
+          printf '%s\n' "$relink_backup" ;;
+      esac
+    done
+}
+relink_stale="$(relink_stale_backups)"
 [ -z "$relink_stale" ] || fail "relink archived the first checkout's links as backups: $relink_stale"
 [ "$(find "$relink_home/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' | wc -l | tr -d ' ')" = 1 ] ||
   fail "relink must leave exactly the user's original Codex backup"
@@ -841,8 +845,11 @@ PY
 if [ "$relink_symlinks" = 1 ]; then
   rm -f "$relink_home/.codex/AGENTS.md"
   ln -s "$relink_other/rules/global-AGENTS.md" "$relink_home/.codex/AGENTS.md"
-  relink_run "$relink_b" link.sh > "$TMP/relink-d.out" 2>&1 ||
-    fail "relink after the receipt edit failed: $(cat "$TMP/relink-d.out")"
+fi
+# Relink regardless: it also rewrites the edited receipt, which uninstall checks.
+relink_run "$relink_b" link.sh > "$TMP/relink-d.out" 2>&1 ||
+  fail "relink after the receipt edit failed: $(cat "$TMP/relink-d.out")"
+if [ "$relink_symlinks" = 1 ]; then
   relink_kept="$(find "$relink_home/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' -type l)"
   [ -n "$relink_kept" ] && [ "$(readlink "$relink_kept")" = "$relink_other/rules/global-AGENTS.md" ] ||
     fail "a receipt naming a non-OMS directory let a user link be replaced without a backup"
