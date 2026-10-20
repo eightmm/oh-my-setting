@@ -17,7 +17,7 @@ emit_hook_output() {
   if [ "$tool" = "resume-hook" ]; then
     # The resume block begins with a bracket, which Codex treats as JSON-like;
     # Claude's direct hook still receives the shared script's plain-text context.
-    python3 -I -B -c '
+    python3 -X utf8 -I -B -c '
 import json, sys
 
 context = sys.stdin.read()

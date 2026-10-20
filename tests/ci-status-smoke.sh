@@ -360,7 +360,7 @@ test_completed_run_for_head_is_the_current_result() {
     real_python="$(command -v python3)"
     # Observe the child launch itself; gh would already be quiet for completed CI.
     python3() {
-      while [ "${1:-}" = -I ] || [ "${1:-}" = -B ] || [ "${1:-}" = -E ] || [ "${1:-}" = -s ]; do shift; done
+      while [ "${1:-}" = -I ] || [ "${1:-}" = -B ] || [ "${1:-}" = -E ] || [ "${1:-}" = -s ] || [ "${1:-}" = -X ]; do [ "$1" = -X ] && shift; shift; done
       "$real_python" -c '
 import os, subprocess, sys
 from pathlib import Path

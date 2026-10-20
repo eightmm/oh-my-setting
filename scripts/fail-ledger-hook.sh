@@ -37,7 +37,7 @@ payload="$(cat 2>/dev/null || true)"
 # resolving needs no git state fingerprint, so this never computes one.
 parsed="$(OMS_FLH_PAYLOAD="$payload" \
   OMS_FLH_FAMILIES="$ROOT/scripts/lib/usage-families.json" \
-  python3 -I -B - "$ROOT/scripts/lib" <<'PY' 2>/dev/null || true
+  python3 -X utf8 -I -B - "$ROOT/scripts/lib" <<'PY' 2>/dev/null || true
 import datetime
 import hashlib
 import json

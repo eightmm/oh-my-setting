@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 payload="$(cat 2>/dev/null || true)"
 state_repo=""
 if command -v python3 >/dev/null 2>&1; then
-  state_repo="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" \
+  state_repo="$(OMS_HOOK_PAYLOAD="$payload" python3 -X utf8 "$ROOT/scripts/lib/hook_repo.py" \
     2>/dev/null | tr -d '\r')" || state_repo=""
 fi
 
@@ -53,7 +53,7 @@ state_hint() {
   OMS_SH_TASK="$task" OMS_SH_FAILURES="$failures" \
     OMS_SH_PLAN="$repo/.oms/plan/tasks.json" \
     OMS_SH_PROGRESS="$repo/.oms/plan/progress.jsonl" \
-    python3 -I -B - <<'PY' 2>/dev/null || true
+    python3 -X utf8 -I -B - <<'PY' 2>/dev/null || true
 import json, os
 
 def load(name):
@@ -138,4 +138,4 @@ command -v python3 >/dev/null 2>&1 || exit 0
 
 # The helper owns routing state and fail-opens on malformed hook payloads.
 OMS_HOOK_PAYLOAD="$payload" OMS_HOOK_RESOLVED_REPO="$state_repo" \
-  python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" route --manifest "$MANIFEST" || exit 0
+  python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$HELPER" route --manifest "$MANIFEST" || exit 0

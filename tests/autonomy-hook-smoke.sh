@@ -1583,6 +1583,27 @@ console.log("autonomy-hook-smoke: Pi extension activity/mail/env check ok");
 PYTEST
 }
 
+# Hook stdin is UTF-8 JSON whatever the console code page. Under a non-UTF-8
+# locale, a Hangul cwd must still resolve the adopted repo; -X utf8 pins that.
+test_resume_hook_reads_utf8_repo() {
+  local repo="$TMP/한글저장소"
+  local payload out
+
+  mkdir -p "$repo/.oms"
+  git -C "$repo" init -q
+  git -C "$repo" -c user.email=test@example.com -c user.name=Test \
+    commit -q --allow-empty -m base
+  bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" record \
+    --cmd "bash scripts/check.sh focused" --exit 2 >/dev/null ||
+    fail "the fixture failure should record"
+  payload="{\"hook_event_name\":\"SessionStart\",\"cwd\":\"$repo\"}"
+  out="$(cd "$TMP" && printf '%s' "$payload" |
+    env LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 bash "$ROOT/scripts/resume-hook.sh")" ||
+    fail "the resume hook must exit 0"
+  grep -Fq '[oms resume] 한글저장소' <<<"$out" ||
+    fail "a Hangul cwd under a non-UTF-8 locale must resolve the repo: $out"
+}
+
 test_panel_main_activity
 test_classifier_boundaries
 test_peer_tail_is_bounded
@@ -1590,4 +1611,5 @@ test_explicit_goal_rotation
 test_fail_ledger_hook_resolves_on_success
 test_route_is_hermetic_to_inherited_harness_session
 test_live_thread_delivery_at_existing_safe_points
+test_resume_hook_reads_utf8_repo
 echo "autonomy-hook-smoke: ok"

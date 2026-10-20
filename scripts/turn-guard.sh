@@ -15,7 +15,7 @@ payload="$(cat)"
 # An explicit state override must match the prompt's budget writer and journal
 # tick. Keep the normal payload-based Stop path when no override is configured.
 if [ -n "${OMS_STATE_REPO:-}" ]; then
-  OMS_HOOK_RESOLVED_REPO="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" \
+  OMS_HOOK_RESOLVED_REPO="$(OMS_HOOK_PAYLOAD="$payload" python3 -X utf8 "$ROOT/scripts/lib/hook_repo.py" \
     2>/dev/null | tr -d '\r')" || OMS_HOOK_RESOLVED_REPO=""
   export OMS_HOOK_RESOLVED_REPO
 fi
@@ -25,7 +25,7 @@ if [ "${OMS_TURN_GUARD_OFF:-0}" != "1" ] && {
   [ "${OMS_SESSION_BUDGET_TURNS:-0}" != "0" ] ||
   [ "${OMS_SESSION_BUDGET_HOURS:-0}" != "0" ];
 }; then
-  guard_out="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" guard 2>/dev/null)" || guard_rc=$?
+  guard_out="$(printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$HELPER" guard 2>/dev/null)" || guard_rc=$?
 fi
 
 # The journal must not record a blocked answer as finished. Parse the guard
@@ -39,7 +39,7 @@ unguarded=""
 if [ "$guard_rc" -ne 0 ]; then
   unguarded="helper exit $guard_rc"
 elif [ -n "$guard_out" ]; then
-  verdict="$(printf '%s' "$guard_out" | python3 -I -B -c '
+  verdict="$(printf '%s' "$guard_out" | python3 -X utf8 -I -B -c '
 import json, sys
 raw = sys.stdin.read().strip()
 try:
@@ -71,7 +71,7 @@ fi
 
 # The other CLI's next prompt shows this turn's completion card. The same pass
 # prints the state repo, so stdout lands here, never in the Stop protocol.
-repo="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" relay 2>/dev/null || true)"
+repo="$(printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$HELPER" relay 2>/dev/null || true)"
 
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
