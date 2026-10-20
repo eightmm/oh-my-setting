@@ -2090,6 +2090,8 @@ PY
     fail "a capped resume did not park as cycles-exhausted"
   grep -Fq 'already used 2 of 2 cycle(s) across resumes' "$cycle_repo/resume.out" ||
     fail "the exhaustion message omitted lifetime cycle usage"
+  grep -Fq 'retire it with oms autopilot abandon --reason TEXT, then start a fresh contract' "$cycle_repo/resume.out" ||
+    fail "the exhaustion message omitted the contract retirement path"
   if grep -Eiq 'plan-run|provider' "$cycle_repo/resume.out"; then
     fail "a capped resume reached task execution or provider launch"
   fi

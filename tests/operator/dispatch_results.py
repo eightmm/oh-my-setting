@@ -552,6 +552,17 @@ for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
 
 import panel_results as saved
 from panel_view import render_results
+from types import SimpleNamespace
+for has_write_patch, expected in (
+        (True, "after oms land run oms agent-plan finish --id hint-task --landed-commit SHA"),
+        (False, "a task with no patch cannot finish by landing; close it with oms agent-plan accept-main-research (completion bundle) or oms agent-plan block --id hint-task --reason TEXT")):
+    hint = io.StringIO()
+    with patch.object(saved.subprocess, "run", return_value=SimpleNamespace(
+            returncode=0, stdout='{"state":"review"}', stderr="")), redirect_stderr(hint):
+        saved._plan_hint(project, "hint-task", has_write_patch)
+    assert expected in hint.getvalue(), hint.getvalue()
+    if not has_write_patch:
+        assert "after oms land" not in hint.getvalue(), hint.getvalue()
 first = json.loads(call(final_args))
 assert first["verification"]["status"] == "passed"
 # A result recorded without panel identity still reaches the shared Plan,

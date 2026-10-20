@@ -1275,7 +1275,8 @@ held = json.loads(call(plan_cli + ["show", "--id", "plan-link"]))
 call(plan_cli + ["start", "--id", "plan-link", "--lease-id", held["lease_id"]])
 again = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
 assert again.returncode == 0 and plan_task()["state"] == "running", again
-assert "plan plan-link running (lease %s)" % held["lease_id"] in again.stderr, again.stderr
+assert "plan plan-link linked to a read-only call; record the owner decision with oms panel --finalize" in again.stderr, again.stderr
+assert "after oms land" not in again.stderr, again.stderr
 dependent_read = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-link-dependent", "--label", "Read dependency"],
                                 env=room_env, capture_output=True, text=True)
 assert dependent_read.returncode == 0 and "is ready; panel left it unchanged" in dependent_read.stderr, dependent_read
@@ -1288,7 +1289,8 @@ call(plan_cli + ["start", "--id", "plan-link-owned", "--lease-id", owned["lease_
 owned_dispatch = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-link-owned", "--label", "Observe owned"],
                                 env=room_env, capture_output=True, text=True)
 assert owned_dispatch.returncode == 0, owned_dispatch
-assert "plan plan-link-owned running (lease %s)" % owned["lease_id"] in owned_dispatch.stderr, owned_dispatch.stderr
+assert "plan plan-link-owned linked to a read-only call; record the owner decision with oms panel --finalize" in owned_dispatch.stderr, owned_dispatch.stderr
+assert "after oms land" not in owned_dispatch.stderr, owned_dispatch.stderr
 assert json.loads(call(plan_cli + ["show", "--id", "plan-link-owned"]))["lease_id"] == owned["lease_id"]
 call(plan_cli + ["add", "--id", "plan-held", "--title", "Held by codex"])
 call(plan_cli + ["claim", "--id", "plan-held", "--provider", "codex"],
@@ -1353,7 +1355,8 @@ assert thread.read_bytes() == before_thread and worker_log.read_bytes() == befor
 (project / "write-brief.md").unlink()  # The later blocking reviewer must see only its source fixture.
 hinted = subprocess.run(final_args[:final_args.index("--task-id") + 1] + ["plan-link"] + final_args[final_args.index("--task-id") + 2:],
                         cwd=project, env=environment, capture_output=True, text=True)
-assert hinted.returncode == 0 and "agent-plan finish --id plan-link --landed-commit SHA" in hinted.stderr, hinted
+assert hinted.returncode == 0 and "a task with no patch cannot finish by landing; close it with oms agent-plan accept-main-research" in hinted.stderr, hinted
+assert "after oms land" not in hinted.stderr, hinted.stderr
 
 _operator_block("continuation-and-lineage")
 

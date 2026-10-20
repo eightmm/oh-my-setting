@@ -2207,7 +2207,7 @@ print(found)
   prev_tree="$tree"; prev_accept_out="$accept_digest"
 
   if [ -n "$CONTRACT_ID" ] && [ "$CONTRACT_CYCLES" -ge "$MAX_CYCLES" ]; then
-    park "cycles-exhausted" "autopilot contract already used $CONTRACT_CYCLES of $MAX_CYCLES cycle(s) across resumes; review progress.jsonl before starting a fresh contract"
+    park "cycles-exhausted" "autopilot contract already used $CONTRACT_CYCLES of $MAX_CYCLES cycle(s) across resumes; retire it with oms autopilot abandon --reason TEXT, then start a fresh contract"
   fi
   if [ "$CYCLE" -gt "$MAX_CYCLES" ]; then
     park "cycles-exhausted" "acceptance still failing after $MAX_CYCLES cycle(s); review progress.jsonl, then extend the plan or raise --max-cycles"

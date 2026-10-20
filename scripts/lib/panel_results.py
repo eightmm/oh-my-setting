@@ -470,14 +470,19 @@ def _deliver(repo, payload, relative, rows, retry=False):
     return delivered
 
 
-def _plan_hint(repo, task_id):
+def _plan_hint(repo, task_id, has_write_patch):
     # No land receipt exists here, so the plan is never finished automatically.
     try:
         shown = subprocess.run(['bash', str(ENTRY), 'agent-plan', '--repo', str(repo), 'show', '--id', task_id],
                                capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=60)
         if not shown.returncode and json.loads(shown.stdout).get('state') not in ('done', None):
-            print('plan %s is not done: after oms land run oms agent-plan finish --id %s --landed-commit SHA'
-                  % (task_id, task_id), file=sys.stderr)
+            if has_write_patch:
+                print('plan %s is not done: after oms land run oms agent-plan finish --id %s --landed-commit SHA'
+                      % (task_id, task_id), file=sys.stderr)
+            else:
+                print('plan %s is not done: a task with no patch cannot finish by landing; close it with '
+                      'oms agent-plan accept-main-research (completion bundle) or oms agent-plan block '
+                      '--id %s --reason TEXT' % (task_id, task_id), file=sys.stderr)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
 
@@ -728,7 +733,7 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
             print('OMS review settlement: %d worker(s) remain pending' % len(settlement['pending']), file=sys.stderr)
         delivery = _deliver(repo, payload, relative, rows) if notify else _last_delivery(repo, rows, task_id, payload['revision'])
         if outcome == 'accepted':
-            _plan_hint(repo, task_id)
+            _plan_hint(repo, task_id, any(current['admissions']))
         return dict(payload, artifact=relative, delivery=delivery, settlement=settlement)
 
 
