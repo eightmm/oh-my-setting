@@ -3058,7 +3058,54 @@ EOF
   done
 }
 
+test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose() {
+  local main="$TMP/scratch-refusal-main" managed="$TMP/scratch-refusal-managed"
+  local scratch normal rc=0 parent_env
+  make_repo "$main"
+  mkdir -p "$main/calls" "$TMP/bin" "$managed"
+  write_orchestration_stubs "$TMP/bin"
+  main="$(cd "$main" && pwd -P)"
+  parent_env="env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH OMS_DELEGATE_WORKTREE_ROOT=$managed"
+  scratch="$($parent_env "$ROOT/scripts/scratch-worktree.sh" add --repo "$main" --owner-pid $$)" ||
+    fail "scratch worktree fixture creation failed"
+  git -C "$scratch" switch -q main
+  mkdir -p "$scratch/calls"
+
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" \
+      run_autopilot "$scratch" propose --planner claude --allowed 'src,tests' --base main
+  ) > "$scratch/propose.out" 2>&1 || rc=$?
+  [ ! -f "$scratch/calls/plan-from-spec" ] ||
+    fail "autopilot propose from verified scratch reached the stub planner"
+  [ ! -e "$scratch/.oms/plan/autopilot-run.json" ] ||
+    fail "autopilot propose from verified scratch wrote an outer receipt"
+  [ "$rc" = 2 ] || fail "autopilot propose from verified scratch must refuse, got $rc"
+  grep -Fq "$scratch" "$scratch/propose.out" ||
+    fail "scratch refusal did not name the execution checkout"
+  grep -Fq "$main" "$scratch/propose.out" ||
+    fail "scratch refusal did not name the canonical checkout"
+  grep -Fq 'run oms autopilot from the main checkout' "$scratch/propose.out" ||
+    fail "scratch refusal did not direct the user to the main checkout"
+
+  normal="$TMP/scratch-refusal-normal"
+  make_repo "$normal"
+  mkdir -p "$normal/calls"
+  rc=0
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" \
+      run_autopilot "$normal" propose --planner claude --allowed 'src,tests' --base main
+  ) > "$normal/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "ordinary checkout should propose normally, got $rc: $(tail -5 "$normal/propose.out")"
+  [ -f "$normal/calls/plan-from-spec" ] ||
+    fail "ordinary checkout did not reach the stub planner"
+  [ -f "$normal/.oms/plan/autopilot-run.json" ] ||
+    fail "ordinary checkout did not write the outer receipt"
+}
+
 test_autopilot_acceptance_reuse
+test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose
 test_auto_collaboration
 test_atomic_proposal_apply
 test_autopilot_orchestration

@@ -282,6 +282,18 @@ REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 REPO="${REPO//$'\r'/}"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository path"
 REPO="${REPO//$'\r'/}"
+STATE_REPO="$(oms_state_root "$REPO")" || fail "cannot resolve the canonical state repository"
+STATE_REPO="${STATE_REPO//$'\r'/}"
+STATE_REPO="$(cd "$STATE_REPO" && pwd -P)" || fail "cannot resolve the physical state repository path"
+STATE_REPO="${STATE_REPO//$'\r'/}"
+if [ "$STATE_REPO" != "$REPO" ]; then
+  case "$ACTION" in
+    status) ;;
+    *)
+      fail "autopilot $ACTION cannot run from verified OMS scratch worktree $REPO because plan state is in canonical repository $STATE_REPO; run oms autopilot from the main checkout ($STATE_REPO)"
+      ;;
+  esac
+fi
 PLAN_FILE="$REPO/.oms/plan/tasks.json"
 PROGRESS_FILE="$REPO/.oms/plan/progress.jsonl"
 SPEC="$REPO/PROJECT.md"
