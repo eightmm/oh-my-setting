@@ -1967,9 +1967,34 @@ oms_worker_path_is_managed_foreign_worktree() {  # PATH CURRENT_WORKTREE
 # Lifecycle exemptions cannot hide executable per-worktree config or rewired
 # registrations. Admin bytes stay fixed for surviving checkouts. Git may reuse
 # a removed managed sibling slot only after both checkout identities are proven.
+oms_worker_gitmeta_admin_file_identity() {  # PATH
+  local path="$1"
+  local digest
+  if [ -L "$path" ]; then
+    digest="$(readlink "$path" 2>/dev/null | oms_sha256_stream 2>/dev/null)" || {
+      printf 'unreadable\n'
+      return 0
+    }
+    printf 'link:%s\n' "$digest"
+  elif [ -f "$path" ]; then
+    digest="$(oms_sha256_file "$path" 2>/dev/null || true)"
+    [ -n "$digest" ] || {
+      printf 'unreadable\n'
+      return 0
+    }
+    printf 'file:%s\n' "$digest"
+  elif [ -e "$path" ]; then
+    printf 'other\n'
+  else
+    printf 'missing\n'
+  fi
+}
+
 oms_worker_gitmeta_admin_changes_are_safe() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local repo="$1" before="$2" worker="${3:-}"
-  local common entry receipt physical line side head
+  local common entry receipt physical line side head current_path gitfile baseline_path
+  local field baseline_identity current_identity baseline_gitdir_identity current_gitdir_identity
+  local in_place_safe metadata_complete
   OMS_WG_GITMETA_ADMIN_QUIET=0
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before/gitmeta-managed-added" \
@@ -2025,6 +2050,85 @@ PY
   : > "$before/gitmeta-managed-replaced"
   while IFS= read -r entry; do
     entry="${entry//$'\r'/}"
+    # Existing OMS-managed siblings can be re-registered in place. The
+    # baseline exemption identifies the old sibling; current metadata must
+    # keep its wiring fixed or fall through to the stronger receipt proof.
+    # An absent slot also needs a baseline path or receipt confined to the
+    # managed root before it can be accepted directly.
+    if grep -Fxq "worktrees/$entry" "$before/gitmeta-exempt"; then
+      if [ ! -e "$common/worktrees/$entry" ] && [ ! -L "$common/worktrees/$entry" ]; then
+        baseline_path="$(awk -F '\t' -v e="$entry" \
+          '$1 == e { print $2; found = 1; exit } END { if (!found) exit 1 }' \
+          "$before/gitmeta-managed-paths" 2>/dev/null || true)"
+        baseline_path="${baseline_path//$'\r'/}"
+        receipt="$before/foreign-worktrees/$entry"
+        if [ -f "$receipt/physical" ] && [ ! -L "$receipt/physical" ]; then
+          physical="$(sed -n '1p' "$receipt/physical" 2>/dev/null || true)"
+          physical="${physical//$'\r'/}"
+          if [ -n "$physical" ] &&
+            oms_worker_path_is_managed_foreign_worktree "$physical" "$worker" 1; then
+            printf 'worktrees/%s\n' "$entry" >> "$before/gitmeta-managed-replaced"
+            continue
+          fi
+        fi
+        if [ -n "$baseline_path" ] &&
+          oms_worker_path_is_managed_foreign_worktree "$baseline_path" "$worker" 1; then
+          printf 'worktrees/%s\n' "$entry" >> "$before/gitmeta-managed-replaced"
+          continue
+        fi
+      fi
+      if oms_worker_gitmeta_is_live_managed_worktree "$repo" \
+        "$common/worktrees/$entry/gitdir" "$worker"; then
+        # The liveness validator proves this checkout still belongs to a
+        # managed sibling. Keep its common-dir and executable config fixed to
+        # the baseline; a changed gitdir may only spell the same physical path.
+        in_place_safe=1
+        metadata_complete=1
+        for field in commondir config.worktree; do
+          if ! baseline_identity="$(awk -F '\t' -v e="$entry" -v f="$field" \
+            '$1 == e && $2 == f { print $3; found = 1; exit } END { if (!found) exit 1 }' \
+            "$before/gitmeta-managed-metadata" 2>/dev/null)" ||
+            [ -z "$baseline_identity" ]; then
+            metadata_complete=0
+            continue
+          fi
+          current_identity="$(oms_worker_gitmeta_admin_file_identity \
+            "$common/worktrees/$entry/$field")" || current_identity=""
+          case "$baseline_identity:$current_identity" in *unreadable*) return 1 ;; esac
+          [ "$baseline_identity" = "$current_identity" ] || return 1
+        done
+        if ! baseline_gitdir_identity="$(awk -F '\t' -v e="$entry" \
+          '$1 == e && $2 == "gitdir" { print $3; found = 1; exit } END { if (!found) exit 1 }' \
+          "$before/gitmeta-managed-metadata" 2>/dev/null)" ||
+          [ -z "$baseline_gitdir_identity" ]; then
+          metadata_complete=0
+        fi
+        baseline_path="$(awk -F '\t' -v e="$entry" \
+          '$1 == e { print $2; found = 1; exit } END { if (!found) exit 1 }' \
+          "$before/gitmeta-managed-paths" 2>/dev/null || true)"
+        baseline_path="${baseline_path//$'\r'/}"
+        [ -n "$baseline_path" ] || metadata_complete=0
+        if [ "$metadata_complete" = 1 ]; then
+          current_gitdir_identity="$(oms_worker_gitmeta_admin_file_identity \
+            "$common/worktrees/$entry/gitdir")" || current_gitdir_identity=""
+          if [ "$baseline_gitdir_identity" != "$current_gitdir_identity" ]; then
+            gitfile="$(sed -n '1p' "$common/worktrees/$entry/gitdir" 2>/dev/null || true)"
+            gitfile="${gitfile//$'\r'/}"
+            case "$gitfile" in */.git) current_path="${gitfile%/.git}" ;; *) current_path="" ;; esac
+            current_path="$(oms_harness_physical_dir "$current_path" 2>/dev/null || true)"
+            if [ -z "$current_path" ] || [ "$baseline_path" != "$current_path" ]; then
+              in_place_safe=0
+            fi
+          fi
+        else
+          in_place_safe=0
+        fi
+        if [ "$in_place_safe" = 1 ]; then
+          printf 'worktrees/%s\n' "$entry" >> "$before/gitmeta-managed-replaced"
+          continue
+        fi
+      fi
+    fi
     if ! grep -Fxq "worktrees/$entry" "$before/gitmeta-exempt"; then
       grep -Fxq "worktrees/$entry" "$before/gitmeta-residue" || return 1
     fi
@@ -2809,7 +2913,8 @@ PY
       # another checkout of this repo, and a submodule keeps its own config,
       # refs, and hooks under .git/modules.
       if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
-        local meta head worktree_gitfile worktree_path
+        local meta head worktree_gitfile worktree_path worktree_physical
+        local worktree_slot worktree_identity worktree_field
         for meta in objects/info/alternates objects/info/http-alternates \
           info/exclude info/grafts info/attributes shallow; do
           if [ -f "$git_dir/$meta" ]; then
@@ -2856,6 +2961,38 @@ PY
                 "$current_worktree_physical"; then
                 [ -z "${OMS_WG_GITMETA_EXEMPT_OUT:-}" ] ||
                   printf '%s\n' "${wt#"$git_dir"/}" >> "$OMS_WG_GITMETA_EXEMPT_OUT"
+                worktree_slot="${wt##*/}"
+                if [ -n "${OMS_WG_GITMETA_MANAGED_METADATA_OUT:-}" ]; then
+                  case "$worktree_slot" in
+                    ""|*[$'\t\r\n']*) ;;
+                    *)
+                      for worktree_field in gitdir commondir config.worktree; do
+                        worktree_identity="$(oms_worker_gitmeta_admin_file_identity \
+                          "$wt/$worktree_field")"
+                        printf '%s\t%s\t%s\n' "$worktree_slot" "$worktree_field" \
+                          "$worktree_identity" >> "$OMS_WG_GITMETA_MANAGED_METADATA_OUT"
+                      done
+                      ;;
+                  esac
+                fi
+                if [ -n "${OMS_WG_GITMETA_MANAGED_PATHS_OUT:-}" ]; then
+                  worktree_gitfile="$(sed -n '1p' "$wt/gitdir" 2>/dev/null || true)"
+                  worktree_gitfile="${worktree_gitfile//$'\r'/}"
+                  case "$worktree_gitfile" in
+                    */.git)
+                      worktree_path="${worktree_gitfile%/.git}"
+                      worktree_physical="$(oms_harness_physical_dir "$worktree_path" 2>/dev/null || true)"
+                      if [ -n "$worktree_physical" ]; then
+                        case "$worktree_physical" in
+                          *[$'\t\r\n']*) ;;
+                          *) printf '%s\t%s\n' "$worktree_slot" "$worktree_physical" \
+                            >> "$OMS_WG_GITMETA_MANAGED_PATHS_OUT" ;;
+                        esac
+                      fi
+                      ;;
+                    *) ;;
+                  esac
+                fi
                 if [ -n "${OMS_WG_GITMETA_MANAGED_ADDED_OUT:-}" ] ||
                   [ -n "${OMS_WG_GITMETA_MANAGED_COMPLETE_OUT:-}" ]; then
                   if [ -f "$wt/HEAD" ] && [ ! -L "$wt/HEAD" ]; then
@@ -2970,6 +3107,13 @@ def add(label, value):
     digest.update(len(value).to_bytes(8, "big"))
     digest.update(value)
 
+details = []
+def record(label, value):
+    part = hashlib.sha256()
+    part.update(label)
+    part.update(value)
+    return part.hexdigest()
+
 def git_output(*args, empty_status=()):
     try:
         process = subprocess.Popen(["git", "-C", repo] + list(args),
@@ -2984,26 +3128,34 @@ def git_output(*args, empty_status=()):
 
 refs = git_output("show-ref", empty_status=(1,))
 add("refs", b"\n".join(sorted(refs.splitlines())))
+details.append("refs\t" + record(b"refs", b"\n".join(sorted(refs.splitlines()))))
 head = git_output("rev-parse", "--verify", "--quiet", "HEAD", empty_status=(1, 128))
 add("head", head.strip() or b"unborn")
 symbolic_head = git_output("symbolic-ref", "-q", "HEAD", empty_status=(1,))
 add("symbolic-head", symbolic_head.strip())
+details.append("head\t" + record(b"head", head.strip() or b"unborn"))
+details.append("symbolic-head\t" + record(b"symbolic-head", symbolic_head.strip()))
 
 worktrees = os.path.join(common, "worktrees")
 try:
     root_stat = os.lstat(worktrees)
 except FileNotFoundError:
     add("worktrees-root", b"missing")
+    details.append("root\t" + record(b"root", b"missing"))
 else:
     if stat.S_ISLNK(root_stat.st_mode):
         add("worktrees-root-link", os.fsencode(os.readlink(worktrees)))
+        details.append("root\t" + record(b"root-link", os.fsencode(os.readlink(worktrees))))
     elif stat.S_ISDIR(root_stat.st_mode):
         add("worktrees-root", b"directory")
+        details.append("root\t" + record(b"root", b"directory"))
         try:
             entries = sorted(os.listdir(worktrees), key=os.fsencode)
         except OSError:
             raise SystemExit(1)
         for name in entries:
+            if "\t" in name or "\r" in name or "\n" in name:
+                raise SystemExit(1)
             entry = os.path.join(worktrees, name)
             add("entry-name", os.fsencode(name))
             try:
@@ -3011,37 +3163,151 @@ else:
             except OSError:
                 raise SystemExit(1)
             if stat.S_ISLNK(entry_stat.st_mode):
-                add("entry-link", os.fsencode(os.readlink(entry)))
+                value = os.fsencode(os.readlink(entry))
+                add("entry-link", value)
+                details.append("other\t" + name + "\t" + record(b"link", value))
                 continue
             if not stat.S_ISDIR(entry_stat.st_mode):
-                add("entry-type", str(stat.S_IFMT(entry_stat.st_mode)))
+                value = str(stat.S_IFMT(entry_stat.st_mode)).encode()
+                add("entry-type", value)
+                details.append("other\t" + name + "\t" + record(b"type", value))
                 continue
             add("entry-type", b"directory")
-            for field in ("HEAD", "gitdir", "commondir"):
+            slot = hashlib.sha256()
+            slot.update(b"directory")
+            for field in ("HEAD", "gitdir", "commondir", "config.worktree"):
                 path = os.path.join(entry, field)
                 try:
                     field_stat = os.lstat(path)
                 except FileNotFoundError:
-                    add(field + "-state", b"missing")
+                    if field != "config.worktree":
+                        add(field + "-state", b"missing")
+                    slot.update(field.encode() + b"-missing")
+                    details.append("slot-field\t" + name + "\t" + field + "\t" +
+                                   record(field.encode(), b"missing"))
                     continue
                 except OSError:
                     raise SystemExit(1)
                 if stat.S_ISLNK(field_stat.st_mode):
-                    add(field + "-link", os.fsencode(os.readlink(path)))
+                    value = os.fsencode(os.readlink(path))
+                    if field != "config.worktree":
+                        add(field + "-link", value)
+                    slot.update(field.encode() + b"-link" + value)
+                    identity = b"link:" + value
                 elif stat.S_ISREG(field_stat.st_mode):
                     try:
                         with open(path, "rb") as handle:
                             value = handle.read()
                     except OSError:
                         raise SystemExit(1)
-                    add(field, value)
+                    if field != "config.worktree":
+                        add(field, value)
+                    slot.update(field.encode() + b"-file" + value)
+                    identity = b"file:" + value
                 else:
-                    add(field + "-type", str(stat.S_IFMT(field_stat.st_mode)))
+                    value = str(stat.S_IFMT(field_stat.st_mode)).encode()
+                    if field != "config.worktree":
+                        add(field + "-type", value)
+                    slot.update(field.encode() + b"-type" + value)
+                    identity = b"type:" + value
+                details.append("slot-field\t" + name + "\t" + field + "\t" +
+                               record(field.encode(), identity))
+                if field == "gitdir" and stat.S_ISREG(field_stat.st_mode):
+                    backpointer = value.split(b"\n", 1)[0].rstrip(b"\r")
+                    physical = b""
+                    suffix = b"/.git"
+                    if backpointer.endswith(suffix):
+                        candidate = os.fsdecode(backpointer[:-len(suffix)])
+                        if os.path.isabs(candidate) or (len(candidate) > 2 and
+                                candidate[1:3] == ":/"):
+                            try:
+                                process = subprocess.Popen(["pwd", "-P"], cwd=candidate,
+                                                           stdout=subprocess.PIPE,
+                                                           stderr=subprocess.DEVNULL)
+                                output = process.communicate()[0].replace(b"\r", b"").rstrip(b"\n")
+                                if process.returncode == 0:
+                                    physical = output
+                            except OSError:
+                                pass
+                    physical_text = os.fsdecode(physical)
+                    if "\t" in physical_text or "\r" in physical_text or "\n" in physical_text:
+                        raise SystemExit(1)
+                    details.append("slot-path\t" + name + "\t" + physical_text)
+            details.append("slot\t" + name + "\t" + slot.hexdigest())
     else:
         add("worktrees-root-type", str(stat.S_IFMT(root_stat.st_mode)))
+        details.append("root\t" + record(b"root-type", str(stat.S_IFMT(root_stat.st_mode)).encode()))
 
+if os.environ.get("OMS_WG_BOUNDARY_DETAIL_OUT"):
+    with open(os.environ["OMS_WG_BOUNDARY_DETAIL_OUT"], "w", encoding="utf-8") as handle:
+        handle.write("\n".join(details) + "\n")
 print(digest.hexdigest())
 PY
+}
+
+oms_worker_gitmeta_boundary_churn_is_safe() {  # REPO BEFORE AFTER CAPTURE_DIR WORKER
+  local repo="$1" before="$2" after="$3" capture_dir="$4" worker="${5:-}"
+  local common slot
+  [ -f "$before" ] && [ -f "$after" ] || return 1
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  if ! python3 - "$before" "$after" > "$capture_dir/boundary-changed-slots" <<'PY'
+import sys
+def read(path):
+    result, slots, slot_fields, slot_paths = {}, {}, {}, {}
+    for raw in open(path, encoding="utf-8"):
+        fields = raw.rstrip("\r\n").split("\t")
+        if fields[0] == "slot" and len(fields) == 3:
+            slots[fields[1]] = fields[2]
+        elif fields[0] == "slot-field" and len(fields) == 4:
+            slot_fields.setdefault(fields[1], {})[fields[2]] = fields[3]
+        elif fields[0] == "slot-path" and len(fields) == 3:
+            slot_paths[fields[1]] = fields[2]
+        elif fields[0] == "other" and len(fields) == 3:
+            result[fields[0] + ":" + fields[1]] = fields[2]
+        elif len(fields) == 2:
+            result[fields[0]] = fields[1]
+        else:
+            raise SystemExit(1)
+    return result, slots, slot_fields, slot_paths
+old_meta, old_slots, old_fields, old_paths = read(sys.argv[1])
+new_meta, new_slots, new_fields, new_paths = read(sys.argv[2])
+if old_meta != new_meta:
+    raise SystemExit(1)
+for name in sorted(set(old_slots) | set(new_slots)):
+    if old_slots.get(name) != new_slots.get(name):
+        if name in old_slots and name in new_slots:
+            for field in ("commondir", "config.worktree"):
+                if old_fields.get(name, {}).get(field) != new_fields.get(name, {}).get(field):
+                    raise SystemExit(1)
+            if old_fields.get(name, {}).get("gitdir") != new_fields.get(name, {}).get("gitdir"):
+                old_path = old_paths.get(name, "")
+                new_path = new_paths.get(name, "")
+                if not old_path or old_path != new_path:
+                    raise SystemExit(1)
+        elif name not in old_slots:
+            missing_config = __import__("hashlib").sha256(
+                b"config.worktree" + b"missing").hexdigest()
+            if new_fields.get(name, {}).get("config.worktree") != missing_config:
+                raise SystemExit(1)
+        print(name)
+PY
+  then
+    return 1
+  fi
+  [ -s "$capture_dir/boundary-changed-slots" ] || return 1
+  while IFS= read -r slot; do
+    case "$slot" in ""|*/*|*[$'\r\t\n']*) return 1 ;; esac
+    if [ -e "$common/worktrees/$slot" ] || [ -L "$common/worktrees/$slot" ]; then
+      if ! oms_worker_gitmeta_is_live_managed_worktree "$repo" \
+        "$common/worktrees/$slot/gitdir" "$worker"; then
+        return 1
+      fi
+    else
+      if ! grep -Fxq "worktrees/$slot" "$capture_dir/gitmeta-exempt"; then
+        return 1
+      fi
+    fi
+  done < "$capture_dir/boundary-changed-slots"
 }
 
 # Capture each surface separately so a later comparison can name what moved.
@@ -3054,10 +3320,14 @@ oms_worker_surface_snapshot_capture_once() {
   mkdir -p "$dir" || return 1
   : > "$dir/gitmeta-exempt"
   : > "$dir/gitmeta-residue"
+  : > "$dir/gitmeta-managed-paths"
+  : > "$dir/gitmeta-managed-metadata"
   : > "$dir/gitmeta-managed-complete"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks omsstate; do
     OMS_WG_GITMETA_EXEMPT_OUT="$dir/gitmeta-exempt" \
       OMS_WG_GITMETA_RESIDUE_OUT="$dir/gitmeta-residue" \
+    OMS_WG_GITMETA_MANAGED_PATHS_OUT="$dir/gitmeta-managed-paths" \
+      OMS_WG_GITMETA_MANAGED_METADATA_OUT="$dir/gitmeta-managed-metadata" \
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
     # Deterministic race coverage for the baseline consistency test. The
@@ -3171,7 +3441,12 @@ oms_worker_surface_snapshot() {
     return 1
   }
   while [ "$attempt" -le 3 ]; do
-    before="$(oms_worker_surface_boundary_fingerprint "$repo")" || {
+    rm -f "$dir/boundary-before" "$dir/boundary-after" || {
+      OMS_WG_SNAPSHOT_ERROR="could not prepare worker guard boundary retry"
+      return 1
+    }
+    before="$(OMS_WG_BOUNDARY_DETAIL_OUT="$dir/boundary-before" \
+      oms_worker_surface_boundary_fingerprint "$repo")" || {
       OMS_WG_SNAPSHOT_ERROR="could not fingerprint refs and worktree registrations"
       return 1
     }
@@ -3186,7 +3461,8 @@ oms_worker_surface_snapshot() {
     # per-worktree receipts must not survive when an entry was removed.
     for name in config remotes refs remote-refs work-branches tracked files \
       gitmeta hooks omsstate refs-protected gitmeta-exempt gitmeta-residue \
-      gitmeta-managed-complete foreign-worktrees branch-logs \
+      gitmeta-managed-paths gitmeta-managed-metadata gitmeta-managed-complete \
+      foreign-worktrees branch-logs \
       omsstate.artifact-index omsstate.completion-pins; do
       rm -rf "${dir:?}/$name" || {
         OMS_WG_SNAPSHOT_ERROR="could not prepare worker guard baseline retry"
@@ -3198,12 +3474,20 @@ oms_worker_surface_snapshot() {
       OMS_WG_SNAPSHOT_ERROR="could not capture worker guard protected surfaces"
       return 1
     fi
-    after="$(oms_worker_surface_boundary_fingerprint "$repo")" || {
+    after="$(OMS_WG_BOUNDARY_DETAIL_OUT="$dir/boundary-after" \
+      oms_worker_surface_boundary_fingerprint "$repo")" || {
       OMS_WG_SNAPSHOT_ERROR="could not fingerprint refs and worktree registrations"
       return 1
     }
     after="${after//$'\r'/}"
     if [ "$before" = "$after" ]; then
+      OMS_WG_SNAPSHOT_ERROR=""
+      return 0
+    fi
+    if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
+      oms_worker_gitmeta_boundary_churn_is_safe "$repo" \
+      "$dir/boundary-before" "$dir/boundary-after" "$dir" \
+      "$current_worktree_physical"; then
       OMS_WG_SNAPSHOT_ERROR=""
       return 0
     fi

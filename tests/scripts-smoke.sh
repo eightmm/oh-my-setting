@@ -29184,6 +29184,118 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
   [ "$(awk 'END { print NR }' "$unstable_capture_count")" = 3 ] ||
     fail "an unstable baseline must stop after three captures"
 
+  # Boundary churn is tolerated only when every changed slot still validates
+  # as a managed sibling. Unrelated common-dir metadata remains fail-closed.
+  local churn_repo="$TMP/guard-baseline-sibling-churn"
+  local churn_root="$TMP/guard-baseline-sibling-root"
+  local churn_sibling="$churn_root/oh-my-setting-delegate.churn"
+  local churn_snap="$TMP/guard-baseline-sibling-snapshot"
+  make_guard_repo "$churn_repo"
+  make_live_managed_sibling "$churn_repo" "$churn_sibling"
+  OMS_DELEGATE_WORKTREE_ROOT="$churn_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" sibling="$3" snap="$4"
+    oms_worker_surface_snapshot_capture_once "$repo" "$snap" "$repo" || exit 1
+    OMS_WG_BOUNDARY_DETAIL_OUT="$snap/boundary-before" \
+      oms_worker_surface_boundary_fingerprint "$repo" >/dev/null || exit 2
+    metadata="$(git -C "$sibling/wt" rev-parse --git-dir)"
+    case "$metadata" in /*) ;; *) metadata="$repo/$metadata" ;; esac
+    gitdir="$metadata/gitdir"
+    content="$(cat "$gitdir")"
+    printf "%s\r\n" "$content" > "$gitdir"
+    OMS_WG_BOUNDARY_DETAIL_OUT="$snap/boundary-after" \
+      oms_worker_surface_boundary_fingerprint "$repo" >/dev/null || exit 3
+    oms_worker_gitmeta_boundary_churn_is_safe "$repo" \
+      "$snap/boundary-before" "$snap/boundary-after" "$snap" "$repo" || exit 4
+    common="$(oms_harness_git_path_physical "$repo" --git-common-dir)" || exit 5
+    printf late > "$common/worktrees/unrelated-admin-entry"
+    OMS_WG_BOUNDARY_DETAIL_OUT="$snap/boundary-unrelated" \
+      oms_worker_surface_boundary_fingerprint "$repo" >/dev/null || exit 5
+    if oms_worker_gitmeta_boundary_churn_is_safe "$repo" \
+      "$snap/boundary-before" "$snap/boundary-unrelated" "$snap" "$repo"; then
+      exit 6
+    fi
+  ' _ "$ROOT" "$churn_repo" "$churn_sibling" "$churn_snap" ||
+    fail "baseline should accept validated sibling churn and reject unrelated admin churn"
+
+  local actual_churn="$TMP/guard-baseline-actual-sibling-churn"
+  local actual_root="$TMP/guard-baseline-actual-sibling-root"
+  local actual_sibling="$actual_root/oh-my-setting-delegate.concurrent"
+  local actual_ready="$TMP/guard-baseline-actual-ready"
+  local actual_release="$TMP/guard-baseline-actual-release"
+  local actual_count="$TMP/guard-baseline-actual-count"
+  make_guard_repo "$actual_churn"
+  make_live_managed_sibling "$actual_churn" "$actual_sibling"
+  rm -f "$actual_ready" "$actual_release"
+  : > "$actual_count"
+  (
+    local tries=0
+    while [ ! -e "$actual_ready" ] && [ "$tries" -lt 100 ]; do
+      sleep 0.05
+      tries=$((tries + 1))
+    done
+    [ -e "$actual_ready" ] || exit 1
+    metadata="$(git -C "$actual_sibling/wt" rev-parse --git-dir)"
+    case "$metadata" in /*) ;; *) metadata="$actual_churn/$metadata" ;; esac
+    content="$(cat "$metadata/gitdir")"
+    printf '%s\r\n' "$content" > "$metadata/gitdir"
+    touch "$actual_release"
+  ) &
+  pid=$!
+  OMS_TEST_WG_SNAPSHOT_PAUSE_AFTER=refs \
+    OMS_TEST_WG_SNAPSHOT_READY="$actual_ready" \
+    OMS_TEST_WG_SNAPSHOT_RELEASE="$actual_release" \
+    OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT="$actual_count" \
+    OMS_DELEGATE_WORKTREE_ROOT="$actual_root" bash -c '
+      . "$1/scripts/lib/harness-residue.sh"
+      . "$1/scripts/lib/oms-common.sh"
+      oms_worker_surface_snapshot "$2" "$3" "$2"
+    ' _ "$ROOT" "$actual_churn" "$TMP/guard-baseline-actual-snapshot" ||
+      fail "a managed sibling created during baseline capture must stabilize"
+  wait "$pid" || fail "managed sibling baseline churn fixture failed"
+  [ "$(awk 'END { print NR }' "$actual_count")" = 1 ] ||
+    fail "validated sibling baseline churn should stabilize in one capture: $(cat "$actual_count")"
+
+  # A pending registration can precede complete managed registrations in
+  # Git's sorted admin scan. It must not truncate the remaining baseline rows.
+  local pending_baseline="$TMP/guard-baseline-pending-sibling"
+  local pending_root="$TMP/guard-baseline-pending-root"
+  local pending_snap="$TMP/guard-baseline-pending-snapshot"
+  make_guard_repo "$pending_baseline"
+  OMS_DELEGATE_WORKTREE_ROOT="$pending_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    repo="$2" root="$3" snap="$4"
+    pending="$root/oh-my-setting-delegate.pending/wt"
+    complete="$root/oh-my-setting-scratch.complete/wt"
+    mkdir -p "${pending%/wt}" "${complete%/wt}"
+    git -C "$repo" worktree add --quiet --detach "$pending" HEAD || exit 1
+    printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n" \
+      "$$" "$repo" "$pending" > "${pending%/wt}/.oh-my-setting-tmp"
+    git -C "$repo" worktree add --quiet --detach "$complete" HEAD || exit 2
+    printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n" \
+      "$$" "$repo" "$complete" > "${complete%/wt}/.oh-my-setting-tmp"
+    common="$(git -C "$repo" rev-parse --git-common-dir)"
+    case "$common" in /*) ;; *) common="$repo/$common" ;; esac
+    pending_meta="$(git -C "$pending" rev-parse --git-dir)"
+    complete_meta="$(git -C "$complete" rev-parse --git-dir)"
+    case "$pending_meta" in /*) ;; *) pending_meta="$repo/$pending_meta" ;; esac
+    case "$complete_meta" in /*) ;; *) complete_meta="$repo/$complete_meta" ;; esac
+    mv "$pending_meta" "$common/worktrees/000-pending" || exit 3
+    mv "$complete_meta" "$common/worktrees/999-complete" || exit 4
+    printf "gitdir: %s\n" "$common/worktrees/999-complete" > "$complete/.git"
+    printf "%s/.git\n" "$complete" > "$common/worktrees/999-complete/gitdir"
+    printf "gitdir: %s\n" "$common/worktrees/000-pending" > "$pending/.git"
+    printf "%s/.git\n" "$pending" > "$common/worktrees/000-pending/gitdir"
+    rm -rf "$pending"
+    oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 5
+    grep -Fxq worktrees/999-complete "$snap/gitmeta-exempt" || exit 6
+    awk -F "\t" '\''$1 == "999-complete" { found = 1 } END { exit !found }'\'' \
+      "$snap/gitmeta-managed-paths" || exit 7
+  ' _ "$ROOT" "$pending_baseline" "$pending_root" "$pending_snap" ||
+    fail "a registered pending sibling must not truncate later baseline worktree entries"
+
   rm -f "$baseline_ready" "$baseline_release" "$ready" "$done"
   : > "$baseline_capture_count"
   (
@@ -29508,6 +29620,73 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
   if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-removal should not be reported as a change: $result"
   fi
+
+  local rewritten="$TMP/guard-sibling-gitdir-rewrite"
+  local rewritten_root="$TMP/guard-sibling-gitdir-rewrite-root"
+  local rewritten_sibling="$rewritten_root/oh-my-setting-delegate.sibling"
+  make_guard_repo "$rewritten"
+  make_live_managed_sibling "$rewritten" "$rewritten_sibling"
+  local rewritten_body
+  rewritten_body="metadata=\$(git -C '$rewritten_sibling/wt' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$rewritten/'\$metadata ;; esac; content=\$(cat \"\$metadata/gitdir\"); printf '%s\\r\\n' \"\$content\" > \"\$metadata/gitdir\""
+  result="$(run_delegate_beside_sibling "$rewritten" "$rewritten_root" "$rewritten_body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "rewriting a validated managed sibling gitdir must not stop the worker: $result"
+
+  local same_checkout="$TMP/guard-sibling-gitdir-same-checkout"
+  local same_checkout_root="$TMP/guard-sibling-gitdir-same-checkout-root"
+  local same_checkout_sibling="$same_checkout_root/oh-my-setting-delegate.sibling"
+  make_guard_repo "$same_checkout"
+  make_live_managed_sibling "$same_checkout" "$same_checkout_sibling"
+  local same_checkout_body
+  same_checkout_body="metadata=\$(git -C '$same_checkout_sibling/wt' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$same_checkout/'\$metadata ;; esac; printf '%s/../%s/wt/.git\\n' '$same_checkout_sibling' 'oh-my-setting-delegate.sibling' > \"\$metadata/gitdir\""
+  result="$(run_delegate_beside_sibling "$same_checkout" "$same_checkout_root" "$same_checkout_body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a sibling gitdir resolving to the same physical checkout must remain exempt: $result"
+
+  local same_common="$TMP/guard-sibling-commondir-same-common"
+  local same_common_root="$TMP/guard-sibling-commondir-same-common-root"
+  local same_common_sibling="$same_common_root/oh-my-setting-delegate.sibling"
+  make_guard_repo "$same_common"
+  make_live_managed_sibling "$same_common" "$same_common_sibling"
+  local same_common_body
+  same_common_body="metadata=\$(git -C '$same_common_sibling/wt' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$same_common/'\$metadata ;; esac; common=\$(git -C '$same_common' rev-parse --git-common-dir); case \"\$common\" in /*) ;; *) common='$same_common/'\$common ;; esac; printf '%s\\n' \"\$common\" > \"\$metadata/commondir\""
+  result="$(run_delegate_beside_sibling "$same_common" "$same_common_root" "$same_common_body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "changing a sibling commondir's bytes must stop even when it resolves to the same common directory: $result"
+
+  local bad_common="$TMP/guard-sibling-commondir-rewrite"
+  local bad_common_root="$TMP/guard-sibling-commondir-rewrite-root"
+  local bad_common_sibling="$bad_common_root/oh-my-setting-delegate.sibling"
+  local fake_common="$TMP/guard-sibling-fake-common"
+  make_guard_repo "$bad_common"
+  make_live_managed_sibling "$bad_common" "$bad_common_sibling"
+  local bad_common_body
+  bad_common_body="metadata=\$(git -C '$bad_common_sibling/wt' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$bad_common/'\$metadata ;; esac; git init -q '$fake_common' && git -C '$fake_common' -c user.name=guard -c user.email=guard@example.invalid commit --allow-empty -qm fake && fake_common=\$(git -C '$fake_common' rev-parse --git-common-dir); case \"\$fake_common\" in /*) ;; *) fake_common='$fake_common/'\$fake_common ;; esac; printf '%s\\n' \"\$fake_common\" > \"\$metadata/commondir\""
+  result="$(run_delegate_beside_sibling "$bad_common" "$bad_common_root" "$bad_common_body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "rewriting a live sibling commondir to a fake common directory must stop the worker: $result"
+
+  local outside="$TMP/guard-sibling-gitdir-outside"
+  local outside_root="$TMP/guard-sibling-gitdir-outside-root"
+  local outside_sibling="$outside_root/oh-my-setting-delegate.sibling"
+  make_guard_repo "$outside"
+  make_live_managed_sibling "$outside" "$outside_sibling"
+  local outside_body
+  outside_body="metadata=\$(git -C '$outside_sibling/wt' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$outside/'\$metadata ;; esac; printf '/tmp/outside/.git\\n' > \"\$metadata/gitdir\""
+  result="$(run_delegate_beside_sibling "$outside" "$outside_root" "$outside_body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "a rewritten sibling gitdir outside the managed root must stop the worker: $result"
+
+  local own_base="$TMP/guard-own-registration-base"
+  local own_checkout="$TMP/guard-own-registration"
+  make_guard_repo "$own_base"
+  git -C "$own_base" worktree add --quiet --detach "$own_checkout" HEAD ||
+    fail "could not create the guarded worker's linked checkout"
+  mkdir -p "$own_checkout-bin" "$own_checkout-home"
+  result="$(run_guarded_worker "$own_checkout" \
+    "metadata=\$(git -C '$own_checkout' rev-parse --git-dir); case \"\$metadata\" in /*) ;; *) metadata='$own_base/'\$metadata ;; esac; printf '/tmp/forged/.git\\n' > \"\$metadata/gitdir\"")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "rewriting the worker's own linked-worktree registration must stop the worker: $result"
 }
 
 # smoke-weight: 20
@@ -29793,6 +29972,36 @@ git -C $project worktree add --quiet --detach $live_a/wt HEAD && git -C $project
     . "$1/scripts/lib/harness-residue.sh"
     . "$1/scripts/lib/oms-common.sh"
     repo="$2" root="$3" snap="$4"
+    ready_fifo="$5" removal_done="$snap/removal-done"
+    removal_failed="$snap/removal-failed"
+    rm -f "$ready_fifo" "$removal_done" "$removal_failed"
+    mkfifo "$ready_fifo" || exit 14
+    wait_for_removal() {
+      wait_count=0
+      while [ ! -e "$removal_done" ] && [ "$wait_count" -lt 1000 ]; do
+        command sleep 0.01
+        wait_count=$((wait_count + 1))
+      done
+      [ -e "$removal_done" ]
+    }
+    poll_signal_sent=0
+    # Coordinate the simulated removal with the first partial-removal
+    # poll. The 0.3s settle captures still use the real sleep; only the
+    # partial-removal wait is held until the fixture removes the sibling.
+    sleep() {
+      if [ "${1:-}" = 0.1 ] && [ "$poll_signal_sent" = 0 ]; then
+        poll_signal_sent=1
+        printf "compare-poll\n" > "$ready_fifo" || {
+          : > "$removal_failed"
+          return 1
+        }
+        if ! wait_for_removal; then
+          : > "$removal_failed"
+          return 1
+        fi
+      fi
+      command sleep "$@"
+    }
     oms_worker_surface_snapshot "$repo" "$snap" "$repo" || exit 10
     mkdir -p "$root/oh-my-setting-delegate.transient"
     printf "kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s/wt\ntemporary=1\n" \
@@ -29813,18 +30022,28 @@ git -C $project worktree add --quiet --detach $live_a/wt HEAD && git -C $project
     entry="$(sed -n 1p "$snap/gitmeta-managed-added")"
     rm -rf "$root/oh-my-setting-delegate.transient/wt"
     rm -f "$metadata/HEAD"
-    ( sleep 1.3; rm -rf "$common/worktrees/$entry" \
-      "$root/oh-my-setting-delegate.transient" ) &
+    (
+      IFS= read -r _ < "$ready_fifo" || exit 1
+      rm -rf "$common/worktrees/$entry" \
+        "$root/oh-my-setting-delegate.transient" || exit 1
+      : > "$removal_done"
+    ) &
+    remove_pid=$!
     changed="$(oms_worker_surface_diff "$repo" "$snap" "" "$repo")"
+    if [ -e "$removal_failed" ] || ! wait_for_removal; then
+      kill -KILL "$remove_pid" 2>/dev/null || true
+      exit 18
+    fi
     case "$changed" in *gitmeta*) exit 15 ;; esac
-    # Under load the removal may finish before compare captures; an empty
-    # change set is equally correct, any other surface is not.
+    # The FIFO releases removal inside the compare poll; an empty change set
+    # is equally correct if the next capture sees the completed cleanup.
     case "$changed" in *kept-sibling*|"") ;; *) exit 16 ;; esac
     if OMS_WORKER_GUARD_STRICT=1 \
       oms_worker_gitmeta_only_added_removed_siblings "$repo" "$snap" "$repo"; then
       exit 17
     fi
-  ' _ "$ROOT" "$transient" "$managed_root" "$transient_snap" ||
+  ' _ "$ROOT" "$transient" "$managed_root" "$transient_snap" \
+    "$TMP/guard-sibling-transient-ready.fifo" ||
     fail "a validated partially removed sibling that finishes during compare must be soft (rc=$?)"
 
   local transient_stuck="$project-transient-stuck"
@@ -30009,9 +30228,33 @@ mkdir -p $wave_kept && git -C $wave worktree add --quiet --detach $wave_kept/wt 
   contains "$result" 'kept-sibling' || fail "mixed wave lost kept-sibling classification: $result"
   [ "$(git -C "$wave_kept/wt" rev-parse --git-dir)" = "$old_metadata" ] ||
     fail "mixed-wave fixture did not reuse the deleted registration slot"
+
+  # The replacement can already be live when comparison begins. It must use
+  # the same receipt proof as any other slot reuse because its checkout differs
+  # from the baseline sibling's checkout.
+  local wave_live="$project-wave-live"
+  local gone_live="$managed_root/oh-my-setting-delegate.gone-live"
+  local wave_live_kept="$managed_root/oh-my-setting-delegate.wave-live"
+  make_guard_repo "$wave_live"
+  make_live_managed_sibling "$wave_live" "$gone_live"
+  local live_old_metadata
+  live_old_metadata="$(git -C "$gone_live/wt" rev-parse --git-dir)"
+  local wave_live_body="git -C $wave_live worktree remove --force $gone_live/wt && rm -rf $gone_live
+mkdir -p $wave_live_kept && git -C $wave_live worktree add --quiet --detach $wave_live_kept/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$wave_live\\nworktree=$wave_live_kept/wt\\ntemporary=1\\n' > $wave_live_kept/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$wave_live" "$managed_root" "$wave_live_body" --allow-no-change)"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a live sibling reusing a removed slot must pass: $result"
+  grep -Fxq "pid=$$" "$wave_live_kept/.oh-my-setting-tmp" ||
+    fail "live slot-reuse fixture did not retain the test process pid"
+  [ "$(git -C "$wave_live_kept/wt" rev-parse --git-dir)" = "$live_old_metadata" ] ||
+    fail "live mixed-wave fixture did not reuse the deleted registration slot"
+
   local invalid bad bad_gone bad_kept bad_metadata bad_body
-  for invalid in surviving-checkout executable-config; do
+  for invalid in surviving-checkout executable-config outside-root symbolic-head; do
     bad="$project-$invalid"; bad_gone="$gone-$invalid"; bad_kept="$wave_kept-$invalid"
+    if [ "$invalid" = outside-root ]; then
+      bad_gone="$TMP/guard-sibling-old-outside-root"
+    fi
     make_guard_repo "$bad"
     make_live_managed_sibling "$bad" "$bad_gone"
     bad_metadata="$(git -C "$bad_gone/wt" rev-parse --git-dir)"
@@ -30020,9 +30263,12 @@ mkdir -p $bad_kept && git -C $bad worktree add --quiet --detach $bad_kept/wt HEA
     if [ "$invalid" = surviving-checkout ]; then
       bad_body="$bad_body
 mkdir -p $bad_gone/wt"
-    else
+    elif [ "$invalid" = executable-config ]; then
       bad_body="$bad_body
 printf '[core]\\nfsmonitor=unsafe\\n' > $bad_metadata/config.worktree"
+    elif [ "$invalid" = symbolic-head ]; then
+      bad_body="$bad_body
+test \"\$(git -C $bad_kept/wt rev-parse --git-dir)\" = '$bad_metadata' && printf 'ref: refs/heads/%s\\n' \"\$(git -C $bad symbolic-ref --short HEAD)\" > '$bad_metadata/HEAD'"
     fi
     result="$(run_delegate_beside_sibling "$bad" "$managed_root" "$bad_body" --allow-no-change)"
     [ "${result%%	*}" != 0 ] || fail "unproven slot replacement passed ($invalid): $result"
