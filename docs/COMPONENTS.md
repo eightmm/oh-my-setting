@@ -327,6 +327,9 @@ names remain readable and are not renamed automatically.
 
 Use `oms skill-forge add|validate|link` for ordinary local guidance. Neither
 external bundle management nor evaluation is required for a local edit.
+`oms skill-forge status` gives kind-specific recovery guidance for skills that
+differ from same-name OMS templates; local replacement warns that local edits
+will be lost, while imported updates remain explicit.
 `oms skill-forge` remains the single project-skill authority. Local authored
 skills live under `.oms/skills`; explicitly imported bundles first pass a bounded,
 no-follow preview and then live as content-addressed immutable revisions under

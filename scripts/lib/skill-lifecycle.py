@@ -598,6 +598,71 @@ def active_targets(repo: Path) -> None:
         print("%s\t%s" % (child.name, target))
 
 
+def shell_quote(value: str) -> str:
+    """Quote a value as one POSIX shell word, always using single quotes."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def template_drift(repo: Path, templates: Path) -> None:
+    """Print recovery guidance for installed skills that differ from templates."""
+    installed: Dict[str, Tuple[str, Path, str]] = {}
+    skills = repo / ".oms" / "skills"
+    if skills.is_dir() and not skills.is_symlink():
+        for child in skills.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                installed[child.name] = ("local", child, "")
+    store = repo / ".oms" / "skill-store"
+    if store.is_dir() and not store.is_symlink():
+        for child in store.iterdir():
+            if not child.is_dir() or child.is_symlink() or not (child / "lock.json").exists():
+                continue
+            try:
+                lock = load_lock(repo, child.name)
+            except LifecycleError:
+                continue
+            if lock is not None:
+                installed[child.name] = (
+                    "imported", (repo / lock["revision_path"]).resolve(), lock["bundle_sha256"]
+                )
+    if not templates.is_dir():
+        return
+    for name, (kind, skill, current_sha256) in sorted(installed.items()):
+        template = templates / name
+        installed_file = skill / "SKILL.md"
+        template_file = template / "SKILL.md"
+        if (template.is_dir() and not template.is_symlink() and
+                template_file.is_file() and not template_file.is_symlink() and
+                installed_file.is_file() and not installed_file.is_symlink() and
+                installed_file.read_bytes() != template_file.read_bytes()):
+            quoted_name = shell_quote(name)
+            if kind == "local":
+                compare = "diff -u %s %s" % (
+                    shell_quote(str(template_file)), shell_quote(str(installed_file))
+                )
+                replace = "oms skill-forge remove %s && oms skill-forge add --name %s --file %s" % (
+                    quoted_name, quoted_name, shell_quote(str(template_file))
+                )
+                print(
+                    "skill-forge: %s differs from the OMS template; compare: %s; "
+                    "recovery (local edits are lost): %s" % (name, compare, replace)
+                )
+            else:
+                prepared, report = prepare_bundle(str(templates), "", name)
+                try:
+                    template_sha256 = report["bundle_sha256"]
+                finally:
+                    prepared.__exit__()
+                print(
+                    "skill-forge: %s differs from the OMS template; preview: "
+                    "oms skill-forge update --source %s --subdir %s "
+                    "--expected-bundle-sha256 %s --expected-current-sha256 %s"
+                    % (
+                        name, shell_quote(str(templates)), quoted_name,
+                        template_sha256, current_sha256,
+                    )
+                )
+
+
 def command_array(value: Any, where: str) -> List[str]:
     if not isinstance(value, list) or not value or len(value) > 64:
         fail("%s must be a nonempty command array" % where)
@@ -819,6 +884,8 @@ def parser() -> argparse.ArgumentParser:
     rollback.add_argument("--apply", action="store_true")
     rollback.add_argument("--json", action="store_true")
     active = sub.add_parser("active-targets")
+    drift = sub.add_parser("template-drift")
+    drift.add_argument("--templates", required=True)
     return value
 
 
@@ -837,6 +904,9 @@ def main() -> int:
     repo = repo_root(args.repo)
     if args.command == "active-targets":
         active_targets(repo)
+        return 0
+    if args.command == "template-drift":
+        template_drift(repo, Path(args.templates))
         return 0
     if args.command == "eval":
         result = evaluate(

@@ -531,7 +531,7 @@ PY
 }
 
 cmd_status() {
-  local total=0 invalid=0 contracts=0 stale=0 skill stale_days name imported
+  local total=0 invalid=0 contracts=0 stale=0 skill stale_days name imported status_rc=0 drift_output
   stale_days="${OMS_SKILL_STALE_DAYS:-90}"
   case "$stale_days" in
     *[!0-9]*|'') fail "OMS_SKILL_STALE_DAYS must be a non-negative integer" ;;
@@ -564,9 +564,8 @@ cmd_status() {
   fi
   if [ "$invalid" -gt 0 ]; then
     echo "skill-forge: $invalid of $total project skill(s) invalid (run 'oms skill-forge validate')"
-    return 1
-  fi
-  if [ "$contracts" -gt 0 ]; then
+    status_rc=1
+  elif [ "$contracts" -gt 0 ]; then
     echo "skill-forge: $total project skill(s) valid, $contracts with a verify contract"
   else
     echo "skill-forge: $total project skill(s) valid"
@@ -574,6 +573,13 @@ cmd_status() {
   if [ "$stale" -gt 0 ]; then
     echo "skill-forge: $stale project skill(s) untouched >${stale_days}d — review with oms skill-forge list"
   fi
+  if drift_output="$(python3 "$SKILL_LIFECYCLE_HELPER" --repo "$REPO" template-drift \
+    --templates "$ROOT/templates/project-skills" 2>/dev/null)"; then
+    [ -z "$drift_output" ] || printf '%s\n' "$drift_output"
+  else
+    echo "skill-forge: warning: template drift check failed" >&2
+  fi
+  return "$status_rc"
 }
 
 # One row per declared verify contract; consumed by agent-task close to

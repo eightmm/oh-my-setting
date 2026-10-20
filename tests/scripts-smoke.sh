@@ -33313,7 +33313,14 @@ assert all(f["remedy"] for f in report["findings"]), report
 
 test_skill_forge_verify_contract_lifecycle() {
   local project="$TMP/sf-contract"
-  local out
+  local fixture_oms="$TMP/sf template oms"
+  local templates="$TMP/sf template oms/templates/project-skills"
+  local template="$TMP/sf template oms/templates/project-skills/oms-template-sample/SKILL.md"
+  local imported_template="$TMP/sf template oms/templates/project-skills/oms-template-imported/SKILL.md"
+  local failure_project="$TMP/sf-status-helper-failure"
+  local helper="$TMP/sf template oms/scripts/lib/skill-lifecycle.py"
+  local helper_backup="$TMP/sf template oms/scripts/lib/skill-lifecycle.py.disabled"
+  local expected_local expected_imported preview current_sha next_sha recovery_command imported_preview rc count out preview_out
 
   make_committed_repo "$project"
   # The portable contract form: metadata.verify, accepted by the strict add
@@ -33338,6 +33345,122 @@ EOF
     fail "skill contract status failed: $out"
   printf '%s\n' "$out" | grep >/dev/null '1 with a verify contract' ||
     fail "status should surface the contract count: $out"
+
+  # Status compares a project's bytes to the running OMS template and only
+  # advises; it never replaces a customized local copy.
+  mkdir -p "$(dirname "$template")" "$(dirname "$imported_template")"
+  cp -R "$ROOT/scripts" "$fixture_oms/scripts"
+  cat > "$template" <<'EOF'
+---
+name: oms-template-sample
+description: A fixture template skill used to verify byte-level template drift reporting.
+---
+
+Initial guidance.
+EOF
+  out="$("$fixture_oms/scripts/skill-forge.sh" --repo "$project" add \
+    --name oms-template-sample --file "$template" 2>&1)" ||
+    fail "adding a skill from the fixture template failed: $out"
+  out="$("$fixture_oms/scripts/skill-forge.sh" --repo "$project" status 2>&1)" ||
+    fail "status failed for a skill identical to its template: $out"
+  if printf '%s\n' "$out" | grep -F 'oms-template-sample differs from the OMS template' >/dev/null; then
+    fail "identical template content should not produce a drift advisory: $out"
+  fi
+  cat > "$imported_template" <<'EOF'
+---
+name: oms-template-imported
+description: A fixture template used to verify imported skill digest guidance.
+---
+
+Imported guidance.
+EOF
+  preview="$("$fixture_oms/scripts/skill-forge.sh" --repo "$project" preview \
+    --source "$templates" --subdir oms-template-imported --json)" ||
+    fail "previewing the imported fixture skill failed: $preview"
+  current_sha="$(printf '%s' "$preview" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')" ||
+    fail "could not read the initial imported bundle digest: $preview"
+  out="$("$fixture_oms/scripts/skill-forge.sh" --repo "$project" import \
+    --source "$templates" --subdir oms-template-imported \
+    --expected-bundle-sha256 "$current_sha" --apply 2>&1)" ||
+    fail "importing the fixture skill failed: $out"
+
+  printf '\nLocal customization.\n' >> "$project/.oms/skills/oms-template-sample/SKILL.md"
+  printf '\nUpdated template guidance.\n' >> "$template"
+  printf '\nUpdated imported guidance.\n' >> "$imported_template"
+  preview="$("$fixture_oms/scripts/skill-forge.sh" --repo "$project" preview \
+    --source "$templates" --subdir oms-template-imported --json)" ||
+    fail "previewing the changed imported fixture skill failed: $preview"
+  next_sha="$(printf '%s' "$preview" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')" ||
+    fail "could not read the updated imported bundle digest: $preview"
+  out="$("$fixture_oms/scripts/skill-forge.sh" --repo "$project" status 2>&1)" ||
+    fail "status failed for changed template content: $out"
+  expected_local="skill-forge: oms-template-sample differs from the OMS template; compare: diff -u '$template' '$project/.oms/skills/oms-template-sample/SKILL.md'; recovery (local edits are lost): oms skill-forge remove 'oms-template-sample' && oms skill-forge add --name 'oms-template-sample' --file '$template'"
+  printf '%s\n' "$out" | grep -F "$expected_local" >/dev/null ||
+    fail "local skill drift did not print the quoted compare and recovery commands: $out"
+  expected_imported="skill-forge: oms-template-imported differs from the OMS template; preview: oms skill-forge update --source '$templates' --subdir 'oms-template-imported' --expected-bundle-sha256 $next_sha --expected-current-sha256 $current_sha"
+  printf '%s\n' "$out" | grep -F "$expected_imported" >/dev/null ||
+    fail "imported skill drift did not print the digest-bound update preview: $out"
+
+  # Execute the exact local recovery command from the advisory through a tiny
+  # oms shim, then confirm it replaced the customized copy with template bytes.
+  mkdir -p "$TMP/sf-bin"
+  cat > "$TMP/sf-bin/oms" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = skill-forge ] || exit 2
+shift
+exec "$ROOT/scripts/skill-forge.sh" "\$@"
+EOF
+  chmod +x "$TMP/sf-bin/oms"
+  imported_preview="$(printf '%s\n' "$out" | grep -F \
+    'skill-forge: oms-template-imported differs from the OMS template;' | sed -n 's/.*preview: //p')"
+  [ -n "$imported_preview" ] || fail "imported preview command was not present: $out"
+  preview_out="$(
+    cd "$project" || exit 2
+    PATH="$TMP/sf-bin:$PATH"
+    export PATH
+    eval "$imported_preview"
+  )" || fail "the advised imported preview command failed: $preview_out"
+  printf '%s' "$preview_out" | grep -F "$next_sha" >/dev/null ||
+    fail "imported preview did not report the advised template digest: $preview_out"
+  preview_out="$(
+    cd "$project" || exit 2
+    PATH="$TMP/sf-bin:$PATH"
+    export PATH
+    eval "$imported_preview --apply"
+  )" || fail "the digest-bound imported apply command failed: $preview_out"
+  printf '%s' "$preview_out" | grep -F 'status: applied' >/dev/null ||
+    fail "imported apply did not report success: $preview_out"
+
+  recovery_command="$(printf '%s\n' "$out" | sed -n \
+    's/.*recovery (local edits are lost): //p')"
+  [ -n "$recovery_command" ] || fail "local recovery command was not present: $out"
+  (
+    cd "$project" || exit 2
+    PATH="$TMP/sf-bin:$PATH"
+    export PATH
+    eval "$recovery_command"
+  ) ||
+    fail "the advised local recovery command failed"
+  cmp -s "$template" "$project/.oms/skills/oms-template-sample/SKILL.md" ||
+    fail "the advised recovery did not replace the project skill with template bytes"
+
+  # A helper failure is advisory too: suppress its traceback, emit one warning,
+  # and preserve the status failure for the invalid skill.
+  make_committed_repo "$failure_project"
+  mkdir -p "$failure_project/.oms/skills/oms-invalid"
+  printf 'invalid skill\n' > "$failure_project/.oms/skills/oms-invalid/SKILL.md"
+  mv "$helper" "$helper_backup"
+  rc=0
+  out="$("$fixture_oms/scripts/skill-forge.sh" --repo "$failure_project" status 2>&1)" || rc=$?
+  mv "$helper_backup" "$helper"
+  [ "$rc" = 1 ] || fail "helper failure changed the invalid-skill status (rc=$rc): $out"
+  count="$(printf '%s\n' "$out" | grep -c -F 'skill-forge: warning: template drift check failed' || true)"
+  [ "$count" = 1 ] || fail "helper failure must produce one warning line: $out"
+  if printf '%s\n' "$out" | grep -E 'Traceback|can.t open file' >/dev/null; then
+    fail "helper failure exposed a traceback instead of one warning: $out"
+  fi
 
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts 2>&1)" ||
     fail "skill contracts listing failed: $out"
