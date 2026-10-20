@@ -306,14 +306,16 @@ fi
 # A patch that applies and verifies can still smuggle a credential onto the
 # main tree. Scan the added lines with the shared sensitive regex before any
 # worktree work. This is a landing-side mirror of the outbound scrubber.
-secret_scan_file="$(mktemp)" || fail "mktemp failed"
-grep -E '^\+' "$PATCH" | grep -Ev '^\+\+\+ ' > "$secret_scan_file" || true
-if agent_memory_file_has_sensitive_content "$secret_scan_file"; then
-  record "secrets" "FAIL" "added lines contain sensitive-looking content (secret/key/token/private path)"
-else
-  record "secrets" "PASS" "no sensitive-looking content in added lines"
-fi
-rm -f "$secret_scan_file"
+secret_scan_status=0
+secret_scan_report="$(agent_memory_sensitive_diff_scan "$PATCH")" || secret_scan_status=$?
+case "$secret_scan_status" in
+  0) record "secrets" "FAIL" "added lines contain sensitive-looking content: $secret_scan_report" ;;
+  1) record "secrets" "PASS" "no sensitive-looking content in added lines" ;;
+  *)
+    echo "error: sensitive-content scan failed; patch admission blocked" >&2
+    record "secrets" "FAIL" "sensitive-content scan failed"
+    ;;
+esac
 
 changed_files=""
 verify_out=""

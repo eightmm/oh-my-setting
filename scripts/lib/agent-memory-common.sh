@@ -324,6 +324,78 @@ agent_memory_file_has_sensitive_content() {
   agent_memory_match_file "$file" "$(agent_memory_sensitive_re)"
 }
 
+# Scan unified-diff additions and report only target-file locations and the
+# scrubber's existing tier/pattern labels. Returns 0 on a match, 1 when clean,
+# 2 when the scan itself failed. The verdict is one sed|grep pass over all
+# added lines; the per-match location walk runs only after it reports a match.
+# Only a "+++" line outside a hunk (hunk counts exhausted, after "--- ") is a
+# file header; inside a hunk it is added content. A "+" line outside any hunk
+# is still scanned, so a miscounted hunk header cannot hide an addition.
+agent_memory_sensitive_diff_scan() {  # DIFF
+  local file="$1" content_file loc_file idx_file rc=0 tier re n pattern
+  local reported shown cap=10 scan_status=()
+  content_file="$(agent_memory_mktemp)" || return 2
+  loc_file="$(agent_memory_mktemp)" || { rm -f "$content_file"; return 2; }
+  idx_file="$(agent_memory_mktemp)" || { rm -f "$content_file" "$loc_file"; return 2; }
+  if ! LC_ALL=C awk -v content="$content_file" -v locs="$loc_file" '
+    BEGIN { printf "" > content; printf "" > locs }
+    function emit() { print substr($0, 2) > content; print path ":" nl > locs; nl++ }
+    substr($0, 1, 3) == "@@ " {
+      x = $3
+      if (x !~ /^\+[0-9]+(,[0-9]+)?$/ || $2 !~ /^-[0-9]+(,[0-9]+)?$/) exit 2
+      split(substr($2, 2), o, ","); split(substr(x, 2), w, ",")
+      orem = (o[2] == "") ? 1 : o[2] + 0; nrem = (w[2] == "") ? 1 : w[2] + 0; nl = w[1] + 0
+      prev = $0; next
+    }
+    {
+      c = substr($0, 1, 1)
+      if (orem > 0 || nrem > 0) {
+        if (c == "+") { nrem--; emit(); prev = $0; next }
+        if (c == "-") { orem--; prev = $0; next }
+        if (c == " " || $0 == "") { orem--; nrem--; nl++; prev = $0; next }
+        if (c == "\\") { prev = $0; next }
+        orem = 0; nrem = 0
+      }
+      if (substr($0, 1, 4) == "+++ " && prev ~ /^--- /) {
+        path = substr($0, 5); sub(/^b\//, "", path); sub(/\t.*$/, "", path)
+      } else if (c == "+") emit()
+      prev = $0
+    }
+    END { close(content); close(locs) }' "$file"; then
+    rm -f "$content_file" "$loc_file" "$idx_file"
+    return 2
+  fi
+  agent_memory_file_has_sensitive_content "$content_file" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    for tier in secret machine; do
+      if [ "$tier" = secret ]; then re="$(agent_memory_secret_re)"; else re="$(agent_memory_machine_re)"; fi
+      # Both branches capture: the status of each stage tells grep's no-match
+      # (1) from a sed or grep failure that would otherwise read as clean.
+      if agent_memory_scan_input "$content_file" | LC_ALL=C grep -Ein "$re" > "$idx_file"; then
+        scan_status=("${PIPESTATUS[@]}")
+      else
+        scan_status=("${PIPESTATUS[@]}")
+      fi
+      if [ "${scan_status[0]}" -ne 0 ] || [ "${scan_status[1]}" -gt 1 ]; then
+        rc=2
+        break
+      fi
+      shown=0; reported=0
+      while IFS= read -r n; do
+        n="${n%%:*}"
+        reported=$((reported + 1))
+        [ "$shown" -lt "$cap" ] || continue
+        shown=$((shown + 1))
+        pattern="$(agent_memory_sensitive_line_pattern "$tier" "$(LC_ALL=C sed -n "${n}p" "$content_file")")"
+        printf '%s: %s-tier match: %s\n' "$(LC_ALL=C sed -n "${n}p" "$loc_file")" "$tier" "$pattern"
+      done < "$idx_file"
+      [ "$reported" -le "$shown" ] || printf '%s-tier: +%s more added-line matches\n' "$tier" "$((reported - shown))"
+    done
+  fi
+  rm -f "$content_file" "$loc_file" "$idx_file"
+  return "$rc"
+}
+
 # Where the scrubber matched, and in which half of the composed prompt, without
 # echoing the match itself. A refusal that names nothing costs a whole round: a
 # caller cannot tell its own sentence from the memory, task packet or git
@@ -434,8 +506,8 @@ agent_memory_sensitive_line_pattern() {  # TIER LINE
     case "$lower" in */lustr[e]/*) printf 'lustre-path\n'; return 0 ;; esac
     case "$lower" in */gpf[s]/*) printf 'gpfs-path\n'; return 0 ;; esac
     case "$lower" in */beegf[s]/*) printf 'beegfs-path\n'; return 0 ;; esac
-    case "$lower" in */.ss[h]/*) printf 'ssh-dir\n'; return 0 ;; esac
-    case "$lower" in */.aw[s]/*) printf 'aws-dir\n'; return 0 ;; esac
+    case "$lower" in *.ss[h]/*) printf 'ssh-dir\n'; return 0 ;; esac
+    case "$lower" in *.aw[s]/*) printf 'aws-dir\n'; return 0 ;; esac
     case "$lower" in *cluster*[=:]*) printf 'cluster-field\n'; return 0 ;; esac
     case "$lower" in *partition*[=:]*) printf 'partition-field\n'; return 0 ;; esac
     case "$lower" in *nodelist*[=:]*) printf 'nodelist-field\n'; return 0 ;; esac

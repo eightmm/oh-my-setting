@@ -1225,13 +1225,17 @@ PY
   fi
   IFS= read -r continuation_base < "$worktree_parent/continuation-base"
   continuation_base="${continuation_base//$'\r'/}"
-  # Carrying bytes outside the prompt must retain the same outbound screen.
-  # Only added lines are new outbound content; context and removed lines stay
-  # in the repository, so blank them (keeping line numbers) before scanning.
-  continuation_added_file="$worktree_parent/continuation-added.txt"
-  awk '/^\+/ { print; next } { print "" }' "$continuation_patch_file" > "$continuation_added_file"
-  ma_validate_outbound_prompt "$continuation_added_file" ||
-    fail "continuation patch failed outbound validation (added lines); no worker ran"
+  # Scan added lines in the original diff to preserve target file locations.
+  continuation_scan_status=0
+  continuation_scan_report="$(agent_memory_sensitive_diff_scan "$continuation_patch_file")" || continuation_scan_status=$?
+  case "$continuation_scan_status" in
+    0)
+      echo "$continuation_scan_report" >&2
+      fail "continuation patch failed outbound validation (added lines); no worker ran"
+      ;;
+    1) ;;
+    *) fail "sensitive-content scan failed; continuation patch blocked and no worker ran" ;;
+  esac
 fi
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \

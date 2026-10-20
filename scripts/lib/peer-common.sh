@@ -490,10 +490,7 @@ ma_git_diff_base() {
 # drift apart; added lines only.
 contains_sensitive_content() {
   local file="$1"
-  grep -E '^\+' "$file" |
-    grep -Ev '^\+\+\+ ' |
-    agent_memory_scan_input |
-    grep -Ei "$(agent_memory_sensitive_re)" >/dev/null
+  agent_memory_sensitive_diff_scan "$file"
 }
 
 # No exclusions by symbol name: a secret on a line mentioning an excluded
@@ -508,8 +505,11 @@ ma_prompt_has_sensitive_content() {
 
 ma_validate_outbound_prompt() {
   local prompt="$1"
+  local scan_status=0
 
-  if ma_prompt_has_sensitive_content "$prompt"; then
+  ma_prompt_has_sensitive_content "$prompt" || scan_status=$?
+  case "$scan_status" in
+    0)
     echo "error: outbound provider context contains sensitive-looking content; external call blocked" >&2
     # Say which tier matched and in which half of the composed prompt. The
     # block is correct; a refusal that names nothing is not, because it costs
@@ -519,7 +519,10 @@ ma_validate_outbound_prompt() {
     agent_memory_sensitive_report "$prompt" >&2
     echo "hint: remove secrets, private keys, absolute machine paths, cluster details, raw logs, datasets, or checkpoints from task/memory/prompt context" >&2
     return 3
-  fi
+      ;;
+    1) return 0 ;;
+    *) echo "error: sensitive-content scan failed; external call blocked" >&2; return 3 ;;
+  esac
 }
 
 ma_write_task_context() {
@@ -1667,7 +1670,7 @@ ma_emit_bounded_prompt_file() {
   rm -f "$slice"
 }
 
-# Returns 0 on success, 1 on git failure, 3 on sensitive-looking content.
+# Returns 0 on success, 1 on git failure, 3 on sensitive content, 4 on scan failure.
 ma_safe_diff() {
   local repo="$1"
   local base
@@ -1687,10 +1690,21 @@ ma_safe_diff() {
     return 1
   fi
 
-  if contains_sensitive_content "$tmp"; then
-    rm -f "$tmp"
-    return 3
-  fi
+  local diff_scan_status=0 diff_scan_report
+  diff_scan_report="$(contains_sensitive_content "$tmp")" || diff_scan_status=$?
+  case "$diff_scan_status" in
+    0)
+      rm -f "$tmp"
+      printf '%s\n' "$diff_scan_report" >&2
+      return 3
+      ;;
+    1) ;;
+    *)
+      rm -f "$tmp"
+      echo "error: sensitive-content scan failed; diff unavailable" >&2
+      return 4
+      ;;
+  esac
 
   budget="$(ma_prompt_diff_bytes)"
   ma_emit_bounded_prompt_file "$tmp" "$budget" "git diff" "OMS_PROMPT_DIFF_BYTES"

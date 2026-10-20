@@ -916,10 +916,17 @@ if [ "$NO_DIFF" -eq 0 ]; then
     diff --no-ext-diff --no-textconv \
     "$diff_base" -- "${MA_SAFE_PATHS[@]}" > "$raw_diff_file" ||
     fail "git diff failed for $MA_READ_SOURCE_REPO"
-  if contains_sensitive_content "$raw_diff_file"; then
-    echo "external review skipped: sensitive-looking diff content detected" >&2
-    exit 3
-  fi
+  diff_scan_status=0
+  diff_scan_report="$(contains_sensitive_content "$raw_diff_file")" || diff_scan_status=$?
+  case "$diff_scan_status" in
+    0)
+      echo "external review skipped: sensitive-looking diff content detected" >&2
+      printf '%s\n' "$diff_scan_report" >&2
+      exit 3
+      ;;
+    1) ;;
+    *) echo "external review skipped: sensitive-content scan failed" >&2; exit 3 ;;
+  esac
   diff_budget="$(ma_prompt_diff_bytes)"
   raw_diff_bytes="$(LC_ALL=C wc -c < "$raw_diff_file" | tr -d ' ')"
   if [ "$GATE" -eq 1 ] && [ "$raw_diff_bytes" -gt "$diff_budget" ]; then

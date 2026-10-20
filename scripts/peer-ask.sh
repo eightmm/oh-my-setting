@@ -374,6 +374,10 @@ if [ "$INCLUDE_DIFF" -eq 1 ]; then
       echo "external ask skipped: sensitive-looking diff content detected" >&2
       exit 3
       ;;
+    4)
+      echo "external ask skipped: sensitive-content scan failed" >&2
+      exit 3
+      ;;
     *)
       fail "git diff failed for $REPO"
       ;;

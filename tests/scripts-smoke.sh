@@ -4110,6 +4110,47 @@ assert re.search(r"secret-tier match in prompt at line [1-9][0-9]*:token-assignm
                  open(sys.argv[2], encoding="utf-8").read())
 PY
   [ "$?" = "0" ] || fail "secret refusal evidence should identify tier, pattern, source and line without the token"
+
+  local scan_project="$TMP/outbound-scan-failure"
+  local scan_bin="$TMP/outbound-scan-bin"
+  local real_sed
+  mkdir -p "$scan_project" "$scan_bin"
+  real_sed="$(command -v sed)"
+  cat > "$scan_bin/sed" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in *"$OMS_TEST_SCAN_FAIL_PATH"*) exit 2 ;; esac
+exec "$OMS_TEST_REAL_SED" "$@"
+EOF
+  chmod +x "$scan_bin/sed"
+  printf 'clean prompt\n' > "$scan_project/prompt"
+  rc=0
+  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" \
+    OMS_TEST_SCAN_FAIL_PATH="$scan_project/prompt" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"; ma_validate_outbound_prompt "$2"' \
+      _ "$ROOT" "$scan_project/prompt" >"$scan_project/out" 2>"$scan_project/error" || rc=$?
+  [ "$rc" = 3 ] || fail "scanner failure must block outbound validation, got $rc"
+  assert_file_contains "$scan_project/error" "sensitive-content scan failed"
+  if grep -Fq "sensitive-looking content" "$scan_project/error"; then
+    fail "scanner failure must not be described as a sensitive-content match"
+  fi
+
+  local provider_bin="$TMP/outbound-scan-provider-bin"
+  mkdir -p "$provider_bin"
+  cat > "$provider_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+touch "$OMS_TEST_PROVIDER_MARKER"
+exit 0
+EOF
+  chmod +x "$provider_bin/codex"
+  rc=0
+  PATH="$scan_bin:$provider_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" \
+    OMS_TEST_SCAN_FAIL_PATH="/prompt." OMS_TEST_PROVIDER_MARKER="$scan_project/provider-called" \
+    "$ROOT/scripts/agent-call.sh" --repo "$scan_project" \
+      --artifact-dir "$scan_project/artifacts" --to codex --prompt 'safe prompt' \
+      > "$scan_project/call.out" 2> "$scan_project/call.error" || rc=$?
+  [ "$rc" = 3 ] || fail "provider call must be blocked when scanning fails, got $rc"
+  assert_file_contains "$scan_project/call.error" "sensitive-content scan failed"
+  [ ! -e "$scan_project/provider-called" ] || fail "provider ran after a scanner failure"
 }
 
 test_peer_review_dry_run_artifacts() {
@@ -13305,6 +13346,95 @@ test_scrubber_blocks_outbound_secret_shapes() {
     bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
       fail "scrubber should block a bare provider credential (${s%%_*})"
   done
+
+  local diff="$TMP/scrub-diff-report"
+  cat > "$diff" <<EOF
+diff --git a/config/settings.sh b/config/settings.sh
+index 0000000..1111111 100644
+--- a/config/settings.sh
++++ b/config/settings.sh
+@@ -2,0 +3 @@
+EOF
+  printf '+API_TOK%s=assembled-at-runtime\n' 'EN' >> "$diff"
+  local report
+  report="$(bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' _ "$ROOT" "$diff")" ||
+    fail "diff scanner should block a token-shaped addition"
+  printf '%s\n' "$report" | grep -Fq 'config/settings.sh:3: secret-tier match: token-assignment' ||
+    fail "diff diagnostic must identify target file line, tier and pattern: $report"
+  ! grep -Fq 'assembled-at-runtime' <<< "$report" ||
+    fail "diff diagnostic must not echo matched content"
+
+  local scan_bin="$TMP/scan-fail-bin" scan_tmp="$TMP/scan-fail-tmp" real_sed rc=0
+  mkdir -p "$scan_bin" "$scan_tmp"
+  real_sed="$(command -v sed)"
+  cat > "$scan_bin/sed" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in *"$OMS_TEST_SCAN_FAIL_PATH"*) exit 2 ;; esac
+exec "$OMS_TEST_REAL_SED" "$@"
+EOF
+  chmod +x "$scan_bin/sed"
+  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$scan_tmp" OMS_TEST_SCAN_FAIL_PATH="$scan_tmp" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' \
+      _ "$ROOT" "$diff" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "diff filter errors must remain distinguishable from clean scans, got $rc"
+
+  # A "+++"-prefixed content line inside a hunk is content: it advances the
+  # new-file line counter, so the flagged line after it keeps an exact number.
+  local plus_diff="$TMP/scrub-diff-plusplus"
+  cat > "$plus_diff" <<EOF
+diff --git a/lib/a.sh b/lib/a.sh
+--- a/lib/a.sh
++++ b/lib/a.sh
+@@ -4,0 +5,3 @@
++first
++++second
+EOF
+  printf '+API_TOK%s=assembled-at-runtime\n' 'EN' >> "$plus_diff"
+  report="$(bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' _ "$ROOT" "$plus_diff")" ||
+    fail "diff scanner should block a token after a ++-prefixed content line"
+  printf '%s\n' "$report" | grep -Fxq 'lib/a.sh:7: secret-tier match: token-assignment' ||
+    fail "line number after a ++-prefixed content line must be exact: $report"
+  # A "+++ " content line carrying the token is scanned, not skipped as a header.
+  printf -- '--- a/x\n+++ b/x\n@@ -0,0 +1,2 @@\n+ok\n+++ API_TOK%s=assembled-at-runtime\n' 'EN' > "$plus_diff"
+  report="$(bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' _ "$ROOT" "$plus_diff")" ||
+    fail "a +++ content line inside a hunk must still be scanned"
+  printf '%s\n' "$report" | grep -Fxq 'x:2: secret-tier match: token-assignment' ||
+    fail "+++ content line location wrong: $report"
+
+  # The two hidden-directory machine patterns match without a leading slash.
+  printf -- '--- a/h\n+++ b/h\n@@ -0,0 +1 @@\n+dir=.ss%s/id\n' 'h' > "$plus_diff"
+  report="$(bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' _ "$ROOT" "$plus_diff")" ||
+    fail "diff scanner should block a hidden credential directory"
+  printf '%s\n' "$report" | grep -Fxq 'h:1: machine-tier match: ssh-dir' ||
+    fail "machine-tier label must name the slashless hidden directory: $report"
+
+  # A clean diff of thousands of added lines is one pass, not a fork per line.
+  local big_diff="$TMP/scrub-diff-big" i=0
+  { printf -- '--- a/big.txt\n+++ b/big.txt\n@@ -0,0 +1,6000 @@\n'
+    while [ "$i" -lt 6000 ]; do printf '+line %s of ordinary prose\n' "$i"; i=$((i + 1)); done
+  } > "$big_diff"
+  rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 20 bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' _ "$ROOT" "$big_diff" >/dev/null 2>&1 || rc=$?
+  else
+    bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' _ "$ROOT" "$big_diff" >/dev/null 2>&1 || rc=$?
+  fi
+  [ "$rc" = 1 ] || fail "a clean multi-thousand-line diff must scan clean within the bound, got $rc"
+
+  # peer-ask reports a scan failure as such, not as a failed git diff.
+  local ask_project="$TMP/ask-scan-failure"
+  make_committed_repo "$ask_project"
+  printf 'changed\n' >> "$ask_project/file.txt"
+  rc=0
+  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$scan_tmp" OMS_TEST_SCAN_FAIL_PATH="$scan_tmp" \
+    OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" --repo "$ask_project" \
+      --artifact-dir "$ask_project/artifacts" --providers claude --diff --prompt 'review' \
+      >"$ask_project/out" 2>"$ask_project/error" || rc=$?
+  [ "$rc" = 3 ] || fail "peer-ask must block on a diff scan failure, got $rc"
+  assert_file_contains "$ask_project/error" "sensitive-content scan failed"
+  if grep -Fq "git diff failed" "$ask_project/error"; then
+    fail "peer-ask must not report a scan failure as a git diff failure"
+  fi
 }
 
 test_scrubber_allows_common_clean_text() {
@@ -13341,6 +13471,23 @@ test_review_diff_side_blocks_env_token() {
   printf '+GITHUB_TOK%s=ghx-not-real\n' "EN" > "$diff"
   bash -c ". '$ROOT/scripts/lib/peer-common.sh'; contains_sensitive_content '$diff'" ||
     fail "diff-side check should block env-style tokens"
+
+  local project="$TMP/review-sensitive-diff" rc=0
+  make_committed_repo "$project"
+  printf 'base\n' > "$project/config.sh"
+  git -C "$project" add config.sh
+  git -C "$project" commit -qm 'add config fixture'
+  printf 'base\nAPI_TOK%s=assembled-at-runtime\n' 'EN' > "$project/config.sh"
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$project/artifacts" --prompt 'review change' \
+    > "$project/out" 2> "$project/error" || rc=$?
+  [ "$rc" = 3 ] || fail "review must stop before providers on sensitive diff, got $rc"
+  assert_file_contains "$project/error" "config.sh:2: secret-tier match: token-assignment"
+  ! grep -Fq 'assembled-at-runtime' "$project/error" ||
+    fail "review diff diagnostic must not echo matched content"
+  if find "$project/artifacts" -type f -name '*-review-*.md' 2>/dev/null | grep -q .; then
+    fail "sensitive review diff must not call providers or create review artifacts"
+  fi
 }
 
 test_run_ledger_gate_blocks_failing_check() {
@@ -17000,6 +17147,30 @@ test_patch_admit_rejects_secret_in_patch() {
   r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
   [ -n "$r" ] || fail "no admission report written"
   assert_file_contains "$r" "secrets: FAIL"
+  assert_file_contains "$r" "file.txt:2: secret-tier match: token-assignment"
+
+  local scan_bin="$TMP/admit-scan-bin" real_sed rc=0
+  mkdir -p "$scan_bin"
+  real_sed="$(command -v sed)"
+  cat > "$scan_bin/sed" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in *"$OMS_TEST_SCAN_FAIL_PATH"*) exit 2 ;; esac
+exec "$OMS_TEST_REAL_SED" "$@"
+EOF
+  chmod +x "$scan_bin/sed"
+  mkdir -p "$TMP/admit-scan-tmp"
+  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$TMP/admit-scan-tmp" \
+    OMS_TEST_SCAN_FAIL_PATH="$TMP/admit-scan-tmp" \
+    "$SH" --patch "$repo/change.patch" --repo "$repo" --verify true \
+    > "$repo/scan-failure.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "admission must reject a failed sensitive-content scan"
+  local scan_report_line scan_report
+  scan_report_line="$(grep -F 'patch-admit: REJECT (' "$repo/scan-failure.out")"
+  scan_report="${scan_report_line#*\(}"
+  scan_report="${scan_report%)}"
+  [ -n "$scan_report" ] && [ -f "$scan_report" ] || fail "admission scan-failure report path missing"
+  grep -Fq "sensitive-content scan failed" "$scan_report" ||
+    fail "admission report must record scan failure: $(cat "$scan_report")"
 }
 
 test_patch_admit_rejects_invalid_source_syntax() {
