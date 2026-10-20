@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hashlib
+from functools import lru_cache
 import json
 from contextlib import nullcontext
 import os
@@ -23,6 +24,24 @@ import uuid
 class NativeShutdown(KeyboardInterrupt):
     def __init__(self, number):
         self.exit_code = 128 + number
+
+
+# Measured panel sessions (4 spans, 2437 turns) model ~2.6x lower input-equivalent cost at 300k.
+CLAUDE_AUTOCOMPACT_TOKENS = 300000
+
+
+@lru_cache(maxsize=1)
+def _claude_supports_autocompact():
+    # A resolved path keeps the probe distinct from a "claude" main launch.
+    binary = shutil.which("claude")
+    if not binary:
+        return False
+    try:
+        result = subprocess.run([binary, "--help"], capture_output=True, text=True,
+                                check=False, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "--autocompact" in (result.stdout + result.stderr)
 
 
 def native_adapter(provider):
@@ -227,6 +246,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
             command += ["--model", model]
         if default:
             command += ["--effort", preset["effort"]]
+        if _claude_supports_autocompact():
+            command += ["--autocompact", str(CLAUDE_AUTOCOMPACT_TOKENS)]
         command += ["--append-system-prompt", instructions]
         if task:
             command += ["--", task]

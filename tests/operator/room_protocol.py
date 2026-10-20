@@ -10,6 +10,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import panel_native
 
 _operator_block("provider-and-routing")
 baseline = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
@@ -278,6 +280,32 @@ for owner in panel.PROVIDERS:
     assert "worker exit or review handoff is an intermediate step" in panel.bootstrap(owner, project)
     assert "OMS_ROOM_REPO" in panel.bootstrap(owner, project)
     assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
+with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
+    claude_stub = Path(help_dir) / "claude"
+    claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--autocompact <auto|tokens>'\n")
+    claude_stub.chmod(0o700)
+    old_path = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = help_dir
+        panel_native._claude_supports_autocompact.cache_clear()
+        supported_argv = panel.native_command("claude", project)
+        resumed_supported_argv = panel.native_command("claude", project, resume="compact-session")
+        assert supported_argv[supported_argv.index("--autocompact") + 1] == "300000"
+        assert resumed_supported_argv[resumed_supported_argv.index("--autocompact") + 1] == "300000"
+
+        claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]'\n")
+        panel_native._claude_supports_autocompact.cache_clear()
+        unsupported_argv = panel.native_command("claude", project)
+        assert "--autocompact" not in unsupported_argv
+
+        os.environ["PATH"] = ""
+        panel_native._claude_supports_autocompact.cache_clear()
+        missing_argv = panel.native_command("claude", project)
+        assert "--autocompact" not in missing_argv
+    finally:
+        os.environ["PATH"] = old_path
+        panel_native._claude_supports_autocompact.cache_clear()
+
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]
 assert option_text not in panel.native_command("codex", project, task=option_text)[:-1]
