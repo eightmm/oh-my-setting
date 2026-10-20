@@ -550,7 +550,7 @@ agent_task_loop_warnings() {
   local max_attempts
   local diff_budget
   local repeated_failures
-  local repeat_threshold="${OMS_AGENT_TASK_STUCK_REPEATS:-3}"
+  local repeat_threshold=3
   local changed_lines
 
   [ -n "$file" ] || file="$(agent_task_project_file "$repo")"
@@ -924,7 +924,6 @@ agent_task_verify_command() {
 agent_task_record_outcome() {
   local repo="$1" kind="$2" provider="$3" status="$4" artifact="$5"
   local patch="${6:-}" detail="${7:-}" task_file note_file
-  [ "${OMS_TASK_OUTCOME:-${OMS_AGENT_RUN_TASK_OUTCOME:-1}}" = 1 ] || return 0
   [ -f "$artifact" ] || return 0
   task_file="$(agent_task_project_file "$repo")" || return 0
   [ -s "$task_file" ] || return 0

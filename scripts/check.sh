@@ -607,7 +607,7 @@ stage() {  # stage NAME COMMAND...
     # for oms job-digest. Unbounded, one failing smoke can dump hundreds of
     # kilobytes into the calling context.
     local log_cap log_bytes
-    log_cap="${OMS_CHECK_LOG_BYTES:-65536}"
+    log_cap=65536
     case "$log_cap" in ''|0|*[!0-9]*) log_cap=65536 ;; esac
     log_bytes="$(wc -c < "$log" | tr -d ' ')"
     if [ "$log_bytes" -gt "$log_cap" ]; then

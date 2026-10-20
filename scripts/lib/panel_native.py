@@ -1090,7 +1090,7 @@ def _swap_submit(pane, text):
     """Type into a native CLI and submit; an Enter inside the typed burst reads as a pasted newline."""
     from terminal_panel import tmux_command
     subprocess.run(tmux_command("send-keys", "-t", pane, "-l", text), check=True, timeout=3, stdin=subprocess.DEVNULL)
-    time.sleep(float(os.environ.get("OMS_PANEL_SWAP_SUBMIT_DELAY", ".8")))
+    time.sleep(.8)
     subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3, stdin=subprocess.DEVNULL)
 
 

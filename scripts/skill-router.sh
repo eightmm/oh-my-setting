@@ -131,7 +131,7 @@ fi
 
 [ "${OMS_SKILL_ROUTER_OFF:-0}" = "1" ] && exit 0
 
-MANIFEST="${OMS_SKILL_MANIFEST:-$ROOT/skills.manifest.json}"
+MANIFEST="$ROOT/skills.manifest.json"
 HELPER="$ROOT/scripts/lib/hook_state.py"
 [ -f "$HELPER" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0

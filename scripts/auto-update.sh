@@ -148,7 +148,7 @@ auto_update_error_line() {
 print_attention() {
   local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
   local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
-  local overdue="${OMS_AUTO_UPDATE_OVERDUE:-172800}"
+  local overdue=172800
   local owner enabled wired=0 systemd_state status last_run message age now epoch_last
 
   owner="$(auto_update_receipt_field "$receipt" source_root 2>/dev/null || true)"

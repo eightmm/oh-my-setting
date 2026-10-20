@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 
 REPO="$PWD"
-MAX_BYTES="${OMS_AGENT_ML_CONTEXT_BYTES:-5000}"
+MAX_BYTES=5000
 LEDGER=""
 FORCE=0
 
@@ -226,7 +226,7 @@ if [ -s "$LEDGER" ]; then
   if agent_memory_file_has_sensitive_content "$LEDGER"; then
     printf 'Experiment ledger omitted because it contains sensitive-looking content.\n' >> "$tmp"
   elif command -v python3 >/dev/null 2>&1; then
-    tail -n "${OMS_AGENT_ML_LEDGER_ROWS:-8}" "$LEDGER" |
+    tail -n 8 "$LEDGER" |
       python3 -c '
 import json, sys
 rows = []
@@ -255,7 +255,7 @@ for r in rows:
     print(row)
 ' >> "$tmp"
   else
-    tail -n "${OMS_AGENT_ML_LEDGER_ROWS:-8}" "$LEDGER" | sed 's/^/- /' >> "$tmp"
+    tail -n 8 "$LEDGER" | sed 's/^/- /' >> "$tmp"
   fi
 else
   printf 'No docs/EXPERIMENTS.jsonl ledger found.\n' >> "$tmp"

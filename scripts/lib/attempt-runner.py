@@ -1266,11 +1266,7 @@ def runner(repo: Path, attempt_id: str) -> int:
             transition(repo, attempt_id, "working", key="runner-working")
 
         max_wall = job.get("budget", {}).get("max_wall_seconds")
-        heartbeat_seconds_raw = os.environ.get("OMS_SUPERVISOR_HEARTBEAT_SECONDS", "10")
-        try:
-            heartbeat_seconds = max(1.0, float(heartbeat_seconds_raw))
-        except ValueError:
-            heartbeat_seconds = 10.0
+        heartbeat_seconds = 10.0
         next_heartbeat = time.monotonic() + heartbeat_seconds
         timed_out = False
         identity_failed = False

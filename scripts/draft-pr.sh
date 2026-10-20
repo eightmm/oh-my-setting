@@ -36,7 +36,7 @@ if [ "${OMS_DRAFT_PROCESS_SUPERVISED:-0}" != 1 ]; then
   # .sh path, while Git Bash itself is the documented Windows runtime.
   OMS_DRAFT_PROCESS_SUPERVISED=1 python3 \
     "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
-    --wall "${OMS_DRAFT_TOTAL_TIMEOUT_S:-86400}" \
+    --wall 86400 \
     --kill-after "${OMS_DRAFT_CANCEL_GRACE_S:-2}" --label draft-pr -- \
     bash "$ROOT/scripts/draft-pr.sh" "$@" &
   DRAFT_SUPERVISOR_PID=$!
@@ -213,15 +213,15 @@ OMS_LIB_TMPDIR="$DRAFT_TMPDIR"
 export -n OMS_LIB_TMPDIR 2>/dev/null || true
 
 draft_run_remote() {
-  draft_run_scan "${OMS_DRAFT_REMOTE_TIMEOUT:-30s}" "$@"
+  draft_run_scan 30s "$@"
 }
 
 draft_run_github() {
-  draft_run_scan "${OMS_DRAFT_GH_TIMEOUT:-30s}" "$@"
+  draft_run_scan 30s "$@"
 }
 
 draft_run_push() {
-  draft_run_scan "${OMS_DRAFT_PUSH_TIMEOUT:-15m}" "$@"
+  draft_run_scan 15m "$@"
 }
 
 draft_init_scan_runner() {

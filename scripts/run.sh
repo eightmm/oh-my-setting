@@ -363,7 +363,7 @@ cmd_timeline() {
   case "$limit" in *[!0-9]*|"") fail "--limit must be a positive integer" ;; esac
   OMS_SINCE="$since" OMS_LIMIT="$limit" OMS_TL_ROOT="$STATE_ROOT/.oms" \
     OMS_TL_AGENT="$agent_filter" OMS_TL_TOOL="$tool_filter" OMS_TL_JSON="$as_json" \
-    OMS_TL_LEDGER="${OMS_LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}" python3 <<'PY'
+    OMS_TL_LEDGER="$STATE_ROOT/docs/EXPERIMENTS.jsonl" python3 <<'PY'
 import glob, json, os
 since = os.environ["OMS_SINCE"]
 limit = int(os.environ["OMS_LIMIT"])

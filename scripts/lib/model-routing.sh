@@ -340,9 +340,6 @@ EOF
     fi
   fi
   if [ "$effort_requested" != auto ]; then
-    if [ "${OMS_REASONING_CLAMP:-0}" = 1 ]; then
-      effort_requested="$(oms_capability_clamp_effort "$provider" "$effort_requested" "${explicit:-}" 2>/dev/null || printf '%s' "$effort_requested")"
-    fi
     oms_reasoning_provider_validate "$provider" "$effort_requested" \
       "${explicit:-}" || return $?
     OMS_REASONING_RESOLVED="$effort_requested"

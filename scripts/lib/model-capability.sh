@@ -68,9 +68,7 @@ oms_capability_stat() {
 }
 
 oms_capability_ttl() {
-  local ttl="${OMS_CAPABILITY_TTL:-86400}"
-  case "$ttl" in *[!0-9]*|"") ttl=86400 ;; esac
-  printf '%s\n' "$ttl"
+  printf '86400\n'
 }
 
 # Values a provider accepts for its thinking control, read out of --help.
@@ -538,26 +536,4 @@ oms_capability_model_efforts() {
     return 0
   done < "$file"
   return 1
-}
-
-# Does this provider accept EFFORT right now?
-# Highest supported effort at or below WANT, so a tier maps onto the scale the
-# provider actually has instead of failing or overshooting it.
-oms_capability_clamp_effort() {
-  local provider="$1" want="$2" model="${3:-}"
-  local order="low medium high xhigh max ultra"
-  local candidate result="" scale=""
-  oms_capability_peek "$provider" || return 2
-  case "$OMS_CAP_EFFORT_MECHANISM" in none|absent) return 1 ;; esac
-  # The model's own scale where the catalog reports one: the provider-wide
-  # union would offer a step the chosen model does not actually have.
-  [ -z "$model" ] || scale="$(oms_capability_model_efforts "$provider" "$model" 2>/dev/null || true)"
-  [ -n "$scale" ] || scale="$OMS_CAP_EFFORT_VALUES"
-  for candidate in $order; do
-    case " $scale " in *" $candidate "*) ;; *) continue ;; esac
-    result="$candidate"
-    [ "$candidate" != "$want" ] || break
-  done
-  [ -n "$result" ] || return 1
-  printf '%s\n' "$result"
 }

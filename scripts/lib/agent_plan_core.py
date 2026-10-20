@@ -652,8 +652,7 @@ def worker_marker_is_typed(marker):
     return True
 
 CLAIM_TTL = int(os.environ.get("OMS_CLAIM_TTL") or 3600)
-raw_review_ttl = os.environ.get("OMS_PLAN_REVIEW_TTL", "86400")
-REVIEW_TTL = int(raw_review_ttl) if raw_review_ttl.isdigit() else 86400
+REVIEW_TTL = 86400
 
 def parse_ts(s):
     try:

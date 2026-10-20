@@ -238,7 +238,7 @@ outputs_json() {
   # producing run (see `whence`). Multi-GB files are recorded path+size+mtime
   # only, with hashed=false, to avoid an expensive full read.
   OMS_OUTPUTS="$(printf '%s\n' "${OUTPUTS[@]:-}")" \
-  OMS_HASH_MAX="${OMS_CAPSULE_HASH_MAX:-536870912}" python3 <<'PY'
+  OMS_HASH_MAX=536870912 python3 <<'PY'
 import hashlib, json, os
 cap = int(os.environ.get("OMS_HASH_MAX", "536870912"))
 rows = []

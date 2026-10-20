@@ -825,8 +825,8 @@ agent_memory_refresh_summary() {
   local scope="$2"
   local summary_file
   local tmp
-  local max_items="${OMS_AGENT_MEMORY_SUMMARY_ITEMS:-40}"
-  local chars="${OMS_AGENT_MEMORY_ENTRY_CHARS:-240}"
+  local max_items=40
+  local chars=240
 
   [ -s "$memory_file" ] || return 0
   if agent_memory_file_has_sensitive_content "$memory_file"; then
@@ -1029,7 +1029,7 @@ agent_memory_pin_file() {
 agent_memory_emit_full_section() {
   local label="$1"
   local file="$2"
-  local lines="${OMS_AGENT_MEMORY_TAIL_LINES:-120}"
+  local lines=120
 
   [ -s "$file" ] || return 1
   if agent_memory_file_has_sensitive_content "$file"; then
@@ -1045,10 +1045,9 @@ agent_memory_emit_full_section() {
   buf_file="$(agent_memory_mktemp)" || return 1
   tail -n "$lines" "$file" > "$buf_file"
   total="$(LC_ALL=C wc -c < "$buf_file" | tr -d ' ')"
-  if [ "$total" -gt "${OMS_AGENT_MEMORY_FULL_BYTES:-16384}" ]; then
-    agent_memory_truncate_bytes "${OMS_AGENT_MEMORY_FULL_BYTES:-16384}" < "$buf_file"
-    printf '\n[shared memory truncated: %s of %s bytes shown; OMS_AGENT_MEMORY_FULL_BYTES]\n' \
-      "${OMS_AGENT_MEMORY_FULL_BYTES:-16384}" "$total"
+  if [ "$total" -gt 16384 ]; then
+    agent_memory_truncate_bytes 16384 < "$buf_file"
+    printf '\n[shared memory truncated: 16384 of %s bytes shown]\n' "$total"
   else
     cat "$buf_file"
   fi
@@ -1064,8 +1063,8 @@ agent_memory_emit_compact_section() {
   local pins_file
   local summary_file
   local body
-  local pin_lines="${OMS_AGENT_MEMORY_PIN_LINES:-30}"
-  local summary_lines="${OMS_AGENT_MEMORY_SUMMARY_LINES:-45}"
+  local pin_lines=30
+  local summary_lines=45
   local entries
 
   pins_file="$(agent_memory_pins_file "$memory_file")"
@@ -1127,7 +1126,7 @@ agent_memory_emit_recall_section() {
   local memory_file="$1"
   local query="$2"
   local scope="${3:-memory}"
-  local limit="${OMS_AGENT_MEMORY_RECALL_LIMIT:-5}"
+  local limit=5
   local out
 
   [ -s "$memory_file" ] || return 1
