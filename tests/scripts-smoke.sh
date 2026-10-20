@@ -29285,6 +29285,50 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
   [ "$(awk 'END { print NR }' "$actual_count")" = 1 ] ||
     fail "validated sibling baseline churn should stabilize in one capture: $(cat "$actual_count")"
 
+  # A per-worktree config change during capture must alter the boundary
+  # fingerprint and force the baseline to capture the new bytes.
+  local config_churn="$TMP/guard-baseline-config-churn"
+  local config_root="$TMP/guard-baseline-config-root"
+  local config_sibling="$config_root/oh-my-setting-delegate.config-churn"
+  local config_ready="$TMP/guard-baseline-config-ready"
+  local config_release="$TMP/guard-baseline-config-release"
+  local config_count="$TMP/guard-baseline-config-count"
+  local config_snap="$TMP/guard-baseline-config-snapshot"
+  make_guard_repo "$config_churn"
+  make_live_managed_sibling "$config_churn" "$config_sibling"
+  rm -f "$config_ready" "$config_release"
+  : > "$config_count"
+  (
+    local tries=0
+    while [ ! -e "$config_ready" ] && [ "$tries" -lt 100 ]; do
+      sleep 0.05
+      tries=$((tries + 1))
+    done
+    [ -e "$config_ready" ] || exit 1
+    local config_metadata
+    config_metadata="$(git -C "$config_sibling/wt" rev-parse --git-dir)"
+    case "$config_metadata" in /*) ;; *) config_metadata="$config_churn/$config_metadata" ;; esac
+    printf '[core]\nfsmonitor=unsafe\n' > "$config_metadata/config.worktree"
+    touch "$config_release"
+  ) &
+  pid=$!
+  OMS_TEST_WG_SNAPSHOT_PAUSE_AFTER=refs \
+    OMS_TEST_WG_SNAPSHOT_READY="$config_ready" \
+    OMS_TEST_WG_SNAPSHOT_RELEASE="$config_release" \
+    OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT="$config_count" \
+    OMS_DELEGATE_WORKTREE_ROOT="$config_root" bash -c '
+      . "$1/scripts/lib/harness-residue.sh"
+      . "$1/scripts/lib/oms-common.sh"
+      oms_worker_surface_snapshot "$2" "$3" "$2"
+    ' _ "$ROOT" "$config_churn" "$config_snap" ||
+      fail "a config.worktree change during baseline capture must stabilize"
+  wait "$pid" || fail "config.worktree baseline race fixture failed"
+  [ "$(awk 'END { print NR }' "$config_count")" = 2 ] ||
+    fail "a config-only boundary race must recapture once: $(cat "$config_count")"
+  grep -Fq "worktree worktrees/" "$config_snap/gitmeta" &&
+    grep -Fq "/config.worktree " "$config_snap/gitmeta" ||
+    fail "the stabilized baseline must include config.worktree bytes"
+
   # A pending registration can precede complete managed registrations in
   # Git's sorted admin scan. It must not truncate the remaining baseline rows.
   local pending_baseline="$TMP/guard-baseline-pending-sibling"
@@ -30256,10 +30300,13 @@ mkdir -p $wave_live_kept && git -C $wave_live worktree add --quiet --detach $wav
     fail "live mixed-wave fixture did not reuse the deleted registration slot"
 
   local invalid bad bad_gone bad_kept bad_metadata bad_body
-  for invalid in surviving-checkout executable-config outside-root symbolic-head; do
+  for invalid in surviving-checkout executable-config outside-root \
+    outside-replacement-root symbolic-head; do
     bad="$project-$invalid"; bad_gone="$gone-$invalid"; bad_kept="$wave_kept-$invalid"
     if [ "$invalid" = outside-root ]; then
       bad_gone="$TMP/guard-sibling-old-outside-root"
+    elif [ "$invalid" = outside-replacement-root ]; then
+      bad_kept="$TMPDIR/oh-my-setting-delegate.outside-replacement-root"
     fi
     make_guard_repo "$bad"
     make_live_managed_sibling "$bad" "$bad_gone"

@@ -2123,6 +2123,12 @@ PY
     grep -Fxq "worktree worktrees/$entry/gitdir $(oms_sha256_file "$receipt/gitdir")" \
       "$before/gitmeta" || return 1
     oms_worker_gitmeta_is_live_managed_worktree "$repo" "$common/worktrees/$entry/gitdir" "$worker" kept || return 1
+    gitfile="$(sed -n '1p' "$common/worktrees/$entry/gitdir" 2>/dev/null || true)"
+    gitfile="${gitfile//$'\r'/}"
+    case "$gitfile" in */.git) current_path="${gitfile%/.git}" ;; *) return 1 ;; esac
+    current_path="$(oms_harness_physical_dir "$current_path" 2>/dev/null || true)"
+    [ -n "$current_path" ] &&
+      oms_worker_path_is_managed_foreign_worktree "$current_path" "$worker" 1 || return 1
     head="$(sed -n '1p' "$common/worktrees/$entry/HEAD")"
     head="${head//$'\r'/}"
     case "$head" in ""|*[!0-9a-f]*) return 1 ;; esac
@@ -3161,8 +3167,7 @@ else:
                 try:
                     field_stat = os.lstat(path)
                 except FileNotFoundError:
-                    if field != "config.worktree":
-                        add(field + "-state", b"missing")
+                    add(field + "-state", b"missing")
                     slot.update(field.encode() + b"-missing")
                     details.append("slot-field\t" + name + "\t" + field + "\t" +
                                    record(field.encode(), b"missing"))
@@ -3171,8 +3176,7 @@ else:
                     raise SystemExit(1)
                 if stat.S_ISLNK(field_stat.st_mode):
                     value = os.fsencode(os.readlink(path))
-                    if field != "config.worktree":
-                        add(field + "-link", value)
+                    add(field + "-link", value)
                     slot.update(field.encode() + b"-link" + value)
                     identity = b"link:" + value
                 elif stat.S_ISREG(field_stat.st_mode):
@@ -3181,14 +3185,12 @@ else:
                             value = handle.read()
                     except OSError:
                         raise SystemExit(1)
-                    if field != "config.worktree":
-                        add(field, value)
+                    add(field, value)
                     slot.update(field.encode() + b"-file" + value)
                     identity = b"file:" + value
                 else:
                     value = str(stat.S_IFMT(field_stat.st_mode)).encode()
-                    if field != "config.worktree":
-                        add(field + "-type", value)
+                    add(field + "-type", value)
                     slot.update(field.encode() + b"-type" + value)
                     identity = b"type:" + value
                 details.append("slot-field\t" + name + "\t" + field + "\t" +
