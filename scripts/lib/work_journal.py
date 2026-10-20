@@ -221,10 +221,18 @@ _RAW_KEY_RE = re.compile(
 )
 _AUTH_RE = re.compile(r"(?i)\b(authorization\s*[:=]\s*).*$")
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
+# Key names mirror agent_memory_secret_re in agent-memory-common.sh: any
+# identifier ending in a key word (camelCase too), optionally quoted as in JSON.
 _SECRET_ASSIGN_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9])(?P<key>api[\s_-]?key|token|secret|password|passwd|credential)"
+    r"(?i)(?<![A-Za-z0-9_])(?P<key>[A-Za-z0-9_]*(?:t[o]ken|s[e]cret|passw(?:or)?[d]|"
+    r"credentia[l]s?|(?:ap[i]|s[e]cret|privat[e])[-_ ]?(?:ke[y]|t[o]ken)|"
+    r"aws_s[e]cret_access_[k]ey))(?P<quote>[\"']?)"
     r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
+_WEBHOOK_RE = re.compile(
+    r"(?i)(?:hook[s]\.slac[k]\.com/service[s]/|disc[o]rd(?:app)?\.com/api/webhook[s]/)\S*"
+)
+_NETRC_RE = re.compile(r"(?i)\b(machin[e]\s+\S+\s+logi[n]\s+\S+\s+passwor[d]\s+)\S+")
 _PEM_PATTERN = (
     r"-----BE[G]IN [A-Z ]*PRIVATE KEY-----[\s\S]*?"
     r"(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"
@@ -236,7 +244,8 @@ _TOKEN_RE = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9_.-]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"sk-(?:live|test)?[_-]?[A-Za-z0-9_-]{10,}|"
     r"xox[bap]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{20,}|"
-    r"\bn[t]n_[0-9]{11}[A-Za-z0-9]{35}\b|"
+    r"(?<![A-Za-z0-9_])n[t]n_[0-9]{11}[A-Za-z0-9]{35}(?![A-Za-z0-9])|"
+    r"[sr]k_(?:liv[e]|tes[t])_[A-Za-z0-9]{16,}|"
     r"AK[I]A[0-9A-Z]{16}|AI[z]a[0-9A-Za-z_-]{35}|"
     r"glpa[t]-[A-Za-z0-9_-]{20,}|np[m]_[A-Za-z0-9]{36,}|"
     r"\bey[J][A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|"
@@ -425,10 +434,14 @@ def sanitize_text(value: str, maximum: int = MAX_TEXT_BYTES) -> str:
     """Redact common credentials and machine-private paths, then bound bytes."""
 
     clean = "".join(char if char >= " " or char == "\t" else " " for char in str(value))
+    # A key block first: the assignment rule would otherwise eat its armor.
+    clean = _PEM_RE.sub("[REDACTED]", clean)
     clean = _AUTH_RE.sub(r"\1[REDACTED]", clean)
     clean = _BEARER_RE.sub("Bearer [REDACTED]", clean)
+    clean = _NETRC_RE.sub(r"\1[REDACTED]", clean)
+    clean = _WEBHOOK_RE.sub("[REDACTED]", clean)
     clean = _SECRET_ASSIGN_RE.sub(
-        lambda match: match.group("key") + "=[REDACTED]", clean
+        lambda match: match.group("key") + match.group("quote") + "=[REDACTED]", clean
     )
     clean = _TOKEN_RE.sub("[REDACTED]", clean)
     clean = _CREDENTIAL_URL_RE.sub(

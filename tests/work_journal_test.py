@@ -968,6 +968,21 @@ class JournalTestCase(unittest.TestCase):
         self.assertEqual(
             wj.sanitize_text(env_key + "=abc123"), env_key + "=[REDACTED]"
         )
+        # Parity with the outbound scanner's key names and shapes.
+        for line, expected in (
+            ("accessTok" + "en=abc123", "accessTok" + "en=[REDACTED]"),
+            ('{"clientSec' + 'ret": "abc123"}', '{"clientSec' + 'ret"=[REDACTED]}'),
+            ("AWS_SEC" + "RET_ACCESS_KEY=abc123", "AWS_SEC" + "RET_ACCESS_KEY=[REDACTED]"),
+            ("sk" + "_live_" + alnum[:24], "[REDACTED]"),
+            ("post https://hooks.sla" + "ck.com/services/T0/B0/x", "post https://[REDACTED]"),
+            ("machine h login u pass" + "word p4ss", "machine h login u pass" + "word [REDACTED]"),
+            ("nt" + "n_" + "1" * 11 + alnum[:35] + "_x", "[REDACTED]_x"),
+            ("private_" + "key: " + pem, "private_" + "key=[REDACTED]"),
+            ("max_tokens: 100", "max_tokens: 100"),
+        ):
+            clean = wj.sanitize_text(line)
+            self.assertEqual(clean, expected, line)
+            self.assertNotIn("MIIE", clean)
 
         # GitHub variable-length installation tokens carry an app id and a
         # JWT, so the body holds `_`, `.` and `-`; no fragment may survive.
