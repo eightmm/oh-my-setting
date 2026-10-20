@@ -60,8 +60,8 @@ oms_effective_run_id() {
   printf '%s\n' "$id"
 }
 
-# Hash stdin / a file with whatever sha256 tool exists. Returns nonzero (no
-# output) when none is available, so callers can compose without aborting.
+# Hash stdin with whichever sha256 tool exists. The stream helper fails
+# silently when none exists; oms_sha256_file reports that condition on stderr.
 oms_sha256_stream() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum | awk '{print $1}'
@@ -74,10 +74,17 @@ oms_sha256_stream() {
   fi
 }
 
-oms_sha256_file() {
-  [ -f "$1" ] || return 1
-  oms_sha256_stream < "$1"
-}
+# Keep platform.sh's standalone implementation when it was sourced first.
+if ! declare -F oms_sha256_file >/dev/null 2>&1; then
+  oms_sha256_file() {
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 < "$1" | awk '{print $NF}'
+    else echo "error: sha256sum, shasum, or openssl is required" >&2; return 1
+    fi
+  }
+fi
 
 # Git is an execution boundary, not only a content reader. Repository and
 # worktree config can make seemingly read-only status/diff commands execute a

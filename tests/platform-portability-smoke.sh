@@ -37,6 +37,46 @@ assert_regular_copy() {
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 
+# Both source orders must agree that a missing file fails silently.
+missing_sha_file="$TMP/does-not-exist"
+sha_special_supported=0
+if ! oms_platform_is_windows; then
+  # Windows filenames cannot contain a literal backslash.
+  sha_special_supported=1
+  sha_special_file="$TMP/back\\slash.txt"
+  printf 'backslash path contents\n' > "$sha_special_file"
+fi
+for sha_source_order in common-platform platform-common; do
+  sha_output="$TMP/sha-output"
+  sha_error="$TMP/sha-error"
+  if [ "$sha_source_order" = common-platform ]; then
+    sha_sources=". '$ROOT/scripts/lib/oms-common.sh'; . '$ROOT/scripts/lib/platform.sh'"
+  else
+    sha_sources=". '$ROOT/scripts/lib/platform.sh'; . '$ROOT/scripts/lib/oms-common.sh'"
+  fi
+  sha_probe='
+file_sum="$(oms_sha256_file "$1")" || exit 2
+stream_sum="$(oms_sha256_stream < "$1")" || exit 3
+[ "$file_sum" = "$stream_sum" ] || exit 4
+printf "%s\n" "$file_sum"
+'
+  if bash -c "$sha_sources; oms_sha256_file \"\$1\"" _ "$missing_sha_file" > "$sha_output" 2> "$sha_error"; then
+    fail "oms_sha256_file succeeded for a missing file ($sha_source_order)"
+  fi
+  [ ! -s "$sha_output" ] || fail "oms_sha256_file printed output for a missing file ($sha_source_order)"
+  [ ! -s "$sha_error" ] || fail "oms_sha256_file printed an error for a missing file ($sha_source_order)"
+
+  if [ "$sha_special_supported" -eq 1 ]; then
+    if ! bash -c "$sha_sources; $sha_probe" _ "$sha_special_file" > "$sha_output" 2> "$sha_error"; then
+      fail "oms_sha256_file did not match the stream digest for a backslash path ($sha_source_order)"
+    fi
+    [ "$(wc -c < "$sha_output")" -eq 65 ] || fail "oms_sha256_file did not print one 64-character digest line ($sha_source_order)"
+    grep -Eq '^[0-9a-f]{64}$' "$sha_output" ||
+      fail "oms_sha256_file did not print a 64-character lowercase hex digest ($sha_source_order)"
+    [ ! -s "$sha_error" ] || fail "oms_sha256_file printed an error for a valid path ($sha_source_order)"
+  fi
+done
+
 [ "$(OMS_PLATFORM_OVERRIDE=windows oms_platform_name)" = windows ] ||
   fail "Windows platform override was not detected"
 [ "$(OMS_PLATFORM_OVERRIDE=windows oms_install_link_mode)" = copy ] ||

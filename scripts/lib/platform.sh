@@ -129,9 +129,10 @@ oms_tool_platform() {
 }
 
 oms_sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
-  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | awk '{print $NF}'
+  [ -f "$1" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 < "$1" | awk '{print $NF}'
   else echo "error: sha256sum, shasum, or openssl is required" >&2; return 1
   fi
 }
