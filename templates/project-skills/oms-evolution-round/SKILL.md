@@ -31,10 +31,18 @@ the regularized selection of RRSI (arXiv 2609.24972):
   experiment` enforces the band through `success.noise_band`.
 - Bundle edits to explore, then split a winning bundle so each landed change
   is attributable.
+- Label each proposed edit invariant (global rules or roles) or domain
+  (template or project skill). For guidance edits, run one fixed task with the
+  old and new text under matched provider, model, and prompt settings; adopt
+  only when the targeted behavior changes, as in Harness^2 (arXiv 2610.14224).
+  This is a behavior probe, not an application test; retain the reference and
+  contract checks below.
 - Reject a change whose only evidence is the fixture it was tuned on; confirm
   it on a defect or task outside that fixture.
-- Before proposing, check the project's record of rejected hypotheses; after
-  measuring, record the hypothesis, the effect on score and cost, and the verdict.
+- Before proposing, check the shared project record of rejected hypotheses
+  with `oms agent-memory recall --text "hypothesis: TOPIC"`; after deciding,
+  append one or two lines: `hypothesis: CHANGE | evidence | effect on score and
+  cost | verdict (adopted, rejected, deferred) | source`.
 - Treat a mechanism with no recorded evidence of use as a removal candidate.
 
 ## Collaborate when explicitly authorized
