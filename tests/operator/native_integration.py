@@ -1278,12 +1278,13 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     with tokens_log.open("a") as handle:
         handle.write(torn[:40])
     agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["t1"]
-    assert (agent["tokens"], agent["output"], agent["partial"]) == (1052 + 1413 + 6 + 7, 459, False), agent
+    # The torn tail is still being written, so the total says it is incomplete.
+    assert (agent["tokens"], agent["output"], agent["partial"]) == (1052 + 1413 + 6 + 7, 459, True), agent
     with tokens_log.open("a") as handle:
         handle.write(torn[40:] + "\n")
     agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["t1"]
     assert panel_chats._usage[str(tokens_log)]["offset"] == tokens_log.stat().st_size
-    assert (agent["tokens"], agent["output"]) == (2478 + 8, 466), agent
+    assert (agent["tokens"], agent["output"], agent["partial"]) == (2478 + 8, 466, False), agent
     text, nav = sub_board(panel_chats.native_subagents([claude_main]), "log")
     assert "2486 tok (out 466)" in text, text
     # Absent cache counts are zero; a malformed count leaves the total partial instead of looking complete.
@@ -1386,6 +1387,20 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
         first = shown(panel_chats.native_subagents([claude_main]))["workflows"]["wf_r1"]
         second = shown(panel_chats.native_subagents([claude_main]))["workflows"]["wf_r1"]
     assert (first["tokens"], first["partial"], second["tokens"], second["partial"]) == (17, True, 27, False), (first, second)
+    # A 110-agent run under a budget of about ten transcripts per refresh still reaches every agent: the least
+    # recently read go first, and the total stays partial until all are counted.
+    write_journal("wf_many", started)
+    for number in range(110):
+        (runs_dir / "wf_many" / ("agent-m%03d.jsonl" % number)).write_text(usage_line("m", 1, 0, 0, 2) + "\n")
+    one = (runs_dir / "wf_many" / "agent-m000.jsonl").stat().st_size
+    seen = []
+    with patch.object(panel_chats, "USAGE_REFRESH_BYTES", 10 * one):
+        panel_chats._usage.clear()
+        for _ in range(14):
+            many = shown(panel_chats.native_subagents([claude_main]))["workflows"]["wf_many"]
+            seen.append((many.get("tokens"), many.get("partial")))
+    assert seen[0][1] is True and seen[-1] == (110 * 3, False), seen
+    shutil.rmtree(runs_dir / "wf_many")
     assert set(flows) == {"wf_r1", "wf_r2"} and flows["wf_r2"]["title"] == "Workflow wf_r2", flows
     assert flows["wf_r1"]["title"] == "Workflow wf_r1 · phase Review · agents ~2 started · ~1 done", flows
     text, nav = sub_board(found, "detail", ("chat", "adv-main"))

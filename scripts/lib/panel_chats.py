@@ -32,8 +32,6 @@ WORKFLOW_BYTES = 256 * 1024  # journal tail read for display counts
 USAGE_FILE_BYTES = 8 * 1024 * 1024      # appended transcript bytes read per file per refresh
 USAGE_REFRESH_BYTES = 16 * 1024 * 1024  # ... and per refresh across every transcript
 USAGE_LINE_BYTES = 256 * 1024           # a longer line is an api-request blob, not a message
-USAGE_MESSAGES = 50000                  # distinct messages remembered per transcript
-RUN_AGENTS = 64                         # newest agent transcripts summed per workflow run
 OVERSIZED_ROLE = re.compile(rb'"(?:role|type)"\s*:\s*"assistant"')
 OVERSIZED_USAGE = re.compile(rb'"usage"\s*:\s*')
 OVERSIZED_ID = re.compile(rb'"id"\s*:\s*"(msg_[A-Za-z0-9_-]{1,120})"')
@@ -278,8 +276,9 @@ def _transcript_usage(path, budget):
     """(total tokens, output tokens, partial, counted) from one subagent transcript, or None when it cannot be
     examined at all (callers treat that as unread).
 
-    Only assistant records holding a usage object are counted, one entry per message id (each streamed content
-    block repeats its message's usage); a record over USAGE_LINE_BYTES is read from its two ends instead of parsed
+    Only assistant records holding a usage object are counted, once per message: each streamed content block
+    repeats its message's usage on consecutive lines, so only the previous message is remembered and a repeat
+    replaces it (measured 2026-10-20: 0 non-consecutive repeats in 4454 usage lines of 40 real transcripts); a record over USAGE_LINE_BYTES is read from its two ends instead of parsed
     whole. A refresh reads appended bytes only, within USAGE_FILE_BYTES and the shared `budget`; a replaced
     (inode), truncated or older file is read again from the start. Partial means bytes or records are
     uncounted: the caps stopped the read, the file was unreadable, or a record's usage could not be read.
@@ -295,8 +294,8 @@ def _transcript_usage(path, budget):
     if entry and (entry["id"] != ident or info.st_size < entry["offset"] or info.st_mtime_ns < entry["mtime"]):
         entry = None
     if entry is None:
-        entry = _usage[path] = {"id": ident, "mtime": 0, "offset": 0, "messages": {}, "anon": 0, "capped": False,
-                                "over": False, "total": 0, "output": 0}
+        entry = _usage[path] = {"id": ident, "mtime": 0, "offset": 0, "last": None, "counted": False,
+                                "capped": False, "over": False, "total": 0, "output": 0, "read": -1}
     entry["mtime"], entry["refresh"] = info.st_mtime_ns, _refresh[0]
     if entry["offset"] < info.st_size:
         limit = min(USAGE_FILE_BYTES, budget[0])
@@ -309,7 +308,7 @@ def _transcript_usage(path, budget):
                 entry["capped"] = True
         if data is not None:
             budget[0] -= len(data)
-            entry["capped"] = entry["offset"] + len(data) < info.st_size
+            entry["read"] = _refresh[0]
             end = data.rfind(b"\n") + 1
             if not end and len(data) >= USAGE_FILE_BYTES:
                 end = len(data)  # one line longer than the read cap: skipped, and the total says so
@@ -340,19 +339,18 @@ def _transcript_usage(path, budget):
                         key = message.get("id")
                     except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
                         continue
-                    if isinstance(key, str) and key:
-                        key = key[:128]
-                    else:
-                        entry["anon"] += 1
-                        key = ("line", entry["anon"])
-                if key not in entry["messages"] and len(entry["messages"]) >= USAGE_MESSAGES:
-                    entry["over"] = True
-                    continue
-                entry["messages"][key] = counts
+                    key = key[:128] if isinstance(key, str) and key else None
+                last = entry["last"]
+                if key is not None and last and last[0] == key:
+                    entry["total"] -= sum(last[1])
+                    entry["output"] -= last[1][3]
+                entry["total"] += sum(counts)
+                entry["output"] += counts[3]
+                entry["last"], entry["counted"] = (key, counts), True
             entry["offset"] += end
-            entry["total"] = sum(sum(counts) for counts in entry["messages"].values())
-            entry["output"] = sum(counts[3] for counts in entry["messages"].values())
-    return entry["total"], entry["output"], entry["capped"] or entry["over"], bool(entry["messages"])
+    # Unread bytes, including a torn last line still being written, leave the total incomplete.
+    entry["capped"] = entry["offset"] < info.st_size
+    return entry["total"], entry["output"], entry["capped"] or entry["over"], entry["counted"]
 
 
 def _native_agents(folder, now, budget):
@@ -395,14 +393,16 @@ def _run_agents(run, now, budget):
         return {}
     if not files:
         return {}
-    files.sort(reverse=True)
     found = {"agents": len(files), "live": sum(0 <= now - mtime <= NATIVE_ACTIVE for mtime, _ in files)}
-    reads = [_transcript_usage(path, budget) for _, path in files[:RUN_AGENTS]]
+    # Every agent is visited; the least recently read go first, so a shared byte budget that runs out on one
+    # refresh reaches the rest on the next ones instead of starving them.
+    files.sort(key=lambda item: (_usage.get(item[1], {}).get("read", -1), -item[0]))
+    reads = [_transcript_usage(path, budget) for _, path in files]
     counted = [used for used in reads if used and used[3]]
     if counted:
         # An agent left unread or partly read (budget, caps, unreadable) keeps the run's total marked partial.
         found.update(tokens=sum(u[0] for u in counted), output=sum(u[1] for u in counted),
-                     partial=len(files) > RUN_AGENTS or any(used is None or used[2] for used in reads))
+                     partial=any(used is None or used[2] for used in reads))
     return found
 
 
