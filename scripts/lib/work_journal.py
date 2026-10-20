@@ -219,7 +219,7 @@ _RAW_KEY_RE = re.compile(
     r"(?i)^(?:raw|stdout|stderr|transcript|conversation|environment|env|diff|"
     r"output_log|log_text|full_log|workspace_dump)$"
 )
-_AUTH_RE = re.compile(r"(?i)\b(authorization\s*[:=]\s*).*$")
+_AUTH_RE = re.compile(r"(?i)(authorization\s*[:=]\s*).*$")
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 # Key names mirror agent_memory_secret_re in agent-memory-common.sh: any
 # identifier ending in a key word (camelCase too), optionally quoted as in JSON.

@@ -979,6 +979,8 @@ class JournalTestCase(unittest.TestCase):
             ("nt" + "n_" + "1" * 11 + alnum[:35] + "_x", "[REDACTED]_x"),
             ("private_" + "key: " + pem, "private_" + "key=[REDACTED]"),
             ("max_tokens: 100", "max_tokens: 100"),
+            ("x-authori" + "zation: abc123", "x-authori" + "zation: [REDACTED]"),
+            ("proxyAuthori" + "zation: abc123", "proxyAuthori" + "zation: [REDACTED]"),
         ):
             clean = wj.sanitize_text(line)
             self.assertEqual(clean, expected, line)
