@@ -12433,7 +12433,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end
 EOF
   chmod +x "$bin_dir/claude"
 
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=reviewer "$ROOT/scripts/agent-call.sh" \
     --repo "$project" --artifact-dir "$artifact_dir" --to claude \
     --prompt "Envelope probe" >/dev/null
 
@@ -12486,6 +12486,21 @@ PY
   # Four tools is the whole belt a judging seat carries.
   grep -Fxq -- 'Read,Grep,Glob,Bash' "$home_dir/claude-argv" ||
     fail "a read seat must carry the bounded tool belt: $(cat "$home_dir/claude-argv")"
+  cp "$home_dir/claude-argv" "$home_dir/claude-reviewer-argv"
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher OMS_PANEL_DISPATCH=1 OMS_PANEL_PURPOSE=research \
+    "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --model claude-haiku-5-5 --reasoning-effort low --prompt "Researcher web tools probe" >/dev/null
+  cp "$home_dir/claude-argv" "$home_dir/claude-researcher-argv"
+  # A researcher role left in the environment is not a panel researcher dispatch.
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher \
+    "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt "Ambient researcher role probe" >/dev/null
+  grep -Fxq -- 'Read,Grep,Glob,Bash' "$home_dir/claude-argv" ||
+    fail 'an ambient researcher role outside a panel dispatch widened the tool belt'
+  grep -Fxq -- 'Read,Grep,Glob,Bash,WebSearch,WebFetch' "$home_dir/claude-researcher-argv" ||
+    fail 'a researcher read seat must carry bounded web lookup tools'
+  grep -Fxq -- 'Read,Grep,Glob,Bash' "$home_dir/claude-reviewer-argv" ||
+    fail 'a reviewer read seat must keep the bounded judge tool belt'
   # Settings carry the hooks, and a judging seat inheriting the parent's hook
   # table gets the parent's resume block injected into a context stripped to
   # four tools -- and writes the parent's .oms while it judges.

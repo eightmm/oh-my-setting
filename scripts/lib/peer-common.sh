@@ -2601,15 +2601,24 @@ ma_provider_attempt() {
       # actually closed; parsed back to plain text right after the run
       # (ma_codex_jsonl_to_text), parse-or-passthrough like the claude branch.
       cmd+=(--json)
-      # A judging seat's evidence is the prompt and the repo in front of it.
+      # Judging seats use only the prompt and repo; researchers also need
+      # Codex's web search for cited document/source lookups.
       # Since codex PR #13675 a boolean tools.web_search is parsed and
       # discarded and the tool defaults to Cached, so the string form is
       # needed. codex_apps is a separate web route the sandbox proxy does not
       # cover; -c features.apps=false is used because older codex hard-errors
       # on an unknown name passed to --disable but accepts -c silently. User
       # mcp_servers still load, so this is not parity with Claude's
-      # --strict-mcp-config (probed on codex 0.163.0, 2026-10-19).
-      [ "$access" = write ] || cmd+=(-c 'web_search="disabled"' -c features.apps=false)
+      # --strict-mcp-config (probed on codex 0.163.0, 2026-10-19). Researchers
+      # use the supported live mode; other read seats remain web-free.
+      if [ "$access" != write ]; then
+        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = researcher ]; then
+          cmd+=(-c 'web_search="live"')
+        else
+          cmd+=(-c 'web_search="disabled"')
+        fi
+        cmd+=(-c features.apps=false)
+      fi
       if [ "$access" = write ]; then
         cmd+=(--sandbox workspace-write)
         [ -z "$panel_worker_root" ] || cmd+=(--add-dir "$panel_worker_root")
@@ -2649,11 +2658,18 @@ ma_provider_attempt() {
       # Write workers keep them: they run headless and need the operator's
       # permission rules to edit at all.
       [ "$access" = write ] || cmd+=(--setting-sources "")
-      # Four tools is the whole belt a judging seat needs (read the code,
+      # Four tools are enough for judging seats (read the code,
       # search it, run read-only commands) — past four or five, tool
       # selection degrades and none of the write/spawn tools belong in a
-      # reviewer's hands anyway. Write workers keep the default set.
-      [ "$access" = write ] || cmd+=(--tools "Read,Grep,Glob,Bash")
+      # reviewer's hands anyway. Researchers add web lookup tools; write
+      # workers keep the default set.
+      if [ "$access" != write ]; then
+        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = researcher ]; then
+          cmd+=(--tools "Read,Grep,Glob,Bash,WebSearch,WebFetch")
+        else
+          cmd+=(--tools "Read,Grep,Glob,Bash")
+        fi
+      fi
       # Plan mode names a plan file in the owner's ~/.claude/plans, titled from
       # the prompt's first line; 18 seat prompts' plans were found there.
       # Probed 2026-09-29: --settings still applies under --setting-sources "",

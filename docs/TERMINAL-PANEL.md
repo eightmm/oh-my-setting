@@ -1602,7 +1602,11 @@ status appears in tree/graph views. It never becomes a main or a patch approver.
 
 The researcher takes the light tier's Haiku or Luna candidate, whichever provider
 is installed first (`--to codex|claude` narrows it). Current configured floors are
-`claude-haiku-5-5` and `gpt-6-luna`. The dispatcher compares
+`claude-haiku-5-5` and `gpt-6-luna`. Read-only researcher seats that the panel
+dispatched may use provider web search/fetch while judging roles remain
+web-free. A researcher reads the repository and the web in one context, so
+repository text can leave the machine in a search query or fetched URL; do not
+dispatch researchers in a repository whose content must stay local. The dispatcher compares
 numeric versions within that family against the cached provider catalog and pins
 the newest exact ID. An omitted minor version means zero; `6.10` is newer than
 `6.2`. Cached discovery does not prove account access or live availability. No

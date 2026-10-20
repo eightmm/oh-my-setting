@@ -390,13 +390,15 @@ for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid 
 done
 grep -Fxq -- '--force' "$TMP/logs/cursor-agent.argv" || fail 'Cursor write authority missing'
 
-# New path: no codex read-seat argv check existed. A read seat disables the web
-# tool and the apps connector route; a write seat sets neither.
+# Codex judging seats disable web search and the apps connector route;
+# researcher seats enable web search while keeping apps disabled; write seats
+# set neither read-seat flag.
 mkdir -p "$TMP/codexbin"
 ln -s ../bin/provider-fake "$TMP/codexbin/codex"
 for access in read write; do
   PATH="$TMP/codexbin:$PATH" OMS_TEST_WRITE=1 MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
     MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+    OMS_PANEL_ROLE=reviewer \
     ma_provider_attempt codex "$access" "$prompt_file" "$TMP/logs/codex.$access-output" "$repo" \
       provider-default '' provider-registry '' "codex-$access" >/dev/null 2>&1 || true
   cp "$TMP/logs/codex.argv" "$TMP/logs/codex.$access.argv" 2>/dev/null || fail "codex $access seat never reached the CLI"
@@ -404,6 +406,25 @@ done
 grep -Fxq -- 'web_search="disabled"' "$TMP/logs/codex.read.argv" || fail 'codex read seat leaves web_search on'
 grep -Fxq -- 'features.apps=false' "$TMP/logs/codex.read.argv" || fail 'codex read seat leaves apps connectors on'
 if grep -Eq -- 'web_search|features\.apps' "$TMP/logs/codex.write.argv"; then fail 'codex write seat must not carry the read-seat web/apps flags'; fi
+PATH="$TMP/codexbin:$PATH" OMS_TEST_WRITE=1 MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+  MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' OMS_PANEL_ROLE=researcher \
+  ma_provider_attempt codex read "$prompt_file" "$TMP/logs/codex.ambient-output" "$repo" \
+    provider-default '' provider-registry '' codex-ambient >/dev/null 2>&1 || true
+# A researcher role left in the environment is not a researcher dispatch.
+grep -Fxq -- 'web_search="disabled"' "$TMP/logs/codex.argv" ||
+  fail 'an ambient researcher role outside a panel dispatch enabled web search'
+PATH="$TMP/codexbin:$PATH" OMS_TEST_WRITE=1 MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+  MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' OMS_PANEL_ROLE=researcher OMS_PANEL_DISPATCH=1 \
+  ma_provider_attempt codex read "$prompt_file" "$TMP/logs/codex.researcher-output" "$repo" \
+    provider-default '' provider-registry '' codex-researcher >/dev/null 2>&1 || true
+cp "$TMP/logs/codex.argv" "$TMP/logs/codex.researcher.argv" || fail 'codex researcher seat never reached the CLI'
+if grep -Fq -- 'web_search="disabled"' "$TMP/logs/codex.researcher.argv"; then
+  fail 'codex researcher seat disables web search'
+fi
+grep -Fxq -- 'web_search="live"' "$TMP/logs/codex.researcher.argv" ||
+  fail 'codex researcher seat must use live web search'
+grep -Fxq -- 'features.apps=false' "$TMP/logs/codex.researcher.argv" ||
+  fail 'codex researcher seat must keep apps connectors disabled'
 grep -Fxq -- '--always-approve' "$TMP/logs/grok.argv" || fail 'Grok write authority missing'
 grep -Fxq -- 'workspace' "$TMP/logs/grok.argv" || fail 'Grok workspace sandbox missing'
 grep -Fxq -- 'yolo' "$TMP/logs/gemini.argv" || fail 'Gemini write authority missing'
