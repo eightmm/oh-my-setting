@@ -17,6 +17,7 @@ from pathlib import Path
 import pty
 import select
 import faulthandler
+import hashlib
 import shutil
 import shlex
 import signal
@@ -77,6 +78,10 @@ def launch(code, label='Fixture job'):
     row = jobs.run_job(repo, session, [sys.executable, '-c', code], label=label)
     tracked.append(row['id'])
     return row
+
+
+def private_root():
+    return Path(os.environ['XDG_STATE_HOME']) / 'oh-my-setting' / 'panel-control' / hashlib.sha256(str(repo.resolve()).encode()).hexdigest()
 
 
 def record(ident):
@@ -172,7 +177,7 @@ try:
     retained = launch("print('retained before restart')")
     await_row(retained['id'], lambda value: value['state'] == 'exited')
     before = record(retained['id'])
-    retained_path = terminals.state_directory(repo) / 'jobs' / retained['id'] / 'output'
+    retained_path = private_root() / 'jobs' / retained['id'] / 'output'
     old_bytes = retained_path.read_bytes()
     real_proof = terminals.session_proof
     proofs = 0
@@ -192,7 +197,7 @@ try:
 
     uncertain = launch("print('old output survives spawn error')")
     await_row(uncertain['id'], lambda value: value['state'] == 'exited')
-    uncertain_path = terminals.state_directory(repo) / 'jobs' / uncertain['id'] / 'output'
+    uncertain_path = private_root() / 'jobs' / uncertain['id'] / 'output'
     uncertain_bytes = uncertain_path.read_bytes()
     uncertain_before = record(uncertain['id'])
     real_popen = subprocess.Popen
@@ -211,7 +216,7 @@ try:
     rollback_job = launch("print('log preserved on publication failure')")
     await_row(rollback_job['id'], lambda value: value['state'] == 'exited')
     rollback_before = record(rollback_job['id'])
-    rollback_path = terminals.state_directory(repo) / 'jobs' / rollback_job['id'] / 'output'
+    rollback_path = private_root() / 'jobs' / rollback_job['id'] / 'output'
     rollback_bytes = rollback_path.read_bytes()
     real_write = terminals.Store.write
     def fail_new_generation(store, value, name='record'):
@@ -366,7 +371,7 @@ try:
 
     noisy = launch("import os; [os.write(1,b'x'*65536) for _ in range(40)]; print('drained')")
     done = await_row(noisy['id'], lambda value: value['state'] == 'exited')
-    logfile = terminals.state_directory(repo) / 'jobs' / noisy['id'] / 'output'
+    logfile = private_root() / 'jobs' / noisy['id'] / 'output'
     check(logfile.stat().st_size == jobs.LOG_LIMIT and done['log_truncated'], 'log retention exceeded bound')
     check(done['exit_code'] == 0 and jobs.job_logs(repo, noisy['id'], 1, maximum=100)['truncated'],
           'output beyond limit blocked child or hid truncation')
@@ -374,7 +379,7 @@ try:
     # All unsafe objects are restored before the next case; no background writer
     # touches these already-completed generations.
     safe_id = row['id']
-    folder = terminals.state_directory(repo) / 'jobs' / safe_id
+    folder = private_root() / 'jobs' / safe_id
     for name in ('record', 'recipe', 'output'):
         path = folder / name
         backup = folder / ('saved-' + name)
@@ -427,7 +432,7 @@ try:
               'completed history did not free a saturated active slot')
         kept = history[0]
         kept_id, kept_gen = kept['id'], kept['generation']
-        kept_folder = terminals.state_directory(repo) / 'jobs-archive' / kept_id
+        kept_folder = private_root() / 'jobs-archive' / kept_id
         previous_log = (kept_folder / 'output').read_bytes()
         previous_recipe = (kept_folder / 'recipe').read_bytes()
         check(kept['archived'] and kept['capabilities']['restore'] and not kept['capabilities']['restart'],
@@ -443,7 +448,7 @@ try:
             check(opened_before_archive.read()['archived'] is True,
                   'an already-open record could miss its archival control guard')
         jobs.restore_job(repo, kept_id, kept_gen)
-        restored_folder = terminals.state_directory(repo) / 'jobs' / kept_id
+        restored_folder = private_root() / 'jobs' / kept_id
         check((restored_folder / 'output').read_bytes() == previous_log and
               (restored_folder / 'recipe').read_bytes() == previous_recipe and record(kept_id)['generation'] == kept_gen,
               'restore reran a recipe or altered retained output')
@@ -477,13 +482,13 @@ try:
         check(record(kept_id) == original and (restored_folder / 'output').read_bytes() == previous_log,
               'interrupted archive/restore markers could not recover without rerunning or deleting history')
         write_record(kept_id, original)
-        duplicate = terminals.state_directory(repo) / 'jobs-archive' / kept_id
+        duplicate = private_root() / 'jobs-archive' / kept_id
         shutil.copytree(restored_folder, duplicate)
         refused(lambda: jobs.job_logs(repo, kept_id, kept_gen))
         refused(lambda: jobs.restart_job(repo, session, kept_id, kept_gen))
         check((restored_folder / 'output').read_bytes() == previous_log, 'ambiguous history identity changed active output')
         shutil.rmtree(duplicate)
-        archive_root = terminals.state_directory(repo) / 'jobs-archive'
+        archive_root = private_root() / 'jobs-archive'
         real_archive = archive_root.with_name('saved-history')
         archive_root.rename(real_archive)
         archive_root.symlink_to(real_archive, target_is_directory=True)

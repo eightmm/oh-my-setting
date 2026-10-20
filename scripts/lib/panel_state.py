@@ -258,12 +258,6 @@ def session_candidates(repo):
     return ["oms-" + slug, "oms-%s-%s" % (slug, hashlib.sha256(str(path).encode()).hexdigest()[:6])]
 
 
-def panel_session(repo):
-    """One OMS tmux session per checkout: the first candidate free or proven to belong to it."""
-    from terminal_panel import resolve_session
-    return resolve_session(repo, wait=False)[0]
-
-
 def resolve_session(repo, wait=True):
     """(session, owner) for a checkout; a name held by another checkout or a non-OMS session is never taken."""
     from terminal_panel import session_candidates, session_owner

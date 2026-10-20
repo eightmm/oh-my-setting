@@ -861,23 +861,6 @@ def attention_header(ranked, width, unicode):
     return clipped("Attn %s" % len(ranked), width)
 
 
-def attention_row(item, width, unicode, tag=True):
-    """One queue item: class tag with a decision's age, glyph, who and what; narrow rows keep tag, who and state."""
-    sep = " · " if unicode else " / "
-    word = dict((kind, word) for kind, word, unused, unused_heading in ATTENTION_CLASSES)[item["cls"]] if tag else ""
-    lead = " ".join(part for part in (word, item.get("age")) if part)
-    text = (lead + sep if lead else "") + item["glyph"] + " " + item["who"] + sep + item["what"]
-    if display_width(text) > width:
-        state = item["what"].split(":", 1)[0].replace("waiting for approval", "needs approval").replace(
-            "waiting for input", "needs input")
-        who = item["who"].split(" for ", 1)[0]
-        if item["row_id"][0] == "call":
-            who = who.rsplit(" ", 1)[0]
-        # The tag already says "failed"; the state repeats only when it adds a word.
-        text = sep.join(part for part in (lead, who, "" if state == word else state) if part)
-    return clipped(text, width)
-
-
 def render_inbox(report, width, height, color, unicode, managed, previous, navigation):
     """The control window's menu pane: only what needs the person, then the few actions that start work."""
     navigation = navigation if navigation is not None else {}

@@ -1175,14 +1175,6 @@ def _valid_rework_context(context, member):
             and re.fullmatch(r"[0-9a-f]{64}", context["brief_sha256"]))
 
 
-def _record_dispatch_call(repo, room_id, member, caller, process, identity, status=None):
-    from terminal_panel import _dispatch_call_path, _dispatch_call_record, _dispatch_exit_record, _write
-    call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
-    if not call or type(status) is not int:
-        raise ValueError("dispatch exit does not match its launch record")
-    _write(repo, _dispatch_call_path(member, True), _dispatch_exit_record(call, status))
-
-
 def _dispatch_call_record(repo, room_id, member):
     from terminal_panel import _dispatch_call_path, _read, _valid_rework_context
     try:

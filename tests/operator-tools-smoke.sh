@@ -712,8 +712,7 @@ CONTINUATION
                 assert panel._dispatch_group_gone(process.pid), "supervisor process group survived cancellation"
                 panel._record_dispatch_pending(project, call, 143, "cancel-selected-call",
                                                {"descendants": panel._dispatch_descendants(process.pid) or []})
-                panel._record_dispatch_call(project, shared, name, room_owner, process,
-                                            fixture["supervisor"]["identity"], 143)
+                panel._write(project, panel._dispatch_call_path(name, True), panel._dispatch_exit_record(call, 143))
                 panel._settle_dispatch(project, shared, name, 143)
                 panel.deliver_result(project, shared, name, room_owner, "cancel-selected-call", 143)
                 settled = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
@@ -823,13 +822,6 @@ CONTINUATION
             original_launch = launch_path.read_bytes()
             launch_path.write_text(json.dumps(dict(call, nonce="different-launch")))
             assert not panel._dispatch_call_finished(project, shared, member), "receipt replayed against a substituted launch"
-            try:
-                panel._record_dispatch_call(project, shared, name, room_owner, process, None, 0)
-            except ValueError:
-                refused_exit = True
-            else:
-                refused_exit = False
-            assert refused_exit, "exit writer accepted a substituted launch"
             launch_path.write_bytes(original_launch)
             assert not panel._dispatch_call_finished(project, shared, member), "identical bytes repaired a changed launch"
 

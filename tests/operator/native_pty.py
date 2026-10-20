@@ -444,7 +444,7 @@ if os.name == "posix":
             # One command opens a native chat below a full-width graph. The
             # watcher can zoom/collapse without replacing the native process.
             # The checkout keeps one panel session; a later launch adds a native window to it.
-            assert session == panel.panel_session(project), session
+            assert session == panel.resolve_session(project, wait=False)[0], session
             assert subprocess.check_output(tmux + ["show-options", "-v", "-t", session, "@oms_panel_repo"],
                                            env=env, text=True).strip() == str(project.resolve())
             known_sessions = set(subprocess.check_output(tmux + ["list-sessions", "-F", "#{session_name}"], env=env, text=True).splitlines())

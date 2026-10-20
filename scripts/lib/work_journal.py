@@ -1688,26 +1688,6 @@ def render_weekly(period: str, events: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(sections)
 
 
-def optional_enrichment(
-    template: str, enricher: Optional[Callable[[str, str], str]]
-) -> str:
-    """Return template on any optional enrichment failure.
-
-    No lifecycle currently supplies an enricher; this narrow boundary exists so
-    an existing safe prose service could be attached later without changing the
-    canonical renderer or its failure semantics.
-    """
-
-    if enricher is None:
-        return template
-    content_hash = _sha256_bytes(template.encode("utf-8"))
-    try:
-        enriched = enricher(template, content_hash)
-    except Exception:
-        return template
-    return enriched if isinstance(enriched, str) and enriched.strip() else template
-
-
 def _cold_read(path: pathlib.Path) -> bytes:
     try:
         info = path.lstat()
@@ -3527,15 +3507,6 @@ class JournalStore:
             atomic_write_json(self.notion_state_path, state)
         report["attempted"] = attempted
         return report
-
-
-def observe_fail_open(store: JournalStore, payload: Mapping[str, Any]) -> bool:
-    try:
-        store.record_event(payload)
-        store.materialize()
-        return True
-    except Exception:
-        return False
 
 
 def _command_summary(value: Any) -> Optional[str]:

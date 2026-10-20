@@ -150,7 +150,6 @@ from panel_dispatch import _save_dispatch_output
 from panel_dispatch import _dispatch_verifier
 from panel_dispatch import _prepare_dispatch_call
 from panel_dispatch import _valid_rework_context
-from panel_dispatch import _record_dispatch_call
 from panel_dispatch import _dispatch_call_record
 from panel_dispatch import _record_dispatch_pending
 from panel_dispatch import _dispatch_pending
@@ -204,7 +203,6 @@ from panel_layout import board_split_cells
 from panel_layout import work_split_cells
 from panel_layout import next_panel_mode
 from panel_layout import cycle_panel_mode
-from panel_layout import split_resize
 from panel_layout import terminal_window
 from panel_layout import board_split
 from panel_layout import panel_geometry
@@ -217,7 +215,6 @@ from panel_layout import reload_ready
 from panel_layout import panel_panes
 from panel_layout import reopen_panel
 from panel_state import session_candidates
-from panel_state import panel_session
 from panel_state import resolve_session
 from panel_state import session_owner
 from panel_state import room_open
@@ -238,7 +235,6 @@ MAIN_KEYS = (("F9", "select-pane -t :.+"),
                     '"if-shell -F \\"#{==:#{@oms_panel_mode},focus}\\" \\"set-option -w @oms_panel_mode work\\" '
                     '\\"set-option -w @oms_panel_mode overview\\""'),
              ("F12", 'display-message -d 8000 "#{?#{==:#{window_name},control},%s,%s}"' % KEYS_HELP))
-from panel_layout import _legacy_main_key
 from panel_layout import bind_main_keys
 from panel_native import legacy_session
 from panel_native import panel_mains

@@ -206,10 +206,6 @@ oms_provider_cli_discovered() {
 
 OMS_PROVIDER_PROBE_CACHE="${OMS_PROVIDER_PROBE_CACHE:-|}"
 
-oms_provider_probe_cache_reset() {
-  OMS_PROVIDER_PROBE_CACHE='|'
-}
-
 # PATH presence is only discovery. A stale nvm shim or broken interpreter is
 # not an installed provider for routing purposes until a bounded, local,
 # no-inference version/help probe proves the executable can start.

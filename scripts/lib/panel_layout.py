@@ -169,14 +169,6 @@ def cycle_panel_mode(pane):
         return None
 
 
-def split_resize(stored, pane, window):
-    """Cells a board of `pane` cells in a `window`-cell axis should take to match the stored geometry, or None
-    when it is already within one cell (a 2-cell gap is the threshold that keeps windows from ping-ponging)."""
-    from terminal_panel import split_cells
-    wanted = split_cells(stored, window)
-    return wanted if abs(wanted - pane) >= 2 else None
-
-
 def terminal_window():
     """The launching terminal as the window an attaching client will get (one row goes to the tmux status line)."""
     for fd in (1, 0, 2):
@@ -668,21 +660,6 @@ def keys_help(installed=None):
               if name in installed]
     return (" ".join(starts + ["s Swap main", "? More F5 Back"]),
             "F9 Chat/Board F8 Modes F5 Control s Swap main ? Keys k Capacity i Headers")
-
-
-def _legacy_main_key(binding, key, command):
-    """Recognize legacy OMS commands; a match alone cannot authorize an unbind."""
-    try:
-        tokens = shlex.split(binding)
-        if (len(tokens) != 9 or tokens[:7] != ["bind-key", "-T", "root", key, "if-shell", "-F", "#{@oms_panel_repo}"]
-                or tokens[8] != "send-keys " + key):
-            return False
-        action = shlex.split(tokens[7])
-    except ValueError:
-        return False
-    # Older panels also skipped up to two windows without a native chat pane.
-    skip = [";", "if-shell", "-F", "#{==:#{@oms_panel_native_pane},}", command]
-    return any(action == [command] + skip * steps for steps in range(3))
 
 
 def bind_main_keys():

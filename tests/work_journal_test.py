@@ -1012,22 +1012,6 @@ class JournalTestCase(unittest.TestCase):
             wj._judgment_summary(legacy, "decision", wj._headings()).endswith("…")
         )
 
-    def test_optional_enrichment_timeout_falls_back_to_template(self):
-        def timeout(_text, _content_hash):
-            raise TimeoutError("provider timeout")
-
-        template = "# deterministic"
-        self.assertEqual(template, wj.optional_enrichment(template, timeout))
-        self.assertEqual(template, wj.optional_enrichment(template, None))
-
-    def test_append_and_renderer_exceptions_can_be_fail_open(self):
-        with mock.patch.object(self.store, "_write_event", side_effect=OSError("read only")):
-            result = wj.observe_fail_open(self.store, base_event("append-fail"))
-        self.assertFalse(result)
-        with mock.patch.object(self.store, "_render_all", side_effect=RuntimeError("renderer")):
-            result = wj.observe_fail_open(self.store, base_event("render-fail"))
-        self.assertFalse(result)
-
     def test_summary_and_index_atomic_replacement_leave_valid_files(self):
         self.store.record_event(base_event())
         self.store.materialize()

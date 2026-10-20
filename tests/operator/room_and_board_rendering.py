@@ -450,9 +450,6 @@ assert panel.work_split_cells(("left", 190, False), 120) == 99, "narrow windows 
 assert panel.split_cells(("left", 40, True), 220) == 88 and panel.split_cells(("left", 25, False), 50) == 25
 assert panel.split_cells(("left", 5, False), 100) == 20 and panel.split_cells(("left", 95, False), 100) == 79
 assert panel.split_cells(("left", 30, False), 30) == 15
-assert panel.split_resize(("left", 25, False), 25, 50) is None and panel.split_resize(("left", 25, False), 24, 50) is None
-assert panel.split_resize(("left", 25, False), 22, 50) == 25 and panel.split_resize(("left", 20, False), 25, 50) == 20
-assert panel.split_resize(("left", 40, True), 25, 50) == 20
 def board_calls(display, terminal=None, percent="", failed=False, main_watch=False):
     def answer(command, **kwargs):
         is_geometry = "display-message" in command
@@ -1349,7 +1346,7 @@ with patch.object(panel, "session_owner", return_value="/elsewhere"):
         assert "not this checkout" in str(error)
     else:
         raise AssertionError("a foreign panel session was reused")
-assert panel.panel_session(Path("/tmp/project-a")) == panel.panel_session(Path("/tmp/project-a/."))
+assert panel.resolve_session(Path("/tmp/project-a"), wait=False)[0] == panel.resolve_session(Path("/tmp/project-a/."), wait=False)[0]
 # A launch that loses the creation race joins the winner without treating its own new room as a choice.
 race_repo = project
 original_split = panel.split_panel
@@ -1376,7 +1373,7 @@ with patch.object(panel, "session_owner", return_value=None), patch.object(panel
     windows = [c.args[0] for c in created_panes.call_args_list]
     assert windows[0][1] == "new-session" and [w[w.index("-n") + 1] for w in windows[1:]] == ["claude"], windows
     order = [c.args[0][1:5] for c in tmux_calls.call_args_list]
-    assert ["set-environment", "-t", "=" + panel.panel_session(race_repo), "OMS_ROOM_ID"] in order
+    assert ["set-environment", "-t", "=" + panel.resolve_session(race_repo, wait=False)[0], "OMS_ROOM_ID"] in order
     assert any(c.args[0][1:3] == ["select-window", "-t"] and c.args[0][3] == "%2" for c in tmux_calls.call_args_list)
 with patch.dict(os.environ, {"OMS_PANEL_MAIN": ""}), patch.object(panel.sys, "stderr", new_callable=io.StringIO) as warnings:
     assert panel.panel_mains() == []
@@ -1413,7 +1410,7 @@ with patch.object(panel, "session_owner", return_value=None), patch.object(panel
     os.environ.pop("OMS_ROOM_ID")
     assert panel.split_panel(race_repo, launch="codex") == 0
     order = [c.args[0][1:4] for c in tmux_calls.call_args_list]
-    assert order.index(["set-environment", "-t", "=" + panel.panel_session(race_repo)]) < \
+    assert order.index(["set-environment", "-t", "=" + panel.resolve_session(race_repo, wait=False)[0]]) < \
         next(i for i, a in enumerate(order) if a[0] == "set-option"), order
 # One proven legacy random-named panel is adopted; several are never merged.
 legacy_rows = [{"session": "oms-panel-aaaaaaaaaaaa"}, {"session": "oms-panel-aaaaaaaaaaaa"}]
@@ -1421,7 +1418,7 @@ with patch.object(panel, "panel_panes", return_value=legacy_rows):
     assert panel.legacy_session(Path("/tmp/project-a")) == "oms-panel-aaaaaaaaaaaa"
 with patch.object(panel, "panel_panes", return_value=legacy_rows + [{"session": "oms-panel-bbbbbbbbbbbb"}]):
     assert panel.legacy_session(Path("/tmp/project-a")) is None
-assert panel.panel_session(Path("/tmp/project-a")) == "oms-project-a"
+assert panel.resolve_session(Path("/tmp/project-a"), wait=False)[0] == "oms-project-a"
 # The slug is lowercase [a-z0-9-]; a taken name falls to the hashed one, never over another checkout or a non-OMS session.
 import tempfile
 with tempfile.TemporaryDirectory() as slug_root:
@@ -1850,65 +1847,6 @@ for state in ("failed", "timed_out", "abandoned", "orphaned", "review", "blocked
     assert any(i["action"] == ("result", "builder") for i in inbox_items(failure)) == (state in {"review", "waiting_approval"}), state
     member = next(m for m in graph_text.nodes(failure) if m["participant"] == "builder")
     assert (graph_text.call_classifier(failure)(member) == "past") == (state not in {"review", "blocked", "waiting_approval"}), state
-# Exact legacy recognition is insufficient authority for a separate unbind.
-legacy_f6 = "bind-key -T root F6 if-shell -F '#{@oms_panel_repo}' previous-window 'send-keys F6'\n"
-legacy_f7 = "bind-key -T root F7 if-shell -F '#{@oms_panel_repo}' " + shlex.quote(
-    "next-window" + " ; if-shell -F '#{==:#{@oms_panel_native_pane},}' next-window" * 2) + " 'send-keys F7'\n"
-for f6_binding, f7_binding, inspect_error, matched in (
-        (legacy_f6, legacy_f7, None, {"F6", "F7"}),
-        ("bind-key -T root F6 next-window\n", legacy_f7, None, {"F7"}),
-        (legacy_f6.replace("previous-window", "run-shell 'echo previous-window'"), "", None, set()),
-        (legacy_f6.replace("previous-window", "'previous-window ; display-message user'"), "", None, set()),
-        (legacy_f6.replace("send-keys F6", "display-message user"), "", None, set()),
-        ("bind-key -T root F6 if-shell -F 'unterminated", "", None, set()),
-        (legacy_f6, legacy_f7, 1, {"F6", "F7"}),
-        (legacy_f6, legacy_f7, OSError("unavailable"), {"F6", "F7"}),
-        (legacy_f6, legacy_f7, subprocess.TimeoutExpired("tmux", 3), {"F6", "F7"})):
-    assert {key for key, binding, command in (("F6", f6_binding, "previous-window"),
-                                              ("F7", f7_binding, "next-window"))
-            if panel._legacy_main_key(binding, key, command)} == matched
-    bindings = {"F6": f6_binding, "F7": f7_binding}
-    def key_run(argv, **kwargs):
-        if argv[1] == "list-keys":
-            key = argv[-1]
-            if inspect_error is not None:
-                if isinstance(inspect_error, Exception):
-                    raise inspect_error
-                return subprocess.CompletedProcess(argv, inspect_error, f6_binding, "")
-            binding = {"F6": f6_binding, "F7": f7_binding}.get(key, "")
-            return subprocess.CompletedProcess(argv, 0 if binding else 1, binding, "")
-        assert argv[1] != "unbind-key", argv
-        if argv[1] == "bind-key":
-            assert argv[3] not in bindings, argv
-        return subprocess.CompletedProcess(argv, 0, "", "")
-    with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
-            patch.object(panel.subprocess, "run", side_effect=key_run):
-        panel.bind_main_keys()
-    assert bindings == {"F6": f6_binding, "F7": f7_binding}
-
-# A config reload can replace a legacy binding after the first snapshot. No later
-# cleanup may remove the replacement, even if inspection returns the old command.
-bindings = {"F6": legacy_f6, "F7": legacy_f7}
-replacement_keys = {key: "bind-key -T root " + key + " display-message user\n" for key in bindings}
-keys_reloaded = []
-def reloaded_key_run(argv, **kwargs):
-    snapshot = dict(bindings)
-    if not keys_reloaded:
-        bindings.update(replacement_keys)
-        keys_reloaded.append(True)
-    if argv[1] == "list-keys":
-        binding = snapshot.get(argv[-1], "")
-        return subprocess.CompletedProcess(argv, 0 if binding else 1, binding, "")
-    if argv[1] == "unbind-key":
-        bindings.pop(argv[-1], None)
-    elif argv[1] == "bind-key":
-        assert argv[3] not in replacement_keys, argv
-    return subprocess.CompletedProcess(argv, 0, "", "")
-with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
-        patch.object(panel.subprocess, "run", side_effect=reloaded_key_run):
-    panel.bind_main_keys()
-assert bindings == replacement_keys, bindings
-
 # Context headers cover main variants, reader composition, escaping, and border restoration.
 header_state = {"room": {"id": "fixture", "participants": [
     {"participant": "header-main", "role": "main", "provider": "claude", "harness": "claude",
@@ -3245,7 +3183,7 @@ assert {item["action"] for item in attention_items(plain_needs)} == {item["actio
 # The Attention queue ranks by urgency, not recency: needs you, failed, timed out, decide (oldest first), stale, mail, info;
 # within any other class the newest comes first. A superseded failure or one whose task closed leaves the queue, and
 # a held task whose failed call is listed is not repeated as stale.
-from panel_view import attention_items, attention_header, attention_row
+from panel_view import attention_items, attention_header
 from unittest.mock import patch
 import panel_view
 queue = deepcopy(held_flow)
@@ -3289,11 +3227,6 @@ strip = needs_strip(queue, 127, True)
 assert [row["action"] for row in strip] == [("tab", "needs")], strip
 assert strip[0]["text"] == full_header, strip
 assert needs_strip(queue, 127, True, ranked=ranked) == strip
-# The narrow fallback keeps tag, who and state, and does not repeat a tag the state already says.
-assert attention_row(ranked[3], 24, True) == "failed · Luna 6", attention_row(ranked[3], 24, True)
-assert attention_row(ranked[5], 30, False) == "timed out / Luna 6"
-assert attention_row(ranked[6], 40, True) == "decide 30m · Fable 5.1 · patch awaits a…" and \
-    attention_row(ranked[6], 200, True).startswith("decide 30m · ! Fable 5.1 reviewer for Sol 6 · patch")
 # The compact board repeats no ranked-item previews; Attention owns the full queue.
 queue_screen = graph_text.render_graph(queue, 127, 40, navigation={"dismissed": True})
 assert sum(line.startswith("Attention 11") for line in queue_screen.splitlines()) == 1, queue_screen

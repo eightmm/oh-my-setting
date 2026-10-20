@@ -1566,8 +1566,7 @@ def exercise_main_lineage():
                    "pid": process.pid, "all_reaped": True, "exit": 0}
         panel.dispatch_store.write(project, call["participant"] + "-supervisor.json", receipt)
         panel._record_dispatch_pending(project, call, 0, "lineage-task-0", {"descendants": []})
-        panel._record_dispatch_call(project, "lineage-room", call["participant"], "lineage-stable",
-                                    process, "lineage-process-identity", 0)
+        panel._write(project, panel._dispatch_call_path(call["participant"], True), panel._dispatch_exit_record(call, 0))
         return receipt
     receipt = completion(launch)
     settled = dict(workers[0], attempt_id="lineage-settled", task_id="lineage-settled", state="done", terminal=True)

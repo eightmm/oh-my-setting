@@ -151,7 +151,7 @@ PY
 
 rm -f "$TMP/bin/pi"
 ln -s provider-fake "$TMP/bin/pi"
-oms_provider_probe_cache_reset
+OMS_PROVIDER_PROBE_CACHE='|'
 
 
 for pair in \

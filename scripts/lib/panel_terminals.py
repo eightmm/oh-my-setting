@@ -101,15 +101,6 @@ def state_home():
     return path
 
 
-def state_directory(repo):
-    """Private user-local path; never part of a repository or shared OMS state."""
-    repo = canonical(repo)
-    base = state_home()
-    if base == repo or repo in base.parents:
-        raise ValueError("private terminal/job state must be outside the repository")
-    return base / "oh-my-setting" / "panel-control" / hashlib.sha256(str(repo).encode()).hexdigest()
-
-
 def matches(pid, identity):
     current = process(pid)
     return bool(current and current["state"] not in {"Z", "X"} and current["identity"] == identity)
