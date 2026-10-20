@@ -53,7 +53,8 @@ with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
                         "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
 WORKER
   if [ -n "${LEASE_FIXTURE_ENTERED:-}" ]; then
-    python3 - "$@" <<'LEASEWAIT'
+    # A failed precondition must fail the worker, not exit 0 without the marker.
+    python3 - "$@" <<'LEASEWAIT' || exit 97
 import json, os, sys, subprocess, time
 from pathlib import Path
 assert os.environ["OMS_AGENT"] == os.environ["LEASE_FIXTURE_PROVIDER"]
