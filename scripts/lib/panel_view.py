@@ -1710,8 +1710,13 @@ def render_results(report, width=100, compact=False, heading=None):
             add("Owner summary pending. Model exit does not establish acceptance.", "  ")
         for call in calls:
             model = call.get("served_model") or call.get("selected_model") or call.get("requested_model")
-            add("%s / %s / exit %s" % (MODEL_NAMES.get(model, model) or "unrecorded model",
-                call.get("kind") or "call", call.get("exit", "unknown")), "  ", 3)
+            line = "%s / %s / exit %s" % (MODEL_NAMES.get(model, model) or "unrecorded model",
+                call.get("kind") or "call", call.get("exit", "unknown"))
+            if "tokens" in call or "provider_usage" in call:
+                token_call = dict(call, attempt_id=call.get("attempt_id") or "results-call")
+                line += " / " + call_tokens({"operations": {"recent": [token_call]}}, token_call["attempt_id"],
+                                             call.get("state"))
+            add(line, "  ", 3)
             if call.get("answer"):
                 prose(call["answer"], "    ")
                 if call.get("answer_truncated"):

@@ -913,7 +913,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 continue
             call = {k: row[k] for k in ('kind', 'exit', 'verify_exit', 'verify_status', 'state', 'reason_code', 'guard',
                                        'provider_error_exit', 'artifact', 'patch', 'patch_sha256', 'event_id',
-                                       'selected_model', 'requested_model', 'served_model', 'attempt_id') if k in row}
+                                       'selected_model', 'requested_model', 'served_model', 'attempt_id', 'tokens',
+                                       'provider_usage') if k in row}
             attempt_meta = next((a for a in matching if a.get('attempt_id') == row.get('attempt_id')), {})
             alias = attempt_meta.get('refs', {}).get('panel_alias')
             if alias:

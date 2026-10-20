@@ -1286,6 +1286,19 @@ with patch.object(panel, 'results', return_value=aggregate_results), \
         patch.object(panel.sys, 'stdout', aggregate_out):
     assert panel.main(['--repo', str(project), '--results']) == 0
 assert 'FIRST_TASK_BODY' in aggregate_out.getvalue() and 'SECOND_TASK_BODY' in aggregate_out.getvalue()
+token_calls = {'rows': [{'task_id': 'token-result', 'summary': 'Recorded result', 'outcome': 'completed',
+                         'calls': [{'kind': 'delegate', 'exit': 0, 'state': 'done', 'attempt_id': 'token-call',
+                                    'served_model': 'gpt-6-luna', 'tokens': 1820000,
+                                    'provider_usage': {'input_tokens': 1700000, 'output_tokens': 120000,
+                                                       'cache_in_input': True}},
+                                   {'kind': 'call', 'exit': 0, 'state': 'done',
+                                    'served_model': 'gpt-6-luna', 'tokens': 1820000},
+                                   {'kind': 'review', 'exit': 0, 'state': 'done', 'attempt_id': 'no-usage',
+                                    'served_model': 'claude-opus-5-5'}]}]}
+token_text = render_results(token_calls, 160)
+assert 'Luna 6 / delegate / exit 0 / 1.8m tok (out 120.0k)' in token_text, token_text
+assert 'Luna 6 / call / exit 0 / 1.8m tok' in token_text, token_text
+assert 'Opus 5.5 / review / exit 0' in token_text and 'Opus 5.5 / review / exit 0 /' not in token_text, token_text
 from dashboard_projection import ELLIPSIS, use_unicode
 import unicodedata
 previous_unicode = ELLIPSIS[0] == '…'
@@ -1686,6 +1699,8 @@ own_attempt = {"task_id": "own-task", "attempt_id": "att_own_task", "parent_atte
                "state": "done", "refs": {"panel_label": "Own task title", "panel_model": "own-model",
                "panel_role": "reviewer", "panel_location": "local"}}
 own_call = {"kind": "call", "task_id": "own-task", "attempt_id": "att_own_task", "exit": 0}
+own_call.update(tokens=1820000, provider_usage={"input_tokens": 1700000, "output_tokens": 120000,
+                                               "cache_in_input": True})
 with patch.object(saved, "_records", return_value=([own_attempt, unrelated_child],
         [{"kind": "panel-result", "task_id": "own-task"}, own_call, failed_call])), \
         patch.object(saved, "_load_result", return_value=own_task_result):
@@ -1694,6 +1709,8 @@ with patch.object(saved, "_records", return_value=([own_attempt, unrelated_child
             own_metadata["location"], own_metadata["process_state"]) == (
                 "Own task title", "own-model", "reviewer", "local", "done")
     assert [call["attempt_id"] for call in own_metadata["calls"]] == ["att_own_task"]
+    assert own_metadata["calls"][0]["tokens"] == 1820000
+    assert own_metadata["calls"][0]["provider_usage"] == own_call["provider_usage"]
 # A task with its own attempts never adopts its main's other children.
 call(final_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 own = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
