@@ -147,6 +147,7 @@ ma_read_guard_rebaseline_source() {
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
   local root name digest changed surface hard soft execution named
+  MA_READ_GUARD_DIAGNOSTIC=""
   # A linked source's HEAD also appears in the state's Git metadata. Diagnose
   # source protection first so that shared surface cannot mask the cause.
   for name in source state; do
@@ -193,9 +194,10 @@ ma_read_guard_assert() {
         # Reuse the existing before/after manifests, which retain each path
         # alongside its stat fingerprint, to name the bounded change list.
         if [ -f "$MA_READ_GUARD_DIR/$name/files.after" ]; then
-          python3 - "$MA_READ_GUARD_DIR/$name/files" \
-            "$MA_READ_GUARD_DIR/$name/files.after" <<'PY' >&2
+          named="$(python3 - "$MA_READ_GUARD_DIR/$name/files" \
+            "$MA_READ_GUARD_DIR/$name/files.after" <<'PY'
 import base64
+import re
 import sys
 
 def entries(path):
@@ -211,13 +213,31 @@ before, after = map(entries, sys.argv[1:])
 changed = set(before) ^ set(after)
 changed.update(key for key in before.keys() & after.keys()
                if before[key][1] != after[key][1])
-for key in sorted(changed)[:8]:
+def safe_name(value):
+    value = value.replace("\\", "/")
+    if value.startswith("/") or any(part == ".." for part in value.split("/")):
+        return "[redacted path]"
+    if not re.fullmatch(r"[A-Za-z0-9._/@+ -]{1,180}", value):
+        return "[redacted path]"
+    if re.search(r"(^|[._/-])(secret|token|credential|password|\.env)([._/-]|$)", value, re.I):
+        return "[redacted path]"
+    return value
+
+for key in sorted(changed)[:20]:
     encoded = (after.get(key) or before.get(key))[0]
     try:
-        print("  " + ascii(base64.b64decode(encoded).decode("utf-8", "backslashreplace")))
+        value = base64.b64decode(encoded).decode("utf-8", "backslashreplace")
+        print("  " + safe_name(value))
     except Exception:
         continue
+if len(changed) > 20:
+    print("  additional changed paths omitted")
 PY
+          )"
+          MA_READ_GUARD_DIAGNOSTIC="surface: $name files${named:+
+$named}"
+          [ -n "$named" ] || MA_READ_GUARD_DIAGNOSTIC="surface: $name files (paths unavailable)"
+          printf '%s\n' "$MA_READ_GUARD_DIAGNOSTIC" >&2
         fi
         ;;
     esac

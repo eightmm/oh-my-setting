@@ -3756,20 +3756,41 @@ PY
 
 test_peer_review_gate_refuses_untracked_content() {
   local project="$TMP/review-gate-untracked"
-  local bin_dir="$project/bin"
-  local home_dir="$project/home"
+  local state_repo="$TMP/review-gate-untracked-state"
+  local bin_dir="$TMP/review-gate-untracked-bin"
+  local home_dir="$TMP/review-gate-untracked-home"
+  local synthesis_artifact
   local rc=0
 
   make_committed_repo "$project"
+  make_committed_repo "$state_repo"
   mkdir -p "$home_dir"
   write_fake_review_gate_provider "$bin_dir" claude pass
   printf 'not present in git diff\n' > "$project/new_file.txt"
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$project/artifacts" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review" \
     --providers claude --gate --no-verify --prompt "Review every changed byte" \
-    > "$project/out" 2>&1 || rc=$?
+    > "$TMP/review-gate-untracked-out" 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "gate with untracked content must fail closed, got $rc"
-  assert_file_contains "$project/out" "blocking gate cannot review untracked file content"
+  assert_file_contains "$TMP/review-gate-untracked-out" "blocking gate cannot review untracked file content"
+
+  rm -f "$project/new_file.txt"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  cat >> "$bin_dir/claude" <<EOF
+printf 'provider side effect\n' > '$project/provider-created.txt'
+EOF
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review" \
+    --providers claude --gate --no-verify --prompt "Review every changed byte" \
+    > "$TMP/review-gate-guard-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "gate must reject provider source mutation, got $rc"
+  contains "$(cat "$TMP/review-gate-guard-out")" "provider-created.txt" ||
+    fail "guard stderr omitted provider-created.txt: $(cat "$TMP/review-gate-guard-out")"
+  synthesis_artifact="$(find "$state_repo/.oms/artifacts/review" -name '_synthesis-*.md' -print | head -n 1)"
+  [ -n "$synthesis_artifact" ] || fail "guard failure did not preserve synthesis artifact"
+  assert_file_contains "$synthesis_artifact" "Guard diagnostic"
+  assert_file_contains "$synthesis_artifact" "provider-created.txt"
 }
 
 test_git_diff_readers_never_execute_clean_filters() {

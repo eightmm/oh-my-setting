@@ -1073,7 +1073,14 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-ma_read_guard_assert || fail "review changed protected repository state"
+if ! ma_read_guard_assert; then
+  if [ -n "${MA_READ_GUARD_DIAGNOSTIC:-}" ]; then
+    printf '\n## Guard diagnostic\n\n%s\n' "$MA_READ_GUARD_DIAGNOSTIC" >> "$synth_file"
+    printf 'error: review changed protected repository state\nGuard diagnostic:\n%s\n' \
+      "$MA_READ_GUARD_DIAGNOSTIC" >&2
+  fi
+  fail "review changed protected repository state"
+fi
 
 record_review_outcome() {
   local review_rc="$1"
