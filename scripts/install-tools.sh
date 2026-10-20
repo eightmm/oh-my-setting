@@ -93,7 +93,7 @@ sha512_file() {
 verify_digest() {  # ALGORITHM EXPECTED FILE LABEL
   local algorithm="$1" expected="$2" file="$3" label="$4" actual=""
   case "$algorithm" in
-    sha256) actual="$(sha256_file "$file")" || return 1 ;;
+    sha256) actual="$(oms_sha256_file "$file")" || return 1 ;;
     sha512) actual="$(sha512_file "$file")" || return 1 ;;
     *) echo "error: unsupported checksum algorithm: $algorithm" >&2; return 1 ;;
   esac
@@ -135,7 +135,7 @@ nvm_script_matches_lock() {
   local expected actual
   [ -s "$NVM_DIR/nvm.sh" ] || return 1
   expected="$(tool_lock_get nvm.script_sha256)"
-  actual="$(sha256_file "$NVM_DIR/nvm.sh" 2>/dev/null || true)"
+  actual="$(oms_sha256_file "$NVM_DIR/nvm.sh" 2>/dev/null || true)"
   [ -n "$actual" ] && [ "$actual" = "$expected" ]
 }
 
@@ -898,7 +898,7 @@ verify_resolved_npm_binary() {  # NAME
 
 direct_owner_write() {  # TARGET
   local target="$1" owner="$1.oh-my-setting-managed" staged digest
-  digest="$(sha256_file "$target")" || return 1
+  digest="$(oms_sha256_file "$target")" || return 1
   staged="$owner.stage.$$"
   printf 'sha256=%s\n' "$digest" > "$staged"
   mv "$staged" "$owner"
@@ -917,7 +917,7 @@ direct_target_claimed() {  # TARGET [OWNER_SOURCE]
 direct_target_owned() {  # TARGET [OWNER_SOURCE]
   local target="$1" owner_source="${2:-$1}" digest
   direct_target_claimed "$target" "$owner_source" || return 1
-  digest="$(sha256_file "$target")" || return 1
+  digest="$(oms_sha256_file "$target")" || return 1
   [ "$(sed -n '1p' "$owner_source.oh-my-setting-managed")" = "sha256=$digest" ]
 }
 
@@ -1147,7 +1147,7 @@ install_antigravity() {
     *) rm -rf "$tmp"; echo "error: unsupported Antigravity archive: $archive" >&2; exit 1 ;;
   esac
   [ -f "$source" ] || { rm -rf "$tmp"; echo "error: verified Antigravity payload has no binary" >&2; exit 1; }
-  source_expected="$(sha256_file "$source")" || { rm -rf "$tmp"; exit 1; }
+  source_expected="$(oms_sha256_file "$source")" || { rm -rf "$tmp"; exit 1; }
   ensure_local_bin_path
   if ! install_direct_binary "$source" "$target" sha256 "$source_expected" \
       "$version" "Antigravity $version ($platform)"; then
@@ -1214,7 +1214,7 @@ install_gh() {
     echo "error: verified gh archive did not contain the expected binary" >&2
     exit 1
   }
-  source_expected="$(sha256_file "$source")" || { rm -rf "$tmp"; exit 1; }
+  source_expected="$(oms_sha256_file "$source")" || { rm -rf "$tmp"; exit 1; }
   ensure_local_bin_path
   if ! install_direct_binary "$source" "$target" sha256 "$source_expected" \
       "$version" "gh $version ($platform)"; then
@@ -1300,8 +1300,8 @@ ensure_uv() {
     echo "error: verified uvx payload is not version $version" >&2
     exit 1
   }
-  source_uv_expected="$(sha256_file "$source_uv")" || { rm -rf "$tmp"; exit 1; }
-  source_uvx_expected="$(sha256_file "$source_uvx")" || { rm -rf "$tmp"; exit 1; }
+  source_uv_expected="$(oms_sha256_file "$source_uv")" || { rm -rf "$tmp"; exit 1; }
+  source_uvx_expected="$(oms_sha256_file "$source_uvx")" || { rm -rf "$tmp"; exit 1; }
   if ! install_uv_binaries "$source_uv" "$source_uvx" "$target_uv" "$target_uvx" \
       "$source_uv_expected" "$source_uvx_expected" "$version" "$platform"; then
     rm -rf "$tmp"

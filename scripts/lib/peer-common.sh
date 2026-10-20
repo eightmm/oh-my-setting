@@ -645,17 +645,6 @@ ma_task_goal() {
   awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null || true
 }
 
-ma_sha256_file() {
-  local file="$1"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$file" | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" | awk '{print $1}'
-  elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 "$file" | awk '{print $NF}'
-  fi
-}
-
 # Mark provider CLIs as harness children so their own prompt hooks cannot
 # mistake an internal brief for a new user task. Call only inside a subshell:
 # this intentionally changes the caller's exported environment.
@@ -1237,7 +1226,7 @@ ma_append_artifact_index() {
   index="$(ma_artifact_index_shell_path "$native_index")" || return 1
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
-    prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
+    prompt_hash="$(oms_sha256_file "$prompt_file" || true)"
     prompt_bytes="$(LC_ALL=C wc -c < "$prompt_file" | tr -d ' ')"
   fi
   task_goal="$(ma_task_goal "$repo" | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200)"

@@ -30,24 +30,6 @@ def _node_index(nodes: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, An
     return index
 
 
-def _iter_edges(edges: Sequence[Mapping[str, Any]], index: Mapping[str, Any], relations: Sequence[str] = ()) -> List[Tuple[str, str]]:
-    wanted = tuple(relations)
-    pairs = []  # type: List[Tuple[str, str]]
-    for edge in edges:
-        if not isinstance(edge, dict):
-            continue
-        source = edge.get("source")
-        target = edge.get("target")
-        if not isinstance(source, str) or not isinstance(target, str):
-            continue
-        if source not in index or target not in index:
-            continue
-        if wanted and edge.get("relation") not in wanted:
-            continue
-        pairs.append((source, target))
-    return pairs
-
-
 def _uncertain_site_key(edge: Mapping[str, Any], index: Mapping[str, Mapping[str, Any]]) -> Tuple[Any, ...]:
     """One unresolved source occurrence, independent of candidate fan-out."""
     evidence = edge.get("evidence") if isinstance(edge.get("evidence"), Mapping) else {}

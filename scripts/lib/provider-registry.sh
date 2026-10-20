@@ -249,22 +249,6 @@ oms_provider_cli_available() {
   oms_provider_cli_usable "$1"
 }
 
-oms_provider_installed_names() {
-  local provider
-  while IFS= read -r provider; do
-    [ -n "$provider" ] || continue
-    oms_provider_cli_available "$provider" && printf '%s\n' "$provider"
-  done <<EOF
-$(oms_provider_supported_names)
-EOF
-  while IFS= read -r provider; do
-    [ -n "$provider" ] || continue
-    oms_provider_cli_available "$provider" && printf '%s\n' "$provider"
-  done <<EOF
-$(oms_provider_custom_names)
-EOF
-}
-
 # Physical discovery without executing a provider. Read-only inventory
 # surfaces use this to preserve their "no CLI invocation" contract; routing
 # and model-doctor use the usable list above.
@@ -277,21 +261,6 @@ oms_provider_discovered_names() {
 $(oms_provider_supported_names)
 EOF
   oms_provider_custom_names
-}
-
-# Preserve the historical core diagnostics even when one of those CLIs is
-# missing, then add optional transports only when they are actually installed.
-# This avoids turning every absent optional agent into a permanent doctor
-# warning while still making newly installed agents visible without config.
-oms_provider_default_names() {
-  local provider
-  oms_provider_core_names
-  while IFS= read -r provider; do
-    case "$provider" in codex|claude|antigravity) continue ;; esac
-    printf '%s\n' "$provider"
-  done <<EOF
-$(oms_provider_installed_names)
-EOF
 }
 
 oms_provider_default_discovered_names() {

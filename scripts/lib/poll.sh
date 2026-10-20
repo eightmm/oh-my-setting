@@ -10,7 +10,6 @@ oms_poll_int_or_default() {
     *) printf '%s\n' "$value" ;;
   esac
 }
-
 oms_poll_interval_seconds() {
   local elapsed
   local remaining
@@ -73,8 +72,4 @@ oms_poll_sleep_labeled() {
   oms_poll_log_next "$label" "$elapsed" "$interval" "$remaining"
   [ "$interval" -gt 0 ] || return 0
   sleep "$interval"
-}
-
-oms_poll_sleep() {
-  oms_poll_sleep_labeled wait "${1:-0}" "${2:-}"
 }

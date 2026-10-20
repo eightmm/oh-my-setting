@@ -47,14 +47,6 @@ EOF
 
 fail() { echo "error: $*" >&2; exit 2; }
 
-file_sha256() {
-  python3 - "$1" <<'PY'
-import hashlib, sys
-with open(sys.argv[1], "rb") as handle:
-    print(hashlib.sha256(handle.read()).hexdigest())
-PY
-}
-
 write_index_patch() {
   local output="$1"
   local repo="${2:-$REPO}"
@@ -195,8 +187,8 @@ checkpoint_create_raw() {
     rm -rf "$tmp"
     return 1
   fi
-  index_hash="$(file_sha256 "$tmp/index.patch" | tr -d '\r')"
-  worktree_hash="$(file_sha256 "$tmp/worktree.patch" | tr -d '\r')"
+  index_hash="$(oms_sha256_file "$tmp/index.patch" | tr -d '\r')"
+  worktree_hash="$(oms_sha256_file "$tmp/worktree.patch" | tr -d '\r')"
   untracked_count="$(git -C "$REPO" ls-files --others --exclude-standard -- |
     awk 'END { print NR + 0 }' | tr -d '\r')"
 
@@ -288,10 +280,10 @@ tracked_state_matches() {
   write_index_patch "$tmp/index.patch" || rc=1
   write_worktree_patch "$tmp/worktree.patch" || rc=1
   if [ "$rc" -eq 0 ]; then
-    current_index="$(file_sha256 "$tmp/index.patch" | tr -d '\r')"
-    current_worktree="$(file_sha256 "$tmp/worktree.patch" | tr -d '\r')"
-    saved_index="$(file_sha256 "$dir/index.patch" | tr -d '\r')"
-    saved_worktree="$(file_sha256 "$dir/worktree.patch" | tr -d '\r')"
+    current_index="$(oms_sha256_file "$tmp/index.patch" | tr -d '\r')"
+    current_worktree="$(oms_sha256_file "$tmp/worktree.patch" | tr -d '\r')"
+    saved_index="$(oms_sha256_file "$dir/index.patch" | tr -d '\r')"
+    saved_worktree="$(oms_sha256_file "$dir/worktree.patch" | tr -d '\r')"
     [ "$current_index" = "$saved_index" ] &&
       [ "$current_worktree" = "$saved_worktree" ] || rc=1
   fi

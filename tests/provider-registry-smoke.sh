@@ -120,19 +120,6 @@ aider'
 [ "$(oms_provider_supported_names)" = "$expected_supported" ] ||
   fail "supported provider catalog is incomplete: $(oms_provider_supported_names 2>&1 || true)"
 
-expected_installed='cursor
-grok
-gemini
-qwen
-opencode
-deepseek
-vibe
-copilot
-droid
-aider
-localfoo'
-[ "$(oms_provider_installed_names)" = "$expected_installed" ] ||
-  fail "installed provider discovery mismatch: $(oms_provider_installed_names 2>&1 || true)"
 oms_provider_cli_discovered pi || fail 'the stale Pi wrapper should remain visible to diagnostics'
 if oms_provider_cli_available pi; then
   fail 'a hanging PATH wrapper must not enter the usable provider pool'
@@ -166,20 +153,6 @@ rm -f "$TMP/bin/pi"
 ln -s provider-fake "$TMP/bin/pi"
 oms_provider_probe_cache_reset
 
-expected_installed='cursor
-grok
-gemini
-qwen
-opencode
-deepseek
-vibe
-pi
-copilot
-droid
-aider
-localfoo'
-[ "$(oms_provider_installed_names)" = "$expected_installed" ] ||
-  fail "usable provider discovery mismatch: $(oms_provider_installed_names 2>&1 || true)"
 
 for pair in \
   'agy antigravity' \

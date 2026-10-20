@@ -956,7 +956,7 @@ write_prompt "$prompt_file" "$MA_READ_SOURCE_REPO" "$PROMPT" "$diff_file" "$stat
 # Freeze the reviewed-diff identity now: the typed outcome row must bind the
 # exact bytes the seats judged, not whatever the tree holds at exit.
 REVIEW_DIFF_SHA=""
-[ "$NO_DIFF" -eq 1 ] || REVIEW_DIFF_SHA="$(ma_sha256_file "$raw_diff_file" 2>/dev/null || true)"
+[ "$NO_DIFF" -eq 1 ] || REVIEW_DIFF_SHA="$(oms_sha256_file "$raw_diff_file" 2>/dev/null || true)"
 if [ "$GATE" -eq 1 ]; then
   write_gate_instruction >> "$prompt_file"
   MA_DEBATE_GATE_INSTRUCTION="$(write_gate_instruction)"

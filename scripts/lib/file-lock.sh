@@ -19,7 +19,6 @@ if [ -f "$OMS_FILE_LOCK_LIB_DIR/poll.sh" ]; then
   . "$OMS_FILE_LOCK_LIB_DIR/poll.sh"
 else
   oms_poll_sleep_labeled() { sleep 1; }
-  oms_poll_sleep() { oms_poll_sleep_labeled wait "$@"; }
 fi
 
 oms_file_lock_timeout() {
