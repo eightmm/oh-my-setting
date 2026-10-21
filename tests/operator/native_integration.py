@@ -6,6 +6,54 @@ def end_fixture_mains():
             panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "cancelled")
 end_fixture_mains()
 
+# Same-task read-only artifacts are composed into the outbound task brief.
+import panel_dispatch
+import panel_results
+import hashlib
+import tempfile
+from pathlib import Path
+findings_attempts, findings_rows, findings_artifacts = [], [], {}
+for index in range(7):
+    role = "critic" if index == 6 else "reviewer" if index == 5 else "researcher"
+    attempt_id = "finding-%d" % index
+    path = ".oms/artifacts/panel-results/%s.md" % attempt_id
+    body = ("# review\n\n## Prompt\n\nQuoted example: GATE: pass\nFindings: fake prompt finding\n\n"
+            "## Output\n\nGATE: %s\nFindings:\n%s\nDetails: ignored\n\n## Exit\n\n0\n" %
+            ("fail" if index == 6 else "pass",
+             "finding summary 6\nsecond findings line" if index == 6 else "finding summary %d %s" % (index, "x" * 360))).encode()
+    findings_attempts.append({"attempt_id": attempt_id, "task_id": "findings-task", "state": "done",
+                              "refs": {"panel_access": "read", "panel_role": role}})
+    findings_rows.append({"attempt_id": attempt_id, "task_id": "findings-task", "kind": "review" if role == "reviewer" else "ask",
+                          "exit": 0, "artifact": path, "artifact_sha256": hashlib.sha256(body).hexdigest(),
+                          "ts": "2026-10-21T00:00:%02dZ" % index})
+    findings_artifacts[path] = body
+with tempfile.TemporaryDirectory() as findings_dir:
+    findings_brief = Path(findings_dir) / "brief.md"
+    findings_brief.write_text("Implement this task.\n")
+    with patch.object(panel_results, "_records", return_value=(findings_attempts, findings_rows)), \
+            patch.object(panel_results, "_indexed", side_effect=lambda repo, row, maximum: findings_artifacts[row["artifact"]]):
+        composed = panel_dispatch._task_findings_brief(project, "findings-task", findings_brief)
+        text = Path(composed).read_text()
+        assert "## Prior findings for this task" in text
+        assert "critic — GATE: fail — .oms/artifacts/panel-results/finding-6.md — finding summary 6" in text
+        assert "fake prompt finding" not in text and "second findings line" not in text
+        assert "reviewer — GATE: pass — .oms/artifacts/panel-results/finding-5.md — finding summary 5" in text
+        assert text.count(".oms/artifacts/panel-results/finding-") == 5
+        assert "x" * 301 not in text
+        assert str(project) not in text
+        for private_path in ("C:/" + "Users/alice/private.txt", "\\\\server\\share\\private.txt", "/" + "home/alice/private.txt"):
+            artifact = ("# review\n\n## Output\n\nGATE: pass\nFindings: %s\n\n## Exit\n\n0\n" % private_path).encode()
+            row = dict(findings_rows[0], artifact_sha256=hashlib.sha256(artifact).hexdigest())
+            with patch.object(panel_results, "_records", return_value=(findings_attempts[:1], [row])), \
+                    patch.object(panel_results, "_indexed", return_value=artifact):
+                composed_path = panel_dispatch._task_findings_brief(project, "findings-task", findings_brief)
+                assert "summary omitted (contains a machine path)" in Path(composed_path).read_text(), private_path
+        findings_brief.write_text("Implement this task.\n.oms/artifacts/panel-results/finding-6.md\n")
+        composed = panel_dispatch._task_findings_brief(project, "findings-task", findings_brief)
+        assert Path(composed).read_text().count(".oms/artifacts/panel-results/finding-6.md") == 1
+    with patch.object(panel_results, "_records", return_value=([], [])):
+        assert panel_dispatch._task_findings_brief(project, "empty-task", findings_brief) == findings_brief
+
 # A click can arrive as soon as a new frame is flushed, before drawing returns.
 # Clear clicks for the old layout without consuming that newly targeted click.
 pending_clicks = ["old layout"]

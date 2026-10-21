@@ -484,6 +484,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         raise ValueError("call alias is already used in this room lineage")
     resume = None
     temporary = None
+    temporaries = []
     continuation_patch = {} if continue_task and access == "write" else None
     if continue_task:
         if role not in WRITERS or not brief or prompt or task_id:
@@ -496,6 +497,15 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
+        if temporary:
+            temporaries.append(temporary)
+            temporary = None
+        # A dry run validates inputs only; prior findings join the brief that is actually sent.
+        if task_id and brief and not dry_run:
+            composed = _task_findings_brief(repo, task_id, brief)
+            if composed != brief:
+                brief = composed
+                temporaries.append(brief)
         fallback = None
         if not target:
             fallback = alternate_route(route, provider_status=routing_status(repo, None, main))
@@ -519,8 +529,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                             dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias, **options)
     finally:
-        if temporary:
-            temporary.unlink()
+        for path in temporaries:
+            path.unlink()
 
 
 def _validate_dispatch_verifier(repo, verify):
@@ -828,6 +838,19 @@ def _validate_dry_run_inputs(prompt, brief):
                 if checked.returncode == 3:
                     raise ValueError("outbound dispatch input contains sensitive-looking content")
                 raise ValueError("outbound dispatch input could not be validated")
+
+
+def _task_findings_brief(repo, task_id, brief):
+    import panel_results
+    original = _read_dispatch_brief(Path(brief)).decode("utf-8")
+    section = panel_results.prior_findings(repo, task_id, original)
+    if not section:
+        return brief
+    handle = tempfile.NamedTemporaryFile("w", suffix=".md", prefix="oms-task-findings-",
+                                         encoding="utf-8", delete=False)
+    with handle:
+        handle.write(original + section)
+    return Path(handle.name)
 
 
 def _rollover_if_needed(repo, room_id, state, caller):

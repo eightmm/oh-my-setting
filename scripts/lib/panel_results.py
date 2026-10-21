@@ -69,6 +69,55 @@ def _records(repo, full=False, _attempts=None, task_id=None):
     return attempts, index
 
 
+def prior_findings(repo, task_id, brief):
+    """Return a bounded task findings section from settled read-only call artifacts."""
+    attempts, rows = _records(repo, full=True, task_id=task_id)
+    by_attempt = {row.get('attempt_id'): row for row in attempts
+                  if row.get('task_id') == task_id and row.get('state') == 'done'
+                  and row.get('refs', {}).get('panel_access') == 'read'}
+    results = []
+    for row in rows:
+        attempt = by_attempt.get(row.get('attempt_id'))
+        path = row.get('artifact')
+        if (not attempt or row.get('kind') not in {'ask', 'call', 'consult', 'review'}
+                or row.get('exit') != 0 or not isinstance(path, str)
+                or not path.startswith('.oms/artifacts/') or path in brief):
+            continue
+        try:
+            content = _indexed(repo, row, 1024 * 1024).decode('utf-8')
+        except (OSError, ValueError, UnicodeError):
+            continue
+        answer, _ = artifact_sections_stream(io.BytesIO(content.encode('utf-8')))
+        from panel_review import _review_verdict
+        gate = _review_verdict(answer)
+        _, sections = debate_sections(answer)
+        findings = next((body for heading, body in sections if heading == 'Findings'), '')
+        summary = next((line.strip() for line in findings.splitlines() if line.strip()), '')
+        if not summary:
+            summary = next((match.group(1).strip() for line in answer.splitlines()
+                            if (match := re.match(r'(?i)^summary\s*:\s*(.*)', line))), '')
+        if _contains_outbound_machine_path(summary):
+            summary = 'summary omitted (contains a machine path)'
+        role = attempt.get('refs', {}).get('panel_role') or attempt.get('tool') or 'read-only'
+        outcome = ('GATE: ' + gate) if gate else str(row.get('outcome') or 'completed')
+        results.append((row.get('ts') or attempt.get('updated_at') or '',
+                        '- %s — %s — %s — %s' % (role, outcome, path, summary[:300])))
+    selected = sorted(results, key=lambda item: item[0], reverse=True)[:5]
+    if not selected:
+        return ''
+    return '\n\n## Prior findings for this task\n\n' + '\n'.join(line for _, line in selected) + '\n'
+
+
+def _contains_outbound_machine_path(value):
+    """Apply the outbound machine-path rule plus Windows absolute path forms."""
+    screen = subprocess.run(
+        ['bash', '-c', '. "$1"; grep -Eiq "$(agent_memory_machine_re)"',
+         'panel-result', str(ROOT / 'scripts/lib/agent-memory-common.sh')],
+        input=value, capture_output=True, text=True, timeout=5, check=False)
+    return (screen.returncode != 1 or
+            re.search(r'(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s]+|\\\\[^\\/]+[\\/][^\s]+', value) is not None)
+
+
 def _read(repo, relative, maximum=MAX_RESULT, missing=False):
     try:
         return DURABLE['read_no_follow'](str(repo), relative, 'panel evidence',
