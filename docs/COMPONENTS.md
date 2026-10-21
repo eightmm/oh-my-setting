@@ -362,6 +362,9 @@ preview/import flow for bundles. Automatic draft generation is not required.
 | Diff review | `oms peer-review --gate` | Verdicts plus mechanical backstop |
 | High-risk decision | `oms advise` | Adversarial recommendation |
 
+Blocking review gates default to 192 KiB; set `OMS_PROMPT_DIFF_BYTES` to raise the
+complete-diff budget, increasing prompt usage and provider cost.
+
 Debate rounds after the initial independent answers share a 64 KiB prompt
 budget across all seats (`OMS_DEBATE_ROUND_BYTES`). Each fresh call receives
 section-balanced excerpts of current claims/findings, evidence, changes and

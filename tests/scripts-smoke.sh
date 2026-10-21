@@ -3647,7 +3647,7 @@ test_peer_review_gate_binds_complete_diff_and_refuses_truncation() {
   git -C "$project" mv old.txt new.txt
   mkdir -p "$home_dir"
   write_fake_review_gate_provider "$bin_dir" claude pass
-  printf '/artifacts/\n/truncated-artifacts/\n/bin/\n/out\n/truncated.out\n/provider-called\n' >> "$project/.git/info/exclude"
+  printf '/artifacts/\n/truncated-artifacts/\n/default-large-artifacts/\n/default-overflow-artifacts/\n/raised-artifacts/\n/home/\n/bin/\n/out\n/truncated.out\n/default-large.out\n/default-overflow.out\n/raised.out\n/provider-called\n' >> "$project/.git/info/exclude"
   printf 'reviewed change\n' >> "$project/file.txt"
   cat > "$project/.git/hostile-external-diff" <<'EOF'
 #!/usr/bin/env bash
@@ -3725,6 +3725,49 @@ EOF
   [ "$rc" = 2 ] || fail "truncated gate diff must fail closed with exit 2, got $rc"
   assert_file_contains "$project/truncated.out" "blocking gate requires the complete diff"
   [ ! -s "$home_dir/provider-called" ] || fail "provider was called with a truncated gate diff"
+
+  # Gated reviews default to a complete 192 KiB diff, which accommodates ordinary
+  # feature patches that exceed the smaller advisory prompt budget.
+  python3 - "$project/file.txt" <<'PY'
+import sys
+with open(sys.argv[1], "ab") as stream:
+    stream.write(b"x" * (100 * 1024))
+PY
+  rc=0
+  (
+    unset OMS_PROMPT_DIFF_BYTES
+    HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$project/default-large-artifacts" \
+      --providers claude --gate --no-verify --prompt "Review a normal feature diff"
+  ) >"$project/default-large.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "100 KiB gate diff should pass the 192 KiB default, got $rc: $(cat "$project/default-large.out")"
+
+  # A 225 KiB diff still refuses by default but passes when the operator raises the budget.
+  python3 - "$project/file.txt" <<'PY'
+import sys
+with open(sys.argv[1], "ab") as stream:
+    stream.write(b"y" * (125 * 1024))
+PY
+  : > "$home_dir/provider-called"
+  rc=0
+  (
+    unset OMS_PROMPT_DIFF_BYTES
+    HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$project/default-overflow-artifacts" \
+      --providers claude --gate --no-verify --prompt "Refuse an incomplete review"
+  ) >"$project/default-overflow.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "225 KiB diff above the default must fail closed, got $rc"
+  assert_file_contains "$project/default-overflow.out" "OMS_PROMPT_DIFF_BYTES=196608"
+  [ ! -s "$home_dir/provider-called" ] || fail "provider was called with an oversized gate diff"
+  rc=0
+  (
+    unset OMS_PROMPT_DIFF_BYTES
+    HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PROMPT_DIFF_BYTES=262144 \
+      "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$project/raised-artifacts" \
+      --providers claude --gate --no-verify --prompt "Review the complete larger diff"
+  ) >"$project/raised.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "225 KiB gate diff should pass a raised budget, got $rc: $(cat "$project/raised.out")"
+  [ -s "$home_dir/provider-called" ] || fail "provider was not called after raising the complete-diff budget"
 
   # The final selected route is read from the provider artifact, not inferred
   # from the transport name or copied from the requested primary.

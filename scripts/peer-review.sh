@@ -933,7 +933,11 @@ if [ "$NO_DIFF" -eq 0 ]; then
     1) ;;
     *) echo "external review skipped: sensitive-content scan failed" >&2; exit 3 ;;
   esac
-  diff_budget="$(ma_prompt_diff_bytes)"
+  if [ "$GATE" -eq 1 ] && [ -z "${OMS_PROMPT_DIFF_BYTES:-}" ]; then
+    diff_budget=196608
+  else
+    diff_budget="$(ma_prompt_diff_bytes)"
+  fi
   raw_diff_bytes="$(LC_ALL=C wc -c < "$raw_diff_file" | tr -d ' ')"
   if [ "$GATE" -eq 1 ] && [ "$raw_diff_bytes" -gt "$diff_budget" ]; then
     echo "error: blocking gate requires the complete diff; $raw_diff_bytes bytes exceed OMS_PROMPT_DIFF_BYTES=$diff_budget" >&2
