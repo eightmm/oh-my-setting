@@ -100,13 +100,28 @@ def visible(rows, show_finished):
     return [r for r in rows if show_finished or r["kind"] != "job" or r["state"] not in FINISHED]
 
 
-def row_line(number, row, width):
+def row_extra(row):
     extra = ""
     if row["kind"] == "job":
         extra = " g%s" % (row["generation"] if row["generation"] is not None else "?")
         if row["exit_code"] is not None:
             extra += " exit %d" % row["exit_code"]
-    return clip("%2d %-5s %-10s %s%s" % (number, row["kind"], row["state"], row["label"], extra), width)
+    return extra
+
+
+def pad_display(text, width):
+    return text + " " * max(0, width - display_width(text))
+
+
+def row_line(number, row, width, number_width=2, kind_width=5, state_width=10, label_width=0):
+    prefix = "%s %s %s " % (str(number).rjust(number_width),
+                            pad_display(row["kind"], kind_width),
+                            pad_display(row["state"], state_width))
+    extra = row_extra(row)
+    label = row["label"]
+    if extra:
+        label = pad_display(clip(label, label_width), label_width)
+    return clip(prefix + label + extra, width)
 
 
 def render(rows, notes, page, width, height, show_finished, archived=False):
@@ -125,7 +140,17 @@ def render(rows, notes, page, width, height, show_finished, archived=False):
     size = avail - len(head)
     pages = max(1, -(-len(shown) // size)) if size > 0 else 1
     page = min(max(page, 0), pages - 1)
-    lines = head + [row_line(i + 1, r, width) for i, r in enumerate(shown) if size > 0 and page * size <= i < (page + 1) * size]
+    page_rows = [(i + 1, r) for i, r in enumerate(shown) if size > 0 and page * size <= i < (page + 1) * size]
+    number_width = max(2, len(str(len(shown))))
+    kind_width = max([5] + [display_width(r["kind"]) for r in shown])
+    state_width = max([10] + [display_width(r["state"]) for r in shown])
+    prefix_width = number_width + kind_width + state_width + 3
+    widest_extra = max([0] + [display_width(row_extra(r)) for r in shown if r["kind"] == "job"])
+    widest_label = max([0] + [display_width(r["label"]) for r in shown if r["kind"] == "job"])
+    inner_width = width - 4 if width >= 20 and height >= 3 else width
+    label_width = min(widest_label, max(0, inner_width - prefix_width - widest_extra))
+    lines = head + [row_line(number, r, inner_width, number_width, kind_width, state_width, label_width)
+                    for number, r in page_rows]
     if not shown and size > 0:
         lines.append("No terminals or jobs.")
     lines.append("page %d/%d  n/p page, u refresh, f finished, h history, c archive finished, o shell, r job, number select, Enter exit"

@@ -1,4 +1,5 @@
 # PANEL_VISUAL_TOKENS_BEGIN
+from panel_controls import render as render_controls
 from unittest.mock import patch
 from panel_view import (role_style, call_identity, status_tag, paint, GLYPHS, glyph,
                         ROLE_COLORS, STATE_COLORS, box_edge, box_row, use_unicode)
@@ -8,6 +9,36 @@ for role in ("advisor", "reviewer", "critic", "verifier", "security-auditor", "a
 for role in ("worker", "builder", "refactorer", "documenter", "integrator", "performance-engineer", "release-engineer"):
     assert role_style(role) == "worker", role
 assert role_style("unrecorded") == "unknown" and role_style("worker", "advise") == "worker"
+# Number and label columns span every page and keep 99/100 and wide labels aligned.
+def control_row_texts(lines):
+    return [line[2:-2] for line in lines[1:-1]]
+
+# Keep the original 99/100 regression while adding the cross-page checks below.
+control_rows = [{"kind": "job", "state": "running", "label": "x" if n == 98 else "a much longer label" if n == 99 else "job %d" % n,
+                 "generation": n + 1, "exit_code": 0} for n in range(100)]
+single_page, _ = render_controls(control_rows, [], 0, 100, 103, True)
+single_page_texts = control_row_texts(single_page)
+single_page_offsets = [display_width(line[:line.index("g%d" % row["generation"])])
+                       for line, row in zip(single_page_texts, control_rows)]
+assert single_page_offsets[98] == single_page_offsets[99], (single_page_texts[98:100], single_page_offsets[98:100])
+
+paged_rows = [{"kind": "job", "state": "running", "label": "job %d" % n,
+               "generation": n + 1, "exit_code": 0} for n in range(100)]
+paged_rows[-1]["label"] = "界" * 4
+control_first, _ = render_controls(paged_rows, [], 0, 80, 9, True)
+control_last, _ = render_controls(paged_rows, [], 14, 80, 9, True)
+first_texts, last_texts = control_row_texts(control_first), control_row_texts(control_last)
+assert display_width(first_texts[0][:first_texts[0].index("job")]) == \
+    display_width(last_texts[-1][:last_texts[-1].index("job")]), (first_texts[0], last_texts[-1])
+assert display_width(first_texts[0][:first_texts[0].index("g1")]) == \
+    display_width(last_texts[-1][:last_texts[-1].index("g100")]), (first_texts[0], last_texts[-1])
+
+# A 60-cell label is clipped so it cannot hide the generation and exit suffixes.
+capped_rows = [{"kind": "job", "state": "running", "label": "L" * 60, "generation": 1, "exit_code": 1},
+               {"kind": "job", "state": "running", "label": "short", "generation": 2, "exit_code": 0}]
+capped_lines, _ = render_controls(capped_rows, [], 0, 80, 8, True)
+capped_texts = control_row_texts(capped_lines)
+assert "g1 exit 1" in capped_texts[0] and "g2 exit 0" in capped_texts[1], capped_texts
 use_unicode(True)
 assert call_identity("worker", "gpt-6.1-sol", "Routing") == "WORKER Sol 6.1 · Routing"
 assert call_identity("reviewer", "gpt-6.1-sol", "Goal verification", purpose="verifier") == "VERIFIER Sol 6.1 · Goal verification"
