@@ -190,7 +190,17 @@ fail() {
   exit 2
 }
 
+# Park diagnostics come only from this run, never the caller's environment.
+PARK_REASON_CODE='' PARK_PHASE='' PARK_REASON='' PARK_SEMANTIC_VERDICT='' PARK_EVIDENCE_PATH=''
+
 park() {
+  PARK_REASON_CODE="${1:0:96}"
+  PARK_PHASE="${PARK_PHASE:-${OUTER_STAGE:-startup}}"
+  PARK_REASON="${PARK_REASON:-$1}"
+  PARK_REASON="${PARK_REASON:0:240}"
+  PARK_SEMANTIC_VERDICT="${PARK_SEMANTIC_VERDICT:-unknown}"
+  PARK_EVIDENCE_PATH="${PARK_EVIDENCE_PATH:-}"
+  PARK_EVIDENCE_PATH="${PARK_EVIDENCE_PATH:0:1024}"
   if [ "${OUTER_RECEIPT_READY:-0}" -eq 1 ]; then
     outer_receipt_write parked >/dev/null 2>&1 ||
       echo "autopilot: warning: outer receipt could not record the park" >&2
@@ -465,6 +475,12 @@ if [ "$ACTION" = status ]; then
     fail "unsafe repository Git execution config"
   oms_git_assert_plain_index "$REPO" ||
     fail "skip-worktree/assume-unchanged flags make autopilot status unsafe"
+  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+    if ! python3 "$RECEIPT_HELPER" inspect "$OUTER_RECEIPT" \
+      --repo "$REPO" --continuation; then
+      echo "outer run: invalid receipt (no continuation)"
+    fi
+  fi
   if [ -f "$PLAN_FILE" ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status
   else
@@ -508,12 +524,6 @@ if proposals:
     except (OSError, ValueError):
         print("latest proposal: %s (unreadable)" % latest)
 PY
-  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
-    if ! python3 "$RECEIPT_HELPER" inspect "$OUTER_RECEIPT" \
-      --repo "$REPO" --continuation; then
-      echo "outer run: invalid receipt (no continuation)"
-    fi
-  fi
   exit 0
 fi
 
@@ -968,6 +978,13 @@ outer_receipt_write_locked() {  # STAGE
     --proposal-sha256 "$APPROVED_PROPOSAL_SHA" \
     --branch "$receipt_branch" --owner-id "$AUTOPILOT_OWNER_ID" \
     --updated "$now")
+  if [ "$stage" = parked ]; then
+    receipt_args+=(--diagnostic-phase "${PARK_PHASE:-${OUTER_STAGE:-startup}}" \
+      --diagnostic-reason-code "${PARK_REASON_CODE:-unknown}" \
+      --diagnostic-reason "${PARK_REASON:-${PARK_REASON_CODE:-unknown}}" \
+      --diagnostic-semantic-verdict "${PARK_SEMANTIC_VERDICT:-unknown}" \
+      --diagnostic-evidence-path "${PARK_EVIDENCE_PATH:-}")
+  fi
   [ "$AUTO_REPAIR" -eq 0 ] || receipt_args+=(--auto-repair)
   [ "$RETRY_KNOWN" -eq 0 ] || receipt_args+=(--retry-known)
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || receipt_args+=(--allow-verifier-change)
@@ -980,6 +997,7 @@ outer_receipt_write() {  # STAGE
   autopilot_owner_prepare
   value="$(oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_write_locked "$1")" || return $?
   value="${value//$'\r'/}"
+  OUTER_STAGE="$1"
   OUTER_RECEIPT_READY=1
   printf '%s\n' "$value"
 }
@@ -1913,12 +1931,13 @@ PY
   oms_git_assert_plain_index "$REPO" ||
     park "hidden-index-flags-after-review" \
       "clear skip-worktree/assume-unchanged flags and inspect tracked files"
-  rm -f "$review_out"
   if [ "$review_rc" -eq 0 ]; then
+    rm -f "$review_out"
     echo "autopilot: semantic review: pass"
     review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER writers=$review_writers review-scope=campaign:$review_base_sha..$final_head family-independence=not-verified"
     echo "autopilot: review scope: campaign $review_base_sha..$final_head; external recovery patches require separate review"
   elif [ "$REVIEW_MODE" = shadow ]; then
+    rm -f "$review_out"
     if [ "$review_rc" -eq 1 ]; then
       echo "autopilot: semantic review: advisory fail"
       review_evidence="mode=shadow outcome=advisory-fail reviewer=$REVIEWER"
@@ -1927,7 +1946,23 @@ PY
       review_evidence="mode=shadow outcome=advisory-incomplete reviewer=$REVIEWER"
     fi
   else
-    park "semantic-review-failed" "inspect the typed review outcome"
+    PARK_PHASE="semantic-review"
+    PARK_EVIDENCE_PATH="$REPO/.oms/plan/autopilot-review-$AUTOPILOT_OWNER_ID.out"
+    if chmod 600 "$review_out" 2>/dev/null && mv "$review_out" "$PARK_EVIDENCE_PATH"; then
+      :
+    else
+      PARK_EVIDENCE_PATH=""
+    fi
+    if [ "$review_rc" -eq 1 ]; then
+      PARK_REASON="semantic review rejected the accepted drive"
+      PARK_SEMANTIC_VERDICT="fail"
+      park "semantic-review-failed" "inspect the typed review outcome"
+    else
+      PARK_REASON="semantic review did not complete; rerun the printed parent-agent continuation with oms autopilot run"
+      PARK_SEMANTIC_VERDICT="incomplete"
+      park "semantic-review-incomplete" \
+        "rerun the printed parent-agent continuation with oms autopilot run"
+    fi
   fi
 fi
 

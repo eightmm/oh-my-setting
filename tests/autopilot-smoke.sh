@@ -2331,6 +2331,74 @@ PY
     --base main --draft-pr --review-mode gate > "$repo/gate.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "strict semantic gate should park, got $rc"
   [ ! -s "$repo/calls/draft-pr" ] || fail "failed semantic gate reached remote publish"
+  python3 - "$repo/.oms/plan/autopilot-run.json" "$repo" \
+    "$ROOT/scripts/lib" <<'PY'
+import json, os, runpy, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    receipt = json.load(handle)
+diagnostic = receipt.get("diagnostic", {})
+assert receipt["stage"] == "parked", receipt
+assert diagnostic.get("phase") == "semantic-review", diagnostic
+assert diagnostic.get("reason_code") == "semantic-review-failed", diagnostic
+assert diagnostic.get("reason") == "semantic review rejected the accepted drive", diagnostic
+assert diagnostic.get("semantic_verdict") == "fail", diagnostic
+evidence = diagnostic.get("evidence_path", "")
+assert evidence.startswith(os.path.realpath(sys.argv[2]) + os.sep), diagnostic
+assert os.path.isfile(evidence), diagnostic
+sys.path.insert(0, sys.argv[3])
+rules = runpy.run_path(sys.argv[3] + "/autopilot-receipt.py")
+rules["validate_receipt"](receipt)
+nonparked = dict(receipt, stage="reviewing")
+try:
+    rules["validate_receipt"](nonparked)
+except rules["ReceiptError"]:
+    pass
+else:
+    raise AssertionError("a non-parked outer receipt accepted a diagnostic")
+PY
+  run_autopilot "$repo" status > "$repo/gate-status.out" 2>&1 ||
+    fail "parked semantic campaign should remain visible in status"
+  grep -Fq 'outer run: stage=parked' "$repo/gate-status.out" ||
+    fail "status omitted parked outer stage"
+  grep -Fq 'reason=semantic-review-failed' "$repo/gate-status.out" ||
+    fail "status omitted semantic park reason"
+  grep -Fq 'semantic=fail' "$repo/gate-status.out" ||
+    fail "status omitted semantic verdict"
+  grep -Fq 'semantic review rejected the accepted drive' "$repo/gate-status.out" ||
+    fail "status did not show the park reason separately from the recovery hint"
+  grep -Fq -- 'autopilot-review-' "$repo/gate-status.out" ||
+    fail "status omitted semantic review evidence path"
+  parked_line="$(grep -n -F 'outer run: stage=parked' "$repo/gate-status.out" | cut -d: -f1)"
+  drive_line="$(grep -n -F 'latest drive: done (acceptance-pass)' "$repo/gate-status.out" | cut -d: -f1)"
+  [ -n "$parked_line" ] && [ -n "$drive_line" ] &&
+    [ "$parked_line" -lt "$drive_line" ] ||
+    fail "status showed the earlier successful drive before the parked campaign"
+
+  write_done_plan "$repo" true
+  : > "$repo/calls/peer-review"
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_REVIEW_RC=2 run_autopilot "$repo" run \
+    --planner claude --worker codex --reviewer claude --allowed 'src/,tests/' \
+    --base main --review-mode gate > "$repo/incomplete-gate.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "incomplete semantic review should park, got $rc"
+  python3 - "$repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    diagnostic = json.load(handle)["diagnostic"]
+assert diagnostic["reason_code"] == "semantic-review-incomplete", diagnostic
+assert diagnostic["semantic_verdict"] == "incomplete", diagnostic
+assert "review did not complete" in diagnostic["reason"], diagnostic
+assert "oms autopilot run" in diagnostic["reason"], diagnostic
+assert "rejected" not in diagnostic["reason"], diagnostic
+PY
+  run_autopilot "$repo" status > "$repo/incomplete-status.out" 2>&1 ||
+    fail "incomplete semantic campaign should remain visible in status"
+  grep -Fq 'reason=semantic-review-incomplete' "$repo/incomplete-status.out" ||
+    fail "status omitted the incomplete semantic park reason"
+  grep -Fq 'semantic=incomplete' "$repo/incomplete-status.out" ||
+    fail "status omitted the incomplete semantic verdict"
+  grep -Fq 'review did not complete' "$repo/incomplete-status.out" ||
+    fail "status omitted why semantic review was incomplete"
 
   # A run-default worker is not the only author once tasks are assigned.
   write_done_plan "$repo" true

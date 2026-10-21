@@ -212,10 +212,39 @@ def validate_receipt(row: dict[str, Any]) -> None:
         "owner_id",
         "updated",
     }
-    if set(row) != expected or row.get("schema") != 1 or row.get("kind") != "autopilot-run":
+    if (
+        frozenset(row)
+        not in {frozenset(expected), frozenset(expected | {"diagnostic"})}
+        or row.get("schema") != 1
+        or row.get("kind") != "autopilot-run"
+    ):
         raise ReceiptError("outer receipt does not match schema 1")
     if row.get("stage") not in STAGES:
         raise ReceiptError("outer receipt stage is invalid")
+    if "diagnostic" in row and row["stage"] != "parked":
+        raise ReceiptError("outer receipt diagnostic is allowed only on a parked run")
+    if "diagnostic" in row:
+        diagnostic = row["diagnostic"]
+        if not isinstance(diagnostic, dict) or set(diagnostic) != {
+            "phase", "reason_code", "reason", "semantic_verdict", "evidence_path"
+        }:
+            raise ReceiptError("outer receipt diagnostic is invalid")
+        for key, limit in (
+            ("phase", 48), ("reason_code", 96), ("reason", 240),
+            ("semantic_verdict", 32), ("evidence_path", 1024),
+        ):
+            value = diagnostic.get(key)
+            if (
+                not isinstance(value, str)
+                or len(value) > limit
+                or any(ord(ch) < 32 for ch in value)
+            ):
+                raise ReceiptError("outer receipt diagnostic %s is invalid" % key)
+        if diagnostic["semantic_verdict"] not in {
+            "unknown", "pass", "fail", "incomplete", "advisory-fail",
+            "advisory-incomplete", "skipped",
+        }:
+            raise ReceiptError("outer receipt diagnostic semantic verdict is invalid")
     owner_id = text(row.get("owner_id"), "autopilot owner id", empty=True)
     if owner_id and not OWNER_ID.fullmatch(owner_id):
         raise ReceiptError("autopilot owner id is invalid")
@@ -577,7 +606,7 @@ def immutable_view(row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: row[key]
         for key in row
-        if key not in {"stage", "updated", "proposal", "branch"}
+        if key not in {"stage", "updated", "proposal", "branch", "diagnostic"}
     }
 
 
@@ -737,7 +766,7 @@ def option_args(row: dict[str, Any]) -> list[str]:
 
 
 def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    row = {
         "schema": 1,
         "kind": "autopilot-run",
         "stage": args.stage,
@@ -790,6 +819,15 @@ def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "owner_id": args.owner_id,
         "updated": args.updated,
     }
+    if args.diagnostic_phase:
+        row["diagnostic"] = {
+            "phase": args.diagnostic_phase,
+            "reason_code": args.diagnostic_reason_code,
+            "reason": args.diagnostic_reason,
+            "semantic_verdict": args.diagnostic_semantic_verdict,
+            "evidence_path": args.diagnostic_evidence_path,
+        }
+    return row
 
 
 def add_binding_args(parser: argparse.ArgumentParser) -> None:
@@ -822,6 +860,11 @@ def add_binding_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--branch", required=True)
     parser.add_argument("--owner-id", required=True)
     parser.add_argument("--updated", required=True)
+    parser.add_argument("--diagnostic-phase", default="")
+    parser.add_argument("--diagnostic-reason-code", default="")
+    parser.add_argument("--diagnostic-reason", default="")
+    parser.add_argument("--diagnostic-semantic-verdict", default="unknown")
+    parser.add_argument("--diagnostic-evidence-path", default="")
 
 
 def atomic_write(path: Path, payload: bytes) -> None:
@@ -2188,6 +2231,16 @@ def main() -> int:
             row, payload = load_receipt(path)
             validate_live(row, args.repo)
             print("outer run: stage=%s receipt=%s" % (row["stage"], digest(payload)))
+            if row.get("diagnostic"):
+                diagnostic = row["diagnostic"]
+                print(
+                    "outer diagnostic: phase=%s reason=%s (%s) semantic=%s evidence=%s"
+                    % (
+                        diagnostic["phase"], diagnostic["reason_code"],
+                        diagnostic["reason"], diagnostic["semantic_verdict"],
+                        diagnostic["evidence_path"] or "none",
+                    )
+                )
             if args.continuation and row["stage"] != "done":
                 print("parent-agent continuation:")
                 print("  " + " ".join(shlex.quote(value) for value in option_args(row)))
