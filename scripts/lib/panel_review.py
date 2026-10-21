@@ -240,6 +240,31 @@ def _review_findings(answer):
     return findings
 
 
+def _relativize_quoted_paths(text, roots):
+    """Rewrite quoted citations under known repository roots while retaining line anchors."""
+    value = str(text)
+    for root in sorted((str(root).rstrip('/\\') for root in roots if str(root).rstrip('/\\')),
+                       key=len, reverse=True):
+        pattern = re.compile(r'([`\'" ])' + re.escape(root) + r'[/\\]([^`\'"\s]+)(?=[:`\'" ])')
+        resolved_root = Path(root).resolve()
+
+        def relativize(match):
+            # Resolve the cited file without its :line[:column] anchor, so a symlink that
+            # escapes the root cannot pass as a nonexistent 'name:42' inside it.
+            cited = re.sub(r'(?::\d+){1,2}$', '', match.group(2))
+            candidate = (resolved_root / cited.replace('\\', '/')).resolve()
+            try:
+                contained = os.path.commonpath((str(resolved_root), str(candidate))) == str(resolved_root)
+            except ValueError:
+                contained = False
+            if not contained:
+                return match.group(0)
+            return match.group(1) + match.group(2)
+
+        value = pattern.sub(relativize, value)
+    return value
+
+
 def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
     """Draft from verified review bytes and controller-owned dispatch inputs; never launch rework."""
     from terminal_panel import MAX_PROMPT, WRITERS, _dispatch_call_record, _read, _review_findings
@@ -322,11 +347,7 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
                     roots.add(prefix)
                 offset = finding_text.find(marker, offset + len(marker))
     # Only known repository prefixes are relativized; the outbound screen refuses all other private paths.
-    for root in sorted(roots, key=len, reverse=True):
-        if not root.rstrip("/\\"):
-            continue
-        finding_text = finding_text.replace(root.rstrip("/\\") + "/", "")
-        finding_text = finding_text.replace(root.rstrip("/\\") + "\\", "")
+    finding_text = _relativize_quoted_paths(finding_text, roots)
     content = ("# Draft fix brief for task %s\n\n## Scope and authority\n\n"
                "Fix every finding; same scope and authority as the previous round.\n"
                "Declared scope: %s\n\n## Original brief\n\n%s\n\n"

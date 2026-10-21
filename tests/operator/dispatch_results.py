@@ -647,6 +647,61 @@ for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
 import panel_results as saved
 from panel_view import render_results
 from types import SimpleNamespace
+
+# Settled delegate artifacts carry complete bounded findings across task IDs.
+carry_attempts = []
+carry_rows = []
+carry_payloads = {}
+carry_repo = Path.home() / "fixture-repo"
+for source_task, artifact, body in (
+        ("source-task", ".oms/artifacts/critic.md",
+         '## Output\n## Findings\n[P1] Fix `"%s/value.py:42"`\nDetails retained.\n## Exit\n0\n' % carry_repo),
+        ("secret-task", ".oms/artifacts/security.md",
+         "## Output\n## Findings\n[P1] api" "_key=fixture-secret-shaped-value\n## Exit\n0\n")):
+    ident = "attempt-" + source_task
+    carry_attempts.append({"attempt_id": ident, "task_id": source_task, "state": "done",
+                           "refs": {"panel_access": "read", "panel_role": "critic"}})
+    row = {"attempt_id": ident, "task_id": source_task, "kind": "delegate", "exit": 0,
+           "artifact": artifact, "outcome": "completed", "ts": source_task}
+    carry_rows.append(row)
+    carry_payloads[artifact] = ("## Output\n" + body.split("## Output\n", 1)[1]).encode()
+with patch.object(saved, "_records", return_value=(carry_attempts, carry_rows)), \
+        patch.object(saved, "_indexed", side_effect=lambda repo, row, limit: carry_payloads[row["artifact"]]):
+    same_task_carry = saved.prior_findings(carry_repo, "source-task", "")
+    cross_task_carry = saved.prior_findings(carry_repo, ["destination-task", "source-task"], "")
+    secret_carry = saved.prior_findings(carry_repo, ["secret-task"], "")
+assert "critic" in same_task_carry and ".oms/artifacts/critic.md" in same_task_carry
+assert '"value.py:42"' in same_task_carry and "Details retained." in same_task_carry
+assert "source-task" in cross_task_carry
+from panel_review import _relativize_quoted_paths
+escaped_path = str(carry_repo) + "/../../outside/private.txt:42"
+assert _relativize_quoted_paths('`%s`' % escaped_path, [str(carry_repo)]) == '`%s`' % escaped_path
+if True:
+    link_dir = temporary / "relativize-symlink"
+    link_root = link_dir / "repo"
+    link_root.mkdir(parents=True)
+    (link_dir / "outside.py").write_text("x\n")
+    (link_root / "link.py").symlink_to(link_dir / "outside.py")
+    for anchor in ("", ":42", ":42:7"):
+        cited = "`%s/link.py%s`" % (link_root, anchor)
+        assert _relativize_quoted_paths(cited, [str(link_root)]) == cited, anchor
+    (link_root / "inside.py").write_text("x\n")
+    assert _relativize_quoted_paths("`%s/inside.py:42`" % link_root, [str(link_root)]) == "`inside.py:42`"
+unc_path = "\\\\server\\share\\private.txt:42"
+unc_artifact = ("## Output\n## Findings\n[P1] inspect %s\n## Exit\n0\n" % unc_path).encode()
+unc_row = dict(carry_rows[0], artifact_sha256="")
+with patch.object(saved, "_records", return_value=(carry_attempts[:1], [unc_row])), \
+        patch.object(saved, "_indexed", return_value=unc_artifact):
+    unc_carry = saved.prior_findings(carry_repo, "source-task", "")
+assert "summary omitted (contains a machine path)" in unc_carry
+brief_path = temporary / "carry-secret-brief.md"
+brief_path.write_text("Initial scope.\n" + secret_carry, encoding="utf-8")
+try:
+    dispatch._validate_dry_run_inputs(None, brief_path)
+    raise AssertionError("secret-shaped carried finding passed outbound scan")
+except ValueError as error:
+    assert "sensitive-looking" in str(error), error
+
 for has_write_patch, expected in (
         (True, "after oms land run oms agent-plan finish --id hint-task --landed-commit SHA"),
         (False, "a task with no patch cannot finish by landing; close it with oms agent-plan accept-main-research (completion bundle) or oms agent-plan block --id hint-task --reason TEXT")):

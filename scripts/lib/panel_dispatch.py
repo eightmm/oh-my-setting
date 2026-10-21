@@ -490,7 +490,7 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
-             candidate=None, allow_stale_base=False):
+             candidate=None, allow_stale_base=False, from_task=None):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
     from terminal_panel import continuation, events, newest_route_model, provider_catalog, routing_status
     from terminal_panel import run_dispatch, safe_label, selected_route
@@ -545,11 +545,12 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             temporaries.append(temporary)
             temporary = None
         # A dry run validates inputs only; prior findings join the brief that is actually sent.
-        if task_id and brief and not dry_run:
-            composed = _task_findings_brief(repo, task_id, brief)
+        if (task_id or from_task) and brief and not dry_run:
+            composed = _task_findings_brief(repo, [task_id] + list(from_task or []) if task_id else from_task, brief)
             if composed != brief:
                 brief = composed
                 temporaries.append(brief)
+                _validate_dry_run_inputs(prompt, brief)
         fallback = None
         if not target:
             fallback = alternate_route(route, provider_status=routing_status(repo, None, main))

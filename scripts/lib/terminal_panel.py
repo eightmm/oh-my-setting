@@ -417,6 +417,8 @@ def main(argv=None):
                         help="continue on the recorded patch base even when it differs from current HEAD")
     parser.add_argument("--verify", help="mechanical verifier for --finalize or the dispatched role (required for write and reviewer; other read roles refuse it)")
     parser.add_argument("--task-id", help="existing plan/task identifier for the worker")
+    parser.add_argument("--from-task", action="append", metavar="ID",
+                        help="append settled read-only findings from another task (repeatable; needs --brief-file)")
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--alias", help="short unique room call name (1-8 letters, digits or hyphens)")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
@@ -536,6 +538,11 @@ def main(argv=None):
         parser.error("council --workload must be deep or frontier")
     if args.task_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.task_id):
         parser.error("invalid task ID")
+    if args.from_task and (not args.brief_file or any(
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", value) for value in args.from_task)):
+        parser.error("--from-task requires --brief-file and valid task IDs")
+    if args.from_task and not args.dispatch:
+        parser.error("--from-task requires --dispatch")
     if args.dispatch:
         try:
             owner = args.owner or caller_owner()
@@ -756,7 +763,7 @@ def main(argv=None):
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
                               continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias,
-                              allow_stale_base=args.allow_stale_base)
+                              allow_stale_base=args.allow_stale_base, from_task=args.from_task)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)
