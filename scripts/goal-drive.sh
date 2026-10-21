@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bounded goal driver: loop [acceptance -> one plan-run task -> exact commit]
+# Bounded goal driver: acceptance -> isolated task batch -> ordered exact commits
 # over an EXISTING human-approved plan until the plan's acceptance command
 # passes, the cycle cap is hit, tasks run out, or anything looks unsafe. This
 # is the mechanized form of the parent's re-orientation between tasks — the
@@ -28,6 +28,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$PWD"
 PROVIDER="codex"
 MAX_CYCLES=3
+MAX_PARALLEL_TASKS=1
+GOAL_BATCH_ID=""
 AUTO_REPAIR=0
 RUN_ID_OVERRIDE=""
 CONTRACT_ID=""
@@ -57,9 +59,9 @@ Usage: goal-drive.sh [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID
                      [--provider-timeout DUR] [--expected-ref REF]
 
 Drive an existing agent-plan toward its acceptance command: each cycle runs
-acceptance first (pass = done), otherwise executes exactly one plan task via
-plan-run --next, freezes its reviewed patch, then lands and commits exactly
-those bytes (and nothing else).
+acceptance first (pass = done), otherwise dispatches up to the contracted
+width of independent tasks. After a batch barrier it freezes, lands and
+commits each reviewed patch serially in plan order. Width 1 uses plan-run --next.
 
 Stops by design: acceptance pass; --max-cycles (the hard terminator, default
 3); no actionable task while acceptance still fails; identical tree + same
@@ -70,7 +72,8 @@ it parked; a later run whose acceptance passes resolves those park rows.
 
   --repo PATH     Repository (default: current directory). Tree must be clean.
   --to PROVIDER   Default worker for tasks without an assignment (default: codex).
-  --max-cycles N  Hard cycle cap (default 3, max 10).
+  --max-cycles N  Hard task-attempt cap (default 3, max 10).
+  --max-parallel-tasks N  Independent concurrent workers, 1..4 (default 1).
   --run-id ID      Optional caller correlation receipt (1..64 safe characters).
   --contract-id OWNER_ID  Internal autopilot lifetime-cycle identity.
   --auto-repair   Run one same-lease repair delegation after a failed landing,
@@ -97,6 +100,11 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --to) [ "$#" -ge 2 ] || fail "--to requires a provider"; PROVIDER="$2"; shift 2 ;;
+    --max-parallel-tasks)
+      [ "$#" -ge 2 ] || fail "--max-parallel-tasks requires a count"
+      case "$2" in *[!0-9]*|"") fail "--max-parallel-tasks must be 1..4" ;; esac
+      [ "$2" -ge 1 ] && [ "$2" -le 4 ] || fail "--max-parallel-tasks must be 1..4"
+      MAX_PARALLEL_TASKS="$2"; shift 2 ;;
     --max-cycles)
       [ "$#" -ge 2 ] || fail "--max-cycles requires a count"
       case "$2" in *[!0-9]*|"") fail "--max-cycles requires a positive integer" ;; esac
@@ -285,6 +293,7 @@ TERMINAL_RECEIPT="$(python3 -c 'import os; print(os.urandom(32).hex())' | tr -d 
 case "$TERMINAL_RECEIPT" in *[!0-9a-f]*|"") fail "invalid terminal receipt" ;; esac
 [ "${#TERMINAL_RECEIPT}" -eq 64 ] || fail "invalid terminal receipt"
 CYCLE=0
+RUN_ATTEMPTS=0
 CONTRACT_CYCLES=0
 if [ -n "$CONTRACT_ID" ]; then
   CONTRACT_CYCLES="$(OMS_GD_CONTRACT="$CONTRACT_ID" python3 -c '
@@ -378,6 +387,10 @@ terminal_result() {  # STATUS REASON
 
 park() {  # REASON NEXT
   local recorded
+  if [ -n "${GOAL_BATCH_ID:-}" ] && [ "$1" = task-failed ]; then
+    goal_batch_tool retire || fail "cannot retire the failed batch safely"
+    GOAL_BATCH_ID=""
+  fi
   if ! terminal_row park "$1"; then
     echo "error: cannot durably append the goal-drive terminal row" >&2
     exit 2
@@ -2122,175 +2135,174 @@ PY
   intent_commit
   exit 0
 fi
-reconcile_commit_intent
-guard_expected_ref
-
-# A dirty tree now means another session's live work, not an OMS-owned intent.
-# Include untracked files: a new-file-only landing was previously invisible.
-dirty="$(git_status_porcelain)"
-[ -z "$dirty" ] || fail "tree is dirty; commit or stash first, or drive from a dedicated worktree"
-
-prev_tree=""
-prev_accept_out=""
-
-while :; do
-  CYCLE=$((CYCLE + 1))
-  guard_git_authority
-  guard_expected_ref
-  # Judge against the start-of-run contract only: a mid-run edit to the
-  # acceptance command is a moved goalpost, not a pass. Checked in the main
-  # shell so park() actually terminates the run.
-  now="$(printf '%s' "$(read_accept_cmd)" | oms_sha256_stream 2>/dev/null || echo unhashed)"
-  [ "$now" = "$ACCEPT_SNAPSHOT" ] ||
-    park "acceptance-command-changed" "re-run goal-drive after reviewing the new acceptance command"
-  accept_rc=0
-  accept_out="$(OMS_GOAL_RUN_ID="$RUN_ID" OMS_GOAL_CYCLE="$CYCLE" \
-    "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept 2>&1)" || accept_rc=$?
-  guard_expected_ref
-  printf '%s\n' "$accept_out" | tail -n 3
-  if [ "$accept_rc" -eq 0 ]; then
-    # An acceptance command that already passes before this run did anything
-    # cannot tell the goal state from the start state. Reporting done here is a
-    # run that accomplished nothing while every caller downstream — a semantic
-    # review of an empty diff, a parent reading the terminal row — takes it for
-    # success. Two things redeem a cycle-1 pass: a recorded failure of this same
-    # contract at an ancestor commit (work landed and turned it around), or a
-    # plan with nothing left to do. Neither one, and the contract is broken.
-    if [ "$CYCLE" -eq 1 ] && [ -z "$(acceptance_ever_failed)" ] &&
-      [ "$(plan_has_unfinished_work)" = 1 ]; then
-      park "acceptance-vacuous" "acceptance passes on the base tree while every task is still pending; tighten it (agent-plan init --accept) so it fails until the goal is actually met"
-    fi
-    if ! terminal_row "done" acceptance-pass; then
-      echo "error: cannot durably append the goal-drive terminal row" >&2
-      exit 2
-    fi
-    resolve_parks
-    work_journal_observe "$REPO" goal-drive "$PROGRESS" \
-      --source-id "$RUN_ID:done" --outcome "Goal drive reached acceptance" \
-      --outcome-status "done" --verification-status passed \
-      >/dev/null 2>&1 || true
-    echo "goal-drive: done run=$RUN_ID cycles=$CYCLE (acceptance passed)"
-    if ! terminal_result "done" acceptance-pass; then
-      echo "error: cannot emit the goal-drive terminal result" >&2
-      exit 2
-    fi
-    exit 0
-  fi
-  if [ "$accept_rc" -ne 3 ]; then
-    accept_reason="$(printf '%s\n' "$accept_out" | python3 -c '
-import re, sys
-allowed = {
-    "acceptance-command-changed", "acceptance-files-changed",
-    "acceptance-mutated-repository", "acceptance-supervision-failed",
-    "acceptance-timeout", "acceptance-output-limit",
+# A batch owns leases before any provider starts. Its append-only receipt is
+# separate from the singleton exact commit intent: recovery never redispatches
+# an uncertain attempt, and only the ordered successful prefix can integrate.
+goal_batch_tool() {  # MODE [ARGS...]
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/lib/autopilot-receipt.py" goal-batch -- \
+    "$PLAN_FILE" "$PROGRESS" "$REPO" "$CONTRACT_ID" "$MAX_PARALLEL_TASKS" "$ACCEPT_SNAPSHOT" "$@" | tr -d '\r'
 }
-found = ""
-for line in sys.stdin:
-    match = re.search(r"(?:^|\s)reason=([a-z0-9-]+)(?=$|\s)", line)
-    if match and match.group(1) in allowed:
-        found = match.group(1)
-print(found)
-' | tr -d '\r')"
-    if [ -n "$accept_reason" ]; then
-      park "$accept_reason" "inspect the acceptance receipt and restore the frozen plan, files, and repository state before retrying"
-    fi
-    park "acceptance-command-error" "the acceptance command itself failed to run; fix the spec (agent-plan init --accept)"
-  fi
 
-  # Stuck: nothing changed since the last failing cycle — more cycles would
-  # replay the same failure, not fix it.
-  tree="$(git -C "$REPO" rev-parse 'HEAD^{tree}' 2>/dev/null || echo none)"
-  accept_digest="$(printf '%s' "$accept_out" | oms_sha256_stream 2>/dev/null || echo unhashed)"
-  if [ "$tree" = "$prev_tree" ] && [ "$accept_digest" = "$prev_accept_out" ]; then
-    park "stuck" "same tree and same failing acceptance twice; get an outside read: oms advise"
-  fi
-  prev_tree="$tree"; prev_accept_out="$accept_digest"
+GOAL_BATCH_PIDS=()
+GOAL_BATCH_LOGS=()
+GOAL_BATCH_LAUNCHING=0
+GOAL_BATCH_PENDING_SIGNAL=""
+GOAL_BATCH_PENDING_EXIT=""
+goal_batch_forget_pid() {  # PID
+  local target="$1" pid
+  local -a remaining=()
+  for pid in ${GOAL_BATCH_PIDS[@]+"${GOAL_BATCH_PIDS[@]}"}; do
+    [ "$pid" = "$target" ] || remaining+=("$pid")
+  done
+  GOAL_BATCH_PIDS=(${remaining[@]+"${remaining[@]}"})
+}
 
-  if [ -n "$CONTRACT_ID" ] && [ "$CONTRACT_CYCLES" -ge "$MAX_CYCLES" ]; then
-    park "cycles-exhausted" "autopilot contract already used $CONTRACT_CYCLES of $MAX_CYCLES cycle(s) across resumes; retire it with oms autopilot abandon --reason TEXT, then start a fresh contract"
+goal_batch_reap_completed() {
+  local active pid rc=0
+  # Keep stopped jobs owned; only wait for jobs Bash no longer reports active.
+  active="$(jobs -pr; jobs -ps)"
+  active="${active//$'\n'/ }"
+  for pid in ${GOAL_BATCH_PIDS[@]+"${GOAL_BATCH_PIDS[@]}"}; do
+    case " $active " in
+      *" $pid "*) ;;
+      *)
+        wait "$pid" || rc=$?
+        goal_batch_forget_pid "$pid"
+        ;;
+    esac
+  done
+  return "$rc"
+}
+
+goal_batch_wait_all() {
+  local rc=0
+  while [ -n "${GOAL_BATCH_PIDS[*]-}" ]; do
+    goal_batch_reap_completed || rc=$?
+    [ -z "${GOAL_BATCH_PIDS[*]-}" ] || sleep 0.1
+  done
+  return "$rc"
+}
+
+goal_batch_signal() {  # SIGNAL EXIT_CODE
+  local pid
+  if [ "$GOAL_BATCH_LAUNCHING" -eq 1 ]; then
+    GOAL_BATCH_PENDING_SIGNAL="$1"
+    GOAL_BATCH_PENDING_EXIT="$2"
+    return 0
   fi
-  if [ "$CYCLE" -gt "$MAX_CYCLES" ]; then
-    park "cycles-exhausted" "acceptance still failing after $MAX_CYCLES cycle(s); review progress.jsonl, then extend the plan or raise --max-cycles"
-  fi
+  trap - HUP INT TERM
+  # Bash can reap an exited job asynchronously. Drop it before signalling any
+  # remaining PID so cancellation cannot target a later process that reused it.
+  goal_batch_reap_completed || true
+  for pid in ${GOAL_BATCH_PIDS[@]+"${GOAL_BATCH_PIDS[@]}"}; do
+    kill -s "$1" "$pid" 2>/dev/null || true
+  done
+  goal_batch_wait_all || true
+  rm -f ${GOAL_BATCH_LOGS[@]+"${GOAL_BATCH_LOGS[@]}"}
+  exit "$2"
+}
+
+goal_reserve_cycle() {  # TASK [LEASE]
+  OMS_GD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_GD_CONTRACT="$CONTRACT_ID" \
+    OMS_GD_RUN="$RUN_ID" OMS_GD_CYCLE="$CYCLE" python3 - "$1" "${2:-}" <<'PY' | progress_append || return $?
+import json, os, sys
+owner = os.environ["OMS_GD_CONTRACT"]
+print(json.dumps({"schema": 1, "kind": "autopilot-cycle" if owner else "goal-cycle",
+    "ts": os.environ["OMS_GD_TS"], "contract_id": owner, "run_id": os.environ["OMS_GD_RUN"],
+    "cycle": int(os.environ["OMS_GD_CYCLE"]), "task_id": sys.argv[1], "lease_id": sys.argv[2]}))
+PY
+  RUN_ATTEMPTS=$((${RUN_ATTEMPTS:-0} + 1))
   if [ -n "$CONTRACT_ID" ]; then
-    OMS_GD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_GD_CONTRACT="$CONTRACT_ID" \
-      OMS_GD_RUN="$RUN_ID" OMS_GD_CYCLE="$CYCLE" python3 -c '
-import json, os
-print(json.dumps({"schema": 1, "kind": "autopilot-cycle",
-    "ts": os.environ["OMS_GD_TS"], "contract_id": os.environ["OMS_GD_CONTRACT"],
-    "run_id": os.environ["OMS_GD_RUN"], "cycle": int(os.environ["OMS_GD_CYCLE"])}))
-' | progress_append || fail "cannot durably record autopilot contract cycle"
     CONTRACT_CYCLES=$((CONTRACT_CYCLES + 1))
   fi
+}
 
-  head_before="$(git -C "$REPO" rev-parse HEAD)"
-  head_ref_before="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')"
-  [ -n "$head_ref_before" ] ||
-    park "detached-head" "check out the reviewed work branch before goal-drive can commit"
-  # First obtain a reviewed patch without mutating the main tree. The durable
-  # intent below is the handoff between delegation authority and landing/
-  # commit authority; plan-run no longer gets to cross both in one opaque
-  # call. A unique exact review may predate this process (provider completed,
-  # then goal-drive crashed), so adopt that receipt before claiming new work.
-  pending_rc=0
-  task_id="$(pending_review 2>&1)" || pending_rc=$?
-  provider_called=0
-  case "$pending_rc" in
-    0)
-      if [ -n "$task_id" ]; then
-        load_task_receipt "$task_id" ||
-          park "invalid-review-receipt" "the pending reviewed task could not be read"
-        patch_file="$TASK_RECEIPT_PATCH"
-        echo "goal-drive: continuing reviewed task=$task_id without a provider call"
-      else
-        provider_called=1
-      fi
-      ;;
-    4) park "multiple-reviewed-tasks" "choose one reviewed task explicitly before resuming goal-drive: $task_id" ;;
-    5) park "review-requires-executor" "goal-drive cannot consume the pending executor-bound review: $task_id" ;;
-    *) park "invalid-review-receipt" "repair the malformed reviewed task before goal-drive continues: $task_id" ;;
-  esac
-
-  if [ "$provider_called" = 1 ]; then
-    run_args=(--repo "$REPO" --to "$PROVIDER" --next)
-    [ "$RETRY_KNOWN" -eq 0 ] || run_args+=(--retry-known)
-    [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || run_args+=(--allow-verifier-change)
-    [ -z "$MODEL" ] || run_args+=(--model "$MODEL")
-    [ -z "$FALLBACK_MODEL" ] || run_args+=(--fallback-model "$FALLBACK_MODEL")
-    [ "$REASONING_EFFORT" = auto ] || run_args+=(--reasoning-effort "$REASONING_EFFORT")
-    run_rc=0
-    goal_phase_run env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" bash \
-      "$ROOT/scripts/plan-run.sh" "${run_args[@]}" || run_rc=$?
-    run_out="$GOAL_PHASE_OUT"
-    guard_git_authority
-    guard_expected_ref
-    printf '%s\n' "$run_out" | tail -n 6
-    if [ "$run_rc" -ne 0 ]; then
-      if printf '%s\n' "$run_out" | grep -q 'no actionable task'; then
-        park "tasks-exhausted" "acceptance fails and the plan has no actionable task; add tasks (agent-plan add) or decompose the remaining gap"
-      fi
-      park "task-failed" "plan-run failed (see its ledger row); review the task, then re-run goal-drive"
-    fi
-
-    task_id="$(printf '%s\n' "$run_out" | sed -n 's/^plan-run: result task=\([^ ]*\).*/\1/p' | tail -n 1)"
-    patch_file="$(printf '%s\n' "$run_out" | sed -n 's/.* patch=\([^ ]*\).*/\1/p' | tail -n 1)"
+goal_batch_dispatch() {
+  local ready selected remaining id lease log pid rc=0 i provider dispatched=0
+  local -a ids leases args
+  remaining=$((MAX_CYCLES - RUN_ATTEMPTS))
+  [ -z "$CONTRACT_ID" ] || remaining=$((MAX_CYCLES - CONTRACT_CYCLES))
+  [ "$remaining" -ge 0 ] || remaining=0
+  ready="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json)" ||
+    park invalid-plan "cannot verify ready dependencies"
+  selected="$(goal_batch_tool select "$ready" "$remaining")" || park invalid-batch "cannot select a safe task batch"
+  if [ -z "$selected" ]; then
+    [ "$remaining" -gt 0 ] || park cycles-exhausted "the task-attempt budget is exhausted"
+    park tasks-exhausted "acceptance fails and the plan has no actionable task"
   fi
-
+  ids=(); leases=()
+  while IFS= read -r id; do
+    load_task_receipt "$id" || park invalid-batch "cannot resolve task $id"
+    if [ "$TASK_RECEIPT_STATE" = review ]; then
+      ids+=("$id"); leases+=("")
+      continue
+    fi
+    provider="$TASK_ROUTE_PROVIDER"
+    OMS_AUTOPILOT_OWNER_ID="$CONTRACT_ID" "$ROOT/scripts/agent-plan.sh" --repo "$REPO" claim --id "$id" --provider "$provider" >/dev/null ||
+      park batch-claim-failed "task $id changed before reservation; preserve existing leases"
+    load_task_receipt "$id" || park invalid-batch "cannot read reserved lease $id"
+    lease="$TASK_RECEIPT_LEASE"
+    ids+=("$id"); leases+=("$lease")
+    goal_reserve_cycle "$id" "$lease" || fail "cannot durably reserve task attempt"
+    CYCLE=$((CYCLE + 1))
+    dispatched=$((dispatched + 1))
+  done <<EOF_IDS
+$selected
+EOF_IDS
+  [ "$dispatched" -eq 0 ] || CYCLE=$((CYCLE - 1))
+  GOAL_BATCH_ID="$RUN_ID-b$CYCLE-${TERMINAL_RECEIPT:0:16}"
+  goal_batch_tool prepare "$GOAL_BATCH_ID" "$RUN_ID" "${ids[@]}" | progress_append ||
+    park batch-receipt-failed "reserved leases were preserved; no provider was started"
+  GOAL_BATCH_PIDS=(); GOAL_BATCH_LOGS=()
+  # Allocate every output before starting a child: allocation failure must
+  # leave no running sibling behind an internal-error exit.
+  for ((i=0; i<${#ids[@]}; i++)); do
+    log="$(agent_memory_mktemp)" || park internal "cannot allocate batch output"
+    GOAL_BATCH_LOGS+=("$log")
+  done
+  trap 'goal_batch_signal HUP 129' HUP
+  trap 'goal_batch_signal INT 130' INT
+  trap 'goal_batch_signal TERM 143' TERM
+  for ((i=0; i<${#ids[@]}; i++)); do
+    [ -n "${leases[$i]}" ] || continue
+    args=(--repo "$REPO" --to "$PROVIDER" --id "${ids[$i]}" --claimed-lease "${leases[$i]}")
+    [ "$RETRY_KNOWN" -eq 0 ] || args+=(--retry-known)
+    [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || args+=(--allow-verifier-change)
+    [ -z "$MODEL" ] || args+=(--model "$MODEL")
+    [ -z "$FALLBACK_MODEL" ] || args+=(--fallback-model "$FALLBACK_MODEL")
+    [ "$REASONING_EFFORT" = auto ] || args+=(--reasoning-effort "$REASONING_EFFORT")
+    log="${GOAL_BATCH_LOGS[$i]}"
+    GOAL_BATCH_LAUNCHING=1
+    python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
+      --wall "$((PROVIDER_TIMEOUT_SECONDS * 5 + 60))" --kill-after 1 --label goal-provider -- \
+      env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" "OMS_AUTOPILOT_OWNER_ID=$CONTRACT_ID" bash "$ROOT/scripts/plan-run.sh" "${args[@]}" >"$log" 2>&1 &
+    pid=$!
+    GOAL_BATCH_PIDS+=("$pid")
+    GOAL_BATCH_LAUNCHING=0
+    if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
+      goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
+    fi
+  done
+  goal_batch_wait_all || rc=$?
+  trap - HUP INT TERM
+  for log in "${GOAL_BATCH_LOGS[@]}"; do
+    tail -n 6 "$log"
+    rm -f "$log"
+  done
+  GOAL_BATCH_LOGS=()
   guard_git_authority
   guard_expected_ref
   [ "$(git -C "$REPO" rev-parse HEAD)" = "$head_before" ] ||
-    park "head-moved" "another writer advanced HEAD mid-cycle; inspect git log, then re-run on a quiet tree"
-  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$head_ref_before" ] ||
-    park "intent-ref-moved" "the checked-out branch changed mid-cycle; return to the reviewed branch"
-  [ -n "$task_id" ] || park "missing-plan-task" "plan-run returned no task id"
-  if [ -z "$patch_file" ] || [ ! -f "$patch_file" ]; then
-    park "no-admitted-patch" "plan-run returned no reviewed patch"
-  fi
-  if [ "$provider_called" = 1 ] && [ "${OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW:-0}" = 1 ]; then
-    echo "goal-drive: injected stop after provider review; rerun to adopt task $task_id" >&2
+    park head-moved "another writer advanced HEAD during the batch; preserve its reviews"
+  # Task receipts, not child exit codes, determine the integrable prefix.
+  if [ "${OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW:-0}" = 1 ]; then
+    echo "goal-drive: injected stop after batch review" >&2
     exit 75
   fi
+  [ "$rc" -eq 0 ] || echo "goal-drive: batch has a failed attempt; preserving its ordered prefix" >&2
+}
 
+goal_integrate_current() {
   intent_prepare "$task_id" "$patch_file" "$head_before" "$head_ref_before" ""
   guard_expected_ref
   patch_abs="$(intent_patch_file)" || park "unsafe-patch-path" "inspect the commit intent"
@@ -2432,4 +2444,201 @@ print(json.dumps({"schema": 1, "kind": "autopilot-cycle",
     exit 75
   fi
   intent_commit "committed"
+}
+
+reconcile_commit_intent
+guard_expected_ref
+
+# A dirty tree now means another session's live work, not an OMS-owned intent.
+# Include untracked files: a new-file-only landing was previously invisible.
+dirty="$(git_status_porcelain)"
+[ -z "$dirty" ] || fail "tree is dirty; commit or stash first, or drive from a dedicated worktree"
+
+prev_tree=""
+prev_accept_out=""
+GOAL_BATCH_ID="$(goal_batch_tool recover)" || park invalid-batch "the durable batch contract or lease changed; preserve its patches"
+
+while :; do
+  if [ -n "$GOAL_BATCH_ID" ]; then
+    batch_results="$(goal_batch_tool collect)" ||
+      park batch-recovery-required "an attempt is unresolved or its batch results changed; preserve every owned worker and patch"
+    if [ -n "$batch_results" ]; then
+      printf '%s\n' "$batch_results" | progress_append || fail "cannot freeze batch results"
+    fi
+    while :; do
+      task_id="$(goal_batch_tool next)" || park invalid-batch "the durable batch receipt cannot be reconciled"
+      case "$task_id" in
+        complete)
+          goal_batch_tool complete | progress_append || fail "cannot close completed batch"
+          GOAL_BATCH_ID=""
+          break ;;
+        failed:*)
+          goal_batch_tool retire || park batch-recovery-required "cannot retire the failed batch safely"
+          GOAL_BATCH_ID=""
+          park batch-task-failed "ordered prefix integrated and batch retired; retry released tasks under the remaining cycle budget" ;;
+        "") park invalid-batch "the pending batch disappeared" ;;
+      esac
+      load_task_receipt "$task_id" || park invalid-review-receipt "cannot read batch task $task_id"
+      patch_file="$TASK_RECEIPT_PATCH"
+      head_before="$(git -C "$REPO" rev-parse HEAD)"
+      head_ref_before="$(git -C "$REPO" symbolic-ref -q HEAD | tr -d '\r')"
+      goal_integrate_current
+      "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json >/dev/null ||
+        park invalid-plan "cannot recompute dependency readiness after integration"
+    done
+  fi
+  CYCLE=$((CYCLE + 1))
+  guard_git_authority
+  guard_expected_ref
+  # Judge against the start-of-run contract only: a mid-run edit to the
+  # acceptance command is a moved goalpost, not a pass. Checked in the main
+  # shell so park() actually terminates the run.
+  now="$(printf '%s' "$(read_accept_cmd)" | oms_sha256_stream 2>/dev/null || echo unhashed)"
+  [ "$now" = "$ACCEPT_SNAPSHOT" ] ||
+    park "acceptance-command-changed" "re-run goal-drive after reviewing the new acceptance command"
+  accept_rc=0
+  accept_out="$(OMS_GOAL_RUN_ID="$RUN_ID" OMS_GOAL_CYCLE="$CYCLE" \
+    "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept 2>&1)" || accept_rc=$?
+  guard_expected_ref
+  printf '%s\n' "$accept_out" | tail -n 3
+  if [ "$accept_rc" -eq 0 ]; then
+    # An acceptance command that already passes before this run did anything
+    # cannot tell the goal state from the start state. Reporting done here is a
+    # run that accomplished nothing while every caller downstream — a semantic
+    # review of an empty diff, a parent reading the terminal row — takes it for
+    # success. Two things redeem a cycle-1 pass: a recorded failure of this same
+    # contract at an ancestor commit (work landed and turned it around), or a
+    # plan with nothing left to do. Neither one, and the contract is broken.
+    if [ "$CYCLE" -eq 1 ] && [ -z "$(acceptance_ever_failed)" ] &&
+      [ "$(plan_has_unfinished_work)" = 1 ]; then
+      park "acceptance-vacuous" "acceptance passes on the base tree while every task is still pending; tighten it (agent-plan init --accept) so it fails until the goal is actually met"
+    fi
+    if ! terminal_row "done" acceptance-pass; then
+      echo "error: cannot durably append the goal-drive terminal row" >&2
+      exit 2
+    fi
+    resolve_parks
+    work_journal_observe "$REPO" goal-drive "$PROGRESS" \
+      --source-id "$RUN_ID:done" --outcome "Goal drive reached acceptance" \
+      --outcome-status "done" --verification-status passed \
+      >/dev/null 2>&1 || true
+    echo "goal-drive: done run=$RUN_ID cycles=$CYCLE (acceptance passed)"
+    if ! terminal_result "done" acceptance-pass; then
+      echo "error: cannot emit the goal-drive terminal result" >&2
+      exit 2
+    fi
+    exit 0
+  fi
+  if [ "$accept_rc" -ne 3 ]; then
+    accept_reason="$(printf '%s\n' "$accept_out" | python3 -c '
+import re, sys
+allowed = {
+    "acceptance-command-changed", "acceptance-files-changed",
+    "acceptance-mutated-repository", "acceptance-supervision-failed",
+    "acceptance-timeout", "acceptance-output-limit",
+}
+found = ""
+for line in sys.stdin:
+    match = re.search(r"(?:^|\s)reason=([a-z0-9-]+)(?=$|\s)", line)
+    if match and match.group(1) in allowed:
+        found = match.group(1)
+print(found)
+' | tr -d '\r')"
+    if [ -n "$accept_reason" ]; then
+      park "$accept_reason" "inspect the acceptance receipt and restore the frozen plan, files, and repository state before retrying"
+    fi
+    park "acceptance-command-error" "the acceptance command itself failed to run; fix the spec (agent-plan init --accept)"
+  fi
+
+  # Stuck: nothing changed since the last failing cycle — more cycles would
+  # replay the same failure, not fix it.
+  tree="$(git -C "$REPO" rev-parse 'HEAD^{tree}' 2>/dev/null || echo none)"
+  accept_digest="$(printf '%s' "$accept_out" | oms_sha256_stream 2>/dev/null || echo unhashed)"
+  if [ "$tree" = "$prev_tree" ] && [ "$accept_digest" = "$prev_accept_out" ]; then
+    park "stuck" "same tree and same failing acceptance twice; get an outside read: oms advise"
+  fi
+  prev_tree="$tree"; prev_accept_out="$accept_digest"
+
+  head_before="$(git -C "$REPO" rev-parse HEAD)"
+  head_ref_before="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')"
+  [ -n "$head_ref_before" ] ||
+    park "detached-head" "check out the reviewed work branch before goal-drive can commit"
+  # First obtain a reviewed patch without mutating the main tree. The durable
+  # intent below is the handoff between delegation authority and landing/
+  # commit authority; plan-run no longer gets to cross both in one opaque
+  # call. A unique exact review may predate this process (provider completed,
+  # then goal-drive crashed), so adopt that receipt before claiming new work.
+  retired_reviews="$(goal_batch_tool retired-reviews)" || park invalid-batch "cannot identify retained reviews"
+  if [ "$MAX_PARALLEL_TASKS" -gt 1 ] || [ "$retired_reviews" = 1 ]; then
+    goal_batch_dispatch
+    continue
+  fi
+  pending_rc=0
+  task_id="$(pending_review 2>&1)" || pending_rc=$?
+  provider_called=0
+  case "$pending_rc" in
+    0)
+      if [ -n "$task_id" ]; then
+        load_task_receipt "$task_id" ||
+          park "invalid-review-receipt" "the pending reviewed task could not be read"
+        patch_file="$TASK_RECEIPT_PATCH"
+        echo "goal-drive: continuing reviewed task=$task_id without a provider call"
+      else
+        provider_called=1
+      fi
+      ;;
+    4) park "multiple-reviewed-tasks" "choose one reviewed task explicitly before resuming goal-drive: $task_id" ;;
+    5) park "review-requires-executor" "goal-drive cannot consume the pending executor-bound review: $task_id" ;;
+    *) park "invalid-review-receipt" "repair the malformed reviewed task before goal-drive continues: $task_id" ;;
+  esac
+
+  if [ "$provider_called" = 1 ]; then
+    if [ -n "$CONTRACT_ID" ] && [ "$CONTRACT_CYCLES" -ge "$MAX_CYCLES" ]; then
+      park "cycles-exhausted" "autopilot contract already used $CONTRACT_CYCLES of $MAX_CYCLES cycle(s) across resumes; retire it with oms autopilot abandon --reason TEXT, then start a fresh contract"
+    fi
+    if [ -z "$CONTRACT_ID" ] && [ "$RUN_ATTEMPTS" -ge "$MAX_CYCLES" ]; then
+      park "cycles-exhausted" "acceptance still failing after $MAX_CYCLES cycle(s); review progress.jsonl, then extend the plan or raise --max-cycles"
+    fi
+    goal_reserve_cycle "" || fail "cannot durably record autopilot contract cycle"
+    run_args=(--repo "$REPO" --to "$PROVIDER" --next)
+    [ "$RETRY_KNOWN" -eq 0 ] || run_args+=(--retry-known)
+    [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || run_args+=(--allow-verifier-change)
+    [ -z "$MODEL" ] || run_args+=(--model "$MODEL")
+    [ -z "$FALLBACK_MODEL" ] || run_args+=(--fallback-model "$FALLBACK_MODEL")
+    [ "$REASONING_EFFORT" = auto ] || run_args+=(--reasoning-effort "$REASONING_EFFORT")
+    run_rc=0
+    goal_phase_run env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" bash \
+      "$ROOT/scripts/plan-run.sh" "${run_args[@]}" || run_rc=$?
+    run_out="$GOAL_PHASE_OUT"
+    guard_git_authority
+    guard_expected_ref
+    printf '%s\n' "$run_out" | tail -n 6
+    if [ "$run_rc" -ne 0 ]; then
+      if printf '%s\n' "$run_out" | grep -q 'no actionable task'; then
+        park "tasks-exhausted" "acceptance fails and the plan has no actionable task; add tasks (agent-plan add) or decompose the remaining gap"
+      fi
+      park "task-failed" "plan-run failed (see its ledger row); review the task, then re-run goal-drive"
+    fi
+
+    task_id="$(printf '%s\n' "$run_out" | sed -n 's/^plan-run: result task=\([^ ]*\).*/\1/p' | tail -n 1)"
+    patch_file="$(printf '%s\n' "$run_out" | sed -n 's/.* patch=\([^ ]*\).*/\1/p' | tail -n 1)"
+  fi
+
+  guard_git_authority
+  guard_expected_ref
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$head_before" ] ||
+    park "head-moved" "another writer advanced HEAD mid-cycle; inspect git log, then re-run on a quiet tree"
+  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$head_ref_before" ] ||
+    park "intent-ref-moved" "the checked-out branch changed mid-cycle; return to the reviewed branch"
+  [ -n "$task_id" ] || park "missing-plan-task" "plan-run returned no task id"
+  if [ -z "$patch_file" ] || [ ! -f "$patch_file" ]; then
+    park "no-admitted-patch" "plan-run returned no reviewed patch"
+  fi
+  if [ "$provider_called" = 1 ] && [ "${OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW:-0}" = 1 ]; then
+    echo "goal-drive: injected stop after provider review; rerun to adopt task $task_id" >&2
+    exit 75
+  fi
+
+  goal_integrate_current
+
 done

@@ -35,6 +35,7 @@ KNOWN_FAILURE_FP=""
 CHILD_PID=""
 KEEP_CLAIM=0
 CLAIMED=0
+RESERVED_LEASE=""
 CONTINUE_REVIEW=0
 POSSIBLE_REPAIR_RESUME=0
 RESUME_REPAIR=0
@@ -54,6 +55,8 @@ Options:
   --to PROVIDER   Default transport for tasks without a reviewed assignment.
   --id ID         Claim and execute this ready task. With --land, a matching
                   reviewed task continues from its stored patch first.
+  --claimed-lease LEASE  Internal goal-drive reservation; requires --id and
+                  the exact existing claimed task/provider lease.
   --next          Atomically claim the next actionable task.
   --repair N      Bounded worker repair rounds, 0-3 (default: 0).
   --land          Land through patch-land after successful delegation.
@@ -88,6 +91,7 @@ fail() { echo "error: $*" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --to) [ "$#" -ge 2 ] || fail "--to requires provider"; TO="$2"; shift 2 ;;
+    --claimed-lease) [ "$#" -ge 2 ] || fail "--claimed-lease requires a lease"; RESERVED_LEASE="$2"; shift 2 ;;
     --id) [ "$#" -ge 2 ] || fail "--id requires value"; TASK_ID="$2"; shift 2 ;;
     --next) USE_NEXT=1; shift ;;
     --repair) [ "$#" -ge 2 ] || fail "--repair requires N"; REPAIR="$2"; shift 2 ;;
@@ -115,6 +119,7 @@ oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 case "$REPAIR" in *[!0-9]*|"") fail "--repair must be 0-3" ;; esac
 [ "$REPAIR" -le 3 ] || fail "--repair must be 0-3"
 [ "$AUTO_REPAIR" -eq 0 ] || [ "$LAND" -eq 1 ] || fail "--auto-repair requires --land"
+[ -z "$RESERVED_LEASE" ] || { [ -n "$TASK_ID" ] && [ "$DRY_RUN" -eq 0 ] && [ "$LAND" -eq 0 ]; } || fail "--claimed-lease requires --id without --land/--dry-run"
 if [ "$USE_NEXT" -eq 1 ] && [ -n "$TASK_ID" ]; then fail "use exactly one of --id or --next"; fi
 if [ "$USE_NEXT" -eq 0 ] && [ -z "$TASK_ID" ]; then fail "use exactly one of --id or --next"; fi
 case "$TASK_ID" in *[!A-Za-z0-9._-]* ) fail "task ids must match [A-Za-z0-9._-]+" ;; esac
@@ -256,7 +261,7 @@ trap 'exit 143' TERM
 # plan-run never invokes reclaim, so a dead worker would park its task forever.
 # Guarded and tolerant: if this cannot run, the claim simply stays put. Skipped
 # for a dry run, which must not write.
-if [ "$DRY_RUN" -eq 0 ]; then
+if [ "$DRY_RUN" -eq 0 ] && [ -z "$RESERVED_LEASE" ]; then
   preflight="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" reclaim 2>/dev/null || true)"
   case "$preflight" in
     ""|*"reclaimed 0 task"*) ;;
@@ -297,7 +302,17 @@ count=d.get("repair_count",0)
 print(1 if count == 1 and not isinstance(count,bool) and d.get("lease_id") and d.get("review_lease_id") == d.get("lease_id") else 0)
 ')"
   fi
-  if [ "$state" = review ] && [ "$LAND" -eq 1 ]; then
+  if [ -n "$RESERVED_LEASE" ]; then
+    printf '%s' "$task_json" | python3 -c '
+import json,sys
+t=json.load(sys.stdin)
+if (t.get("state") != "claimed" or t.get("lease_id") != sys.argv[1]
+        or t.get("provider") != sys.argv[2]):
+    raise SystemExit(2)
+' "$RESERVED_LEASE" "$TO" || fail "reserved task lease changed"
+    LEASE_ID="$RESERVED_LEASE"
+    CLAIMED=1
+  elif [ "$state" = review ] && [ "$LAND" -eq 1 ]; then
     CONTINUE_REVIEW=1
   elif [ "$POSSIBLE_REPAIR_RESUME" -eq 1 ]; then
     : # Exact repair marker is validated with the full receipt below.
@@ -315,7 +330,7 @@ print(1 if count == 1 and not isinstance(count,bool) and d.get("lease_id") and d
       fail "interrupted repair task $TASK_ID provider is $task_provider, not $TO"
   fi
   if [ "$DRY_RUN" -eq 0 ] &&
-    [ "$CONTINUE_REVIEW" -eq 0 ] && [ "$POSSIBLE_REPAIR_RESUME" -eq 0 ]; then
+    [ "$CONTINUE_REVIEW" -eq 0 ] && [ "$POSSIBLE_REPAIR_RESUME" -eq 0 ] && [ -z "$RESERVED_LEASE" ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" claim --id "$TASK_ID" --provider "$TO" >/dev/null
     CLAIMED=1
     task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$TASK_ID")"

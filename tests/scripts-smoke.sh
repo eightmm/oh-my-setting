@@ -21269,6 +21269,56 @@ PY
   fi
 }
 
+test_autopilot_parallel_receipt_contract() {
+  python3 - "$ROOT/scripts/lib/autopilot-receipt.py" "$TMP/parallel-receipt.json" <<'PY' ||
+import argparse, copy, importlib.util, json, pathlib, sys
+helper, target = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(helper.parent))
+spec = importlib.util.spec_from_file_location("receipt", helper)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+parser = argparse.ArgumentParser()
+m.add_binding_args(parser)
+args = parser.parse_args([
+    "--stage", "proposing", "--repo", str(target.parent), "--spec-sha256", "a" * 64,
+    "--planner", "claude", "--worker", "codex", "--reviewer", "claude",
+    "--planner-reasoning-effort", "auto", "--worker-reasoning-effort", "auto",
+    "--reviewer-reasoning-effort", "auto", "--provider-timeout", "5m",
+    "--planner-timeout", "5m", "--worker-timeout", "5m", "--reviewer-timeout", "5m",
+    "--allowed", "src", "--base", "main", "--base-sha", "b" * 40,
+    "--remote", "origin", "--max-cycles", "3", "--max-parallel-tasks", "2",
+    "--initial-tasks", "3", "--replan-tasks", "2", "--review-mode", "off",
+    "--branch", "oms/autopilot-" + "a" * 12, "--owner-id", "owner_" + "1" * 32,
+    "--updated", "2026-10-21T00:00:00Z",
+])
+row = m.row_from_args(args)
+m.validate_receipt(row)
+for stage in ("proposing", "driving", "parked"):
+    row["stage"] = stage
+    target.write_text(json.dumps(row), encoding="utf-8")
+    loaded, _ = m.load_receipt(target)
+    continuation = m.option_args(loaded)
+    assert continuation[continuation.index("--max-parallel-tasks") + 1] == "2"
+    assert ("propose" if stage == "proposing" else "run") in continuation
+    changed = copy.deepcopy(loaded)
+    changed["contract"]["max_parallel_tasks"] = 1
+    assert m.immutable_view(changed) != m.immutable_view(loaded)
+for bad in (0, 5, True, "2", None):
+    row["contract"]["max_parallel_tasks"] = bad
+    try:
+        m.validate_receipt(row)
+    except m.ReceiptError:
+        pass
+    else:
+        raise AssertionError(bad)
+row["contract"].pop("max_parallel_tasks")
+target.write_text(json.dumps(row), encoding="utf-8")
+loaded, _ = m.load_receipt(target)
+assert loaded["contract"]["max_parallel_tasks"] == 1
+PY
+    fail "parallel receipt validation/legacy/reenter continuation failed"
+}
+
 test_autopilot_receipt_corrupt_lineage_is_fail_closed() {
   if ! python3 - "$ROOT/scripts/lib/autopilot-receipt.py" \
       "$TMP/receipt-corrupt-lineage" <<'PY'
@@ -34171,6 +34221,418 @@ assert row["status"] == "invalid" and row["capsule_id"] == "'"$latest_id"'", row
   printf '%s\n' "$resume_out" | grep >/dev/null -F \
     'portable capsule unknown (invalid; advisory only' ||
     fail "resume rendered a null capsule id instead of unknown: $resume_out"
+}
+
+goal_drive_batch_review_probe() {
+  local project="$TMP/batch-review-$1" helper="$TMP/batch-review-$1.sh"
+  make_committed_repo "$project"
+  sed -n '/^goal_batch_tool() {/,/^GOAL_BATCH_PIDS=()/p' "$ROOT/scripts/goal-drive.sh" | sed '$d' > "$helper"
+  python3 - "$ROOT" "$project" "$helper" "$1" <<'PY'
+import hashlib,json,os,pathlib,subprocess,sys
+root,repo,helper,kind=sys.argv[1:]
+p=pathlib.Path(repo); state=p/".oms/plan";state.mkdir(parents=True,exist_ok=True)
+checks=p/"checks";checks.mkdir()
+def task(i):
+    return {"id":i,"created":i,"title":i,"state":"ready","depends":[],
+            "allowed_paths":[i+".future","checks/"+i+".sh"],"verify":"bash checks/"+i+".sh"}
+tasks={i:task(i) for i in ("t1","t2")}
+def save():
+    (state/"tasks.json").write_text(json.dumps({"tasks":tasks}),encoding="utf-8")
+def run(mode,*args):
+    env=dict(os.environ,ROOT=root,REPO=repo,PLAN_FILE=str(state/"tasks.json"),
+             PROGRESS=str(state/"progress.jsonl"),CONTRACT_ID="",MAX_PARALLEL_TASKS="2",ACCEPT_SNAPSHOT="fixture")
+    return subprocess.run(["bash","-c",'set -o pipefail; . "$1"; goal_batch_tool "$2" "${@:3}"',"probe",helper,mode,*args],
+                          env=env,capture_output=True,text=True)
+if kind == "inputs":
+    failures=[]
+    for body in ("rg -q needle\n", "grep -q needle shared.future\n"):
+        for i in tasks:
+            (checks/(i+".sh")).write_text(body)
+        save()
+        result=run("select",json.dumps({"actionable":["t1","t2"]}),"2")
+        if result.returncode != 0 or result.stdout.strip() != "t1":
+            failures.append((body,result.stdout,result.stderr))
+    # Brace expansion makes a task's own-file check also read a shared file.
+    for i in tasks:
+        (checks/(i+".sh")).write_text("grep -q {needle,shared.future} "+i+".future\n")
+    save()
+    result=run("select",json.dumps({"actionable":["t1","t2"]}),"2")
+    if result.returncode != 0 or result.stdout.strip() != "t1":
+        failures.append(("brace",result.stdout,result.stderr))
+    for i in tasks:
+        (checks/(i+".sh")).write_text("grep -q needle "+i+".future\n")
+    save()
+    result=run("select",json.dumps({"actionable":["t1","t2"]}),"2")
+    assert result.returncode == 0 and result.stdout.split() == ["t1","t2"],result.stderr
+    assert not failures,failures
+elif kind == "retire":
+    script=str(pathlib.Path(root)/"scripts/agent-plan.sh")
+    def plan(*args):
+        return subprocess.check_output(["bash",script,"--repo",repo,*args],text=True)
+    plan("init","--goal","retirement","--accept","false")
+    for i in ("t1","t2"):
+        plan("add","--id",i,"--title",i,"--allowed",i+".future","--verify","test -f "+i+".future")
+        plan("claim","--id",i,"--provider","codex")
+    second=json.loads(plan("show","--id","t2"))
+    prepared=run("prepare","retire-probe","fixture","t1","t2")
+    assert prepared.returncode == 0,prepared.stderr
+    (state/"progress.jsonl").write_text(prepared.stdout)
+    plan("start","--id","t2","--lease-id",second["lease_id"])
+    result=run("abandon")
+    assert result.returncode == 0,result.stderr
+    first=json.loads(plan("show","--id","t1"));second_after=json.loads(plan("show","--id","t2"))
+    assert first["state"] == "ready" and not first["lease_id"],first
+    assert second_after["state"] == "running" and second_after["lease_id"] == second["lease_id"]
+    terminal=json.loads((state/"progress.jsonl").read_text().splitlines()[-1])
+    assert terminal["outcome"]["released"] == ["t1"] and terminal["outcome"]["preserved"] == ["t2"]
+else:
+    def git(*args):
+        return subprocess.check_output(["git","-C",repo,*args],text=True).strip()
+    base=git("rev-parse","HEAD")
+    (p/"first.txt").write_text("reviewed\n")
+    git("add","first.txt")
+    patch=state/"commit-patches"/"frozen.patch";patch.parent.mkdir()
+    patch.write_bytes(subprocess.check_output(["git","-C",repo,"diff","--cached","--binary"]))
+    git("commit","-qm","reviewed")
+    tasks={"t1":dict(tasks["t1"],state="done",allowed_paths=["first.txt"],
+                     verify="test -f first.txt",lease_id="lease_one",lease_epoch=1)}
+    save()
+    binding={k:tasks["t1"].get(k) for k in ("id","created","title","allowed_paths","verify","depends","assignment")}
+    digest=lambda v:hashlib.sha256(json.dumps(v,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+    prepared={"schema":1,"kind":"goal-batch","phase":"prepared","batch_id":"batch-probe","contract_id":"",
+              "width":2,"accept_sha256":"fixture","plan_contract":digest(None),"worktree":repo,
+              "base_sha":base,"head_ref":git("symbolic-ref","-q","HEAD"),
+              "tasks":[{"id":"t1","lease_id":"lease_one","lease_epoch":1,"binding":digest(binding)}]}
+    committed={"kind":"commit-intent","phase":"committed","worktree":repo,"base_sha":base,
+               "task_id":"t1","lease_id":"lease_one","patch":".oms/plan/commit-patches/frozen.patch",
+               "patch_sha256":hashlib.sha256(patch.read_bytes()).hexdigest()}
+    (state/"progress.jsonl").write_text(json.dumps(prepared)+"\n"+json.dumps(committed)+"\n")
+    result=run("recover")
+    assert result.returncode == 0 and result.stdout.strip() == "batch-probe",result.stderr
+    (p/"first.txt").write_text("amended bytes\n")
+    git("add","first.txt");git("commit","--amend","-qm","amended")
+    result=run("recover")
+    assert result.returncode != 0 and "batch committed tree differs from frozen patch" in result.stderr,(result.stdout,result.stderr)
+PY
+}
+
+test_goal_drive_batch_input_ownership() {
+  goal_drive_batch_review_probe inputs || fail "unbounded or missing verifier inputs joined a batch"
+}
+
+test_goal_drive_batch_abandon_preserves_live_state() {
+  goal_drive_batch_review_probe retire || fail "batch abandonment lost unstarted or active lease ownership"
+}
+
+test_goal_drive_batch_prefix_tree_identity() {
+  goal_drive_batch_review_probe prefix || fail "an amended prefix escaped frozen patch validation"
+}
+
+test_goal_drive_batch_reservation_and_signals() {
+  local helper="$TMP/goal-batch-functions.sh" child="$TMP/goal-batch-child.py" early="$TMP/goal-batch-early.py"
+  local killbin="$TMP/goal-batch-kill-bin" cancel="$TMP/goal-batch-cancel.sh" rc=0
+  sed -n '/^GOAL_BATCH_PIDS=()/,/^goal_batch_dispatch() {/p' "$ROOT/scripts/goal-drive.sh" |
+    sed '$d' > "$helper"
+  (
+    set -euo pipefail
+    . "$helper"
+    # Read by the extracted production reservation helper.
+    # shellcheck disable=SC2034
+    CONTRACT_ID=owner_11111111111111111111111111111111 RUN_ID=reservation-fixture CYCLE=1
+    CONTRACT_CYCLES=0
+    progress_append() { cat >/dev/null; return 1; }
+    reserve_rc=0
+    goal_reserve_cycle t1 lease_fixture || reserve_rc=$?
+    [ "$reserve_rc" != 0 ] && [ "$CONTRACT_CYCLES" = 0 ]
+    # Read by the extracted production signal helper.
+    # shellcheck disable=SC2034
+    GOAL_BATCH_LAUNCHING=1
+    goal_batch_signal TERM 143
+    [ "$GOAL_BATCH_PENDING_SIGNAL" = TERM ] && [ "$GOAL_BATCH_PENDING_EXIT" = 143 ]
+  ) || fail "a failed reservation or launch-time signal lost its fence"
+
+  cat > "$child" <<'PY'
+import pathlib, signal, sys, time
+root = pathlib.Path(sys.argv[1])
+def stop(*_args):
+    root.with_suffix(".stopped").touch()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+root.with_suffix(".started").touch()
+while True:
+    time.sleep(0.1)
+PY
+  (
+    . "$helper"
+    for id in one two; do
+      python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise --wall 15 --kill-after 1 \
+        --label batch-signal -- python3 "$child" "$TMP/batch-$id" >/dev/null 2>&1 &
+      GOAL_BATCH_PIDS+=("$!")
+    done
+    for ((i=0; i<100; i++)); do
+      if [ -f "$TMP/batch-one.started" ] && [ -f "$TMP/batch-two.started" ]; then break; fi
+      sleep 0.1
+    done
+    goal_batch_signal TERM 143
+  ) || rc=$?
+  [ "$rc" = 143 ] || fail "batch signal returned $rc"
+  [ -f "$TMP/batch-one.stopped" ] && [ -f "$TMP/batch-two.stopped" ] ||
+    fail "batch signal failed to stop and reap both supervised children"
+
+  cat > "$early" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).with_suffix(".finished").touch()
+PY
+  mkdir -p "$killbin"
+  cat > "$killbin/kill" <<'PY'
+#!/usr/bin/env python3
+import os, signal, sys
+if len(sys.argv) != 4 or sys.argv[1] != "-s":
+    raise SystemExit(2)
+pid = int(sys.argv[3])
+with open(os.environ["BATCH_KILL_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(str(pid) + "\n")
+try:
+    os.kill(pid, getattr(signal, "SIG" + sys.argv[2]))
+except ProcessLookupError:
+    pass
+PY
+  chmod +x "$killbin/kill"
+  cat > "$cancel" <<'SH'
+set -euo pipefail
+. "$1"
+child="$2"; early="$3"; tmp="$4"
+python3 "$child" "$tmp/batch-live" &
+live_pid=$!
+python3 "$early" "$tmp/batch-finished" &
+early_pid=$!
+GOAL_BATCH_PIDS=("$live_pid" "$early_pid")
+printf '%s\n' "$live_pid" > "$tmp/batch-live.pid"
+for ((i=0; i<100; i++)); do
+  [ -f "$tmp/batch-live.started" ] && [ -f "$tmp/batch-finished.finished" ] && break
+  sleep 0.05
+done
+[ -f "$tmp/batch-live.started" ] && [ -f "$tmp/batch-finished.finished" ]
+for ((i=0; i<100; i++)); do
+  active="$(jobs -pr; jobs -ps)"
+  active="${active//$'\n'/ }"
+  case " $active " in
+    *" $early_pid "*) sleep 0.05 ;;
+    *) break ;;
+  esac
+done
+case " $active " in
+  *" $early_pid "*) exit 1 ;;
+esac
+enable -n kill
+goal_batch_signal TERM 143
+SH
+  rc=0
+  # PATH is scoped to this fixture process so cancellation uses its fake kill.
+  # shellcheck disable=SC2031
+  env PATH="$killbin:$PATH" BATCH_KILL_LOG="$TMP/batch-kills" \
+    bash "$cancel" "$helper" "$child" "$early" "$TMP" || rc=$?
+  [ "$rc" = 143 ] || fail "cancellation after an early finisher returned $rc"
+  [ "$(cat "$TMP/batch-kills")" = "$(cat "$TMP/batch-live.pid")" ] ||
+    fail "cancellation signalled a reaped batch PID: $(cat "$TMP/batch-kills")"
+  [ -f "$TMP/batch-live.stopped" ] || fail "cancellation missed the still-running batch child"
+
+  local project="$TMP/batch-verifier-alias" selection="$TMP/batch-selection.sh"
+  make_committed_repo "$project"
+  mkdir -p "$project/checks"
+  printf 'true\n' > "$project/checks/shared.sh"
+  if ln -s checks "$project/checkalias" 2>/dev/null; then
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal alias --accept false >/dev/null
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title first \
+      --allowed first.txt --verify 'bash checks/shared.sh' >/dev/null
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t2 --title second \
+      --allowed second.txt --verify 'bash checkalias/shared.sh' >/dev/null
+    sed -n '/^goal_batch_tool() {/,/^GOAL_BATCH_PIDS=()/p' "$ROOT/scripts/goal-drive.sh" |
+      sed '$d' > "$selection"
+    (
+      . "$selection"
+      # Read by the extracted production selector.
+      # shellcheck disable=SC2034
+      PLAN_FILE="$project/.oms/plan/tasks.json" PROGRESS="$project/.oms/plan/progress.jsonl" REPO="$project" CONTRACT_ID="" MAX_PARALLEL_TASKS=2 ACCEPT_SNAPSHOT=fixture
+      ready="$("$ROOT/scripts/agent-plan.sh" --repo "$project" status --json)"
+      [ "$(goal_batch_tool select "$ready" 2)" = t1 ]
+    ) || fail "two verifier directory spellings scheduled the same physical file together"
+  fi
+}
+
+goal_drive_batch_cases() {
+  local mode project bin logs out rc width allowed verify task cap owner
+  local -a deps
+  for mode in "$@"; do
+    project="$TMP/goal-batch-$mode"
+    bin="$TMP/goal-batch-bin-$mode"
+    logs="$TMP/goal-batch-events-$mode"
+    make_committed_repo "$project"
+    mkdir -p "$project/checks" "$bin" "$logs"
+    for task in t1 t2 t3; do
+      printf 'grep -qx ok %s.txt\n' "$task" > "$project/checks/$task.sh"
+    done
+    printf 'test -f t1.txt\n' > "$project/checks/shared.sh"
+    git -C "$project" add checks
+    git -C "$project" commit -qm verifiers
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal batches \
+      --accept 'test -f t1.txt && test -f t2.txt && test -f t3.txt' >/dev/null
+    for task in t1 t2 t3; do
+      allowed="$task.txt,checks/$task.sh"; verify="bash checks/$task.sh"; deps=()
+      if [ "$mode" = overlap ] && [ "$task" != t3 ]; then allowed="$allowed,shared.txt"; fi
+      if [ "$mode" = verifier ] && [ "$task" = t1 ]; then allowed="$allowed,checks/t2.sh"; fi
+      if [ "$mode" = shared ] && [ "$task" != t3 ]; then verify='bash checks/shared.sh'; fi
+      if [ "$mode" = unknown ] && [ "$task" != t3 ]; then verify="test -f $task.txt"; fi
+      if [ "$task" = t3 ]; then deps=(--depends "t1,t2"); fi
+      "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id "$task" --title "feat: $task" \
+        --allowed "$allowed" --verify "$verify" ${deps[@]+"${deps[@]}"} >/dev/null
+    done
+    cat > "$bin/codex" <<'WORKER'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'codex fixture'; exit 0 ;; esac
+cat >/dev/null
+id="${OMS_TASK_ID:?}"
+printf '%s\n' "$id" >> "$BATCH_EVENTS/calls"
+touch "$BATCH_EVENTS/$id.started"
+if [ "$id" = t3 ]; then
+  [ "$(git -C "$BATCH_REPO" log -2 --format=%s | tr '\n' '|')" = 'feat: t2|feat: t1|' ] || exit 93
+fi
+if [ "$BATCH_MODE" = parallel ] || [ "$BATCH_MODE" = recover ] || [ "$BATCH_MODE" = abandon ] || [ "$BATCH_MODE" = land-recover ] || [ "$BATCH_MODE" = tamper ] || [ "$BATCH_MODE" = failure ]; then
+  if [ "$id" = t1 ] || [ "$id" = t2 ]; then
+    other=t1; [ "$id" != t1 ] || other=t2
+    for ((i=0; i<300; i++)); do
+      [ ! -f "$BATCH_EVENTS/$other.started" ] || break
+      sleep 0.1
+    done
+    [ -f "$BATCH_EVENTS/$other.started" ] || exit 94
+    touch "$BATCH_EVENTS/$id.ready"
+    for ((i=0; i<300; i++)); do
+      [ ! -f "$BATCH_EVENTS/$other.ready" ] || break
+      sleep 0.1
+    done
+    [ -f "$BATCH_EVENTS/$other.ready" ] || exit 95
+    if [ "$id" = t1 ]; then
+      for ((i=0; i<300; i++)); do
+        if python3 - "$BATCH_REPO/.oms/plan/tasks.json" <<'PY'
+import json,sys
+t=json.load(open(sys.argv[1]))["tasks"]["t2"]
+raise SystemExit(0 if t["state"] in ("review", "ready", "blocked") else 1)
+PY
+        then break; fi
+        sleep 0.1
+      done
+    fi
+  fi
+fi
+if [ "$BATCH_MODE" = failure ] && [ "$id" = t2 ]; then exit 9; fi
+printf 'ok\n' > "$id.txt"
+printf '%s\n' "$id" >> "$BATCH_EVENTS/finished"
+echo worker-ok
+WORKER
+    chmod +x "$bin/codex"
+    width=2; cap=3; rc=0; owner="owner_11111111111111111111111111111111"
+    [ "$mode" != serial ] || width=1
+    [ "$mode" != cap ] || cap=1
+    [ "$mode" != failure ] || cap=4
+    out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+      BATCH_MODE="$mode" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW="$([ "$mode" = recover ] || [ "$mode" = abandon ] && echo 1 || echo 0)" \
+      OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND="$([ "$mode" = land-recover ] || [ "$mode" = tamper ] && echo 1 || echo 0)" \
+      "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles "$cap" \
+      --max-parallel-tasks "$width" --contract-id "$owner" 2>&1)" || rc=$?
+    if [ "$mode" = abandon ]; then
+      [ "$rc" = 75 ] || fail "abandon fixture did not retain its batch: $out"
+      python3 "$ROOT/scripts/lib/autopilot-receipt.py" write "$project/.oms/plan/autopilot-run.json" \
+        --expected absent --stage parked --repo "$project" --spec-sha256 "$(printf '%064d' 0)" \
+        --planner codex --worker codex --reviewer codex --provider-timeout 5m \
+        --planner-timeout 5m --worker-timeout 5m --reviewer-timeout 5m \
+        --planner-reasoning-effort auto --worker-reasoning-effort auto --reviewer-reasoning-effort auto \
+        --allowed checks,t1.txt,t2.txt,t3.txt --base main --base-sha "$(git -C "$project" rev-parse HEAD)" \
+        --remote origin --max-cycles 3 --max-parallel-tasks 2 --initial-tasks 3 --replan-tasks 2 \
+        --review-mode off --branch oms/autopilot-000000000000 --owner-id "$owner" \
+        --updated 2026-10-21T00:00:00Z >/dev/null || fail "could not bind abandon fixture receipt"
+      "$ROOT/scripts/autopilot.sh" --repo "$project" abandon --reason 'new reviewed contract' >/dev/null ||
+        fail "could not abandon unfinished batch"
+      owner=owner_22222222222222222222222222222222
+      rc=0
+      out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+        BATCH_MODE=retry "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 \
+        --max-parallel-tasks 1 --contract-id "$owner" 2>&1)" || rc=$?
+    fi
+    if [ "$mode" = recover ] || [ "$mode" = land-recover ] || [ "$mode" = tamper ]; then
+      [ "$rc" = 75 ] || fail "batch review crash did not retain both reviews ($rc): $out"
+      if [ "$mode" = tamper ]; then
+        python3 - "$project/.oms/plan/tasks.json" <<'PY_TAMPER'
+import json,pathlib,sys
+task=json.load(open(sys.argv[1]))["tasks"]["t2"]
+with pathlib.Path(task["patch"]).open("a") as handle:
+    handle.write("\n")
+PY_TAMPER
+      fi
+      rc=0
+      out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+        BATCH_MODE="$mode" "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 3 \
+        --max-parallel-tasks 2 --contract-id "$owner" 2>&1)" || rc=$?
+    fi
+    case "$mode" in
+      tamper)
+        [ "$rc" = 3 ] || fail "changed batch artifact should park ($rc): $out"
+        contains "$out" reason=invalid-batch || fail "missing artifact mismatch recovery: $out"
+        [ "$(git -C "$project" log -1 --format=%s)" = 'feat: t1' ] || fail "artifact mismatch lost exact prefix"
+        [ ! -e "$logs/t3.started" ] || fail "artifact mismatch dispatched dependent"
+        ;;
+      failure)
+        [ "$rc" = 3 ] || fail "failed sibling should park ($rc): $out"
+        contains "$out" reason=batch-task-failed || fail "missing named batch recovery: $out"
+        [ "$(git -C "$project" log -1 --format=%s)" = 'feat: t1' ] || fail "failed sibling lost successful prefix"
+        [ ! -e "$logs/t3.started" ] || fail "dependent started after failed sibling"
+        rc=0
+        out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+          BATCH_MODE=retry "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 4 \
+          --retry-known --max-parallel-tasks 2 --contract-id "$owner" 2>&1)" || rc=$?
+        [ "$rc" = 0 ] || fail "released failed task could not start a fresh batch ($rc): $out"
+        [ "$(cat "$logs/calls" | tr '\n' ' ')" = 't1 t2 t2 t3 ' ] ||
+          [ "$(cat "$logs/calls" | tr '\n' ' ')" = 't2 t1 t2 t3 ' ] || fail "retry called a completed prefix again"
+        python3 - "$project/.oms/plan/progress.jsonl" <<'PY_CLOSED'
+import json,sys
+rows=[json.loads(s) for s in open(sys.argv[1])]
+failed=[r for r in rows if r.get("kind") == "goal-batch" and r.get("phase") == "complete"
+        and r.get("outcome",{}).get("status") == "failed"]
+assert len(failed) == 1 and failed[0]["outcome"]["integrated_prefix"] == ["t1"],failed
+assert failed[0]["outcome"]["released"] == ["t2"],failed
+PY_CLOSED
+        ;;
+      cap)
+        [ "$rc" = 3 ] || fail "exhausted attempt budget should park ($rc): $out"
+        [ "$(cat "$logs/calls")" = t1 ] || fail "width exceeded remaining cycle budget"
+        ;;
+      *)
+        [ "$rc" = 0 ] || fail "$mode batch drive failed ($rc): $out"
+        [ "$(git -C "$project" log -3 --reverse --format=%s | tr '\n' '|')" = 'feat: t1|feat: t2|feat: t3|' ] ||
+          fail "$mode changed integration order"
+        [ "$(sort "$logs/calls" | tr '\n' ' ')" = 't1 t2 t3 ' ] || fail "$mode redispatched a completed patch"
+        if [ "$mode" = parallel ] || [ "$mode" = recover ] || [ "$mode" = abandon ] || [ "$mode" = land-recover ]; then
+          [ "$(cat "$logs/finished" | tr '\n' ' ')" = 't2 t1 t3 ' ] || fail "rendezvous did not finish t2 before t1"
+        else
+          [ "$(cat "$logs/finished" | tr '\n' ' ')" = 't1 t2 t3 ' ] || fail "$mode did not serialize workers"
+        fi
+        ;;
+    esac
+    python3 - "$project/.oms/plan/progress.jsonl" "$logs/calls" <<'PY' || fail "$mode cycle accounting changed"
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1])]
+assert sum(r.get("kind") == "autopilot-cycle" for r in rows) == len(open(sys.argv[2]).readlines())
+PY
+  done
+}
+
+# smoke-weight: 240
+test_goal_drive_parallel_batches() {
+  goal_drive_batch_cases parallel shared overlap verifier unknown serial cap recover land-recover tamper
+}
+
+# smoke-weight: 73
+test_goal_drive_parallel_failure_recovery() {
+  goal_drive_batch_cases failure abandon
 }
 
 test_goal_drive_silences_foreign_closed_intents() {

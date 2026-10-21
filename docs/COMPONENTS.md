@@ -777,7 +777,7 @@ The detailed operating contract is in the harness state-memory reference.
 draft spec and does not alter the plan until the proposal is explicitly
 applied. `oms plan-run` claims and executes at most one ready task. `oms
 goal-drive` repeats within a cycle cap and acceptance command; the cap counts
-iterations across resumes of one autopilot contract, bounds iterations rather
+task attempts across resumes of one autopilot contract, bounds attempts rather
 than provider cost, and an exhausted contract is retired with `oms autopilot
 abandon`. It is not an unbounded autonomous loop. Before landing,
 `goal-drive` freezes the reviewed
@@ -1000,6 +1000,32 @@ a fresh reviewed task without editing away the old binding. GC preserves legacy
 executor markers instead of attempting to resume or retire their contracts.
 Default state/envelope queries no longer scan or advertise these retired files.
 Normal task leases, scoped admission, one-use approvals and one-shot repair remain.
+
+`oms autopilot --max-parallel-tasks N` binds an immutable width of 1..4
+(default 1); standalone `oms goal-drive` accepts the same flag. Propose/run
+continuations and reentry retain it, and older receipts mean width 1. Each
+new task attempt reserves one lifetime cycle before dispatch; adopting a
+completed review spends no additional cycle or provider call. Width never
+exceeds the remaining attempt budget.
+
+Parallel goal-drive keeps per-task worktrees, selects ready tasks in plan order,
+and uses graph scope overlap checks to serialize intersecting allowed paths,
+shared verifier files and writer/verifier intersections. Only literal direct
+shell verifiers with recognized, explicit file inputs prove coverage in v1.
+Every program and data input must be within the task's allowed paths, whether
+it exists yet or not. Implicit repository scans, directories, globs, inputs
+outside that scope and unknown forms serialize. A batch barrier precedes serial admission and
+exact commits in plan order. Campaign review semantics are unchanged. A failed
+sibling preserves all results, integrates the successful ordered prefix and
+closes the batch with its integrated prefix, released tasks and preserved reviews,
+then parks with `batch-task-failed`. A retry uses a fresh batch and the remaining
+attempt budget. `autopilot abandon` also retires the old batch; completed reviews
+remain reusable without provider calls or charges, including when the replacement
+contract chooses width 1. Claimed tasks are released only through exact-lease
+recovery with live-marker protection; running or uncertain work is preserved.
+Reentry reconciles the existing commit intent first, then the batch's lease-bound
+reviews. Every committed prefix tree must match its frozen patch digest. Changed contracts, leases or commit lineage park
+with `invalid-batch` and preserve evidence for the owning agent to reconcile.
 
 Each new autopilot receipt also binds an opaque run owner. Claims and worker
 markers inherit it. Re-entry recovers only that owner's exact current

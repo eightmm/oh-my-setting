@@ -172,6 +172,7 @@ def load_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
     if isinstance(contract, dict):
         contract.setdefault("allow_verifier_change", False)
         contract.setdefault("collaboration", "off")
+        contract.setdefault("max_parallel_tasks", 1)
     # Legacy receipts predate owner-fenced task recovery. Keep them readable,
     # but leave the owner empty so recovery fails closed instead of guessing.
     row.setdefault("owner_id", "")
@@ -270,6 +271,7 @@ def validate_receipt(row: dict[str, Any]) -> None:
         "base_sha",
         "remote",
         "max_cycles",
+        "max_parallel_tasks",
         "initial_tasks",
         "replan_tasks",
         "auto_repair",
@@ -289,6 +291,7 @@ def validate_receipt(row: dict[str, Any]) -> None:
     if not GIT_SHA.fullmatch(text(contract.get("base_sha"), "base digest")):
         raise ReceiptError("base digest is invalid")
     integer(contract.get("max_cycles"), "max cycles", 1, 10)
+    integer(contract.get("max_parallel_tasks"), "max parallel tasks", 1, 4)
     integer(contract.get("initial_tasks"), "initial tasks", 1, 12)
     integer(contract.get("replan_tasks"), "replan tasks", 1, 2)
     boolean(contract.get("auto_repair"), "auto repair")
@@ -680,6 +683,8 @@ def option_args(row: dict[str, Any]) -> list[str]:
         contract["remote"],
         "--max-cycles",
         str(contract["max_cycles"]),
+        "--max-parallel-tasks",
+        str(contract["max_parallel_tasks"]),
         "--initial-tasks",
         str(contract["initial_tasks"]),
         "--replan-tasks",
@@ -770,6 +775,7 @@ def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "base_sha": args.base_sha,
             "remote": args.remote,
             "max_cycles": args.max_cycles,
+            "max_parallel_tasks": args.max_parallel_tasks,
             "initial_tasks": args.initial_tasks,
             "replan_tasks": args.replan_tasks,
             "auto_repair": args.auto_repair,
@@ -802,6 +808,7 @@ def add_binding_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--remote", required=True)
     parser.add_argument("--max-cycles", type=int, required=True)
+    parser.add_argument("--max-parallel-tasks", type=int, default=1)
     parser.add_argument("--initial-tasks", type=int, required=True)
     parser.add_argument("--replan-tasks", type=int, required=True)
     parser.add_argument("--auto-repair", action="store_true")
@@ -1407,9 +1414,405 @@ def supervise_phase(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def retire_goal_batch(row: dict[str, Any], progress: str, reason: str) -> None:
+    """Retire batch authority without cancelling workers or discarding reviews."""
+    root = Path(__file__).resolve().parent.parent
+    outcome: dict[str, Any] = {"status": reason, "integrated_prefix": [], "released": [],
+                               "reviews": [], "preserved": []}
+    prefix = True
+    for item in row["tasks"]:
+        shown = subprocess.run(["bash", str(root / "agent-plan.sh"), "--repo", row["worktree"],
+                                "show", "--id", item["id"]], capture_output=True, text=True)
+        if shown.returncode:
+            outcome["preserved"].append(item["id"])
+            prefix = False
+            continue
+        task = json.loads(shown.stdout)
+        if task.get("state") == "done" and prefix:
+            outcome["integrated_prefix"].append(item["id"])
+            continue
+        prefix = False
+        if task.get("state") == "claimed" and task.get("lease_id") == item["lease_id"]:
+            recovered = subprocess.run(["bash", str(root / "agent-plan.sh"), "--repo", row["worktree"],
+                "recover-lease", "--id", item["id"], "--lease-id", item["lease_id"],
+                "--expected-state", "claimed"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if recovered.returncode == 0:
+                outcome["released"].append(item["id"])
+                continue
+        key = "released" if task.get("state") == "ready" else "reviews" if task.get("state") == "review" else "preserved"
+        outcome[key].append(item["id"])
+    terminal = dict(row, phase="complete", outcome=outcome)
+    subprocess.run([sys.executable, str(root / "lib/durable-jsonl.py"), "--label", "progress.jsonl",
+                    "append", progress], input=json.dumps(terminal) + "\n", text=True, check=True)
+
+
+def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, args):
+    from oms_graph.scheduler import scopes_overlap
+    import path_scope
+    width = int(width)
+    repo = os.path.realpath(repo)
+    def same_checkout(value):
+        if not isinstance(value, str) or not value:
+            return False
+        # Stored shell receipts may use the Git Bash spelling while native
+        # Python uses a drive path; both must bind the same physical checkout.
+        if os.name == "nt" and re.match(r"^/[A-Za-z]/", value):
+            value = value[1] + ":" + value[2:]
+        return os.path.isabs(value) and os.path.normcase(os.path.realpath(value)) == os.path.normcase(repo)
+    plan = (json.loads(Path(plan_file).read_text(encoding="utf-8"))
+            if mode != "abandon" and Path(plan_file).is_file() else {"tasks": {}})
+    tasks = plan["tasks"]
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    def binding(task):
+        return digest({key: task.get(key) for key in
+                       ("id", "created", "title", "allowed_paths", "verify", "depends", "assignment")})
+    def git(*argv):
+        return subprocess.check_output(["git", "-C", repo, *argv], text=True).strip()
+    def load_rows():
+        rows = []
+        if Path(progress).exists():
+            for line in Path(progress).read_text(encoding="utf-8").splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+        return rows
+    def active():
+        pending = {}
+        for row in load_rows():
+            if row.get("kind") != "goal-batch" or not same_checkout(row.get("worktree")):
+                continue
+            key = row.get("batch_id")
+            if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", key):
+                raise ValueError("invalid batch identity")
+            if row.get("phase") == "prepared":
+                if key in pending:
+                    raise ValueError("duplicate batch")
+                pending[key] = row
+            elif row.get("phase") == "complete":
+                prepared = pending.get(key)
+                if prepared is None or dict(prepared, phase="complete") != {k:v for k,v in row.items() if k != "outcome"}:
+                    raise ValueError("batch terminal binding changed")
+                pending.pop(key)
+            else:
+                raise ValueError("invalid batch phase")
+        if len(pending) > 1:
+            raise ValueError("multiple unfinished batches")
+        return next(iter(pending.values()), None)
+    def validate(row):
+        if (not same_checkout(row["worktree"]) or row["contract_id"] != owner or row["width"] != width or row["accept_sha256"] != accept
+                or row["plan_contract"] != digest(plan.get("project_contract"))
+                or row["head_ref"] != git("symbolic-ref", "-q", "HEAD")
+                or not 1 <= len(row["tasks"]) <= width):
+            raise ValueError("batch contract changed")
+        if subprocess.call(["git", "-C", repo, "merge-base", "--is-ancestor", row["base_sha"], "HEAD"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+            raise ValueError("batch base is no longer an ancestor")
+        for item in row["tasks"]:
+            task = tasks[item["id"]]
+            released = (task.get("state") in ("ready", "blocked") and not task.get("lease_id")
+                        and task.get("lease_epoch") == item["lease_epoch"])
+            if binding(task) != item["binding"] or (task.get("lease_id") != item["lease_id"] and not released):
+                raise ValueError("batch task contract/lease changed: " + item["id"])
+        commits = git("rev-list", "--reverse", row["base_sha"] + "..HEAD").splitlines()
+        done = []
+        for item in row["tasks"]:
+            if tasks[item["id"]].get("state") != "done":
+                break
+            done.append(item)
+        if len(commits) != len(done):
+            raise ValueError("batch HEAD differs from its committed prefix")
+        parent = row["base_sha"]
+        rows = load_rows()
+        for item, commit in zip(done, commits):
+            if git("rev-parse", commit + "^") != parent or not any(
+                    r.get("kind") == "commit-intent" and r.get("phase") == "committed"
+                    and same_checkout(r.get("worktree")) and r.get("base_sha") == parent
+                    and r.get("task_id") == item["id"] and r.get("lease_id") == item["lease_id"]
+                    for r in rows):
+                raise ValueError("batch commit lineage changed")
+            intent = next(r for r in reversed(rows) if r.get("kind") == "commit-intent"
+                and r.get("phase") == "committed" and same_checkout(r.get("worktree"))
+                and r.get("base_sha") == parent and r.get("task_id") == item["id"]
+                and r.get("lease_id") == item["lease_id"])
+            rel = Path(intent["patch"])
+            state_repo = Path(plan_file).parent.parent.parent
+            frozen = state_repo / rel
+            if (rel.is_absolute() or rel.parts[:3] != (".oms", "plan", "commit-patches") or len(rel.parts) != 4
+                    or frozen.is_symlink() or frozen.resolve() != frozen.absolute()):
+                raise ValueError("invalid batch frozen patch")
+            patch = regular_bytes(frozen, 64 * 1024 * 1024, "batch frozen patch")
+            if hashlib.sha256(patch).hexdigest() != intent["patch_sha256"]:
+                raise ValueError("batch frozen patch digest changed")
+            with tempfile.TemporaryDirectory(prefix="oms-batch-tree-") as directory:
+                env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"))
+                def indexed(*argv, data=None):
+                    return subprocess.check_output(["git", "-C", repo, *argv], env=env,
+                                                   input=data, stderr=subprocess.DEVNULL)
+                indexed("read-tree", parent)
+                indexed("apply", "--cached", "--binary", data=patch)
+                expected = indexed("write-tree").decode().strip()
+            def delta(target):
+                return subprocess.check_output(["git", "-C", repo, "-c", "diff.renames=false", "diff",
+                    "--binary", "--full-index", "--no-ext-diff", "--no-textconv", parent, target, "--"])
+            if hashlib.sha256(delta(expected)).digest() != hashlib.sha256(delta(commit)).digest():
+                raise ValueError("batch committed tree differs from frozen patch")
+            parent = commit
+        return row
+
+    def verify_files(command, allowed):
+        # A recognized verifier is parallel-safe only when every program and data
+        # input is explicit and task-owned. Missing files still carry dependencies.
+        def owned(value, program=False):
+            if not value or value == "-" or value.endswith("/") or any(c in value for c in "*?[]{}~"):
+                raise ValueError("unknown verifier input")
+            path = Path(repo, value)
+            physical = path.resolve()
+            if path.is_dir() or path.is_symlink() or not physical.is_relative_to(Path(repo).resolve()):
+                raise ValueError("directory or escaping verifier input")
+            if program and not path.is_file():
+                raise ValueError("missing verifier program")
+            names = {path.relative_to(repo).as_posix(), physical.relative_to(Path(repo).resolve()).as_posix()}
+            if not all(path_scope.matches_any(name, allowed) for name in names):
+                raise ValueError("verifier reads outside task scope")
+            return names
+
+        def inputs(words):
+            name, args = words[0], words[1:]
+            if name == "set":
+                if all(v in ("-e", "-u", "-eu", "-euo", "-o", "pipefail") for v in args):
+                    return []
+                raise ValueError("unknown shell setting")
+            if name in ("true", "false") and not args:
+                return []
+            if name in ("test", "["):
+                if name == "[":
+                    if not args or args[-1] != "]":
+                        raise ValueError("unknown test")
+                    args = args[:-1]
+                if len(args) == 2 and args[0] in ("-e", "-f", "-s", "-r", "-w", "-x"):
+                    return [args[1]]
+                raise ValueError("unknown test inputs")
+            if name not in ("grep", "rg", "cat", "wc", "cmp", "diff"):
+                raise ValueError("unknown reader")
+            paths, positional = [], []
+            explicit_pattern = False
+            i = 0
+            options = True
+            while i < len(args):
+                arg = args[i]
+                if options and arg == "--":
+                    options = False
+                elif options and name in ("grep", "rg") and arg in ("-e", "-f"):
+                    i += 1
+                    if i >= len(args):
+                        raise ValueError("missing pattern")
+                    if arg == "-f":
+                        paths.append(args[i])
+                    explicit_pattern = True
+                elif options and arg.startswith("-"):
+                    flags = {"grep":"qxisvFEnwclhH", "rg":"qxisvFnwcl", "cat":"nbsETv", "wc":"clwmL",
+                             "cmp":"s", "diff":"qsu"}[name]
+                    if arg not in ("--quiet", "--fixed-strings", "--line-regexp") and (
+                            not re.fullmatch(r"-[" + flags + r"]+", arg)):
+                        raise ValueError("unknown reader option")
+                    if arg.startswith("--") and name not in ("grep", "rg"):
+                        raise ValueError("unknown reader option")
+                else:
+                    positional.append(arg)
+                i += 1
+            if name in ("grep", "rg") and not explicit_pattern:
+                if not positional:
+                    raise ValueError("missing search pattern")
+                positional.pop(0)
+            if not positional or (name in ("cmp", "diff") and len(positional) != 2):
+                raise ValueError("implicit reader coverage")
+            return paths + positional
+
+        try:
+            parts = shlex.split(command)
+            if not parts or any(c in command for c in "$`;&|<>()*?[]{}~\n"):
+                return []
+            if parts[0] in ("bash", "sh") and len(parts) == 2 and not parts[1].startswith("-"):
+                target = parts[1]
+            elif len(parts) == 1 and parts[0].startswith("./"):
+                target = parts[0]
+            else:
+                return []
+            files = owned(target, program=True)
+            for line in Path(repo, target).read_text(encoding="utf-8").splitlines():
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                if any(c in line for c in "$`;&|<>()*?[]{}~\\"):
+                    return []
+                words = shlex.split(line, comments=True)
+                if not words:
+                    continue
+                for value in inputs(words):
+                    files.update(owned(value))
+            return sorted(files)
+        except (OSError, ValueError, IndexError):
+            return []
+
+    if mode == "retired-reviews":
+        for row in load_rows():
+            if (row.get("kind") != "goal-batch" or row.get("phase") != "complete"
+                    or not same_checkout(row.get("worktree"))
+                    or row.get("outcome", {}).get("status") not in ("failed", "abandoned")):
+                continue
+            for item in row["tasks"]:
+                task = tasks.get(item["id"], {})
+                if (task.get("state") == "review" and task.get("lease_id") == item["lease_id"]
+                        and binding(task) == item["binding"]):
+                    print("1")
+                    return 0
+        return 0
+    if mode == "select":
+        if any(t.get("state") in ("claimed", "running", "landing") for t in tasks.values()):
+            raise ValueError("unreconciled active task outside batch")
+        status = json.loads(args[0])
+        budget = max(0, int(args[1]))
+        limit = width
+        attempts = 0
+        chosen = []
+        scopes = []
+        for task in sorted(tasks.values(), key=lambda t: t.get("created", "")):
+            reviewed = task.get("state") == "review"
+            if task["id"] not in status["actionable"] and not reviewed:
+                continue
+            if reviewed:
+                for dep in task.get("depends", []):
+                    shown = subprocess.check_output(["bash", str(Path(__file__).resolve().parent.parent / "agent-plan.sh"),
+                        "--repo", repo, "show", "--id", dep], text=True)
+                    dependency = json.loads(shown)
+                    if dependency.get("state") != "done" or dependency.get("completion_verified") is False:
+                        raise ValueError("review dependencies are not verified")
+            if not reviewed and attempts >= budget:
+                break
+            allowed = task.get("allowed_paths", [])
+            files = verify_files(task.get("verify", ""), allowed)
+            if not allowed:
+                break
+            if chosen and (not files or any(not f or scopes_overlap(allowed, a)
+                    or scopes_overlap(files, f) or scopes_overlap(allowed, f)
+                    or scopes_overlap(files, a) for a, f in scopes)):
+                break
+            chosen.append(task["id"])
+            attempts += int(not reviewed)
+            scopes.append((allowed, files))
+            if len(chosen) >= limit or not files:
+                break
+        print("\n".join(chosen))
+    elif mode == "prepare":
+        if active():
+            raise ValueError("unfinished batch already exists")
+        batch_id, run_id, *ids = args
+        items = []
+        for task_id in ids:
+            task = tasks[task_id]
+            if task.get("state") not in ("claimed", "review") or not task.get("lease_id"):
+                raise ValueError("batch task is not claimed")
+            items.append({"id": task_id, "lease_id": task["lease_id"],
+                          "lease_epoch": task["lease_epoch"], "binding": binding(task)})
+        print(json.dumps({"schema": 1, "kind": "goal-batch", "phase": "prepared",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "batch_id": batch_id,
+            "run_id": run_id, "worktree": repo, "contract_id": owner, "width": width, "accept_sha256": accept,
+            "plan_contract": digest(plan.get("project_contract")), "base_sha": git("rev-parse", "HEAD"),
+            "head_ref": git("symbolic-ref", "-q", "HEAD"), "tasks": items}))
+    elif mode in ("recover", "collect", "next", "complete", "retire", "abandon"):
+        row = active()
+        if not row:
+            return 0
+        if mode == "abandon":
+            if row["contract_id"] == owner:
+                retire_goal_batch(row, progress, "abandoned")
+            return 0
+        validate(row)
+        if mode == "retire":
+            retire_goal_batch(row, progress, "failed")
+        elif mode == "recover":
+            print(row["batch_id"])
+        elif mode == "collect":
+            previous = [r for r in load_rows() if r.get("kind") == "goal-batch-results"
+                        and r.get("batch_id") == row["batch_id"] and same_checkout(r.get("worktree"))]
+            if len(previous) > 1:
+                raise ValueError("duplicate batch results")
+            if not previous:
+                results = []
+                for item in row["tasks"]:
+                    task = tasks[item["id"]]
+                    result = {"id": item["id"], "lease_id": item["lease_id"], "state": task.get("state")}
+                    if task.get("state") in ("claimed", "running", "landing"):
+                        raise ValueError("batch attempt unresolved: " + item["id"])
+                    if task.get("state") == "review":
+                        for field in ("patch", "artifact"):
+                            path = Path(task[field])
+                            if path.is_symlink() or not path.is_file():
+                                raise ValueError("invalid batch artifact")
+                            h = hashlib.sha256()
+                            with path.open("rb") as handle:
+                                for chunk in iter(lambda: handle.read(65536), b""):
+                                    h.update(chunk)
+                            result[field] = str(path)
+                            result[field + "_sha256"] = h.hexdigest()
+                    results.append(result)
+                print(json.dumps({"schema": 1, "kind": "goal-batch-results", "batch_id": row["batch_id"],
+                                  "worktree": repo, "results": results}))
+        elif mode == "complete":
+            row["phase"] = "complete"
+            print(json.dumps(row))
+        else:
+            rows = load_rows()
+            for item in row["tasks"]:
+                task_id = item["id"]
+                task = tasks[task_id]
+                if task.get("state") == "done":
+                    committed = any(r.get("kind") == "commit-intent" and r.get("phase") == "committed"
+                        and r.get("task_id") == task_id and r.get("lease_id") == item["lease_id"]
+                        for r in rows)
+                    if not committed:
+                        raise ValueError("completed batch task has no exact commit: " + task_id)
+                    continue
+                snapshots = [r for r in rows if r.get("kind") == "goal-batch-results"
+                             and r.get("batch_id") == row["batch_id"] and same_checkout(r.get("worktree"))]
+                if len(snapshots) != 1:
+                    raise ValueError("batch results are not frozen")
+                frozen = next(r for r in snapshots[0]["results"] if r["id"] == task_id)
+                if frozen["lease_id"] != item["lease_id"]:
+                    raise ValueError("batch result lease changed")
+                if task.get("state") == "review":
+                    for field in ("patch", "artifact"):
+                        path = Path(task[field])
+                        h = hashlib.sha256()
+                        if path.is_symlink() or not path.is_file():
+                            raise ValueError("invalid batch artifact")
+                        with path.open("rb") as handle:
+                            for chunk in iter(lambda: handle.read(65536), b""):
+                                h.update(chunk)
+                        if str(path) != frozen.get(field) or h.hexdigest() != frozen.get(field + "_sha256"):
+                            raise ValueError("batch review bytes changed: " + task_id)
+                if task.get("state") != "review":
+                    print("failed:" + task_id + ":" + str(task.get("state")))
+                    break
+                print(task_id)
+                break
+            else:
+                print("complete")
+    else:
+        raise ValueError("unknown batch operation")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
+    batch = sub.add_parser("goal-batch")
+    for key in ("plan_file", "progress", "repo", "owner", "width", "accept", "mode"):
+        batch.add_argument(key)
+    batch.add_argument("args", nargs="*")
     write = sub.add_parser("write")
     write.add_argument("path")
     write.add_argument("--expected", required=True)
@@ -1476,6 +1879,9 @@ def main() -> int:
     try:
         if args.command == "supervise":
             return supervise_phase(args)
+        if args.command == "goal-batch":
+            return goal_batch_command(args.plan_file, args.progress, args.repo, args.owner,
+                                      args.width, args.accept, args.mode, args.args)
         path = Path(args.path)
         if args.command == "digest":
             print(digest(regular_bytes(path, RECEIPT_LIMIT, "outer receipt")))
@@ -1532,6 +1938,9 @@ def main() -> int:
                 record_path,
                 (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
             )
+            goal_batch_command(str(path.with_name("tasks.json")), str(path.with_name("progress.jsonl")),
+                               os.path.realpath(args.repo), row.get("owner_id", ""),
+                               row["contract"]["max_parallel_tasks"], "", "abandon", [])
             os.unlink(path)
             fsync_directory(path.parent)
             print(record_path)
@@ -1882,7 +2291,7 @@ def main() -> int:
         atomic_write(path, payload)
         print(digest(payload))
         return 0
-    except (OSError, ReceiptError, subprocess.SubprocessError) as exc:
+    except (OSError, ReceiptError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
 
