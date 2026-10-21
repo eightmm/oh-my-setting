@@ -98,7 +98,7 @@ def exercise_observed_worker_leases():
         live_rows += [{"parent_attempt_id": "other-main", "terminal": False, "refs": {"panel_role": "worker"}},
                       {"parent_attempt_id": argv_binding.owner_attempt, "terminal": True,
                        "refs": {"panel_role": "worker"}}]
-        def enroll(repo, room_id, member, provider, role, model, label, owns, parent):
+        def enroll(repo, room_id, member, provider, role, model, label, owns, parent, **_join_fields):
             children.append((room_id, member, provider, role, model, owns, parent))
             state["participants"].append({"participant": member, "provider": provider,
                                            "role": role, "joined": True})

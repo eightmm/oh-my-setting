@@ -842,7 +842,11 @@ def _validate_dry_run_inputs(prompt, brief):
 
 def _task_findings_brief(repo, task_id, brief):
     import panel_results
-    original = _read_dispatch_brief(Path(brief)).decode("utf-8")
+    try:
+        original = _read_dispatch_brief(Path(brief)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        # The dispatch path reports an unreadable brief itself; findings never change that error.
+        return brief
     section = panel_results.prior_findings(repo, task_id, original)
     if not section:
         return brief
