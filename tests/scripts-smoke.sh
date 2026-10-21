@@ -35785,7 +35785,7 @@ SH
     cmp "$root/call-0123456789abcdef/run.attempts.json" "$root/none/run.attempts.json"
     cmp "$root/call-0123456789abcdef/run.attempt-1.out" "$root/none/run.attempt-1.out"
     codex_root="$root/codex"
-    codex_call=call-fedcba9876543210
+    codex_call="call-fedcba9876543210"
     mkdir -p "$codex_root"
     printf 'prompt\n' > "$codex_root/prompt"
     cat > "$bin/codex" <<'SH'
