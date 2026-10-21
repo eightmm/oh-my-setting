@@ -1869,6 +1869,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     status, process, identity = 1, None, None
     launch = None
     control_member = member or "call-" + uuid.uuid4().hex[:16]
+    env["OMS_PANEL_CALL_ID"] = control_member
     spawn_failed = False
     term_sent = False
     shutdown = None

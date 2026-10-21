@@ -1,7 +1,9 @@
 """Board navigation, reader selection, headers and shared view state."""
 
 from pathlib import Path
+from collections import OrderedDict
 import json
+import math
 import os
 import panel_debate
 import panel_messages
@@ -14,6 +16,8 @@ import time
 import uuid
 
 # Call-local facade imports preserve the public entry point and avoid import cycles.
+_ACTIVITY_READERS = OrderedDict()
+_ACTIVITY_READER_LIMIT = 8
 
 
 def _cancel_window_id():
@@ -205,6 +209,15 @@ def reset_group_view(navigation):
     navigation["offset"] = 0
 
 
+def _next_activity_generation(navigation):
+    generation = navigation.get("activity_generation", 0)
+    if type(generation) is not int or generation < 0:
+        generation = 0
+    generation += 1
+    navigation["activity_generation"] = generation
+    return generation
+
+
 def navigate(repo, action, state, navigation, width):
     from terminal_panel import clean, managed_session, pane_option
     kind, ident = action
@@ -242,9 +255,36 @@ def navigate(repo, action, state, navigation, width):
         navigation["detail"] = {"title": "MESSAGES", "text": panel_messages.mail_page(current, ident, width)}
         navigation["offset"] = 0
     elif kind in {"result", "debate"}:
-        # The watch loop reads the evidence in the background and opens the detail when it arrives.
-        navigation["opening"] = action
-        navigation["notice"] = "Opening recorded result..."
+        attempt = (state.get("room_attempts") or {}).get(ident) if kind == "result" else None
+        generation = _next_activity_generation(navigation) if kind == "result" else None
+        if generation is not None:
+            navigation["activity_generation_call"] = ident
+            navigation["activity_generation_state"] = (attempt or {}).get("state")
+        if attempt and attempt.get("state") in {"starting", "working", "running", "verifying"}:
+            target = ("result", ident)
+            navigation.setdefault("preview", {"target": target})
+            if navigation["preview"].get("target") != target:
+                navigation["preview"] = {"target": target}
+            navigation["preview"]["generation"] = generation
+            navigation["preview"]["refresh"] = True
+            cached = navigation.get("activity_snapshot")
+            if not isinstance(cached, dict):
+                cached = (navigation.get("preview") or {}).get("report", {}).get("activity_snapshot", {})
+            events = ((cached.get("calls") or {}).get(ident, [])
+                      if isinstance(cached, dict) and cached.get("repo") == os.path.realpath(repo) else [])
+            navigation["detail"] = {"title": "LIVE ACTIVITY / " + (member.get("label") or ident),
+                                     "activity_call": ident, "activity_events": events}
+            attempt_access = (attempt or {}).get("access") or member.get("access")
+            if member.get("provider") == "claude" and attempt_access == "write":
+                navigation["detail"]["activity_unavailable"] = \
+                    "Live activity not available for Claude write workers"
+            navigation["offset"] = 0
+        else:
+            # The watch loop reads the evidence in the background and opens the detail when it arrives.
+            navigation["opening"] = action
+            if generation is not None:
+                navigation["opening_generation"] = generation
+            navigation["notice"] = "Opening recorded result..."
     elif kind == "task":
         task = next((t for t in state.get("room", {}).get("repo_tasks", []) if t.get("id") == ident), None)
         if task is None:
@@ -273,29 +313,155 @@ def navigate(repo, action, state, navigation, width):
         navigation["offset"] = 0
 
 
-def read_evidence(repo, target):
+_LIVE_ACTIVITY_STATES = {"starting", "working", "running", "verifying"}
+
+
+def _running_activity_calls(state):
+    """Return room participant call ids whose latest projected attempt is live."""
+    if not isinstance(state, dict):
+        return frozenset()
+    linked = state.get("room_attempts")
+    linked = linked if isinstance(linked, dict) else {}
+    running = {call for call, row in linked.items()
+               if isinstance(call, str) and isinstance(row, dict) and
+               row.get("state") in _LIVE_ACTIVITY_STATES}
+    attempts = state.get("attempts")
+    active = attempts.get("active_recent") if isinstance(attempts, dict) else None
+    for attempt in (active if isinstance(active, list) else []):
+        if not isinstance(attempt, dict) or attempt.get("state") not in _LIVE_ACTIVITY_STATES:
+            continue
+        panel = attempt.get("panel")
+        call = panel.get("room_participant") if isinstance(panel, dict) else None
+        if not isinstance(call, str):
+            continue
+        latest = linked.get(call)
+        if latest is None:
+            running.add(call)
+        elif (isinstance(latest, dict) and latest.get("state") in _LIVE_ACTIVITY_STATES and
+              (not latest.get("attempt_id") or not attempt.get("attempt_id") or
+               latest.get("attempt_id") == attempt.get("attempt_id"))):
+            running.add(call)
+    return frozenset(running)
+
+
+def _read_activity_snapshot(repo, call=None, running_calls=()):
+    from panel_activity import snapshot, snapshot_call
+    calls = (snapshot(repo, running_calls=running_calls) if call is None else
+             {call: snapshot_call(repo, call, running_calls=running_calls)})
+    result = {"repo": os.path.realpath(repo), "calls": calls, "captured_at": time.time()}
+    if call is not None:
+        result["scope_call"] = call
+    return result
+
+
+def _keep_newest_activity_snapshot(navigation, candidate):
+    if not isinstance(candidate, dict):
+        return False
+    current = navigation.get("activity_snapshot")
+    if isinstance(current, dict):
+        current_time = current.get("captured_at")
+        candidate_time = candidate.get("captured_at")
+        current_time = current_time if type(current_time) in (int, float) and math.isfinite(current_time) else None
+        candidate_time = candidate_time if type(candidate_time) in (int, float) and math.isfinite(candidate_time) else None
+        if current_time is not None and (candidate_time is None or candidate_time < current_time):
+            return False
+        scope_call = candidate.get("scope_call")
+        calls = candidate.get("calls")
+        current_calls = current.get("calls")
+        if (current.get("repo") == candidate.get("repo") and isinstance(scope_call, str) and
+                isinstance(calls, dict) and scope_call in calls and isinstance(current_calls, dict)):
+            merged = dict(current)
+            merged_calls = dict(current_calls)
+            merged_calls[scope_call] = calls[scope_call]
+            merged["calls"] = merged_calls
+            if candidate_time is not None:
+                merged["captured_at"] = candidate_time
+            navigation["activity_snapshot"] = merged
+            return True
+    navigation["activity_snapshot"] = candidate
+    return True
+
+
+def _refresh_activity_snapshot(navigation, state):
+    """Use the panel's nonblocking background reader to refresh tree activity snapshots."""
+    if navigation.get("surface") not in {"tree", "graph"}:
+        return
+    from panel_view import _repo_root
+    from terminal_panel import BackgroundRead
+    repo = _repo_root(state)
+    record = _ACTIVITY_READERS.get(repo)
+    if record is None:
+        record = {"reader": BackgroundRead(), "refreshed_at": None}
+        _ACTIVITY_READERS[repo] = record
+        while len(_ACTIVITY_READERS) > _ACTIVITY_READER_LIMIT:
+            _ACTIVITY_READERS.popitem(last=False)
+    else:
+        _ACTIVITY_READERS.move_to_end(repo)
+    reader = record["reader"]
+    loaded, result = reader.take()
+    if loaded and isinstance(result, dict) and result.get("repo") == repo:
+        _keep_newest_activity_snapshot(navigation, result)
+    now = time.monotonic()
+    last = record.get("refreshed_at")
+    if not reader.pending and (last is None or now - last >= 5):
+        running_calls = _running_activity_calls(state)
+        reader.start(lambda repo=repo, running_calls=running_calls:
+                     _read_activity_snapshot(repo, running_calls=running_calls))
+        record["refreshed_at"] = now
+
+
+def read_evidence(repo, target, state=None):
     """A background evidence read that always names its target, even when it fails."""
     from terminal_panel import call_results, clean
     try:
-        return target, call_results(repo, target), None
+        evidence = call_results(repo, target)
+        if target[0] == "result":
+            from panel_activity import read_summary, summary_lines
+            running_calls = _running_activity_calls(state)
+            evidence["activity_snapshot"] = _read_activity_snapshot(repo, target[1], running_calls)
+            evidence["activity_what_it_did"] = summary_lines(read_summary(repo, target[1]))
+        return target, evidence, None
     except Exception as error:
         return target, {}, clean(str(error), 120) or "Result evidence unavailable"
 
 
-def finish_opening(navigation, report):
+def finish_opening(navigation, report, generation=None):
     """Open the detail for a background evidence read that still matches what was asked to open."""
     target, evidence, error = report
     if navigation.get("opening") != target:
         return False
+    if generation is not None and (generation != navigation.get("activity_generation") or
+                                   generation != navigation.get("opening_generation")):
+        return False
     navigation.pop("opening")
+    navigation.pop("opening_generation", None)
     if error:
         navigation["notice"] = error
     else:
         navigation.pop("notice", None)
         navigation["detail"] = {"title": "RECORDED RESULTS", "report": dict(
             evidence, rows=[r for r in evidence.get("rows", []) if r.get("calls")])}
+        if evidence.get("activity_what_it_did"):
+            navigation["detail"]["what_it_did"] = evidence["activity_what_it_did"]
+        if evidence.get("activity_snapshot") is not None:
+            _keep_newest_activity_snapshot(navigation, evidence["activity_snapshot"])
         navigation["offset"] = 0
     return True
+
+
+def accept_activity_report(navigation, generation, report):
+    """Apply a result read only while its captured Detail generation is still current."""
+    if type(generation) is not int or generation != navigation.get("activity_generation"):
+        return False
+    target, evidence, error = report
+    if navigation.get("opening") == target:
+        return finish_opening(navigation, report, generation)
+    preview = navigation.get("preview")
+    if (isinstance(preview, dict) and preview.get("target") == target and
+            preview.get("generation") == generation):
+        preview.update(report=evidence, error=error)
+        return True
+    return False
 
 
 def expire_notice(navigation, now, limit=10):
@@ -795,7 +961,7 @@ def refreshed_navigation(navigation, state, bottom=None, close_call=None):
             close_call()
         navigation = {"collapsed": set(), "offset": 0}
     elif navigation.get("preview"):
-        # Evidence is re-read only when the room's messages or a call's state moved, not on every refresh.
+        # Preview reports keep a snapshot copy; promote it only when its capture is newer than the background cache.
         attempts = state.get("attempts") or {}
         signature = (state.get("room", {}).get("message_count"), tuple(
             (row.get("attempt_id"), row.get("state")) for key in ("active_recent", "recent")
@@ -803,6 +969,10 @@ def refreshed_navigation(navigation, state, bottom=None, close_call=None):
         if signature != navigation.get("preview_signature"):
             navigation["preview"]["refresh"] = True
         navigation["preview_signature"] = signature
+        preview = navigation["preview"]
+        cached = (preview.get("report") or {}).get("activity_snapshot") if isinstance(preview.get("report"), dict) else None
+        if isinstance(cached, dict):
+            _keep_newest_activity_snapshot(navigation, cached)
     if (navigation.get("debate_view") or {}).get("shown"):
         navigation["debate_view"]["refresh"] = True
     # The bottom box is the session's: a tab, target or scroll chosen in one window reaches every board in one refresh.
@@ -810,4 +980,30 @@ def refreshed_navigation(navigation, state, bottom=None, close_call=None):
     if shared and shared != navigation.get("bottom_seen"):
         navigation["bottom_seen"] = shared
         apply_bottom(navigation, state, shared)
+    _refresh_activity_snapshot(navigation, state)
+    detail = navigation.get("detail")
+    call = detail.get("activity_call") if isinstance(detail, dict) else None
+    if isinstance(call, str):
+        from panel_view import TERMINAL_STATES
+        attempt = (state.get("room_attempts") or {}).get(call)
+        if isinstance(attempt, dict):
+            call_state = attempt.get("state")
+            if (navigation.get("activity_generation_call") == call and
+                    call_state != navigation.get("activity_generation_state")):
+                generation = _next_activity_generation(navigation)
+                navigation["activity_generation_state"] = call_state
+                preview = navigation.get("preview")
+                target = ("result", call)
+                if isinstance(preview, dict) and preview.get("target") == target:
+                    preview["generation"] = generation
+                    preview["refresh"] = True
+                if navigation.get("opening") == target:
+                    navigation["opening_generation"] = generation
+        if (isinstance(attempt, dict) and attempt.get("state") in TERMINAL_STATES and
+                not navigation.get("opening")):
+            # Reuse the watcher’s recorded-result reader to replace this live-only detail.
+            target = ("result", call)
+            navigation["opening"] = target
+            navigation["opening_generation"] = navigation.get("activity_generation")
+            navigation["notice"] = "Loading completed activity..."
     return navigation

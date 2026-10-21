@@ -35230,6 +35230,159 @@ with mock.patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}, clear=True):
 PY
 }
 
+test_panel_stream_pointer_is_live_and_attempt_bytes_are_unchanged() {
+  local root="$TMP/panel-live-stream" bin="$TMP/panel-live-stream-bin" call pid ticks pointer expected codex_root codex_call
+  mkdir -p "$root" "$bin"
+  cat > "$bin/claude" <<'SH'
+#!/usr/bin/env bash
+printf 'provider-stream-bytes\n'
+: > "$FAKE_PROVIDER_ENTERED"
+while [ ! -e "$FAKE_PROVIDER_RELEASE" ]; do sleep 0.02; done
+SH
+  chmod +x "$bin/claude"
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    oms_provider_normalize() { printf '%s' "$1"; }
+    oms_provider_supports_access() { return 0; }
+    oms_provider_supports_model_override() { return 0; }
+    oms_provider_transport() { return 0; }
+    oms_provider_cli_discovered() { return 0; }
+    oms_provider_cli_available() { return 0; }
+    ma_export_child_env() { :; }
+    run_with_timeout() { "$@"; }
+    export PATH="$bin:$PATH"
+    for call in call-0123456789abcdef none; do
+      local_dir="$root/$call"
+      mkdir -p "$local_dir"
+      printf 'prompt\n' > "$local_dir/prompt"
+      export FAKE_PROVIDER_ENTERED="$local_dir/entered" FAKE_PROVIDER_RELEASE="$local_dir/release"
+      if [ "$call" = none ]; then unset OMS_PANEL_CALL_ID; else export OMS_PANEL_CALL_ID="$call"; fi
+      ma_provider_attempt claude write "$local_dir/prompt" "$local_dir/output" "$local_dir" \
+        provider-default '' test "$root" irrelevant >"$local_dir/stderr" 2>&1 &
+      pid=$!
+      ticks=0
+      while [ ! -e "$FAKE_PROVIDER_ENTERED" ] && [ "$ticks" -lt 250 ]; do sleep 0.02; ticks=$((ticks + 1)); done
+      [ -e "$FAKE_PROVIDER_ENTERED" ] || { kill "$pid" 2>/dev/null || true; exit 1; }
+      if [ "$call" = none ]; then
+        [ ! -e "$root/.oms/panel-state/dispatch-logs/none.stream" ] || exit 2
+      else
+        pointer="$root/.oms/panel-state/dispatch-logs/$call.stream"
+        [ -f "$pointer" ] || exit 3
+        expected="$(cd "$local_dir" && pwd -P)/output"
+        [ "$(cat "$pointer")" = "$expected" ] || exit 4
+      fi
+      : > "$FAKE_PROVIDER_RELEASE"
+      wait "$pid"
+      rm -f "$FAKE_PROVIDER_ENTERED" "$FAKE_PROVIDER_RELEASE"
+      ma_record_attempt "$local_dir/run.md" claude provider-default '' 0 '' "$local_dir/output"
+    done
+    cmp "$root/call-0123456789abcdef/output" "$root/none/output"
+    cmp "$root/call-0123456789abcdef/run.attempts.json" "$root/none/run.attempts.json"
+    cmp "$root/call-0123456789abcdef/run.attempt-1.out" "$root/none/run.attempt-1.out"
+    codex_root="$root/codex"
+    codex_call=call-fedcba9876543210
+    mkdir -p "$codex_root"
+    printf 'prompt\n' > "$codex_root/prompt"
+    cat > "$bin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${OMS_PANEL_CALL_ID+x}" = x ]; then
+  echo 'nested call id leaked' >&2
+  exit 88
+fi
+printf '%s\n' \
+  '{"type":"item.completed","item":{"type":"command_execution","command":"python -m compileall src/changed.py","exit_code":0}}' \
+  '{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"src/changed.py","kind":"update"}]}}' \
+  '{"type":"item.completed","item":{"type":"agent_message","text":"Updated src/changed.py"}}' \
+  '{"type":"turn.completed","usage":{"input_tokens":8,"output_tokens":3}}'
+SH
+    chmod +x "$bin/codex"
+    export OMS_PANEL_CALL_ID="$codex_call"
+    . "$ROOT/scripts/lib/peer-common.sh"
+    oms_provider_normalize() { printf '%s' "$1"; }
+    oms_provider_supports_access() { return 0; }
+    oms_provider_supports_model_override() { return 0; }
+    oms_provider_transport() { return 0; }
+    oms_provider_cli_discovered() { return 0; }
+    oms_provider_cli_available() { return 0; }
+    run_with_timeout() { "$@"; }
+    ma_codex_room_config() { :; }
+    ma_provider_attempt codex write "$codex_root/prompt" "$codex_root/output" "$codex_root" \
+      gpt-6-luna '' test "$codex_root" irrelevant >"$codex_root/stderr" 2>&1
+    grep -Fq 'stop-reason: provider=codex reason=turn_completed' "$codex_root/output" || {
+      echo 'codex output did not pass through the normal JSONL converter' >&2
+      cat "$codex_root/output" >&2
+      exit 6
+    }
+    pointer="$codex_root/.oms/panel-state/dispatch-logs/$codex_call.stream"
+    expected="$codex_root/.oms/panel-state/dispatch-logs/$codex_call.activity.json"
+    [ "$(cat "$pointer")" = "$(cd "$(dirname "$expected")" && pwd -P)/$(basename "$expected")" ] || {
+      echo "finished pointer is $(cat "$pointer" 2>/dev/null), expected $expected" >&2
+      exit 5
+    }
+    PYTHONPATH="$ROOT/scripts/lib" python3 - "$codex_root" "$codex_call" <<'PY'
+import sys
+from pathlib import Path
+from unittest.mock import patch
+import panel_navigation
+import panel_tree
+
+repo, call = Path(sys.argv[1]), sys.argv[2]
+with patch("terminal_panel.call_results", return_value={"rows": []}):
+    arrived = panel_navigation.read_evidence(repo, ("result", call))
+nav = {"opening": ("result", call)}
+assert panel_navigation.finish_opening(nav, arrived)
+rendered = panel_tree.render_detail({}, nav["detail"], 100, 32, {}, color=False)
+assert "What it did:" in rendered and "src/changed.py" in rendered, rendered
+assert "Commands run: 1 passed, 0 failed" in rendered, rendered
+assert "python -m compileall src/changed.py (exit 0)" in rendered, rendered
+PY
+  ) || fail "panel stream pointer was not available during provider execution or changed retained attempt bytes: $(tail -n 35 "$root"/*/stderr 2>/dev/null)"
+}
+
+test_panel_claude_forwards_subagent_text_when_supported() {
+  local root="$TMP/panel-claude-subagent" bin="$TMP/panel-claude-subagent-bin" index
+  mkdir -p "$root" "$bin"
+  cat > "$bin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' '--forward-subagent-text' >> "$FAKE_CLAUDE_HELP_LOG"
+  printf '%s\n' '  --forward-subagent-text  Forward subagent text'
+  exit 0
+fi
+printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGS"
+printf '%s\n' '{"type":"assistant","parent_tool_use_id":"agent-1","message":{"content":[{"type":"text","text":"delegated answer"}]}}'
+SH
+  chmod +x "$bin/claude"
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    oms_provider_normalize() { printf '%s' "$1"; }
+    oms_provider_supports_access() { return 0; }
+    oms_provider_supports_model_override() { return 0; }
+    oms_provider_transport() { return 0; }
+    oms_provider_cli_discovered() { return 0; }
+    oms_provider_cli_available() { return 0; }
+    ma_export_child_env() { :; }
+    run_with_timeout() { "$@"; }
+    export PATH="$bin:$PATH" FAKE_CLAUDE_HELP_LOG="$root/help.log" FAKE_CLAUDE_ARGS="$root/args" \
+      OMS_PANEL_DISPATCH=1
+    for index in 1 2; do
+      printf 'prompt\n' > "$root/prompt-$index"
+      ma_provider_attempt claude read "$root/prompt-$index" "$root/output-$index" "$root" \
+        provider-default '' test "$root" irrelevant >"$root/stderr-$index" 2>&1 || exit 1
+      grep -Fxq -- '--forward-subagent-text' "$root/args" || {
+        echo 'supported Claude omitted --forward-subagent-text' >&2
+        cat "$root/args" >&2
+        exit 2
+      }
+      grep -Fxq -- 'stream-json' "$root/args" || exit 3
+    done
+    [ "$(wc -l < "$root/help.log" | tr -d ' ')" = 1 ] || {
+      echo 'Claude --help was not probed exactly once in this process' >&2
+      exit 3
+    }
+  ) || fail "Claude read stream did not include supported forwarded subagent text"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

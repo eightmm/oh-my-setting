@@ -120,6 +120,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     from terminal_panel import refreshed_navigation, reload_ready, reset_group_view, session_option
     from terminal_panel import source_stamps, stale_notice, start_spawn, swap_choices, tab_event
     from terminal_panel import terminal_style, tmux_command, toggle_context_headers, update_context_header
+    from panel_navigation import accept_activity_report
     from panel_input import TerminalInput, choose
     n, frame, last = 0, 0, None
     capable = terminal_style()[0]
@@ -581,6 +582,13 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     loaded, report = previews.take()
                     if isinstance(report, Exception):
                         report = None
+                    if (loaded and isinstance(report, tuple) and len(report) == 2 and
+                            type(report[0]) is int and isinstance(report[1], tuple) and len(report[1]) == 3):
+                        generation, activity_report = report
+                        if accept_activity_report(navigation, generation, activity_report):
+                            size = redraw()
+                        # Result reads are versioned; never let an old completion reach target-only handlers.
+                        loaded, report = False, None
                     preview = navigation.get("preview")
                     opening = navigation.get("opening")
                     if loaded and opening and report is None:
@@ -627,13 +635,33 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             log["reading"] = True
                             previews.start(messages_read)
                     if navigation.get("opening") and not previews.pending:
-                        previews.start(lambda target=navigation["opening"]: read_evidence(repo, target))
+                        target = navigation["opening"]
+                        if target[0] == "result":
+                            generation = navigation.get("opening_generation")
+                            previews.start(lambda target=target, state=state, generation=generation:
+                                           (generation, read_evidence(repo, target, state)))
+                        else:
+                            previews.start(lambda target=target, state=state:
+                                           read_evidence(repo, target, state))
                     elif preview and preview["target"][0] == "chat":
                         # Main detail is drawn from the room snapshot; no evidence read is needed.
                         preview.setdefault("report", {})
                         preview.pop("refresh", None)
                     elif preview and ("report" not in preview or preview.pop("refresh", False)) and not previews.pending:
-                        previews.start(lambda target=preview["target"]: read_evidence(repo, target))
+                        target = preview["target"]
+                        if target[0] == "result":
+                            generation = preview.get("generation")
+                            if type(generation) is not int:
+                                generation = navigation.get("activity_generation", 0)
+                                if type(generation) is not int:
+                                    generation = 0
+                                preview["generation"] = generation
+                                navigation["activity_generation"] = generation
+                            previews.start(lambda target=target, state=state, generation=generation:
+                                           (generation, read_evidence(repo, target, state)))
+                        else:
+                            previews.start(lambda target=target, state=state:
+                                           read_evidence(repo, target, state))
                     if expire_notice(navigation, time.monotonic()):
                         size = redraw()
                     if motion and time.monotonic() >= next_frame:

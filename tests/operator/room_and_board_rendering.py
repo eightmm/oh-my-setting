@@ -1546,6 +1546,387 @@ assert "".join(late_colon) == "first linethe panel already has a live main or un
 long_prefix = message_rows("Last: " + "漢" * 20, 7, indent=6)
 assert all(display_width(line) <= 7 for line in long_prefix), long_prefix
 assert "".join(long_prefix) == "Last: " + "漢" * 20, long_prefix
+import panel_activity
+import panel_navigation as panel_nav
+with tempfile.TemporaryDirectory() as activity_root:
+    activity_repo = Path(activity_root)
+    codex_stream = activity_repo / "codex.jsonl"
+    codex_stream.write_text("\n".join(json.dumps(row) for row in [
+        {"type": "item.completed", "item": {"type": "reasoning", "text": "checking"}},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "pwd", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "file_change", "changes": [{"path": "a.py"}]}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "Codex says done"}},
+    ]) + "\n", encoding="utf-8")
+    claude_stream = activity_repo / "claude.jsonl"
+    claude_stream.write_text("\n".join(json.dumps(row) for row in [
+        {"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "planning"},
+            {"type": "tool_use", "id": "bash-1", "name": "Bash", "input": {"command": "git status"}},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "b.py"}},
+            {"type": "text", "text": "Claude says done"}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "bash-1",
+                                                       "is_error": False, "content": "clean"}]}}
+    ]) + "\n", encoding="utf-8")
+    codex_events = panel_activity.events(codex_stream)
+    claude_events = panel_activity.events(claude_stream)
+    assert [(e["kind"], e["text"], e["ok"]) for e in codex_events] == [
+        ("think", "checking", None), ("run", "pwd (0)", True), ("edit", "a.py", None),
+        ("say", "Codex says done", None)], codex_events
+    assert [e["kind"] for e in claude_events] == ["think", "run", "edit", "say"], claude_events
+    assert claude_events[1]["ok"] is True, claude_events
+    subagent_stream = activity_repo / "claude-subagent.jsonl"
+    subagent_stream.write_text("\n".join(json.dumps(row) for row in [
+        {"type": "assistant", "parent_tool_use_id": "agent-1",
+         "message": {"content": [{"type": "text", "text": "delegated result"}]}},
+        {"type": "assistant", "parent_tool_use_id": "agent-1",
+         "message": {"content": [{"type": "tool_use", "name": "Edit",
+                                     "input": {"file_path": "delegated.py"}}]}},
+    ]) + "\n", encoding="utf-8")
+    assert panel_activity.events(subagent_stream) == [
+        {"kind": "say", "text": "sub: delegated result", "ok": None},
+        {"kind": "edit", "text": "sub: delegated.py", "ok": None}], panel_activity.events(subagent_stream)
+    linked_stream = activity_repo / "linked.jsonl"
+    linked_stream.symlink_to(codex_stream)
+    assert panel_activity.events(linked_stream) == [] and panel_activity.events(codex_stream, 0) == []
+    if hasattr(panel_activity.os, "getuid"):
+        with patch.object(panel_activity.os, "getuid", return_value=os.getuid() + 1):
+            assert panel_activity.events(codex_stream) == []
+    call = "call-0123456789abcdef"
+    log_dir = activity_repo / ".oms/panel-state/dispatch-logs"
+    log_dir.mkdir(parents=True, mode=0o700)
+    log_dir.chmod(0o700)
+    (log_dir / (call + ".stream")).write_text(str(codex_stream) + "\n", encoding="utf-8")
+    evidence = {"rows": [{"calls": [{"artifact": ".oms/artifacts/sample.md"}]}]}
+    call_live_state = {"room_attempts": {call: {"state": "working", "attempt_id": "attempt-live"}}}
+    with patch.object(panel, "call_results", return_value=evidence):
+        background = panel_nav.read_evidence(activity_repo, ("result", call), call_live_state)
+    assert type(background[1]["activity_snapshot"].get("captured_at")) in (int, float), \
+        background[1]["activity_snapshot"]
+    other_call = "call-3123456789abcdef"
+    other_stream = activity_repo / "other-live.jsonl"
+    other_stream.write_text(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "other live call"}}) + "\n", encoding="utf-8")
+    (log_dir / (other_call + ".stream")).write_text(str(other_stream) + "\n", encoding="utf-8")
+    with patch.object(panel_activity, "snapshot", side_effect=AssertionError("preview read all call streams")):
+        selected_evidence = panel_nav.read_evidence(activity_repo, ("result", call), call_live_state)
+    assert selected_evidence[0] == ("result", call) and selected_evidence[1].get("activity_snapshot", {}).get(
+        "calls", {}).keys() == {call}, selected_evidence
+    merged_nav = {"opening": ("result", call), "activity_snapshot": {
+        "repo": str(activity_repo.resolve()), "captured_at": time.time() - 5,
+        "calls": {other_call: [{"kind": "say", "text": "keep other call", "ok": None}],
+                  call: [{"kind": "say", "text": "older target", "ok": None}]}}}
+    assert panel_nav.finish_opening(merged_nav, selected_evidence)
+    assert merged_nav["activity_snapshot"]["calls"][other_call][0]["text"] == "keep other call" and \
+        merged_nav["activity_snapshot"]["calls"][call][-1]["text"] == "Codex says done", merged_nav
+    class ImmediateActivityReader:
+        def __init__(self):
+            self.pending = False
+            self.result = None
+
+        def start(self, reader):
+            self.result = reader()
+            self.pending = True
+
+        def take(self):
+            if not self.pending:
+                return False, None
+            self.pending = False
+            return True, self.result
+
+    periodic = {"room_id": "room-fixture", "surface": "tree"}
+    live_state = {"repo": {"path": str(activity_repo)}, "room": {"id": "room-fixture"},
+                  "attempts": {"active_recent": [], "recent": []},
+                  "room_attempts": {call: {"state": "working", "attempt_id": "attempt-live"}}}
+    panel_nav._ACTIVITY_READERS.pop(str(activity_repo.resolve()), None)
+    with patch.object(panel, "BackgroundRead", ImmediateActivityReader), \
+            patch.object(panel_nav.time, "monotonic", side_effect=[1.0, 6.0]):
+        panel_nav.refreshed_navigation(periodic, live_state)
+        panel_nav.refreshed_navigation(periodic, live_state)
+    assert periodic["activity_snapshot"]["calls"][call], "tree refresh did not cache live activity"
+    preview_snapshot = {"repo": str(activity_repo.resolve()), "captured_at": 10.0,
+                        "calls": {call: [{"kind": "say", "text": "old preview", "ok": None}]}}
+    background_snapshot = {"repo": str(activity_repo.resolve()), "captured_at": 20.0,
+                           "calls": {call: [{"kind": "say", "text": "new background event", "ok": None}]}}
+    periodic["preview"] = {"target": ("result", call), "report": {"activity_snapshot": preview_snapshot}}
+    periodic["activity_snapshot"] = background_snapshot
+    with patch.object(panel_nav, "_refresh_activity_snapshot"):
+        panel_nav.refreshed_navigation(periodic, live_state)
+    assert periodic["activity_snapshot"]["calls"][call][0]["text"] == "new background event", \
+        "an open result preview replaced the newer background activity snapshot"
+    periodic.pop("preview")
+    periodic["activity_snapshot"] = background[1]["activity_snapshot"]
+    cap_repo = activity_repo / "pointer-cap"
+    cap_dir = cap_repo / ".oms/panel-state/dispatch-logs"
+    cap_dir.mkdir(parents=True, mode=0o700)
+    cap_dir.chmod(0o700)
+    live_file = cap_repo / "live.jsonl"
+    live_file.write_text(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "still live"}}) + "\n", encoding="utf-8")
+    for index in range(300):
+        finished_call = "call-finished-%03d" % index
+        (cap_dir / (finished_call + ".stream")).write_text(
+            str(cap_dir / (finished_call + ".activity.json")) + "\n", encoding="utf-8")
+    stale_file = cap_repo / "stale.jsonl"
+    stale_file.write_text(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "stale"}}) + "\n", encoding="utf-8")
+    stale_time = time.time() - 10
+    os.utime(stale_file, (stale_time, stale_time))
+    for index in range(300):
+        stale_call = "call-stale-%03d" % index
+        (cap_dir / (stale_call + ".stream")).write_text(str(stale_file) + "\n", encoding="utf-8")
+    for index in range(20):
+        live_call = "call-live-%03d" % index
+        (cap_dir / (live_call + ".stream")).write_text(str(live_file) + "\n", encoding="utf-8")
+    with patch.dict(os.environ, {"OMS_PEER_TIMEOUT": "1s"}):
+        cap_snapshot = panel_activity.snapshot(
+            cap_repo, running_calls={"call-live-%03d" % index for index in range(20)})
+    assert len(cap_snapshot) == 20 and all("call-live-%03d" % i in cap_snapshot for i in range(20)), \
+        "finished or stale pointers consumed the live activity cap: %s" % sorted(cap_snapshot)
+    slot_repo = activity_repo / "ended-call-does-not-take-slot"
+    slot_dir = slot_repo / ".oms/panel-state/dispatch-logs"
+    slot_dir.mkdir(parents=True, mode=0o700)
+    slot_dir.chmod(0o700)
+    fresh_output = slot_repo / "fresh-output.jsonl"
+    fresh_output.write_text(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "fresh but ended"}}) + "\n", encoding="utf-8")
+    running_output = slot_repo / "running-output.jsonl"
+    running_output.write_text(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "running call"}}) + "\n", encoding="utf-8")
+    (slot_dir / "call-ended-first.stream").write_text(str(fresh_output) + "\n", encoding="utf-8")
+    (slot_dir / "call-running-second.stream").write_text(str(running_output) + "\n", encoding="utf-8")
+    slot_state = {"room_attempts": {
+        "call-ended-first": {"state": "failed", "attempt_id": "attempt-ended"},
+        "call-running-second": {"state": "working", "attempt_id": "attempt-running"}}}
+    class OrderedScan:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def __iter__(self):
+            return iter(self.entries)
+
+    with os.scandir(slot_dir) as entries:
+        slot_entries = sorted(entries, key=lambda entry: entry.name)
+    with patch.object(panel_activity.os, "scandir", return_value=OrderedScan(slot_entries)):
+        slot_snapshot = panel_activity.snapshot(slot_repo, max_calls=1,
+            running_calls=panel_nav._running_activity_calls(slot_state))
+    assert set(slot_snapshot) == {"call-running-second"}, \
+        "a fresh output pointer for an ended call consumed the live slot: %s" % slot_snapshot
+    class RacingCache(dict):
+        def __contains__(self, key):
+            present = super().__contains__(key)
+            if present:
+                super().clear()
+            return present
+
+    cached_info = codex_stream.stat()
+    cached_key = (str(codex_stream.resolve()), cached_info.st_size,
+                  cached_info.st_mtime_ns if hasattr(cached_info, "st_mtime_ns") else cached_info.st_mtime)
+    with patch.object(panel_activity, "_CACHE", RacingCache({cached_key: codex_stream.read_text(encoding="utf-8")})):
+        assert panel_activity.events(codex_stream) == codex_events
+    state = {"room_attempts": {call: {"state": "working"}}}
+    nav = {"room_id": "room-fixture", "activity_snapshot": background[1]["activity_snapshot"]}
+    participants = [{"participant": call, "provider": "codex", "role": "worker", "label": "Codex fixture", "joined": True}]
+    with patch.object(panel.room, "status", return_value={"participants": participants}):
+        panel.navigate(activity_repo, ("result", call), state, nav, 80)
+    screen = render_detail({}, nav["detail"], 80, 30, {}, color=False)
+    assert "Activity:" in screen and "› Codex says done" in screen and "$ ✓ pwd (0)" in screen, screen
+    claude_write_call = "call-2123456789abcdef"
+    claude_write_state = {"room_attempts": {claude_write_call: {"state": "working", "access": "write"}}}
+    claude_write_member = {"participant": claude_write_call, "provider": "claude", "role": "worker",
+                           "label": "Claude write fixture", "joined": True}
+    claude_write_nav = {"room_id": "room-fixture", "activity_snapshot": {"repo": str(activity_repo), "calls": {}}}
+    participants.append(claude_write_member)
+    with patch.object(panel.room, "status", return_value={"participants": participants}):
+        panel_nav.navigate(activity_repo, ("result", claude_write_call), claude_write_state, claude_write_nav, 80)
+    claude_write_screen = render_detail({}, claude_write_nav["detail"], 80, 30, claude_write_nav, color=False)
+    assert "Live activity not available for Claude write workers" in claude_write_screen and \
+        "No activity yet" not in claude_write_screen, claude_write_screen
+    last12_call = "call-1123456789abcdef"
+    last12_stream = activity_repo / "codex-last12.jsonl"
+    last12_stream.write_text("".join(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "line %02d" % index}}) + "\n" for index in range(13)),
+        encoding="utf-8")
+    (log_dir / (last12_call + ".stream")).write_text(str(last12_stream) + "\n", encoding="utf-8")
+    with patch.object(panel, "call_results", return_value=evidence):
+        last12_background = panel_nav.read_evidence(
+            activity_repo, ("result", last12_call), {"room_attempts": {
+                last12_call: {"state": "working", "attempt_id": "attempt-last12"}}})
+    last12_state = {"room_attempts": {last12_call: {"state": "working"}}}
+    last12_nav = {"room_id": "room-fixture", "activity_snapshot": last12_background[1]["activity_snapshot"]}
+    participants.append({"participant": last12_call, "provider": "codex", "role": "worker",
+                         "label": "Codex last 12", "joined": True})
+    with patch.object(panel.room, "status", return_value={"participants": participants}):
+        panel.navigate(activity_repo, ("result", last12_call), last12_state, last12_nav, 80)
+    last12_detail = render_detail({}, last12_nav["detail"], 80, 30, {}, color=False)
+    assert "line 00" not in last12_detail and "line 01" in last12_detail and "line 12" in last12_detail, last12_detail
+    tree_report = deepcopy(flow)
+    tree_report["room"]["participants"].append({"participant": call, "provider": "codex", "role": "worker",
+                                                 "model": "gpt-6-luna", "label": "Live worker", "joined": True,
+                                                 "parent": "flow-main"})
+    tree_report["attempts"]["active_recent"].append({"attempt_id": "activity-attempt", "state": "working",
+        "panel": {"role": "worker", "room_id": tree_report["room"]["id"], "room_participant": call,
+                  "model": "gpt-6-luna", "label": "Live worker"}})
+    tree_report["repo"] = {"name": "activity fixture without a path"}
+    tree_nav = {"activity_snapshot": periodic["activity_snapshot"]}
+    with patch.dict(os.environ, {"OMS_ROOM_REPO": str(activity_repo)}), \
+            patch.object(panel_activity, "events", side_effect=AssertionError("tree render read a stream")):
+        tree_row = render(tree_report, "codex", 110, 40, view="tree", main_attempt="flow-attempt",
+                          navigation=tree_nav)
+    assert "Codex says done" in tree_row, tree_row
+    assert panel_activity.record_summary(activity_repo, call, claude_stream, "claude", "read")
+    assert panel_activity.finish_pointer(activity_repo, call)
+    assert (log_dir / (call + ".stream")).read_text(encoding="utf-8").strip() == str(log_dir / (call + ".activity.json"))
+    with patch.object(panel, "call_results", return_value=evidence):
+        arrived = panel_nav.read_evidence(activity_repo, ("result", call))
+    finished_nav = {"opening": ("result", call)}
+    assert panel_nav.finish_opening(finished_nav, arrived)
+    finished = render_detail({}, finished_nav["detail"], 90, 30, {}, color=False)
+    assert "What it did:" in finished and "b.py" in finished and "Commands run: 1 passed, 0 failed" in finished, finished
+    transition_call = "call-6123456789abcdef"
+    transition_stream = activity_repo / "codex-finished-live-call.jsonl"
+    transition_stream.write_text("\n".join(json.dumps(row) for row in [
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "git status", "exit_code": 0}},
+        {"type": "item.completed", "item": {"type": "file_change", "changes": [{"path": "transition.py"}]}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "transition complete"}},
+    ]) + "\n", encoding="utf-8")
+    (log_dir / (transition_call + ".stream")).write_text(str(transition_stream) + "\n", encoding="utf-8")
+    transition_events = panel_activity.events(transition_stream)
+    transition_snapshot = {"repo": str(activity_repo.resolve()), "captured_at": time.time(),
+                           "calls": {transition_call: transition_events}}
+    transition_nav = {"room_id": "room-fixture", "surface": "tree", "activity_snapshot": transition_snapshot}
+    transition_member = {"participant": transition_call, "provider": "codex", "role": "worker",
+                         "label": "Finishing worker", "joined": True}
+    participants.append(transition_member)
+    transition_working = {"room_attempts": {transition_call: {
+        "state": "working", "attempt_id": "transition-attempt"}}}
+    with patch.object(panel.room, "status", return_value={"participants": participants}):
+        panel.navigate(activity_repo, ("result", transition_call), transition_working, transition_nav, 80)
+    transition_live = render_detail({}, transition_nav["detail"], 80, 30, transition_nav, color=False)
+    assert "LIVE ACTIVITY" in transition_live and "What it did:" not in transition_live, transition_live
+    queued_generation = transition_nav["activity_generation"]
+    with patch.object(panel, "call_results", return_value=evidence):
+        queued_live_preview = (queued_generation, panel_nav.read_evidence(
+            activity_repo, ("result", transition_call), transition_working))
+    assert panel_activity.record_summary(activity_repo, transition_call, transition_stream, "codex", "write")
+    assert panel_activity.finish_pointer(activity_repo, transition_call)
+    transition_finished = {"room": {"id": "room-fixture", "message_count": 1},
+                          "attempts": {"active_recent": [], "recent": [{
+                              "attempt_id": "transition-attempt", "state": "done"}]},
+                          "room_attempts": {transition_call: {
+                              "state": "done", "attempt_id": "transition-attempt"}}}
+    with patch.object(panel_nav, "_refresh_activity_snapshot"):
+        panel_nav.refreshed_navigation(transition_nav, transition_finished)
+    assert transition_nav.get("opening") == ("result", transition_call), transition_nav
+    assert transition_nav["activity_generation"] > queued_generation, transition_nav
+    assert transition_nav["opening_generation"] == transition_nav["activity_generation"], transition_nav
+    assert transition_nav["detail"].get("activity_call") == transition_call, transition_nav
+    with patch.object(panel, "call_results", return_value=evidence):
+        transition_report = panel_nav.read_evidence(
+            activity_repo, ("result", transition_call), transition_finished)
+    assert panel_nav.accept_activity_report(transition_nav, transition_nav["activity_generation"], transition_report)
+    transition_detail = render_detail({}, transition_nav["detail"], 80, 30, transition_nav, color=False)
+    assert "What it did:" in transition_detail and "transition.py" in transition_detail and \
+        "Commands run: 1 passed, 0 failed" in transition_detail and "LIVE ACTIVITY" not in transition_detail, \
+        transition_detail
+    assert not panel_nav.accept_activity_report(transition_nav, *queued_live_preview), transition_nav
+    after_stale_preview = render_detail({}, transition_nav["detail"], 80, 30, transition_nav, color=False)
+    assert "What it did:" in after_stale_preview and "transition.py" in after_stale_preview and \
+        "Commands run: 1 passed, 0 failed" in after_stale_preview and "LIVE ACTIVITY" not in after_stale_preview, \
+        after_stale_preview
+    with patch.object(panel_nav, "_refresh_activity_snapshot"):
+        panel_nav.refreshed_navigation(transition_nav, transition_finished)
+    later_transition_detail = render_detail({}, transition_nav["detail"], 80, 30, transition_nav, color=False)
+    assert "What it did:" in later_transition_detail and "transition.py" in later_transition_detail and \
+        "LIVE ACTIVITY" not in later_transition_detail, later_transition_detail
+    many_tools_call = "call-4123456789abcdef"
+    many_tools_stream = activity_repo / "claude-many-tools.jsonl"
+    tool_blocks = [{"type": "tool_use", "id": "bash-%02d" % index, "name": "Bash",
+                    "input": {"command": "command-%02d" % index}}
+                   for index in range(65)]
+    tool_results = [{"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "bash-%02d" % index,
+         "is_error": index == 64, "content": "result"}]}}
+        for index in range(65)]
+    many_tools_stream.write_text("\n".join(json.dumps(row) for row in [
+        {"type": "assistant", "message": {"content": tool_blocks}}, *tool_results]) + "\n",
+        encoding="utf-8")
+    assert panel_activity.record_summary(activity_repo, many_tools_call, many_tools_stream, "claude", "read")
+    many_tools_summary = panel_activity.read_summary(activity_repo, many_tools_call)
+    assert len(many_tools_summary["commands"]) == 64 and \
+        many_tools_summary["command_counts"] == {"passed": 64, "failed": 1}, many_tools_summary
+    overflow_call = "call-5123456789abcdef"
+    overflow_stream = activity_repo / "claude-tool-overflow.jsonl"
+    overflow_stream.write_text("\n".join(json.dumps(row) for row in [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "bash-overflow-%d" % index, "name": "Bash",
+             "input": {"command": "overflow-%d" % index}} for index in range(2)]}},
+        *[{"type": "user", "message": {"content": [{"type": "tool_result",
+              "tool_use_id": "bash-overflow-%d" % index, "is_error": False, "content": "ok"}]}}
+          for index in range(2)]]) + "\n", encoding="utf-8")
+    with patch.object(panel_activity, "_MAX_PENDING_TOOL_RESULTS", 1):
+        assert panel_activity.record_summary(activity_repo, overflow_call, overflow_stream, "claude", "read")
+    overflow_summary = panel_activity.read_summary(activity_repo, overflow_call)
+    assert "tool result tracking overflow" in overflow_summary.get("partial", ""), overflow_summary
+    large_stream = activity_repo / "codex-large.jsonl"
+    with large_stream.open("w", encoding="utf-8") as large_out:
+        large_out.write(json.dumps({"type": "item.completed", "item": {
+            "type": "file_change", "changes": [{"path": "early/edited.py"}]}}) + "\n")
+        for index in range(2200):
+            large_out.write(json.dumps({"type": "item.completed", "item": {
+                "type": "agent_message", "text": "line %d " % index + "x" * 180}}) + "\n")
+    assert large_stream.stat().st_size > 262144, large_stream.stat().st_size
+    large_call = "call-large-0123456789abcdef"
+    assert panel_activity.record_summary(activity_repo, large_call, large_stream, "codex", "write")
+    large_summary = panel_activity.read_summary(activity_repo, large_call)
+    assert "early/edited.py" in large_summary["files"], large_summary
+    partial_stream = activity_repo / "codex-partial.jsonl"
+    with partial_stream.open("w", encoding="utf-8") as partial_out:
+        partial_out.write(json.dumps({"type": "item.completed", "item": {
+            "type": "file_change", "changes": [{"path": "partial/early.py"}]}}) + "\n")
+        for index in range(5000):
+            partial_out.write(json.dumps({"type": "item.completed", "item": {
+                "type": "agent_message", "text": "line %d " % index + "x" * 190}}) + "\n")
+    assert partial_stream.stat().st_size > 1024 * 1024, partial_stream.stat().st_size
+    partial_call = "call-partial-0123456789abcdef"
+    with patch.object(panel_activity, "_SUMMARY_MAX_BYTES", 1024 * 1024):
+        assert panel_activity.record_summary(activity_repo, partial_call, partial_stream, "codex", "write")
+    partial_summary = panel_activity.read_summary(activity_repo, partial_call)
+    assert partial_summary["partial"] == "first 1 MiB", partial_summary
+    assert "partial: first 1 MiB" in panel_activity.summary_lines(partial_summary), partial_summary
+    assert "partial/early.py" in partial_summary["files"], partial_summary
+    failed_call = "call-unavailable-0123456789abcdef"
+    failed_pointer = log_dir / (failed_call + ".stream")
+    failed_pointer.write_text(str(codex_stream) + "\n", encoding="utf-8")
+    with patch.object(panel_activity, "_summarize_stream", side_effect=OSError("fixture failure")):
+        assert not panel_activity.record_summary(activity_repo, failed_call, codex_stream, "codex", "write")
+    assert failed_pointer.is_file() and failed_pointer.read_text(encoding="utf-8").strip() == "unavailable"
+    assert not panel_activity.finish_pointer(activity_repo, failed_call)
+    assert failed_pointer.is_file() and failed_pointer.read_text(encoding="utf-8").strip() == "unavailable"
+    (log_dir / (call + ".stream")).write_text("unavailable\n", encoding="utf-8")
+    artifacts = activity_repo / ".oms/artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "sample.attempts.json").write_text(json.dumps({"attempts": [{"output": "sample.attempt-1.out"}]}),
+                                                    encoding="utf-8")
+    (artifacts / "sample.attempt-1.out").write_text(codex_stream.read_text(encoding="utf-8"), encoding="utf-8")
+    (log_dir / (call + ".activity.json")).unlink()
+    with patch.object(panel, "call_results", return_value=evidence):
+        fallback_arrived = panel_nav.read_evidence(activity_repo, ("result", call))
+    fallback_nav = {"opening": ("result", call)}
+    assert panel_nav.finish_opening(fallback_nav, fallback_arrived)
+    missing = render_detail({}, fallback_nav["detail"], 90, 30, {}, color=False)
+    assert "Activity not recorded" in missing and "a.py" not in missing, missing
+    write_call = "call-abcdef0123456789"
+    claude_write = activity_repo / "claude-write.json"
+    claude_write.write_text(json.dumps({"type": "result", "result": "completed"}) + "\n", encoding="utf-8")
+    assert panel_activity.record_summary(activity_repo, write_call, claude_write, "claude", "write")
+    unavailable = panel_activity.summary_lines(panel_activity.read_summary(activity_repo, write_call))
+    assert unavailable == ["Live activity not available for Claude write workers"], unavailable
 detail_fixture = {"title": "Failure", "text": "## Result\nNarrative mentions failed and ok.\nOutcome: failed\nStage: running"}
 colored_detail = render_detail({}, detail_fixture, 80, 20, {}, color=True)
 assert "\033[" in colored_detail and "\033[" in colored_detail.splitlines()[0], colored_detail

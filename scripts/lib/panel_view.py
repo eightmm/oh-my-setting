@@ -89,6 +89,11 @@ _JUDGMENTS = OrderedDict()
 _JUDGMENT_BYTES = 64 * 1024
 
 
+def _repo_root(report):
+    return os.path.realpath(mapping(report.get("repo")).get("path") or
+                            os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_PANEL_REPO") or os.getcwd())
+
+
 def _artifact_judgment(report, member):
     """Read a regular OMS artifact's tail once per file generation; never open pipes or links."""
     relative = member.get("artifact")
@@ -97,8 +102,7 @@ def _artifact_judgment(report, member):
         return None
     key = None
     try:
-        root = os.path.realpath(mapping(report.get("repo")).get("path") or
-                                os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_PANEL_REPO") or os.getcwd())
+        root = _repo_root(report)
         path = os.path.join(root, relative)
         if os.path.realpath(path) != path:
             return None

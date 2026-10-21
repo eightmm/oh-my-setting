@@ -5,7 +5,7 @@ import re
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
-                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, worker_rows, wrapped,
+                        _repo_root, main_occupied, menu_rows, status_alerts, TERMINAL_STATES, worker_rows, wrapped,
                         role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
                         JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
                         judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
@@ -23,6 +23,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     interactive = navigation is not None
     navigation = navigation if interactive else {}
     navigation.update(tab_strip_visible=False, tab_body_visible=False, help_rows=max(4, height // 3))
+    cached_activity = navigation.get("activity_snapshot")
+    if not isinstance(cached_activity, dict):
+        cached_activity = mapping(mapping(navigation.get("preview")).get("report")).get("activity_snapshot")
+    root = _repo_root(report)
+    if isinstance(cached_activity, dict) and cached_activity.get("repo") == root:
+        navigation["activity_snapshot"] = cached_activity
+    else:
+        navigation["activity_snapshot"] = {"repo": root, "calls": {}}
     sep = " · " if unicode else " / "
     selected = navigation.get("selected")
     collapsed = navigation.get("collapsed", set())
@@ -109,6 +117,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         age = main_words(call, unicode) if call.get("role") == "main" else age_label(call.get("joined_at")) or "unknown"
         tokens = token_label(call)
         label = call.get("title") or (None if call.get("role") == "main" else call["participant"])
+        if not extra and call.get("state") in LIVE_STATES:
+            latest = mapping(mapping(navigation.get("activity_snapshot")).get("calls")).get(
+                call.get("participant")) or []
+            if latest:
+                extra = latest[-1].get("text", "")
         identity = call_identity(call.get("role"), call.get("model"), label, alias=call.get("alias"),
                                  purpose=purpose(call))
         if extra:
@@ -601,9 +614,32 @@ def render_detail(report, detail, width, height, navigation, managed=False, colo
         body = render_results(detail["report"], width).split("\n")
     else:
         body = []
-        for line, kind in _result_blocks(detail["text"]):
+        for line, kind in _result_blocks(detail.get("text", "")):
             body.extend(_result_structured(line, width) if kind != "prose" else
                         wrapped(line, width, max(1, len(line)), max_chars=max(400, len(line))))
+    activity = detail.get("activity_events")
+    activity_call = detail.get("activity_call")
+    if activity_call:
+        cached = navigation.get("activity_snapshot")
+        if not isinstance(cached, dict):
+            cached = mapping(mapping(navigation.get("preview")).get("report")).get("activity_snapshot")
+        if isinstance(cached, dict):
+            activity = mapping(cached.get("calls")).get(activity_call, [])
+    what_did = detail.get("what_it_did")
+    if activity is not None:
+        glyphs = {"say": "›", "think": "~", "run": "$", "edit": "✎", "tool": "·"}
+        body.extend(wrapped("Activity:", width, 1))
+        if not activity:
+            body.extend(wrapped(detail.get("activity_unavailable") or "No activity yet", width, 1))
+        for event in activity[-12:]:
+            marker = glyphs.get(event.get("kind"), "·")
+            if event.get("kind") == "run":
+                marker += " ✓" if event.get("ok") is True else " ✗" if event.get("ok") is False else ""
+            body.extend(wrapped(marker + " " + event.get("text", ""), width, 1))
+    if what_did:
+        body.extend(wrapped("What it did:", width, 1))
+        for line in what_did:
+            body.extend(wrapped(line, width, 1))
     budget = max(0, height - len(heading) - 2)
     offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - budget))
     navigation.update(hits=[], items=[], offset=offset, viewport=budget, body_rows=len(body), bands=[])

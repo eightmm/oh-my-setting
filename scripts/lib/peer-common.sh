@@ -509,6 +509,35 @@ $(jobs -pr)
 EOF
 }
 
+ma_claude_supports_forward_subagent_text() {
+  case "${_MA_CLAUDE_FORWARD_SUBAGENT_TEXT_SUPPORT:-}" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  _MA_CLAUDE_FORWARD_SUBAGENT_TEXT_SUPPORT=no
+  local binary pybin
+  binary="$(command -v claude 2>/dev/null || true)"
+  pybin="$(command -v python3 2>/dev/null || true)"
+  [ -n "$binary" ] && [ -n "$pybin" ] || return 1
+  if "$pybin" - "$binary" <<'PY' >/dev/null 2>&1
+import subprocess
+import sys
+
+try:
+    result = subprocess.run([sys.argv[1], "--help"], capture_output=True, text=True,
+                            check=False, timeout=2)
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(1)
+raise SystemExit(0 if result.returncode == 0 and
+                 "--forward-subagent-text" in result.stdout + result.stderr else 1)
+PY
+  then
+    _MA_CLAUDE_FORWARD_SUBAGENT_TEXT_SUPPORT=yes
+    return 0
+  fi
+  return 1
+}
+
 # Run "$@" under a wall clock. SIGTERM alone is not a bound — a CLI that traps
 # or ignores it survives the timeout — so pass --kill-after (SIGKILL
 # escalation) when the binary supports it (GNU coreutils does; busybox may
@@ -836,7 +865,7 @@ ma_export_child_env() {
   # prompt omits its path, so removing these variables is not an OS sandbox;
   # it prevents accidental/confused-deputy use while the repository guards
   # detect a direct reach-around. Read passes retain a read-only state pointer.
-  unset OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+  unset OMS_STATE_REPO OMS_PANEL_CALL_ID OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
     OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE
   if [ "$access" = read ]; then
     unset OMS_ROOM_RELAY_QUEUE OMS_ROOM_RELAY_ALLOWED
@@ -2850,8 +2879,13 @@ ma_provider_attempt() {
       if [ "$access" != write ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
         # Keep earlier assistant evidence when the last result is only a
         # closing remark. Permissions/tools remain the same read-only policy.
+        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && ma_claude_supports_forward_subagent_text; then
+          cmd+=(--forward-subagent-text)
+        fi
         cmd+=(--output-format stream-json --verbose -p)
       else
+        # Write workers keep the envelope: stream-json adds public message and
+        # tool-call footer data, which changes their retained output contract.
         cmd+=(--output-format json -p)
       fi
       ;;
@@ -3180,6 +3214,35 @@ ma_provider_attempt() {
         room_relay_dir="" room_relay_pid=""
       fi
     fi
+    if [ -n "${OMS_PANEL_CALL_ID:-}" ]; then
+      python3 - "$state_repo" "$OMS_PANEL_CALL_ID" "$output_file" <<'PY' >/dev/null 2>&1 || true
+import os, re, stat, sys
+repo, call, output = sys.argv[1:]
+if not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", call):
+    raise SystemExit(1)
+directory = os.path.join(repo, ".oms", "panel-state", "dispatch-logs")
+os.makedirs(directory, mode=0o700, exist_ok=True)
+info = os.lstat(directory)
+if (not stat.S_ISDIR(info.st_mode) or
+        os.name == "posix" and (info.st_mode & 0o077 or
+        hasattr(os, "getuid") and info.st_uid != os.getuid())):
+    raise SystemExit(1)
+absolute = os.path.join(os.path.realpath(os.path.dirname(output)), os.path.basename(output))
+fd = os.open(os.path.join(directory, call + ".stream"),
+             os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    data = (absolute + "\n").encode("utf-8")
+    while data:
+        written = os.write(fd, data)
+        if written <= 0:
+            raise OSError("short dispatch stream pointer write")
+        data = data[written:]
+finally:
+    os.close(fd)
+PY
+    fi
     (
       ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
       if [ "$provider" = codex ]; then
@@ -3223,6 +3286,10 @@ ma_provider_attempt() {
       rm -rf -- "$seat_plans_real"
     fi
   fi
+  if [ -n "${OMS_PANEL_CALL_ID:-}" ]; then
+    python3 "$(ma_scripts_dir)/lib/panel_activity.py" record \
+      "$state_repo" "$OMS_PANEL_CALL_ID" "$output_file" "$provider" "$access" >/dev/null 2>&1 || true
+  fi
   if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
     if [ "$provider" = antigravity ] && grep -Eq '^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$' "$output_file"; then
       printf '\nstop-reason: provider=antigravity reason=stream_truncated subtype=print_timeout is_error=0\n' >> "$output_file"
@@ -3230,6 +3297,10 @@ ma_provider_attempt() {
     [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
   fi
   [ "$provider" != codex ] || ma_codex_jsonl_to_text "$output_file"
+  if [ -n "${OMS_PANEL_CALL_ID:-}" ]; then
+    python3 "$(ma_scripts_dir)/lib/panel_activity.py" finish \
+      "$state_repo" "$OMS_PANEL_CALL_ID" >/dev/null 2>&1 || true
+  fi
   ma_note_configured_default_model "$provider" "$model" "$output_file"
   if [ -n "$authority_before" ]; then
     if ! ma_authority_state_snapshot "$state_repo" "$authority_after"; then
