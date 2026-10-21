@@ -34734,6 +34734,48 @@ PY
 # smoke-weight: 240
 test_goal_drive_parallel_batches() {
   goal_drive_batch_cases parallel shared overlap verifier unknown serial cap recover land-recover tamper
+  local project="$TMP/goal-batch-skip-candidates" out
+  make_committed_repo "$project"
+  mkdir -p "$project/checks" "$project/.oms/plan"
+  for task in t1 t2 t3 t4 u1 u2 u3; do
+    printf 'true\n' > "$project/checks/$task.sh"
+  done
+  git -C "$project" add checks && git -C "$project" commit -qm verifiers
+  python3 - "$project" <<'PY'
+import json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+tasks = {}
+for i, task in enumerate(("t1", "t2", "t3", "t4")):
+    allowed = ["checks/%s.sh" % task, "%s.txt" % task]
+    if task in ("t1", "t2"):
+        allowed.append("shared.txt")
+    tasks[task] = {"id": task, "created": "%04d" % i, "state": "ready",
+                   "allowed_paths": allowed, "verify": "bash checks/%s.sh" % task,
+                   "depends": []}
+tasks["u1"] = {"id": "u1", "created": "0000", "state": "ready",
+               "allowed_paths": ["checks/u1.sh", "u1.txt"],
+               "verify": "bash checks/u1.sh", "depends": []}
+tasks["u2"] = {"id": "u2", "created": "0001", "state": "ready",
+               "allowed_paths": ["checks/u2.sh", "u2.txt"],
+               "verify": "python3 -m pytest", "depends": []}
+tasks["u3"] = {"id": "u3", "created": "0002", "state": "ready",
+               "allowed_paths": ["checks/u3.sh", "u3.txt"],
+               "verify": "bash checks/u3.sh", "depends": []}
+(repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": tasks}), encoding="utf-8")
+(repo / ".oms/plan/progress.jsonl").touch()
+PY
+  out="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" goal-batch -- \
+    "$project/.oms/plan/tasks.json" "$project/.oms/plan/progress.jsonl" "$project" "" 4 "" \
+    select '{"actionable":["t1","t2","t3","t4"]}' 4 2>&1)" ||
+    fail "overlap selector failed: $out"
+  contains "$out" 't1' && contains "$out" 't3' && contains "$out" 't4' && contains "$out" 't2: overlap' ||
+    fail "overlap did not preserve later independent tasks and explain the skip: $out"
+  out="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" goal-batch -- \
+    "$project/.oms/plan/tasks.json" "$project/.oms/plan/progress.jsonl" "$project" "" 4 "" \
+    select '{"actionable":["u1","u2","u3"]}' 3 2>&1)" ||
+    fail "unknown-verifier selector failed: $out"
+  contains "$out" 'u1' && contains "$out" 'u3' && contains "$out" 'u2: unknown verifier' ||
+    fail "unknown verifier did not preserve later independent task and explain the skip: $out"
 }
 
 # smoke-weight: 73

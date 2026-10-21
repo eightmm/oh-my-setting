@@ -1696,10 +1696,14 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
             files = verify_files(task.get("verify", ""), allowed)
             if not allowed:
                 break
-            if chosen and (not files or any(not f or scopes_overlap(allowed, a)
+            if chosen and not files:
+                print("goal-drive: skipped %s: unknown verifier" % task["id"], file=sys.stderr)
+                continue
+            if chosen and any(not f or scopes_overlap(allowed, a)
                     or scopes_overlap(files, f) or scopes_overlap(allowed, f)
-                    or scopes_overlap(files, a) for a, f in scopes)):
-                break
+                    or scopes_overlap(files, a) for a, f in scopes):
+                print("goal-drive: skipped %s: overlap" % task["id"], file=sys.stderr)
+                continue
             chosen.append(task["id"])
             attempts += int(not reviewed)
             scopes.append((allowed, files))

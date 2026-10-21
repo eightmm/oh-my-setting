@@ -1011,8 +1011,9 @@ new task attempt reserves one lifetime cycle before dispatch; adopting a
 completed review spends no additional cycle or provider call. Width never
 exceeds the remaining attempt budget.
 
-Parallel goal-drive keeps per-task worktrees, selects ready tasks in plan order,
-and uses graph scope overlap checks to serialize intersecting allowed paths,
+Parallel goal-drive keeps per-task worktrees, selects ready tasks in plan order
+(a candidate that overlaps a selected task or has an unknown verifier is skipped
+for this batch and left for a later one, named on stderr), and uses graph scope overlap checks to serialize intersecting allowed paths,
 shared verifier files and writer/verifier intersections. Only literal direct
 shell verifiers with recognized, explicit file inputs prove coverage in v1.
 Every program and data input must be within the task's allowed paths, whether
