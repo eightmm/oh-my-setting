@@ -3759,8 +3759,8 @@ test_peer_review_gate_refuses_untracked_content() {
   local state_repo="$TMP/review-gate-untracked-state"
   local bin_dir="$TMP/review-gate-untracked-bin"
   local home_dir="$TMP/review-gate-untracked-home"
+  local bytecode_outside="$TMP/review-gate-bytecode-outside"
   local synthesis_artifact
-  local bytecode_paths
   local rc=0
 
   make_committed_repo "$project"
@@ -3769,7 +3769,12 @@ test_peer_review_gate_refuses_untracked_content() {
   # Keep a real importable source module in the reviewed checkout. Both the
   # gate verifier and provider import it after the read guard starts.
   printf 'value = 1\n' > "$project/review_bytecode_probe.py"
+  mkdir -p "$project/existing/__pycache__" "$project/symlinked" "$bytecode_outside"
+  printf 'baseline bytecode' > "$project/existing/__pycache__/baseline.cpython-312.pyc"
+  ln -s "$bytecode_outside" "$project/symlinked/__pycache__" ||
+    fail "could not create symlinked __pycache__ fixture"
   git -C "$project" add review_bytecode_probe.py
+  git -C "$project" add -f existing/__pycache__/baseline.cpython-312.pyc symlinked/__pycache__
   git -C "$project" -c user.name=t -c user.email=t@example.com \
     commit -qm 'add review bytecode probe'
   write_fake_review_gate_provider "$bin_dir" claude pass
@@ -3799,40 +3804,77 @@ EOF
   assert_file_contains "$synthesis_artifact" "Guard diagnostic"
   assert_file_contains "$synthesis_artifact" "provider-created.txt"
 
-  # Read passes must not create bytecode when either process imports from the
-  # reviewed checkout. The verifier runs before source files are rebaselined;
-  # the provider runs after that rebaseline.
+  # The provider inherits bytecode suppression for ordinary imports.
   rm -f "$project/provider-created.txt"
   write_fake_review_gate_provider "$bin_dir" claude pass
   cat >> "$bin_dir/claude" <<EOF
 test "\${PYTHONDONTWRITEBYTECODE:-}" = 1 || { echo 'bytecode environment missing' >&2; exit 65; }
 PYTHONPATH='$project' python3 -c 'import review_bytecode_probe'
 EOF
-  find "$project" -type d -name __pycache__ -prune -exec rm -rf {} +
   rc=0
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
     "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/import" \
     --providers claude --gate --verify 'test "$PYTHONDONTWRITEBYTECODE" = 1 && python3 -c "import review_bytecode_probe"' \
     --prompt "Review bytecode behavior" > "$TMP/review-gate-bytecode-out" 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "read pass importing a Python source module must complete without bytecode writes: $(cat "$TMP/review-gate-bytecode-out")"
-  bytecode_paths="$(find "$project" \( -type d -name __pycache__ -o -type f -name '*.pyc' \) -print)"
-  [ -z "$bytecode_paths" ] || fail "read pass created Python bytecode under the reviewed source: $bytecode_paths"
+  [ -f "$project/existing/__pycache__/baseline.cpython-312.pyc" ] ||
+    fail "read pass changed the baseline bytecode file"
 
-  # Explicit bytecode writes remain ordinary source file mutations and must
-  # still be rejected by the read guard.
+  # Providers may ignore PYTHONDONTWRITEBYTECODE. New bytecode in an existing
+  # cache is removed, while a symlinked cache is never followed outside source.
   write_fake_review_gate_provider "$bin_dir" claude pass
   cat >> "$bin_dir/claude" <<EOF
-mkdir -p '$project/__pycache__'
-printf 'unchecked hash bytecode' > '$project/__pycache__/planted.pyc'
+unset PYTHONDONTWRITEBYTECODE
+printf 'unchecked hash bytecode' > '$project/existing/__pycache__/planted.cpython-312.pyc'
+printf 'outside bytecode' > '$project/symlinked/__pycache__/outside.cpython-312.pyc'
 EOF
   rc=0
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
     "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/direct-pyc" \
-    --providers claude --gate --no-verify --prompt "Reject direct bytecode writes" \
+    --providers claude --gate --no-verify --prompt "Purge provider bytecode" \
     > "$TMP/review-gate-direct-pyc-out" 2>&1 || rc=$?
-  [ "$rc" = 2 ] || fail "read guard must reject a directly written .pyc, got $rc: $(cat "$TMP/review-gate-direct-pyc-out")"
-  contains "$(cat "$TMP/review-gate-direct-pyc-out")" "planted.pyc" ||
-    fail "guard diagnostic omitted directly written bytecode: $(cat "$TMP/review-gate-direct-pyc-out")"
+  [ "$rc" = 0 ] || fail "read pass should preserve verdict after purging provider bytecode, got $rc: $(cat "$TMP/review-gate-direct-pyc-out")"
+  [ ! -e "$project/existing/__pycache__/planted.cpython-312.pyc" ] ||
+    fail "read pass left provider bytecode behind"
+  [ -f "$bytecode_outside/outside.cpython-312.pyc" ] ||
+    fail "read pass followed a symlinked __pycache__ outside the source tree"
+  contains "$(cat "$TMP/review-gate-direct-pyc-out")" "removed 1 bytecode files written during the read pass" ||
+    fail "review log omitted bytecode purge count"
+
+  # A pre-existing bytecode file is not purged when the provider changes it.
+  mkdir -p "$project/preexisting/__pycache__"
+  printf 'baseline bytecode' > "$project/preexisting/__pycache__/baseline.cpython-312.pyc"
+  git -C "$project" add preexisting/__pycache__/baseline.cpython-312.pyc
+  git -C "$project" -c user.name=t -c user.email=t@example.com \
+    commit -qm 'add baseline bytecode'
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  cat >> "$bin_dir/claude" <<EOF
+printf 'changed baseline bytecode' > '$project/preexisting/__pycache__/baseline.cpython-312.pyc'
+EOF
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/modified-pyc" \
+    --providers claude --gate --no-verify --prompt "Reject changed baseline bytecode" \
+    > "$TMP/review-gate-modified-pyc-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "read guard must reject modified pre-existing .pyc, got $rc: $(cat "$TMP/review-gate-modified-pyc-out")"
+  contains "$(cat "$TMP/review-gate-modified-pyc-out")" "source repository protected surfaces: tracked" ||
+    fail "guard did not identify modified baseline bytecode as a tracked mutation"
+
+  # Verifier output is captured by the rebaseline and remains in the reviewed
+  # tree; the provider starts only after that gate verification has completed.
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  cat >> "$bin_dir/claude" <<EOF
+test "\${PYTHONDONTWRITEBYTECODE:-}" = 1 || { echo 'bytecode environment missing' >&2; exit 65; }
+PYTHONPATH='$project' python3 -c 'import review_bytecode_probe'
+EOF
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/verifier-pyc" \
+    --providers claude --gate --verify "env -u PYTHONDONTWRITEBYTECODE PYTHONPATH='$project' python3 -c 'import review_bytecode_probe'" \
+    --prompt "Preserve verifier bytecode" > "$TMP/review-gate-verifier-pyc-out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "gate verifier bytecode should be absorbed by source rebaseline: $(cat "$TMP/review-gate-verifier-pyc-out")"
+  find "$project/__pycache__" -maxdepth 1 -type f -name 'review_bytecode_probe*.pyc' -print -quit | grep -q . ||
+    fail "gate verifier bytecode was unexpectedly removed"
 }
 
 test_git_diff_readers_never_execute_clean_filters() {

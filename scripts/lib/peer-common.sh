@@ -144,10 +144,160 @@ ma_read_guard_rebaseline_source() {
   mv "$MA_READ_GUARD_DIR/source/files.after" "$MA_READ_GUARD_DIR/source/files"
 }
 
+ma_read_guard_purge_new_bytecode() {
+  [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
+  local current_manifest removed
+  current_manifest="$MA_READ_GUARD_DIR/source/files.bytecode-current"
+  oms_worker_surface_capture_one "$MA_READ_SOURCE_REPO" files > "$current_manifest" || return 2
+  removed="$(python3 - "$MA_READ_SOURCE_REPO" \
+    "$MA_READ_GUARD_DIR/source/files" "$current_manifest" <<'PY'
+import base64
+import errno
+import os
+import re
+import stat
+import sys
+
+root = os.path.realpath(sys.argv[1])
+bytecode = re.compile(br"(?:^|/)__pycache__/[^/]+\.pyc\Z")
+
+def manifest_paths(path):
+    result = set()
+    complete = True
+    with open(path, "rb") as stream:
+        for line in stream:
+            fields = line.rstrip(b"\n").split(b" ")
+            if fields and fields[0] == b"TRUNCATED":
+                complete = False
+                continue
+            if len(fields) < 2:
+                complete = False
+                continue
+            try:
+                result.add(base64.b64decode(fields[-1], validate=True))
+            except (ValueError, base64.binascii.Error):
+                complete = False
+    return result, complete
+
+before, before_complete = manifest_paths(sys.argv[2])
+after, _ = manifest_paths(sys.argv[3])
+root_fd_support = (os.open in os.supports_dir_fd and
+                   os.stat in os.supports_dir_fd and
+                   os.stat in os.supports_follow_symlinks and
+                   os.unlink in os.supports_dir_fd and
+                   os.rmdir in os.supports_dir_fd and
+                   hasattr(os, "O_DIRECTORY") and getattr(os, "O_NOFOLLOW", 0))
+count = 0
+cache_dirs = set()
+
+def safe_parent_fd(parts):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(root, flags)
+    try:
+        for part in parts:
+            next_fd = os.open(os.fsdecode(part), flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+def fallback_path(parts):
+    current = root
+    for part in parts:
+        current = os.path.join(current, os.fsdecode(part))
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400):
+            return None
+        resolved = os.path.realpath(current)
+        if os.path.commonpath((root, resolved)) != root:
+            return None
+    return current
+
+for rel in sorted(after - before if before_complete else ()):
+    if not bytecode.search(rel) or rel.startswith(b"/") or b"\\" in rel:
+        continue
+    parts = rel.split(b"/")
+    if any(part in (b"", b".", b"..") for part in parts):
+        continue
+    cache = b"/".join(parts[:-1])
+    cache_dirs.add(cache)
+    try:
+        if root_fd_support:
+            parent_fd = safe_parent_fd(parts[:-1])
+            try:
+                info = os.stat(os.fsdecode(parts[-1]), dir_fd=parent_fd,
+                               follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                try:
+                    os.unlink(os.fsdecode(parts[-1]), dir_fd=parent_fd)
+                    count += 1
+                except FileNotFoundError:
+                    pass
+            finally:
+                os.close(parent_fd)
+        else:
+            parent = fallback_path(parts[:-1])
+            if parent is None:
+                continue
+            full = os.path.join(parent, os.fsdecode(parts[-1]))
+            try:
+                info = os.lstat(full)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                try:
+                    os.unlink(full)
+                    count += 1
+                except FileNotFoundError:
+                    pass
+    except FileNotFoundError:
+        # Another read pass may have purged this path after the manifest read.
+        pass
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            continue
+        raise SystemExit("could not safely remove read-pass bytecode")
+
+for cache in sorted(cache_dirs):
+    if any(path.startswith(cache + b"/") for path in before):
+        continue
+    parts = cache.split(b"/")
+    try:
+        if root_fd_support:
+            parent_fd = safe_parent_fd(parts[:-1])
+            try:
+                os.rmdir(os.fsdecode(parts[-1]), dir_fd=parent_fd)
+            finally:
+                os.close(parent_fd)
+        else:
+            parent = fallback_path(parts[:-1])
+            if parent is not None:
+                os.rmdir(os.path.join(parent, os.fsdecode(parts[-1])))
+    except OSError:
+        # Non-empty directories, symlinks, and concurrent removals are retained.
+        pass
+print(count)
+PY
+)" || return 2
+  removed="${removed//$'\r'/}"
+  case "$removed" in ''|*[!0-9]*) return 2 ;; esac
+  if [ "$removed" -gt 0 ]; then
+    echo "read pass: removed $removed bytecode files written during the read pass"
+  fi
+}
+
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
   local root name digest changed surface hard soft execution named
   MA_READ_GUARD_DIAGNOSTIC=""
+  ma_read_guard_purge_new_bytecode || return 2
   # A linked source's HEAD also appears in the state's Git metadata. Diagnose
   # source protection first so that shared surface cannot mask the cause.
   for name in source state; do
