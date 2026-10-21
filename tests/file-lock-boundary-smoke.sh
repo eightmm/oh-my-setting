@@ -141,11 +141,64 @@ test_old_live_holder_is_not_reclaimed() {
   printf '%s\n' "$$" > "$lock_dir/pid"
   printf '1\n' > "$lock_dir/started"
   printf 'live-generation\n' > "$lock_dir/owner"
+  touch -t 200001010000 "$lock_dir"
 
   marker="$TMP/live-entered"
   OMS_LOCK_TIMEOUT=1 oms_try_file_lock "$state" touch "$marker" || rc=$?
   [ "$rc" = 75 ] || fail "an old but live holder was reclaimed (status $rc)"
   [ ! -e "$marker" ] || fail "a contender entered an old live holder's critical section"
+}
+
+test_ownerless_interrupted_acquisition_is_reclaimed() {
+  local state="$TMP/interrupted/state"
+  local lock_dir observed start elapsed rc=0
+
+  mkdir -p "$(dirname "$state")"
+  lock_dir="$(oms_file_lock_path_for_file "$state")"
+  mkdir "$lock_dir" # killed after mkdir, before identity publication
+  touch -t 200001010000 "$lock_dir"
+  observed="$(oms_file_lock_probe "$state")"
+  [ "$observed" = free ] ||
+    fail "an old ownerless directory should probe free, got $observed"
+  start="$(date +%s)"
+  OMS_LOCK_TIMEOUT=5 oms_try_file_lock "$state" true || rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" = 0 ] || fail "an interrupted ownerless acquisition was not recovered (status $rc)"
+  [ "$elapsed" -lt 5 ] || fail "ownerless recovery waited out the acquisition timeout"
+}
+
+test_young_ownerless_directory_is_not_reclaimed() {
+  local state="$TMP/interrupted-young/state"
+  local lock_dir marker="$TMP/interrupted-young-entered" observed rc=0
+
+  mkdir -p "$(dirname "$state")"
+  lock_dir="$(oms_file_lock_path_for_file "$state")"
+  mkdir "$lock_dir"
+  observed="$(oms_file_lock_probe "$state")"
+  [ "$observed" = held ] ||
+    fail "a fresh ownerless directory must probe as held, got $observed"
+
+  OMS_LOCK_TIMEOUT=1 oms_try_file_lock "$state" touch "$marker" || rc=$?
+  [ "$rc" = 75 ] || fail "a fresh ownerless directory was reclaimed (status $rc)"
+  [ -d "$lock_dir" ] || fail "a fresh ownerless directory was moved or removed"
+  [ ! -e "$marker" ] || fail "a contender entered a fresh ownerless directory"
+}
+
+test_ownerless_generation_distinguishes_replacement() {
+  local state="$TMP/ownerless-generation/state"
+  local lock_dir first second
+
+  mkdir -p "$(dirname "$state")"
+  lock_dir="$(oms_file_lock_path_for_file "$state")"
+  mkdir "$lock_dir"
+  touch -t 200001010000 "$lock_dir"
+  first="$(oms_file_lock_mkdir_generation "$lock_dir")"
+  mv "$lock_dir" "$lock_dir.original"
+  mkdir "$lock_dir"
+  touch -t 200001010000 "$lock_dir"
+  second="$(oms_file_lock_mkdir_generation "$lock_dir")"
+  [ "$first" != "$second" ] ||
+    fail "a replacement ownerless directory reused the prior generation token"
 }
 
 test_reused_pid_token_is_reclaimed_when_supported() {
@@ -301,6 +354,66 @@ EOF
     fail "a stale observer renamed the new winner's live lock"
 }
 
+test_two_ownerless_waiters_do_not_reclaim_the_winner() {
+  local state="$TMP/race/state"
+  local lock_dir p1 p2 i=0
+
+  mkdir -p "$(dirname "$state")"
+  lock_dir="$(oms_file_lock_path_for_file "$state")"
+  mkdir "$lock_dir"
+  touch -t 200001010000 "$lock_dir"
+
+  cat > "$TMP/critical.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if mkdir "$2/critical" 2>/dev/null; then
+  : > "$2/$OMS_TEST_ROLE-entered"
+  if [ "$OMS_TEST_ROLE" = A ]; then
+    while [ ! -e "$2/release-A" ]; do sleep 0.01; done
+  fi
+  rmdir "$2/critical"
+else
+  : > "$2/overlap"
+fi
+EOF
+  chmod +x "$TMP/critical.sh"
+
+  run_contender() {
+    local role="$1"
+    OMS_TEST_ROLE="$role" OMS_LOCK_TIMEOUT=5 \
+      oms_with_file_lock "$state" "$TMP/critical.sh" "$state" "$TMP/race"
+  }
+
+  mkdir -p "$TMP/race"
+  run_contender A &
+  p1=$!
+  while [ ! -e "$TMP/race/A-entered" ] && [ "$i" -lt 200 ]; do
+    i=$((i + 1))
+    sleep 0.01
+  done
+  [ -e "$TMP/race/A-entered" ] || {
+    : > "$TMP/race/release-A"
+    wait "$p1" 2>/dev/null || true
+    fail "first waiter did not recover the old ownerless directory"
+  }
+
+  run_contender B &
+  p2=$!
+  sleep 0.15
+  [ ! -e "$TMP/race/B-entered" ] || {
+    : > "$TMP/race/release-A"
+    wait "$p1" 2>/dev/null || true
+    wait "$p2" 2>/dev/null || true
+    fail "second waiter entered while the first held the recovered lock"
+  }
+  : > "$TMP/race/release-A"
+  wait "$p1" || fail "first ownerless waiter failed"
+  wait "$p2" || fail "second ownerless waiter failed"
+  [ -e "$TMP/race/B-entered" ] || fail "second waiter never acquired the released lock"
+  [ ! -e "$TMP/race/overlap" ] ||
+    fail "two waiters entered the recovered ownerless lock at once"
+}
+
 
 test_flock_observation_is_conservative_and_read_only() {
   local state="$TMP/flock/state" lock_path proc_fixture key result real_python holder_pid attempts
@@ -387,10 +500,14 @@ EOF
 }
 
 test_old_live_holder_is_not_reclaimed
+test_ownerless_interrupted_acquisition_is_reclaimed
+test_young_ownerless_directory_is_not_reclaimed
+test_ownerless_generation_distinguishes_replacement
 test_reused_pid_token_is_reclaimed_when_supported
 test_bash32_fallback_records_the_holder_process
 test_crashed_reclaimer_does_not_wedge_the_generation
 test_two_stale_contenders_do_not_reclaim_the_winner
+test_two_ownerless_waiters_do_not_reclaim_the_winner
 if command -v flock >/dev/null 2>&1; then
   test_flock_observation_is_conservative_and_read_only
 fi

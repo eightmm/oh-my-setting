@@ -300,6 +300,27 @@ oms_file_lock_mkdir_write_identity() {
   }
 }
 
+oms_file_lock_mkdir_ownerless_old() {
+  local lock_dir="$1"
+
+  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] || return 1
+  # Live and older-library acquirers publish identity immediately after mkdir,
+  # so an empty directory past 60 seconds is crash residue unless its acquirer
+  # was stopped (SIGSTOP, frozen cgroup) in that window, an accepted trade-off.
+  [ -n "$(find "$lock_dir" -prune -mmin +1 -print 2>/dev/null)" ]
+}
+
+oms_file_lock_mkdir_directory_generation() {
+  local lock_dir="$1"
+  local signature=""
+
+  signature="$(stat -c '%d:%i:%y' "$lock_dir" 2>/dev/null)" ||
+    signature="$(stat -f '%d:%i:%m' "$lock_dir" 2>/dev/null)" || return 1
+  signature="${signature//$'\r'/}"
+  [ -n "$signature" ] || return 1
+  printf '%s\n' "$signature"
+}
+
 oms_file_lock_mkdir_stale() {
   local lock_dir="$1"
   local timeout="$2"
@@ -338,6 +359,10 @@ oms_file_lock_mkdir_stale() {
   esac
 
   [ -f "$lock_dir/started" ] && started="$(sed -n '1p' "$lock_dir/started" 2>/dev/null || true)"
+  if [ -z "$owner$pid$started" ]; then
+    oms_file_lock_mkdir_ownerless_old "$lock_dir"
+    return $?
+  fi
   case "$started" in
     *[!0-9]*|"") return 1 ;;
   esac
@@ -365,7 +390,12 @@ oms_file_lock_mkdir_generation() {
   [ -f "$lock_dir/process-start" ] &&
     process_start="$(sed -n '1p' "$lock_dir/process-start" 2>/dev/null || true)"
   [ -f "$lock_dir/started" ] && started="$(sed -n '1p' "$lock_dir/started" 2>/dev/null || true)"
-  [ -n "$pid$process_start$started" ] || return 1
+  if [ -z "$owner$pid$started" ]; then
+    local directory_generation
+    directory_generation="$(oms_file_lock_mkdir_directory_generation "$lock_dir")" || return 1
+    printf 'ownerless:%s\n' "$directory_generation"
+    return 0
+  fi
   printf 'legacy:%s:%s:%s\n' "$pid" "$process_start" "$started"
 }
 

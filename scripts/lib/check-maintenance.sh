@@ -41,9 +41,11 @@ oms_check_maintenance_active() {
   checks="$(oms_file_lock_path_for_file "$1/.oms/tick/last.json").checks"
   for marker in "$checks"/*; do
     [ -d "$marker" ] || continue
+    owner="$(sed -n '1p' "$marker/owner" 2>/dev/null || true)"
+    # Keep ownerless markers active: without owner metadata, cleanup cannot safely release them.
+    [ -n "$owner" ] || return 0
     if oms_file_lock_mkdir_stale "$marker" "$(oms_file_lock_timeout)" "$(date +%s)"; then
-      owner="$(sed -n '1p' "$marker/owner" 2>/dev/null || true)"
-      [ -z "$owner" ] || oms_file_lock_mkdir_release "$marker" "$owner"
+      oms_file_lock_mkdir_release "$marker" "$owner"
     else
       return 0
     fi

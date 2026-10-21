@@ -14607,6 +14607,21 @@ test_cleanup_removes_dead_lock_only() {
   assert_file_contains "$home_dir/cleanup.out" "removed: $dead_lock (dead harness lock)"
 }
 
+test_empty_check_maintenance_marker_remains_active() {
+  local project="$TMP/check-maintenance-empty"
+
+  (
+    local lock_path
+    export OMS_LOCK_DIR="$TMP/check-maintenance-empty-locks"
+    mkdir -p "$project/.oms/tick"
+    . "$ROOT/scripts/lib/check-maintenance.sh"
+    lock_path="$(oms_file_lock_path_for_file "$project/.oms/tick/last.json")"
+    mkdir -p "$lock_path.checks/incomplete"
+    touch -t 200001010000 "$lock_path.checks/incomplete"
+    oms_check_maintenance_active "$project"
+  ) || fail "an empty in-progress maintenance marker must remain conservative"
+}
+
 test_agent_call_term_removes_tmp_prompt() {
   local project="$TMP/agent-call-term"
   local bin_dir="$project/bin"
