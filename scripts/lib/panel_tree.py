@@ -83,7 +83,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if call.get("_native") or not call.get("attempt"):
             return ""
         value = call_tokens(report, call.get("attempt"), call["state"], True)
-        return "" if value in {"tok pending", "tok n/a"} else value
+        return "" if value == "tok n/a" else value
 
     drawn_calls = calls + mains
     if attention_only:
@@ -188,9 +188,12 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 notes.append("ctx %s%% used" % context[0])
             if extra:
                 notes.append(extra)
-            if call.get("tokens") and not call.get("_native"):
-                # The selected card replaces the row, so it keeps the row's token count.
-                notes += wrapped(call["tokens"], max(1, card_width - 4), 2)
+            if (not call.get("_native") and call.get("role") != "main" and
+                    call.get("attempt")):
+                # The selected card replaces the compact row, so retain the full usage label.
+                token_label = call_tokens(report, call.get("attempt"), call.get("state"))
+                if token_label:
+                    notes += wrapped(token_label, max(1, card_width - 4), 2)
             if call.get("_kind") in {"agent", "workflow"}:
                 notes += wrapped(call.get("tokens") or "", max(1, card_width - 4), 2)
                 notes.append("Claude Code's own %s - not a panel worker: no admission, review or finalize" % call["_kind"])

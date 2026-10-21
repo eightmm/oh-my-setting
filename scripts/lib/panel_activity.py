@@ -11,6 +11,15 @@ import time
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
 _MAX_CACHE = 64
+_USAGE_CACHE = {}
+_MAX_USAGE_CACHE = 128
+_MAX_USAGE_MESSAGES = 4096
+_USAGE_FILE_BYTES = 8 * 1024 * 1024
+_USAGE_REFRESH_BYTES = 16 * 1024 * 1024
+_USAGE_MAX_LINE_BYTES = 1024 * 1024
+_MAX_USAGE_CALLS = 128
+_USAGE_LOCK = threading.RLock()
+_USAGE_REFRESH = threading.local()
 _SUMMARY_MAX_BYTES = 64 * 1024 * 1024
 _MAX_PENDING_TOOL_RESULTS = 4096
 _UNAVAILABLE_POINTER = "unavailable"
@@ -230,6 +239,256 @@ def events(path, max_bytes=262144):
     return output
 
 
+def _usage(doc):
+    """Normalize one provider usage event without combining per-message totals."""
+    payload = doc.get("payload")
+    if doc.get("type") == "event_msg" and isinstance(payload, dict):
+        doc = payload
+    kind = doc.get("type")
+    if kind == "token_count":
+        info = doc.get("info")
+        usage = info.get("total_token_usage") if isinstance(info, dict) else None
+        usage = usage if isinstance(usage, dict) else info
+        if isinstance(usage, dict) and "input_tokens" in usage and "output_tokens" in usage:
+            return ("codex", {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+                              "cache_in_input": True}, None)
+    if kind == "turn.completed":
+        usage = doc.get("usage")
+        if isinstance(usage, dict):
+            total = usage.get("total_token_usage")
+            usage = total if isinstance(total, dict) else usage
+            if "input_tokens" in usage and "output_tokens" in usage:
+                return ("codex", {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+                                  "cache_in_input": True}, None)
+    if kind in ("assistant", "result"):
+        message = doc.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+        usage = usage if isinstance(usage, dict) else doc.get("usage")
+        if isinstance(usage, dict) and "input_tokens" in usage and "output_tokens" in usage:
+            normalized = {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+                          "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                          "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
+                          "cache_in_input": False}
+            if kind == "result":
+                return ("claude-result", normalized, None)
+            ident = message.get("id") if isinstance(message, dict) else None
+            ident = ident or doc.get("message_id")
+            return ("claude-message", normalized, ident if isinstance(ident, str) and ident else None)
+    return None
+
+
+def _claude_usage_total(messages):
+    keys = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+    totals = dict.fromkeys(keys, 0)
+    for usage in messages.values():
+        for key in keys:
+            value = usage.get(key)
+            if type(value) is not int or value < 0:
+                return None
+            totals[key] += value
+    return dict(totals, cache_in_input=False) if messages else None
+
+
+def _begin_usage_refresh():
+    """Reset live usage parsing limits and generation cache for one panel render."""
+    _USAGE_REFRESH.budget = [_USAGE_REFRESH_BYTES]
+    _USAGE_REFRESH.files = set()
+    _USAGE_REFRESH.parsed = {}
+
+
+def _usage_refresh():
+    if not hasattr(_USAGE_REFRESH, "budget"):
+        _begin_usage_refresh()
+    return _USAGE_REFRESH
+
+
+def _new_usage_state(info):
+    return {
+        "id": (info.st_dev, info.st_ino),
+        "mtime": info.st_mtime_ns if hasattr(info, "st_mtime_ns") else info.st_mtime,
+        "offset": 0, "pending": b"", "discard_line": False,
+        "messages": {}, "message_overflow": False, "incomplete": False, "claude_result": None,
+        "codex_total_seen": False, "codex_total": None, "codex_fallback": None,
+        "codex_turns": 0, "codex_turns_valid": True, "codex_turn_input": 0, "codex_turn_output": 0,
+    }
+
+
+def _read_usage(path, limit, start, expect):
+    """Read appended bytes from one own-uid, unlinked regular stream without following links."""
+    if _provider_home_path(path):
+        raise OSError("unsafe provider stream")
+    info = os.lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+            hasattr(os, "getuid") and info.st_uid != os.getuid()):
+        raise OSError("unsafe provider stream")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as source:
+        opened = os.fstat(source.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or
+                (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or
+                (opened.st_dev, opened.st_ino) != expect or
+                hasattr(os, "getuid") and opened.st_uid != os.getuid()):
+            raise OSError("provider stream changed while opening")
+        source.seek(start)
+        return source.read(limit)
+
+
+def _record_usage(entry, doc):
+    usage_doc = doc.get("payload") if doc.get("type") == "event_msg" else doc
+    if not isinstance(usage_doc, dict):
+        usage_doc = doc
+    kind = usage_doc.get("type")
+    event = _usage(doc)
+    if kind == "token_count":
+        info = usage_doc.get("info")
+        total = info.get("total_token_usage") if isinstance(info, dict) else None
+        if isinstance(total, dict):
+            entry["codex_total_seen"] = True
+            entry["codex_total"] = event[1] if event and event[0] == "codex" else None
+        elif event and event[0] == "codex":
+            entry["codex_fallback"] = event[1]
+    elif kind == "turn.completed":
+        raw = usage_doc.get("usage")
+        total = raw.get("total_token_usage") if isinstance(raw, dict) else None
+        if isinstance(total, dict):
+            entry["codex_total_seen"] = True
+            entry["codex_total"] = event[1] if event and event[0] == "codex" else None
+        else:
+            entry["codex_turns"] += 1
+            if not event or event[0] != "codex":
+                entry["codex_turns_valid"] = False
+            else:
+                usage = event[1]
+                input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
+                if (type(input_tokens) is not int or input_tokens < 0 or
+                        type(output_tokens) is not int or output_tokens < 0):
+                    entry["codex_turns_valid"] = False
+                else:
+                    entry["codex_turn_input"] += input_tokens
+                    entry["codex_turn_output"] += output_tokens
+    elif event:
+        provider, usage, ident = event
+        if provider == "codex":
+            entry["codex_fallback"] = usage
+        elif provider == "claude-result":
+            entry["claude_result"] = usage
+        elif provider == "claude-message":
+            if ident is None:
+                entry["incomplete"] = True
+            elif ident in entry["messages"]:
+                entry["messages"][ident] = usage
+            elif len(entry["messages"]) < _MAX_USAGE_MESSAGES:
+                entry["messages"][ident] = usage
+            else:
+                entry["message_overflow"] = True
+
+
+def _consume_usage(entry, data):
+    if entry["discard_line"]:
+        newline = data.find(b"\n")
+        if newline < 0:
+            return
+        data = data[newline + 1:]
+        entry["discard_line"] = False
+    lines = (entry["pending"] + data).split(b"\n")
+    entry["pending"] = lines.pop()
+    for line in lines:
+        if len(line) > _USAGE_MAX_LINE_BYTES:
+            continue
+        try:
+            doc = json.loads(line)
+        except (ValueError, TypeError, RecursionError):
+            continue
+        if isinstance(doc, dict):
+            _record_usage(entry, doc)
+    if len(entry["pending"]) > _USAGE_MAX_LINE_BYTES:
+        entry["pending"] = b""
+        entry["discard_line"] = True
+
+
+def _usage_total(entry):
+    if entry["claude_result"] is not None:
+        return entry["claude_result"]
+    if not entry["message_overflow"] and not entry["incomplete"]:
+        total = _claude_usage_total(entry["messages"])
+        if total is not None:
+            return total
+    if entry["codex_total_seen"]:
+        return entry["codex_total"]
+    if entry["codex_turns"] and entry["codex_turns_valid"]:
+        return {"input_tokens": entry["codex_turn_input"],
+                "output_tokens": entry["codex_turn_output"], "cache_in_input": True}
+    if not entry["codex_turns"]:
+        return entry["codex_fallback"]
+    return None
+
+
+def live_usage(repo, call):
+    """Return live usage while parsing only bounded, newly appended stream bytes."""
+    path = stream_path(repo, call)
+    if not path or path.endswith(".activity.json") or not _live_stream(path, time.time(), _peer_timeout_seconds()):
+        return None
+    path = os.path.abspath(path)
+    try:
+        info = os.lstat(path)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            raise OSError("unsafe provider stream")
+    except (OSError, TypeError, ValueError):
+        with _USAGE_LOCK:
+            for old_key in [key for key in _USAGE_CACHE if key[0] == path]:
+                _USAGE_CACHE.pop(old_key, None)
+        return None
+    ident = (info.st_dev, info.st_ino)
+    mtime = info.st_mtime_ns if hasattr(info, "st_mtime_ns") else info.st_mtime
+    generation = (path, ident[0], ident[1], info.st_size, mtime)
+    refresh = _usage_refresh()
+    with _USAGE_LOCK:
+        if generation in refresh.parsed:
+            return refresh.parsed[generation]
+        key = (path, ident[0], ident[1])
+        for old_key in [item for item in _USAGE_CACHE if item[0] == path and item != key]:
+            _USAGE_CACHE.pop(old_key, None)
+        entry = _USAGE_CACHE.get(key)
+        if entry and (info.st_size < entry["offset"] or mtime < entry["mtime"]):
+            entry = None
+            _USAGE_CACHE.pop(key, None)
+        if entry is None:
+            if len(_USAGE_CACHE) >= _MAX_USAGE_CACHE:
+                _USAGE_CACHE.pop(next(iter(_USAGE_CACHE)))
+            entry = _USAGE_CACHE[key] = _new_usage_state(info)
+        if key not in refresh.files and len(refresh.files) >= _MAX_USAGE_CALLS:
+            result = _usage_total(entry)
+            if len(refresh.parsed) < _MAX_USAGE_CACHE:
+                refresh.parsed[generation] = result
+            return result
+        refresh.files.add(key)
+        if entry["offset"] < info.st_size and refresh.budget[0] > 0:
+            limit = min(_USAGE_FILE_BYTES, refresh.budget[0])
+            try:
+                data = _read_usage(path, limit, entry["offset"], ident)
+            except (OSError, TypeError, ValueError):
+                if len(refresh.parsed) < _MAX_USAGE_CACHE:
+                    refresh.parsed[generation] = None
+                return None
+            refresh.budget[0] -= len(data)
+            _consume_usage(entry, data)
+            entry["offset"] += len(data)
+            try:
+                current = os.lstat(path)
+            except OSError:
+                _USAGE_CACHE.pop(key, None)
+                return None
+            if ((current.st_dev, current.st_ino) != ident or current.st_size < entry["offset"]):
+                _USAGE_CACHE.pop(key, None)
+                return None
+            entry["mtime"] = (current.st_mtime_ns if hasattr(current, "st_mtime_ns") else current.st_mtime)
+        result = _usage_total(entry)
+        if len(refresh.parsed) < _MAX_USAGE_CACHE:
+            refresh.parsed[generation] = result
+        return result
+
+
 def _summarize_stream(path):
     """Summarize a complete stream incrementally, with fixed-size retained state."""
     if not isinstance(path, (str, os.PathLike)) or _provider_home_path(path):
@@ -318,7 +577,7 @@ def _summarize_stream(path):
                     add_event(event)
                 for ident, ok in results:
                     update_tool(ident, ok)
-        return {
+        summary = {
             "recorded": recorded,
             "files": files,
             "commands": commands,
@@ -330,6 +589,7 @@ def _summarize_stream(path):
                 ("tool result tracking overflow after %d ids" % _MAX_PENDING_TOOL_RESULTS
                  if tracking_partial else None)) if partial),
         }
+        return summary
     finally:
         if fd >= 0:
             os.close(fd)

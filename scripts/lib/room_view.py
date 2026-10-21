@@ -105,10 +105,11 @@ def nodes(report):
             member.get("state") if member.get("dispatch_role") else None) or derived
         # Display only: a review whose task its main decided reads "decided"; the state stays.
         decided = state == "review" and finalized.get(attempt.get("task_id")) in DECIDED
+        token_label = call_tokens(report, attempt["attempt_id"], state, True) if attempt.get("attempt_id") else ""
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
                            panel_activity=mapping(mapping(report.get("main_activity")).get(member.get("participant"))),
-                           tokens=(call_tokens(report, attempt["attempt_id"], state)
-                                   if attempt.get("attempt_id") and member.get("role") != "main" else None),
+                           tokens=(token_label if token_label != "tok n/a" else None)
+                           if attempt.get("attempt_id") and member.get("role") != "main" else None,
                            ended=result.get("ts"), exit=code if type(code) is int else None,
                            artifact=result.get("artifact") or attempt.get("artifact") or member.get("artifact"),
                            reason_code=reason, guard=member.get("guard") is True or reason == "worker_authority_violation",
@@ -1350,8 +1351,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     for member in gates + counsel + workers:
         tag = tagged(member)
         band_tails[id(member)] = [(tag, judgment_tone(tag, call_ending(member) or member.get("state"))),
+                                  (member.get("tokens") or "", "metadata"),
                                   (elapsed(member.get("joined_at")) or "unknown", "metadata")]
-    tail_plan = plan_tail_columns(list(band_tails.values()), width, prefix_width=stem + 5)
+    tail_plan = plan_tail_columns(list(band_tails.values()), width, prefix_width=stem + 5, optional=(1,))
     band_tails = dict(zip(band_tails, tail_plan["rows"]))
 
     def card_lines(member, content, indent=0, tree_card=False, band_prefix=""):
@@ -1417,7 +1419,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
             band_prefix = (glyph(name, unicode) + " " + (name.title() + " " if n == 0 else "")) if name != "calls" else ""
             values = band_tails[id(member)]
-            age = values[1][0]
+            age = values[2][0]
             _, spans = format_tail_row([(" " * stem, "text"), (connector, style_key), (mark, "text")],
                                        (band_prefix + member_identity(member), style_key), values, tail_plan)
             lines.append("".join(styled(text, tone, action(member) == selected and tone == style_key)

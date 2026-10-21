@@ -545,12 +545,11 @@ records. `REPO ACCEPT` and repo attention belong to shared repository state,
 including earlier work. Recent outcomes and successful native process exit do
 not establish acceptance of a task.
 
-Each worker and reviewer row ends with its tokens: `48.2k tok (out 9149)` when
-the provider reported a breakdown (input, cache and output summed, so Claude
-and Codex compare), plain `12.3k tok` when only a total exists,
-`tokens pending` while the call runs and `tokens unreported` when a finished
-call recorded none; missing data is never shown as 0. Narrow panes keep the
-short form or drop it before clipping the call's name.
+Each worker and reviewer row shows `~12.3k tok` while a call runs and
+`12.3k tok` when it finishes. Input, cache and output are summed when the provider
+reports a breakdown, so Claude and Codex compare. Unknown usage leaves the row
+cell blank; missing data is never shown as 0. Narrow panes keep the short form
+or drop it before clipping the call's name.
 
 A Claude main's own subagents (Agent tool and workflow runs) appear as
 read-only rows under it while their files were written in the last 10 minutes;

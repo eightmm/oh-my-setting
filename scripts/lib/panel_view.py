@@ -656,9 +656,14 @@ def provider_usage_tokens(usage):
 def call_tokens(report, attempt_id, state, short=False):
     """One call's tokens: providers differ on cache, so a breakdown is summed to the same total."""
     if state in LIVE_STATES:
-        return "tok pending" if short else "tokens pending"
-    operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
+        live = _live_call_tokens(report, attempt_id)
+        return (live + " so far" if live and not short else live) or ""
+    call_rows = [item for row in listing(report.get("rows")) for item in listing(mapping(row).get("calls"))]
+    operation = next((item for item in call_rows
                       if attempt_id and item.get("attempt_id") == attempt_id), {})
+    if not operation:
+        operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
+                          if attempt_id and item.get("attempt_id") == attempt_id), {})
     usage = mapping(operation.get("provider_usage"))
     tokens = provider_usage_tokens(usage)
     if tokens is not None:
@@ -671,6 +676,24 @@ def call_tokens(report, attempt_id, state, short=False):
     if tokens is None:
         return "tok n/a" if short else "tokens unreported"
     return amount(tokens) + " tok"
+
+
+def _live_call_tokens(report, attempt_id):
+    if not attempt_id:
+        return ""
+    attempts = listing(mapping(report.get("attempts")).get("active_recent")) + listing(
+        mapping(report.get("attempts")).get("recent"))
+    attempt = next((item for item in attempts if item.get("attempt_id") == attempt_id), {})
+    call = mapping(attempt.get("panel")).get("room_participant")
+    if not call or not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", str(call)):
+        return ""
+    try:
+        import panel_activity
+        usage = panel_activity.live_usage(_repo_root(report), call)
+    except (ImportError, OSError, TypeError, ValueError):
+        return ""
+    tokens = provider_usage_tokens(mapping(usage))
+    return "~" + amount(tokens) + " tok" if tokens is not None else ""
 
 
 def usage_labels(report, costs=False):
@@ -1175,6 +1198,11 @@ def needs_strip(report, width, unicode, limit=3, ranked=None):
 def render(report, provider, width=100, height=28, color=False, unicode=True,
            previous=None, availability=None, menu=False, managed=False, main_attempt=None, frame=None,
            view="auto", attention_only=False, navigation=None):
+    try:
+        import panel_activity
+        panel_activity._begin_usage_refresh()
+    except ImportError:
+        pass
     width, height = max(1, min(200, width)), max(1, height)
     use_unicode(unicode)
     color = bool(paint("x", "text", color=color) != "x")
@@ -1376,7 +1404,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     token_labels = {}
     for record in all_records:
         label = call_tokens(report, record.get("attempt"), record.get("state"), True)
-        token_labels[record.get("attempt")] = "" if label in {"tok pending", "tok n/a"} else label
+        token_labels[record.get("attempt")] = "" if label == "tok n/a" else label
     def tail_values(state, call=None, attempt=None, age="unknown", exit_code=None):
         tag = judgment_tag(call, report, unicode, ending_tag(call, unicode)) if call else status_tag(state, exit_code=exit_code, unicode=unicode)
         tag_tone = judgment_tone(tag, call_ending(call) or state) if call else tone(state)

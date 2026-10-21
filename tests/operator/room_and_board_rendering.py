@@ -179,6 +179,15 @@ for ident, role, state in (("layout-review-a", "reviewer", "working"),
         "room_id": layout_room_id, "room_participant": ident, "role": role}})
 layout_tree["room"]["participants"] = layout_members
 layout_tree["attempts"] = {"active_recent": layout_attempts, "recent": []}
+finished_usage_tree = deepcopy(layout_tree)
+for attempt in finished_usage_tree["attempts"]["active_recent"][1:]:
+    attempt["task_id"] = "task-" + attempt["panel"]["room_participant"]
+finished_usage_tree["rows"] = [{"task_id": attempt["task_id"], "calls": [{
+    "attempt_id": attempt["attempt_id"], "provider_usage": {
+        "input_tokens": 8000, "output_tokens": 4000, "cache_in_input": True}}]}
+    for attempt in finished_usage_tree["attempts"]["active_recent"][1:]]
+for attempt in finished_usage_tree["attempts"]["active_recent"][1:]:
+    attempt["state"] = "failed"
 
 # MAIN band ages share one display column and tags finish in one column.
 import time as band_clock
@@ -195,6 +204,55 @@ band_rows = [band_picture[hit["y"] - 1] for hit in band_nav["hits"]
 band_tags = [row[row.rfind("["):row.rfind("]") + 1] for row in band_rows]
 band_ends = [display_width(row[:row.rfind("]") + 1]) for row in band_rows]
 assert len(band_rows) == 4 and len(set(band_ends)) == 1, (band_rows, band_ends)
+finished_band_nav = {}
+finished_band = render(finished_usage_tree, "codex", 120, 40, view="graph", navigation=finished_band_nav).splitlines()
+finished_band_rows = [finished_band[hit["y"] - 1] for hit in finished_band_nav["hits"]
+                      if hit.get("tree") and hit["action"][0] == "result"
+                      and hit["action"][1] in {"layout-review-a", "layout-review-b", "layout-builder", "layout-awaiting"}]
+assert len(finished_band_rows) == 4 and all("12.0k tok" in row for row in finished_band_rows), finished_band_rows
+finished_list = render(finished_usage_tree, "codex", 120, 40, view="list")
+assert finished_list.count("12.0k tok") >= 4, finished_list
+ambiguous_usage_tree = deepcopy(layout_tree)
+ambiguous_attempts = ambiguous_usage_tree["attempts"]["active_recent"]
+review_attempt = next(item for item in ambiguous_attempts if item["attempt_id"] == "layout-review-a")
+implement_attempt = next(item for item in ambiguous_attempts if item["attempt_id"] == "layout-builder")
+review_attempt.update(task_id="shared-stage-task", state="failed")
+implement_attempt.update(task_id="shared-stage-task", state="failed")
+ambiguous_usage_tree["rows"] = [{"task_id": "shared-stage-task", "calls": [
+    {"attempt_id": "layout-builder", "provider_usage": {
+        "input_tokens": 8000, "output_tokens": 4000, "cache_in_input": True}},
+    {"attempt_id": "result-layout-review-a"}]}]
+ambiguous_picture = render(ambiguous_usage_tree, "codex", 120, 40, view="tree")
+review_line = next(line for line in ambiguous_picture.splitlines() if "layout-review-a" in line)
+implement_line = next(line for line in ambiguous_picture.splitlines() if "layout-builder" in line)
+assert "tok" not in review_line and "12.0k tok" in implement_line, (review_line, implement_line)
+selected_result = render(finished_usage_tree, "codex", 100, 40, view="tree",
+                         navigation={"selected": ("result", "layout-builder")})
+assert "12.0k tok (out 4000)" in selected_result, selected_result
+selected_unknown = render(ambiguous_usage_tree, "codex", 100, 40, view="tree",
+                          navigation={"selected": ("result", "layout-review-a")})
+assert "tokens unreported" in selected_unknown, selected_unknown
+one_call_sibling_tree = deepcopy(layout_tree)
+one_call_review = next(item for item in one_call_sibling_tree["attempts"]["active_recent"]
+                       if item["attempt_id"] == "layout-review-a")
+one_call_builder = next(item for item in one_call_sibling_tree["attempts"]["active_recent"]
+                        if item["attempt_id"] == "layout-builder")
+one_call_review.update(task_id="one-call-sibling-task", state="failed")
+one_call_builder.update(task_id="one-call-sibling-task", state="failed")
+one_call_sibling_tree["rows"] = [{"task_id": "one-call-sibling-task", "calls": [{
+    "attempt_id": "layout-builder", "provider_usage": {
+        "input_tokens": 8000, "output_tokens": 4000, "cache_in_input": True}}]}]
+one_call_sibling_picture = render(one_call_sibling_tree, "codex", 120, 40, view="tree")
+one_call_review_line = next(line for line in one_call_sibling_picture.splitlines() if "layout-review-a" in line)
+one_call_builder_line = next(line for line in one_call_sibling_picture.splitlines() if "layout-builder" in line)
+assert "tok" not in one_call_review_line and "12.0k tok" in one_call_builder_line, \
+    (one_call_review_line, one_call_builder_line)
+selected_main_tree = deepcopy(layout_tree)
+next(item for item in selected_main_tree["attempts"]["active_recent"]
+     if item["attempt_id"] == "layout-main-attempt")["state"] = "failed"
+selected_main = render(selected_main_tree, "codex", 100, 40, view="tree",
+                       navigation={"selected": ("result", layout_main)})
+assert "tokens unreported" not in selected_main, selected_main
 assert len(set(map(len, band_tags))) > 1, (band_tags, band_rows)
 assert all(row.rstrip().endswith(age) for row, age in zip(band_rows, ("37m", "4m", "<1m", "12m"))), band_rows
 
@@ -1691,6 +1749,156 @@ with tempfile.TemporaryDirectory() as activity_root:
     log_dir = activity_repo / ".oms/panel-state/dispatch-logs"
     log_dir.mkdir(parents=True, mode=0o700)
     log_dir.chmod(0o700)
+    from panel_view import call_tokens
+    for call_id, attempt_id, provider, event, expected in (
+            ("call-live-codex", "attempt-live-codex", "codex",
+             {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                 "total_token_usage": {"input_tokens": 10000, "output_tokens": 2300}}}}, "~12.3k tok"),
+            ("call-live-claude", "attempt-live-claude", "claude",
+             [{"type": "assistant", "message": {"id": "msg-one", "usage": {"input_tokens": 1000,
+                  "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}},
+              {"type": "assistant", "message": {"id": "msg-two", "usage": {"input_tokens": 1000,
+                  "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}},
+              {"type": "assistant", "message": {"id": "msg-one", "usage": {"input_tokens": 1000,
+                  "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}}],
+             "~6800 tok")):
+        usage_stream = activity_repo / (provider + "-usage.jsonl")
+        usage_events = event if isinstance(event, list) else [event]
+        usage_stream.write_text("\n".join(json.dumps(item) for item in usage_events) + "\n", encoding="utf-8")
+        (log_dir / (call_id + ".stream")).write_text(str(usage_stream) + "\n", encoding="utf-8")
+        live_report = {"repo": {"path": str(activity_repo)}, "room": {"id": "live-usage-room", "participants": [
+            {"participant": "live-usage-main", "role": "main", "provider": provider, "model": "gpt-6-sol",
+             "joined": True, "seq": 1},
+            {"participant": call_id, "role": "worker", "provider": provider, "model": "gpt-6-luna",
+             "parent": "live-usage-main", "joined": True, "seq": 2}]},
+            "attempts": {"active_recent": [
+                {"attempt_id": "live-usage-main-attempt", "state": "working", "panel": {
+                    "role": "main", "room_id": "live-usage-room", "room_participant": "live-usage-main"}},
+                {"attempt_id": attempt_id, "state": "working", "panel": {
+                    "role": "worker", "room_id": "live-usage-room", "room_participant": call_id}}]}}
+        assert call_tokens(live_report, attempt_id, "working", True) == expected, (provider, call_tokens(live_report, attempt_id, "working", True))
+        live_picture = render(live_report, provider, 100, 30, view="tree")
+        assert expected in live_picture, (provider, live_picture)
+        selected_live = render(live_report, provider, 100, 30, view="tree",
+                               navigation={"selected": ("result", call_id)})
+        assert expected + " so far" in selected_live, (provider, selected_live)
+        if provider == "codex":
+            usage_stream.write_text(json.dumps({"type": "turn.completed", "usage": {
+                "total_token_usage": {"input_tokens": 10000, "output_tokens": 2300}}}) + "\n", encoding="utf-8")
+            assert call_tokens(live_report, attempt_id, "working", True) == expected, "Codex turn.completed usage"
+        else:
+            result_event = {"type": "result", "usage": {"input_tokens": 9000, "output_tokens": 1000,
+                           "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}}
+            with usage_stream.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(result_event) + "\n")
+            assert call_tokens(live_report, attempt_id, "working", True) == "~10.1k tok", "Claude result total"
+        usage_stream.write_text(json.dumps({"type": "message_start"}) + "\n", encoding="utf-8")
+        assert call_tokens(live_report, attempt_id, "working", True) == "", provider
+        assert expected not in render(live_report, provider, 100, 30, view="tree"), provider
+        selected_without_usage = render(live_report, provider, 100, 30, view="tree",
+                                        navigation={"selected": ("result", call_id)})
+        blank_card_rows = [line for line in selected_without_usage.splitlines()
+                           if "╎" in line and not any(char.isalnum() for char in line)]
+        assert not blank_card_rows, (provider, blank_card_rows, selected_without_usage)
+    codex_multi_call = "call-live-codex-multi"
+    codex_multi_attempt = "attempt-live-codex-multi"
+    codex_multi_stream = activity_repo / "codex-multi-usage.jsonl"
+    codex_multi_stream.write_text("\n".join(json.dumps(item) for item in [
+        {"type": "turn.completed", "usage": {"input_tokens": 120, "output_tokens": 30}},
+        {"type": "turn.completed", "usage": {"input_tokens": 240, "output_tokens": 60}},
+    ]) + "\n", encoding="utf-8")
+    (log_dir / (codex_multi_call + ".stream")).write_text(str(codex_multi_stream) + "\n", encoding="utf-8")
+    codex_multi_report = {"repo": {"path": str(activity_repo)}, "attempts": {"active_recent": [{
+        "attempt_id": codex_multi_attempt, "state": "working", "panel": {
+            "role": "worker", "room_id": "live-usage-room", "room_participant": codex_multi_call}}]}}
+    assert call_tokens(codex_multi_report, codex_multi_attempt, "working", True) == "~450 tok", \
+        "Codex completed turn usage must accumulate across turns"
+    claude_long_call = "call-live-claude-long"
+    claude_long_attempt = "attempt-live-claude-long"
+    claude_long_stream = activity_repo / "claude-long-usage.jsonl"
+    first_message = {"type": "assistant", "message": {"id": "long-message-one", "usage": {
+        "input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 100,
+        "cache_creation_input_tokens": 50}, "content": []}}
+    second_message = {"type": "assistant", "message": {"id": "long-message-two", "usage": {
+        "input_tokens": 400, "output_tokens": 100, "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 50}, "content": []}}
+    claude_long_stream.write_text("\n".join(json.dumps(item) for item in [
+        first_message, first_message, {"type": "progress", "padding": "x" * (270 * 1024)}, second_message,
+    ]) + "\n", encoding="utf-8")
+    assert claude_long_stream.stat().st_size > 262144
+    (log_dir / (claude_long_call + ".stream")).write_text(str(claude_long_stream) + "\n", encoding="utf-8")
+    claude_long_report = {"repo": {"path": str(activity_repo)}, "attempts": {"active_recent": [{
+        "attempt_id": claude_long_attempt, "state": "working", "panel": {
+            "role": "worker", "room_id": "live-usage-room", "room_participant": claude_long_call}}]}}
+    assert call_tokens(claude_long_report, claude_long_attempt, "working", True) == "~1900 tok", \
+        "Claude usage must retain messages before the 256 KiB tail and deduplicate IDs"
+    cache_call = "call-live-cache"
+    cache_stream = activity_repo / "cache-usage.jsonl"
+    cache_stream.write_text(json.dumps({"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": 10, "output_tokens": 2}}}) + "\n", encoding="utf-8")
+    (log_dir / (cache_call + ".stream")).write_text(str(cache_stream) + "\n", encoding="utf-8")
+    with patch.object(panel_activity, "_usage", wraps=panel_activity._usage) as usage_parser:
+        assert panel_activity.live_usage(activity_repo, cache_call) == {
+            "input_tokens": 10, "output_tokens": 2, "cache_in_input": True}
+        assert panel_activity.live_usage(activity_repo, cache_call) == {
+            "input_tokens": 10, "output_tokens": 2, "cache_in_input": True}
+        assert usage_parser.call_count == 1, usage_parser.call_count
+    incremental_call = "call-live-incremental"
+    incremental_attempt = "attempt-live-incremental"
+    incremental_stream = activity_repo / "incremental-usage.jsonl"
+
+    def codex_total_event(input_tokens, output_tokens):
+        return {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}}}}
+
+    first_usage_line = json.dumps(codex_total_event(10, 2)) + "\n"
+    incremental_stream.write_text(first_usage_line, encoding="utf-8")
+    first_usage_bytes = len(first_usage_line.encode("utf-8"))
+    (log_dir / (incremental_call + ".stream")).write_text(str(incremental_stream) + "\n", encoding="utf-8")
+    incremental_report = {"repo": {"path": str(activity_repo)}, "room": {"id": "incremental-room",
+        "participants": [
+            {"participant": "incremental-main", "role": "main", "provider": "codex", "model": "gpt-6-sol",
+             "joined": True, "seq": 1},
+            {"participant": incremental_call, "role": "worker", "provider": "codex", "model": "gpt-6-luna",
+             "parent": "incremental-main", "joined": True, "seq": 2}]},
+        "attempts": {"active_recent": [
+            {"attempt_id": "incremental-main-attempt", "state": "working", "panel": {
+                "role": "main", "room_id": "incremental-room", "room_participant": "incremental-main"}},
+            {"attempt_id": incremental_attempt, "state": "working", "panel": {
+                "role": "worker", "room_id": "incremental-room", "room_participant": incremental_call}}]}}
+    read_sizes = []
+    real_usage_reader = panel_activity._read_usage
+
+    def track_usage_read(path, limit, start, expect):
+        data = real_usage_reader(path, limit, start, expect)
+        read_sizes.append(len(data))
+        return data
+
+    with patch.object(panel_activity, "_read_usage", side_effect=track_usage_read) as usage_reader:
+        with patch.object(panel_activity, "_usage", wraps=panel_activity._usage) as usage_parser:
+            first_frame = render(incremental_report, "codex", 100, 30, view="tree")
+            assert "~12 tok" in first_frame, first_frame
+            first_count = usage_parser.call_count
+            second_usage_line = json.dumps(codex_total_event(29, 3)) + "\n"
+            with incremental_stream.open("a", encoding="utf-8") as output:
+                output.write(second_usage_line)
+            second_frame = render(incremental_report, "codex", 100, 30, view="tree")
+            assert "~32 tok" in second_frame, second_frame
+            assert usage_parser.call_count == first_count + 1, usage_parser.call_count
+        assert [call.args[2] for call in usage_reader.call_args_list] == [0, first_usage_bytes], \
+            usage_reader.call_args_list
+        truncated_line = json.dumps(codex_total_event(4, 1)) + "\n"
+        incremental_stream.write_text(truncated_line, encoding="utf-8")
+        assert "~5 tok" in render(incremental_report, "codex", 100, 30, view="tree")
+        replacement_stream = activity_repo / "incremental-replacement.jsonl"
+        replacement_line = json.dumps(codex_total_event(6, 1)) + "\n"
+        replacement_stream.write_text(replacement_line, encoding="utf-8")
+        os.replace(replacement_stream, incremental_stream)
+        assert "~7 tok" in render(incremental_report, "codex", 100, 30, view="tree")
+        assert [call.args[2] for call in usage_reader.call_args_list[2:]] == [0, 0], \
+            usage_reader.call_args_list
+        assert read_sizes == [first_usage_bytes, len(second_usage_line.encode("utf-8")),
+                              len(truncated_line.encode("utf-8")), len(replacement_line.encode("utf-8"))], read_sizes
     (log_dir / (call + ".stream")).write_text(str(codex_stream) + "\n", encoding="utf-8")
     evidence = {"rows": [{"calls": [{"artifact": ".oms/artifacts/sample.md"}]}]}
     call_live_state = {"room_attempts": {call: {"state": "working", "attempt_id": "attempt-live"}}}
@@ -3196,6 +3404,9 @@ for unicode_tree in (True, False):
     layout_picture = render(layout_tree, "codex", 100, 40, view="tree", unicode=unicode_tree,
                             navigation=layout_nav)
     layout_rows = visible_tree_rows(layout_picture)
+    finished_tree_rows = visible_tree_rows(render(finished_usage_tree, "codex", 100, 40, view="tree", unicode=unicode_tree))
+    assert all("12.0k tok" in next(line for line in finished_tree_rows if ident in line)
+               for ident in ("layout-review-a", "layout-review-b", "layout-builder", "layout-awaiting")), finished_tree_rows
     first_heading = next(line for line in layout_rows if "REVIEWERS (2)" in line)
     activity_heading = next(line for line in layout_rows if "Activity" in line and "calls" in line)
     origin = display_width(activity_heading[:activity_heading.index("Activity")]) - 1
