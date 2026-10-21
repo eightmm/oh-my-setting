@@ -10073,11 +10073,10 @@ test_plan_from_spec_rejects_delegating_verify() {
     mkdir -p "$project/$(dirname "$suite")"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/$suite"
   done
-  cat > "$project/tests/scripts-smoke.sh" <<'EOF'
-test_fixture_delegates() {
-  "$ROOT/scripts/peer-delegate.sh" --dry-run
-}
-EOF
+  # printf keeps the fixture's test_ definition off column 0 of this file,
+  # where the smoke runner would discover it as one of its own tests.
+  printf '%s() {\n  "$ROOT/scripts/peer-delegate.sh" --dry-run\n}\n' test_fixture_delegates \
+    > "$project/tests/scripts-smoke.sh"
   printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash tests/run.sh\n\n## Verification\n\n- Required checks: bash tests/run.sh\n' > "$project/PROJECT.md"
   fake_planner() {  # fake_planner VERIFY -> a codex stub proposing one task with that verify
     local proposal proposal_quoted
