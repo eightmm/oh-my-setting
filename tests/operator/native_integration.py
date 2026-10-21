@@ -2775,7 +2775,8 @@ for native_call in (open_call, answered_call):
             assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection, native_inspection
             if glyphs:
                 tree_rows = native_inspection.splitlines()
-                assert not any("└╌╌" in left and "└╌╌" in right
+                # Two stacked "last" connectors in one column would close a branch twice.
+                assert not any("└╌╌" in left and "└╌╌" in right and left.index("└╌╌") == right.index("└╌╌")
                                for left, right in zip(tree_rows, tree_rows[1:])), native_inspection
             assert ("result", "native-advisor-adv-main") not in native_nav["items"], native_nav
 attention_nav = {}
