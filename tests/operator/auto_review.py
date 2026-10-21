@@ -49,7 +49,8 @@ for fixture_call in (auto_call, "call-auto-review-off", "call-auto-review-read",
                      "call-review-gate-nonzero",
                      "call-review-gate-timeout", "call-review-gate-last-fail",
                      "call-review-gate-fenced-suffix",
-                     "call-review-gate-guard-stop", "call-review-gate-missing"):
+                     "call-review-gate-guard-stop", "call-review-gate-fail-guard-text",
+                     "call-review-gate-missing"):
     room.join(project, shared, fixture_call, "codex", "worker", parent=room_owner)
 auto_attempt = {"attempt_id": auto_attempt, "task_id": auto_task,
                 "refs": {"panel_room_id": shared, "panel_room_participant": auto_call,
@@ -572,20 +573,30 @@ for reviewer_call, answer, exit_status, expected in (
         ("call-review-gate-fenced-suffix", "GATE: fail\n```\n```example\nGATE: pass\n```", 0,
          "Review gate failed"),
         ("call-review-gate-guard-stop", "The worker guard stopped this run.\nGATE: pass", 0,
-         "failed or is inconclusive"),
+         "guard stopped the review"),
+        ("call-review-gate-fail-guard-text",
+         "Findings: checked.\n> The worker guard stopped this run.\nGATE: fail", 0,
+         "Review gate failed"),
         ("call-review-gate-missing", "Findings: review ended early.", 0, "failed or is inconclusive")):
     reviewer_attempt = dict(auto_attempt, attempt_id="attempt-" + reviewer_call,
         refs=dict(auto_attempt["refs"], panel_room_participant=reviewer_call,
                   panel_role="reviewer", panel_purpose="review", panel_access="read"))
-    with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], [
-            {"attempt_id": reviewer_attempt["attempt_id"], "task_id": auto_task, "verify_exit": 0}])), \
+    if reviewer_call == "call-review-gate-guard-stop":
+        reviewer_attempt.update(state="failed", reason_code="worker_authority_violation")
+    review_record = {"attempt_id": reviewer_attempt["attempt_id"], "task_id": auto_task, "verify_exit": 0}
+    with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], [review_record])), \
             patch.object(panel, "_dispatch_verifier", return_value=None), \
             patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": answer}]}]}), \
             patch.dict(os.environ, room_env, clear=True):
         panel.deliver_result(project, shared, reviewer_call, room_owner, auto_task, exit_status)
     verdict_mail = next(m for m in room.status(project, shared)["messages"]
                         if m["id"] == "result-" + reviewer_call)
-    assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"]
+    assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"], (reviewer_call, verdict_mail)
+    if reviewer_call in {"call-review-gate-fail", "call-review-gate-last-fail",
+                         "call-review-gate-fenced-suffix", "call-review-gate-fail-guard-text"}:
+        assert "GATE: fail" in verdict_mail["text"]
+    if reviewer_call == "call-review-gate-fail-guard-text":
+        assert "guard stopped the review" not in verdict_mail["text"]
 for dispatched_role in ("verifier", "security-auditor", "critic", "architect"):
     judge_call = "call-judge-no-gate-" + dispatched_role
     judge_attempt = dict(auto_attempt, attempt_id="attempt-" + judge_call,

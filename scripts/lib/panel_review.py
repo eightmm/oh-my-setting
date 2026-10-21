@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from call_ending import call_ending
 
 # Call-local facade imports preserve the public entry point and avoid import cycles.
 
@@ -141,6 +142,7 @@ def _call_result_event(repo, room_id, member, task_id, status):
                                                             and refs.get("panel_access") == "write")}
     room.append(repo, room_id, payload, "Structured call result")
     result_record = dict(record)
+    result_record.update({key: attempt[key] for key in ("state", "reason_code") if key in attempt})
     result_record["dispatched_role"] = refs.get("panel_purpose") or refs.get("panel_role")
     return payload, result_record
 
@@ -342,7 +344,8 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
     for path in scope:
         arguments += ["--scope", path]
     command = " ".join(quote(part) for part in arguments)
-    notice = "Review verdict FAIL for task %s; draft %s; manual command: %s" % (task_id, draft, command)
+    notice = ("Review gate failed (GATE: fail) for task %s; draft %s; manual command: %s" %
+              (task_id, draft, command))
     if len(notice.encode("utf-8")) > 3800:
         raise ValueError("draft notification exceeds the room message limit")
     _write_brief_artifact(repo, draft, content)
@@ -626,7 +629,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         print("OMS structured call result unavailable for task " + task_id, file=sys.stderr)
     role = (result_event or {}).get("role")
     verify_failed = (result_event or {}).get("verify_status") == "failed"
-    guard_stop = "worker guard stopped this run" in str(summary).lower()
+    guard_stop = call_ending(result_record) == "guard_stop"
     review_delivered = False
     dispatched_role = result_record.get("dispatched_role")
     review_notice = None
@@ -667,8 +670,9 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                         notice += " Completion inputs unavailable; finalize explicitly after admission."
             else:
                 patch_digest = (result_event or {}).get("patch_sha256")
-                notice = ("Review verdict FAIL for task %s; patch %s." % (task_id, patch_digest)
-                          if patch_digest else "Review gate failed for task %s; owner judgment is required." % task_id)
+                notice = ("Review gate failed (GATE: fail) for task %s; patch %s." % (task_id, patch_digest)
+                          if patch_digest else
+                          "Review gate failed (GATE: fail) for task %s; owner judgment is required." % task_id)
                 if review_context:
                     try:
                         notice = (_review_fix_notice(repo, room_id, member, caller, task_id,
