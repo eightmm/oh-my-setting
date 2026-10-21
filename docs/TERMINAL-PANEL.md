@@ -56,6 +56,8 @@ Each dispatched call has a short room alias such as `B7`, shown before its role
 on the board, selected card, reader, session log and Results. `--alias NAME`
 chooses one (1–8 letters, digits or hyphens); otherwise the panel assigns the
 next alias using the role letter and number. Aliases are unique across a room lineage.
+Concurrent dispatches reserve aliases before launch, so a four-call worker
+wave receives `W1` through `W4` rather than duplicate names.
 `--continue TASK_OR_ALIAS` retains the continued call's alias, and Results
 accepts an alias in `--task-id` when it resolves to one task. The default alias
 prefix is selected by role (for example, `B` for builder and `W` for worker).
@@ -91,7 +93,11 @@ shared-plan tasks and use the same lifecycle as every other plan task: claim a
 ready task in the confirmed `PROJECT.md` plan's order (dependencies first),
 dispatch it with `--task-id`, verify and inspect the work, integrate
 it with the required checks, run `oms agent-plan review` after acceptance, and
-record the owner result with `oms panel --finalize`. Choose the role from the
+record the owner result with `oms panel --finalize`. For one-step owner patch
+acceptance, `oms panel --accept TASK --repo PATH --message TEXT --verify
+COMMAND` admits and commits the reviewed patch and records the plan review;
+after a published landing, `oms panel --finalize --landed-commit SHA` binds the
+owner result to that accepted change. Choose the role from the
 task's scope and source, rely on the automatic reviewer gate, and add a critic
 or security-auditor when the change warrants one. Use `oms agent-plan add` only
 for bounded gaps outside the reviewed proposal. Dependencies become ready
@@ -118,6 +124,9 @@ An autopilot campaign runs from the main checkout on its own `oms/autopilot-*`
 work branch, the sole exception to the no-commit-in-shared-checkout rule; the
 main does not commit there itself, and publication still needs authority (Draft
 PR or `oms land` from that branch).
+For a parked campaign, `oms autopilot status` puts the recorded phase, reason,
+semantic verdict and evidence path first, so a failed or incomplete review is
+not presented as a completed drive.
 
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,
@@ -138,7 +147,9 @@ binds to the current plan and task. Plan displays **completed locally** for a
 matching passing result, including one recorded outside a panel session, while
 retaining the plan's review/acceptance state. Changed task generations, replaced
 plans, modified evidence and a later unverified result invalidate that display.
-Use `--verify-timeout SECONDS` to set the finalize verifier wall time (1–86400 seconds; default 1800).
+Use `--verify-timeout SECONDS` to set the finalize verifier wall time
+(1–86400 seconds; default 1800).
+Worker, review-gate and patch-admission verify records include elapsed seconds.
 The verifier runs outside the shared result lock; finalization rechecks its
 snapshot before writing.
 Historical results without the binding remain available in Results.

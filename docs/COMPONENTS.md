@@ -1014,11 +1014,16 @@ exceeds the remaining attempt budget.
 Parallel goal-drive keeps per-task worktrees and selects dependency-ready tasks
 in plan order under the explicit `--max-parallel-tasks N` opt-in. Intersecting
 allowed paths serialize using graph scope overlap checks; an overlapping
-candidate is named on stderr and skipped so later disjoint tasks can join the
-batch. Verifier syntax does not decide eligibility: Python, pytest, npm and make
-checks can run concurrently. With this option the project asserts its checks
-tolerate concurrent runs. Worktrees do not isolate shared caches, ports,
-databases or network services, or provide resource isolation.
+candidate is named and skipped while selection continues, so later eligible
+tasks can join the batch. Verifier syntax does not decide eligibility: Python,
+pytest, npm and make checks can run concurrently. A batch of two or more tasks
+prints a start line with width, selected tasks and skips, then a done line with
+each task's outcome and the batch's elapsed seconds. If a later claim or the
+prepare step fails before launch, already claimed tasks are rolled back;
+startup also reports how to release owner claims left without a worker.
+With this option the project asserts its checks tolerate concurrent runs.
+Worktrees do not isolate shared caches, ports, databases or network services,
+or provide resource isolation.
 
 A batch barrier precedes serial native admission and exact commits in plan
 order. Each candidate replays the already committed tasks' stored verifiers
