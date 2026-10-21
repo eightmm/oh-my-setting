@@ -109,6 +109,28 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if action:
             items.append(action)
 
+    def fit_spans(spans, text):
+        """Keep colored segments aligned with the fitted plain row."""
+        source = "".join(part for part, _ in spans)
+        if display_width(source) <= content_width:
+            return spans
+        marker = ("…" if unicode else "...") if content_width >= 3 else ""
+        prefix = text[:-len(marker)] if marker and text.endswith(marker) else text
+        remaining = len(prefix)
+        fitted, marker_style = [], spans[-1][1] if spans else "text"
+        for part, token in spans:
+            if remaining <= 0:
+                break
+            kept = part[:remaining]
+            if kept:
+                fitted.append((kept, token))
+                remaining -= len(kept)
+                if remaining == 0:
+                    marker_style = token
+        if marker:
+            fitted.append((marker, marker_style))
+        return fitted
+
     def call_row(call, connector="", action=None, fold=False, extra=""):
         state = main_state(call) if call.get("role") == "main" else call["state"]
         tag = judgment_tag(dict(call, purpose=purpose(call)), report, unicode,
@@ -161,12 +183,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         text = gutter + connector + identity + padding + tail
         style = band_style(call.get("role"), purpose(call))
         add(text, None, action, fold)
-        rows[-1]["spans"] = [(gutter, "text"), (connector, style), (identity, style), (padding, "text")]
+        spans = [(gutter, "text"), (connector, style), (identity, style), (padding, "text")]
         if tiny_tail:
-            rows[-1]["spans"].append((tail, "metadata"))
+            spans.append((tail, "metadata"))
         else:
-            rows[-1]["spans"].extend([(tag_pad, "metadata"), (tag, tag_tone),
-                                      (tail[len(tag_pad) + len(tag):], "metadata")])
+            spans.extend([(tag_pad, "metadata"), (tag, tag_tone),
+                          (tail[len(tag_pad) + len(tag):], "metadata")])
+        rows[-1]["spans"] = fit_spans(spans, rows[-1]["text"])
         rows[-1]["identity"] = action == selected
         if call.get("role") == "main" and action != selected:
             for note in declared_status(room, call["participant"], max(1, content_width - 6))[:1]:
@@ -240,8 +263,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 heading_text = "%s %s (%s)" % (mark, heading, len(children))
                 heading_gutter = glyph("selected", unicode) + " " if selected == heading_action else "  "
                 add(heading_gutter + root_branch + heading_text, None, heading_action)
-                rows[-1]["spans"] = [(heading_gutter, "text"), (root_branch, group_style),
-                                     (heading_text, group_style)]
+                rows[-1]["spans"] = fit_spans([(heading_gutter, "text"), (root_branch, group_style),
+                                                (heading_text, group_style)], rows[-1]["text"])
                 if group_key not in expanded:
                     if height >= 16:
                         continue
@@ -251,8 +274,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 heading_gutter = "  "
                 heading_text = heading + " (%s)" % len(children)
                 add(heading_gutter + root_branch + heading_text, None)
-                rows[-1]["spans"] = [(heading_gutter, "text"), (root_branch, group_style),
-                                     (heading_text, group_style)]
+                rows[-1]["spans"] = fit_spans([(heading_gutter, "text"), (root_branch, group_style),
+                                                (heading_text, group_style)], rows[-1]["text"])
             for child_index, child in enumerate(children):
                 branch = end if child_index == len(children) - 1 else prefix
                 child_action = child.get("_action") or ("result", child["participant"])

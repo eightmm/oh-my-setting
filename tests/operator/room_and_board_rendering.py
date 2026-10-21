@@ -198,6 +198,28 @@ assert len(band_rows) == 4 and len(set(band_ends)) == 1, (band_rows, band_ends)
 assert len(set(map(len, band_tags))) > 1, (band_tags, band_rows)
 assert all(row.rstrip().endswith(age) for row, age in zip(band_rows, ("37m", "4m", "<1m", "12m"))), band_rows
 
+overflow_tree = deepcopy(layout_tree)
+overflow_tree["attempts"]["active_recent"][1]["state"] = "review"
+overflow_tree["operations"] = {"recent": [
+    {"attempt_id": "layout-review-a", "tokens": 123456789},
+    {"attempt_id": "layout-review-b", "tokens": 987654321},
+]}
+# Colored tree rows use the same fitted text as their uncolored hit-target rows,
+# even with review tags, token labels and different age labels in the same band.
+for columns in (42, 60, 150):
+    with mock_patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+        plain_tree = render(overflow_tree, "codex", columns, 40, view="tree", color=False,
+                           navigation={"dismissed": True})
+        colored_tree = render(overflow_tree, "codex", columns, 40, view="tree", color=True,
+                              navigation={"dismissed": True})
+    assert "\033[" in colored_tree, (columns, colored_tree)
+    plain_rows = plain_tree.splitlines()
+    colored_rows = [re.sub(r"\033\[[0-9;]*m", "", line) for line in colored_tree.splitlines()]
+    assert len(plain_rows) == len(colored_rows), (columns, plain_tree, colored_tree)
+    for plain_row, colored_row in zip(plain_rows, colored_rows):
+        assert display_width(plain_row) == display_width(colored_row) <= columns, (
+            columns, plain_row, colored_row)
+
 
 # The visual flow selects one exact parent, keeps an ended main in history, and
 # uses real role cards with frame-local chat/result targets.
