@@ -8,7 +8,7 @@ from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_ed
                         _repo_root, main_occupied, menu_rows, status_alerts, TERMINAL_STATES, worker_rows, wrapped,
                         role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
                         JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
-                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
+                        plan_tail_columns, format_tail_row, judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
 from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
                        goal_banner, native_advisors, nodes, plan_idle,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
@@ -86,13 +86,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         return "" if value in {"tok pending", "tok n/a"} else value
 
     drawn_calls = calls + mains
-    age_width = max([3] + [display_width(main_words(call, unicode) if call.get("role") == "main"
-                                           else age_label(call.get("joined_at")) or "unknown")
-                           for call in drawn_calls if not call.get("_native")])
-    tag_width = max([0] + [display_width(judgment_tag(dict(call, purpose=purpose(call)), report, unicode,
-                                                        ending_tag(dict(call, state=main_state(call) if call.get("role") == "main" else call["state"]), unicode)))
-                            for call in drawn_calls if not call.get("_native")])
-    token_width = max([0] + [display_width(token_label(call)) for call in calls if token_label(call)])
     if attention_only:
         calls = [m for m in calls if classify(m) != "past" and
                  (m["state"] in ATTENTION_STATES or classify(m) == "review")]
@@ -102,6 +95,18 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     rows, items = [], []
     boxed = width >= 28 and height >= 16
     content_width = width - 4 if boxed else width
+
+    call_tails = {}
+    for call in drawn_calls:
+        state = main_state(call) if call.get("role") == "main" else call["state"]
+        tag = judgment_tag(dict(call, purpose=purpose(call)), report, unicode,
+                           ending_tag(dict(call, state=state), unicode))
+        age = main_words(call, unicode) if call.get("role") == "main" else age_label(call.get("joined_at")) or "unknown"
+        call_tails[id(call)] = [(tag, judgment_tone(tag, call_ending(call) or state)),
+                               (token_label(call), "metadata"), (age, "metadata")]
+    tail_plan = plan_tail_columns(list(call_tails.values()), content_width,
+                                  prefix_width=10 if calls else 2, optional=(1,))
+    call_tails = dict(zip(call_tails, tail_plan["rows"]))
 
     def add(text, style=None, action=None, fold=False, divider=False):
         rows.append({"text": clipped(text, content_width), "style": style, "action": action,
@@ -132,12 +137,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         return fitted
 
     def call_row(call, connector="", action=None, fold=False, extra=""):
-        state = main_state(call) if call.get("role") == "main" else call["state"]
-        tag = judgment_tag(dict(call, purpose=purpose(call)), report, unicode,
-                           ending_tag(dict(call, state=state), unicode))
-        tag_tone = judgment_tone(tag, call_ending(call) or state)
-        age = main_words(call, unicode) if call.get("role") == "main" else age_label(call.get("joined_at")) or "unknown"
-        tokens = token_label(call)
+        values = call_tails[id(call)]
+        tag, tag_tone = values[0]
+        age = values[2][0]
         label = call.get("title") or (None if call.get("role") == "main" else call["participant"])
         if not extra and call.get("state") in LIVE_STATES:
             latest = mapping(mapping(navigation.get("activity_snapshot")).get("calls")).get(
@@ -155,41 +157,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             context = context_note(report, call)
             if context:
                 identity += sep + "ctx %s%% used" % context[0]
-        available = max(0, content_width - 2 - display_width(connector))
-        # Fit identity separately from the aligned state columns.
-        age = main_words(call, unicode) if call.get("role") == "main" else age_label(call.get("joined_at")) or "unknown"
-        row_token_width = token_width
-        fixed = tag_width + 2 + age_width + (2 + row_token_width if row_token_width else 0)
-        if row_token_width and available < fixed + 2:
-            row_token_width = 0
-        tag_pad = " " * max(0, tag_width - display_width(tag))
-        age_pad = " " * max(0, age_width - display_width(age))
-        token_pad = " " * max(0, row_token_width - display_width(tokens)) if row_token_width else ""
-        tail = tag_pad + tag + "  " + ((token_pad + tokens + "  ") if row_token_width else "") + age_pad + age
-        tail_width = display_width(tail)
-        tiny_tail = False
-        if tail_width > available:
-            # Preserve tag and age until even those columns cannot fit.
-            if available >= display_width(tag) + 2 + display_width(age):
-                tail, tag_pad = tag + "  " + age, ""
-            else:
-                tail = clipped(tag + "  " + age, available)
-                tiny_tail = True
-            tail_width = display_width(tail)
-        room_for_identity = max(0, available - tail_width - 2)
-        identity = clipped(identity, room_for_identity)
         gutter = glyph("selected", unicode) + " " if action and selected == action else "  "
-        padding = " " * max(2, available - display_width(identity) - tail_width)
-        text = gutter + connector + identity + padding + tail
         style = band_style(call.get("role"), purpose(call))
+        text, spans = format_tail_row([(gutter, "text"), (connector, style)], (identity, style), values, tail_plan)
         add(text, None, action, fold)
-        spans = [(gutter, "text"), (connector, style), (identity, style), (padding, "text")]
-        if tiny_tail:
-            spans.append((tail, "metadata"))
-        else:
-            spans.extend([(tag_pad, "metadata"), (tag, tag_tone),
-                          (tail[len(tag_pad) + len(tag):], "metadata")])
-        rows[-1]["spans"] = fit_spans(spans, rows[-1]["text"])
+        rows[-1]["spans"] = spans
         rows[-1]["identity"] = action == selected
         if call.get("role") == "main" and action != selected:
             for note in declared_status(room, call["participant"], max(1, content_width - 6))[:1]:

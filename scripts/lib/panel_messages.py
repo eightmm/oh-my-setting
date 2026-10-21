@@ -9,7 +9,7 @@ import time
 import unicodedata
 
 from dashboard_projection import clean, display_width, listing, mapping
-from panel_view import clipped, wrapped
+from panel_view import clipped, wrapped, plan_tail_columns, format_tail_row
 
 MAX_MESSAGES, MAX_TEXT = 200, 8000
 KINDS = ("question", "answer", "handoff", "status", "note", "decision")
@@ -171,18 +171,16 @@ def call_rows(rows, members, name_of, room, width, unicode=True):
             phase = "done" if code == 0 else "failed" if type(code) is int else "unknown"
         state = " " + status_tag(phase, exit_code=member.get("exit"), unicode=unicode)
         state += " [accepted]" if member.get("decision") == "accepted" else " [main decided]" if member.get("_decided") else ""
-        budget = max(0, width - 2)
-        tail = clipped(tail, budget)
-        available = max(0, budget - display_width(tail))
-        note = clean(row["text"], 300) or "(no notes)"
-        note_width = min(display_width(note), available // 3) if available >= display_width(state) + 6 else 0
-        head_width = max(0, available - note_width - (3 if note_width else 0))
-        head = (clipped(name_of(member["participant"]), head_width - display_width(state)) + state
-                if head_width >= display_width(state) + 3 else clipped(name_of(member["participant"]) + state, head_width))
-        row["line"] = head + (" · " + clipped(note, note_width) if note_width else "") + tail
-        if not unicode:
-            row["line"] = row["line"].replace(" · ", " / ")
+        note = clipped(clean(row["text"], 300) or "(no notes)", max(0, (width - 2) // 3))
+        sep = " · " if unicode else " / "
+        row["_tail"] = [(state.strip(), "metadata"), ((sep + note) if note else "", "metadata"),
+                        (tail.replace(" · ", sep).strip(), "metadata")]
+        row["_label"] = name_of(member["participant"])
         output.append(row)
+    plan = plan_tail_columns([row["_tail"] for row in output], max(0, width - 2), optional=(1,))
+    for row, values in zip(output, plan["rows"]):
+        row["line"], _ = format_tail_row([], (row.pop("_label"), "text"), values, plan)
+        row.pop("_tail")
     return output
 
 

@@ -381,6 +381,60 @@ def clipped(text, width):
     return result
 
 
+def plan_tail_columns(rows, content_width, prefix_width=0, optional=(), min_gap=2):
+    """Reserve one right-anchored tail for a group; shed optional columns before labels.
+
+    Rows contain (text, style) values. Callers retain status semantics and capture
+    volatile values before planning. Widths count terminal cells, including prefixes.
+    """
+    rows = [[(clipped(text, 2000), style) for text, style in row] for row in rows]
+    widths = [max(display_width(row[n][0]) for row in rows) for n in range(len(rows[0]))] if rows else []
+    active = [n for n, width in enumerate(widths) if width]
+    budget = max(0, content_width - prefix_width)
+    def size():
+        return sum(widths[n] for n in active) + min_gap * max(0, len(active) - 1)
+    for n in optional:
+        if size() + min_gap + 1 <= budget:
+            break
+        if n in active:
+            active.remove(n)
+    # At impossible widths, trim the rightmost metadata before the status column.
+    while active and size() > budget:
+        n = active[-1]
+        widths[n] = max(0, widths[n] - (size() - budget))
+        if not widths[n]:
+            active.pop()
+    return dict(rows=rows, widths=widths, active=active, width=content_width,
+                tail_width=size(), gap=min_gap,
+                label=budget >= size() + min_gap + 1)
+
+
+def format_tail_row(prefix, label, values, plan):
+    """Return plain text and styles from the very same fitted segments."""
+    spans = [(clipped(text, plan["width"]), style) for text, style in prefix]
+    lead_width = sum(display_width(text) for text, _ in spans)
+    room = max(0, plan["width"] - lead_width - plan["tail_width"])
+    if plan["label"]:
+        text, style = label
+        text = clipped(text, max(0, room - plan["gap"]))
+        spans.append((text, style))
+        room -= display_width(text)
+    spans.append((" " * room, "text"))
+    for i, n in enumerate(plan["active"]):
+        if i:
+            spans.append((" " * plan["gap"], "metadata"))
+        text, style = values[n]
+        text = clipped(text, plan["widths"][n])
+        spans.extend([(" " * max(0, plan["widths"][n] - display_width(text)), "metadata"), (text, style)])
+    # A prefix can itself exceed an extremely narrow viewport.
+    remaining, fitted = plan["width"], []
+    for text, style in spans:
+        text = clipped(text, remaining)
+        fitted.append((text, style))
+        remaining -= display_width(text)
+    return "".join(text for text, _ in fitted), fitted
+
+
 def fixed_column(text, width):
     """Clip and pad a label to a display-cell width."""
     width = max(0, int(width))
@@ -979,11 +1033,11 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     body = []
     if not shown:
         body.append(("Nothing needs you right now", "dim", None))
-    for row_id, item in zip(row_ids[start:start + capacity], window):
-        tail = item["tail"] if "tail" in item else age_label(item["stamp"])
-        tail = sep + tail if tail else ""
-        text = clipped("%s %s%s" % (item["glyph"], item["who"], sep + item["what"] if item["what"] else ""),
-                       max(1, content_width - display_width(tail) - 2)) + tail
+    inbox_tails = [[(item["tail"] if "tail" in item else age_label(item["stamp"]), "metadata")] for item in window]
+    inbox_plan = plan_tail_columns(inbox_tails, max(0, content_width - 2))
+    for row_id, item, values in zip(row_ids[start:start + capacity], window, inbox_plan["rows"]):
+        text, _ = format_tail_row([], ("%s %s%s" % (item["glyph"], item["who"],
+                                  sep + item["what"] if item["what"] else ""), item["style"]), values, inbox_plan)
         body.append((text, item["style"], item["action"], row_id))
     more = len(shown) - len(window) + hidden
     if shown and more and available > len(window):
@@ -1323,52 +1377,34 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     for record in all_records:
         label = call_tokens(report, record.get("attempt"), record.get("state"), True)
         token_labels[record.get("attempt")] = "" if label in {"tok pending", "tok n/a"} else label
-    token_width = max([0] + [display_width(label) for label in token_labels.values() if label])
-    age_values = [age_label(record.get("joined_at")) or "unknown" for record in all_records]
-    age_values += [main_words(shown_mains[root.get("id")], unicode)
-                   if root.get("id") in shown_mains else "unknown" for root in roots]
-    age_width = max([3] + [display_width(age) for age in age_values])
-    tag_width = max([0] + [display_width(judgment_tag(projected_calls.get(record.get("attempt")), report, unicode,
-                                                       ending_tag(projected_calls.get(record.get("attempt")), unicode)))
-                            if projected_calls.get(record.get("attempt")) else
-                            display_width(status_tag(record["state"], exit_code=record.get("exit"), unicode=unicode))
-                            for record in all_records] + [
-                                display_width(judgment_tag(main, report, unicode, ending_tag(main, unicode)))
-                                for main in shown_mains.values()])
+    def tail_values(state, call=None, attempt=None, age="unknown", exit_code=None):
+        tag = judgment_tag(call, report, unicode, ending_tag(call, unicode)) if call else status_tag(state, exit_code=exit_code, unicode=unicode)
+        tag_tone = judgment_tone(tag, call_ending(call) or state) if call else tone(state)
+        return [(tag, tag_tone), (token_labels.get(attempt, ""), "metadata"), (age, "metadata")]
+
+    record_tails = {id(record): tail_values(record["state"], projected_calls.get(record.get("attempt")),
+                    record.get("attempt"), age_label(record.get("joined_at")) or "unknown", record.get("exit"))
+                    for record in all_records}
+    root_tails = {id(root): tail_values(main_state(shown_mains[root["id"]]) if root["id"] in shown_mains else root["state"],
+                  age=main_words(shown_mains[root["id"]], unicode) if root["id"] in shown_mains else "unknown") for root in roots}
+    main_tails = [root_tails[id(root)] for root in roots if root["id"] is not None]
+    tail_plan = plan_tail_columns(list(record_tails.values()) + main_tails, width,
+                                  prefix_width=9 if all_records else 2, optional=(1,))
+    # Owner placeholders have no call evidence and belong to their own row group.
+    unowned_plan = plan_tail_columns([root_tails[id(root)] for root in roots if root["id"] is None], width, prefix_width=2)
+    record_tails = dict(zip(record_tails, tail_plan["rows"]))
     shown = 0
     selected = (navigation or {}).get("selected")
 
-    def list_row(identity, state, style, action=None, age="unknown", details=None, exit_code=None, connector="", call=None, attempt=None,
-                 extras=()):
+    def list_row(identity, style, values, action=None, details=None, connector="", plan=tail_plan):
         nonlocal space
         if space <= 0:
             return
-        tag = judgment_tag(call, report, unicode, ending_tag(call, unicode)) if call else status_tag(state, exit_code=exit_code, unicode=unicode)
-        tag_tone = judgment_tone(tag, call_ending(call) or state) if call else tone(state)
-        token_text = token_labels.get(attempt, "")
-        row_token_width = token_width
-        fixed = tag_width + 2 + age_width + (row_token_width + 2 if row_token_width else 0)
-        if row_token_width and width - display_width(connector) - 4 < fixed + 1:
-            row_token_width = 0
-        tag_pad = " " * max(0, tag_width - display_width(tag))
-        age_pad = " " * max(0, age_width - display_width(age))
-        token_pad = " " * max(0, row_token_width - display_width(token_text)) if row_token_width else ""
-        token_part = token_pad + token_text + "  " if row_token_width else ""
-        tail = tag_pad + tag + "  " + token_part + age_pad + age
-        tail_width = display_width(tail)
-        available_tail = width - display_width(connector) - 4
-        tiny_tail = False
-        if tail_width > available_tail:
-            if available_tail >= display_width(tag) + 2 + display_width(age):
-                tail, tag_pad = tag + "  " + age, ""
-            else:
-                tail = clipped(tag + "  " + age, max(0, available_tail))
-                tiny_tail = True
-            tail_width = display_width(tail)
-        identity = clipped(identity, max(0, available_tail - tail_width))
+        tag, tag_tone = values[0]
+        age = values[2][0]
         gutter = glyph("selected", unicode) + " " if action and action == selected else "  "
-        lead = gutter + connector + identity
-        gap = " " * max(2, width - display_width(lead + tail))
+        value, spans = format_tail_row([(gutter, "text"), (connector, style)],
+                                       (identity, style), values, plan)
         if action and action == selected and space >= 4 and width >= 28:
             add(box_edge(identity, width, unicode, dashed=True), style)
             state_line = box_row(tag + "  " + age, width, unicode, dashed=True)
@@ -1383,17 +1419,9 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             add(box_edge("", width, unicode, "bottom", dashed=True), style)
             space -= 3 + len(kept)
         else:
-            value = clipped(lead + gap + tail, width)
             if color:
-                prefix = (paint(gutter, "text", color=True, colors=color_count(), light=light_theme()) +
-                          paint(connector + identity, style, color=True, colors=color_count(), light=light_theme(), bold=True) + gap)
-                if tiny_tail:
-                    value = prefix + paint(tail, "metadata", color=True, colors=color_count(), light=light_theme())
-                else:
-                    tag_start = len(tag_pad)
-                    value = (prefix + paint(tail[:tag_start], "metadata", color=True, colors=color_count(), light=light_theme()) +
-                             paint(tag, tag_tone, color=True, colors=color_count(), light=light_theme()) +
-                             paint(tail[tag_start + len(tag):], "metadata", color=True, colors=color_count(), light=light_theme()))
+                value = "".join(paint(text, tone, color=True, colors=color_count(), light=light_theme(),
+                                      bold=tone == style) for text, tone in spans)
             lines.append(value)
             space -= 1
 
@@ -1415,20 +1443,17 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
                 point = 1 + frame % 2
                 connector = connector[:point] + glyph("dot", unicode) + connector[point + 1:]
             tokens = row.get("tokens")
-            list_row(call_identity(role, row["name"], row["work"]), row["state"], band_style(row["role"], row.get("purpose")),
-                     ("result", row.get("attempt")), age_label(row.get("joined_at")) or "unknown",
-                     [row["work"], location_label(row.get("location")), row["model"]] + ([tokens] if tokens else []), row.get("exit"),
-                     connector, call=projected_calls.get(row.get("attempt")), attempt=row.get("attempt"),
-                     extras=())
+            list_row(call_identity(role, row["name"], row["work"]), band_style(row["role"], row.get("purpose")),
+                     record_tails[id(row)], ("result", row.get("attempt")),
+                     [row["work"], location_label(row.get("location")), row["model"]] + ([tokens] if tokens else []), connector)
         for row in judges[:judge_count]:
             child(row)
             shown += 1
         main = shown_mains.get(root["id"])
         title = root["title"] + (sep + root["label"] if root.get("label") else "")
-        list_row(title, main_state(main) if main else root["state"], "main" if root["id"] else "unknown",
-                 ("chat", main["participant"] if main else root["id"]),
-                 main_words(main, unicode) if main else "unknown",
-                 [root.get("label") or "No task recorded"])
+        list_row(title, "main" if root["id"] else "unknown", root_tails[id(root)],
+                 ("chat", main["participant"] if main else root["id"]), [root.get("label") or "No task recorded"],
+                 plan=tail_plan if root["id"] is not None else unowned_plan)
         for row in workers[:max(0, space - int(len(records) > shown + space))]:
             child(row)
             shown += 1

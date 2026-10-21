@@ -198,6 +198,61 @@ assert len(band_rows) == 4 and len(set(band_ends)) == 1, (band_rows, band_ends)
 assert len(set(map(len, band_tags))) > 1, (band_tags, band_rows)
 assert all(row.rstrip().endswith(age) for row, age in zip(band_rows, ("37m", "4m", "<1m", "12m"))), band_rows
 
+# Every collapsed call group shares its tail columns, including narrow fallbacks.
+tail_fixture = deepcopy(layout_tree)
+tail_fixture["room"]["participants"] = tail_fixture["room"]["participants"][:4]
+tail_fixture["attempts"]["active_recent"] = tail_fixture["attempts"]["active_recent"][:4]
+for member, attempt in zip(tail_fixture["room"]["participants"], tail_fixture["attempts"]["active_recent"]):
+    attempt["started_at"] = member.get("joined_at")
+    attempt["parent_attempt_id"] = "layout-main-attempt" if member["role"] != "main" else None
+    attempt["panel"].update(model="gpt-6-luna", label="한글 작업 " + member["participant"])
+tail_fixture["operations"] = {"recent": [{"attempt_id": ident, "tokens": tokens}
+    for ident, tokens in (("layout-review-a", 9800), ("layout-review-b", 12000))]}
+import panel_messages as tail_messages
+import panel_view as tail_view
+tail_members = [member for member in projected_nodes(tail_fixture) if member["role"] != "main"]
+tail_inbox = [{"glyph": "!", "who": name, "what": "한글 작업", "tail": age, "style": "alert",
+               "action": ("result", member["participant"]), "row_id": ("call", member["participant"])}
+              for member, name, age in zip(tail_members, ("A", "Long name", "한글"), ("37m", "4m", "<1m"))]
+tail_names = {m["participant"]: name for m, name in zip(tail_members, ("A", "Long name", "한글"))}
+tail_notes = [{"sender": member["participant"], "id": "%s-%s" % (member["participant"], n),
+               "text": "한글 note " + "x" * (n + 1), "unread": n == 1,
+               "message": {"sender": member["participant"], "recipient": "layout-main", "message_kind": "note"}}
+              for index, member in enumerate(tail_members) for n in range(index % 2 + 1)]
+tail_plain = {}
+for columns in (27, 42, 80, 150):
+    for colored in (False, True):
+        for surface in ("compact", "tree", "graph", "inbox", "messages"):
+            with mock_patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+                if surface == "messages":
+                    message_rows = tail_messages.call_rows(tail_notes, tail_members, tail_names.__getitem__,
+                        tail_fixture["room"], columns)
+                    picture = "\n".join(row["line"] for row in message_rows)
+                elif surface == "inbox":
+                    with mock_patch.object(tail_view, "inbox_items", return_value=tail_inbox):
+                        picture = render(tail_fixture, "codex", columns, 60, menu=True, color=colored, navigation={})
+                else:
+                    picture = render(tail_fixture, "codex", columns, 60, view=surface, color=colored,
+                                     navigation={"dismissed": True})
+            if colored and surface != "messages":
+                assert "\033[" in picture, (surface, columns, picture)
+            picture = re.sub(r"\033\[[0-9;]*m", "", picture)
+            if surface != "inbox":
+                if colored:
+                    assert picture == tail_plain[columns, surface], (surface, columns, picture)
+                else:
+                    tail_plain[columns, surface] = picture
+            if surface == "inbox":
+                call_lines = [line for line in picture.splitlines() if any(age in line for age in ("37m", "4m", "<1m"))]
+                ends = [display_width(re.split(r"(37m|4m|<1m)", line)[0]) + len(re.search(r"37m|4m|<1m", line)[0])
+                        for line in call_lines]
+            else:
+                call_lines = [line for line in picture.splitlines() if "running]" in line
+                              and (surface == "messages" or any(age in line for age in ("37m", "4m", "<1m")))]
+                ends = [display_width(line[:line.index("running]") + len("running]")]) for line in call_lines]
+            assert len(call_lines) == 3 and len(set(ends)) == 1, (surface, columns, call_lines, ends, picture)
+            assert all(display_width(line) <= columns for line in picture.splitlines()), (surface, columns, picture)
+
 overflow_tree = deepcopy(layout_tree)
 overflow_tree["attempts"]["active_recent"][1]["state"] = "review"
 overflow_tree["operations"] = {"recent": [

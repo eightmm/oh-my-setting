@@ -6,7 +6,7 @@ import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
 from panel_view import (amount, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
-                        clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
+                        plan_tail_columns, format_tail_row, clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
                         judgment_tag, judgment_tone, call_ending, ending_tag, call_tone)
@@ -1335,8 +1335,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             break
     main_width, main_left = layout(width)
     stem = main_left + 2
-    band_age_width = max((display_width(elapsed(member.get("joined_at")) or "unknown")
-                          for group in (gates, counsel, workers) for member in group), default=0)
     offsets = dict(mapping(navigation.get("band_offsets")))
     drawn = []
 
@@ -1347,6 +1345,14 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         if member.get("state") == "done" and member.get("participant") in awaiting_admission:
             return status_tag("review", unicode=unicode).replace("awaiting decision", "patch awaits admission")
         return judgment_tag(member, report, unicode, execution_tag(member, unicode))
+
+    band_tails = {}
+    for member in gates + counsel + workers:
+        tag = tagged(member)
+        band_tails[id(member)] = [(tag, judgment_tone(tag, call_ending(member) or member.get("state"))),
+                                  (elapsed(member.get("joined_at")) or "unknown", "metadata")]
+    tail_plan = plan_tail_columns(list(band_tails.values()), width, prefix_width=stem + 5)
+    band_tails = dict(zip(band_tails, tail_plan["rows"]))
 
     def card_lines(member, content, indent=0, tree_card=False, band_prefix=""):
         style_key = band_style(member.get("role"), member.get("purpose"))
@@ -1410,15 +1416,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
             band_prefix = (glyph(name, unicode) + " " + (name.title() + " " if n == 0 else "")) if name != "calls" else ""
-            tag = tagged(member)
-            age = elapsed(member.get("joined_at")) or "unknown"
-            age = " " * max(0, band_age_width - display_width(age)) + age
-            available = max(0, width - stem - display_width(connector + mark))
-            tail = clipped(tag + "  " + age, max(0, available - 3))
-            label = clipped(band_prefix + member_identity(member), max(1, width - stem - display_width(connector + mark + tail) - 2))
-            gap = max(2, width - stem - display_width(connector + mark + label + tail))
-            lines.append(" " * stem + styled(connector, style_key) + mark + styled(label, style_key, action(member) == selected) +
-                         " " * gap + styled(tail[:len(tag)], judgment_tone(tag, call_ending(member) or member.get("state"))) + styled(tail[len(tag):], "metadata"))
+            values = band_tails[id(member)]
+            age = values[1][0]
+            _, spans = format_tail_row([(" " * stem, "text"), (connector, style_key), (mark, "text")],
+                                       (band_prefix + member_identity(member), style_key), values, tail_plan)
+            lines.append("".join(styled(text, tone, action(member) == selected and tone == style_key)
+                                 for text, tone in spans))
             hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(member), "preview": True, "tree": True})
             drawn.append(member)
             if expansion and member is selected_member:
