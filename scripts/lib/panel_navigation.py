@@ -274,10 +274,6 @@ def navigate(repo, action, state, navigation, width):
                       if isinstance(cached, dict) and cached.get("repo") == os.path.realpath(repo) else [])
             navigation["detail"] = {"title": "LIVE ACTIVITY / " + (member.get("label") or ident),
                                      "activity_call": ident, "activity_events": events}
-            attempt_access = (attempt or {}).get("access") or member.get("access")
-            if member.get("provider") == "claude" and attempt_access == "write":
-                navigation["detail"]["activity_unavailable"] = \
-                    "Live activity not available for Claude write workers"
             navigation["offset"] = 0
         else:
             # The watch loop reads the evidence in the background and opens the detail when it arrives.

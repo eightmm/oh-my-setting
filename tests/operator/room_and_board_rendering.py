@@ -1766,9 +1766,9 @@ with tempfile.TemporaryDirectory() as activity_root:
     assert all(value in claude_write_screen for value in (
         "Activity:", "src/claude_live.py", "python -m pytest tests/test_live.py", "Claude writer says done")), \
         claude_write_screen
-    empty_activity = render_detail({}, {"title": "Claude write fixture", "activity_events": [],
-                                        "activity_unavailable": "stale label"}, 80, 30, {}, color=False)
-    assert "No activity yet" in empty_activity and "stale label" not in empty_activity, empty_activity
+    empty_activity = render_detail({}, {"title": "Claude write fixture", "activity_events": []},
+                                   80, 30, {}, color=False)
+    assert "No activity yet" in empty_activity, empty_activity
     last12_call = "call-1123456789abcdef"
     last12_stream = activity_repo / "codex-last12.jsonl"
     last12_stream.write_text("".join(json.dumps({"type": "item.completed", "item": {
