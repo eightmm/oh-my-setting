@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -72,12 +73,21 @@ usage_report = {'repo': {'name': 'r', 'path': '/tmp/r'}, 'collection': {'ok': Tr
                     ('att_rev', None, 'reviewer', 'review', 'Check diff'), ('att_codex', None, 'worker', 'implement', 'Plain total'),
                     ('att_late', 700, 'worker', 'implement', 'Attempt total'), ('att_none', None, 'worker', 'implement', 'No report'))]}}
 usage_board = panel_view.render(usage_report, 'claude', 110, 40)
-for text in ('Check diff · 48.2k tok (out 9149)', 'Plain total · 12.3k tok', 'Attempt total · 700 tok',
-             'Fix parser · tokens pending', 'No report · tokens unreported'):
-    check(text in usage_board, 'row tokens missing: ' + text + usage_board)
+for value in ('48.2k tok', '12.3k tok', '700 tok'):
+    check(any(value in line for line in usage_board.splitlines()), 'token total missing from column: ' + value + usage_board)
+detail_board = panel_view.render(usage_report, 'claude', 110, 40,
+                                 navigation={'selected': ('result', 'att_rev')})
+check('(out 9149)' in detail_board, 'provider output detail missing from Detail view: ' + detail_board)
+check('Fix parser · tokens pending' not in usage_board and 'No report · tokens unreported' not in usage_board,
+      'unknown token filler leaked into row identity')
 check(' 0 tok' not in usage_board and 'tokens 0' not in usage_board, 'missing tokens rendered as zero')
-check(all(panel_view.display_width(line) <= 44 for line in panel_view.render(usage_report, 'claude', 44, 40).splitlines()),
-      'narrow token rows overflow')
+for narrow_width in (44, 36):
+    for color in (False, True):
+        narrow_board = panel_view.render(usage_report, 'claude', narrow_width, 40, color=color)
+        # Width is measured on the visible text; ANSI styling adds bytes, not columns.
+        check(all(panel_view.display_width(re.sub(r'\x1b\[[0-9;]*m', '', line)) <= narrow_width
+                  for line in narrow_board.splitlines()),
+              'narrow token rows overflow at %s columns (color=%s): %s' % (narrow_width, color, narrow_board))
 expanded_menu = panel_view.menu_rows(90, 24, True, True, False)
 check('[j] Terminals and jobs' in '\n'.join(expanded_menu), 'expanded terminal command missing')
 expected_keys = [workspaces._key_command(repo, 'term-' + 'a' * 32, str(tmp / r'dollar $ literal \$ ${x} $_y $1 $$z end$'), action)

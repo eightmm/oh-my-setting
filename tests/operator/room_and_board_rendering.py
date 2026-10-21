@@ -1835,7 +1835,7 @@ for glyphs in (False, True):
         assert not re.search(r"[│|]\s+high\s+[│|]", clocked_cards), clocked_cards
         assert "high" not in clocked_cards and " for " not in clocked_cards, clocked_cards
 clocked_tree = render(clocked, "codex", 100, 50, view="tree", navigation={})
-assert re.search(r"\[⟳ running\]  12m", clocked_tree), clocked_tree
+assert re.search(r"\[⟳ running\]\s+12m", clocked_tree), clocked_tree
 with patch.object(graph_text.time, "time", return_value=1800000000):
     for seconds, expected in ((30, "<1m"), (720, "12m"), (7200, "2h"), (172800, "2d")):
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1800000000 - seconds))

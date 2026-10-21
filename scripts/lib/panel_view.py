@@ -1314,21 +1314,54 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         " / " + ("compact" if compact else "detail"), "alert" if attention_only else "dim")
     space = max(0, budget - len(lines) - len(status_lines) - 1)
     roots.sort(key=lambda r: (r["id"] is None, r["id"] or ""))
+    all_records = [record for root in roots for _, group in root["groups"] for record in group]
+    token_labels = {}
+    for record in all_records:
+        label = call_tokens(report, record.get("attempt"), record.get("state"), True)
+        token_labels[record.get("attempt")] = "" if label in {"tok pending", "tok n/a"} else label
+    token_width = max([0] + [display_width(label) for label in token_labels.values() if label])
+    age_values = [age_label(record.get("joined_at")) or "unknown" for record in all_records]
+    age_values += [main_words(shown_mains[root.get("id")], unicode)
+                   if root.get("id") in shown_mains else "unknown" for root in roots]
+    age_width = max([3] + [display_width(age) for age in age_values])
+    tag_width = max([0] + [display_width(judgment_tag(projected_calls.get(record.get("attempt")), report, unicode,
+                                                       ending_tag(projected_calls.get(record.get("attempt")), unicode)))
+                            if projected_calls.get(record.get("attempt")) else
+                            display_width(status_tag(record["state"], exit_code=record.get("exit"), unicode=unicode))
+                            for record in all_records] + [
+                                display_width(judgment_tag(main, report, unicode, ending_tag(main, unicode)))
+                                for main in shown_mains.values()])
     shown = 0
     selected = (navigation or {}).get("selected")
 
-    def list_row(identity, state, style, action=None, age="unknown", details=None, exit_code=None, connector="", call=None,
+    def list_row(identity, state, style, action=None, age="unknown", details=None, exit_code=None, connector="", call=None, attempt=None,
                  extras=()):
         nonlocal space
         if space <= 0:
             return
         tag = judgment_tag(call, report, unicode, ending_tag(call, unicode)) if call else status_tag(state, exit_code=exit_code, unicode=unicode)
         tag_tone = judgment_tone(tag, call_ending(call) or state) if call else tone(state)
-        tail = clipped(tag + "  " + age, max(0, width - display_width(connector) - 8))
-        # Token text joins the identity only whole: it never clips the call's own name.
-        identity = next((identity + sep + extra for extra in extras
-                         if display_width(identity + sep + extra) <= width - display_width(connector + tail) - 4), identity)
-        identity = clipped(identity, max(0, width - display_width(connector + tail) - 4))
+        token_text = token_labels.get(attempt, "")
+        row_token_width = token_width
+        fixed = tag_width + 2 + age_width + (row_token_width + 2 if row_token_width else 0)
+        if row_token_width and width - display_width(connector) - 4 < fixed + 1:
+            row_token_width = 0
+        tag_pad = " " * max(0, tag_width - display_width(tag))
+        age_pad = " " * max(0, age_width - display_width(age))
+        token_pad = " " * max(0, row_token_width - display_width(token_text)) if row_token_width else ""
+        token_part = token_pad + token_text + "  " if row_token_width else ""
+        tail = tag_pad + tag + "  " + token_part + age_pad + age
+        tail_width = display_width(tail)
+        available_tail = width - display_width(connector) - 4
+        tiny_tail = False
+        if tail_width > available_tail:
+            if available_tail >= display_width(tag) + 2 + display_width(age):
+                tail, tag_pad = tag + "  " + age, ""
+            else:
+                tail = clipped(tag + "  " + age, max(0, available_tail))
+                tiny_tail = True
+            tail_width = display_width(tail)
+        identity = clipped(identity, max(0, available_tail - tail_width))
         gutter = glyph("selected", unicode) + " " if action and action == selected else "  "
         lead = gutter + connector + identity
         gap = " " * max(2, width - display_width(lead + tail))
@@ -1348,10 +1381,15 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         else:
             value = clipped(lead + gap + tail, width)
             if color:
-                value = (paint(gutter, "text", color=True, colors=color_count(), light=light_theme()) +
-                         paint(connector + identity, style, color=True, colors=color_count(), light=light_theme(), bold=True) + gap +
-                         paint(tag if tail.startswith(tag) else tail, tag_tone, color=True, colors=color_count(), light=light_theme()) +
-                         paint(tail[len(tag):] if tail.startswith(tag) else "", "metadata", color=True, colors=color_count(), light=light_theme()))
+                prefix = (paint(gutter, "text", color=True, colors=color_count(), light=light_theme()) +
+                          paint(connector + identity, style, color=True, colors=color_count(), light=light_theme(), bold=True) + gap)
+                if tiny_tail:
+                    value = prefix + paint(tail, "metadata", color=True, colors=color_count(), light=light_theme())
+                else:
+                    tag_start = len(tag_pad)
+                    value = (prefix + paint(tail[:tag_start], "metadata", color=True, colors=color_count(), light=light_theme()) +
+                             paint(tag, tag_tone, color=True, colors=color_count(), light=light_theme()) +
+                             paint(tail[tag_start + len(tag):], "metadata", color=True, colors=color_count(), light=light_theme()))
             lines.append(value)
             space -= 1
 
@@ -1376,8 +1414,8 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             list_row(call_identity(role, row["name"], row["work"]), row["state"], band_style(row["role"], row.get("purpose")),
                      ("result", row.get("attempt")), age_label(row.get("joined_at")) or "unknown",
                      [row["work"], location_label(row.get("location")), row["model"]] + ([tokens] if tokens else []), row.get("exit"),
-                     connector, call=projected_calls.get(row.get("attempt")),
-                     extras=[tokens, call_tokens(report, row.get("attempt"), row["state"], True)] if tokens else [])
+                     connector, call=projected_calls.get(row.get("attempt")), attempt=row.get("attempt"),
+                     extras=())
         for row in judges[:judge_count]:
             child(row)
             shown += 1

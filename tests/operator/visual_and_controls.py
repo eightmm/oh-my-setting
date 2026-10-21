@@ -1583,7 +1583,7 @@ assert changed_text.index("MAIN Sol 6") < changed_text.index("No known main")
 missing_model = deepcopy(tree)
 missing_model["attempts"]["active_recent"][0]["panel"].pop("model")
 missing_text = render(missing_model, "codex", 42, 34, main_attempt="att_main")
-assert "MAIN model unknow" in missing_text and "Sol 6 / high / working" not in missing_text, missing_text
+assert "MAIN mo…" in missing_text and "Sol 6 / high / working" not in missing_text, missing_text
 assert "MAIN model unknown" in render(missing_model, "codex", 100, 34, main_attempt="att_main")
 
 # Usage is the recent artifact window, never an account total or an overlapping

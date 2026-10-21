@@ -1189,7 +1189,7 @@ assert linked["attempt"] == "fresh-attempt" and linked["model"] == "fixture-mode
 debate_graph = graph_view.render_graph(native_report, 110, 40)
 assert "COUNCIL 1 seat(s) answering" in debate_graph and "Debate: Pick next work" in debate_graph, debate_graph
 debate_navigation = {}
-debate_connected = render(native_report, "claude", 91, 40, view="tree", main_attempt="fresh-attempt",
+debate_connected = render(native_report, "claude", 110, 40, view="tree", main_attempt="fresh-attempt",
                           navigation=debate_navigation)
 assert "COUNCIL (1)" in debate_connected and "Debate: Pick next work" in debate_connected, debate_connected
 assert "1 seat(s) answering" in debate_connected and "MAIN fixture-model" in debate_connected, debate_connected
