@@ -27513,6 +27513,29 @@ PY
     cp "$base_config" "$project/.git/config"
     git -c core.fsmonitor=false -c diff.external= -C "$project" checkout -- file.txt
   done
+
+  # A snapshot error crosses the registry-lock subshell. It must stop before
+  # the provider, with the snapshot's diagnostic retained for the caller.
+  local snapshot_capture_count="$TMP/worker-exec-config-snapshot-capture-count"
+  local provider_invoked="$project/provider-invoked"
+  mkdir -p "$snapshot_capture_count"
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+: > "$provider_invoked"
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT=1 \
+    OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT="$snapshot_capture_count" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "a worker-guard snapshot failure must stop delegation: $out"
+  contains "$out" 'could not record worker guard test capture count' ||
+    fail "the snapshot failure reason should reach the caller: $out"
+  [ ! -e "$provider_invoked" ] ||
+    fail "the provider ran after its worker-guard snapshot failed: $out"
 }
 
 test_delegate_rejects_linked_worktree_config_before_capture() {

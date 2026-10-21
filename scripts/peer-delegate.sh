@@ -866,7 +866,30 @@ load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
-oms_harness_prune_stale_worktrees "$delegate_worktree_repo" 0 >/dev/null
+# A guard scan can read a sibling's admin leaves before removal and validate
+# its marker after removal. Coordinate peer-delegate registry writes with its
+# guard reads, keyed by physical common directory. patch-admit, checkpoint,
+# scratch-worktree, peer-common, and residue writers do not take this lock.
+# Providers run outside it; guard checks stay intact.
+delegate_with_worktree_registry_lock() {
+  local repo="$1" common
+  shift
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir)" || {
+    echo "error: cannot resolve Git worktree registry for delegation" >&2
+    return 1
+  }
+  oms_with_file_lock "$common/worktrees" "$@"
+}
+
+delegate_surface_snapshot() {
+  oms_worker_surface_snapshot "$@" && return 0
+  # The lock runs in a subshell, so report the snapshot's diagnostic here.
+  echo "error: ${OMS_WG_SNAPSHOT_ERROR:-could not freeze worker protected surfaces}" >&2
+  return 1
+}
+
+delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+  oms_harness_prune_stale_worktrees "$delegate_worktree_repo" 0 >/dev/null
 [ "$DRY_RUN" = 1 ] || oms_harness_reap_dead_delegation_markers "$REPO"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 repair_prompt_file="$prompt_file.repair"
@@ -928,7 +951,8 @@ cleanup_delegated_worktree() {
       "$worker_identity_common_dir" "$worker_identity_gitfile_sha" \
       "$worker_identity_backpointer_sha" "$worker_identity_worktree_stat" \
       "$worker_identity_gitdir_stat" 2>/dev/null)"; then
-    if git -C "$delegate_worktree_repo" worktree remove --force "$worktree" >/dev/null 2>&1; then
+    if delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+      git -C "$delegate_worktree_repo" worktree remove --force "$worktree" >/dev/null 2>&1; then
       worktree_created=0
       rm -rf "$worktree_parent"
       worktree_parent=""
@@ -1238,7 +1262,8 @@ PY
   esac
 fi
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-  GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 delegate_with_worktree_registry_lock "$DELEGATE_SOURCE_REPO" \
+  git -c core.hooksPath=/dev/null \
   -c core.fsmonitor=false -C "$DELEGATE_SOURCE_REPO" \
   worktree add --detach "$worktree" "$continuation_base" >/dev/null 2>&1
 worktree_created=1
@@ -2182,8 +2207,10 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   [ -n "$worker_guard_worktree_physical" ] ||
     fail "could not resolve delegated worktree identity for the worker guard"
   worker_guard_dir="$worktree_parent/worker-guard"
-  if oms_worker_surface_snapshot "$REPO" "$worker_guard_dir" \
-    "$worker_guard_worktree_physical"; then
+  worker_guard_snapshot_error_file="$worktree_parent/worker-guard-snapshot.error"
+  if delegate_with_worktree_registry_lock "$REPO" \
+    delegate_surface_snapshot "$REPO" "$worker_guard_dir" \
+    "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
     if ! oms_git_execution_state_snapshot "$REPO" \
       "$worker_guard_dir/git-execution-state"; then
       fail "could not freeze Git execution config/index state before provider start"
@@ -2205,9 +2232,11 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
       fail "could not hash delegated worktree Git execution config snapshot"
     if [ "$delegate_worktree_repo" != "$REPO" ]; then
       worker_source_guard_dir="$worker_guard_dir/source"
-      if ! oms_worker_surface_snapshot "$delegate_worktree_repo" "$worker_source_guard_dir" \
-        "$worker_guard_worktree_physical"; then
-        fail "${OMS_WG_SNAPSHOT_ERROR:-could not freeze source repository protected surfaces}"
+      if ! delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+        delegate_surface_snapshot "$delegate_worktree_repo" "$worker_source_guard_dir" \
+        "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
+        snapshot_error="$(cat "$worker_guard_snapshot_error_file" 2>/dev/null || true)"
+        fail "${snapshot_error:-could not freeze source repository protected surfaces}"
       fi
       oms_git_execution_state_snapshot "$delegate_worktree_repo" \
         "$worker_source_guard_dir/git-execution-state" || fail "could not freeze source Git execution state"
@@ -2248,8 +2277,8 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
       echo "warning: worker guard could not cover even the untracked files in ${OMS_WORKER_GUARD_MAX_FILES:-20000} entries; coverage is partial (raise OMS_WORKER_GUARD_MAX_FILES)" >&2
     fi
   else
-    [ -z "${OMS_WG_SNAPSHOT_ERROR:-}" ] || fail "$OMS_WG_SNAPSHOT_ERROR"
-    worker_guard_dir=""
+    snapshot_error="$(cat "$worker_guard_snapshot_error_file" 2>/dev/null || true)"
+    fail "${snapshot_error:-worker guard snapshot or registry lock failed}"
   fi
 fi
 worker_execution_boundary_check() {
@@ -2278,10 +2307,12 @@ worker_execution_boundary_check() {
 }
 worker_protected_surface_diff() {
   local changed source_changed
-  changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
+  changed="$(delegate_with_worktree_registry_lock "$REPO" \
+    oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
     "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
   if [ -n "$worker_source_guard_dir" ]; then
-    source_changed="$(oms_worker_surface_diff "$delegate_worktree_repo" "$worker_source_guard_dir" \
+    source_changed="$(delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+      oms_worker_surface_diff "$delegate_worktree_repo" "$worker_source_guard_dir" \
       "" "$worker_guard_worktree_physical")" || return 2
     if [ -n "$source_changed" ]; then
       echo "source repository protected surfaces changed: $source_changed" >&2

@@ -326,6 +326,50 @@ class FanOutTest(RuntimeFixture, unittest.TestCase):
         self.assertEqual(self.task_state("t1"), "ready")
         self.assertEqual(self.task_state("t2"), "ready")
 
+    def test_sibling_cleanup_cannot_interrupt_a_worker_guard_scan(self) -> None:
+        # Keep b inside its provider until a starts cleanup. Stretch the real
+        # Git removal's observed registry state: a scan read admin leaves
+        # before removal, then checked ownership after the marker disappeared.
+        self._write(self.bin / "codex", BARRIER_CODEX.replace(
+            'wait_for "$other.seen"',
+            'wait_for "$other.seen"\n[ "$me" != t2 ] || wait_for t1.removing'))
+        real_git = shutil.which("git")
+        self._write(self.bin / "git", """#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*)
+    for tree in "$@"; do :; done
+    if [ -f "$tree/delegated.txt" ]; then
+      exec python3 - "$@" <<'PY'
+import os, shutil, subprocess, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+tree = Path(args[-1])
+admin = Path((tree / ".git").read_text().strip().split("gitdir: ", 1)[1])
+leaves = {name: (admin / name).read_bytes() for name in ("gitdir", "commondir")}
+result = subprocess.run([os.environ["OMS_TEST_REAL_GIT"]] + args)
+if result.returncode:
+    sys.exit(result.returncode)
+(tree.parent / ".oh-my-setting-tmp").unlink()
+admin.mkdir()
+for name, body in leaves.items():
+    (admin / name).write_bytes(body)
+(Path(os.environ["BARRIER_DIR"]) / "t1.removing").touch()
+time.sleep(4)
+shutil.rmtree(admin)
+PY
+    fi ;;
+esac
+exec "$OMS_TEST_REAL_GIT" "$@"
+""")
+        call_timeout = os.environ.get("OMS_TEST_CALL_TIMEOUT")
+        barrier_wait = str(max(1, int(call_timeout) - 10)) if call_timeout else "120"
+        result = self.run_graph(fanout_spec(), jobs=2, env_extra={"BARRIER_DIR": str(self.barrier), "BARRIER_WAIT": barrier_wait,
+                                                               "OMS_TEST_REAL_GIT": real_git})
+        self.assertTrue((self.barrier / "t1.removing").exists())
+        self.assertEqual(result["status"], "terminal", result)
+        self.assertEqual(self.task_state("t1"), "review")
+        self.assertEqual(self.task_state("t2"), "review")
+
     def test_the_same_task_and_a_land_never_share_a_wave(self) -> None:
         spec = fanout_spec(b=agent_node("t1", proof=["plan.task.t1.patch_present"]))
         dry = self.drive(runner.run, self.repo, spec, worker="codex", jobs=2, dry_run=True)
