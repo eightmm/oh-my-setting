@@ -655,20 +655,22 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                 if not admission:
                     continue
                 digest = admission.get('patch_sha256')
-                passing = any(
-                    row.get('kind') == 'review-outcome'
+                matching_reviews = [
+                    row for row in rows
+                    if row.get('kind') == 'review-outcome'
                     and (row.get('task_id') == task_id
                          or (not worker.get('task_id') and not row.get('task_id')))
-                    and row.get('exit') == 0
                     and isinstance(row.get('review'), dict)
-                    and row['review'].get('gate_verify_exit') == 0
                     and isinstance(row['review'].get('candidate'), dict)
-                    and row['review']['candidate'].get('patch_sha256') == digest
-                    and isinstance(row['review'].get('seats'), list)
-                    and bool(row['review']['seats'])
-                    and all(isinstance(seat, dict) and seat.get('verdict') == 'pass'
-                            for seat in row['review']['seats'])
-                    for row in rows)
+                    and row['review']['candidate'].get('patch_sha256') == digest]
+                latest_review = matching_reviews[-1] if matching_reviews else None
+                passing = (latest_review is not None
+                           and latest_review.get('exit') == 0
+                           and latest_review['review'].get('gate_verify_exit') == 0
+                           and isinstance(latest_review['review'].get('seats'), list)
+                           and bool(latest_review['review']['seats'])
+                           and all(isinstance(seat, dict) and seat.get('verdict') == 'pass'
+                                   for seat in latest_review['review']['seats']))
                 if not passing:
                     missing_reviews.append(worker.get('attempt_id', 'unknown'))
             if missing_reviews:

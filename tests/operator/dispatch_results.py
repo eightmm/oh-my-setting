@@ -1492,6 +1492,22 @@ with patch.dict(os.environ, environment, clear=True), \
     with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(simple_patch))):
         assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
                               ["value.txt"])["outcome"] == "accepted"
+    reviews = scope_evidence(simple_patch)
+    passing_review = reviews[-1]
+    failing_review = dict(passing_review, exit=1,
+                         review=dict(passing_review["review"], gate_verify_exit=1,
+                                     seats=[{"verdict": "fail"}]))
+    for ordered_reviews, should_accept in (([passing_review, failing_review], False),
+                                           ([failing_review, passing_review], True)):
+        ordered_rows = reviews[:-1] + ordered_reviews
+        with patch.object(saved, "_records", return_value=([scope_worker], ordered_rows)):
+            try:
+                result = saved.finalize(project, "codex", "scope-result", str(summary), "accepted",
+                                        "true", ["value.txt"])
+            except ValueError as error:
+                assert not should_accept and "lack a passing review gate" in str(error), error
+            else:
+                assert should_accept and result["outcome"] == "accepted", result
     with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(extra_patch))):
         changes = saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]
         assert changes["out_of_scope"] == {"count": 1, "paths": ["other.txt"]}, changes
