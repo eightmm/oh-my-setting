@@ -878,6 +878,9 @@ $(compgen -e)
 EOF
         printf 'unset owner environment: %s\n' "${verify_unset:-none}"
       fi
+      if [ -n "${MA_READ_GUARD_DIR:-}" ]; then
+        export PYTHONDONTWRITEBYTECODE=1
+      fi
       run_verify_with_timeout bash -c "$VERIFY_CMD"
     ) >> "$gate_verify_temp" 2>&1
     gate_verify_exit=$?

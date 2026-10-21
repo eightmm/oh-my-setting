@@ -3712,6 +3712,11 @@ ma_run_routed_provider() {
   local -a start_args
   local -a usage_args
 
+  if [ "$access" = read ]; then
+    local PYTHONDONTWRITEBYTECODE=1
+    export PYTHONDONTWRITEBYTECODE
+  fi
+
   oms_require_peer_owner || return $?
 
   # Names the provider that actually ran; a stale value from an earlier call must not stand in.

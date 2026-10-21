@@ -3765,6 +3765,12 @@ test_peer_review_gate_refuses_untracked_content() {
   make_committed_repo "$project"
   make_committed_repo "$state_repo"
   mkdir -p "$home_dir"
+  # Keep a real importable source module in the reviewed checkout. Both the
+  # gate verifier and provider import it after the read guard starts.
+  printf 'value = 1\n' > "$project/review_bytecode_probe.py"
+  git -C "$project" add review_bytecode_probe.py
+  git -C "$project" -c user.name=t -c user.email=t@example.com \
+    commit -qm 'add review bytecode probe'
   write_fake_review_gate_provider "$bin_dir" claude pass
   printf 'not present in git diff\n' > "$project/new_file.txt"
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
@@ -3791,6 +3797,40 @@ EOF
   [ -n "$synthesis_artifact" ] || fail "guard failure did not preserve synthesis artifact"
   assert_file_contains "$synthesis_artifact" "Guard diagnostic"
   assert_file_contains "$synthesis_artifact" "provider-created.txt"
+
+  # Read passes must not create bytecode when either process imports from the
+  # reviewed checkout. The verifier runs before source files are rebaselined;
+  # the provider runs after that rebaseline.
+  rm -f "$project/provider-created.txt"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  cat >> "$bin_dir/claude" <<EOF
+test "\${PYTHONDONTWRITEBYTECODE:-}" = 1 || { echo 'bytecode environment missing' >&2; exit 65; }
+PYTHONPATH='$project' python3 -c 'import review_bytecode_probe'
+EOF
+  rm -rf "$project/__pycache__"
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/import" \
+    --providers claude --gate --verify 'test "$PYTHONDONTWRITEBYTECODE" = 1 && python3 -c "import review_bytecode_probe"' \
+    --prompt "Review bytecode behavior" > "$TMP/review-gate-bytecode-out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "read pass importing a Python source module must complete without bytecode writes: $(cat "$TMP/review-gate-bytecode-out")"
+  [ ! -e "$project/__pycache__" ] || fail "read pass created Python bytecode under the reviewed source"
+
+  # Explicit bytecode writes remain ordinary source file mutations and must
+  # still be rejected by the read guard.
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  cat >> "$bin_dir/claude" <<EOF
+mkdir -p '$project/__pycache__'
+printf 'unchecked hash bytecode' > '$project/__pycache__/planted.pyc'
+EOF
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/direct-pyc" \
+    --providers claude --gate --no-verify --prompt "Reject direct bytecode writes" \
+    > "$TMP/review-gate-direct-pyc-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "read guard must reject a directly written .pyc, got $rc: $(cat "$TMP/review-gate-direct-pyc-out")"
+  contains "$(cat "$TMP/review-gate-direct-pyc-out")" "planted.pyc" ||
+    fail "guard diagnostic omitted directly written bytecode: $(cat "$TMP/review-gate-direct-pyc-out")"
 }
 
 test_git_diff_readers_never_execute_clean_filters() {
