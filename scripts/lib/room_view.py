@@ -100,7 +100,9 @@ def nodes(report):
             provider_error = int(provider_error) if re.fullmatch(r"\d{1,4}", provider_error) else None
         derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
             "done" if code == 0 else "timed_out" if code == 124 else "failed"
-        state = attempt.get("state") or derived
+        # A recorded exit outranks the dispatch join's starting state once the attempt has aged out.
+        state = attempt.get("state") or (derived if type(code) is int else None) or (
+            member.get("state") if member.get("dispatch_role") else None) or derived
         # Display only: a review whose task its main decided reads "decided"; the state stays.
         decided = state == "review" and finalized.get(attempt.get("task_id")) in DECIDED
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
@@ -117,7 +119,8 @@ def nodes(report):
                            task_id=attempt.get("task_id") or result.get("task_id"),
                            decision=finalized.get(attempt.get("task_id") or result.get("task_id")), location=meta.get("location"),
                            lease_id=meta.get("lease_id") or attempt.get("lease_id"),
-                           effort=effort, purpose=clean(meta.get("purpose") or meta.get("strategy"), 60),
+                           effort=effort, purpose=clean(meta.get("purpose") or meta.get("strategy") or
+                                                        member.get("dispatch_role"), 60),
                            access=meta.get("access") or attempt.get("access"),
                            harness=mapping(attempt.get("panel")).get("harness"),
                            title=member.get("label_override") or meta.get("label") or member.get("label"),

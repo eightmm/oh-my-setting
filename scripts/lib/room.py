@@ -296,6 +296,15 @@ def event_shape(event):
             raise ValueError("invalid room event list")
     if kind == "scope" and "owns" not in event:
         raise ValueError("missing declared scopes")
+    if kind == "join":
+        if (event.get("dispatch_role") is not None and
+                (not isinstance(event["dispatch_role"], str)
+                 or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", event["dispatch_role"]))):
+            raise ValueError("invalid dispatched role")
+        if event.get("purpose") is not None and not isinstance(event["purpose"], str):
+            raise ValueError("invalid join purpose")
+        if event.get("state") is not None and event["state"] != "queued":
+            raise ValueError("invalid initial join state")
     if kind == "main-swap" and not isinstance(event.get("attempt"), str):
         raise ValueError("invalid swapped main attempt")
     if kind == "received" and "messages" not in event:
@@ -472,7 +481,8 @@ def validate_event(rows, event, text, repo=None):
     kind = event["kind"]
     carry = _carrying()
     keys = {"created": {"kind", "task_id", "participant", "predecessor"},
-            "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent"},
+            "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent",
+                     "dispatch_role", "purpose", "state"},
             "main-swap": {"kind", "participant", "provider", "model", "attempt", "harness"},
             "bind": {"kind", "participant", "consumer", "previous"},
             "scope": {"kind", "participant", "owns"},
@@ -1245,7 +1255,8 @@ def rollover(repo, old, actor=None):
         return new
 
 
-def join(repo, room, who, provider, role="main", model=None, label=None, native_session=None, owns=None, parent=None):
+def join(repo, room, who, provider, role="main", model=None, label=None, native_session=None, owns=None, parent=None,
+         dispatch_role=None, purpose=None, state=None):
     result = subprocess.run(["bash", "-c", '. "$1"; oms_provider_normalize "$2"', "room-provider",
                              str(ROOT / "scripts/lib/provider-registry.sh"), provider],
                             capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
@@ -1259,6 +1270,12 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
         native_session = current_session()
     event = {"kind": "join", "participant": identifier(who, "participant"), "provider": provider,
              "role": role, "model": model, "label": label or who, "owns": owns or []}
+    if dispatch_role is not None:
+        event["dispatch_role"] = dispatch_role
+    if purpose is not None:
+        event["purpose"] = purpose
+    if state is not None:
+        event["state"] = state
     if native_session:
         event["consumer"] = hashlib.sha256(native_session.encode("utf-8")).hexdigest()[:32]
     if parent:

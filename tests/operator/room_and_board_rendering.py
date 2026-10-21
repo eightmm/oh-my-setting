@@ -3,6 +3,43 @@ room_view["attempts"]["active_recent"].append({"attempt_id": "graph-example-chil
     "task_id": "graph-sample", "panel": {"role": "worker", "room_id": shared,
     "room_participant": child["participant"], "model": "gpt-6-luna", "label": "긴 작업 설명을 분리해서 표시",
     "location": "worktree:example/wt"}})
+# A dispatch join is the first visible row; retain its role and queued state before attempts arrive.
+from unittest.mock import patch as mock_patch
+import room as room_module
+from room_view import nodes as projected_nodes
+join_event = {}
+with mock_patch.object(room_module, "append", side_effect=lambda repo, ident, event, text: join_event.update(event)):
+    room_module.join(".", shared, child["participant"], "codex", "worker", "gpt-6-luna", "Builder work",
+                     parent=child.get("parent"), dispatch_role="builder", purpose="implement", state="queued")
+room_module.event_shape(join_event)
+join_only = deepcopy(room_view)
+joined_member = next(member for member in join_only["room"]["participants"]
+                     if member["participant"] == child["participant"])
+joined_member.update({key: value for key, value in join_event.items() if key != "kind"})
+join_only["attempts"]["active_recent"] = [row for row in join_only["attempts"]["active_recent"]
+                                              if row.get("panel", {}).get("room_participant") != child["participant"]]
+join_only["attempts"]["recent"] = [row for row in join_only["attempts"]["recent"]
+                                    if row.get("panel", {}).get("room_participant") != child["participant"]]
+join_only.get("room_attempts", {}).pop(child["participant"], None)
+join_only["room"].get("call_results", {}).pop(child["participant"], None)
+join_call = next(call for call in projected_nodes(join_only) if call["participant"] == child["participant"])
+assert join_call["purpose"] == "builder" and join_call["state"] == "queued", join_call
+# A finished call whose attempt aged out keeps its recorded outcome, not the join's starting state.
+finished_join = deepcopy(join_only)
+finished_join["room"].setdefault("call_results", {})[child["participant"]] = {"exit": 0}
+finished_call = next(call for call in projected_nodes(finished_join) if call["participant"] == child["participant"])
+assert finished_call["state"] == "done", finished_call
+join_text = render(join_only, "claude", 100, 44, view="tree")
+assert "BUILDERS" in join_text and "BUILDER Luna 6" in join_text and "[queued]" in join_text, join_text
+legacy_join = deepcopy(join_only)
+legacy_member = next(member for member in legacy_join["room"]["participants"]
+                     if member["participant"] == child["participant"])
+for key in ("dispatch_role", "purpose", "state"):
+    legacy_member.pop(key, None)
+legacy_call = next(call for call in projected_nodes(legacy_join) if call["participant"] == child["participant"])
+assert legacy_call["state"] == "presence unknown" and legacy_call["purpose"] is None, legacy_call
+legacy_text = render(legacy_join, "claude", 100, 44, view="tree")
+assert "WORKERS" in legacy_text and "status unknown" in legacy_text, legacy_text
 immutable = json.dumps(room_view, sort_keys=True)
 graph = render(room_view, "claude", 100, 44, view="graph", frame=0)
 assert graph.startswith("OMS · ") and "unread for live participants" not in graph and "MAIN " in graph and "Luna" in graph, graph

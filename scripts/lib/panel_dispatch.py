@@ -1815,7 +1815,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if room_id:
         member = member_id or "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],
-                  owns=scopes, parent=caller)
+                  owns=scopes, parent=caller, dispatch_role=route["role"], purpose=route["purpose"], state="queued")
         try:
             # A rollover that sealed the room meanwhile carried the join; enroll the call where it now lives.
             room_id = room.settle(repo, room_id)

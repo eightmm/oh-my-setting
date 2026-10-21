@@ -238,7 +238,8 @@ def status_tag(state, *, exit_code=None, unicode=True) -> str:
             "unknown" if state in {"needs input", "status unknown"} else
             "failed" if state in {"failed", "timed out", "abandoned", "lost process", "unavailable"} else
             "verified" if state in {"finished", "checks passed", "accepted"} or re.fullmatch(r"\d+/\d+ pass", str(state)) else None)
-    known = mark is not None or state in {"cancelled", "checks not run", "checks unknown", "acceptance pending", "test failed"}
+    known = mark is not None or state in {"queued", "cancelled", "checks not run", "checks unknown",
+                                          "acceptance pending", "test failed"}
     if not known:
         state, mark = "status unknown", "unknown"
     if state in {"finished", "failed", "test failed"} and type(exit_code) is int:
