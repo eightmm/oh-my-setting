@@ -1013,8 +1013,8 @@ import json,sys
 value=json.load(sys.stdin).get("verify", "")
 if not isinstance(value, str) or "\x00" in value:
     raise SystemExit(1)
-sys.stdout.write(value + "__OMS_PLAN_VERIFY_END_9f31c8__")
-' | tr -d '\r')" || fail "cannot read verify contract for plan task $PLAN_TASK"
+sys.stdout.buffer.write((value + "__OMS_PLAN_VERIFY_END_9f31c8__").encode("utf-8"))
+')" || fail "cannot read verify contract for plan task $PLAN_TASK"
   case "$PLAN_VERIFY_RAW" in
     *"__OMS_PLAN_VERIFY_END_9f31c8__") ;;
     *) fail "cannot decode verify contract for plan task $PLAN_TASK" ;;
@@ -1022,7 +1022,6 @@ sys.stdout.write(value + "__OMS_PLAN_VERIFY_END_9f31c8__")
   PLAN_VERIFY="${PLAN_VERIFY_RAW%__OMS_PLAN_VERIFY_END_9f31c8__}"
   [ -n "$PLAN_VERIFY" ] || fail "plan task $PLAN_TASK has no stored verify contract"
   if [ "$VERIFY_EXPLICIT" = 1 ]; then
-    VERIFY="${VERIFY//$'\r'/}"
     [ "$VERIFY" = "$PLAN_VERIFY" ] ||
       fail "--verify does not match plan task $PLAN_TASK review contract"
   else

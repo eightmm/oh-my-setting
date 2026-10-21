@@ -255,8 +255,8 @@ import json,sys
 value=json.load(sys.stdin).get("verify", "")
 if not isinstance(value, str) or "\x00" in value:
     raise SystemExit(1)
-sys.stdout.write(value + "__OMS_VERIFY_END__")
-' | tr -d '\r'
+sys.stdout.buffer.write((value + "__OMS_VERIFY_END__").encode("utf-8"))
+'
   }
   task_verify_raw="$(read_task_verify)" || fail "cannot read task verify contract"
   case "$task_verify_raw" in
@@ -265,12 +265,26 @@ sys.stdout.write(value + "__OMS_VERIFY_END__")
   esac
   task_verify="${task_verify_raw%__OMS_VERIFY_END__}"
   [ -n "$task_verify" ] || fail "plan task $PLAN_TASK has no stored verify contract"
-  VERIFY="${VERIFY//$'\r'/}"
   [ "$VERIFY_EXPLICIT" = 0 ] || [ "$VERIFY" = "$task_verify" ] ||
     fail "--verify does not match plan task $PLAN_TASK review contract"
   VERIFY="$task_verify"
   export OMS_TASK_ID="$PLAN_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
 fi
+
+# Reuse and execution derive the same obligation from canonical plan/batch
+# records. This also covers patch-land calls made directly during recovery.
+batch_prefix="$(python3 "$ROOT_LIB/landing-capture.py" batch-prefix "$reference_state" "$REPO" "$PLAN_TASK")" ||
+  fail "cannot validate batch prefix for admission"
+batch_prefix="${batch_prefix//$'\r'/}"
+prefix_count="$(printf '%s' "$batch_prefix" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["checks"]))' | tr -d '\r')" ||
+  fail "cannot read batch prefix verification count"
+prefix_field() {
+  printf '%s' "$batch_prefix" | python3 -c '
+import json,sys
+value=json.load(sys.stdin)["checks"][int(sys.argv[1])][sys.argv[2]]
+sys.stdout.buffer.write((value + "__OMS_PREFIX_END__").encode("utf-8"))
+' "$1" "$2"
+}
 
 base_full_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 base_sha="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo 'no-commit')"
@@ -341,7 +355,6 @@ if [ "$apply_ok" = 1 ]; then
       # An explicit candidate-only test can use the unchanged project suite as
       # its floor. An unusable default must not invalidate an explicit command.
       BASE_VERIFY="$(oms_default_verify_command "$worktree/scripts/check.sh" "$ML" 2>/dev/null)" || BASE_VERIFY=""
-      BASE_VERIFY="${BASE_VERIFY//$'\r'/}"
       if [ -z "$VERIFY" ]; then
         [ -n "$BASE_VERIFY" ] || oms_default_verify_command "$worktree/scripts/check.sh" "$ML" >/dev/null
         VERIFY="$BASE_VERIFY"
@@ -510,8 +523,9 @@ EOF
     surface_tab="$(printf "\t")"
     if [ -n "$VERIFY" ] && command -v python3 >/dev/null 2>&1; then
       scan_surface() {
-        OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" OMS_WORKTREE="$worktree" \
+        OMS_VERIFY="$VERIFY" OMS_BATCH_PREFIX="$batch_prefix" OMS_CHANGED="$changed_files" OMS_WORKTREE="$worktree" \
           OMS_ACCEPTANCE_FILES="$ACCEPTANCE_FILES" python3 - <<'SURFACE_PY'
+import json
 import os
 import posixpath
 import re
@@ -646,6 +660,8 @@ def commands(command, cwd="", candidate_eligible=True):
                     and base(path) is None and os.path.isfile(os.path.join(wt, path))):
                 new_only.append(path)
 commands(os.environ["OMS_VERIFY"])
+for check in json.loads(os.environ["OMS_BATCH_PREFIX"])["checks"]:
+    commands(check["verify"], candidate_eligible=False)
 reviewed = set(x for x in os.environ.get("OMS_ACCEPTANCE_FILES", "").split("\n") if x)
 ENTRY = {"check.sh", "Makefile", "makefile", "GNUmakefile", "package.json",
          "pyproject.toml", "tox.ini", "noxfile.py", "conftest.py",
@@ -799,9 +815,31 @@ PY
     # the candidate run; otherwise both verification projections stay inert.
     preverify_failed=0
     case "$ladder" in *"	FAIL	"*) preverify_failed=1 ;; esac
+    prefix_failed=0
+    prefix_index=0
+    while [ "$prefix_index" -lt "$prefix_count" ]; do
+      prefix_id_raw="$(prefix_field "$prefix_index" id)" || fail "cannot read batch prefix task"
+      prefix_verify_raw="$(prefix_field "$prefix_index" verify)" || fail "cannot read batch prefix verifier"
+      prefix_id="${prefix_id_raw%__OMS_PREFIX_END__}"
+      prefix_verify="${prefix_verify_raw%__OMS_PREFIX_END__}"
+      if [ "$preverify_failed" = 1 ] || [ "$prefix_failed" = 1 ]; then
+        record "verify-prefix-$prefix_id" "SKIP" "earlier policy, integrity or prefix gate failed"
+      elif prefix_started="$(date +%s)" && prefix_out="$(cd "$worktree" && OMS_TASK_ID="$prefix_id" run_verify_with_timeout bash -c "$prefix_verify" 2>&1)"; then
+        record "verify-prefix-$prefix_id" "PASS" "$prefix_verify — $(( $(date +%s) - prefix_started ))s"
+      else
+        prefix_exit=$?
+        prefix_failed=1
+        timeout_note="$(ma_verify_timeout_note "$prefix_exit")"
+        record "verify-prefix-$prefix_id" "FAIL" "$prefix_verify${timeout_note:+ — $timeout_note}"
+        verify_out="$prefix_out"
+      fi
+      prefix_index=$((prefix_index + 1))
+    done
     if [ -n "$VERIFY" ]; then
       if [ "$preverify_failed" = 1 ]; then
         record "verify" "SKIP" "pre-verification policy or integrity gate failed"
+      elif [ "$prefix_failed" = 1 ]; then
+        record "verify" "SKIP" "batch prefix verification failed"
       else
         verify_started="$(date +%s)"
         if verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
@@ -875,6 +913,22 @@ PY
 $verification_surface
 EOF
             if [ "$floor_restore_ok" = 1 ]; then
+              prefix_index=0
+              while [ "$prefix_index" -lt "$prefix_count" ]; do
+                prefix_id_raw="$(prefix_field "$prefix_index" id)" || fail "cannot read batch floor task"
+                prefix_verify_raw="$(prefix_field "$prefix_index" verify)" || fail "cannot read batch floor verifier"
+                prefix_id="${prefix_id_raw%__OMS_PREFIX_END__}"
+                prefix_verify="${prefix_verify_raw%__OMS_PREFIX_END__}"
+                if prefix_out="$(cd "$floor_worktree" && OMS_TASK_ID="$prefix_id" run_verify_with_timeout bash -c "$prefix_verify" 2>&1)"; then
+                  record "verify-prefix-floor-$prefix_id" "PASS" "$prefix_verify (restored from HEAD: $surface_detail)"
+                else
+                  prefix_exit=$?
+                  timeout_note="$(ma_verify_timeout_note "$prefix_exit")"
+                  record "verify-prefix-floor-$prefix_id" "FAIL" "$prefix_verify${timeout_note:+ — $timeout_note}"
+                  floor_verify_out="$prefix_out"
+                fi
+                prefix_index=$((prefix_index + 1))
+              done
               floor_verify_started="$(date +%s)"
               if floor_verify_out="$(cd "$floor_worktree" && run_verify_with_timeout bash -c "$floor_verify" 2>&1)"; then
                 floor_verify_exit=0
@@ -953,6 +1007,14 @@ if [ "$security_status" != "ADVISE" ] && [ "$security_status" != "SKIP" ]; then
   security_detail="risk path scan unavailable; run a security-auditor before landing"
 fi
 record "security" "$security_status" "$security_detail"
+
+if [ -n "$PLAN_TASK" ]; then
+  current_prefix="$(python3 "$ROOT_LIB/landing-capture.py" batch-prefix "$reference_state" "$REPO" "$PLAN_TASK")" || current_prefix=""
+  current_prefix="${current_prefix//$'\r'/}"
+  if [ "$current_prefix" != "$batch_prefix" ]; then
+    record "batch-prefix" "FAIL" "batch prefix changed during admission"
+  fi
+fi
 
 # REJECT if any gate failed (SKIP does not reject).
 case "$ladder" in

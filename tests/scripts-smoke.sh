@@ -1999,6 +1999,20 @@ PYMARKER
     "$ROOT/scripts/patch-admit.sh" --repo "$scratch" --patch "$main/.oms/scratch-review.patch" \
     --verify true --report "$TMP/state-root-unmanaged.md" >"$TMP/state-root-admit.log" 2>&1 ||
     fail "unmanaged scratch admission failed: $(cat "$TMP/state-root-admit.log")"
+  grep -Fq 'Patch admission: ADMIT' "$TMP/state-root-unmanaged.md" ||
+    fail "parent unmanaged admission did not report ADMIT"
+  $parent OMS_HARNESS_CHILD=1 OMS_ARTIFACT_INDEX="$scratch/.oms/artifacts/child-index.jsonl" \
+    "$ROOT/scripts/patch-admit.sh" --repo "$scratch" --patch "$main/.oms/scratch-review.patch" \
+    --verify true --report "$TMP/state-root-child.md" >"$TMP/state-root-child.log" 2>&1 ||
+    fail "harness-child unmanaged admission failed: $(cat "$TMP/state-root-child.log")"
+  grep -Fq 'Patch admission: ADMIT' "$TMP/state-root-child.md" ||
+    fail "harness-child unmanaged admission did not report ADMIT"
+  $parent OMS_HARNESS_DELEGATE_DEPTH=1 OMS_ARTIFACT_INDEX="$scratch/.oms/artifacts/delegate-index.jsonl" \
+    "$ROOT/scripts/patch-admit.sh" --repo "$scratch" --patch "$main/.oms/scratch-review.patch" \
+    --verify true --report "$TMP/state-root-delegate.md" >"$TMP/state-root-delegate.log" 2>&1 ||
+    fail "delegated-worker unmanaged admission failed: $(cat "$TMP/state-root-delegate.log")"
+  grep -Fq 'Patch admission: ADMIT' "$TMP/state-root-delegate.md" ||
+    fail "delegated-worker unmanaged admission did not report ADMIT"
   [ -s "$scratch/.oms/artifacts/custom-index.jsonl" ] || fail "unmanaged explicit index override was ignored"
   cp "$scratch/.oms/artifacts/custom-index.jsonl" "$TMP/state-root-custom-index.before"
   $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" review --id landed \
@@ -19443,6 +19457,7 @@ test_patch_land_finishes_plan_task() {
   local project="$TMP/patch-land-plan"
   local patch="$TMP/patch-land-plan.patch"
   local artifact="$TMP/patch-land-plan-review.md"
+  local verify=$'test "\r" != ""' out
 
   make_committed_repo "$project"
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x --verify true >/dev/null )
@@ -19452,9 +19467,21 @@ test_patch_land_finishes_plan_task() {
   git -C "$project" checkout -q file.txt
   printf 'review\n' > "$artifact"
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" review --id t1 --artifact "$artifact" --patch "$patch" >/dev/null )
+  # New tasks reject control characters; preserve the exact bytes of an
+  # already-recorded verifier rather than silently rewriting legacy records.
+  python3 - "$project/.oms/plan/tasks.json" "$verify" <<'PY'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]);plan=json.loads(path.read_text())
+plan["tasks"]["t1"]["verify"]=sys.argv[2]
+path.write_text(json.dumps(plan))
+PY
 
-  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$patch" --plan-task t1 --verify "true" >/dev/null 2>&1 ) ||
-    fail "patch-land --plan-task should land"
+  if out="$(cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$patch" --plan-task t1 --verify "${verify//$'\r'/}" 2>&1)"; then
+    fail "patch-land accepted a verifier with its recorded carriage return removed"
+  fi
+  contains "$out" 'does not match plan task' || fail "literal CR mismatch was not rejected by the contract check: $out"
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$patch" --plan-task t1 --verify "$verify" >/dev/null 2>&1 ) ||
+    fail "patch-land --plan-task should land with its exact verifier bytes"
   [ "$(python3 -c "import json;print(json.load(open('$project/.oms/plan/tasks.json'))['tasks']['t1']['state'])")" = "done" ] ||
     fail "a successful land should finish the coupled plan task"
 }
@@ -34367,27 +34394,24 @@ def run(mode,*args):
     return subprocess.run(["bash","-c",'set -o pipefail; . "$1"; goal_batch_tool "$2" "${@:3}"',"probe",helper,mode,*args],
                           env=env,capture_output=True,text=True)
 if kind == "inputs":
-    failures=[]
-    for body in ("rg -q needle\n", "grep -q needle shared.future\n"):
+    # Explicit parallel opt-in asserts checks tolerate concurrent execution.
+    # Syntax and read coverage no longer decide speculative eligibility.
+    for verify in ("python3 -c 'assert True'", "python3 -m pytest -q", "pytest -q",
+                   "npm test", "make test", "test -f output.txt", "bash checks/shared.sh"):
         for i in tasks:
-            (checks/(i+".sh")).write_text(body)
+            tasks[i]["verify"]=verify
         save()
         result=run("select",json.dumps({"actionable":["t1","t2"]}),"2")
-        if result.returncode != 0 or result.stdout.strip() != "t1":
-            failures.append((body,result.stdout,result.stderr))
-    # Brace expansion makes a task's own-file check also read a shared file.
-    for i in tasks:
-        (checks/(i+".sh")).write_text("grep -q {needle,shared.future} "+i+".future\n")
+        assert result.returncode == 0 and result.stdout.split() == ["t1","t2"],(verify,result.stdout,result.stderr)
+    tasks["t2"]["allowed_paths"].append("t1.future")
     save()
     result=run("select",json.dumps({"actionable":["t1","t2"]}),"2")
-    if result.returncode != 0 or result.stdout.strip() != "t1":
-        failures.append(("brace",result.stdout,result.stderr))
-    for i in tasks:
-        (checks/(i+".sh")).write_text("grep -q needle "+i+".future\n")
-    save()
-    result=run("select",json.dumps({"actionable":["t1","t2"]}),"2")
-    assert result.returncode == 0 and result.stdout.split() == ["t1","t2"],result.stderr
-    assert not failures,failures
+    assert result.returncode == 0 and result.stdout.split() == ["t1"] and "t2: overlap" in result.stderr
+    for state_name in ("claimed","running","landing"):
+        tasks["foreign"]=dict(task("foreign"),state=state_name)
+        save()
+        result=run("select",json.dumps({"actionable":["t1","t2"]}),"2")
+        assert result.returncode != 0 and "unreconciled active task outside batch" in result.stderr,result.stderr
 elif kind == "retire":
     script=str(pathlib.Path(root)/"scripts/agent-plan.sh")
     def plan(*args):
@@ -34418,18 +34442,87 @@ else:
     patch.write_bytes(subprocess.check_output(["git","-C",repo,"diff","--cached","--binary"]))
     git("commit","-qm","reviewed")
     tasks={"t1":dict(tasks["t1"],state="done",allowed_paths=["first.txt"],
-                     verify="test -f first.txt",lease_id="lease_one",lease_epoch=1)}
+                     verify="test -f first.txt",lease_id="lease_one",lease_epoch=1),
+           "t2":dict(tasks["t2"],state="review",lease_id="lease_two",lease_epoch=1)}
     save()
     binding={k:tasks["t1"].get(k) for k in ("id","created","title","allowed_paths","verify","depends","assignment")}
     digest=lambda v:hashlib.sha256(json.dumps(v,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     prepared={"schema":1,"kind":"goal-batch","phase":"prepared","batch_id":"batch-probe","contract_id":"",
               "width":2,"accept_sha256":"fixture","plan_contract":digest(None),"worktree":repo,
               "base_sha":base,"head_ref":git("symbolic-ref","-q","HEAD"),
-              "tasks":[{"id":"t1","lease_id":"lease_one","lease_epoch":1,"binding":digest(binding)}]}
+              "tasks":[{"id":"t1","lease_id":"lease_one","lease_epoch":1,"binding":digest(binding)},
+                       {"id":"t2","lease_id":"lease_two","lease_epoch":1,
+                        "binding":digest({k:tasks["t2"].get(k) for k in binding})}]}
     committed={"kind":"commit-intent","phase":"committed","worktree":repo,"base_sha":base,
                "task_id":"t1","lease_id":"lease_one","patch":".oms/plan/commit-patches/frozen.patch",
                "patch_sha256":hashlib.sha256(patch.read_bytes()).hexdigest()}
+    capture=str(pathlib.Path(root)/"scripts/lib/landing-capture.py")
+    def admission_binding():
+        return json.loads(subprocess.check_output(["python3",capture,"binding",repo,repo,
+                          tasks["t2"]["verify"],"0","t2","0","0","","0","0"],text=True))
+    (state/"progress.jsonl").touch()
+    before=admission_binding()
     (state/"progress.jsonl").write_text(json.dumps(prepared)+"\n"+json.dumps(committed)+"\n")
+    after=admission_binding()
+    assert before != after,"new prefix reused a stale admission binding"
+    assert before.pop("batch_prefix_sha256") != after.pop("batch_prefix_sha256")
+    assert before == after,"binding probe changed inputs other than the prefix"
+    prefix=json.loads(subprocess.check_output(["python3",capture,"batch-prefix",repo,repo,"t2"],text=True))
+    assert prefix["checks"] == [{"id":"t1","verify":"test -f first.txt"}],prefix
+    # A retired batch's later attempt may be retried with a new lease. It
+    # cannot erase this retained review's obligation to its committed prefix.
+    original=(state/"progress.jsonl").read_text()
+    tasks["t3"]=dict(task("t3"),lease_id="lease_new",lease_epoch=2)
+    save()
+    historical=dict(prepared,tasks=prepared["tasks"]+[
+        {"id":"t3","lease_id":"lease_old","lease_epoch":1,
+         "binding":digest({k:tasks["t3"].get(k) for k in binding})}])
+    # The historical batch had width three; the current native admission
+    # remains tied to t2 and its unchanged predecessors.
+    historical["width"]=3
+    terminal=dict(historical,phase="complete",outcome={"status":"failed"})
+    (state/"progress.jsonl").write_text("".join(json.dumps(row)+"\n" for row in (historical,committed,terminal)))
+    retained=json.loads(subprocess.check_output(["python3",capture,"batch-prefix",repo,repo,"t2"],text=True))
+    assert retained["checks"] == prefix["checks"],retained
+    (state/"progress.jsonl").write_text("".join(json.dumps(row)+"\n" for row in (historical,committed)))
+    active_result=subprocess.run(["python3",capture,"batch-prefix",repo,repo,"t2"],capture_output=True,text=True)
+    assert active_result.returncode != 0 and "batch task contract/lease changed: t3" in active_result.stderr
+    del tasks["t3"];save()
+    failures=[]
+    first_commit=git("rev-parse","HEAD")
+    for gap_state in ("released","retried"):
+        tasks["gap"]=dict(task("gap"),state="ready",lease_id="",lease_epoch=1)
+        recorded_gap={"id":"gap","lease_id":"lease_gap_old","lease_epoch":1,
+                      "binding":digest({k:tasks["gap"].get(k) for k in binding})}
+        if gap_state == "retried":
+            tasks["gap"].update(state="done",lease_id="lease_gap_new",lease_epoch=2)
+            (p/"gap.future").write_text("retried\n")
+            git("add","gap.future");git("commit","-qm","retry gap")
+        save()
+        historical=dict(prepared,width=3,tasks=[prepared["tasks"][0],recorded_gap,prepared["tasks"][1]])
+        terminal=dict(historical,phase="complete",outcome={"status":"failed"})
+        (state/"progress.jsonl").write_text("".join(json.dumps(row)+"\n" for row in (historical,committed,terminal)))
+        result=subprocess.run(["python3",capture,"batch-prefix",repo,repo,"t2"],capture_output=True,text=True)
+        if result.returncode or json.loads(result.stdout)["checks"] != prefix["checks"]:
+            failures.append((gap_state,result.stdout,result.stderr))
+        git("reset","--hard",first_commit)
+    del tasks["gap"];save()
+    (state/"progress.jsonl").write_text(original+'{"torn":\n')
+    result=run("recover")
+    assert result.returncode == 0 and result.stdout.strip() == "batch-probe",result.stderr
+    result=subprocess.run(["python3",capture,"batch-prefix",repo,repo,"t2"],capture_output=True,text=True)
+    if result.returncode or json.loads(result.stdout)["checks"] != prefix["checks"]:
+        failures.append(("torn progress",result.stdout,result.stderr))
+    assert not failures,failures
+    # Raw verifier fields must bypass Windows text-stream CRLF conversion and
+    # preserve literal carriage returns in the recorded command itself.
+    admit=(pathlib.Path(root)/"scripts/patch-admit.sh").read_text()
+    field=admit[admit.index("prefix_field() {"):].split("\n}",1)[0]+"\n}"
+    raw_verify="test '\r' != ''\n"
+    result=subprocess.check_output(["bash","-c",field+"\nprefix_field 0 verify"],
+        env=dict(os.environ,batch_prefix=json.dumps({"checks":[{"id":"t1","verify":raw_verify}]})))
+    assert result == (raw_verify+"__OMS_PREFIX_END__").encode(),repr(result)
+    (state/"progress.jsonl").write_text(original)
     result=run("recover")
     assert result.returncode == 0 and result.stdout.strip() == "batch-probe",result.stderr
     (p/"first.txt").write_text("amended bytes\n")
@@ -34440,7 +34533,7 @@ PY
 }
 
 test_goal_drive_batch_input_ownership() {
-  goal_drive_batch_review_probe inputs || fail "unbounded or missing verifier inputs joined a batch"
+  goal_drive_batch_review_probe inputs || fail "explicit parallel selection did not use writable scope ownership"
 }
 
 test_goal_drive_batch_abandon_preserves_live_state() {
@@ -34578,24 +34671,36 @@ SH
       # shellcheck disable=SC2034
       PLAN_FILE="$project/.oms/plan/tasks.json" PROGRESS="$project/.oms/plan/progress.jsonl" REPO="$project" CONTRACT_ID="" MAX_PARALLEL_TASKS=2 ACCEPT_SNAPSHOT=fixture
       ready="$("$ROOT/scripts/agent-plan.sh" --repo "$project" status --json)"
-      [ "$(goal_batch_tool select "$ready" 2)" = t1 ]
-    ) || fail "two verifier directory spellings scheduled the same physical file together"
+      [ "$(goal_batch_tool select "$ready" 2)" = "$(printf 't1\nt2')" ]
+    ) || fail "shared verifier spellings incorrectly serialized disjoint writable scopes"
   fi
 }
 
 goal_drive_batch_cases() {
-  local mode project bin logs out rc width allowed verify task cap owner
-  local -a deps
+  local mode project bin logs out rc width allowed verify task cap owner task_gate
+  local -a deps flags
   for mode in "$@"; do
     project="$TMP/goal-batch-$mode"
     bin="$TMP/goal-batch-bin-$mode"
     logs="$TMP/goal-batch-events-$mode"
+    flags=()
+    [ "$mode" != replay-floor ] || flags=(--allow-verifier-change)
     make_committed_repo "$project"
     mkdir -p "$project/checks" "$bin" "$logs"
     for task in t1 t2 t3; do
       printf 'grep -qx ok %s.txt\n' "$task" > "$project/checks/$task.sh"
     done
-    printf 'test -f t1.txt\n' > "$project/checks/shared.sh"
+    printf 'true\n' > "$project/checks/shared.sh"
+    if [ "$mode" = replay-forward ]; then
+      printf 'test ! -f t1.txt\n' >> "$project/checks/t2.sh"
+    fi
+    if [ "$mode" = replay-backward ] || [ "$mode" = replay-recover ]; then
+      printf 'test ! -f t2.txt\n' >> "$project/checks/t1.sh"
+    fi
+    if [ "$mode" = replay-surface ] || [ "$mode" = replay-floor ]; then
+      printf 'grep -qx ok t1.txt\ntest ! -f t2.txt\n' > "$project/guard.sh"
+      git -C "$project" add guard.sh
+    fi
     git -C "$project" add checks
     git -C "$project" commit -qm verifiers
     "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal batches \
@@ -34605,11 +34710,21 @@ goal_drive_batch_cases() {
       if [ "$mode" = overlap ] && [ "$task" != t3 ]; then allowed="$allowed,shared.txt"; fi
       if [ "$mode" = verifier ] && [ "$task" = t1 ]; then allowed="$allowed,checks/t2.sh"; fi
       if [ "$mode" = shared ] && [ "$task" != t3 ]; then verify='bash checks/shared.sh'; fi
-      if [ "$mode" = unknown ] && [ "$task" != t3 ]; then verify="test -f $task.txt"; fi
+      if [ "$mode" = python ]; then verify="python3 -c \"import pathlib,sys; assert pathlib.Path(sys.argv[1]).read_text().strip() == 'ok'\" $task.txt"; fi
+      if [ "$mode" = pytest ]; then verify="pytest -q checks/$task.sh"; fi
+      if [ "$mode" = replay-surface ] || [ "$mode" = replay-floor ]; then
+        if [ "$task" = t1 ]; then verify='bash guard.sh'; fi
+        if [ "$task" = t2 ]; then allowed="$allowed,guard.sh"; fi
+      fi
       if [ "$task" = t3 ]; then deps=(--depends "t1,t2"); fi
       "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id "$task" --title "feat: $task" \
         --allowed "$allowed" --verify "$verify" ${deps[@]+"${deps[@]}"} >/dev/null
     done
+    if [ "$mode" = pytest ]; then
+      # Exercise pytest's CLI shape without adding a test dependency.
+      printf '#!/usr/bin/env bash\n[ "$1" = -q ] || exit 2\nexec bash "$2"\n' > "$bin/pytest"
+      chmod +x "$bin/pytest"
+    fi
     cat > "$bin/codex" <<'WORKER'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'codex fixture'; exit 0 ;; esac
@@ -34620,7 +34735,7 @@ touch "$BATCH_EVENTS/$id.started"
 if [ "$id" = t3 ]; then
   [ "$(git -C "$BATCH_REPO" log -2 --format=%s | tr '\n' '|')" = 'feat: t2|feat: t1|' ] || exit 93
 fi
-if [ "$BATCH_MODE" = parallel ] || [ "$BATCH_MODE" = recover ] || [ "$BATCH_MODE" = abandon ] || [ "$BATCH_MODE" = land-recover ] || [ "$BATCH_MODE" = tamper ] || [ "$BATCH_MODE" = failure ]; then
+if [[ "$BATCH_MODE" = replay-* ]] || [ "$BATCH_MODE" = pytest ] || [ "$BATCH_MODE" = python ] || [ "$BATCH_MODE" = shared ] || [ "$BATCH_MODE" = parallel ] || [ "$BATCH_MODE" = recover ] || [ "$BATCH_MODE" = abandon ] || [ "$BATCH_MODE" = land-recover ] || [ "$BATCH_MODE" = tamper ] || [ "$BATCH_MODE" = failure ] || [[ "$BATCH_MODE" = retained* ]]; then
   if [ "$id" = t1 ] || [ "$id" = t2 ]; then
     other=t1; [ "$id" != t1 ] || other=t2
     for ((i=0; i<300; i++)); do
@@ -34648,6 +34763,10 @@ PY
   fi
 fi
 if [ "$BATCH_MODE" = failure ] && [ "$id" = t2 ]; then exit 9; fi
+if [[ "$BATCH_MODE" = retained* ]] && [ "$id" = t1 ]; then exit 9; fi
+if { [ "$BATCH_MODE" = replay-surface ] || [ "$BATCH_MODE" = replay-floor ]; } && [ "$id" = t2 ]; then
+  printf 'true\n' > guard.sh
+fi
 printf 'ok\n' > "$id.txt"
 printf '%s\n' "$id" >> "$BATCH_EVENTS/finished"
 echo worker-ok
@@ -34656,12 +34775,12 @@ WORKER
     width=2; cap=3; rc=0; owner="owner_11111111111111111111111111111111"
     [ "$mode" != serial ] || width=1
     [ "$mode" != cap ] || cap=1
-    [ "$mode" != failure ] || cap=4
+    if [ "$mode" = failure ] || [[ "$mode" = retained* ]]; then cap=4; fi
     out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
       BATCH_MODE="$mode" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW="$([ "$mode" = recover ] || [ "$mode" = abandon ] && echo 1 || echo 0)" \
-      OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND="$([ "$mode" = land-recover ] || [ "$mode" = tamper ] && echo 1 || echo 0)" \
+      OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND="$([ "$mode" = land-recover ] || [ "$mode" = replay-recover ] || [ "$mode" = tamper ] && echo 1 || echo 0)" \
       "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles "$cap" \
-      --max-parallel-tasks "$width" --contract-id "$owner" 2>&1)" || rc=$?
+      --max-parallel-tasks "$width" --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
     if [ "$mode" = abandon ]; then
       [ "$rc" = 75 ] || fail "abandon fixture did not retain its batch: $out"
       python3 "$ROOT/scripts/lib/autopilot-receipt.py" write "$project/.oms/plan/autopilot-run.json" \
@@ -34681,7 +34800,7 @@ WORKER
         BATCH_MODE=retry "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 \
         --max-parallel-tasks 1 --contract-id "$owner" 2>&1)" || rc=$?
     fi
-    if [ "$mode" = recover ] || [ "$mode" = land-recover ] || [ "$mode" = tamper ]; then
+    if [ "$mode" = recover ] || [ "$mode" = land-recover ] || [ "$mode" = replay-recover ] || [ "$mode" = tamper ]; then
       [ "$rc" = 75 ] || fail "batch review crash did not retain both reviews ($rc): $out"
       if [ "$mode" = tamper ]; then
         python3 - "$project/.oms/plan/tasks.json" <<'PY_TAMPER'
@@ -34694,9 +34813,77 @@ PY_TAMPER
       rc=0
       out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
         BATCH_MODE="$mode" "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 3 \
-        --max-parallel-tasks 2 --contract-id "$owner" 2>&1)" || rc=$?
+        --max-parallel-tasks 2 --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
     fi
     case "$mode" in
+      retained*)
+        [ "$rc" = 3 ] || fail "$mode first worker failure should park ($rc): $out"
+        [ "$(git -C "$project" log -1 --format=%s)" = verifiers ] || fail "$mode committed past the failed first worker"
+        python3 - "$project/.oms/plan/tasks.json" <<'PY_RETAINED'
+import json,sys
+assert json.load(open(sys.argv[1]))["tasks"]["t2"]["state"] == "review"
+PY_RETAINED
+        flags=()
+        cap=2
+        if [ "$mode" = retained-retry ]; then
+          flags=(--retry-known)
+          cap=4
+        fi
+        rc=0
+        out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+          BATCH_MODE=retry "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles "$cap" \
+          --max-parallel-tasks 2 --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
+        python3 - "$project/.oms/plan/tasks.json" <<'PY_RETAINED' || fail "$mode could not land retained review ($rc): $out"
+import json,sys
+assert json.load(open(sys.argv[1]))["tasks"]["t2"]["state"] == "done"
+PY_RETAINED
+        [ "$(grep -c '^t2$' "$logs/calls")" = 1 ] || fail "$mode redispatched the retained review"
+        if [ "$mode" = retained-retry ]; then
+          [ "$rc" = 0 ] || fail "$mode failed to finish after explicit retry ($rc): $out"
+        else
+          [ "$rc" = 3 ] && contains "$out" reason=cycles-exhausted || fail "$mode should spend no new attempt: $out"
+          [ "$(sort "$logs/calls" | tr '\n' ' ')" = 't1 t2 ' ] || fail "$mode called a provider while adopting its review"
+          [ ! -e "$project/t1.txt" ] && [ -e "$project/t2.txt" ] || fail "$mode changed the released predecessor"
+        fi
+        ;;
+      replay-*)
+        [ "$rc" = 3 ] || fail "$mode interaction should park ($rc): $out"
+        [ "$(git -C "$project" log -1 --format=%s)" = 'feat: t1' ] || fail "$mode lost the committed prefix or committed its regression"
+        [ ! -e "$project/t2.txt" ] && [ ! -e "$logs/t3.started" ] || fail "$mode applied a rejected sibling or dispatched its dependent"
+        case "$mode" in
+          replay-surface) task_gate='verifier: FAIL' ;;
+          replay-floor) task_gate='verify-prefix-floor-t1: FAIL' ;;
+          replay-forward) task_gate='verify: FAIL' ;;
+          *) task_gate='verify-prefix-t1: FAIL' ;;
+        esac
+        grep -l "$task_gate" "$project"/.oms/artifacts/admit/admit-*.md >/dev/null ||
+          fail "$mode did not fail its native admission gate: $task_gate"
+        if [ "$mode" = replay-backward ]; then
+          cp "$project/.oms/plan/progress.jsonl" "$logs/progress.saved"
+          python3 - "$project" <<'PY_STALE'
+import json,pathlib,sys
+repo=pathlib.Path(sys.argv[1]); path=repo/".oms/plan/progress.jsonl"
+rows=[json.loads(line) for line in path.read_text().splitlines()]
+path.write_text("".join(json.dumps(row)+"\n" for row in rows if row.get("kind") != "goal-batch"))
+PY_STALE
+          # Create a genuine native ADMIT without a batch context, then restore
+          # that context alone. Resume must re-admit the same candidate bytes.
+          out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+            BATCH_MODE="$mode" "$ROOT/scripts/patch-admit.sh" --repo "$project" --plan-task t2 \
+            --patch "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"]["t2"]["patch"])' "$project/.oms/plan/tasks.json")" 2>&1)" ||
+            fail "could not create stale native admission: $out"
+          mv "$logs/progress.saved" "$project/.oms/plan/progress.jsonl"
+        fi
+        rc=0
+        out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+          BATCH_MODE="$mode" "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 3 \
+          --max-parallel-tasks 2 --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
+        [ "$rc" = 3 ] && [ ! -e "$project/t2.txt" ] || fail "$mode resume bypassed the failed interaction: $out"
+        contains "$out" 'oms agent-plan --repo ' && contains "$out" 'block --id t2 --reason' ||
+          fail "$mode park did not name the retained-task release command: $out"
+        [ "$(git -C "$project" log -1 --format=%s)" = 'feat: t1' ] || fail "$mode resume lost the prefix"
+        [ "$(sort "$logs/calls" | tr '\n' ' ')" = 't1 t2 ' ] || fail "$mode resume dispatched a worker"
+        ;;
       tamper)
         [ "$rc" = 3 ] || fail "changed batch artifact should park ($rc): $out"
         contains "$out" reason=invalid-batch || fail "missing artifact mismatch recovery: $out"
@@ -34711,7 +34898,7 @@ PY_TAMPER
         rc=0
         out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
           BATCH_MODE=retry "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 4 \
-          --retry-known --max-parallel-tasks 2 --contract-id "$owner" 2>&1)" || rc=$?
+          --retry-known --max-parallel-tasks 2 --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
         [ "$rc" = 0 ] || fail "released failed task could not start a fresh batch ($rc): $out"
         [ "$(cat "$logs/calls" | tr '\n' ' ')" = 't1 t2 t2 t3 ' ] ||
           [ "$(cat "$logs/calls" | tr '\n' ' ')" = 't2 t1 t2 t3 ' ] || fail "retry called a completed prefix again"
@@ -34733,7 +34920,7 @@ PY_CLOSED
         [ "$(git -C "$project" log -3 --reverse --format=%s | tr '\n' '|')" = 'feat: t1|feat: t2|feat: t3|' ] ||
           fail "$mode changed integration order"
         [ "$(sort "$logs/calls" | tr '\n' ' ')" = 't1 t2 t3 ' ] || fail "$mode redispatched a completed patch"
-        if [ "$mode" = parallel ] || [ "$mode" = recover ] || [ "$mode" = abandon ] || [ "$mode" = land-recover ]; then
+        if [ "$mode" = pytest ] || [ "$mode" = python ] || [ "$mode" = shared ] || [ "$mode" = parallel ] || [ "$mode" = recover ] || [ "$mode" = abandon ] || [ "$mode" = land-recover ]; then
           [ "$(cat "$logs/finished" | tr '\n' ' ')" = 't2 t1 t3 ' ] || fail "rendezvous did not finish t2 before t1"
         else
           [ "$(cat "$logs/finished" | tr '\n' ' ')" = 't1 t2 t3 ' ] || fail "$mode did not serialize workers"
@@ -34820,7 +35007,7 @@ set -uo pipefail
 ROOT="$MOCK_ROOT" REPO="$REPO"
 PLAN_FILE="$REPO/.oms/plan/tasks.json" PROGRESS="$REPO/.oms/plan/progress.jsonl"
 CONTRACT_ID=owner_11111111111111111111111111111111 MAX_PARALLEL_TASKS=2 ACCEPT_SNAPSHOT=fixture
-MAX_CYCLES=4 CONTRACT_CYCLES=0 RUN_ATTEMPTS=0 RUN_ID=rollback-fixture CYCLE=1
+MAX_CYCLES=4 CONTRACT_CYCLES=0 RUN_ATTEMPTS=0 RUN_ID=rollback-fixture CYCLE=1 RETRY_KNOWN=0
 TERMINAL_RECEIPT=0123456789abcdef PROVIDER=codex
 GOAL_BATCH_PIDS=() GOAL_BATCH_LOGS=()
 load_task_receipt() {
@@ -34943,7 +35130,7 @@ PY
 
 # smoke-weight: 240
 test_goal_drive_parallel_batches() {
-  goal_drive_batch_cases parallel shared overlap verifier unknown serial cap recover land-recover tamper
+  goal_drive_batch_cases replay-surface replay-floor python pytest replay-backward replay-forward replay-recover parallel shared overlap verifier serial cap recover land-recover tamper
   local project="$TMP/goal-batch-skip-candidates" out
   make_committed_repo "$project"
   mkdir -p "$project/checks" "$project/.oms/plan"
@@ -34984,13 +35171,13 @@ PY
     "$project/.oms/plan/tasks.json" "$project/.oms/plan/progress.jsonl" "$project" "" 4 "" \
     select '{"actionable":["u1","u2","u3"]}' 3 2>&1)" ||
     fail "unknown-verifier selector failed: $out"
-  contains "$out" 'u1' && contains "$out" 'u3' && contains "$out" 'u2: unknown verifier' ||
-    fail "unknown verifier did not preserve later independent task and explain the skip: $out"
+  [ "$out" = "$(printf 'u1\nu2\nu3')" ] ||
+    fail "pytest verifier did not join disjoint tasks: $out"
 }
 
 # smoke-weight: 73
 test_goal_drive_parallel_failure_recovery() {
-  goal_drive_batch_cases failure abandon
+  goal_drive_batch_cases retained retained-retry failure abandon
   goal_drive_prebatch_rollback_cases
 }
 

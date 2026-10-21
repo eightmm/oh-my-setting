@@ -320,6 +320,18 @@ def find(repo, capture=None, landing=None):
     return found[0]
 
 
+def batch_prefix(repo, execution_repo, task):
+    if not task:
+        return {"batches": [], "checks": []}
+    helper = runpy.run_path(str(HERE / 'autopilot-receipt.py'))
+    state = Path(repo) / '.oms/plan'
+    try:
+        return helper['goal_batch_command'](str(state / 'tasks.json'), str(state / 'progress.jsonl'),
+                                           execution_repo, '', 1, '', 'prefix', [task])
+    except helper['ReceiptError'] as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def admission_binding(repo, execution_repo, *parameters):
     """Bind reuse to the base, policy, local seeds, environment and live harness.
 
@@ -370,6 +382,7 @@ def admission_binding(repo, execution_repo, *parameters):
                 seeds={name: optional(os.path.join(execution_repo, name))
                        for name in ('AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'PROJECT.md')},
                 plan_sha256=optional(os.path.join(repo, '.oms/plan/tasks.json')) if parameters[2] else None,
+                batch_prefix_sha256=digest(encoded(batch_prefix(repo, execution_repo, parameters[2]))),
                 git_config_sha256=optional(config),
                 git_exclude_sha256=optional(os.path.join(common, 'info', 'exclude')))
 
@@ -987,14 +1000,21 @@ def gc(repo, days, apply):
 
 
 def main(args):
-    if os.environ.get('OMS_HARNESS_CHILD') == '1' or os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') != '0':
-        raise ValueError('native capture management is parent-only')
     action, repo, *args = args
+    # Patch admission in workers needs this read-only prefix derivation to
+    # replay canonical batch checks. Capture management remains parent-only.
+    if action != 'batch-prefix' and (
+        os.environ.get('OMS_HARNESS_CHILD') == '1' or
+        os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') != '0'
+    ):
+        raise ValueError('native capture management is parent-only')
     repo = os.path.realpath(repo)
     if action == 'allocate':
         print(allocate(repo, *args))
     elif action == 'intake':
         print(intake(repo, *args))
+    elif action == 'batch-prefix':
+        print(json.dumps(batch_prefix(repo, *args), sort_keys=True))
     elif action == 'binding':
         print(json.dumps(admission_binding(repo, *args), sort_keys=True))
     elif action == 'binding-digest':

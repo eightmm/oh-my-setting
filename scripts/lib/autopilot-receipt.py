@@ -1448,7 +1448,6 @@ def retire_goal_batch(row: dict[str, Any], progress: str, reason: str) -> None:
 
 def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, args):
     from oms_graph.scheduler import scopes_overlap
-    import path_scope
     width = int(width)
     repo = os.path.realpath(repo)
     def same_checkout(value):
@@ -1459,7 +1458,8 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
         if os.name == "nt" and re.match(r"^/[A-Za-z]/", value):
             value = value[1] + ":" + value[2:]
         return os.path.isabs(value) and os.path.normcase(os.path.realpath(value)) == os.path.normcase(repo)
-    plan = (json.loads(Path(plan_file).read_text(encoding="utf-8"))
+    plan = (json.loads(regular_bytes(Path(plan_file), 64 * 1024 * 1024, "batch plan")
+                       if mode == "prefix" else Path(plan_file).read_text(encoding="utf-8"))
             if mode != "abandon" and Path(plan_file).is_file() else {"tasks": {}})
     tasks = plan["tasks"]
     def digest(value):
@@ -1472,7 +1472,9 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
     def load_rows():
         rows = []
         if Path(progress).exists():
-            for line in Path(progress).read_text(encoding="utf-8").splitlines():
+            raw = (regular_bytes(Path(progress), 64 * 1024 * 1024, "batch progress").decode("utf-8")
+                   if mode == "prefix" else Path(progress).read_text(encoding="utf-8"))
+            for line in raw.splitlines():
                 try:
                     row = json.loads(line)
                 except ValueError:
@@ -1502,7 +1504,7 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
         if len(pending) > 1:
             raise ValueError("multiple unfinished batches")
         return next(iter(pending.values()), None)
-    def validate(row):
+    def validate(row, *, historical_prefix=False):
         if (not same_checkout(row["worktree"]) or row["contract_id"] != owner or row["width"] != width or row["accept_sha256"] != accept
                 or row["plan_contract"] != digest(plan.get("project_contract"))
                 or row["head_ref"] != git("symbolic-ref", "-q", "HEAD")
@@ -1523,7 +1525,7 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
             if tasks[item["id"]].get("state") != "done":
                 break
             done.append(item)
-        if len(commits) != len(done):
+        if len(commits) < len(done) or (not historical_prefix and len(commits) != len(done)):
             raise ValueError("batch HEAD differs from its committed prefix")
         parent = row["base_sha"]
         rows = load_rows()
@@ -1563,100 +1565,56 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
             parent = commit
         return row
 
-    def verify_files(command, allowed):
-        # A recognized verifier is parallel-safe only when every program and data
-        # input is explicit and task-owned. Missing files still carry dependencies.
-        def owned(value, program=False):
-            if not value or value == "-" or value.endswith("/") or any(c in value for c in "*?[]{}~"):
-                raise ValueError("unknown verifier input")
-            path = Path(repo, value)
-            physical = path.resolve()
-            if path.is_dir() or path.is_symlink() or not physical.is_relative_to(Path(repo).resolve()):
-                raise ValueError("directory or escaping verifier input")
-            if program and not path.is_file():
-                raise ValueError("missing verifier program")
-            names = {path.relative_to(repo).as_posix(), physical.relative_to(Path(repo).resolve()).as_posix()}
-            if not all(path_scope.matches_any(name, allowed) for name in names):
-                raise ValueError("verifier reads outside task scope")
-            return names
-
-        def inputs(words):
-            name, args = words[0], words[1:]
-            if name == "set":
-                if all(v in ("-e", "-u", "-eu", "-euo", "-o", "pipefail") for v in args):
-                    return []
-                raise ValueError("unknown shell setting")
-            if name in ("true", "false") and not args:
-                return []
-            if name in ("test", "["):
-                if name == "[":
-                    if not args or args[-1] != "]":
-                        raise ValueError("unknown test")
-                    args = args[:-1]
-                if len(args) == 2 and args[0] in ("-e", "-f", "-s", "-r", "-w", "-x"):
-                    return [args[1]]
-                raise ValueError("unknown test inputs")
-            if name not in ("grep", "rg", "cat", "wc", "cmp", "diff"):
-                raise ValueError("unknown reader")
-            paths, positional = [], []
-            explicit_pattern = False
-            i = 0
-            options = True
-            while i < len(args):
-                arg = args[i]
-                if options and arg == "--":
-                    options = False
-                elif options and name in ("grep", "rg") and arg in ("-e", "-f"):
-                    i += 1
-                    if i >= len(args):
-                        raise ValueError("missing pattern")
-                    if arg == "-f":
-                        paths.append(args[i])
-                    explicit_pattern = True
-                elif options and arg.startswith("-"):
-                    flags = {"grep":"qxisvFEnwclhH", "rg":"qxisvFnwcl", "cat":"nbsETv", "wc":"clwmL",
-                             "cmp":"s", "diff":"qsu"}[name]
-                    if arg not in ("--quiet", "--fixed-strings", "--line-regexp") and (
-                            not re.fullmatch(r"-[" + flags + r"]+", arg)):
-                        raise ValueError("unknown reader option")
-                    if arg.startswith("--") and name not in ("grep", "rg"):
-                        raise ValueError("unknown reader option")
-                else:
-                    positional.append(arg)
-                i += 1
-            if name in ("grep", "rg") and not explicit_pattern:
-                if not positional:
-                    raise ValueError("missing search pattern")
-                positional.pop(0)
-            if not positional or (name in ("cmp", "diff") and len(positional) != 2):
-                raise ValueError("implicit reader coverage")
-            return paths + positional
-
-        try:
-            parts = shlex.split(command)
-            if not parts or any(c in command for c in "$`;&|<>()*?[]{}~\n"):
-                return []
-            if parts[0] in ("bash", "sh") and len(parts) == 2 and not parts[1].startswith("-"):
-                target = parts[1]
-            elif len(parts) == 1 and parts[0].startswith("./"):
-                target = parts[0]
+    if mode == "prefix":
+        # A retained review keeps its original batch obligation after retirement
+        # or adoption by a new batch. Never accept caller-supplied replay text.
+        task_id = args[0]
+        task = tasks[task_id]
+        live = active()  # Validate prepared/terminal identities, including retired rows.
+        context = {"batches": [], "checks": []}
+        seen = set()
+        for row in load_rows():
+            if (row.get("kind") != "goal-batch" or row.get("phase") != "prepared"
+                    or not same_checkout(row.get("worktree"))):
+                continue
+            item = next((item for item in row["tasks"] if item["id"] == task_id
+                         and item["lease_id"] == task.get("lease_id")), None)
+            if item is None:
+                continue
+            owner, width, accept = row["contract_id"], row["width"], row["accept_sha256"]
+            position = row["tasks"].index(item)
+            predecessors = row["tasks"][:position]
+            if live is not None and row["batch_id"] == live["batch_id"]:
+                validate(row)
+                if any(tasks[prior["id"]].get("state") != "done" for prior in predecessors):
+                    raise ValueError("batch admission is not in prefix order")
             else:
-                return []
-            files = owned(target, program=True)
-            for line in Path(repo, target).read_text(encoding="utf-8").splitlines():
-                if not line.strip() or line.lstrip().startswith("#"):
-                    continue
-                if any(c in line for c in "$`;&|<>()*?[]{}~\\"):
-                    return []
-                words = shlex.split(line, comments=True)
-                if not words:
-                    continue
-                for value in inputs(words):
-                    files.update(owned(value))
-            return sorted(files)
-        except (OSError, ValueError, IndexError):
-            return []
-
+                if binding(task) != item["binding"]:
+                    raise ValueError("batch task contract/lease changed: " + task_id)
+                # Retirement releases failed attempts. A later review retains
+                # only the original contiguous committed prefix, even if a
+                # released sibling has since committed under a new lease.
+                prefix = []
+                for prior in predecessors:
+                    predecessor = tasks.get(prior["id"], {})
+                    if (predecessor.get("state") != "done"
+                            or predecessor.get("lease_id") != prior["lease_id"]):
+                        break
+                    prefix.append(prior)
+                predecessors = prefix
+                if prefix:
+                    validate(dict(row, tasks=prefix), historical_prefix=True)
+            context["batches"].append(row)
+            for prior in predecessors:
+                predecessor = tasks[prior["id"]]
+                key = (prior["id"], prior["lease_id"], prior["binding"])
+                if key not in seen:
+                    verify = predecessor.get("verify")
+                    if not isinstance(verify, str) or not verify or "\x00" in verify:
+                        raise ValueError("invalid batch prefix verifier")
+                    context["checks"].append({"id": prior["id"], "verify": verify})
+                    seen.add(key)
+        return context
     if mode == "retired-reviews":
         for row in load_rows():
             if (row.get("kind") != "goal-batch" or row.get("phase") != "complete"
@@ -1693,21 +1651,15 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
             if not reviewed and attempts >= budget:
                 break
             allowed = task.get("allowed_paths", [])
-            files = verify_files(task.get("verify", ""), allowed)
             if not allowed:
                 break
-            if chosen and not files:
-                print("goal-drive: skipped %s: unknown verifier" % task["id"], file=sys.stderr)
-                continue
-            if chosen and any(not f or scopes_overlap(allowed, a)
-                    or scopes_overlap(files, f) or scopes_overlap(allowed, f)
-                    or scopes_overlap(files, a) for a, f in scopes):
+            if any(scopes_overlap(allowed, prior) for prior in scopes):
                 print("goal-drive: skipped %s: overlap" % task["id"], file=sys.stderr)
                 continue
             chosen.append(task["id"])
             attempts += int(not reviewed)
-            scopes.append((allowed, files))
-            if len(chosen) >= limit or not files:
+            scopes.append(allowed)
+            if len(chosen) >= limit:
                 break
         print("\n".join(chosen))
     elif mode == "prepare":
@@ -1884,8 +1836,12 @@ def main() -> int:
         if args.command == "supervise":
             return supervise_phase(args)
         if args.command == "goal-batch":
-            return goal_batch_command(args.plan_file, args.progress, args.repo, args.owner,
-                                      args.width, args.accept, args.mode, args.args)
+            result = goal_batch_command(args.plan_file, args.progress, args.repo, args.owner,
+                                        args.width, args.accept, args.mode, args.args)
+            if args.mode == "prefix":
+                print(json.dumps(result, sort_keys=True))
+                return 0
+            return result
         path = Path(args.path)
         if args.command == "digest":
             print(digest(regular_bytes(path, RECEIPT_LIMIT, "outer receipt")))

@@ -471,6 +471,15 @@ park() {  # REASON NEXT
   exit 3
 }
 
+goal_review_release_command() {  # TASK_ID
+  local repo_arg task_arg reason_arg
+  printf -v repo_arg '%q' "$REPO"
+  printf -v task_arg '%q' "$1"
+  printf -v reason_arg '%q' 'review rejected by admission'
+  printf 'oms agent-plan --repo %s block --id %s --reason %s' \
+    "$repo_arg" "$task_arg" "$reason_arg"
+}
+
 # The ledger's contract is resolved-on-success and nothing honored it for
 # parks: a goal that finally passes left every earlier park OPEN in the resume
 # hook, the inbox, and every advise prompt until a human swept it. One list
@@ -813,7 +822,7 @@ def validate(row):
             raise ValueError("released repair authority")
     elif task["provider"] != provider or task["lease_id"] != lease:
         raise ValueError("task authority")
-    verify = task["verify"].replace("\r", "")
+    verify = task["verify"]
     if not verify or hashlib.sha256(verify.encode("utf-8")).hexdigest() != verify_sha:
         raise ValueError("verify")
     task_patch = repo_file(task["patch"])
@@ -1216,9 +1225,10 @@ if d.get("assignment"):
     stable["assignment"]=d["assignment"]
 assignments["TASK_RECEIPT_SHA"]=hashlib.sha256(json.dumps(
  stable,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
-for key,value in assignments.items(): print("%s=%s" % (key,shlex.quote(value)))
+sys.stdout.buffer.write("".join("%s=%s\n" % (key,shlex.quote(value))
+                              for key,value in assignments.items()).encode("utf-8"))
 ' "$ROOT/scripts/lib/task-assignment.py" "$PROVIDER" "$MODEL" "$FALLBACK_MODEL" \
-    "$REASONING_EFFORT" | tr -d '\r')" || return 1
+    "$REASONING_EFFORT")" || return 1
   eval "$values" || return $?
   if [ "$STATE_REPO" != "$(cd "$REPO" && pwd -P)" ]; then
     case "$TASK_RECEIPT_PATCH" in /*|"") ;; *) TASK_RECEIPT_PATCH="$STATE_REPO/$TASK_RECEIPT_PATCH" ;; esac
@@ -2106,7 +2116,14 @@ reconcile_commit_intent() {
     "$ROOT/scripts/patch-land.sh" --repo "$REPO" --patch "$patch_abs" \
       ${AVC_FLAG:+"$AVC_FLAG"} \
       --plan-task "$INTENT_TASK" --verify "$TASK_RECEIPT_VERIFY" >/dev/null 2>&1 || land_rc=$?
-    [ "$land_rc" -eq 0 ] || park "intent-reland-failed" "the frozen reviewed patch no longer admits; inspect its report"
+    if [ "$land_rc" -ne 0 ]; then
+      recovery="the frozen reviewed patch no longer admits; inspect its report"
+      if [ "$RETRY_KNOWN" -eq 0 ] && [ "$(goal_batch_tool retired-reviews)" = 1 ]; then
+        release_command="$(goal_review_release_command "$INTENT_TASK")"
+        recovery="$recovery; to release retained task $INTENT_TASK and permit fresh attempts, run: $release_command"
+      fi
+      park "intent-reland-failed" "$recovery"
+    fi
     intent_write landed "reconciled-by-landing"
     intent_commit "recovered"
     return 0
@@ -2279,6 +2296,12 @@ goal_batch_dispatch() {
   [ "$remaining" -ge 0 ] || remaining=0
   ready="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json)" ||
     park invalid-plan "cannot verify ready dependencies"
+  # Adopt retained work before opening fresh attempts. A released failed
+  # sibling must not hide its independent review behind retry or cycle gates.
+  if [ "$RETRY_KNOWN" -eq 0 ] && [ "${retired_reviews:-0}" = 1 ]; then
+    ready="$(printf '%s' "$ready" | python3 -c 'import json,sys;d=json.load(sys.stdin);d["actionable"]=[];print(json.dumps(d))' | tr -d '\r')" ||
+      park invalid-plan "cannot select retained reviews before new attempts"
+  fi
   selected="$(goal_batch_tool select "$ready" "$remaining")" || park invalid-batch "cannot select a safe task batch"
   if [ -z "$selected" ]; then
     [ "$remaining" -gt 0 ] || park cycles-exhausted "the task-attempt budget is exhausted"
@@ -2535,6 +2558,9 @@ goal_integrate_current() {
     if [ "$current_task_state" != review ] || [ "$current_task_lease" != "$INTENT_LEASE" ]; then
       intent_write abandoned "review-authority-left-${current_task_state:-missing}"
       landing_next="the review lease ended; inspect the failed repair, then re-open or replace the plan task"
+    elif [ "${retired_reviews:-0}" = 1 ] && [ "$RETRY_KNOWN" -eq 0 ]; then
+      release_command="$(goal_review_release_command "$task_id")"
+      landing_next="$landing_next; to release retained task $task_id and permit fresh attempts, run: $release_command"
     fi
     printf '%s\n' "$(tail -n 8 "$land_log")" >&2
     rm -f "$land_log"
