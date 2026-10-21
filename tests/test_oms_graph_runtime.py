@@ -298,7 +298,9 @@ class FanOutTest(RuntimeFixture, unittest.TestCase):
         # The window only has to outlast the second plan-run's own start-up
         # (claim, worktree, provider launch) under gate load; the proof is the
         # exchange itself, not the elapsed time.
-        result = self.run_graph(fanout_spec(), jobs=2, env_extra={"BARRIER_DIR": str(self.barrier), "BARRIER_WAIT": "120"})
+        call_timeout = os.environ.get("OMS_TEST_CALL_TIMEOUT")
+        barrier_wait = str(max(1, int(call_timeout) - 10)) if call_timeout else "120"
+        result = self.run_graph(fanout_spec(), jobs=2, env_extra={"BARRIER_DIR": str(self.barrier), "BARRIER_WAIT": barrier_wait})
         self.assertEqual(result["status"], "terminal", result)
         run_id = result["run_id"]
         recorded = {row["node"]: row["outcome"] for row in self.outcomes(run_id)}
