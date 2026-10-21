@@ -1173,7 +1173,9 @@ EOF
     fail "the refusal must name the changed field: $(tail -3 "$frozen_repo/frozen-retry.out")"
   grep -Fq 'autopilot abandon' "$frozen_repo/frozen-retry.out" ||
     fail "the refusal must name the way out: $(tail -3 "$frozen_repo/frozen-retry.out")"
-  ! grep -Fq 'src,tests' "$frozen_repo/frozen-retry.out" ||
+  # The provenance line before the refusal prints --allowed by design; only the
+  # refusal itself must stay value-free.
+  ! grep -F 'immutable contract changed' "$frozen_repo/frozen-retry.out" | grep -Fq 'src,tests' ||
     fail "the refusal must name fields, never their values: $(tail -3 "$frozen_repo/frozen-retry.out")"
 
   # A reviewed proposal can go stale -- HEAD moves under it, or the parent
@@ -1769,10 +1771,12 @@ PY
     fail "the would-refuse verdict must ride the shadow ledger"
 
   # A proposal continuation is executable, not a template with an unresolved
-  # branch token. Collect the base before the planner is allowed to run.
+  # branch token. Collect the base before the planner is allowed to run; a
+  # detached HEAD leaves no checked-out branch to default --base to.
   local missing_base_repo="$TMP/propose-missing-base"
   make_repo "$missing_base_repo"
   mkdir -p "$missing_base_repo/calls"
+  git -C "$missing_base_repo" checkout -q --detach
   rc=0
   run_autopilot "$missing_base_repo" propose --allowed 'src,tests' \
     > "$missing_base_repo/missing-base.out" 2>&1 || rc=$?
