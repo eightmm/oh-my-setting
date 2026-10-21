@@ -281,6 +281,9 @@ for owner in panel.PROVIDERS:
     assert "reset a contract to evade cycle exhaustion" in guidance
     assert "override a parked receipt" in guidance
     assert "gated whole-change review and fresh acceptance pass" in guidance
+    assert "An autopilot campaign runs from the main checkout on its own oms/autopilot-* work branch" in guidance
+    assert "the sole exception to the no-commit-in-shared-checkout rule" in guidance
+    assert "still needs authority (Draft PR or oms land from that branch)" in guidance
     assert "Without a campaign, ordinary panel plan execution above is unchanged" in guidance
     assert "only when publication is authorized" in panel.bootstrap(owner, project)
     assert "git checkout --no-track -b oms/<task>" in panel.bootstrap(owner, project)

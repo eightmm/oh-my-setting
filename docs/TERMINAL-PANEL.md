@@ -114,6 +114,10 @@ only after gated whole-change review and fresh acceptance. Without a campaign,
 ordinary panel plan execution above is unchanged. To start without a panel, run
 `oms autopilot propose`, review its exact proposal and digest, then run with
 `--review-mode gate` and `--expected-proposal-sha256`.
+An autopilot campaign runs from the main checkout on its own `oms/autopilot-*`
+work branch, the sole exception to the no-commit-in-shared-checkout rule; the
+main does not commit there itself, and publication still needs authority (Draft
+PR or `oms land` from that branch).
 
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,
