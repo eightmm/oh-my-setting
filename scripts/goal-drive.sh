@@ -205,6 +205,37 @@ export GIT_CONFIG_COUNT
 PLAN_FILE="$STATE_REPO/.oms/plan/tasks.json"
 PROGRESS="$STATE_REPO/.oms/plan/progress.jsonl"
 [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; create one first (agent-plan init/add)"
+if [ -n "$CONTRACT_ID" ]; then
+  python3 - "$PLAN_FILE" "$STATE_REPO/.oms/delegations" "$CONTRACT_ID" <<'PY' >&2
+import json, os, sys
+plan_path, marker_dir, owner = sys.argv[1:]
+try:
+    plan = json.load(open(plan_path, encoding="utf-8"))
+    markers = []
+    for name in os.listdir(marker_dir) if os.path.isdir(marker_dir) else ():
+        if name.endswith(".json"):
+            try:
+                markers.append(json.load(open(os.path.join(marker_dir, name), encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+    tasks = plan.get("tasks", {})
+    for task in tasks.values() if isinstance(tasks, dict) else ():
+        try:
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get("id", "")
+            lease = task.get("lease_id", "")
+            if (task.get("state") == "claimed" and task.get("autopilot_owner_id") == owner
+                    and task_id and lease and not any(m.get("task_id") == task_id and m.get("lease_id") == lease
+                                                       for m in markers if isinstance(m, dict))):
+                print("goal-drive: owner claim without worker marker: %s/%s; release with oms agent-plan release --id %s --lease-id %s" %
+                      (task_id, lease, task_id, lease))
+        except (AttributeError, KeyError):
+            continue
+except (OSError, ValueError, TypeError, AttributeError, KeyError):
+    pass
+PY
+fi
 python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl check "$PROGRESS" ||
   fail "progress.jsonl must be a repo-local regular non-symlink file"
 
@@ -341,6 +372,7 @@ TASK_RECEIPT_TITLE=""
 TASK_RECEIPT_STATE=""
 TASK_RECEIPT_PROVIDER=""
 TASK_RECEIPT_LEASE=""
+TASK_RECEIPT_LEASE_EPOCH=0
 TASK_RECEIPT_REVIEW_LEASE=""
 TASK_RECEIPT_VERIFY=""
 TASK_RECEIPT_PATCH=""
@@ -1156,6 +1188,9 @@ for name in names:
 repair=d.get("repair_count", 0)
 if isinstance(repair, bool) or not isinstance(repair, int) or repair < 0 or repair > 1:
     raise ValueError("repair_count")
+epoch=d.get("lease_epoch", 0)
+if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+    raise ValueError("lease_epoch")
 allowed=d.get("allowed_paths", [])
 if not isinstance(allowed, list) or not allowed or not all(
         isinstance(x, str) and x and "\x00" not in x for x in allowed):
@@ -1164,6 +1199,7 @@ assignments={
  "TASK_RECEIPT_ID":d.get("id", ""),"TASK_RECEIPT_TITLE":d.get("title", ""),
  "TASK_RECEIPT_STATE":d.get("state", ""),"TASK_RECEIPT_PROVIDER":d.get("provider", ""),
  "TASK_RECEIPT_LEASE":d.get("lease_id", ""),
+ "TASK_RECEIPT_LEASE_EPOCH":str(epoch),
  "TASK_RECEIPT_REVIEW_LEASE":d.get("review_lease_id", ""),
  "TASK_RECEIPT_VERIFY":d.get("verify", ""),"TASK_RECEIPT_PATCH":d.get("patch", ""),
  "TASK_RECEIPT_ARTIFACT":d.get("artifact", ""),
@@ -2148,6 +2184,23 @@ GOAL_BATCH_LOGS=()
 GOAL_BATCH_LAUNCHING=0
 GOAL_BATCH_PENDING_SIGNAL=""
 GOAL_BATCH_PENDING_EXIT=""
+GOAL_BATCH_CLAIMS=()
+GOAL_BATCH_PREPARED=0
+goal_batch_rollback_claims() {
+  local pair id lease released="" failed=""
+  [ "$GOAL_BATCH_PREPARED" -eq 0 ] || return 0
+  for pair in ${GOAL_BATCH_CLAIMS[@]+"${GOAL_BATCH_CLAIMS[@]}"}; do
+    id="${pair%%:*}"; lease="${pair#*:}"
+    if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" --lease-id "$lease" release --id "$id" >/dev/null 2>&1; then
+      released="${released}${released:+, }$id/$lease"
+    else
+      failed="${failed}${failed:+; }oms agent-plan release --id $id --lease-id $lease"
+    fi
+  done
+  [ -z "$released" ] || echo "goal-drive: released pre-batch claims: $released" >&2
+  [ -z "$failed" ] || echo "goal-drive: release failed; run $failed" >&2
+  GOAL_BATCH_CLAIMS=()
+}
 goal_batch_forget_pid() {  # PID
   local target="$1" pid
   local -a remaining=()
@@ -2191,6 +2244,7 @@ goal_batch_signal() {  # SIGNAL EXIT_CODE
     return 0
   fi
   trap - HUP INT TERM
+  goal_batch_rollback_claims
   # Bash can reap an exited job asynchronously. Drop it before signalling any
   # remaining PID so cancellation cannot target a later process that reused it.
   goal_batch_reap_completed || true
@@ -2218,7 +2272,7 @@ PY
 }
 
 goal_batch_dispatch() {
-  local ready selected remaining id lease log pid rc=0 i provider dispatched=0
+  local ready selected remaining id lease prior_lease_epoch log pid rc=0 i provider dispatched=0 batch_cycle prepare_rc=0
   local -a ids leases args
   remaining=$((MAX_CYCLES - RUN_ATTEMPTS))
   [ -z "$CONTRACT_ID" ] || remaining=$((MAX_CYCLES - CONTRACT_CYCLES))
@@ -2231,28 +2285,82 @@ goal_batch_dispatch() {
     park tasks-exhausted "acceptance fails and the plan has no actionable task"
   fi
   ids=(); leases=()
+  GOAL_BATCH_CLAIMS=(); GOAL_BATCH_PREPARED=0
+  trap 'goal_batch_signal HUP 129' HUP
+  trap 'goal_batch_signal INT 130' INT
+  trap 'goal_batch_signal TERM 143' TERM
   while IFS= read -r id; do
-    load_task_receipt "$id" || park invalid-batch "cannot resolve task $id"
+    load_task_receipt "$id" || { goal_batch_rollback_claims; park invalid-batch "cannot resolve task $id"; }
     if [ "$TASK_RECEIPT_STATE" = review ]; then
       ids+=("$id"); leases+=("")
       continue
     fi
     provider="$TASK_ROUTE_PROVIDER"
-    OMS_AUTOPILOT_OWNER_ID="$CONTRACT_ID" "$ROOT/scripts/agent-plan.sh" --repo "$REPO" claim --id "$id" --provider "$provider" >/dev/null ||
-      park batch-claim-failed "task $id changed before reservation; preserve existing leases"
-    load_task_receipt "$id" || park invalid-batch "cannot read reserved lease $id"
+    prior_lease_epoch="$TASK_RECEIPT_LEASE_EPOCH"
+    GOAL_BATCH_LAUNCHING=1
+    if ! OMS_AUTOPILOT_OWNER_ID="$CONTRACT_ID" "$ROOT/scripts/agent-plan.sh" \
+      --repo "$REPO" claim --id "$id" --provider "$provider" >/dev/null; then
+      GOAL_BATCH_LAUNCHING=0
+      if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
+        goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
+      fi
+      goal_batch_rollback_claims
+      park batch-claim-failed "task $id changed before reservation"
+    fi
+    if ! load_task_receipt "$id"; then
+      lease="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --json --id "$id" 2>/dev/null |
+        python3 -c 'import json,sys
+try:
+ task=json.load(sys.stdin); epoch=int(sys.argv[2])
+except (ValueError,TypeError,KeyError): raise SystemExit(1)
+if (isinstance(task,dict) and task.get("state")=="claimed"
+    and task.get("autopilot_owner_id")==sys.argv[1]
+    and task.get("lease_epoch")==epoch+1 and task.get("lease_id")):
+ print(task["lease_id"])' "$CONTRACT_ID" "$prior_lease_epoch" | tr -d '\r')" || lease=""
+      if [ -n "$lease" ]; then
+        GOAL_BATCH_CLAIMS+=("$id:$lease")
+      else
+        echo "goal-drive: could not confirm the exact claim lease for $id; inspect its current lease before release" >&2
+      fi
+      GOAL_BATCH_LAUNCHING=0
+      if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
+        goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
+      fi
+      goal_batch_rollback_claims
+      park invalid-batch "cannot read reserved lease $id"
+    fi
     lease="$TASK_RECEIPT_LEASE"
+    GOAL_BATCH_CLAIMS+=("$id:$lease")
     ids+=("$id"); leases+=("$lease")
-    goal_reserve_cycle "$id" "$lease" || fail "cannot durably reserve task attempt"
-    CYCLE=$((CYCLE + 1))
+    GOAL_BATCH_LAUNCHING=0
+    if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
+      goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
+    fi
     dispatched=$((dispatched + 1))
   done <<EOF_IDS
 $selected
 EOF_IDS
-  [ "$dispatched" -eq 0 ] || CYCLE=$((CYCLE - 1))
+  [ "$dispatched" -eq 0 ] || CYCLE=$((CYCLE + dispatched - 1))
   GOAL_BATCH_ID="$RUN_ID-b$CYCLE-${TERMINAL_RECEIPT:0:16}"
-  goal_batch_tool prepare "$GOAL_BATCH_ID" "$RUN_ID" "${ids[@]}" | progress_append ||
-    park batch-receipt-failed "reserved leases were preserved; no provider was started"
+  GOAL_BATCH_LAUNCHING=1
+  goal_batch_tool prepare "$GOAL_BATCH_ID" "$RUN_ID" "${ids[@]}" | progress_append || prepare_rc=$?
+  if [ "$prepare_rc" -eq 0 ]; then
+    GOAL_BATCH_PREPARED=1
+    GOAL_BATCH_CLAIMS=()
+  fi
+  GOAL_BATCH_LAUNCHING=0
+  if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
+    goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
+  fi
+  [ "$prepare_rc" -eq 0 ] ||
+    { goal_batch_rollback_claims; park batch-receipt-failed "pre-batch receipt failed; claims were rolled back where possible"; }
+  batch_cycle=$((CYCLE - dispatched + 1))
+  for ((i=0; i<${#ids[@]}; i++)); do
+    [ -n "${leases[$i]}" ] || continue
+    CYCLE="$batch_cycle"
+    goal_reserve_cycle "${ids[$i]}" "${leases[$i]}" || park batch-cycle-failed "prepared batch retained; cycle reservation failed"
+    batch_cycle=$((batch_cycle + 1))
+  done
   GOAL_BATCH_PIDS=(); GOAL_BATCH_LOGS=()
   # Allocate every output before starting a child: allocation failure must
   # leave no running sibling behind an internal-error exit.
@@ -2260,9 +2368,6 @@ EOF_IDS
     log="$(agent_memory_mktemp)" || park internal "cannot allocate batch output"
     GOAL_BATCH_LOGS+=("$log")
   done
-  trap 'goal_batch_signal HUP 129' HUP
-  trap 'goal_batch_signal INT 130' INT
-  trap 'goal_batch_signal TERM 143' TERM
   for ((i=0; i<${#ids[@]}; i++)); do
     [ -n "${leases[$i]}" ] || continue
     args=(--repo "$REPO" --to "$PROVIDER" --id "${ids[$i]}" --claimed-lease "${leases[$i]}")

@@ -34744,8 +34744,201 @@ PY_CLOSED
 import json,sys
 rows=[json.loads(line) for line in open(sys.argv[1])]
 assert sum(r.get("kind") == "autopilot-cycle" for r in rows) == len(open(sys.argv[2]).readlines())
+cycles=[row for row in rows if row.get("kind") == "autopilot-cycle"]
+for batch in (row for row in rows if row.get("kind") == "goal-batch" and row.get("phase") == "prepared"):
+    batch_cycles=[]
+    for task in batch["tasks"]:
+        matches=[row["cycle"] for row in cycles if row.get("run_id") == batch["run_id"]
+                 and row.get("task_id") == task["id"] and row.get("lease_id") == task["lease_id"]]
+        if matches:
+            batch_cycles.append(matches[0])
+    assert not batch_cycles or batch_cycles == list(range(batch_cycles[0], batch_cycles[0] + len(batch_cycles))),(
+        batch.get("batch_id"),batch_cycles)
 PY
   done
+}
+
+goal_drive_prebatch_rollback_cases() {
+  local helper="$TMP/goal-batch-rollback-functions.sh" dispatch="$TMP/goal-batch-rollback-dispatch.sh"
+  local mock="$TMP/goal-batch-rollback-root" wrapper="$TMP/goal-batch-rollback-driver.sh"
+  local mode project out rc old_lease
+  sed -n '/^GOAL_BATCH_PIDS=()/,/^goal_reserve_cycle() {/p' "$ROOT/scripts/goal-drive.sh" |
+    sed '$d' > "$helper"
+  sed -n '/^goal_batch_dispatch() {/,/^goal_integrate_current() {/p' "$ROOT/scripts/goal-drive.sh" |
+    sed '$d' > "$dispatch"
+  [ -s "$helper" ] && [ -s "$dispatch" ] || fail "could not extract production batch rollback code"
+  mkdir -p "$mock/scripts"
+  cat > "$mock/scripts/agent-plan.sh" <<'SH'
+#!/usr/bin/env bash
+set -e
+id="" action="" previous=""
+for arg in "$@"; do
+  case "$arg" in claim|release|status|show) action="$arg" ;; esac
+  [ "$previous" != --id ] || id="$arg"
+  previous="$arg"
+done
+if [ "$action" = claim ] && [ "$id" = t2 ] &&
+  { [ "$BATCH_MODE" = claimfail ] || [ "$BATCH_MODE" = foreign ]; }; then
+  if [ "$BATCH_MODE" = foreign ]; then
+    old="$(cat "$BATCH_FIRST_LEASE")"
+    "$REAL_ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id t1 --lease-id "$old" >/dev/null
+    OMS_AUTOPILOT_OWNER_ID=owner_22222222222222222222222222222222 \
+      "$REAL_ROOT/scripts/agent-plan.sh" --repo "$REPO" claim --id t1 --provider codex >/dev/null
+  fi
+  exit 1
+fi
+if [ "$action" = claim ] && [ "$id" = t1 ] && [ "$BATCH_MODE" = signal ]; then
+  result="$("$REAL_ROOT/scripts/agent-plan.sh" "$@")"
+  python3 - "$REPO/.oms/plan/tasks.json" "$BATCH_FIRST_LEASE" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1], encoding="utf-8"))
+open(sys.argv[2], "w", encoding="utf-8").write(data["tasks"]["t1"]["lease_id"])
+PY
+  kill -INT "$BATCH_PARENT_PID"
+  sleep 0.1
+  printf '%s' "$result"
+  exit 0
+fi
+result="$("$REAL_ROOT/scripts/agent-plan.sh" "$@")"
+status=$?
+if [ "$action" = claim ] && [ "$id" = t1 ] && [ "$status" -eq 0 ]; then
+  python3 - "$REPO/.oms/plan/tasks.json" "$BATCH_FIRST_LEASE" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1], encoding="utf-8"))
+open(sys.argv[2], "w", encoding="utf-8").write(data["tasks"]["t1"]["lease_id"])
+PY
+fi
+printf '%s' "$result"
+exit "$status"
+SH
+  chmod +x "$mock/scripts/agent-plan.sh"
+  cat > "$wrapper" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+. "$BATCH_HELPER"
+. "$BATCH_DISPATCH"
+ROOT="$MOCK_ROOT" REPO="$REPO"
+PLAN_FILE="$REPO/.oms/plan/tasks.json" PROGRESS="$REPO/.oms/plan/progress.jsonl"
+CONTRACT_ID=owner_11111111111111111111111111111111 MAX_PARALLEL_TASKS=2 ACCEPT_SNAPSHOT=fixture
+MAX_CYCLES=4 CONTRACT_CYCLES=0 RUN_ATTEMPTS=0 RUN_ID=rollback-fixture CYCLE=1
+TERMINAL_RECEIPT=0123456789abcdef PROVIDER=codex
+GOAL_BATCH_PIDS=() GOAL_BATCH_LOGS=()
+load_task_receipt() {
+  local data
+  data="$("$MOCK_ROOT/scripts/agent-plan.sh" --repo "$REPO" show --json --id "$1")" || return 1
+  TASK_RECEIPT_STATE="$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+  TASK_RECEIPT_LEASE="$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))')"
+  TASK_RECEIPT_LEASE_EPOCH="$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_epoch", 0))')"
+  TASK_ROUTE_PROVIDER=codex
+  [ "$BATCH_MODE" != receiptfail ] || [ "$TASK_RECEIPT_STATE" != claimed ]
+}
+goal_batch_tool() {
+  case "$1" in
+    select) printf 't1\nt2\n' ;;
+    prepare) printf 'prepared\n' ;;
+    *) return 2 ;;
+  esac
+}
+progress_append() { cat >/dev/null; [ "$BATCH_MODE" != preparefail ]; }
+goal_reserve_cycle() { return 0; }
+park() { echo "reason=$1 $2" >&2; exit 99; }
+BATCH_PARENT_PID=$$
+export BATCH_PARENT_PID
+goal_batch_dispatch
+SH
+  chmod +x "$wrapper"
+
+  for mode in claimfail preparefail receiptfail foreign signal; do
+    if [ -n "${OMS_TEST_GOAL_DRIVE_ROLLBACK_CASE:-}" ] &&
+      [ "$mode" != "$OMS_TEST_GOAL_DRIVE_ROLLBACK_CASE" ]; then
+      continue
+    fi
+    project="$TMP/goal-batch-rollback-$mode"
+    make_committed_repo "$project"
+    mkdir -p "$project/checks"
+    printf 'true\n' > "$project/checks/t1.sh"
+    printf 'true\n' > "$project/checks/t2.sh"
+    git -C "$project" add checks && git -C "$project" commit -qm verifiers
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal rollback --accept false >/dev/null
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title first \
+      --allowed checks/t1.sh,t1.txt --verify 'bash checks/t1.sh' >/dev/null
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t2 --title second \
+      --allowed checks/t2.sh,t2.txt --verify 'bash checks/t2.sh' >/dev/null
+    rc=0
+    out="$(REAL_ROOT="$ROOT" MOCK_ROOT="$mock" REPO="$project" BATCH_MODE="$mode" \
+      BATCH_FIRST_LEASE="$TMP/goal-batch-first-lease" BATCH_HELPER="$helper" \
+      BATCH_DISPATCH="$dispatch" "$wrapper" 2>&1)" || rc=$?
+    if [ "$mode" = signal ]; then
+      [ "$rc" = 130 ] || fail "SIGINT during claim returned $rc: $out"
+    else
+      [ "$rc" = 99 ] || fail "$mode did not park after pre-batch failure ($rc): $out"
+    fi
+    case "$mode" in
+      foreign)
+        old_lease="$(cat "$TMP/goal-batch-first-lease")"
+        contains "$out" "oms agent-plan release --id t1 --lease-id $old_lease" ||
+          fail "foreign replacement rollback omitted the exact release command: $out"
+        python3 - "$project/.oms/plan/tasks.json" "$old_lease" <<'PY' || fail "rollback released a foreign replacement lease"
+import json,sys
+task=json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["t1"]
+assert task["state"] == "claimed" and task["lease_id"] != sys.argv[2],task
+assert task["autopilot_owner_id"] == "owner_22222222222222222222222222222222",task
+PY
+        ;;
+      *)
+        contains "$out" 'released pre-batch claims' || fail "$mode did not report released claims: $out"
+        python3 - "$project/.oms/plan/tasks.json" <<'PY' || fail "$mode left a pre-batch task claimed"
+import json,sys
+tasks=json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]
+expected={"t1":"ready", "t2":"ready"}
+assert {task:tasks[task]["state"] for task in expected} == expected,tasks
+PY
+        ready="$("$ROOT/scripts/agent-plan.sh" --repo "$project" status --json)"
+        selected="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" goal-batch -- \
+          "$project/.oms/plan/tasks.json" "$project/.oms/plan/progress.jsonl" "$project" \
+          owner_11111111111111111111111111111111 2 fixture select "$ready" 2)" ||
+          fail "$mode rollback left the next batch unselectable"
+        case "$mode" in
+          *) [ "$selected" = "$(printf 't1\nt2')" ] || fail "$mode post-rollback selection changed: $selected" ;;
+        esac
+        ;;
+    esac
+    if [ "$mode" != foreign ]; then
+      python3 - "$project/.oms/plan/progress.jsonl" <<'PY' || fail "$mode rollback spent attempt budget"
+import json,os,sys
+rows=([json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+      if os.path.exists(sys.argv[1]) else [])
+assert not any(row.get("kind") == "autopilot-cycle" for row in rows),rows
+PY
+    fi
+  done
+
+  project="$TMP/goal-batch-rollback-startup"
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal startup --accept true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title startup \
+    --allowed t1.txt --verify true >/dev/null
+  OMS_AUTOPILOT_OWNER_ID=owner_11111111111111111111111111111111 \
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  old_lease="$(python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["t1"]["lease_id"])
+PY
+)"
+  rm -rf "$project/.oms/delegations"
+  rc=0
+  out="$(HOME="$TEST_HOME" "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 \
+    --contract-id owner_11111111111111111111111111111111 2>&1)" || rc=$?
+  [ "$rc" = 3 ] || fail "startup diagnostic fixture returned $rc: $out"
+  contains "$out" "owner claim without worker marker: t1/$old_lease" ||
+    fail "missing marker directory suppressed the owner-claim recovery command: $out"
+  contains "$out" "oms agent-plan release --id t1 --lease-id $old_lease" ||
+    fail "startup diagnostic omitted the exact lease release command: $out"
+  python3 - "$project/.oms/plan/tasks.json" "$old_lease" <<'PY' || fail "startup diagnostic changed the owner claim"
+import json,sys
+task=json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["t1"]
+assert task["state"] == "claimed" and task["lease_id"] == sys.argv[2],task
+PY
 }
 
 # smoke-weight: 240
@@ -34798,6 +34991,7 @@ PY
 # smoke-weight: 73
 test_goal_drive_parallel_failure_recovery() {
   goal_drive_batch_cases failure abandon
+  goal_drive_prebatch_rollback_cases
 }
 
 test_goal_drive_silences_foreign_closed_intents() {
