@@ -922,9 +922,10 @@ def supervise_phase(args: argparse.Namespace) -> int:
         or not math.isfinite(grace)
         or wall <= 0
         or grace <= 0
-        # The public maximum is 10 worker cycles, five routed attempts per
-        # cycle, one five-attempt repair, and a one-minute shutdown margin:
-        # 55 days + 60 seconds when each attempt uses the 24 hour maximum.
+        # The largest worker wall is 55 attempts (10 cycles * five, plus one
+        # five-attempt repair) times a 24 hour provider and 24 hour verify
+        # budget, plus 60 seconds: 110 days + 60 seconds. Keep the 56-day
+        # supervisor cap; autopilot rejects oversized computed walls at startup.
         or wall > 56 * 24 * 60 * 60
         or grace > 30
     ):

@@ -18900,7 +18900,64 @@ EOF
 }
 
 test_verify_timeout_bounds_hung_verify() {
-  local out
+  local out seconds project planner planner_called rc=0
+
+  seconds="$(OMS_PEER_VERIFY_TIMEOUT=30s bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_verify_timeout_seconds")" ||
+    fail "the outer phase budget must use the configured verifier timeout"
+  [ "$seconds" = 30 ] || fail "configured verifier timeout should be 30 seconds, got $seconds"
+  seconds="$(OMS_PEER_VERIFY_TIMEOUT=1.5m bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_verify_timeout_seconds")" ||
+    fail "the outer phase budget must accept fractional verifier durations"
+  [ "$seconds" = 90 ] || fail "1.5m verifier timeout should be 90 seconds, got $seconds"
+  seconds="$(OMS_PEER_VERIFY_TIMEOUT=1d bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_verify_timeout_seconds")" ||
+    fail "the outer phase budget must accept day units up to 24h"
+  [ "$seconds" = 86400 ] || fail "1d verifier timeout should be 86400 seconds, got $seconds"
+  seconds="$(OMS_PEER_VERIFY_TIMEOUT=90.5 bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_verify_timeout_seconds")" ||
+    fail "the outer phase budget must accept fractional seconds"
+  [ "$seconds" = 91 ] || fail "90.5 verifier timeout should round up to 91 seconds, got $seconds"
+  seconds="$(env -u OMS_PEER_VERIFY_TIMEOUT bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_verify_timeout_seconds")" ||
+    fail "the outer phase budget must retain the verifier default"
+  [ "$seconds" = 600 ] || fail "default verifier timeout should be 600 seconds, got $seconds"
+
+  project="$TMP/autopilot-phase-wall-cap"
+  planner="$TMP/autopilot-phase-wall-planner"
+  planner_called="$TMP/autopilot-phase-wall-planner-called"
+  make_committed_repo "$project"
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: active
+
+## Project
+
+- Goal: verify phase wall startup bounds
+- Scope: file.txt
+- Non-goals: packaging
+
+## Commands
+
+- Test: true
+EOF
+  git -C "$project" add PROJECT.md && git -C "$project" commit -qm spec
+  cat > "$planner" <<'SH'
+#!/usr/bin/env bash
+: "${AUTOPILOT_PLANNER_CALL_MARKER:?}"
+touch "$AUTOPILOT_PLANNER_CALL_MARKER"
+SH
+  chmod +x "$planner"
+  out="$(HOME="$TEST_HOME" OMS_PEER_VERIFY_TIMEOUT=30m \
+    OMS_AUTOPILOT_PLAN_FROM_SPEC="$planner" AUTOPILOT_PLANNER_CALL_MARKER="$planner_called" \
+    "$ROOT/scripts/autopilot.sh" --repo "$project" --planner codex --worker codex \
+      --reviewer claude --allowed file.txt --base main --max-cycles 10 \
+      --worker-timeout 24h --auto-repair --review-mode off propose 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "oversized autopilot phase should be refused during startup ($rc): $out"
+  contains "$out" 'worker phase wall' && contains "$out" '--worker-timeout' &&
+    contains "$out" 'OMS_PEER_VERIFY_TIMEOUT' ||
+    fail "oversized phase refusal should name lowerable settings: $out"
+  [ ! -e "$planner_called" ] || fail "autopilot launched the planner before checking its phase wall"
+  [ ! -e "$project/.oms/plan/autopilot-run.json" ] ||
+    fail "autopilot wrote a campaign receipt before checking its phase wall"
 
   command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || return 0
   out="$(bash -c "
@@ -35177,9 +35234,22 @@ PY
 }
 
 # smoke-weight: 240
+goal_drive_batch_verifier_deadline() {
+  local helper="$TMP/goal-provider-phase-wall.sh" out
+
+  sed -n '/^goal_provider_phase_wall() {/,/^}/p' "$ROOT/scripts/goal-drive.sh" > "$helper"
+  [ -s "$helper" ] || fail "goal-drive must expose the production provider wall calculation"
+  out="$(PROVIDER_TIMEOUT_SECONDS=1 VERIFY_TIMEOUT_SECONDS=90 \
+    bash -c '. "$1"; goal_provider_phase_wall' _ "$helper")" ||
+    fail "goal-drive provider wall calculation failed"
+  [ "$out" = 155 ] ||
+    fail "a 1-second provider and 90-second verifier need a 155-second outer wall, got $out"
+}
+
 test_goal_drive_parallel_batches() {
-  goal_drive_batch_cases replay-surface replay-floor python pytest replay-backward replay-forward replay-recover parallel shared overlap verifier serial cap unreconciled recover land-recover tamper
   local project="$TMP/goal-batch-skip-candidates" out
+  goal_drive_batch_verifier_deadline
+  goal_drive_batch_cases replay-surface replay-floor python pytest replay-backward replay-forward replay-recover parallel shared overlap verifier serial cap unreconciled recover land-recover tamper
   make_committed_repo "$project"
   mkdir -p "$project/checks" "$project/.oms/plan"
   for task in t1 t2 t3 t4 u1 u2 u3; do

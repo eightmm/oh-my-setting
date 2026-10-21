@@ -9,6 +9,21 @@
 #   MA_DEBATE_SECTIONS   newline-joined section list for debate replies
 # plus the per-run globals referenced inside each function.
 
+# Return the verifier's bounded wall time in seconds. Keep this aligned with
+# run_verify_with_timeout: outer supervisors must leave room for it.
+ma_verify_timeout_seconds() {  # [DURATION]
+  python3 - "${1:-${OMS_PEER_VERIFY_TIMEOUT:-10m}}" <<'PY'
+import math, re, sys
+match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([smhd]?)", sys.argv[1])
+if not match:
+    raise SystemExit(2)
+seconds = float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+if not math.isfinite(seconds) or seconds <= 0 or seconds > 24 * 60 * 60:
+    raise SystemExit(2)
+print(math.ceil(seconds))
+PY
+}
+
 MA_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 # shellcheck source=agent-memory-common.sh
 . "$MA_LIB_DIR/agent-memory-common.sh"

@@ -97,6 +97,10 @@ EOF
 
 fail() { echo "error: $*" >&2; exit 2; }
 
+goal_provider_phase_wall() {  # seconds
+  printf '%s\n' "$((PROVIDER_TIMEOUT_SECONDS * 5 + VERIFY_TIMEOUT_SECONDS + 60))"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
@@ -158,6 +162,10 @@ if seconds > 24 * 60 * 60:
 print(seconds)
 PY
 )" || fail "--provider-timeout must be a positive duration up to 24h (for example 15m)"
+VERIFY_TIMEOUT_SECONDS="$(bash -c '. "$1/scripts/lib/peer-common.sh"; ma_verify_timeout_seconds' _ "$ROOT")" ||
+  fail "OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h"
+VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS//$'\r'/}"
+GOAL_PROVIDER_PHASE_WALL="$(goal_provider_phase_wall)"
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 REPO="$(cd "${REPO//$'\r'/}" && pwd -P)" || fail "bad --repo"
@@ -596,7 +604,7 @@ goal_phase_run() {  # COMMAND [ARGV...]; output -> GOAL_PHASE_OUT
   # One routed delegation may consume primary + safeguard retry + explicit or
   # capacity fallback attempts. Preserve the inner per-attempt timeout rather
   # than cutting off a legitimate fallback sequence halfway through.
-  phase_wall=$((PROVIDER_TIMEOUT_SECONDS * 5 + 60))
+  phase_wall="$GOAL_PROVIDER_PHASE_WALL"
   python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
     --wall "$phase_wall" --kill-after 1 --label goal-provider -- \
     "$@" >"$GOAL_PHASE_OUT_TMP" 2>&1 &
@@ -2428,7 +2436,7 @@ EOF_IDS
     log="${GOAL_BATCH_LOGS[$i]}"
     GOAL_BATCH_LAUNCHING=1
     python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
-      --wall "$((PROVIDER_TIMEOUT_SECONDS * 5 + 60))" --kill-after 1 --label goal-provider -- \
+      --wall "$GOAL_PROVIDER_PHASE_WALL" --kill-after 1 --label goal-provider -- \
       env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" "OMS_AUTOPILOT_OWNER_ID=$CONTRACT_ID" bash "$ROOT/scripts/plan-run.sh" "${args[@]}" >"$log" 2>&1 &
     pid=$!
     GOAL_BATCH_PIDS+=("$pid")

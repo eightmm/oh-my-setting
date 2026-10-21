@@ -388,6 +388,13 @@ print(int(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)])
 PY
 }
 
+SUPERVISOR_PHASE_WALL_MAX=$((56 * 24 * 60 * 60))
+validate_phase_wall() {  # LABEL SECONDS SETTINGS
+  local label="$1" seconds="$2" settings="$3"
+  [ "$seconds" -le "$SUPERVISOR_PHASE_WALL_MAX" ] ||
+    fail "$label phase wall (${seconds}s) exceeds the 56-day supervisor cap; lower $settings"
+}
+
 case "$COLLABORATION" in off|auto) ;; *) fail "--collaboration must be off or auto" ;; esac
 if [ "$COLLABORATION" = auto ]; then
   [ "$REVIEW_MODE_EXPLICIT" -eq 0 ] || [ "$REVIEW_MODE" = gate ] ||
@@ -417,6 +424,9 @@ validate_duration "$REVIEWER_TIMEOUT" "--reviewer-timeout"
 planner_seconds="$(duration_seconds "$PLANNER_TIMEOUT")"; planner_seconds="${planner_seconds//$'\r'/}"
 worker_seconds="$(duration_seconds "$WORKER_TIMEOUT")"; worker_seconds="${worker_seconds//$'\r'/}"
 reviewer_seconds="$(duration_seconds "$REVIEWER_TIMEOUT")"; reviewer_seconds="${reviewer_seconds//$'\r'/}"
+verify_seconds="$(bash -c '. "$1/scripts/lib/peer-common.sh"; ma_verify_timeout_seconds' _ "$ROOT")" ||
+  fail "OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h"
+verify_seconds="${verify_seconds//$'\r'/}"
 # A routed model call may spend primary + two safeguard recoveries + one
 # catalog alternate + one capacity fallback before returning.
 PLANNER_PHASE_WALL=$((planner_seconds * 5 + 60))
@@ -427,13 +437,17 @@ PLANNER_PHASE_WALL=$((planner_seconds * 5 + 60))
 # every inner call retains the exact role timeout from the durable contract.
 worker_phase_attempts=$((MAX_CYCLES * 5))
 [ "$AUTO_REPAIR" -eq 0 ] || worker_phase_attempts=$((worker_phase_attempts + 5))
-WORKER_PHASE_WALL=$((worker_seconds * worker_phase_attempts + 60))
-REVIEWER_PHASE_WALL=$((reviewer_seconds * 5 + 60))
+WORKER_PHASE_WALL=$((worker_seconds * worker_phase_attempts + verify_seconds * worker_phase_attempts + 60))
+REVIEWER_PHASE_WALL=$((reviewer_seconds * 5 + verify_seconds + 60))
 # draft-pr has its own bounded verifier/network workflow and may legitimately
 # outlive one model-provider attempt. Keep the outer kill fence conservative
 # but bounded independently from --provider-timeout so it cannot truncate the
 # verifier's default 10 minute budget (or another documented bounded value).
 PUBLISH_PHASE_WALL=86400
+validate_phase_wall planner "$PLANNER_PHASE_WALL" '--planner-timeout or --collaboration'
+validate_phase_wall worker "$WORKER_PHASE_WALL" '--worker-timeout, --max-cycles, --auto-repair, or OMS_PEER_VERIFY_TIMEOUT'
+validate_phase_wall reviewer "$REVIEWER_PHASE_WALL" '--reviewer-timeout or OMS_PEER_VERIFY_TIMEOUT'
+validate_phase_wall publish "$PUBLISH_PHASE_WALL" '--draft-pr or --provider-timeout'
 oms_model_validate_name "$PLANNER_MODEL" || exit $?
 oms_model_validate_name "$WORKER_MODEL" || exit $?
 oms_model_validate_name "$REVIEWER_MODEL" || exit $?
