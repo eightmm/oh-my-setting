@@ -233,6 +233,10 @@ conversation beside it and a right-side reader for selected calls and results.
 The board's bottom dock has Log, Detail, Plan, Messages, Past and Attention tabs,
 plus Debate while a debate exists. Needs you is an attention strip above activity. The
 dock opens on Log (the recorded session events) and takes every row the activity tree leaves.
+Call rows keep status, token totals and age aligned; fresh calls show their
+recorded role and queued state before an attempt exists. Detail parses live
+provider-stream activity for running calls and shows a What it did summary for
+finished calls; tree rows include the latest event.
 
 ### Keys
 
@@ -698,6 +702,10 @@ oms panel --repo . --dispatch reviewer --owner claude --workload deep \
 oms panel --repo . --room team --dispatch advisor --owner claude --main opus-main \
   --prompt 'Advise on the parser plan.'
 ```
+
+`oms panel --dispatch ROLE --task-id T --brief-file F` or `--continue` appends
+up to five newest settled read-only findings for T from each artifact's
+Output section, with repo-relative references; `--dry-run` appends none.
 
 From the control window, a dispatch belongs to the room's active main of that
 provider. `--main PARTICIPANT` asserts that caller's identity (the board's `a` uses it); a room with multiple live mains refuses every dispatch until the others are released with `oms panel --release-main` or the swap is finished. A native main always dispatches as itself.

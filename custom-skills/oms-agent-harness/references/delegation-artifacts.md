@@ -102,6 +102,7 @@ an artifact log plus patch; workers cannot commit or push.
 While workers run, create scratch worktrees with `oms scratch-worktree add`
 (and `remove PATH`), never plain `git worktree add` in the shared repository:
 an unmarked registration fails every running worker's guard.
+In the shared checkout, `git status` and `git diff` are safe during worker runs; `git fetch` is a soft report, but do not fast-forward the checked-out branch or edit a running worker's own plan task. Finalizing other tasks is safe.
 `peer-delegate --read-only` uses the isolated worker boundary for an audit
 report and returns no patch. Outbound context is scanned and sensitive-looking
 content blocks the call.
