@@ -10019,7 +10019,9 @@ test_plan_from_spec_rejects_delegating_verify() {
   local project="$TMP/plan-from-spec-delegating" allow_project="$TMP/plan-from-spec-project-check" bin_dir out
   bin_dir="$project/bin"
   make_committed_repo "$project"
-  mkdir -p "$bin_dir" "$project/home" "$project/tests" "$project/scripts"
+  mkdir -p "$bin_dir" "$project/home" "$project/tests" "$project/scripts" "$project/.agents/plugins"
+  printf '{}\n' > "$project/.agents/plugins/marketplace.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/install-claude-hooks.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"; chmod +x "$project/tests/run.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/check.sh"; chmod +x "$project/check.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"; chmod +x "$project/scripts/check.sh"
@@ -10031,6 +10033,11 @@ test_plan_from_spec_rejects_delegating_verify() {
     mkdir -p "$project/$(dirname "$suite")"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/$suite"
   done
+  cat > "$project/tests/scripts-smoke.sh" <<'EOF'
+test_fixture_delegates() {
+  "$ROOT/scripts/peer-delegate.sh" --dry-run
+}
+EOF
   printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash tests/run.sh\n\n## Verification\n\n- Required checks: bash tests/run.sh\n' > "$project/PROJECT.md"
   fake_planner() {  # fake_planner VERIFY -> a codex stub proposing one task with that verify
     local proposal proposal_quoted
@@ -10069,6 +10076,11 @@ EOF
   HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/inspection.out" 2>&1 ||
     fail "inspection-only suite references must be proposed: $(tail -3 "$project/inspection.out")"
   assert_file_contains "$project/inspection.out" "proposed 1 task(s)"
+  fake_planner "bash tests/run-smoke-shard.sh --only 'test_plan_from_spec_proposes_then_applies test_fixture_delegates'"
+  out="$(HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex 2>&1)" &&
+    fail "a compound --only selector containing a delegating test must be refused: $out"
+  case "$out" in *'verify runs delegating suite'*) ;; *)
+    fail "the compound selector refusal must identify the shard suite: $out" ;; esac
   fake_planner 'bash tests/run.sh'
   HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/out" 2>&1 ||
     fail "a plain verify must still be proposed: $(tail -3 "$project/out")"
@@ -10076,11 +10088,12 @@ EOF
   make_committed_repo "$allow_project"
   bin_dir="$allow_project/bin"
   mkdir -p "$bin_dir" "$allow_project/home"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$allow_project/check.sh"; chmod +x "$allow_project/check.sh"
-  printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash check.sh\n\n## Verification\n\n- Required checks: bash check.sh\n- Required check files: check.sh\n' > "$allow_project/PROJECT.md"
-  fake_planner 'bash check.sh'
+  mkdir -p "$allow_project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$allow_project/scripts/check.sh"; chmod +x "$allow_project/scripts/check.sh"
+  printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash scripts/check.sh fast\n\n## Verification\n\n- Required checks: bash scripts/check.sh fast\n- Required check files: scripts/check.sh\n' > "$allow_project/PROJECT.md"
+  fake_planner 'bash scripts/check.sh fast'
   HOME="$allow_project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$allow_project" --to codex >"$allow_project/out" 2>&1 ||
-    fail "a project check.sh must be proposed when scripts/check.sh is absent from the target repository: $(tail -3 "$allow_project/out")"
+    fail "a user project's scripts/check.sh must be proposed without OMS markers: $(tail -3 "$allow_project/out")"
   assert_file_contains "$allow_project/out" "proposed 1 task(s)"
 }
 

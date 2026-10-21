@@ -382,7 +382,9 @@ def smoke_shard_invocations(command):
             if words[cursor] == "--only":
                 has_only = True
                 if cursor + 1 < len(words):
-                    names.append(words[cursor + 1])
+                    # The shard runner accepts whitespace-separated test names
+                    # inside one --only argument as well as repeated flags.
+                    names.extend(words[cursor + 1].split())
                 cursor += 2
             else:
                 cursor += 1
@@ -438,10 +440,15 @@ def smoke_test_delegates(name):
 
 
 def delegating_verifier(verify):
-    for suite in DELEGATING_SUITES + FULL_SUITE_VERIFIERS:
-        if (os.path.isfile(os.path.join(repo, suite)) and
-                any(script_invocations(verify, basename(suite)))):
-            return suite
+    is_oms_repo = (
+        os.path.isfile(os.path.join(repo, ".agents", "plugins", "marketplace.json")) and
+        os.path.isfile(os.path.join(repo, "scripts", "install-claude-hooks.sh"))
+    )
+    if is_oms_repo:
+        for suite in DELEGATING_SUITES + FULL_SUITE_VERIFIERS:
+            if (os.path.isfile(os.path.join(repo, suite)) and
+                    any(script_invocations(verify, basename(suite)))):
+                return suite
     for names in smoke_shard_invocations(verify):
         if names is None:
             return "tests/run-smoke-shard.sh"
