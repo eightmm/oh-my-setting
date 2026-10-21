@@ -180,6 +180,25 @@ for ident, role, state in (("layout-review-a", "reviewer", "working"),
 layout_tree["room"]["participants"] = layout_members
 layout_tree["attempts"] = {"active_recent": layout_attempts, "recent": []}
 
+# MAIN band ages share one display column and tags finish in one column.
+import time as band_clock
+band_now = band_clock.time()
+for member, minutes in zip(layout_members[1:], (37, 4, 0.5, 12)):
+    member["joined_at"] = band_clock.strftime("%Y-%m-%dT%H:%M:%SZ", band_clock.gmtime(band_now - minutes * 60))
+layout_tree["awaiting_admission"] = ["layout-awaiting"]
+layout_tree["room"]["participants"][-1]["state"] = "done"
+band_nav = {}
+band_picture = render(layout_tree, "codex", 120, 40, view="graph", navigation=band_nav).splitlines()
+band_rows = [band_picture[hit["y"] - 1] for hit in band_nav["hits"]
+             if hit.get("tree") and hit["action"][0] == "result"
+             and hit["action"][1] in {"layout-review-a", "layout-review-b", "layout-builder", "layout-awaiting"}]
+band_tags = [row[row.rfind("["):row.rfind("]") + 1] for row in band_rows]
+band_ends = [display_width(row[:row.rfind("]") + 1]) for row in band_rows]
+assert len(band_rows) == 4 and len(set(band_ends)) == 1, (band_rows, band_ends)
+assert len(set(map(len, band_tags))) > 1, (band_tags, band_rows)
+assert all(row.rstrip().endswith(age) for row, age in zip(band_rows, ("37m", "4m", "<1m", "12m"))), band_rows
+
+
 # The visual flow selects one exact parent, keeps an ended main in history, and
 # uses real role cards with frame-local chat/result targets.
 flow_members = [{"participant": "flow-main", "role": "main", "joined": True, "provider": "codex",

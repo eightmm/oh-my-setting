@@ -1335,6 +1335,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             break
     main_width, main_left = layout(width)
     stem = main_left + 2
+    band_age_width = max((display_width(elapsed(member.get("joined_at")) or "unknown")
+                          for group in (gates, counsel, workers) for member in group), default=0)
     offsets = dict(mapping(navigation.get("band_offsets")))
     drawn = []
 
@@ -1409,8 +1411,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
             band_prefix = (glyph(name, unicode) + " " + (name.title() + " " if n == 0 else "")) if name != "calls" else ""
             tag = tagged(member)
+            age = elapsed(member.get("joined_at")) or "unknown"
+            age = " " * max(0, band_age_width - display_width(age)) + age
             available = max(0, width - stem - display_width(connector + mark))
-            tail = clipped(tag + "  " + (elapsed(member.get("joined_at")) or "unknown"), max(0, available - 3))
+            tail = clipped(tag + "  " + age, max(0, available - 3))
             label = clipped(band_prefix + member_identity(member), max(1, width - stem - display_width(connector + mark + tail) - 2))
             gap = max(2, width - stem - display_width(connector + mark + label + tail))
             lines.append(" " * stem + styled(connector, style_key) + mark + styled(label, style_key, action(member) == selected) +
@@ -1420,7 +1424,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if expansion and member is selected_member:
                 lines.pop()
                 hits.pop()
-                card_lines(member, [tagged(member) + "  " + (elapsed(member.get("joined_at")) or "unknown"),
+                card_lines(member, [tagged(member) + "  " + age,
                                     "Task: " + clean(member.get("title"))], indent=4, tree_card=True, band_prefix=band_prefix)
         if show_overflow and not upper:
             overflow()
