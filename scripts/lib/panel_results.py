@@ -8,9 +8,12 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shlex
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import threading
 import uuid
@@ -536,7 +539,7 @@ def _plan_hint(repo, task_id, has_write_patch):
         pass
 
 
-def _run_verifier(repo, verify, timeout):
+def _run_verifier(repo, verify, timeout, evidence_repo=None):
     creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) if os.name == 'nt' else 0
     process = subprocess.Popen(['bash', '-c', verify], cwd=str(repo),
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -594,8 +597,8 @@ def _run_verifier(repo, verify, timeout):
                                 'truncated': stream['bytes'] > len(data) or not stream['complete'],
                                 'complete': stream['complete'], 'retained': 'tail'}
         relative = '.oms/artifacts/panel-results/verify-%s.json' % uuid.uuid4().hex
-        _write(repo, relative, diagnostic, maximum=16 * MAX_VERIFY_OUTPUT)
-        result['diagnostics'] = _relative(repo, relative)
+        _write(evidence_repo or repo, relative, diagnostic, maximum=16 * MAX_VERIFY_OUTPUT)
+        result['diagnostics'] = _relative(evidence_repo or repo, relative)
     if timed_out:
         raise ValueError('verifier timed out after %s s; private diagnostics: %s'
                          % (timeout, result['diagnostics']['path']))
@@ -667,17 +670,605 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
             'finalized': finalized, 'superseded_attempts': superseded}, attempts, rows, related, selected, admissions
 
 
-def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False,
-             verify_timeout=1800):
+def _review_preflight(repo, task_id, workers, rows, admissions=None):
+    """Share scope and digest-bound review checks before application and acceptance."""
+    if admissions is not None and any(not item for item in admissions):
+        # Scope evidence is checked first, including for unlanded candidates.
+        missing_admission = True
+    else:
+        missing_admission = False
+    missing_reviews = []
+    passing_gates = []
+    for index, worker in enumerate(workers):
+        patches = [r for r in rows if r.get('kind') == 'delegate'
+                   and r.get('attempt_id') == worker.get('attempt_id') and r.get('patch_sha256')]
+        owns = _worker_owns(repo, worker)
+        for row in patches:
+            data = verified_patch(repo, row)
+            drift = _scope_drift(_patch_paths(data), owns)
+            if drift:
+                raise ValueError('write worker patch has %s path(s) outside its declared scope: %s'
+                                 % (len(drift), ', '.join(drift[:8])))
+        digest = (admissions[index].get('patch_sha256') if admissions is not None and admissions[index]
+                  else patches[-1].get('patch_sha256') if patches else None)
+        reviews = [r for r in rows if r.get('kind') == 'review-outcome'
+                   and (r.get('task_id') == task_id or (not worker.get('task_id') and not r.get('task_id')))
+                   and isinstance(r.get('review'), dict)
+                   and isinstance(r['review'].get('candidate'), dict)
+                   and r['review']['candidate'].get('patch_sha256') == digest]
+        latest = reviews[-1] if reviews else None
+        if not (latest and latest.get('exit') == 0 and latest['review'].get('gate_verify_exit') == 0
+                and isinstance(latest['review'].get('seats'), list) and latest['review']['seats']
+                and all(isinstance(s, dict) and s.get('verdict') == 'pass' for s in latest['review']['seats'])):
+            missing_reviews.append(worker.get('attempt_id', 'unknown'))
+        else:
+            passing_gates.append({'event_id': latest.get('event_id'), 'patch_sha256': digest,
+                                  'exit': latest.get('exit'),
+                                  'gate_verify_exit': latest['review'].get('gate_verify_exit'),
+                                  'seat_verdicts': [seat.get('verdict') for seat in latest['review']['seats']]})
+    if missing_admission:
+        raise ValueError('write worker needs matching landed patch evidence')
+    if missing_reviews:
+        raise ValueError('write worker call(s) lack a passing review gate: %s; run the review or finalize completed instead'
+                         % ', '.join(missing_reviews))
+    return passing_gates
+
+
+def _execution_repo(repo, execution_repo):
+    from room_repository import state_repository, work_repository
+    execution = work_repository(execution_repo or repo)
+    if state_repository(execution) != Path(repo).resolve():
+        raise ValueError('execution clone does not belong to the canonical state repository')
+    return execution
+
+
+def _accept_lock(repo, execution):
+    # Scratch clones have no local ignored .oms directory. Keep their locks
+    # with canonical evidence so locking cannot itself dirty the target tree.
+    return _lock(repo, 'panel-accept-' + hashlib.sha256(os.fsencode(execution)).hexdigest()[:24])
+
+
+def _plan_command(execution, *args, panel_accept=None):
+    child_env = None
+    if panel_accept is not None:
+        child_env = dict(os.environ, OMS_PANEL_ACCEPT_RECORD_JSON=json.dumps(
+            panel_accept, sort_keys=True, separators=(',', ':')))
+    result = subprocess.run(['bash', str(ENTRY), 'agent-plan', '--repo', str(execution), *args],
+                            env=child_env,
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, timeout=60)
+    if result.returncode:
+        raise ValueError(result.stderr.strip() or 'plan command failed')
+    return result.stdout
+
+
+def _owned_task(repo, execution, owner, task_id):
+    from panel_state import active_mains
+    from panel_dispatch import PlanBinding
     _owner()
-    if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed', 'rejected'):
-        raise ValueError('invalid owner result')
-    if isinstance(verify_timeout, bool) or not isinstance(verify_timeout, int) or not 1 <= verify_timeout <= 86400:
-        raise ValueError('verify timeout must be between 1 and 86400 seconds')
-    summary = _safe_summary(summary_file, repo)
-    refs = [_relative(repo, value) for value in (evidence or [])] if not isinstance(evidence, str) else [_relative(repo, evidence)]
-    if len(refs) > 8:
-        raise ValueError('use at most eight evidence references')
+    if owner not in ('codex', 'claude') or not isinstance(task_id, str) or not ID.fullmatch(task_id):
+        raise ValueError('invalid owner task')
+    caller, main_id, ident = (os.environ.get(name) for name in
+                             ('OMS_ROOM_PARTICIPANT', 'OMS_PANEL_MAIN_ATTEMPT', 'OMS_ROOM_ID'))
+    if not caller or not main_id or not ident:
+        raise ValueError('accept/finish requires the current owning room main')
+    state = room.project(room.records(repo, ident))
+    main = active_mains(repo, ident, state, owner, caller=caller, attempt=main_id).get(caller)
+    if state['closed'] or not main or main['attempt_id'] != main_id:
+        raise ValueError('accept/finish requires the current owning room main')
+    plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
+                      object_pairs_hook=PlanBinding.unique_fields)
+    stored = plan.get('tasks', {}).get(task_id)
+    if not isinstance(stored, dict):
+        raise ValueError('plan task is unavailable')
+    # The CLI projection adds elapsed claim age, which cannot fence mutations.
+    task = dict(stored, plan_id=plan.get('plan_id'))
+    if (task.get('id') != task_id or task.get('claimed_by_participant') != caller
+            or task.get('provider') != owner or not re.fullmatch(r'lease_[0-9a-f]{32}', task.get('lease_id', ''))
+            or not re.fullmatch(r'plan_[0-9a-f]{32}', task.get('plan_id', ''))):
+        raise ValueError('plan task owner/lease does not match the current main')
+    return task
+
+
+def _accept_preflight(repo, execution, owner, task_id, verify, expected=None, applied=False):
+    task = _owned_task(repo, execution, owner, task_id)
+    if task.get('state') not in ('claimed', 'running'):
+        raise ValueError('accept requires a claimed/running task; reconcile existing application or commit before retry')
+    if not verify or verify.replace('\r', '') != task.get('verify', '').replace('\r', ''):
+        raise ValueError('--verify does not match the plan task verify contract')
+    main_id = os.environ['OMS_PANEL_MAIN_ATTEMPT']
+    _, _, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
+    if len(workers) != 1 or workers[0].get('task_id') != task_id:
+        raise ValueError('accept requires one unique worker candidate for this task')
+    worker = workers[0]
+    candidates = [r for r in rows if r.get('kind') == 'delegate' and r.get('task_id') == task_id
+                  and r.get('attempt_id') == worker['attempt_id'] and r.get('patch_sha256')]
+    if (len(candidates) != 1 or candidates[0].get('exit') != 0
+            or worker.get('parent_attempt_id') != main_id
+            or worker.get('refs', {}).get('panel_lease_id') != task['lease_id']
+            or candidates[0].get('plan_id') != task['plan_id']):
+        raise ValueError('candidate is ambiguous or does not match the current main/plan lease')
+    candidate = candidates[0]
+    if expected is not None and candidate['patch_sha256'] != expected:
+        raise ValueError('candidate patch digest drift')
+    passing_gates = _review_preflight(repo, task_id, workers, rows)
+    verified_patch(repo, candidate)
+    _indexed(repo, candidate, 1024 * 1024)
+    if any(admissions) and not applied:
+        raise ValueError('candidate already applied; reconcile existing Git/receipt evidence; never reapply blindly')
+    return {'task': task, 'candidate': candidate, 'worker': worker, 'review_gate': passing_gates[0]}
+
+
+def _accept_authority(snapshot):
+    """Return only the stable plan, candidate, lease and review authorities."""
+    task, candidate, worker = snapshot['task'], snapshot['candidate'], snapshot['worker']
+    refs = worker.get('refs', {})
+    candidate_fields = ('event_id', 'attempt_id', 'task_id', 'plan_id', 'artifact', 'patch',
+                        'patch_sha256', 'exit')
+    return {
+        'task_hash': hashlib.sha256(json.dumps(task, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+        'lease_id': task.get('lease_id'),
+        'candidate': {key: candidate.get(key) for key in candidate_fields},
+        'patch_sha256': candidate.get('patch_sha256'),
+        'worker': {key: worker.get(key) for key in ('attempt_id', 'task_id', 'parent_attempt_id')},
+        'worker_authority': {key: refs.get(key) for key in ('panel_access', 'panel_role', 'panel_lease_id')},
+        'review_gate': snapshot['review_gate'],
+    }
+
+
+def _accept_identity(snapshot):
+    authority = _accept_authority(snapshot)
+    authority.pop('review_gate')
+    return authority
+
+
+class _AcceptAuthorityChanged(ValueError):
+    pass
+
+
+def _accept_recheck(repo, execution, owner, task_id, verify, expected, baseline):
+    try:
+        current = _accept_preflight(repo, execution, owner, task_id, verify, expected, True)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise _AcceptAuthorityChanged('authority preflight no longer passes: %s' % error) from error
+    if _accept_authority(current) != _accept_authority(baseline):
+        raise _AcceptAuthorityChanged('candidate, digest, lease, task hash or review gate changed')
+
+
+def _git(execution, *args, env=None):
+    result = subprocess.run(['git', '-C', str(execution), *args], env=env,
+                            stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=60)
+    if result.returncode:
+        raise ValueError('git %s failed: %s' % (args[0], result.stderr.decode('utf-8', 'replace').strip()))
+    return result.stdout
+
+
+class _ExactCommitPublished(ValueError):
+    def __init__(self, sha, message):
+        super().__init__(message)
+        self.sha = sha
+
+
+def _index_digest(path):
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError('Git index is not a regular file')
+        source = os.fdopen(descriptor, 'rb')
+        descriptor = -1
+        with source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                digest.update(chunk)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return digest.hexdigest()
+
+
+def _exact_commit_tree(execution, base, expected_tree, message, authority_check=None):
+    """Publish the verified index tree with a HEAD compare-and-swap; never run commit hooks."""
+    if any(os.environ.get(name) for name in ('GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR')):
+        raise ValueError('custom Git repository/index overrides are unsupported for exact acceptance commits')
+    if _git(execution, 'rev-parse', 'HEAD').decode().strip() != base:
+        raise ValueError('HEAD changed before exact commit')
+    symbolic = subprocess.run(['git', '-C', str(execution), 'symbolic-ref', '-q', 'HEAD'],
+                              stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=30)
+    if symbolic.returncode not in (0, 1):
+        raise ValueError('cannot resolve the current HEAD ref')
+    ref = symbolic.stdout.decode('utf-8', 'replace').replace('\r', '').strip() or 'HEAD'
+    raw_path = _git(execution, 'rev-parse', '--git-path', 'index').decode().replace('\r', '').strip()
+    if not raw_path:
+        raise ValueError('Git index path is unavailable')
+    index_path = Path(raw_path)
+    if not index_path.is_absolute():
+        index_path = Path(execution) / index_path
+    index_path = Path(os.path.realpath(index_path.parent)) / index_path.name
+    try:
+        info = os.lstat(index_path)
+    except OSError as error:
+        raise ValueError('Git index is unavailable: %s' % error) from error
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('Git index is not a regular file')
+    lock_path = Path(str(index_path) + '.lock')
+    try:
+        lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as error:
+        raise ValueError('cannot lock Git index: %s' % error) from error
+    published = None
+    try:
+        source_fd = os.open(index_path, os.O_RDONLY | getattr(os, 'O_BINARY', 0) |
+                            getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        try:
+            opened = os.fstat(source_fd)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                raise ValueError('Git index changed while acquiring its lock')
+            source = os.fdopen(source_fd, 'rb')
+            source_fd = -1
+            try:
+                target = os.fdopen(lock_fd, 'wb')
+            except OSError:
+                source.close()
+                raise
+            lock_fd = -1
+            with source, target:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
+            if lock_fd >= 0:
+                os.close(lock_fd)
+        original_digest = _index_digest(index_path)
+        if _index_digest(lock_path) != original_digest:
+            raise ValueError('Git index changed while acquiring its lock')
+        index_env = dict(os.environ, GIT_INDEX_FILE=str(lock_path))
+        if _git(execution, 'write-tree', env=index_env).decode().strip() != expected_tree:
+            raise ValueError('locked Git index differs from the reviewed tree')
+        if authority_check:
+            authority_check()
+        if (_git(execution, 'rev-parse', 'HEAD').decode().strip() != base
+                or (subprocess.run(['git', '-C', str(execution), 'symbolic-ref', '-q', 'HEAD'],
+                                   stdin=subprocess.DEVNULL, capture_output=True, check=False,
+                                   timeout=30).stdout.decode('utf-8', 'replace').replace('\r', '').strip() or 'HEAD') != ref):
+            raise ValueError('HEAD/ref changed before exact commit')
+        if _index_digest(index_path) != original_digest or _index_digest(lock_path) != original_digest:
+            raise ValueError('Git index changed before exact commit')
+        commit = _git(execution, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+                      'commit-tree', expected_tree, '-p', base, '-m', message).decode().strip()
+        if (not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit)
+                or _git(execution, 'rev-parse', commit + '^{tree}').decode().strip() != expected_tree
+                or _git(execution, 'rev-parse', commit + '^').decode().strip() != base):
+            raise ValueError('created commit object does not match the reviewed tree and parent')
+        if authority_check:
+            authority_check()
+        if (_index_digest(index_path) != original_digest or _index_digest(lock_path) != original_digest
+                or _git(execution, 'rev-parse', 'HEAD').decode().strip() != base):
+            raise ValueError('Git index or HEAD changed before exact publication')
+        _git(execution, '-c', 'core.hooksPath=/dev/null', 'update-ref',
+             '-m', 'panel: accept reviewed patch', ref, commit, base)
+        published = commit
+        if (_git(execution, 'rev-parse', 'HEAD').decode().strip() != commit
+                or (subprocess.run(['git', '-C', str(execution), 'symbolic-ref', '-q', 'HEAD'],
+                                   stdin=subprocess.DEVNULL, capture_output=True, check=False,
+                                   timeout=30).stdout.decode('utf-8', 'replace').replace('\r', '').strip() or 'HEAD') != ref
+                or _git(execution, 'rev-parse', commit + '^{tree}').decode().strip() != expected_tree
+                or _git(execution, 'rev-parse', commit + '^').decode().strip() != base):
+            raise _ExactCommitPublished(commit, 'published HEAD does not match the exact reviewed commit')
+        return commit
+    except _ExactCommitPublished:
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if published:
+            raise _ExactCommitPublished(published, str(error)) from error
+        raise
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
+
+
+def _accept_record(snapshot, base, tree, commit):
+    task, candidate, worker = snapshot['task'], snapshot['candidate'], snapshot['worker']
+    return {'schema': 1, 'task_id': task['id'], 'plan_id': task['plan_id'],
+            'lease_id': task['lease_id'], 'candidate_event_id': candidate['event_id'],
+            'candidate_attempt_id': worker['attempt_id'], 'patch_sha256': candidate['patch_sha256'],
+            'artifact': candidate['artifact'], 'patch': candidate['patch'], 'commit': commit,
+            'tree': tree, 'base': base, 'review_gate': snapshot['review_gate']}
+
+
+def _accepted_review_snapshot(repo, execution, owner, task_id, verify, record, landed_commit):
+    task = _owned_task(repo, execution, owner, task_id)
+    finished_retry = (task.get('state') == 'done' and isinstance(task.get('landing'), dict)
+                      and task['landing'].get('sha') == landed_commit)
+    if ((task.get('state') != 'review' and not finished_retry)
+            or task.get('review_lease_id') != task.get('lease_id')
+            or record.get('task_id') != task_id or record.get('plan_id') != task.get('plan_id')
+            or record.get('lease_id') != task.get('lease_id')):
+        raise ValueError('stored acceptance does not match the reviewed task and lease')
+    if not verify or verify.replace('\r', '') != task.get('verify', '').replace('\r', ''):
+        raise ValueError('--verify does not match the plan task verify contract')
+    main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
+    _, _, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
+    if len(workers) != 1 or workers[0].get('task_id') != task_id:
+        raise ValueError('accepted task no longer has one unique worker candidate')
+    worker = workers[0]
+    candidates = [row for row in rows if row.get('kind') == 'delegate' and row.get('task_id') == task_id
+                  and row.get('attempt_id') == worker.get('attempt_id') and row.get('patch_sha256')]
+    if (len(candidates) != 1 or candidates[0].get('exit') != 0
+            or worker.get('parent_attempt_id') != main_id
+            or worker.get('refs', {}).get('panel_lease_id') != task.get('lease_id')
+            or candidates[0].get('plan_id') != task.get('plan_id')):
+        raise ValueError('accepted candidate is ambiguous or no longer matches the task lease')
+    candidate = candidates[0]
+    gates = _review_preflight(repo, task_id, workers, rows, admissions)
+    current = {'task': task, 'candidate': candidate, 'worker': worker, 'review_gate': gates[0]}
+    if (candidate.get('event_id') != record.get('candidate_event_id')
+            or worker.get('attempt_id') != record.get('candidate_attempt_id')
+            or candidate.get('patch_sha256') != record.get('patch_sha256')
+            or candidate.get('artifact') != record.get('artifact')
+            or candidate.get('patch') != record.get('patch')
+            or current['review_gate'] != record.get('review_gate')):
+        raise ValueError('accepted candidate or digest-bound review gate changed')
+    if hashlib.sha256(verified_patch(repo, candidate)).hexdigest() != record.get('patch_sha256'):
+        raise ValueError('accepted candidate patch digest changed')
+    return current
+
+
+def _accept_recovery(snapshot, repo, execution, owner, task_id, verify, message,
+                     base, expected_tree, committed):
+    task, candidate = snapshot['task'], snapshot['candidate']
+    git = 'git --literal-pathspecs -C %s' % shlex.quote(str(execution))
+    args = {'repo': str(repo), 'execution': str(execution), 'owner': owner, 'task_id': task_id,
+            'verify': verify, 'message': message, 'base': base, 'tree': expected_tree,
+            'patch_sha256': candidate['patch_sha256'], 'committed': committed,
+            'identity': _accept_identity(snapshot)}
+    helper = ('import json,os,sys;sys.path.insert(0,os.path.dirname(sys.argv[1]));'
+              'import panel_results;panel_results._accept_recover(json.loads(sys.argv[2]))')
+    command = ('python3 -c %s %s %s' % (shlex.quote(helper), shlex.quote(str(ROOT / 'scripts/lib/panel_results.py')),
+                                        shlex.quote(json.dumps(args, sort_keys=True, separators=(',', ':')))))
+    review = 'oms agent-plan --repo %s review --id %s --lease-id %s --artifact %s --patch %s' % (
+        shlex.quote(str(execution)), shlex.quote(task['id']), shlex.quote(task['lease_id']),
+        shlex.quote(candidate['artifact']), shlex.quote(candidate['patch']))
+    commands = []
+    if not committed:
+        commands.append(git + ' add -- ' + ' '.join(shlex.quote(path) for path in _patch_paths(verified_patch(repo, candidate))))
+    commands.append(command + ' # records ' + review + ' after exact-tree and authority checks')
+    return '\n'.join(commands)
+
+
+def _accept_recover(args):
+    """Finish an interrupted accept only after rechecking current authority and exact bytes."""
+    repo, execution, owner, task_id = args['repo'], Path(args['execution']), args['owner'], args['task_id']
+    with _accept_lock(repo, execution):
+        snapshot = _accept_preflight(repo, execution, owner, task_id, args['verify'],
+                                     args['patch_sha256'], applied=True)
+        task, candidate = snapshot['task'], snapshot['candidate']
+        expected_head = args.get('committed') or args['base']
+        if (_git(execution, 'rev-parse', 'HEAD').decode().strip() != expected_head
+                or _accept_identity(snapshot) != args['identity']
+                or hashlib.sha256(verified_patch(repo, candidate)).hexdigest() != args['patch_sha256']):
+            raise ValueError('current HEAD, lease or candidate digest differs from the interrupted accept')
+        if args.get('committed'):
+            commit = args['committed']
+            if (_git(execution, 'rev-parse', commit + '^').decode().strip() != args['base']
+                    or _git(execution, 'rev-parse', commit + '^{tree}').decode().strip() != args['tree']
+                    or _git(execution, 'rev-parse', 'HEAD').decode().strip() != commit
+                    or _git(execution, 'write-tree').decode().strip() != args['tree']
+                    or _git(execution, 'status', '--porcelain', '--untracked-files=all')):
+                raise ValueError('existing commit is not the exact interrupted acceptance')
+        else:
+            if _git(execution, 'write-tree').decode().strip() != args['tree']:
+                raise ValueError('staged tree is not the exact reviewed candidate; recovery refused')
+            if (_git(execution, 'diff', '--name-only') or _git(execution, 'ls-files', '--others', '--exclude-standard')):
+                raise ValueError('recovery tree has unstaged or unrelated untracked files')
+            commit = _exact_commit_tree(execution, args['base'], args['tree'], args['message'],
+                authority_check=lambda: _accept_recheck(repo, execution, owner, task_id, args['verify'],
+                                                        args['patch_sha256'], snapshot))
+        _accept_recheck(repo, execution, owner, task_id, args['verify'], args['patch_sha256'], snapshot)
+        record = _accept_record(snapshot, args['base'], args['tree'], commit)
+        _plan_command(execution, 'review', '--id', task_id, '--lease-id', task['lease_id'],
+                      '--artifact', candidate['artifact'], '--patch', candidate['patch'], panel_accept=record)
+        return commit
+
+
+def _patch_id(execution, patch):
+    patch_id = subprocess.run(['git', '-C', str(execution), 'patch-id', '--stable'], input=patch,
+                              capture_output=True, check=False, timeout=60)
+    if patch_id.returncode:
+        raise ValueError('cannot calculate patch identity for acceptance binding')
+    rows = patch_id.stdout.decode('ascii', 'replace').splitlines()
+    return rows[0].split()[0] if rows and rows[0].split() else ''
+
+
+def _commit_patch_id(execution, commit):
+    parent = _git(execution, 'rev-parse', commit + '^').decode().strip()
+    diff = subprocess.run(['git', '-C', str(execution), 'diff', '--binary', '--no-ext-diff',
+                           '--no-renames', parent, commit, '--'],
+                          stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=60)
+    if diff.returncode:
+        raise ValueError('cannot inspect commit patch for acceptance binding')
+    return _patch_id(execution, diff.stdout)
+
+
+def _tree_patch_id(execution, base, tree):
+    diff = subprocess.run(['git', '-C', str(execution), 'diff', '--binary', '--no-ext-diff',
+                           '--no-renames', base, tree, '--'],
+                          stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=60)
+    if diff.returncode:
+        raise ValueError('cannot inspect the accepted tree patch for publication binding')
+    return _patch_id(execution, diff.stdout)
+
+
+def _replay_patch_tree(execution, base, patch):
+    with tempfile.TemporaryDirectory(prefix='oms-panel-accepted-tree-') as directory:
+        patch_path = Path(directory) / 'candidate.patch'
+        patch_path.write_bytes(patch)
+        index_env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / 'index'))
+        _git(execution, 'read-tree', base, env=index_env)
+        _git(execution, 'apply', '--cached', '--binary', str(patch_path), env=index_env)
+        return _git(execution, 'write-tree', env=index_env).decode().strip()
+
+
+def _ensure_accept_tree(execution, record, patch):
+    tree = _replay_patch_tree(execution, record['base'], patch)
+    if tree != record['tree']:
+        raise ValueError('stored accepted tree no longer matches the reviewed patch')
+
+
+def _publication_contains_acceptance(execution, landed_commit, record, patch):
+    accepted = record['commit']
+    _ensure_accept_tree(execution, record, patch)
+    accepted_patch = _tree_patch_id(execution, record['base'], record['tree'])
+    if not accepted_patch:
+        raise ValueError('accepted patch has no patch identity')
+    accepted_object = subprocess.run(['git', '-C', str(execution), 'cat-file', '-e', accepted + '^{commit}'],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, check=False, timeout=30)
+    if accepted_object.returncode == 0:
+        ancestor = subprocess.run(['git', '-C', str(execution), 'merge-base', '--is-ancestor',
+                                   accepted, landed_commit], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=60)
+        if ancestor.returncode == 0:
+            return
+        if ancestor.returncode not in (1,):
+            raise ValueError('cannot verify accepted commit ancestry in the publication')
+    elif accepted_object.returncode != 1:
+        raise ValueError('cannot inspect the accepted commit object')
+    paths = _patch_paths(patch)
+    if not paths:
+        raise ValueError('accepted patch has no paths for rebased publication validation')
+    git_env = dict(os.environ, GIT_LITERAL_PATHSPECS='1', GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='')
+    history = subprocess.run(['git', '-C', str(execution), 'log', '--no-merges', '--format=%H',
+                              landed_commit, '--', *paths], env=git_env, stdin=subprocess.DEVNULL,
+                             capture_output=True, check=False, timeout=60)
+    if history.returncode:
+        raise ValueError('cannot inspect published history for the accepted patch')
+    for commit in history.stdout.decode('ascii', 'replace').splitlines():
+        if commit:
+            try:
+                if _commit_patch_id(execution, commit) != accepted_patch:
+                    continue
+                parent = _git(execution, 'rev-parse', commit + '^').decode().strip()
+                candidate_tree = _git(execution, 'rev-parse', commit + '^{tree}').decode().strip()
+                if _replay_patch_tree(execution, parent, patch) == candidate_tree:
+                    return
+            except (OSError, ValueError, subprocess.SubprocessError):
+                # A shallow or incomplete local history cannot prove this commit exact.
+                continue
+    raise ValueError('published SHA does not contain the accepted commit or an exact replay of the reviewed patch')
+
+
+def _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_commit):
+    task = _owned_task(repo, execution, owner, task_id)
+    record = task.get('panel_accept')
+    required = {'schema', 'task_id', 'plan_id', 'lease_id', 'candidate_event_id',
+                'candidate_attempt_id', 'patch_sha256', 'artifact', 'patch', 'commit', 'tree', 'base',
+                'review_gate'}
+    if (not isinstance(record, dict) or set(record) != required or type(record.get('schema')) is not int
+            or record.get('schema') != 1
+            or record.get('task_id') != task_id or record.get('plan_id') != task.get('plan_id')
+            or record.get('lease_id') != task.get('lease_id')
+            or task.get('review_lease_id') != task.get('lease_id')):
+        raise ValueError('task has no exact panel acceptance bound to its current lease')
+    snapshot = _accepted_review_snapshot(repo, execution, owner, task_id, verify, record, landed_commit)
+    commit = record['commit']
+    if (any(not isinstance(record.get(key), str) for key in ('commit', 'tree', 'base'))
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit)
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', record['tree'])
+            or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', record['base'])):
+        raise ValueError('stored panel acceptance has malformed commit identity')
+    patch = verified_patch(repo, snapshot['candidate'])
+    accepted_object = subprocess.run(['git', '-C', str(execution), 'cat-file', '-e', commit + '^{commit}'],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, check=False, timeout=30)
+    if accepted_object.returncode == 0:
+        if (_git(execution, 'rev-parse', commit + '^').decode().strip() != record['base']
+                or _git(execution, 'rev-parse', commit + '^{tree}').decode().strip() != record['tree']):
+            raise ValueError('stored accepted commit no longer matches its recorded tree and base')
+    elif accepted_object.returncode != 1:
+        raise ValueError('cannot inspect the accepted commit object')
+    _publication_contains_acceptance(execution, landed_commit, record, patch)
+    return record
+
+
+def accept(repo, owner, task_id, message, verify, expected_patch_sha256=None, execution_repo=None):
+    """Apply one reviewed candidate and commit locally; publication remains explicit."""
+    _owner()
+    execution = _execution_repo(repo, execution_repo)
+    if not message or not message.strip() or '\0' in message:
+        raise ValueError('accept requires a nonblank commit message')
+    if expected_patch_sha256 is not None and not re.fullmatch(r'[0-9a-f]{64}', expected_patch_sha256):
+        raise ValueError('expected patch digest must be a lowercase SHA-256')
+    with _accept_lock(repo, execution):
+        base = _git(execution, 'rev-parse', 'HEAD').decode().strip()
+        if _git(execution, 'status', '--porcelain', '--untracked-files=all'):
+            raise ValueError('dirty integration tree; accept refused before application')
+        snapshot = _accept_preflight(repo, execution, owner, task_id, verify, expected_patch_sha256)
+        candidate = snapshot['candidate']
+        stage, committed = 'application', None
+        with tempfile.TemporaryDirectory(prefix='oms-panel-accept-') as directory:
+            patch_path = Path(directory) / 'candidate.patch'
+            patch_path.write_bytes(verified_patch(repo, candidate))
+            index_env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / 'index'))
+            _git(execution, 'read-tree', base, env=index_env)
+            _git(execution, 'apply', '--cached', '--binary', str(patch_path), env=index_env)
+            expected_tree = _git(execution, 'write-tree', env=index_env)
+            try:
+                result = subprocess.run(['bash', str(ROOT / 'scripts/patch-land.sh'), '--repo', str(execution),
+                    '--patch', str(patch_path), '--verify', verify, '--panel-accept',
+                    json.dumps(dict(snapshot=snapshot, owner=owner, task_id=task_id, base=base))],
+                    stdin=subprocess.DEVNULL, stdout=sys.stderr, check=False)
+                if result.returncode:
+                    raise ValueError('patch-land failed; use existing patch-land --recover for incomplete receipts')
+                stage = 'commit'
+                _accept_recheck(repo, execution, owner, task_id, verify, candidate['patch_sha256'], snapshot)
+                if _git(execution, 'rev-parse', 'HEAD').decode().strip() != base:
+                    raise ValueError('HEAD changed after application')
+                _git(execution, '--literal-pathspecs', 'add', '--all', '--', *_patch_paths(patch_path))
+                if _git(execution, 'write-tree') != expected_tree or _git(execution, 'diff', '--name-only'):
+                    raise ValueError('applied/index changes differ from the reviewed patch')
+                if _git(execution, 'ls-files', '--others', '--exclude-standard'):
+                    raise ValueError('integration tree gained unrelated untracked files')
+                try:
+                    committed = _exact_commit_tree(execution, base, expected_tree.decode().strip(), message,
+                        authority_check=lambda: _accept_recheck(repo, execution, owner, task_id, verify,
+                                                                candidate['patch_sha256'], snapshot))
+                except _ExactCommitPublished as error:
+                    committed = error.sha
+                    raise
+                stage = 'plan review'
+                if (_git(execution, 'rev-parse', 'HEAD^').decode().strip() != base
+                        or _git(execution, 'rev-parse', 'HEAD^{tree}').strip() != expected_tree.strip()
+                        or _git(execution, 'status', '--porcelain', '--untracked-files=all')):
+                    raise ValueError('committed tree or HEAD differs from the reviewed application')
+                _accept_recheck(repo, execution, owner, task_id, verify, candidate['patch_sha256'], snapshot)
+                record = _accept_record(snapshot, base, expected_tree.decode().strip(), committed)
+                try:
+                    _plan_command(execution, 'review', '--id', task_id, '--lease-id', snapshot['task']['lease_id'],
+                                  '--artifact', candidate['artifact'], '--patch', candidate['patch'],
+                                  panel_accept=record)
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    raise _AcceptAuthorityChanged('plan review compare-and-set failed: %s' % error) from error
+            except _AcceptAuthorityChanged as error:
+                head = committed or _git(execution, 'rev-parse', 'HEAD').decode().strip()
+                recovery = _accept_recovery(snapshot, repo, execution, owner, task_id, verify, message,
+                                            base, expected_tree.decode().strip(), committed)
+                raise ValueError('accept %s failed; HEAD %s; authority changed after application for reviewed '
+                                 'patch SHA %s: %s\n'
+                                 'Recovery after confirming the reviewed bytes are still present; do not reapply:\n%s'
+                                 % (stage, head, candidate['patch_sha256'], error, recovery)) from error
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                head = committed or _git(execution, 'rev-parse', 'HEAD').decode().strip()
+                raise ValueError('accept %s failed; HEAD %s; preserve state, never reapply blindly: %s'
+                                 % (stage, head, error)) from error
+        return {'sha': committed, 'task_id': task_id, 'patch_sha256': candidate['patch_sha256']}
+
+
+def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify, verify_timeout, execution):
     main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
     with _lock(repo):
         evidence_refs = [dict(ref) for ref in refs]
@@ -685,52 +1276,14 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
             repo, owner, task_id, main_id, evidence_refs)
         binding = snapshot['binding']
         if outcome == 'accepted':
-            for worker in workers:
-                owns = _worker_owns(repo, worker)
-                if not owns:
-                    continue
-                patches = [r for r in rows if r.get('kind') == 'delegate'
-                           and r.get('attempt_id') == worker.get('attempt_id') and r.get('patch_sha256')]
-                for row in patches:
-                    drift = _scope_drift(_patch_paths(verified_patch(repo, row)), owns)
-                    if drift:
-                        raise ValueError('write worker patch has %s path(s) outside its declared scope: %s'
-                                         % (len(drift), ', '.join(drift[:8])))
-        if outcome == 'accepted' and any(not item for item in admissions):
-            raise ValueError('write worker needs matching landed patch evidence')
-        if outcome == 'accepted':
-            missing_reviews = []
-            for worker, admission in zip(workers, admissions):
-                if not admission:
-                    continue
-                digest = admission.get('patch_sha256')
-                matching_reviews = [
-                    row for row in rows
-                    if row.get('kind') == 'review-outcome'
-                    and (row.get('task_id') == task_id
-                         or (not worker.get('task_id') and not row.get('task_id')))
-                    and isinstance(row.get('review'), dict)
-                    and isinstance(row['review'].get('candidate'), dict)
-                    and row['review']['candidate'].get('patch_sha256') == digest]
-                latest_review = matching_reviews[-1] if matching_reviews else None
-                passing = (latest_review is not None
-                           and latest_review.get('exit') == 0
-                           and latest_review['review'].get('gate_verify_exit') == 0
-                           and isinstance(latest_review['review'].get('seats'), list)
-                           and bool(latest_review['review']['seats'])
-                           and all(isinstance(seat, dict) and seat.get('verdict') == 'pass'
-                                   for seat in latest_review['review']['seats']))
-                if not passing:
-                    missing_reviews.append(worker.get('attempt_id', 'unknown'))
-            if missing_reviews:
-                raise ValueError('write worker call(s) lack a passing review gate: %s; run the review or finalize completed instead'
-                                 % ', '.join(missing_reviews))
+            _review_preflight(repo, task_id, workers, rows, admissions)
         if outcome == 'accepted' and (not verify or not refs):
             raise ValueError('accepted requires an evidence reference and a passing verifier')
     verification = {'status': 'not_run'}
     if verify:
         # Output remains local; a verifier transcript is never exported as a summary.
-        verified = _run_verifier(repo, verify, verify_timeout)
+        verified = (_run_verifier(repo, verify, verify_timeout) if execution == repo
+                    else _run_verifier(execution, verify, verify_timeout, evidence_repo=repo))
         verify_exit = verified['exit']
         verification = {'status': 'passed' if verify_exit == 0 else 'failed',
                         'exit': verify_exit, 'command_sha256': hashlib.sha256(verify.encode()).hexdigest()}
@@ -786,6 +1339,42 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         if outcome == 'accepted':
             _plan_hint(repo, task_id, any(current['admissions']))
         return dict(payload, artifact=relative, delivery=delivery, settlement=settlement)
+
+
+def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False,
+             verify_timeout=1800, execution_repo=None, landed_commit=None):
+    _owner()
+    if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed', 'rejected'):
+        raise ValueError('invalid owner result')
+    if landed_commit is not None and outcome not in ('accepted', 'completed'):
+        raise ValueError('--landed-commit requires --outcome accepted or completed')
+    if isinstance(verify_timeout, bool) or not isinstance(verify_timeout, int) or not 1 <= verify_timeout <= 86400:
+        raise ValueError('verify timeout must be between 1 and 86400 seconds')
+    summary = _safe_summary(summary_file, repo)
+    refs = [_relative(repo, value) for value in (evidence or [])] if not isinstance(evidence, str) else [_relative(repo, evidence)]
+    if len(refs) > 8:
+        raise ValueError('use at most eight evidence references')
+    execution = _execution_repo(repo, execution_repo)
+    if landed_commit is not None:
+        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', landed_commit):
+            raise ValueError('--landed-commit must be a full lowercase commit SHA')
+        with _accept_lock(repo, execution):
+            task = _owned_task(repo, execution, owner, task_id)
+            _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_commit)
+            try:
+                _plan_command(execution, 'finish', '--id', task_id, '--lease-id', task['lease_id'],
+                              '--landed-commit', landed_commit)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                raise ValueError('finish failed; SHA %s; retry finish only after validating completion: %s'
+                                 % (landed_commit, error)) from error
+    try:
+        return _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify,
+                                verify_timeout, execution)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if landed_commit is not None:
+            raise ValueError('finalization failed after plan finish; SHA %s; retry only --finalize after '
+                             'confirming exact completion: %s' % (landed_commit, error)) from error
+        raise
 
 
 def retry_delivery(repo, task_id, revision=None):

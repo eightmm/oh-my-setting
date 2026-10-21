@@ -530,6 +530,100 @@ def state_repo():
     """The checkout that owns plan state; a parent's scratch worktree shares the main checkout's."""
     return os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
 
+def panel_accept_record(task_id, task, plan_id, record_input=None, from_task=False,
+                        allow_missing_commit=False):
+    raw = env("OMS_PANEL_ACCEPT_RECORD_JSON") if record_input is None else record_input
+    if not raw:
+        return None
+    try:
+        record = raw if isinstance(raw, dict) else json.loads(raw)
+    except (TypeError, ValueError):
+        die("panel acceptance record is malformed")
+    required = {"schema", "task_id", "plan_id", "lease_id", "candidate_event_id",
+                "candidate_attempt_id", "patch_sha256", "artifact", "patch", "commit", "tree", "base",
+                "review_gate"}
+    if (not isinstance(record, dict) or set(record) != required or
+            type(record.get("schema")) is not int or record["schema"] != 1 or
+            record.get("task_id") != task_id or record.get("plan_id") != plan_id or
+            record.get("lease_id") != task.get("lease_id") or
+            not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", str(record.get("candidate_event_id", ""))) or
+            not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", str(record.get("candidate_attempt_id", ""))) or
+            not re.fullmatch(r"[0-9a-f]{64}", str(record.get("patch_sha256", ""))) or
+            not isinstance(record.get("review_gate"), dict) or
+            record["review_gate"].get("patch_sha256") != record.get("patch_sha256") or
+            not isinstance(record["review_gate"].get("event_id"), str) or
+            record["review_gate"].get("exit") != 0 or record["review_gate"].get("gate_verify_exit") != 0 or
+            not isinstance(record["review_gate"].get("seat_verdicts"), list) or
+            not record["review_gate"]["seat_verdicts"] or
+            any(verdict != "pass" for verdict in record["review_gate"]["seat_verdicts"]) or
+            any(not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(record.get(key, "")))
+                for key in ("commit", "tree", "base"))):
+        die("panel acceptance record does not match the current task, plan or lease")
+    for key in ("artifact", "patch"):
+        rel = clean_rel(record.get(key), "panel acceptance %s" % key)
+        expected = task.get(key, "") if from_task else env("OMS_ARTIFACT" if key == "artifact" else "OMS_PATCH")
+        if rel != record[key] or rel != expected:
+            die("panel acceptance %s differs from the reviewed task evidence" % key)
+    patch_path = os.path.join(state_repo(), *record["patch"].split("/"))
+    patch = read_regular_bytes(patch_path, "panel acceptance patch", 1024 * 1024)
+    if hashlib.sha256(patch).hexdigest() != record["patch_sha256"]:
+        die("panel acceptance patch digest changed")
+    repo = env("OMS_REPO")
+    try:
+        found = subprocess.run(["git", "-C", repo, "cat-file", "-e", record["commit"] + "^{commit}"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=False, timeout=30)
+        if found.returncode == 0:
+            commit = subprocess.check_output(["git", "-C", repo, "rev-parse", "--verify", record["commit"] + "^{commit}"],
+                                             stderr=subprocess.DEVNULL, timeout=30).decode().strip()
+            parent = subprocess.check_output(["git", "-C", repo, "rev-parse", commit + "^"],
+                                             stderr=subprocess.DEVNULL, timeout=30).decode().strip()
+            tree = subprocess.check_output(["git", "-C", repo, "rev-parse", commit + "^{tree}"],
+                                           stderr=subprocess.DEVNULL, timeout=30).decode().strip()
+            parents = subprocess.check_output(["git", "-C", repo, "rev-list", "--parents", "-n", "1", commit],
+                                              stderr=subprocess.DEVNULL, timeout=30).decode().split()
+            if (commit != record["commit"] or parent != record["base"] or tree != record["tree"] or
+                    len(parents) != 2 or parents[1] != record["base"]):
+                die("panel acceptance commit tree does not exactly contain the reviewed patch")
+        elif found.returncode != 1 or not allow_missing_commit:
+            die("panel acceptance commit is unavailable")
+        with tempfile.TemporaryDirectory(prefix="oms-plan-panel-accept-") as directory:
+            index = os.path.join(directory, "index")
+            patch_file = os.path.join(directory, "candidate.patch")
+            with open(patch_file, "wb") as handle:
+                handle.write(patch)
+            git_env = dict(os.environ, GIT_INDEX_FILE=index)
+            subprocess.check_call(["git", "-C", repo, "read-tree", record["base"]],
+                                  env=git_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=30)
+            subprocess.check_call(["git", "-C", repo, "apply", "--cached", "--binary", patch_file],
+                                  env=git_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=30)
+            expected_tree = subprocess.check_output(["git", "-C", repo, "write-tree"], env=git_env,
+                                                   stderr=subprocess.DEVNULL, timeout=30).decode().strip()
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        die("panel acceptance commit or patch is unavailable: %s" % exc)
+    if expected_tree != record["tree"]:
+        die("panel acceptance commit tree does not exactly contain the reviewed patch")
+    return record
+
+def require_panel_acceptance_publication(task_id, task, plan_id, landed_commit):
+    if "panel_accept" not in task:
+        return
+    if task.get("review_lease_id") != task.get("lease_id"):
+        die("task %s panel acceptance does not match its reviewed lease" % task_id)
+    record = panel_accept_record(task_id, task, plan_id, task.get("panel_accept"),
+                                 from_task=True, allow_missing_commit=True)
+    if record is None:
+        die("task %s panel acceptance record is missing" % task_id)
+    patch_path = os.path.join(state_repo(), *record["patch"].split("/"))
+    patch_bytes = read_regular_bytes(patch_path, "panel acceptance patch", 1024 * 1024)
+    try:
+        from panel_results import _publication_contains_acceptance
+        _publication_contains_acceptance(env("OMS_REPO"), landed_commit, record, patch_bytes)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        die("task %s published SHA does not contain its exact accepted patch: %s" % (task_id, exc))
+
 def worker_marker_dir():
     repo_root = state_repo()
     expected = os.path.join(repo_root, ".oms", "delegations")
@@ -1351,6 +1445,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if t["state"] not in ("claimed", "running"):
             die("task %s is %s; only a claimed/running task can go to review" % (i, t["state"]))
         require_current_lease(t)
+        acceptance = panel_accept_record(i, t, d.get("plan_id"))
         executor_id = env("OMS_EXECUTOR_ID")
         executor_soul = env("OMS_EXECUTOR_SOUL_SHA256")
         if executor_id or executor_soul:
@@ -1359,6 +1454,10 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                  patch=env("OMS_PATCH") or t.get("patch", ""),
                  review_lease_id=t.get("lease_id", ""), executor_id=executor_id,
                  executor_soul_sha256=executor_soul, repair_artifact="")
+        if acceptance is not None:
+            t["panel_accept"] = acceptance
+        else:
+            t.pop("panel_accept", None)
     elif act == "repair":
         # A landing gate can reject already-reviewed work and ask for one
         # bounded repair. Reuse the exact lease that produced the review so no
@@ -1374,6 +1473,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("task %s review patch lease mismatch; repair is stale" % i)
         if not t.get("artifact") or not t.get("patch"):
             die("task %s review is missing artifact/patch evidence" % i)
+        t.pop("panel_accept", None)
         repair_count = t.get("repair_count", 0)
         if isinstance(repair_count, bool) or not isinstance(repair_count, int) or repair_count < 0:
             die("task %s has an invalid repair counter" % i)
@@ -1443,7 +1543,12 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("task %s executor review receipt changed during admission" % i)
         t["state"] = "landing"
     elif act == "finish" and env("OMS_LANDED_COMMIT"):
-        if t["state"] != "review":
+        retry = t["state"] == "done" and bool(env("OMS_LEASE_ID"))
+        prior = t.get("landing", {}) if retry else None
+        if retry and (not isinstance(prior, dict) or prior.get("sha") != env("OMS_LANDED_COMMIT")
+                      or not re.fullmatch(r"[0-9a-f]{64}", prior.get("receipt_sha256", ""))):
+            die("completed task does not match this exact landed commit/lease")
+        if t["state"] != "review" and not retry:
             die("task %s is %s; --landed-commit finish requires review" % (i, t["state"]))
         # A review recorded without evidence takes it here instead of a release and a new claim.
         t.update(artifact=env("OMS_ARTIFACT") or t.get("artifact", ""), patch=env("OMS_PATCH") or t.get("patch", ""))
@@ -1453,7 +1558,9 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         history = t.get("history", [])
         if not isinstance(history, list):
             die("task %s history must be a list" % i)
-        landing = commit_landing_proof(env("OMS_LANDED_COMMIT"))
+        landing = commit_landing_proof(env("OMS_LANDED_COMMIT"),
+                                       prior["receipt_sha256"] if retry else None)
+        require_panel_acceptance_publication(i, t, d.get("plan_id"), landing["sha"])
         allowed = t.get("allowed_paths") or []
         if allowed:
             try:
@@ -1467,6 +1574,11 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                     "changed: %s. Finish against the SHA whose land pushed this task's work"
                     % (landing["sha"], i, span, ", ".join(allowed),
                        ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "") or "nothing"))
+        if retry:
+            if landing != prior:
+                die("completed task landing proof changed")
+            # A finalize retry must not change the task hashed by its result.
+            sys.exit(0)
         history.append({"schema": 1, "kind": "finish", "ts": ts,
                         "state": "done", "landing": landing})
         t.update(state="done", landing=landing, history=history)

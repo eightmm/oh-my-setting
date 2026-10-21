@@ -908,6 +908,31 @@ oms panel --retry-delivery --task-id ID
 
 Accepted results also require a passing automatic reviewer gate for each landed write patch.
 
+For one reviewed worker result, the owning room main runs
+`oms panel --accept TASK --repo INTEGRATION_CLONE --message 'fix: description' --verify CMD`
+(optionally `--expected-patch-sha256 DIGEST`). It admits the unique candidate, commits only
+its patch, and records plan review: **committed locally; publication pending**. Run
+`oms land --repo INTEGRATION_CLONE` explicitly, then add `--repo INTEGRATION_CLONE
+--landed-commit SHA` to `--finalize`: publication proof finishes the plan before recording
+its result. Verification runs in that execution clone; evidence remains in the canonical
+state repository. Only clones recognized by the existing repository resolver are supported.
+Accepted outcomes still require matching landed-patch evidence and a passing review gate.
+`--landed-commit` is allowed only with `--outcome accepted` or `completed`. The post-apply
+fence compares the candidate identity and digest, plan task hash and lease, and passing review
+gate; heartbeat, usage and settlement updates alone do not invalidate it. Acceptance records its
+exact commit and tree with the task, lease, candidate digest and review gate. Publication must
+contain that commit or a rebased candidate whose tree exactly matches replay of the reviewed patch
+bytes; patch-ID only locates candidates. The locked plan finish enforces this binding for direct
+`agent-plan finish --landed-commit` calls too.
+The commit is built from the locked, verified index tree with a ref compare-and-swap, without commit
+hooks. If authority changes after application, recovery prints a literal-pathspec add command and
+a helper that repeats the current-authority and exact-tree checks before committing; inspect the
+reviewed bytes before running it and never reapply.
+The per-clone lock serializes callers sharing an integration clone; the plan lease compare-and-set
+remains the authority across clones. Use `patch-land --recover` for incomplete application
+receipts. If finish succeeds but result recording fails, retry only `--finalize` after confirming
+the exact task completion.
+
 Results lists the latest twenty retained tasks from at most 300 lifecycle
 attempts and 1000 artifact events. Selecting a task shows up to eight recent
 call records. Participant browsing selects that participant's tasks before

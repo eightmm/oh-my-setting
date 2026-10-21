@@ -39,7 +39,7 @@ from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_res
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
                            TIERS, WRITERS, newest_route_model, route_family)
-from panel_results import (DURABLE, _read, _write, _lock, finalize, outcomes, results, results_snapshot,
+from panel_results import (DURABLE, _read, _write, _lock, accept, finalize, outcomes, results, results_snapshot,
                            retry_delivery, verified_patch, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
 from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
@@ -382,6 +382,10 @@ def main(argv=None):
     parser.add_argument("--chats", action="store_true", help="read enrolled native chats and navigation capabilities")
     parser.add_argument("--open-chat", help="navigate to a selected room participant without starting a model turn")
     parser.add_argument("--chat-surface", choices=("auto", "terminal", "app"), default="auto")
+    parser.add_argument("--accept", metavar="TASK", help="commit one reviewed worker candidate locally; publication stays explicit")
+    parser.add_argument("--message", help="commit message for --accept")
+    parser.add_argument("--expected-patch-sha256", help="assert the reviewed candidate digest for --accept")
+    parser.add_argument("--landed-commit", help="finish the plan with a published SHA before --finalize")
     parser.add_argument("--finalize", action="store_true", help="record an owner result")
     parser.add_argument("--settle-review", action="store_true", help="list stopped review workers; --apply closes eligible attempts")
     parser.add_argument("--apply", action="store_true", help="apply --settle-review (default: dry run)")
@@ -416,7 +420,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
     if args.settle_review:
-        if args.finalize or args.results or args.retry_delivery:
+        if args.accept or args.finalize or args.results or args.retry_delivery:
             parser.error("--settle-review cannot be combined with result actions")
         return review_settlement.cli_main(arguments)
     if args.salvage is not None:
@@ -444,10 +448,10 @@ def main(argv=None):
     if args.alias is not None and not args.dispatch:
         parser.error("--alias requires --dispatch")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
-                                     args.council, args.results, args.finalize, args.retry_delivery, args.providers,
+                                     args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health, args.mail, args.metrics)) > 1:
         parser.error("choose one panel operation")
-    if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.finalize):
+    if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.accept or args.finalize):
         parser.error("--json is only available for panel state or results")
     if args.open_chat and args.json and not args.dry_run:
         parser.error("chat navigation JSON requires --dry-run")
@@ -464,8 +468,8 @@ def main(argv=None):
     if args.watch and (args.launch or args.json or args.dry_run):
         parser.error("--watch is a read-only view; cannot combine with launch, JSON or dry-run")
     # A main names itself on every panel call; reading results accepts that identity without filtering by it.
-    if args.owner is not None and not (args.watch or args.dispatch or args.council or args.finalize or args.results):
-        parser.error("--owner requires --watch, --dispatch, --council, --finalize or --results")
+    if args.owner is not None and not (args.watch or args.dispatch or args.council or args.accept or args.finalize or args.results):
+        parser.error("--owner requires --watch, --dispatch, --council, --accept, --finalize or --results")
     if args.count is not None and not args.watch:
         parser.error("--count requires --watch")
     if args.no_animation and not args.watch:
@@ -475,7 +479,7 @@ def main(argv=None):
     if args.swap_main and (args.dry_run or args.host not in {"auto", "tmux"} or args.layout == "inline"):
         parser.error("--swap-main requires an existing tmux panel and has no dry-run")
     if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.swap_main or args.reopen or args.json or args.dry_run or args.routes
-            or args.dispatch or args.council or args.results or args.finalize or args.retry_delivery or args.providers
+            or args.dispatch or args.council or args.results or args.accept or args.finalize or args.retry_delivery or args.providers
             or args.chats or args.open_chat or args.mail or args.metrics):
         parser.error("--view and --attention-only apply to the interactive menu or --watch")
     if (args.brief_file or args.purpose or args.access != "read" or
@@ -483,8 +487,8 @@ def main(argv=None):
         parser.error("role task options require --dispatch")
     if args.prompt and not (args.dispatch or args.council):
         parser.error("--prompt requires --dispatch or --council")
-    if args.verify and not (args.dispatch or args.finalize):
-        parser.error("--verify requires --dispatch or --finalize")
+    if args.verify and not (args.dispatch or args.accept or args.finalize):
+        parser.error("--verify requires --dispatch, --accept or --finalize")
     if args.task_id and not (args.dispatch or args.council or args.results or args.finalize or args.retry_delivery):
         parser.error("--task-id requires a task operation")
     if args.main and not args.dispatch:
@@ -508,10 +512,18 @@ def main(argv=None):
         parser.error("--retry-delivery requires --task-id")
     if args.result_id and not args.retry_delivery:
         parser.error("--result-id requires --retry-delivery")
-    if args.dry_run and (args.results or args.finalize or args.retry_delivery or args.providers or args.chats):
+    if args.dry_run and (args.results or args.accept or args.finalize or args.retry_delivery or args.providers or args.chats):
         parser.error("--dry-run only plans a launch, role dispatch or council")
+    if (args.message is not None or args.expected_patch_sha256 is not None) and not args.accept:
+        parser.error("--message and --expected-patch-sha256 require --accept")
+    if args.accept is not None and (not args.accept or not (args.repo and args.message and args.verify) or args.task_id):
+        parser.error("--accept TASK requires --repo, --message and --verify; takes no --task-id")
+    if args.landed_commit is not None and not args.finalize:
+        parser.error("--landed-commit requires --finalize")
     if args.finalize and not (args.task_id and args.summary_file and args.outcome and args.owner):
         parser.error("--finalize requires --owner, --task-id, --summary-file and --outcome")
+    if args.landed_commit is not None and args.outcome not in ("accepted", "completed"):
+        parser.error("--landed-commit requires --outcome accepted or completed")
     if args.council and not (args.task_id and args.label and args.prompt):
         parser.error("--council requires --task-id, --label and --prompt")
     if (args.to or args.reasoning_effort) and not args.dispatch:
@@ -701,10 +713,17 @@ def main(argv=None):
             else:
                 print(reader(shutil.get_terminal_size().columns))
             return 0
+        if args.accept:
+            report = accept(repo, args.owner or caller_owner(), args.accept, args.message, args.verify,
+                            args.expected_patch_sha256, execution_repo=execution)
+            print("committed locally; publication pending: " + report['sha'])
+            print("Next: oms land --repo " + shlex.quote(str(execution)))
+            return 0
         if args.finalize:
             report = finalize(repo, args.owner, args.task_id, args.summary_file, args.outcome,
                               args.verify, args.evidence, args.notify,
-                              1800 if args.verify_timeout is None else args.verify_timeout)
+                              1800 if args.verify_timeout is None else args.verify_timeout,
+                              execution_repo=execution, landed_commit=args.landed_commit)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
         if args.retry_delivery:

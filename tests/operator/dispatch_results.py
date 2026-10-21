@@ -1401,6 +1401,529 @@ call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 
      dict(environment, OMS_TASK_ID="panel-route-3", OMS_ATTEMPT_ID="att_panel_route_3_review",
           OMS_INDEX_REVIEW_OUTCOME_JSON=review_payload))
 assert json.loads(call(write_finalize))["outcome"] == "accepted"
+# BEGIN reviewed-result acceptance composition (uses only disposable Git fixtures).
+accept_repo = temporary / "accept state repo"
+subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(project), str(accept_repo)], check=True)
+for key, value in (("user.name", "accept fixture"), ("user.email", "accept@example.com")):
+    subprocess.run(["git", "-C", str(accept_repo), "config", key, value], check=True)
+accept_env = dict(environment, OMS_AGENT="codex", OMS_ROOM_REPO=str(accept_repo),
+                  OMS_ROOM_ID="accept-room", OMS_ROOM_PARTICIPANT="accept-main")
+for key in ("OMS_STATE_REPO", "OMS_PLAN_FILE", "OMS_PANEL_MAIN_ATTEMPT", "OMS_PANEL_EXECUTION_ROOT",
+            "OMS_ATTEMPT_ID", "OMS_TASK_ID", "OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"):
+    accept_env.pop(key, None)
+def accept_call(verb, *arguments, check=True, execution=None, env=None):
+    options = ["--repo", str(execution or accept_repo)]
+    command = (["bash", str(panel.ENTRY), verb, *arguments, *options] if verb == "scratch-worktree"
+               else ["bash", str(panel.ENTRY), verb, *options, *arguments])
+    result = subprocess.run(command,
+                            env=env or accept_env, cwd=accept_repo, capture_output=True, text=True, timeout=90)
+    if check:
+        assert result.returncode == 0, (verb, arguments, result.stdout, result.stderr)
+    return result
+with patch.dict(os.environ, accept_env, clear=True):
+    room.create(accept_repo, "accept-room", "Acceptance composition")
+    room.join(accept_repo, "accept-room", "accept-main", "codex", "main")
+accept_env["OMS_PANEL_MAIN_ATTEMPT"] = accept_call("agent-events", "start", "--provider", "codex",
+    "--tool", "panel-main", "--ref", "panel_role=main", "--ref", "panel_room_id=accept-room",
+    "--ref", "panel_room_participant=accept-main", "--then", "starting", "--then", "working").stdout.strip()
+accept_call("agent-plan", "init", "--goal", "Review one worker result")
+import shlex
+accept_admission_hook = temporary / "accept-admission-hook.sh"
+accept_verify = 'if [ -f %s ]; then bash %s; fi; test "$(tail -1 value.txt)" = accepted' % (
+    shlex.quote(str(accept_admission_hook)), shlex.quote(str(accept_admission_hook)))
+accept_call("agent-plan", "add", "--id", "accept-task", "--title", "Accept fixture",
+            "--allowed", "value.txt,literal[*].txt", "--verify", accept_verify)
+accept_call("agent-plan", "claim", "--id", "accept-task", "--provider", "codex")
+accept_task = json.loads(accept_call("agent-plan", "evidence-snapshot", "--id", "accept-task").stdout)
+accept_call("agent-plan", "start", "--id", "accept-task", "--lease-id", accept_task["lease_id"])
+accept_execution = Path(accept_call("scratch-worktree", "add", "--owner-pid", str(os.getpid())).stdout.strip())
+# The scratch inherits author config through the existing shared Git metadata.
+accept_worker = accept_call("agent-events", "start", "--provider", "local", "--tool", "peer-delegate",
+    "--task-id", "accept-task", "--parent-attempt-id", accept_env["OMS_PANEL_MAIN_ATTEMPT"],
+    "--ref", "panel_role=worker", "--ref", "panel_access=write", "--ref", "panel_lease_id=" + accept_task["lease_id"],
+    "--then", "starting", "--then", "working", "--then", "verifying", "--then", "review").stdout.strip()
+accept_artifact = accept_repo / ".oms/artifacts/fixture/accept.md"
+accept_artifact.parent.mkdir(parents=True, exist_ok=True)
+accept_artifact.write_text("## Output\nReviewed fixture.\n## Exit\n0\n")
+accept_patch = accept_artifact.with_suffix(".patch")
+(accept_repo / "value.txt").write_text("old\naccepted\n")
+(accept_repo / "literal*.txt").write_text("old\naccepted\n")
+subprocess.run(["git", "--literal-pathspecs", "-C", str(accept_repo), "add", "-N", "--", "literal*.txt"],
+               check=True)
+accept_patch.write_bytes(subprocess.check_output(["git", "-C", str(accept_repo), "diff", "--binary"]))
+(accept_repo / "value.txt").write_text("old\n")
+(accept_repo / "literal*.txt").unlink()
+subprocess.run(["git", "--literal-pathspecs", "-C", str(accept_repo), "reset", "--", "literal*.txt"],
+               check=True, stdout=subprocess.DEVNULL)
+accept_digest = hashlib.sha256(accept_patch.read_bytes()).hexdigest()
+accept_index_env = dict(accept_env, OMS_TASK_ID="accept-task", OMS_ATTEMPT_ID=accept_worker,
+                        OMS_INDEX_PLAN_ID=accept_task["plan_id"])
+call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" delegate local 0 "$3" "$4"',
+      "accept-fixture", str(root / "scripts/lib/peer-common.sh"), str(accept_repo),
+      str(accept_artifact), str(accept_patch)], accept_index_env)
+accept_review = json.dumps({"gate_verify_exit": 0, "candidate": {"patch_sha256": accept_digest},
+                            "seats": [{"verdict": "pass"}]})
+call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 0 "$3"',
+      "accept-fixture", str(root / "scripts/lib/peer-common.sh"), str(accept_repo), str(accept_artifact)],
+     dict(accept_index_env, OMS_INDEX_REVIEW_OUTCOME_JSON=accept_review))
+accept_options = ("--accept", "accept-task", "--message", "fix: accept reviewed fixture", "--verify", accept_verify,
+                  "--expected-patch-sha256", accept_digest)
+accept_base = subprocess.check_output(["git", "-C", str(accept_execution), "rev-parse", "HEAD"]).strip()
+for refusal in ("digest", "dirty", "review", "lease", "ambiguous"):
+    with patch.dict(os.environ, accept_env, clear=True):
+        if refusal == "digest":
+            original = accept_patch.read_bytes()
+            accept_patch.write_bytes(original + b"\n")
+        elif refusal == "dirty":
+            (accept_execution / "unrelated.txt").write_text("preserve\n")
+        try:
+            if refusal in ("review", "lease", "ambiguous"):
+                original_records = saved._records
+                def rejected_records(*args, **kwargs):
+                    attempts, records = deepcopy(original_records(*args, **kwargs))
+                    if refusal == "review":
+                        records = [r for r in records if r.get("kind") != "review-outcome"]
+                    elif refusal == "lease":
+                        next(a for a in attempts if a["attempt_id"] == accept_worker)["refs"]["panel_lease_id"] = "lease_" + "0" * 32
+                    else:
+                        duplicate = deepcopy(next(a for a in attempts if a["attempt_id"] == accept_worker))
+                        duplicate["attempt_id"] = "att_" + "f" * 32
+                        attempts.append(duplicate)
+                    return attempts, records
+                with patch.object(saved, "_records", side_effect=rejected_records):
+                    try:
+                        saved.accept(accept_repo, "codex", "accept-task", "fix: refused", accept_verify,
+                                     accept_digest, accept_execution)
+                        raise AssertionError(refusal + " accepted")
+                    except ValueError:
+                        pass
+            else:
+                rejected = accept_call("panel", *accept_options, execution=accept_execution, check=False)
+                assert rejected.returncode != 0 and ("digest" if refusal == "digest" else "dirty") in rejected.stderr, rejected.stderr
+            assert subprocess.check_output(["git", "-C", str(accept_execution), "rev-parse", "HEAD"]).strip() == accept_base
+            assert (accept_execution / "value.txt").read_text() == "old\n"
+        finally:
+            if refusal == "digest":
+                accept_patch.write_bytes(original)
+            elif refusal == "dirty":
+                (accept_execution / "unrelated.txt").unlink()
+
+def prepare_accept_clone(label):
+    clone = temporary / label
+    subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(accept_repo), str(clone)], check=True)
+    shutil.copytree(accept_repo / ".oms", clone / ".oms")
+    for key, value in (("user.name", "accept fixture"), ("user.email", "accept@example.com")):
+        subprocess.run(["git", "-C", str(clone), "config", key, value], check=True)
+    return clone, dict(accept_env, OMS_ROOM_REPO=str(clone))
+
+# A commit hook that mutates the index must never run for the internal exact-tree
+# accept commit.
+hook_repo, hook_env = prepare_accept_clone("accept commit hook")
+hook_path = hook_repo / ".git/hooks/pre-commit"
+hook_path.parent.mkdir(parents=True, exist_ok=True)
+hook_path.write_text("#!/bin/sh\nprintf 'unreviewed\\n' > hook-added.txt\ngit add -- hook-added.txt\n", encoding="utf-8")
+hook_path.chmod(0o755)
+hook_base = subprocess.check_output(["git", "-C", str(hook_repo), "rev-parse", "HEAD"], text=True).strip()
+hook_index = temporary / "accept-hook-index"
+hook_index_env = dict(os.environ, GIT_INDEX_FILE=str(hook_index), GIT_CONFIG_GLOBAL="/dev/null",
+                      GIT_CONFIG_SYSTEM="/dev/null")
+subprocess.run(["git", "-C", str(hook_repo), "read-tree", hook_base], env=hook_index_env, check=True)
+subprocess.run(["git", "-C", str(hook_repo), "apply", "--cached", "--binary", str(accept_patch)],
+               env=hook_index_env, check=True)
+hook_expected_tree = subprocess.check_output(["git", "-C", str(hook_repo), "write-tree"],
+                                              env=hook_index_env, text=True).strip()
+hook_env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+with patch.dict(os.environ, hook_env, clear=True):
+    hook_accept = saved.accept(hook_repo, "codex", "accept-task", "fix: exact reviewed tree",
+                               accept_verify, accept_digest, hook_repo)
+assert subprocess.check_output(["git", "-C", str(hook_repo), "rev-parse", "HEAD^{tree}"],
+                               text=True).strip() == hook_expected_tree
+assert not (hook_repo / "hook-added.txt").exists()
+assert not subprocess.check_output(["git", "-C", str(hook_repo), "status", "--porcelain"])
+assert hook_accept["sha"] == subprocess.check_output(["git", "-C", str(hook_repo), "rev-parse", "HEAD"],
+                                                      text=True).strip()
+
+# A lifecycle heartbeat during patch-land admission changes the worker's
+# activity fields but must not invalidate the reviewed authority.
+heartbeat_repo, heartbeat_env = prepare_accept_clone("accept heartbeat race")
+heartbeat_attempts = saved._records(heartbeat_repo)[0]
+heartbeat_before = next(a for a in heartbeat_attempts if a["attempt_id"] == accept_worker)
+accept_admission_hook.write_text(
+    "#!/bin/sh\nset -eu\nbash %s agent-events --repo %s heartbeat --attempt %s\n" % (
+        shlex.quote(str(panel.ENTRY)), shlex.quote(str(heartbeat_repo)), shlex.quote(accept_worker)),
+    encoding="utf-8")
+try:
+    with patch.dict(os.environ, heartbeat_env, clear=True):
+        admission_heartbeat_accept = saved.accept(heartbeat_repo, "codex", "accept-task",
+            "fix: admission heartbeat race", accept_verify, accept_digest, heartbeat_repo)
+finally:
+    accept_admission_hook.unlink(missing_ok=True)
+assert admission_heartbeat_accept["sha"]
+admission_heartbeat_after = next(a for a in saved._records(heartbeat_repo)[0]
+                                 if a["attempt_id"] == accept_worker)
+assert admission_heartbeat_after.get("last_heartbeat_at") != heartbeat_before.get("last_heartbeat_at")
+assert (heartbeat_repo / "value.txt").read_text() == "old\naccepted\n"
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=heartbeat_repo,
+                              env=heartbeat_env).stdout)["state"] == "review"
+
+# Keep the post-application heartbeat race too: it exercises the same stable
+# authority comparison in panel_results' follow-up snapshot.
+heartbeat_repo, heartbeat_env = prepare_accept_clone("accept post-apply heartbeat race")
+heartbeat_attempts = saved._records(heartbeat_repo)[0]
+heartbeat_before = next(a for a in heartbeat_attempts if a["attempt_id"] == accept_worker)
+original_preflight = saved._accept_preflight
+preflight_calls = [0]
+def append_heartbeat_after_apply(*args, **kwargs):
+    preflight_calls[0] += 1
+    if preflight_calls[0] == 2:
+        heartbeat = accept_call("agent-events", "heartbeat", "--attempt", accept_worker,
+                                execution=heartbeat_repo, env=heartbeat_env)
+        assert heartbeat.stdout.strip()
+    return original_preflight(*args, **kwargs)
+with patch.dict(os.environ, heartbeat_env, clear=True), \
+        patch.object(saved, "_accept_preflight", side_effect=append_heartbeat_after_apply):
+    heartbeat_accept = saved.accept(heartbeat_repo, "codex", "accept-task", "fix: heartbeat race",
+                                    accept_verify, accept_digest, heartbeat_repo)
+assert heartbeat_accept["sha"]
+heartbeat_after = next(a for a in saved._records(heartbeat_repo)[0] if a["attempt_id"] == accept_worker)
+assert heartbeat_after.get("last_heartbeat_at") != heartbeat_before.get("last_heartbeat_at")
+assert (heartbeat_repo / "value.txt").read_text() == "old\naccepted\n"
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=heartbeat_repo,
+                              env=heartbeat_env).stdout)["state"] == "review"
+
+# A passing review-gate replacement at that same pre-apply boundary is a real
+# authority change and must leave the integration tree untouched.
+authority_admission_repo, authority_admission_env = prepare_accept_clone("accept admission authority race")
+authority_admission_base = subprocess.check_output(
+    ["git", "-C", str(authority_admission_repo), "rev-parse", "HEAD"]).strip()
+with patch.dict(os.environ, authority_admission_env, clear=True):
+    authority_admission_before = saved._accept_preflight(
+        authority_admission_repo, authority_admission_repo, "codex", "accept-task", accept_verify, accept_digest)
+review_hook = '. %s; ma_append_artifact_index %s review-outcome local 0 %s\n' % (
+    shlex.quote(str(root / "scripts/lib/peer-common.sh")),
+    shlex.quote(str(authority_admission_repo)),
+    shlex.quote(str(authority_admission_repo / ".oms/artifacts/fixture/accept.md")))
+for name, value in (("OMS_TASK_ID", "accept-task"), ("OMS_ATTEMPT_ID", accept_worker),
+                    ("OMS_INDEX_PLAN_ID", accept_task["plan_id"]),
+                    ("OMS_INDEX_REVIEW_OUTCOME_JSON", accept_review)):
+    review_hook = "export %s=%s\n" % (name, shlex.quote(value)) + review_hook
+accept_admission_hook.write_text("#!/bin/sh\nset -eu\n" + review_hook, encoding="utf-8")
+try:
+    with patch.dict(os.environ, authority_admission_env, clear=True):
+        try:
+            saved.accept(authority_admission_repo, "codex", "accept-task", "fix: admission authority race",
+                         accept_verify, accept_digest, authority_admission_repo)
+            raise AssertionError("changed review gate during admission was accepted")
+        except ValueError as error:
+            assert "patch-land failed" in str(error), error
+finally:
+    accept_admission_hook.unlink(missing_ok=True)
+with patch.dict(os.environ, authority_admission_env, clear=True):
+    authority_admission_after = saved._accept_preflight(
+        authority_admission_repo, authority_admission_repo, "codex", "accept-task", accept_verify, accept_digest)
+assert saved._accept_authority(authority_admission_after) != saved._accept_authority(authority_admission_before)
+assert subprocess.check_output(["git", "-C", str(authority_admission_repo), "rev-parse", "HEAD"]).strip() == authority_admission_base
+assert (authority_admission_repo / "value.txt").read_text() == "old\n"
+assert not subprocess.check_output(["git", "-C", str(authority_admission_repo),
+                                    "status", "--porcelain", "--untracked-files=all"])
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=authority_admission_repo,
+                              env=authority_admission_env).stdout)["state"] == "running"
+
+# A changed passing gate is still an authority change. Stop before commit and
+# print exact commands for preserving the already-applied bytes and recording review.
+authority_repo, authority_env = prepare_accept_clone("accept authority race")
+original_preflight = saved._accept_preflight
+preflight_calls = [0]
+def append_replacement_review_after_apply(*args, **kwargs):
+    preflight_calls[0] += 1
+    if preflight_calls[0] == 2:
+        review_env = dict(authority_env, OMS_TASK_ID="accept-task", OMS_ATTEMPT_ID=accept_worker,
+                          OMS_INDEX_PLAN_ID=accept_task["plan_id"], OMS_INDEX_REVIEW_OUTCOME_JSON=accept_review)
+        call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 0 "$3"',
+              "accept-review-race", str(root / "scripts/lib/peer-common.sh"), str(authority_repo),
+              str(authority_repo / ".oms/artifacts/fixture/accept.md")], review_env)
+    return original_preflight(*args, **kwargs)
+authority_base = subprocess.check_output(["git", "-C", str(authority_repo), "rev-parse", "HEAD"]).strip()
+with patch.dict(os.environ, authority_env, clear=True), \
+        patch.object(saved, "_accept_preflight", side_effect=append_replacement_review_after_apply):
+    try:
+        saved.accept(authority_repo, "codex", "accept-task", "fix: authority race", accept_verify,
+                     accept_digest, authority_repo)
+        raise AssertionError("changed review gate was accepted")
+    except ValueError as error:
+        recovery = str(error)
+        assert "authority changed after application" in recovery, recovery
+        assert accept_digest in recovery, recovery
+        assert "git --literal-pathspecs -C" in recovery and "add --" in recovery, recovery
+        assert "_accept_recover" in recovery and "oms agent-plan --repo" in recovery, recovery
+        assert "review --id accept-task" in recovery, recovery
+        assert '"task_id":"accept-task"' in recovery, recovery
+        assert '"lease_id":"' + accept_task["lease_id"] + '"' in recovery, recovery
+        assert '"artifact":".oms/artifacts/fixture/accept.md"' in recovery, recovery
+        assert '"patch":".oms/artifacts/fixture/accept.patch"' in recovery, recovery
+assert subprocess.check_output(["git", "-C", str(authority_repo), "rev-parse", "HEAD"]).strip() == authority_base
+assert (authority_repo / "value.txt").read_text() == "old\naccepted\n"
+authority_status = subprocess.check_output(["git", "-C", str(authority_repo), "status", "--porcelain"])
+assert b" M value.txt" in authority_status and b"?? literal*.txt" in authority_status
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=authority_repo,
+                              env=authority_env).stdout)["state"] == "running"
+recovery_commands = recovery.split("Recovery after confirming the reviewed bytes are still present; do not reapply:\n", 1)[1].splitlines()
+assert len(recovery_commands) == 2 and recovery_commands[0].startswith("git --literal-pathspecs -C "), recovery_commands
+(authority_repo / "literalA.txt").write_text("unrelated\n")
+subprocess.run(["bash", "-c", recovery_commands[0]], env=authority_env, check=True)
+staged_paths = subprocess.check_output(["git", "-C", str(authority_repo), "diff", "--cached", "--name-only"],
+                                       text=True).splitlines()
+assert staged_paths == ["literal*.txt", "value.txt"], staged_paths
+assert (authority_repo / "literalA.txt").exists()
+(authority_repo / "literalA.txt").unlink()
+subprocess.run(["bash", "-c", recovery_commands[1]], env=authority_env, check=True)
+authority_recovered = json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=authority_repo,
+                                             env=authority_env).stdout)
+assert authority_recovered["state"] == "review" and authority_recovered["panel_accept"]["patch_sha256"] == accept_digest
+assert not subprocess.check_output(["git", "-C", str(authority_repo), "status", "--porcelain"])
+
+# Partial failures preserve the application/index or the new commit. Each uses
+# an independent clone and copied fixture evidence, never the owner's repository.
+for failed_stage in ("commit", "plan review"):
+    failure_repo = temporary / ("accept failure " + failed_stage)
+    subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(accept_repo), str(failure_repo)], check=True)
+    shutil.copytree(accept_repo / ".oms", failure_repo / ".oms")
+    for key, value in (("user.name", "accept fixture"), ("user.email", "accept@example.com")):
+        subprocess.run(["git", "-C", str(failure_repo), "config", key, value], check=True)
+    failure_env = dict(accept_env, OMS_ROOM_REPO=str(failure_repo))
+    original_exact, original_plan = saved._exact_commit_tree, saved._plan_command
+    def failing_exact(execution, base, tree, message, authority_check=None):
+        if failed_stage == "commit":
+            raise ValueError("fixture commit failure")
+        return original_exact(execution, base, tree, message, authority_check)
+    def failing_plan(execution, *args, **kwargs):
+        if args[0] == "review" and failed_stage == "plan review":
+            raise ValueError("fixture review failure")
+        return original_plan(execution, *args, **kwargs)
+    with patch.dict(os.environ, failure_env, clear=True), patch.object(saved, "_exact_commit_tree", side_effect=failing_exact), \
+            patch.object(saved, "_plan_command", side_effect=failing_plan):
+        try:
+            saved.accept(failure_repo, "codex", "accept-task", "fix: partial failure", accept_verify, accept_digest)
+            raise AssertionError("partial failure unexpectedly succeeded")
+        except ValueError as error:
+            failure_message = str(error)
+            failure_sha = subprocess.check_output(["git", "-C", str(failure_repo), "rev-parse", "HEAD"], text=True).strip()
+            assert failed_stage + " failed" in str(error) and failure_sha in str(error), error
+    assert (failure_repo / "value.txt").read_text() == "old\naccepted\n"
+    status = subprocess.check_output(["git", "-C", str(failure_repo), "status", "--porcelain"])
+    if failed_stage == "commit":
+        assert failure_sha.encode() == accept_base and b"M  value.txt" in status and b"A  literal*.txt" in status
+    else:
+        assert not status
+    assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=failure_repo,
+                                  env=failure_env).stdout)["state"] == "running"
+    refused_retry = accept_call("panel", *accept_options, execution=failure_repo, env=failure_env, check=False)
+    assert refused_retry.returncode != 0
+    assert ("dirty" if failed_stage == "commit" else "already applied") in refused_retry.stderr, refused_retry.stderr
+    if failed_stage == "plan review":
+        recovery_commands = failure_message.split(
+            "Recovery after confirming the reviewed bytes are still present; do not reapply:\n", 1)[1].splitlines()
+        assert len(recovery_commands) == 1 and "_accept_recover" in recovery_commands[0]
+        subprocess.run(["bash", "-c", recovery_commands[0]], env=failure_env, check=True)
+        assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=failure_repo,
+                                      env=failure_env).stdout)["state"] == "review"
+accepted = accept_call("panel", *accept_options, execution=accept_execution)
+assert "committed locally; publication pending" in accepted.stdout and "Next: oms land --repo" in accepted.stdout
+accept_sha = subprocess.check_output(["git", "-C", str(accept_execution), "rev-parse", "HEAD"], text=True).strip()
+assert accept_sha.encode() != accept_base
+assert (accept_execution / "value.txt").read_text() == "old\naccepted\n"
+assert (accept_repo / "value.txt").read_text() == "old\n", "accept edited canonical source instead of execution clone"
+accepted_task = json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)
+assert accepted_task["state"] == "review"
+accept_record = accepted_task["panel_accept"]
+assert accept_record["commit"] == accept_sha and accept_record["tree"] == \
+    subprocess.check_output(["git", "-C", str(accept_execution), "rev-parse", "HEAD^{tree}"], text=True).strip()
+assert accept_record["base"] == accept_base.decode() and accept_record["lease_id"] == accepted_task["lease_id"]
+assert accept_record["patch_sha256"] == accept_digest and accept_record["task_id"] == "accept-task"
+accept_landing_rows = [json.loads(line) for line in (accept_repo / ".oms/landings.jsonl").read_text().splitlines()]
+accept_intent = next(row for row in accept_landing_rows if row.get("event") == "intent")
+assert (accept_intent["task"], accept_intent["plan_id"], accept_intent["lease"]) == (
+    "accept-task", accept_task["plan_id"], accept_task["lease_id"])
+accept_call("patch-land", "--recover", execution=accept_execution)
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)["state"] == "review", \
+    "application recovery finished the plan before publication"
+assert not subprocess.check_output(["git", "-C", str(accept_execution), "status", "--porcelain"])
+retry_accept = accept_call("panel", *accept_options, execution=accept_execution, check=False)
+assert retry_accept.returncode != 0 and "requires a claimed/running task" in retry_accept.stderr
+# A SHA alone is insufficient; the real finish command must require publication proof.
+accept_finalize = ("--finalize", "--task-id", "accept-task", "--owner", "codex", "--landed-commit", accept_sha,
+                   "--summary-file", str(summary), "--outcome", "accepted", "--verify", accept_verify,
+                   "--evidence", ".oms/artifacts/fixture/accept.patch")
+for invalid_outcome in ("failed", "rejected"):
+    invalid_finalize = list(accept_finalize)
+    invalid_finalize[invalid_finalize.index("--outcome") + 1] = invalid_outcome
+    invalid = accept_call("panel", *invalid_finalize, execution=accept_execution, check=False)
+    assert invalid.returncode != 0 and \
+        "--landed-commit requires --outcome accepted or completed" in invalid.stderr, invalid.stderr
+    assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)["state"] == "review"
+with patch.dict(os.environ, accept_env, clear=True), patch.object(saved, "_plan_command") as plan_command:
+    try:
+        saved.finalize(accept_repo, "codex", "accept-task", str(summary), "rejected",
+                       verify=accept_verify, evidence=".oms/artifacts/fixture/accept.patch",
+                       execution_repo=accept_execution, landed_commit=accept_sha)
+        raise AssertionError("API accepted --landed-commit with a rejected outcome")
+    except ValueError as error:
+        assert "--landed-commit requires --outcome accepted or completed" in str(error), error
+    assert not plan_command.called, "invalid outcome ran plan finish"
+bad_summary = list(accept_finalize)
+bad_summary[bad_summary.index("--summary-file") + 1] = str(accept_repo / "missing-summary.txt")
+pre_finish_error = accept_call("panel", *bad_summary, execution=accept_execution, check=False)
+assert pre_finish_error.returncode != 0 and "validating completion" not in pre_finish_error.stderr, pre_finish_error.stderr
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)["state"] == "review"
+unpublished = accept_call("panel", *accept_finalize, execution=accept_execution, check=False)
+assert unpublished.returncode != 0 and "finish failed" in unpublished.stderr
+assert "retry finish only after validating completion" in unpublished.stderr
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)["state"] == "review"
+# Fixture-only publication evidence: no push, provider, network or real land.
+receipt_dir = Path(call(["bash", "-c", '. "$1"; oms_land_state_dir "$2"', "accept-receipt",
+                        str(root / "scripts/lib/land-receipts.sh"), str(accept_execution)], accept_env).strip())
+receipt_dir.mkdir(parents=True, exist_ok=True)
+# A real publication of an older, unrelated commit that edits the same file
+# cannot finish the exact worker acceptance.
+unrelated_index = temporary / "accept-unrelated-index"
+unrelated_env = dict(os.environ, GIT_INDEX_FILE=str(unrelated_index))
+subprocess.run(["git", "-C", str(accept_execution), "read-tree", accept_base.decode()],
+               env=unrelated_env, check=True)
+unrelated_blob = subprocess.check_output(["git", "-C", str(accept_execution), "hash-object", "-w", "--stdin"],
+                                         input=b"old\nunrelated publication\n").decode().strip()
+subprocess.run(["git", "-C", str(accept_execution), "update-index", "--add", "--cacheinfo",
+                "100644," + unrelated_blob + ",value.txt"], env=unrelated_env, check=True)
+unrelated_tree = subprocess.check_output(["git", "-C", str(accept_execution), "write-tree"],
+                                        env=unrelated_env, text=True).strip()
+unrelated_sha = subprocess.check_output(["git", "-C", str(accept_execution), "commit-tree", unrelated_tree,
+                                         "-p", accept_base.decode(), "-m", "older unrelated publication"],
+                                        text=True).strip()
+unrelated_receipt = {"schema": 1, "state": "passed", "sha": unrelated_sha, "remote": "origin", "target": "main",
+                     "gate": {"rc": 0, "command": "true"},
+                     "push": {"rc": 0, "moved": 1, "base": accept_base.decode()},
+                     "ci": {"conclusion": "success"}}
+(receipt_dir / (unrelated_sha + "-fixture.json")).write_text(json.dumps(unrelated_receipt))
+subprocess.run(["git", "-C", str(accept_execution), "update-ref", "refs/remotes/origin/main", unrelated_sha], check=True)
+unrelated_finalize = list(accept_finalize)
+unrelated_finalize[unrelated_finalize.index("--landed-commit") + 1] = unrelated_sha
+unrelated = accept_call("panel", *unrelated_finalize, execution=accept_execution, check=False)
+assert unrelated.returncode != 0 and "does not contain the accepted commit" in unrelated.stderr, unrelated.stderr
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)["state"] == "review"
+# Direct plan finish must enforce the same acceptance binding inside its locked
+# transition; the panel wrapper is not the authority for this invariant.
+direct_unrelated = accept_call("agent-plan", "finish", "--id", "accept-task", "--lease-id",
+                               accepted_task["lease_id"], "--landed-commit", unrelated_sha,
+                               execution=accept_execution, check=False)
+assert direct_unrelated.returncode != 0 and "does not contain the accepted commit" in \
+    direct_unrelated.stderr, direct_unrelated.stderr
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)["state"] == "review"
+# Stable patch IDs ignore whitespace. A different Python indentation must not
+# bind the reviewed patch even though it locates the same candidate class.
+indent_repo = temporary / "accept indentation collision"
+subprocess.run(["git", "init", "-q", str(indent_repo)], check=True)
+for key, value in (("user.name", "indent fixture"), ("user.email", "indent@example.com")):
+    subprocess.run(["git", "-C", str(indent_repo), "config", key, value], check=True)
+indent_sources = {
+    "base": b"def sample():\n    return 1\n",
+    "reviewed": b"def sample():\n        return 1\n",
+    "published": b"def sample():\n      return 1\n",
+}
+indent_trees = {}
+for label, source in indent_sources.items():
+    index_path = temporary / ("accept-indent-" + label + ".index")
+    index_env = dict(os.environ, GIT_INDEX_FILE=str(index_path))
+    if label == "base":
+        subprocess.run(["git", "-C", str(indent_repo), "read-tree", "--empty"], env=index_env, check=True)
+    else:
+        subprocess.run(["git", "-C", str(indent_repo), "read-tree", indent_trees["base"]],
+                       env=index_env, check=True)
+    blob = subprocess.check_output(["git", "-C", str(indent_repo), "hash-object", "-w", "--stdin"],
+                                   input=source).decode().strip()
+    subprocess.run(["git", "-C", str(indent_repo), "update-index", "--add", "--cacheinfo",
+                    "100644," + blob + ",format.py"], env=index_env, check=True)
+    indent_trees[label] = subprocess.check_output(["git", "-C", str(indent_repo), "write-tree"],
+                                                   env=index_env, text=True).strip()
+indent_base = subprocess.check_output(["git", "-C", str(indent_repo), "commit-tree", indent_trees["base"],
+                                       "-m", "indent base"], text=True).strip()
+indent_accepted = subprocess.check_output(["git", "-C", str(indent_repo), "commit-tree", indent_trees["reviewed"],
+                                           "-p", indent_base, "-m", "reviewed indentation"], text=True).strip()
+indent_published = subprocess.check_output(["git", "-C", str(indent_repo), "commit-tree", indent_trees["published"],
+                                            "-p", indent_base, "-m", "different indentation"], text=True).strip()
+subprocess.run(["git", "-C", str(indent_repo), "update-ref", "refs/heads/main", indent_published], check=True)
+indent_patch = subprocess.check_output(["git", "-C", str(indent_repo), "diff", "--binary", "--no-renames",
+                                        indent_base, indent_accepted, "--"])
+published_patch = subprocess.check_output(["git", "-C", str(indent_repo), "diff", "--binary", "--no-renames",
+                                           indent_base, indent_published, "--"])
+assert saved._patch_id(indent_repo, indent_patch) == saved._patch_id(indent_repo, published_patch)
+try:
+    saved._publication_contains_acceptance(
+        indent_repo, indent_published,
+        {"commit": indent_accepted, "tree": indent_trees["reviewed"], "base": indent_base}, indent_patch)
+    raise AssertionError("a same-patch-id indentation change was accepted as the reviewed patch")
+except ValueError as error:
+    assert "does not contain the accepted commit" in str(error), error
+# A rewritten commit whose exact tree comes from replaying the reviewed patch is valid.
+rebase_repo = temporary / "accept rebase clone without accepted commit"
+subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(accept_repo), str(rebase_repo)], check=True)
+for key, value in (("user.name", "rebase fixture"), ("user.email", "rebase@example.com")):
+    subprocess.run(["git", "-C", str(rebase_repo), "config", key, value], check=True)
+rebase_base_index = temporary / "accept-rebase-base-index"
+rebase_base_env = dict(os.environ, GIT_INDEX_FILE=str(rebase_base_index))
+subprocess.run(["git", "-C", str(rebase_repo), "read-tree", accept_base.decode()],
+               env=rebase_base_env, check=True)
+rebase_blob = subprocess.check_output(["git", "-C", str(rebase_repo), "hash-object", "-w", "--stdin"],
+                                     input=b"rebased context\n").decode().strip()
+subprocess.run(["git", "-C", str(rebase_repo), "update-index", "--add", "--cacheinfo",
+                "100644," + rebase_blob + ",rebased-only.txt"], env=rebase_base_env, check=True)
+rebase_base_tree = subprocess.check_output(["git", "-C", str(rebase_repo), "write-tree"],
+                                          env=rebase_base_env, text=True).strip()
+rebase_base = subprocess.check_output(["git", "-C", str(rebase_repo), "commit-tree", rebase_base_tree,
+                                       "-p", accept_base.decode(), "-m", "rebased context"],
+                                      text=True).strip()
+rebase_patch_index = temporary / "accept-rebase-patch-index"
+rebase_patch_env = dict(os.environ, GIT_INDEX_FILE=str(rebase_patch_index))
+subprocess.run(["git", "-C", str(rebase_repo), "read-tree", rebase_base], env=rebase_patch_env, check=True)
+subprocess.run(["git", "-C", str(rebase_repo), "apply", "--cached", "--binary", str(accept_patch)],
+               env=rebase_patch_env, check=True)
+rebase_tree = subprocess.check_output(["git", "-C", str(rebase_repo), "write-tree"],
+                                      env=rebase_patch_env, text=True).strip()
+rebase_sha = subprocess.check_output(["git", "-C", str(rebase_repo), "commit-tree", rebase_tree,
+                                     "-p", rebase_base, "-m", "rebased reviewed patch"],
+                                    text=True).strip()
+saved._publication_contains_acceptance(rebase_repo, rebase_sha, accept_record, accept_patch.read_bytes())
+receipt = {"schema": 1, "state": "passed", "sha": accept_sha, "remote": "origin", "target": "main",
+           "gate": {"rc": 0, "command": "true"}, "push": {"rc": 0, "moved": 1, "base": accept_base.decode()},
+           "ci": {"conclusion": "success"}}
+(receipt_dir / (accept_sha + "-fixture.json")).write_text(json.dumps(receipt))
+subprocess.run(["git", "-C", str(accept_execution), "update-ref", "refs/remotes/origin/main", accept_sha], check=True)
+accept_admission_hook.write_text("printf 'verification failure\\n' > value.txt\n", encoding="utf-8")
+failed = accept_call("panel", *accept_finalize, execution=accept_execution, check=False)
+accept_admission_hook.unlink()
+(accept_execution / "value.txt").write_text("old\naccepted\n")
+assert failed.returncode != 0 and accept_sha in failed.stderr and "finalization failed" in failed.stderr
+assert "retry only --finalize after confirming exact completion" in failed.stderr
+finished_task = json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)
+assert finished_task["state"] == "done", "finalize ran before plan finish"
+assert list((accept_repo / ".oms/artifacts/panel-results").glob("verify-*.json"))
+assert not list((accept_execution / ".oms/artifacts/panel-results").glob("verify-*.json")), "diagnostics left canonical state"
+finalized = json.loads(accept_call("panel", *accept_finalize, execution=accept_execution).stdout)
+assert finalized["outcome"] == "accepted" and saved.result_matches_plan(accept_repo, "accept-task", finalized)
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout) == finished_task
+assert json.loads(accept_call("panel", *accept_finalize, execution=accept_execution).stdout)["revision"] == finalized["revision"]
+# A retry still requires the identical publication proof and completion.
+wrong_completion = list(accept_finalize)
+wrong_completion[wrong_completion.index("--landed-commit") + 1] = accept_base.decode()
+assert accept_call("panel", *wrong_completion, execution=accept_execution, check=False).returncode != 0
+receipt_path = receipt_dir / (accept_sha + "-fixture.json")
+receipt_hidden = receipt_dir / "hidden-fixture.json"
+receipt_path.rename(receipt_hidden)
+try:
+    missing_proof = accept_call("panel", *accept_finalize, execution=accept_execution, check=False)
+    assert missing_proof.returncode != 0 and "finish failed" in missing_proof.stderr
+finally:
+    receipt_hidden.rename(receipt_path)
+assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout) == finished_task
+# END reviewed-result acceptance composition.
 # Finalize does not hold the shared results lock while a verifier runs.
 import threading
 slow_started, release_slow = threading.Event(), threading.Event()

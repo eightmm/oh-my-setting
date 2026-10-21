@@ -32,6 +32,9 @@ VERIFY=""
 VERIFY_EXPLICIT=0
 ML=0
 PLAN_TASK=""
+PANEL_ACCEPT=""
+PANEL_ACCEPT_TASK=""
+PANEL_ACCEPT_LEASE=""
 PLAN_ID=""
 PLAN_LEASE_ID=""
 PLAN_REVIEW_LEASE_ID=""
@@ -73,6 +76,7 @@ intent_base_sha=""
 intent_receipt_sha=""
 intent_has_complete=0
 intent_has_abandoned=0
+intent_panel_accept=0
 
 usage() {
   cat <<'EOF'
@@ -133,6 +137,8 @@ fail() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --patch) [ "$#" -ge 2 ] || fail "--patch requires a file"; PATCH="$2"; shift 2 ;;
+    # Internal composition: apply with plan lineage, leaving review/finish to panel.
+    --panel-accept) [ "$#" -ge 2 ] || fail "missing panel acceptance fence"; PANEL_ACCEPT="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --verify)
       [ "$#" -ge 2 ] || fail "--verify requires a command"
@@ -188,9 +194,29 @@ STATE_REPO="$(oms_state_root "$REPO")" && STATE_REPO="$(cd "$STATE_REPO" && pwd 
   fail "cannot resolve the landing state root for $REPO"
 LANDINGS="$STATE_REPO/.oms/landings.jsonl"
 
+panel_accept_fence() {
+  [ -n "$PANEL_ACCEPT" ] || return 0
+  python3 - "$ROOT_LIB" "$STATE_REPO" "$REPO" "$PANEL_ACCEPT" "$VERIFY" <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from panel_results import _accept_authority, _accept_preflight, _git
+repo, execution = Path(sys.argv[2]), Path(sys.argv[3])
+request = json.loads(sys.argv[4])
+snapshot = request['snapshot']
+current = _accept_preflight(repo, execution, request['owner'], request['task_id'], sys.argv[5],
+                            snapshot['candidate']['patch_sha256'])
+if (_accept_authority(current) != _accept_authority(snapshot)
+        or _git(execution, 'rev-parse', 'HEAD').decode().strip() != request['base']):
+    sys.exit('panel candidate, lease or HEAD changed during admission')
+print('\t'.join((current['task']['plan_id'], current['task']['id'], current['task']['lease_id'])))
+PY
+}
+
 landing_append() {  # landing_append EVENT [KEY=VALUE...]
   local event="$1"
   shift
+  [ "$intent_panel_accept" = 0 ] || set -- "$@" panel_accept=true
   mkdir -p "$(dirname "$LANDINGS")"
   agent_memory_ensure_oms_ignore "$STATE_REPO" 2>/dev/null || true
   OMS_LD_EVENT="$event" OMS_LD_ID="$LANDING_ID" OMS_LD_FILE="$LANDINGS" \
@@ -359,6 +385,7 @@ for lid in order:
             except (TypeError, ValueError):
                 continue
             if (terminal_values == expected and terminal_digest == digest
+                    and terminal.get("panel_accept", "") == row.get("panel_accept", "")
                     and terminal.get("plan_id", "") == row.get("plan_id", "")
                     and terminal.get("receipt_sha") == digest):
                 exact.add(terminal.get("event"))
@@ -449,6 +476,7 @@ print(state + "\t" + lease + "\t" + digest)
 
 plan_complete_receipt_converged() {
   local values state lease receipt_sha
+  [ "$intent_panel_accept" = 0 ] || return 0
   [ -n "$intent_task" ] || return 0
   [ -n "$intent_plan_done_receipt_sha" ] || return 1
   values="$(plan_receipt_values "$intent_task")" || return 1
@@ -504,6 +532,7 @@ plan_superseding_done_receipt_converged() {
 
 plan_abandoned_receipt_converged() {
   local values state lease receipt_sha
+  [ "$intent_panel_accept" = 0 ] || return 0
   [ -n "$intent_task" ] || return 0
   [ -n "$intent_plan_receipt_sha" ] || return 1
   values="$(plan_receipt_values "$intent_task")" || return 1
@@ -545,6 +574,7 @@ plan_release_recover() {  # plan_release_recover TASK LEASE REVIEW_RECEIPT_SHA [
   local expected_receipt_sha="${3:-}"
   local preserve="${4:-0}"
   local release_cmd values state current_lease current_receipt_sha
+  [ "$intent_panel_accept" = 0 ] || return 0
   [ -n "$task" ] || return 0
   [ "$preserve" != 1 ] || return 0
   values="$(plan_receipt_values "$task")" || return 1
@@ -736,6 +766,7 @@ if [ "$RECOVER" = 1 ]; then
     LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))')"
     intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))')"
     intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))')"
+    intent_panel_accept="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("panel_accept") == "true" else 0)' | tr -d '\r')"
     intent_plan_id="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_id",""))' | tr -d '\r')"
     intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))')"
     intent_plan_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_receipt_sha",""))' | tr -d '\r')"
@@ -818,7 +849,7 @@ if [ "$RECOVER" = 1 ]; then
     # Applied content reverse-applies cleanly; unapplied content does not.
     if git -C "$REPO" apply --binary --reverse --check "$intent_patch" >/dev/null 2>&1; then
       rec_ok=1
-      if [ -n "$intent_task" ]; then
+      if [ -n "$intent_task" ] && [ "$intent_panel_accept" = 0 ]; then
         if plan_complete_receipt_converged; then
           : # The interrupted run already published this exact done receipt.
         elif plan_landing_receipt_converged; then
@@ -899,6 +930,15 @@ EOF
   exit 0
 fi
 
+
+if [ -n "$PANEL_ACCEPT" ]; then
+  [ -z "$PLAN_TASK" ] && [ "$RECOVER" = 0 ] && [ "$REQUEST_APPROVAL" = 0 ] ||
+    fail "panel acceptance cannot compose public plan finish, recovery or approval requests"
+  panel_binding="$(panel_accept_fence)" || fail "panel acceptance preflight failed"
+  panel_binding="${panel_binding//$'\r'/}"
+  IFS=$'\t' read -r PLAN_ID PANEL_ACCEPT_TASK PANEL_ACCEPT_LEASE <<< "$panel_binding"
+  export OMS_TASK_ID="$PANEL_ACCEPT_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
+fi
 
 if [ -n "$PLAN_TASK" ]; then
   PLAN_JSON="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" \
@@ -1024,6 +1064,11 @@ PATCH="$(cd "$(dirname "$PATCH")" && pwd -P)/$(basename "$PATCH")"
 SOURCE_PATCH="$PATCH"
 PATCH_SHA="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
 [ -n "$PATCH_SHA" ] || fail "cannot hash patch: $PATCH"
+if [ -n "$PANEL_ACCEPT" ]; then
+  expected_panel_sha="$(printf '%s' "$PANEL_ACCEPT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["snapshot"]["candidate"]["patch_sha256"])' | tr -d '\r')" ||
+    fail "cannot read expected panel patch digest"
+  [ "$PATCH_SHA" = "$expected_panel_sha" ] || fail "panel patch digest drift"
+fi
 if [ -n "$PLAN_TASK" ]; then
   PLAN_REVIEW_PATCH_SHA="$(oms_sha256_file "$PLAN_REVIEW_PATCH" 2>/dev/null || true)"
   [ -n "$PLAN_REVIEW_PATCH_SHA" ] ||
@@ -1125,7 +1170,7 @@ LANDING_ID="land-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}"
 agent_memory_ensure_oms_ignore "$STATE_REPO" || fail "cannot initialize private landing state"
 FROZEN_DIR="$STATE_REPO/.oms/landing-patches"
 FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"
-reuse_parameters=("$VERIFY" "$ML" "$PLAN_TASK" "$ALLOW_VERIFIER_CHANGE" "$ALLOW_TEST_REDUCTION"
+reuse_parameters=("$VERIFY" "$ML" "${PLAN_TASK:-$PANEL_ACCEPT_TASK}" "$ALLOW_VERIFIER_CHANGE" "$ALLOW_TEST_REDUCTION"
   "$ALLOW_FLOOR_CHANGE_REASON" "$ALLOW_RESTRUCTURE" "$ACCEPT_ENCODING_LOSS")
 oms_git_assert_safe_execution_config "$REPO" || fail "unsafe executable Git config before landing admission"
 oms_git_assert_plain_index "$REPO" || fail "Git index has hidden or unreadable entries before landing admission"
@@ -1286,7 +1331,7 @@ fi
 admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ -n "$VERIFY" ] && admit_cmd+=(--verify "$VERIFY")
 [ "$ML" = 1 ] && admit_cmd+=(--ml)
-[ -n "$PLAN_TASK" ] && admit_cmd+=(--plan-task "$PLAN_TASK")
+[ -n "$PLAN_TASK$PANEL_ACCEPT_TASK" ] && admit_cmd+=(--plan-task "${PLAN_TASK:-$PANEL_ACCEPT_TASK}")
 [ "$ALLOW_VERIFIER_CHANGE" = 1 ] && admit_cmd+=(--allow-verifier-change)
 [ "$ALLOW_TEST_REDUCTION" = 1 ] && admit_cmd+=(--allow-test-reduction)
 [ -z "$ALLOW_FLOOR_CHANGE_REASON" ] || admit_cmd+=(--allow-floor-change "$ALLOW_FLOOR_CHANGE_REASON")
@@ -1347,6 +1392,7 @@ fi
 if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=all)" ]; then
   fail "tree became dirty during admission; re-admit against the current tree"
 fi
+panel_accept_fence >/dev/null || fail "panel acceptance fence changed; not applied"
 
 # Keep the private publication anchor: it proves the live inode generation
 # independently of shared terminal hints, filenames, and equal-byte replacements.
@@ -1360,9 +1406,10 @@ frozen_patch_matches || fail "published patch changed; refusing to apply"
 intent_patch="$PATCH"
 intent_patch_sha="$PATCH_SHA"
 intent_base_sha="$LANDING_BASE"
-intent_task="$PLAN_TASK"
+intent_task="${PLAN_TASK:-$PANEL_ACCEPT_TASK}"
 intent_plan_id="$PLAN_ID"
-intent_lease="$PLAN_LEASE_ID"
+intent_lease="${PLAN_LEASE_ID:-$PANEL_ACCEPT_LEASE}"
+[ -z "$PANEL_ACCEPT" ] || intent_panel_accept=1
 intent_plan_receipt_sha="$PLAN_REVIEW_RECEIPT_SHA"
 intent_plan_done_receipt_sha="$PLAN_DONE_RECEIPT_SHA"
 intent_approval="$APPROVAL_ID"
@@ -1430,6 +1477,11 @@ if ! frozen_patch_matches; then
   fail "frozen patch changed after admission; verified bytes were not applied"
 fi
 
+if ! panel_accept_fence >/dev/null; then
+  finish_not_applied_receipts panel-fence-rejected 1 || true
+  fail "panel acceptance fence changed before apply; not applied"
+fi
+
 if ! python3 "$CAPTURE_HELPER" apply "$STATE_REPO" "$CAPTURE_PATCH" "$REPO" "$PATCH_SHA"; then
   if ! finish_not_applied_receipts apply-failed; then
     echo "warning: patch-land: apply failed and recovery receipts remain incomplete" >&2
@@ -1457,7 +1509,7 @@ echo "patch-land: applied $SOURCE_PATCH" >&2
 # lineage unanswerable exactly when something already went wrong.
 receipts_ok=1
 [ "$approval_receipt_ok" = 1 ] || receipts_ok=0
-if ! record_landing_lineage_once "$PATCH" "$PATCH_SHA" "$PLAN_TASK" "$PLAN_ID"; then
+if ! record_landing_lineage_once "$PATCH" "$PATCH_SHA" "${PLAN_TASK:-$PANEL_ACCEPT_TASK}" "$PLAN_ID"; then
   receipts_ok=0
   echo "warning: patch-land: patch applied but the land row could NOT be recorded" >&2
   echo "warning: patch-land: lineage for $SOURCE_PATCH is missing from .oms/artifacts/index.jsonl" >&2
