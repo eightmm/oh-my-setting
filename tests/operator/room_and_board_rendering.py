@@ -125,6 +125,24 @@ tree_room["room"]["participants"].extend([
      "label": "연결 근거 없는 작업", "joined": True, "seq": 101, "parent": "outside-room"}])
 before_tree = json.dumps(tree_room, sort_keys=True)
 
+layout_tree = deepcopy(tree_room)
+layout_main = "layout-main"
+layout_room_id = layout_tree["room"]["id"]
+layout_members = [{"participant": layout_main, "provider": "codex", "model": "gpt-6-sol", "role": "main",
+                   "label": "Layout main", "joined": True, "seq": 1}]
+layout_attempts = [{"attempt_id": "layout-main-attempt", "state": "working", "panel": {
+    "room_id": layout_room_id, "room_participant": layout_main, "role": "main"}}]
+for ident, role, state in (("layout-review-a", "reviewer", "working"),
+                           ("layout-review-b", "reviewer", "working"),
+                           ("layout-builder", "worker", "working"),
+                           ("layout-awaiting", "worker", "review")):
+    layout_members.append({"participant": ident, "provider": "codex", "model": "gpt-6-luna", "role": role,
+                           "label": ident, "parent": layout_main, "joined": True, "seq": len(layout_members) + 1})
+    layout_attempts.append({"attempt_id": ident, "state": state, "panel": {
+        "room_id": layout_room_id, "room_participant": ident, "role": role}})
+layout_tree["room"]["participants"] = layout_members
+layout_tree["attempts"] = {"active_recent": layout_attempts, "recent": []}
+
 # The visual flow selects one exact parent, keeps an ended main in history, and
 # uses real role cards with frame-local chat/result targets.
 flow_members = [{"participant": "flow-main", "role": "main", "joined": True, "provider": "codex",
@@ -2619,6 +2637,77 @@ assert choose(("click", 1, owner_hit["y"]), navigation) == ("fold", owner_hit["a
 navigation["collapsed"] = {owner_hit["action"][1]}
 folded = render(tree_room, "codex", 91, 99, view="tree", navigation=navigation)
 assert "calls" in folded and owner_hit["action"] in navigation["items"]
+
+def visible_tree_rows(picture):
+    return [re.sub(r"\033\[[0-9;]*m", "", line) for line in picture.splitlines()]
+
+def tree_character_at(line, column):
+    position = 0
+    for character in line:
+        width = display_width(character)
+        if position == column:
+            return character
+        if position < column < position + width:
+            return ""
+        position += width
+    return ""
+
+for unicode_tree in (True, False):
+    top_connector = "┌╌╌ " if unicode_tree else ",-  "
+    child_connectors = ("├╌╌ ", "└╌╌ ") if unicode_tree else ("+-  ", "`-  ")
+    vertical = "│" if unicode_tree else "|"
+    layout_nav = {"expanded_groups": {("review", layout_main)}}
+    layout_picture = render(layout_tree, "codex", 100, 40, view="tree", unicode=unicode_tree,
+                            navigation=layout_nav)
+    layout_rows = visible_tree_rows(layout_picture)
+    first_heading = next(line for line in layout_rows if "REVIEWERS (2)" in line)
+    activity_heading = next(line for line in layout_rows if "Activity" in line and "calls" in line)
+    origin = display_width(activity_heading[:activity_heading.index("Activity")]) - 1
+    assert display_width(first_heading[:first_heading.index(top_connector)]) == origin + 2, first_heading
+    main_row = next(index for index, line in enumerate(layout_rows) if "Layout main" in line and "MAIN" in line)
+    heading_row = layout_rows.index(first_heading)
+    assert heading_row < main_row and all(tree_character_at(line, origin + 2) == vertical
+                                          for line in layout_rows[heading_row + 1:main_row]), layout_picture
+    for ident in ("layout-review-a", "layout-review-b", "layout-builder", "layout-awaiting"):
+        hit = next(hit for hit in layout_nav["hits"] if hit["action"] == ("result", ident))
+        row = layout_rows[hit["y"] - 1]
+        branch_at = min(row.index(connector) for connector in child_connectors if connector in row)
+        assert display_width(row[:branch_at]) - origin == 6, (ident, row, origin)
+
+    selected_action = ("group", ("review", layout_main))
+    for colored in (False, True):
+        selected_nav = {"selected": selected_action}
+        selected_picture = render(layout_tree, "codex", 100, 40, view="tree", unicode=unicode_tree,
+                                 color=colored, navigation=selected_nav)
+        selected_rows = visible_tree_rows(selected_picture)
+        selected_hit = next(hit for hit in selected_nav["hits"] if hit["action"] == selected_action)
+        row = selected_rows[selected_hit["y"] - 1]
+        endpoint = "└╌╌ " if unicode_tree else "`-  "
+        selected_glyph = "▸" if unicode_tree else ">"
+        assert tree_character_at(row, origin) == selected_glyph and tree_character_at(row, origin + 1) == " ", row
+        assert display_width(row[:row.index(endpoint)]) == origin + 2, row
+
+    for columns in (100, 63):
+        for colored in (False, True):
+            expanded_nav = {"selected": ("result", "layout-review-a")}
+            expanded_picture = render(layout_tree, "codex", columns, 40, view="tree", unicode=unicode_tree,
+                                      color=colored, navigation=expanded_nav)
+            expanded_rows = visible_tree_rows(expanded_picture)
+            expanded_heading = next(index for index, line in enumerate(expanded_rows) if "REVIEWERS (2)" in line)
+            expanded_main = next(index for index, line in enumerate(expanded_rows)
+                                 if "Layout main" in line and "MAIN" in line)
+            activity_heading = next(line for line in expanded_rows if "Activity" in line and "calls" in line)
+            expanded_origin = display_width(activity_heading[:activity_heading.index("Activity")]) - 1
+            broken_trunk = [line for line in expanded_rows[expanded_heading + 1:expanded_main]
+                            if tree_character_at(line, expanded_origin + 2) != vertical]
+            assert not broken_trunk, (unicode_tree, columns, colored, expanded_origin, broken_trunk,
+                                      expanded_picture)
+    # Below 40 columns the selected card has no left padding; the marker must not eat its corner.
+    narrow_rows = visible_tree_rows(render(layout_tree, "codex", 39, 40, view="tree", unicode=unicode_tree,
+                                           navigation={"selected": ("result", "layout-review-a")}))
+    card_tops = [line for line in narrow_rows if "REVIEWER Luna" in line and "running" not in line]
+    assert card_tops and ("╭" if unicode_tree else "+") in card_tops[0][:card_tops[0].index("REVIEWER")], narrow_rows
+
 for columns, rows in ((91, 99), (42, 24), (28, 16), (28, 12), (2, 8), (1, 1)):
     for ascii_only in (False, True):
         for menu in (False, True):

@@ -77,6 +77,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                  (m["state"] in ATTENTION_STATES or classify(m) == "review")]
     past = past_calls(calls, classify)
     prefix, end, stem = ("├╌╌ ", "└╌╌ ", "│   ") if unicode else ("+-  ", "`-  ", "|   ")
+    top = "┌╌╌ " if unicode else ",-  "
     rows, items = [], []
     boxed = width >= 28 and height >= 16
     content_width = width - 4 if boxed else width
@@ -129,12 +130,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 add("    " + note, "dim")
         # Native advisors have no retained result to open; their card still
         # explains where the answer lives when no selectable action exists.
-        if call.get("_native") or action and action == selected:
-            lead = "" if content_width < 60 else "  " + " " * display_width(connector)
+        if (call.get("_native") or action and action == selected) and content_width >= 10:
+            lead = ("  " + connector[:4] + " " * max(0, display_width(connector) - 4)
+                    if width >= 40 else "")
             card_width = max(4, content_width - display_width(lead))
             rows.pop()
             add(lead + box_edge(call_identity(call.get("role"), call.get("model"), alias=call.get("alias"),
                                               purpose=purpose(call)), card_width, unicode, dashed=True), style, action, fold)
+            rows[-1]["card_role"] = style
             add(lead + box_row(tag + "  " + age, card_width, unicode, dashed=True), None, action)
             rows[-1]["tag_span"] = (tag, tag_tone)
             rows[-1]["card_role"] = style
@@ -160,7 +163,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 rows[-1]["card_role"] = style
             add(lead + box_edge("", card_width, unicode, "bottom", dashed=True), style, action)
 
-    def call_groups(attached, owner, root_stem, band=None):
+    above_group_count = {}
+
+    def call_groups(attached, owner, band=None):
         roles = list(dict.fromkeys(visual_role(m) for m in attached))
         groups = [(role, [m for m in attached if visual_role(m) == role and classify(m) == "live"])
                   for role in roles]
@@ -178,29 +183,43 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             heading = group_title or ("COUNCIL" if role == "council" else role.upper() + "S")
             if band and group_index == 0:
                 heading = glyph(band, unicode) + " " + band.title() + sep + heading
+            above_count = above_group_count.get(owner, 0)
+            root_branch = (top if above_count == 0 else prefix) if band else (end if last_group else prefix)
+            if band:
+                above_group_count[owner] = above_count + 1
+            continues = bool(band) or not last_group
+            child_stem = stem if continues else "    "
+            group_style = (("judge" if band == "gate" else "counsel") if band else
+                           "review" if role == "review" else "dim") if group_title else band_style(role)
             if group_title:
                 mark = ("▾" if group_key in expanded else "▸") if unicode else ("v" if group_key in expanded else ">")
-                add(root_stem + (end if last_group else prefix) + "%s %s (%s)" % (mark, heading, len(children)),
-                    ("judge" if band == "gate" else "counsel") if band else "review" if role == "review" else "dim", ("group", group_key))
+                heading_action = ("group", group_key)
+                heading_text = "%s %s (%s)" % (mark, heading, len(children))
+                heading_gutter = glyph("selected", unicode) + " " if selected == heading_action else "  "
+                add(heading_gutter + root_branch + heading_text, None, heading_action)
+                rows[-1]["spans"] = [(heading_gutter, "text"), (root_branch, group_style),
+                                     (heading_text, group_style)]
                 if group_key not in expanded:
                     if height >= 16:
                         continue
                     # A short viewport still exposes a call directly, alongside the group control.
                     children = children[:1]
             else:
-                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children), band_style(role))
-            indent = root_stem
+                heading_gutter = "  "
+                heading_text = heading + " (%s)" % len(children)
+                add(heading_gutter + root_branch + heading_text, None)
+                rows[-1]["spans"] = [(heading_gutter, "text"), (root_branch, group_style),
+                                     (heading_text, group_style)]
             for child_index, child in enumerate(children):
-                branch = end if child_index == len(children) - 1 and last_group else prefix
+                branch = end if child_index == len(children) - 1 else prefix
                 child_action = child.get("_action") or ("result", child["participant"])
                 if child.get("_native"):
                     child_action = None
-                call_row(child, indent + branch, child_action,
+                call_row(child, child_stem + branch, child_action,
                          extra="patch awaits admission" if child["state"] == "done" and child.get("participant") in listing(report.get("awaiting_admission")) else "")
 
     roots = {ident for m in mains for ident in (m["participant"], m.get("attempt")) if ident}
     for main in mains:
-        root_stem = "  "
         attached = [m for m in calls if m.get("parent") and
                     m["parent"] in {main["participant"], main.get("attempt")}]
         action = ("chat", main["participant"])
@@ -208,14 +227,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if not folded:
             for band in ("gate", "counsel"):
                 call_groups([m for m in attached if judge_band(m.get("role"), purpose(m)) == band],
-                            main["participant"], root_stem, band)
+                            main["participant"], band)
         call_row(main, action=action, fold=bool(attached), extra="%s calls" % len(attached) if folded else "")
         if not folded:
-            call_groups([m for m in attached if role_style(m.get("role"), purpose(m)) != "judge"], main["participant"], root_stem)
+            call_groups([m for m in attached if role_style(m.get("role"), purpose(m)) != "judge"], main["participant"])
     unlinked = [m for m in calls if m.get("parent") not in roots]
     if unlinked:
         add("Calls with no known main", "alert")
-        call_groups(unlinked, "unlinked", "")
+        call_groups(unlinked, "unlinked")
     if interactive and height < 16 and not attention_only and calls and not any(
             item[0] in {"result", "debate"} for item in items):
         hidden = [c for c in calls if not c.get("_native")]
@@ -451,7 +470,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         inner = boxed and len(head) < y < len(shown) - 1
         if not color and not row.get("spans") and row.get("action") and row["action"] == selected and row["action"] != previous_action:
             span = content_width if inner else width
-            value = glyph("selected", unicode) + " " + clipped(value, max(0, span - 2)) if span >= 2 else ">"
+            if row.get("card_role") and span >= 2 and value[:2] == "  ":
+                value = glyph("selected", unicode) + " " + value[2:]
+            else:
+                value = glyph("selected", unicode) + " " + clipped(value, max(0, span - 2)) if span >= 2 else ">"
         previous_action = row.get("action")
         if inner:
             value = box_edge(value, width, unicode, "divider") if row.get("divider") else box_row(value, width, unicode)
