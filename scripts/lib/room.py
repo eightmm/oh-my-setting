@@ -297,6 +297,9 @@ def event_shape(event):
     if kind == "scope" and "owns" not in event:
         raise ValueError("missing declared scopes")
     if kind == "join":
+        if event.get("alias") is not None and (not isinstance(event["alias"], str)
+                                                  or not re.fullmatch(r"[A-Za-z0-9-]{1,8}", event["alias"])):
+            raise ValueError("invalid dispatched alias")
         if (event.get("dispatch_role") is not None and
                 (not isinstance(event["dispatch_role"], str)
                  or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", event["dispatch_role"]))):
@@ -482,7 +485,7 @@ def validate_event(rows, event, text, repo=None):
     carry = _carrying()
     keys = {"created": {"kind", "task_id", "participant", "predecessor"},
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent",
-                     "dispatch_role", "purpose", "state"},
+                     "dispatch_role", "purpose", "state", "alias"},
             "main-swap": {"kind", "participant", "provider", "model", "attempt", "harness"},
             "bind": {"kind", "participant", "consumer", "previous"},
             "scope": {"kind", "participant", "owns"},
@@ -1256,7 +1259,7 @@ def rollover(repo, old, actor=None):
 
 
 def join(repo, room, who, provider, role="main", model=None, label=None, native_session=None, owns=None, parent=None,
-         dispatch_role=None, purpose=None, state=None):
+         dispatch_role=None, purpose=None, state=None, alias=None):
     result = subprocess.run(["bash", "-c", '. "$1"; oms_provider_normalize "$2"', "room-provider",
                              str(ROOT / "scripts/lib/provider-registry.sh"), provider],
                             capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
@@ -1276,6 +1279,10 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
         event["purpose"] = purpose
     if state is not None:
         event["state"] = state
+    if alias is not None:
+        if not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,8}", alias):
+            raise ValueError("invalid dispatched alias")
+        event["alias"] = alias
     if native_session:
         event["consumer"] = hashlib.sha256(native_session.encode("utf-8")).hexdigest()[:32]
     if parent:

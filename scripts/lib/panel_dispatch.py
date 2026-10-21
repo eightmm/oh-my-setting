@@ -20,6 +20,11 @@ import threading
 import time
 import uuid
 
+ROLE_ALIAS_LETTERS = {"builder":"B", "worker":"W", "reviewer":"R", "verifier":"V",
+                      "security-auditor":"S", "advisor":"A", "critic":"C", "architect":"H",
+                      "documenter":"D", "integrator":"I", "performance-engineer":"P",
+                      "release-engineer":"E", "refactorer":"F", "researcher":"X"}
+
 # Call-local facade imports preserve the public entry point and avoid import cycles.
 class PlanBinding(NamedTuple):
     plan_id: str
@@ -468,20 +473,6 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             if alias is not None and existing_alias and alias != existing_alias:
                 raise ValueError("--continue keeps the continued call's alias")
             alias = existing_alias or alias
-    if alias is None:
-        letters = {"builder":"B", "worker":"W", "reviewer":"R", "verifier":"V", "security-auditor":"S",
-                   "advisor":"A", "critic":"C", "architect":"H", "documenter":"D", "integrator":"I",
-                   "performance-engineer":"P", "release-engineer":"E", "refactorer":"F", "researcher":"X"}
-        letter = letters.get(role, "W")
-        numbers = [row for row in call_rows
-                   if re.fullmatch(re.escape(letter) + r"\d+", row.get("refs", {}).get("panel_alias", ""))]
-        number = len(numbers) + 1
-        used = {row.get("refs", {}).get("panel_alias") for row in call_rows}
-        while letter + str(number) in used:
-            number += 1
-        alias = letter + str(number)
-    elif not continue_task and any(row.get("refs", {}).get("panel_alias") == alias for row in call_rows):
-        raise ValueError("call alias is already used in this room lineage")
     resume = None
     temporary = None
     temporaries = []
@@ -526,11 +517,65 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             options["candidate"] = candidate
         if continuation_patch is not None:
             options["continuation_patch"] = continuation_patch
+        if continue_task:
+            options["continue_call"] = True
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                             dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias, **options)
     finally:
         for path in temporaries:
             path.unlink()
+
+
+def _reserve_alias(repo, room_id, role, requested, call_rows):
+    """Reserve an alias atomically until a lineage-resolved call row records it.
+
+    Join aliases only count as used: a rollover does not carry finished members, so a join row
+    cannot release a reservation without risking a second W1 in the successor room.
+    """
+    import panel_results
+    alias_path = str(Path(repo) / ".oms/artifacts/panel-aliases.json")
+    recorded = {row.get("refs", {}).get("panel_alias") for row in call_rows
+                if row.get("refs", {}).get("panel_alias")}
+    joined = {row.get("room_event", {}).get("alias") for row in room.records(repo, room_id)
+              if row.get("room_event", {}).get("kind") == "join" and row.get("room_event", {}).get("alias")}
+    try:
+        with panel_results._lock(repo, "panel-aliases"):
+            selected = []
+            def mutate(old):
+                try:
+                    registry = json.loads(old) if old else {"schema": 1, "reservations": []}
+                except (ValueError, TypeError):
+                    raise ValueError("panel alias reservations are unreadable")
+                if (not isinstance(registry, dict) or registry.get("schema") != 1
+                        or not isinstance(registry.get("reservations"), list)):
+                    raise ValueError("panel alias reservations are invalid")
+                if any(not isinstance(row, dict) or not isinstance(row.get("room"), str)
+                       or not isinstance(row.get("alias"), str) for row in registry["reservations"]):
+                    raise ValueError("panel alias reservations are invalid")
+                live_reservations = [row for row in registry["reservations"]
+                                     if not (row["room"] == room_id or room.same_room(repo, row["room"], room_id))
+                                     or row["alias"] not in recorded]
+                registry["reservations"] = live_reservations
+                reserved = {row["alias"] for row in live_reservations
+                            if row["room"] == room_id or room.same_room(repo, row["room"], room_id)}
+                used = reserved | recorded | joined
+                value = requested
+                if value is None:
+                    letter = ROLE_ALIAS_LETTERS.get(role, "W")
+                    numbers = [int(match.group(1)) for item in used if isinstance(item, str)
+                               for match in [re.fullmatch(re.escape(letter) + r"(\d+)", item)] if match]
+                    number = max(numbers or [0]) + 1
+                    value = letter + str(number)
+                elif value in used:
+                    raise ValueError("call alias is already used in this room lineage")
+                selected.append(value)
+                registry["reservations"].append({"room": room_id, "alias": value})
+                return (json.dumps(registry, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            panel_results.DURABLE["atomic_mutate"](alias_path, mutate, str(repo), missing_ok=True,
+                create_parent=True, label="panel alias reservations")
+            return selected[0]
+    except SystemExit as error:
+        raise ValueError("panel alias reservation refused") from error
 
 
 def _validate_dispatch_verifier(repo, verify):
@@ -1658,7 +1703,7 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
-                 candidate=None, continuation_patch=None):
+                 candidate=None, continuation_patch=None, continue_call=False):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
     from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
@@ -1840,9 +1885,16 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         if forbidden:
             env["OMS_PANEL_FORBIDDEN_PATHS"] = ", ".join(forbidden)
     if room_id:
+        if not continue_call or alias is None:
+            attempts = json.loads(events(repo, "list", "--json", output=True))
+            call_rows = [row for row in attempts
+                         if row.get("refs", {}).get("panel_alias")
+                         and room.same_room(repo, row.get("refs", {}).get("panel_room_id"), room_id)]
+            alias = _reserve_alias(repo, room_id, role, alias, call_rows)
         member = member_id or "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],
-                  owns=scopes, parent=caller, dispatch_role=route["role"], purpose=route["purpose"], state="queued")
+                  owns=scopes, parent=caller, dispatch_role=route["role"], purpose=route["purpose"], state="queued",
+                  alias=alias)
         try:
             # A rollover that sealed the room meanwhile carried the join; enroll the call where it now lives.
             room_id = room.settle(repo, room_id)
@@ -1862,6 +1914,10 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
         if access == "write" and route["kind"] == "worker":
             env["OMS_ROOM_RELAY_ALLOWED"] = "1"
+    elif alias is None:
+        alias = ROLE_ALIAS_LETTERS.get(role, "W") + "1"
+    if alias:
+        env["OMS_PANEL_ALIAS"] = alias
     argv[argv.index("--repo") + 1] = str(execution)
     print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
                                             route["effort"] or "native-settings", access) +

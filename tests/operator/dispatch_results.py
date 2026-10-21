@@ -4,6 +4,29 @@ import panel_dispatch as dispatch
 from contextlib import redirect_stderr
 from unittest.mock import patch
 import io
+from concurrent.futures import ThreadPoolExecutor
+
+alias_repo = temporary / "alias-reservations"
+alias_repo.mkdir()
+with patch.object(dispatch.room, "records", return_value=[]):
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        aliases = list(pool.map(lambda _: dispatch._reserve_alias(alias_repo, "alias-room", "worker", None, []),
+                                range(4)))
+assert len(set(aliases)) == 4, aliases
+with patch.object(dispatch.room, "records", return_value=[
+        {"room_event": {"kind": "join", "alias": aliases[0]}}]):
+    try:
+        dispatch._reserve_alias(alias_repo, "alias-room", "worker", aliases[0], [])
+        raise AssertionError("duplicate explicit alias was accepted")
+    except ValueError as error:
+        assert "already used" in str(error), error
+    next_alias = dispatch._reserve_alias(alias_repo, "alias-room", "worker", None,
+                                         [{"refs": {"panel_alias": aliases[1]}}])
+assert next_alias == "W5", next_alias
+alias_registry = json.loads((alias_repo / ".oms/artifacts/panel-aliases.json").read_text())
+reserved_aliases = [row["alias"] for row in alias_registry["reservations"]]
+assert aliases[1] not in reserved_aliases and aliases[0] in reserved_aliases, alias_registry
+assert dispatch.ROLE_ALIAS_LETTERS["worker"] == "W"
 warning_plan = temporary / "dispatch-warning-plan"
 (warning_plan / ".oms/plan").mkdir(parents=True)
 (warning_plan / ".oms/plan/tasks.json").write_text(
