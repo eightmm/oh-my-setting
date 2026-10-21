@@ -267,7 +267,9 @@ def _continuation_base_note(repo, base, body, allow_stale_base=False):
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError("could not resolve continuation base or current HEAD before continuing: %s" % error)
     if base_result.returncode:
-        raise ValueError("recorded continuation base is not a commit")
+        # The base is not in this checkout (another clone or a pruned object): the harness
+        # still replays at the original base, so there is no drift to judge here.
+        return "recorded continuation base %s is not in this checkout; drift was not checked" % base
     if current.returncode:
         raise ValueError("could not resolve current HEAD before continuing")
     base = base_result.stdout.strip()
