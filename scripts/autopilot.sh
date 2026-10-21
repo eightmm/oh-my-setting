@@ -28,7 +28,9 @@ PLANNER="claude"
 WORKER="codex"
 REVIEWER=""
 ALLOWED=""
+ALLOWED_EXPLICIT=0
 BASE=""
+BASE_EXPLICIT=0
 REMOTE="origin"
 MAX_CYCLES=10
 MAX_PARALLEL_TASKS=1
@@ -128,8 +130,10 @@ Options:
   --reviewer PROVIDER     Semantic reviewer; defaults to a provider different
                           from the worker.
   --allowed PATHS         Immutable comma-separated task path envelope.
-                          Required whenever a proposal may be generated.
-  --base BRANCH           Review/PR base branch. Required for propose and run.
+                          New proposals default to PROJECT.md Scope; a bound
+                          plan keeps its reviewed envelope.
+  --base BRANCH           Review/PR base branch. Defaults to the checked-out
+                          branch for propose; required for run.
   --remote NAME           Git remote for base resolution and Draft PR (origin).
   --max-cycles N          Task-attempt cap, 1..10 (default: 10),
                           counted across resumes of one autopilot contract.
@@ -206,8 +210,8 @@ while [ "$#" -gt 0 ]; do
     --planner) [ "$#" -ge 2 ] || fail "--planner requires a provider"; PLANNER="$2"; shift 2 ;;
     --worker) [ "$#" -ge 2 ] || fail "--worker requires a provider"; WORKER="$2"; shift 2 ;;
     --reviewer) [ "$#" -ge 2 ] || fail "--reviewer requires a provider"; REVIEWER="$2"; shift 2 ;;
-    --allowed) [ "$#" -ge 2 ] || fail "--allowed requires paths"; ALLOWED="$2"; shift 2 ;;
-    --base) [ "$#" -ge 2 ] || fail "--base requires a branch"; BASE="$2"; shift 2 ;;
+    --allowed) [ "$#" -ge 2 ] || fail "--allowed requires paths"; ALLOWED="$2"; ALLOWED_EXPLICIT=1; shift 2 ;;
+    --base) [ "$#" -ge 2 ] || fail "--base requires a branch"; BASE="$2"; BASE_EXPLICIT=1; shift 2 ;;
     --remote) [ "$#" -ge 2 ] || fail "--remote requires a name"; REMOTE="$2"; shift 2 ;;
     --max-parallel-tasks)
       [ "$#" -ge 2 ] || fail "--max-parallel-tasks requires a count"
@@ -1144,6 +1148,37 @@ normalize_allowed() {  # TEXT
   python3 "$PATH_SCOPE_HELPER" normalize-list "$1" | tr -d '\r'
 }
 
+normalize_scope_default() {  # PROJECT_SCOPE -> normalized allowed envelope
+  python3 - "$1" "$PATH_SCOPE_HELPER" <<'PY'
+import runpy, sys
+
+raw, helper = sys.argv[1:]
+if not raw.strip():
+    raise SystemExit(3)
+if "," in raw:
+    items = [item.strip() for item in raw.split(",")]
+    if any(not item for item in items):
+        raise SystemExit(2)
+else:
+    items = [raw.strip()]
+if any(item == "." for item in items):
+    raise SystemExit(4)
+# A derived envelope is plain paths only: a glob such as * or ** could grant the whole repository.
+allowed_chars = set("._/-:")
+for item in items:
+    if any(char.isspace() or char in "()" or
+           not (char.isalnum() or char in allowed_chars) for char in item):
+        raise SystemExit(5)
+try:
+    normalized = runpy.run_path(helper)["normalize_list"](",".join(items))
+except (OSError, ValueError, SyntaxError):
+    raise SystemExit(2)
+if any(item == "." for item in normalized):
+    raise SystemExit(4)
+print(",".join(normalized))
+PY
+}
+
 # A plan file is not the same thing as a plan bound to THIS contract.
 plan_binds_spec() {  # SPEC_SHA256
   [ -f "$PLAN_FILE" ] || return 1
@@ -1351,6 +1386,18 @@ PY
 }
 
 if [ "$ACTION" = propose ]; then
+  base_source="explicit"
+  [ "$ALLOWED_EXPLICIT" -eq 0 ] || [ -n "$ALLOWED" ] ||
+    fail "--allowed requires paths"
+  if [ "$BASE_EXPLICIT" -eq 0 ]; then
+    BASE="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    BASE="${BASE//$'\r'/}"
+    [ -n "$BASE" ] || fail "propose requires --base so its continuation is executable"
+    git check-ref-format --branch "$BASE" >/dev/null 2>&1 ||
+      fail "propose requires --base so its continuation is executable"
+    base_source="checked-out branch"
+  fi
+  echo "autopilot: base: $BASE ($base_source)"
   [ -n "$BASE" ] || fail "propose requires --base so its continuation is executable"
   git check-ref-format --branch "$BASE" >/dev/null 2>&1 ||
     fail "--base is not a valid branch name"
@@ -1367,9 +1414,30 @@ if [ "$ACTION" = propose ]; then
       fail "the plan in .oms/plan/ is bound to a different contract and still has unfinished tasks; finish or resolve and retire it through the plan lifecycle before proposing against the adopted PROJECT.md; oms autopilot abandon only retires a frozen outer receipt, not this plan"
     fi
     archive_superseded_plan || fail "cannot preserve the superseded plan"
+    allowed_source="explicit"
+    if [ "$ALLOWED_EXPLICIT" -eq 0 ]; then
+      scope="$("$PLAN_FROM_SPEC" --repo "$REPO" --scope-only)" ||
+        fail "cannot read PROJECT.md Scope; pass --allowed explicitly"
+      scope="${scope//$'\r'/}"
+      scope_rc=0
+      ALLOWED="$(normalize_scope_default "$scope")" || scope_rc=$?
+      case "$scope_rc" in
+        0) allowed_source="from PROJECT.md Scope" ;;
+        3) fail "PROJECT.md Scope is empty; pass --allowed explicitly" ;;
+        4) fail "PROJECT.md Scope cannot grant the whole repository; pass --allowed explicitly" ;;
+        *) fail "PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly" ;;
+      esac
+    fi
+    echo "autopilot: allowed: $ALLOWED ($allowed_source)"
     propose_tasks "" "$INITIAL_TASKS" || exit $?
   fi
   bind_plan_contract
+  if [ "$ALLOWED_EXPLICIT" -eq 0 ]; then
+    allowed_source="reviewed plan envelope"
+  else
+    allowed_source="explicit"
+  fi
+  echo "autopilot: allowed: $ALLOWED ($allowed_source)"
   [ "$(plan_view all-done)" = 1 ] ||
     fail "current plan still has unfinished tasks; run it before proposing a remainder"
   if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept >/dev/null 2>&1; then

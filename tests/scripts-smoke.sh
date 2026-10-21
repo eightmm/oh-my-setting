@@ -34805,6 +34805,226 @@ test_project_state_parser_is_shared_and_rejects_typos() {
     fail "project-doctor rejected legacy active State"
   contains "$out" 'PROJECT.md state: active' ||
     fail "project-doctor changed the public legacy active spelling: $out"
+
+  sed -i 's/^- Scope:$/- Scope: src\/, tests\//' "$project/PROJECT.md"
+  scope="$("$ROOT/scripts/plan-from-spec.sh" --repo "$project" --scope-only 2>&1)" ||
+    fail "the planner's Scope parser was not exposed to autopilot: $scope"
+  contains "$scope" 'src/' || fail "Scope parser lost the declared paths: $scope"
+
+  sed -i 's@^- Scope:.*@- Scope: ../escape@' "$project/PROJECT.md"
+  git -C "$project" add -f PROJECT.md && git -C "$project" commit -qm 'test: invalid scope fixture' ||
+    fail "could not prepare a clean autopilot scope fixture"
+  rc=0
+  out="$("$ROOT/scripts/autopilot.sh" --repo "$project" propose 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "autopilot accepted an unsafe default Scope (rc=$rc): $out"
+  contains "$out" 'PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly' ||
+    fail "unsafe default Scope used the wrong refusal: $out"
+  # A glob Scope could grant the whole repository; the derived default accepts plain paths only.
+  sed -i 's@^- Scope:.*@- Scope: src/, *@' "$project/PROJECT.md"
+  git -C "$project" commit -qam 'test: glob scope fixture' || fail "could not prepare a glob scope fixture"
+  rc=0
+  out="$("$ROOT/scripts/autopilot.sh" --repo "$project" propose 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "autopilot accepted a glob default Scope (rc=$rc): $out"
+  contains "$out" 'PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly' ||
+    fail "glob default Scope used the wrong refusal: $out"
+
+  git -C "$project" checkout -q --detach HEAD || fail "could not detach the fixture"
+  rc=0
+  out="$("$ROOT/scripts/autopilot.sh" --repo "$project" --allowed src propose 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "autopilot accepted a detached default base (rc=$rc): $out"
+  contains "$out" 'propose requires --base so its continuation is executable' ||
+    fail "detached HEAD used the wrong base refusal: $out"
+
+  rc=0
+  out="$("$ROOT/scripts/autopilot.sh" --repo "$project" --base 'invalid branch' \
+    --allowed src propose 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "autopilot accepted an invalid explicit base (rc=$rc): $out"
+  contains "$out" 'base: invalid branch (explicit)' ||
+    fail "explicit base was not reported as authoritative: $out"
+  contains "$out" '--base is not a valid branch name' ||
+    fail "explicit base was not validated: $out"
+}
+
+test_autopilot_bound_plan_uses_reviewed_envelope_without_scope_default() {
+  local mode project planner out rc
+
+  for mode in accepted remainder; do
+    project="$TMP/autopilot-bound-envelope-$mode"
+    make_committed_repo "$project"
+    printf '/.oms/\n' > "$project/.gitignore"
+    cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: confirmed
+
+## Project
+
+- Goal: finish the bounded feature
+- Scope: src/, tests/
+- Non-goals: release
+
+## Commands
+
+- Test: true
+
+## Verification
+
+- Required checks: true
+- Required check files: PROJECT.md
+EOF
+    git -C "$project" add .gitignore PROJECT.md
+    git -C "$project" -c user.email=test@example.com -c user.name='Test User' \
+      commit -qm 'test: bound autopilot fixture'
+    mkdir -p "$project/.oms/plan"
+    OMS_T_ACCEPT="$([ "$mode" = accepted ] && echo true || echo false)" \
+      python3 - "$project" <<'PY'
+import hashlib, json, os, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+spec = (repo / "PROJECT.md").read_bytes()
+digest = hashlib.sha256(spec).hexdigest()
+now = "2026-10-21T00:00:00Z"
+task = {
+    "id": "t1", "title": "feat: initial", "state": "done",
+    "depends": [], "allowed_paths": ["src/"], "forbidden_paths": [],
+    "verify": "true", "role": "", "provider": "codex", "ttl": "",
+    "artifact": "artifact", "patch": "patch", "reason": "",
+    "executor_id": "", "executor_soul_sha256": "", "lease_epoch": 1,
+    "lease_id": "lease", "review_lease_id": "lease", "repair_count": 0,
+    "repair_artifact": "", "created": now, "updated": now,
+}
+plan = {
+    "schema": 3, "goal": "finish the bounded feature",
+    "accept": os.environ["OMS_T_ACCEPT"],
+    "project_contract": {
+        "schema": 1, "spec_sha256": digest,
+        "allowed_envelope": ["src"],
+        "acceptance_files": ["PROJECT.md"],
+        "acceptance_manifest": [{"path": "PROJECT.md", "sha256": digest}],
+    },
+    "tasks": {"t1": task},
+}
+with (repo / ".oms/plan/tasks.json").open("w", encoding="utf-8") as handle:
+    json.dump(plan, handle)
+    handle.write("\n")
+PY
+
+    if [ "$mode" = accepted ]; then
+      rc=0
+      out="$("$ROOT/scripts/autopilot.sh" --repo "$project" propose 2>&1)" || rc=$?
+      [ "$rc" = 0 ] || fail "bound accepted plan failed without --allowed ($rc): $out"
+      contains "$out" 'acceptance already passes; no remainder proposal is needed' ||
+        fail "bound accepted plan did not exit on passing acceptance: $out"
+    else
+      planner="$TMP/autopilot-fake-plan-from-spec"
+      cat > "$planner" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+repo=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+proposal="$repo/.oms/plan/proposal-r1.json"
+printf '{}\n' > "$proposal"
+digest="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$proposal")"
+printf 'plan-from-spec: proposed 1 task(s) -> %s\n' "$proposal"
+printf 'plan-from-spec: proposal sha256: %s\n' "$digest"
+EOF
+      chmod +x "$planner"
+      rc=0
+      out="$(OMS_AUTOPILOT_PLAN_FROM_SPEC="$planner" \
+        "$ROOT/scripts/autopilot.sh" --repo "$project" propose 2>&1)" || rc=$?
+      [ "$rc" = 4 ] || fail "bound remainder proposal failed without --allowed ($rc): $out"
+      contains "$out" 'proposal awaits parent-agent review' ||
+        fail "bound unfinished acceptance did not reach the remainder proposal: $out"
+    fi
+    contains "$out" 'allowed: src (reviewed plan envelope)' ||
+      fail "bound plan did not report its reviewed envelope: $out"
+    if contains "$out" '--allowed cannot widen or replace the reviewed plan envelope'; then
+      fail "Scope default was treated as a replacement for the bound envelope: $out"
+    fi
+  done
+}
+
+test_autopilot_scope_default_requires_an_explicit_safe_envelope() {
+  local project planner marker kind scope expected out rc
+  project="$TMP/autopilot-invalid-scope"
+  planner="$TMP/autopilot-scope-planner"
+  marker="$TMP/autopilot-scope-planner-called"
+  make_committed_repo "$project"
+  printf '/.oms/\n' > "$project/.gitignore"
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: confirmed
+
+## Project
+
+- Goal: finish the bounded feature
+- Scope: src/, tests/
+- Non-goals: release
+
+## Commands
+
+- Test: true
+
+## Verification
+
+- Required checks: true
+- Required check files: PROJECT.md
+EOF
+  git -C "$project" add .gitignore PROJECT.md
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' \
+    commit -qm 'test: invalid autopilot scope fixture'
+  cat > "$planner" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = --scope-only ]; then
+    exec "$OMS_TEST_REAL_PLAN_FROM_SPEC" "$@"
+  fi
+done
+: > "$OMS_TEST_SCOPE_CALLED"
+exit 0
+EOF
+  chmod +x "$planner"
+
+  for kind in empty prose parentheses root; do
+    case "$kind" in
+      empty) scope="   "; expected='PROJECT.md Scope is empty; pass --allowed explicitly' ;;
+      prose) scope='src and tests'; expected='PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly' ;;
+      parentheses) scope='src/ (tests/)'; expected='PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly' ;;
+      root) scope='.'; expected='PROJECT.md Scope cannot grant the whole repository; pass --allowed explicitly' ;;
+    esac
+    SCOPE_VALUE="$scope" python3 - "$project/PROJECT.md" <<'PY'
+import os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+for index, line in enumerate(lines):
+    if line.startswith("- Scope:"):
+        lines[index] = "- Scope: " + os.environ["SCOPE_VALUE"]
+        break
+else:
+    raise SystemExit("PROJECT.md fixture lost its Scope field")
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+    git -C "$project" add PROJECT.md
+    git -C "$project" -c user.email=test@example.com -c user.name='Test User' \
+      commit -qm "test: $kind autopilot Scope"
+    rm -f "$marker"
+    rc=0
+    out="$(OMS_AUTOPILOT_PLAN_FROM_SPEC="$planner" OMS_TEST_SCOPE_CALLED="$marker" \
+      OMS_TEST_REAL_PLAN_FROM_SPEC="$ROOT/scripts/plan-from-spec.sh" \
+      "$ROOT/scripts/autopilot.sh" --repo "$project" propose 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "$kind Scope should refuse before planner call ($rc): $out"
+    contains "$out" "$expected" || fail "$kind Scope refusal did not explain --allowed: $out"
+    [ ! -e "$marker" ] || fail "$kind Scope reached the planner before refusal"
+  done
 }
 
 test_state_read_is_nonmutating_and_projection_failures_stay_visible() {

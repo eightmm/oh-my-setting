@@ -25,6 +25,7 @@ ID_PREFIX=""
 ALLOWED_ENVELOPE=""
 EXPECTED_PROPOSAL_SHA=""
 ALLOW_VERIFIER_CHANGE=0
+SCOPE_ONLY=0
 MODEL=""
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
@@ -116,6 +117,7 @@ while [ "$#" -gt 0 ]; do
     --validate-spec)
       [ "$#" -ge 2 ] || fail "--validate-spec requires a spec file"
       VALIDATE_SPEC="$2"; shift 2 ;;
+    --scope-only) SCOPE_ONLY=1; shift ;;
     --expected-proposal-sha256)
       [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a digest"
       EXPECTED_PROPOSAL_SHA="$2"; shift 2 ;;
@@ -741,6 +743,12 @@ print(command)
 print(",".join(files))
 PY
 }
+
+if [ "$SCOPE_ONLY" -eq 1 ]; then
+  [ -f "$SPEC" ] || fail "no PROJECT.md in $REPO"
+  spec_field Scope
+  exit 0
+fi
 
 if [ -n "$APPLY_FILE" ]; then
   [ -f "$APPLY_FILE" ] || fail "no proposal at $APPLY_FILE"
