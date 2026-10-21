@@ -88,6 +88,7 @@ for owner in panel.PROVIDERS:
     command = panel.peer_command("delegate", owner, project, brief=brief,
                                  verify="test \"$(tail -1 value.txt)\" = new")
     answer = call(command, write_env)
+    assert re.search(r"^verify: exit 0 \([0-9]+s\)$", answer, re.M), answer
     patch_match = re.search(r"^patch: (.+)$", answer, re.M)
     assert patch_match and "+new" in Path(patch_match.group(1)).read_text(), answer
     assert (project / "value.txt").read_text() == "old\n", "worker edited primary"

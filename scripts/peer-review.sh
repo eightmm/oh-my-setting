@@ -852,6 +852,7 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
       printf -- '- started: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       printf '## Output\n\n'
     } > "$gate_verify_temp"
+    gate_verify_started="$(date +%s)"
     set +e
     (
       cd "$MA_READ_SOURCE_REPO" || exit 1
@@ -884,6 +885,7 @@ EOF
       run_verify_with_timeout bash -c "$VERIFY_CMD"
     ) >> "$gate_verify_temp" 2>&1
     gate_verify_exit=$?
+    gate_verify_seconds=$(( $(date +%s) - gate_verify_started ))
     set -e
     if [ "$gate_verify_exit" -eq 124 ]; then
       printf '\n\n## Timeout\n\n%s\n' "$(ma_verify_timeout_note "$gate_verify_exit")" >> "$gate_verify_temp"
@@ -1170,10 +1172,10 @@ print(json.dumps({
         "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" ||
         fail "gate verify receipt was not recorded; failing closed"
       if [ "$gate_verify_exit" -eq 0 ]; then
-        echo "gate verify: pass"
+        echo "gate verify: pass (${gate_verify_seconds}s)"
       else
         timeout_note="$(ma_verify_timeout_note "$gate_verify_exit")"
-        echo "gate verify: fail (exit $gate_verify_exit${timeout_note:+; $timeout_note}) -> $gate_verify_artifact"
+        echo "gate verify: fail (exit $gate_verify_exit, ${gate_verify_seconds}s${timeout_note:+; $timeout_note}) -> $gate_verify_artifact"
       fi
   fi
   verdict_rc=0

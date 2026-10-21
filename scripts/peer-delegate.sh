@@ -2027,7 +2027,7 @@ verify_clean_env() {
 }
 
 run_verify() {
-  local verify_pid verify_child_status heartbeat_interval
+  local verify_pid verify_child_status heartbeat_interval verify_started
 
   : > "$verify_out"
   if [ "$worker_status" = 126 ] || [ "$worker_status" = 127 ]; then
@@ -2051,6 +2051,7 @@ run_verify() {
     fi
   fi
   set +e
+  verify_started="$(date +%s)"
   (cd "$worktree" && verify_clean_env && run_verify_with_timeout bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
   verify_pid="$!"
   if [ "$worker_attempt_owned" = 1 ] && [ "$WORKER_ACCESS" = write ]; then
@@ -2064,6 +2065,7 @@ run_verify() {
   fi
   wait "$verify_pid"
   verify_status=$?
+  verify_seconds=$(( $(date +%s) - verify_started ))
   set -e
   stop_verify_heartbeat
   verify_child_status="$verify_status"
@@ -2074,13 +2076,13 @@ run_verify() {
     KEEP_WORKTREE=1
     cat "$verify_out" >> "$artifact"
     timeout_note="$(ma_verify_timeout_note "$verify_child_status")"
-    printf '\n- verify exit: %s%s\n- post-verify protected boundary: blocked\n' \
-      "$verify_child_status" "${timeout_note:+ — $timeout_note}" >> "$artifact"
+    printf '\n- verify exit: %s (%ss)%s\n- post-verify protected boundary: blocked\n' \
+      "$verify_child_status" "$verify_seconds" "${timeout_note:+ — $timeout_note}" >> "$artifact"
     return 0
   fi
   cat "$verify_out" >> "$artifact"
   timeout_note="$(ma_verify_timeout_note "$verify_status")"
-  printf '\n- verify exit: %s%s\n' "$verify_status" "${timeout_note:+ — $timeout_note}" >> "$artifact"
+  printf '\n- verify exit: %s (%ss)%s\n' "$verify_status" "$verify_seconds" "${timeout_note:+ — $timeout_note}" >> "$artifact"
   if [ "$worker_status" -eq 0 ]; then
     if [ "$verify_status" -eq 0 ]; then
       if ! delegate_attempt_transition review "" delegate-review; then
@@ -2415,6 +2417,7 @@ if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ]; then
 fi
 
 verify_status=0
+verify_seconds=0
 if [ -z "$VERIFY_CMD" ]; then
   delegate_attempt_finish_without_verify
 elif [ "$worker_status" -ne 0 ] && [ "$worker_attempt_state" = working ]; then
@@ -2950,7 +2953,7 @@ if [ -n "$VERIFY_CMD" ]; then
   if [ -z "$verify_status" ]; then
     echo "verify: NOT RUN (dry run)"
   else
-    echo "verify: exit $verify_status"
+    echo "verify: exit $verify_status (${verify_seconds}s)"
   fi
 fi
 if [ "$REPAIR" -gt 0 ]; then

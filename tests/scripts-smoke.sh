@@ -17973,7 +17973,7 @@ EOF
     --prompt "Gate verify backstop" >"$project/out" 2>&1 || rc=$?
   [ "$rc" = "1" ] || fail "failing mechanical verify must force gate fail, got $rc"
   # An explicit verifier stays authoritative even without a fast mode.
-  assert_file_contains "$project/out" "gate verify: fail (exit 1)"
+  assert_file_contains "$project/out" "gate verify: fail (exit 1, 0s"
   assert_file_contains "$project/out" "claude: pass"
   assert_one_artifact_contains "$artifact_dir" '_verify-gate-verify-backstop-*.md' 'contract broken'
 
@@ -17999,7 +17999,7 @@ EOF
     --gate --verify "bash scripts/check.sh" \
     --prompt "Gate verify backstop" >"$project/out-pass" 2>&1 || rc=$?
   [ "$rc" = "0" ] || fail "verify pass + reviewer pass should exit 0, got $rc"
-  assert_file_contains "$project/out-pass" "gate verify: pass"
+  assert_file_contains "$project/out-pass" "gate verify: pass (0s)"
 
   # --no-verify keeps the old self-report-only behavior.
   printf '#!/usr/bin/env bash\nexit 1\n' > "$project/scripts/check.sh"
@@ -18974,6 +18974,8 @@ test_patch_admit_report_survives_prune() {
   local report
   report="$(ls "$project"/.oms/artifacts/admit/*.md 2>/dev/null | head -1)"
   [ -n "$report" ] || fail "admit report should exist"
+  grep -Eq '^- verify: PASS — bash scripts/check\.sh — [0-9]+s$' "$report" ||
+    fail "admission verify duration missing"
   ( cd "$project" && "$ROOT/scripts/artifact-index.sh" prune 100 --files >/dev/null 2>&1 )
   [ -f "$report" ] || fail "indexed admit report must survive prune --files"
 }

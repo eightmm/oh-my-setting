@@ -802,15 +802,22 @@ PY
     if [ -n "$VERIFY" ]; then
       if [ "$preverify_failed" = 1 ]; then
         record "verify" "SKIP" "pre-verification policy or integrity gate failed"
-      elif verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
-        VERIFICATION="command"
-        VERIFY_EXIT=0
-        record "verify" "PASS" "$VERIFY"
       else
-        VERIFY_EXIT=$?
-        VERIFICATION="command"
-        timeout_note="$(ma_verify_timeout_note "$VERIFY_EXIT")"
-        record "verify" "FAIL" "$VERIFY${timeout_note:+ — $timeout_note}"
+        verify_started="$(date +%s)"
+        if verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
+          VERIFICATION="command"
+          VERIFY_EXIT=0
+        else
+          VERIFY_EXIT=$?
+          VERIFICATION="command"
+        fi
+        verify_seconds=$(( $(date +%s) - verify_started ))
+        if [ "$VERIFY_EXIT" -eq 0 ]; then
+          record "verify" "PASS" "$VERIFY — ${verify_seconds}s"
+        else
+          timeout_note="$(ma_verify_timeout_note "$VERIFY_EXIT")"
+          record "verify" "FAIL" "$VERIFY — ${verify_seconds}s${timeout_note:+ — $timeout_note}"
+        fi
       fi
     else
       record "verify" "SKIP" "no --verify and no base scripts/check.sh"
@@ -868,19 +875,27 @@ PY
 $verification_surface
 EOF
             if [ "$floor_restore_ok" = 1 ]; then
+              floor_verify_started="$(date +%s)"
               if floor_verify_out="$(cd "$floor_worktree" && run_verify_with_timeout bash -c "$floor_verify" 2>&1)"; then
-                record "verify-floor" "PASS" "$floor_verify (restored from HEAD: $surface_detail)"
+                floor_verify_exit=0
+                floor_verify_status=0
               else
                 floor_verify_exit=$?
+                floor_verify_status=1
+              fi
+              floor_verify_seconds=$(( $(date +%s) - floor_verify_started ))
+              if [ "$floor_verify_status" -eq 0 ]; then
+                record "verify-floor" "PASS" "$floor_verify (restored from HEAD: $surface_detail) — ${floor_verify_seconds}s"
+              else
                 floor_timeout_note="$(ma_verify_timeout_note "$floor_verify_exit")"
                 if [ -n "$ALLOW_FLOOR_CHANGE_REASON" ] && [ "$VERIFY_EXIT" = 0 ] && [ "$VERIFICATION" = command ]; then
                   FLOOR_CHANGE_USED=true
-                  record "verify-floor" "PASS" "owner override: base floor failed (exit $floor_verify_exit); reason: $ALLOW_FLOOR_CHANGE_REASON; $floor_verify (restored from HEAD: $surface_detail)${floor_timeout_note:+ — $floor_timeout_note}"
+                  record "verify-floor" "PASS" "owner override: base floor failed (exit $floor_verify_exit); reason: $ALLOW_FLOOR_CHANGE_REASON; $floor_verify (restored from HEAD: $surface_detail) — ${floor_verify_seconds}s${floor_timeout_note:+ — $floor_timeout_note}"
                 else
                   floor_hint=""
                   [ "${OMS_HARNESS_CHILD:-0}" = 1 ] ||
                     floor_hint=" (intended contract change? owner override: --allow-floor-change REASON)"
-                  record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)$floor_hint${floor_timeout_note:+ — $floor_timeout_note}"
+                  record "verify-floor" "FAIL" "$floor_verify (restored from HEAD: $surface_detail)$floor_hint — ${floor_verify_seconds}s${floor_timeout_note:+ — $floor_timeout_note}"
                 fi
               fi
             else
