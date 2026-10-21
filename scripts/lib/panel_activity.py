@@ -380,7 +380,7 @@ def record_summary(repo, call, stream, provider="", access=""):
         parsed = _summarize_stream(stream)
         data = {
             "schema": 1,
-            "available": not (provider == "claude" and access == "write"),
+            "available": True,
             "recorded": parsed["recorded"],
             "files": parsed["files"],
             "commands": parsed["commands"],
@@ -389,8 +389,6 @@ def record_summary(repo, call, stream, provider="", access=""):
         }
         if parsed["partial"]:
             data["partial"] = parsed["partial"]
-        if not data["available"]:
-            data["reason"] = "Live activity not available for Claude write workers"
         encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
         directory = _dispatch_directory(repo, create=True)
         _write_private(os.path.join(directory, os.path.basename(path)), encoded)
@@ -466,8 +464,6 @@ def read_summary(repo, call):
             "failed": sum(row["ok"] is False for row in value["commands"]),
         }
     value["say"] = [_safe_text(line) for line in said if isinstance(line, str)][-3:]
-    if isinstance(value.get("reason"), str):
-        value["reason"] = _safe_text(value["reason"])
     if isinstance(value.get("partial"), str):
         value["partial"] = _safe_text(value["partial"])
     return value
@@ -478,8 +474,7 @@ def summary_lines(value):
     if not isinstance(value, dict):
         return ["Activity not recorded"]
     if value.get("available") is not True:
-        return [value.get("reason") if isinstance(value.get("reason"), str)
-                else "Live activity not available for Claude write workers"]
+        return ["Activity not recorded"]
     if value.get("recorded") is not True:
         return ["Activity not recorded"]
     files = value.get("files") if isinstance(value.get("files"), list) else []

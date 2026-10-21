@@ -12405,7 +12405,11 @@ case "${1:-}" in --version|--help) exit 0 ;; esac
 printf '%s\n' "$@" > "$PANEL_ARGV"
 printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
   "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX:-}" "${TMUX_PANE:-}" > "$PANEL_ENV"
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"ok"}'
+printf '%s\n' \
+  '{"type":"system","subtype":"init"}' \
+  '{"type":"assistant","message":{"id":"writer-1","content":[{"type":"text","text":"Claude write worker answer."},{"type":"tool_use","id":"writer-tool-1","name":"Bash","input":{"command":"printf done"}}]}}' \
+  '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"writer-tool-1","is_error":false,"content":"done"}]}}' \
+  '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Claude write worker answer.","usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}'
 EOF
   chmod +x "$fixture/bin/codex" "$fixture/bin/claude"
   printf 'fixture prompt\n' > "$fixture/prompt"
@@ -12451,6 +12455,14 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     [ -z "$(sed -n '6p' "$root/env")" ] || fail "$provider worker kept the inherited TMUX socket"
     [ -z "$(sed -n '7p' "$root/env")" ] || fail "$provider worker kept the inherited TMUX_PANE"
     [ "$provider" != codex ] || grep -Fxq -- 'workspace-write' "$root/argv" || fail 'Codex workspace-write sandbox changed'
+    if [ "$provider" = claude ]; then
+      grep -Fxq -- 'stream-json' "$root/argv" || fail 'Claude write workers must stream activity'
+      grep -Fxq -- '--verbose' "$root/argv" || fail 'Claude stream-json requires verbose output'
+      grep -Fq 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0' "$fixture/output" ||
+        fail 'Claude writer stream lost its terminal reason'
+      grep -Fq 'Claude write worker answer.' "$fixture/output" || fail 'Claude writer stream lost its answer'
+      grep -Fq '"tool_calls": 1' "$fixture/output" || fail 'Claude writer stream lost its tool-call usage'
+    fi
     if [ "$provider" = codex ]; then
       for room_value in 'OMS_ROOM_ID="room-one"' 'OMS_ROOM_PARTICIPANT="worker-one"' \
         "OMS_ROOM_REPO=\"$root/room repo\"" 'OMS_ROOM_ADMITTED_PARTICIPANT="worker-one"' \
@@ -12787,6 +12799,34 @@ EOF
   bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/cut"
   assert_file_contains "$project/cut" 'Answer: substantive evidence.'
   [ "$(python3 "$ROOT/scripts/lib/answer-quality.py" "$project/cut")" = truncated ] || fail 'unterminated Claude stream passed'
+
+  # A write worker's JSON result and equivalent stream transcript carry the
+  # same answer, stop reason, token totals and non-tool usage fields. Streaming
+  # improves tool_calls from unknown to the count in the transcript.
+  cat > "$project/write-json" <<'EOF'
+{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Answer: same provider answer.","usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}
+EOF
+  cat > "$project/write-stream" <<'EOF'
+{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"id":"write-1","content":[{"type":"text","text":"Answer: same provider answer."},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"fixture.txt"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"fixture contents"}]}}
+{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Answer: same provider answer.","usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}
+EOF
+  for transcript in write-json write-stream; do
+    bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/$transcript"
+  done
+  python3 - "$project/write-json" "$project/write-stream" <<'PY' || fail 'Claude writer JSON/stream equivalence comparison failed'
+import json, sys
+json_lines, stream_lines = [open(path, encoding="utf-8").read().splitlines() for path in sys.argv[1:]]
+for lines in (json_lines, stream_lines):
+    assert lines[0] == "stop-reason: provider=claude reason=end_turn subtype=success is_error=0", lines
+    assert lines[1] == "Answer: same provider answer.", lines
+    assert lines[2:4] == ["tokens used", "15"], lines
+json_usage, stream_usage = (json.loads(lines[4].split(": ", 1)[1]) for lines in (json_lines, stream_lines))
+assert {key: value for key, value in json_usage.items() if key != "tool_calls"} == \
+       {key: value for key, value in stream_usage.items() if key != "tool_calls"}, (json_usage, stream_usage)
+assert json_usage["tool_calls"] is None and stream_usage["tool_calls"] == 1, (json_usage, stream_usage)
+PY
 }
 
 test_codex_jsonl_carries_stop_reason() {

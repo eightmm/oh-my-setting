@@ -2872,10 +2872,10 @@ ma_provider_attempt() {
         seat_plans=".oms/tmp/claude-plans-$(ma_fence_id)"
         cmd+=(--settings "{\"plansDirectory\":\"$seat_plans\"}")
       fi
-      # JSON is the only transport that carries WHY the model stopped. The
-      # envelope is parsed back to plain text right after the run
-      # (ma_claude_envelope_to_text), so every downstream reader keeps its
-      # shape; anything that is not the envelope passes through untouched.
+      # The result envelope and the public stream messages are converted back
+      # to the shared plain-text shape after the run. Non-interactive writers
+      # keep the stream so their tool-call activity and usage are available;
+      # interactive conversations require one JSON result per turn.
       if [ "$access" != write ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
         # Keep earlier assistant evidence when the last result is only a
         # closing remark. Permissions/tools remain the same read-only policy.
@@ -2883,9 +2883,11 @@ ma_provider_attempt() {
           cmd+=(--forward-subagent-text)
         fi
         cmd+=(--output-format stream-json --verbose -p)
+      elif [ "$access" = write ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+        cmd+=(--output-format stream-json --verbose -p)
       else
-        # Write workers keep the envelope: stream-json adds public message and
-        # tool-call footer data, which changes their retained output contract.
+        # The interactive controller validates and extracts a result object
+        # for each turn, so preserve Claude's JSON conversation boundary.
         cmd+=(--output-format json -p)
       fi
       ;;

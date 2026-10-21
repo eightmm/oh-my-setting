@@ -630,7 +630,7 @@ def render_detail(report, detail, width, height, navigation, managed=False, colo
         glyphs = {"say": "›", "think": "~", "run": "$", "edit": "✎", "tool": "·"}
         body.extend(wrapped("Activity:", width, 1))
         if not activity:
-            body.extend(wrapped(detail.get("activity_unavailable") or "No activity yet", width, 1))
+            body.extend(wrapped("No activity yet", width, 1))
         for event in activity[-12:]:
             marker = glyphs.get(event.get("kind"), "·")
             if event.get("kind") == "run":

@@ -1741,12 +1741,34 @@ with tempfile.TemporaryDirectory() as activity_root:
     claude_write_member = {"participant": claude_write_call, "provider": "claude", "role": "worker",
                            "label": "Claude write fixture", "joined": True}
     claude_write_nav = {"room_id": "room-fixture", "activity_snapshot": {"repo": str(activity_repo), "calls": {}}}
+    claude_write_stream = activity_repo / "claude-write-live.jsonl"
+    claude_write_stream.write_text("\n".join(json.dumps(row) for row in [
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "writer-bash", "name": "Bash",
+             "input": {"command": "python -m pytest tests/test_live.py"}},
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "src/claude_live.py"}},
+            {"type": "text", "text": "Claude writer says done"}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "writer-bash",
+                                                           "is_error": False, "content": "passed"}]}}
+    ]) + "\n", encoding="utf-8")
+    assert panel_activity.record_summary(activity_repo, claude_write_call, claude_write_stream, "claude", "write")
+    claude_write_nav["activity_snapshot"]["calls"][claude_write_call] = panel_activity.events(claude_write_stream)
+    claude_write_summary = panel_activity.read_summary(activity_repo, claude_write_call)
+    assert claude_write_summary["available"] is True, claude_write_summary
+    assert "src/claude_live.py" in panel_activity.summary_lines(claude_write_summary)[0], claude_write_summary
+    assert panel_activity.summary_lines(dict(claude_write_summary, available=False, reason="stale label")) == [
+        "Activity not recorded"]
     participants.append(claude_write_member)
     with patch.object(panel.room, "status", return_value={"participants": participants}):
         panel_nav.navigate(activity_repo, ("result", claude_write_call), claude_write_state, claude_write_nav, 80)
     claude_write_screen = render_detail({}, claude_write_nav["detail"], 80, 30, claude_write_nav, color=False)
-    assert "Live activity not available for Claude write workers" in claude_write_screen and \
-        "No activity yet" not in claude_write_screen, claude_write_screen
+    assert all(value in claude_write_screen for value in (
+        "Activity:", "src/claude_live.py", "python -m pytest tests/test_live.py", "Claude writer says done")), \
+        claude_write_screen
+    empty_activity = render_detail({}, {"title": "Claude write fixture", "activity_events": [],
+                                        "activity_unavailable": "stale label"}, 80, 30, {}, color=False)
+    assert "No activity yet" in empty_activity and "stale label" not in empty_activity, empty_activity
     last12_call = "call-1123456789abcdef"
     last12_stream = activity_repo / "codex-last12.jsonl"
     last12_stream.write_text("".join(json.dumps({"type": "item.completed", "item": {
@@ -1921,12 +1943,6 @@ with tempfile.TemporaryDirectory() as activity_root:
     assert panel_nav.finish_opening(fallback_nav, fallback_arrived)
     missing = render_detail({}, fallback_nav["detail"], 90, 30, {}, color=False)
     assert "Activity not recorded" in missing and "a.py" not in missing, missing
-    write_call = "call-abcdef0123456789"
-    claude_write = activity_repo / "claude-write.json"
-    claude_write.write_text(json.dumps({"type": "result", "result": "completed"}) + "\n", encoding="utf-8")
-    assert panel_activity.record_summary(activity_repo, write_call, claude_write, "claude", "write")
-    unavailable = panel_activity.summary_lines(panel_activity.read_summary(activity_repo, write_call))
-    assert unavailable == ["Live activity not available for Claude write workers"], unavailable
 detail_fixture = {"title": "Failure", "text": "## Result\nNarrative mentions failed and ok.\nOutcome: failed\nStage: running"}
 colored_detail = render_detail({}, detail_fixture, 80, 20, {}, color=True)
 assert "\033[" in colored_detail and "\033[" in colored_detail.splitlines()[0], colored_detail
