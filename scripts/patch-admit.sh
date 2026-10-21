@@ -273,11 +273,15 @@ fi
 
 # Reuse and execution derive the same obligation from canonical plan/batch
 # records. This also covers patch-land calls made directly during recovery.
-batch_prefix="$(python3 "$ROOT_LIB/landing-capture.py" batch-prefix "$reference_state" "$REPO" "$PLAN_TASK")" ||
-  fail "cannot validate batch prefix for admission"
-batch_prefix="${batch_prefix//$'\r'/}"
-prefix_count="$(printf '%s' "$batch_prefix" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["checks"]))' | tr -d '\r')" ||
-  fail "cannot read batch prefix verification count"
+batch_prefix='{"batches":[],"checks":[]}'
+prefix_count=0
+if [ -n "$PLAN_TASK" ]; then
+  batch_prefix="$(python3 "$ROOT_LIB/landing-capture.py" batch-prefix "$reference_state" "$REPO" "$PLAN_TASK")" ||
+    fail "cannot validate batch prefix for admission"
+  batch_prefix="${batch_prefix//$'\r'/}"
+  prefix_count="$(printf '%s' "$batch_prefix" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["checks"]))' | tr -d '\r')" ||
+    fail "cannot read batch prefix verification count"
+fi
 prefix_field() {
   printf '%s' "$batch_prefix" | python3 -c '
 import json,sys

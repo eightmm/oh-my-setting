@@ -1001,10 +1001,7 @@ def gc(repo, days, apply):
 
 def main(args):
     action, repo, *args = args
-    # Patch admission in workers needs this read-only prefix derivation to
-    # replay canonical batch checks. Capture management remains parent-only.
-    if action != 'batch-prefix' and (
-        os.environ.get('OMS_HARNESS_CHILD') == '1' or
+    if (os.environ.get('OMS_HARNESS_CHILD') == '1' or
         os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') != '0'
     ):
         raise ValueError('native capture management is parent-only')

@@ -34507,12 +34507,20 @@ else:
             failures.append((gap_state,result.stdout,result.stderr))
         git("reset","--hard",first_commit)
     del tasks["gap"];save()
-    (state/"progress.jsonl").write_text(original+'{"torn":\n')
+    (state/"progress.jsonl").write_text(original+'{"torn":')
     result=run("recover")
     assert result.returncode == 0 and result.stdout.strip() == "batch-probe",result.stderr
     result=subprocess.run(["python3",capture,"batch-prefix",repo,repo,"t2"],capture_output=True,text=True)
     if result.returncode or json.loads(result.stdout)["checks"] != prefix["checks"]:
         failures.append(("torn progress",result.stdout,result.stderr))
+    valid_progress=original
+    progress_lines=valid_progress.splitlines(keepends=True)
+    (state/"progress.jsonl").write_text(progress_lines[0]+"{malformed middle line}\n"+"".join(progress_lines[1:]))
+    result=subprocess.run(["python3",capture,"batch-prefix",repo,repo,"t2"],capture_output=True,text=True)
+    assert result.returncode != 0 and "malformed batch progress line 2" in result.stderr,(result.stdout,result.stderr)
+    (state/"progress.jsonl").write_text(valid_progress+'{"torn":')
+    result=subprocess.run(["python3",capture,"batch-prefix",repo,repo,"t2"],capture_output=True,text=True)
+    assert result.returncode == 0 and json.loads(result.stdout)["checks"] == prefix["checks"],(result.stdout,result.stderr)
     assert not failures,failures
     # Raw verifier fields must bypass Windows text-stream CRLF conversion and
     # preserve literal carriage returns in the recorded command itself.

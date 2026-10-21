@@ -1471,10 +1471,25 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
         return subprocess.check_output(["git", "-C", repo, *argv], text=True).strip()
     def load_rows():
         rows = []
-        if Path(progress).exists():
-            raw = (regular_bytes(Path(progress), 64 * 1024 * 1024, "batch progress").decode("utf-8")
-                   if mode == "prefix" else Path(progress).read_text(encoding="utf-8"))
-            for line in raw.splitlines():
+        progress_path = Path(progress)
+        if not progress_path.exists():
+            # A removed progress file is owner-trusted state; only present damaged history fails closed.
+            return rows
+        raw = (regular_bytes(progress_path, 64 * 1024 * 1024, "batch progress")
+               if mode == "prefix" else progress_path.read_bytes())
+        if mode == "prefix":
+            lines = raw.splitlines(keepends=True)
+            for index, line in enumerate(lines):
+                try:
+                    row = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    if index == len(lines) - 1 and not line.endswith(b"\n"):
+                        continue
+                    raise ValueError("malformed batch progress line %d" % (index + 1))
+                if isinstance(row, dict):
+                    rows.append(row)
+        else:
+            for line in raw.decode("utf-8").splitlines():
                 try:
                     row = json.loads(line)
                 except ValueError:
