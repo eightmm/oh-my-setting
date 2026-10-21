@@ -2791,7 +2791,8 @@ PY
       # state file is a violation regardless of family.
       local transient_helper
       transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
-      OMS_WG_REPO="$repo" OMS_WG_SKIP_VOLATILE="${OMS_WG_SKIP_VOLATILE:-0}" python3 - "$transient_helper" <<'PY'
+      OMS_WG_REPO="$repo" OMS_WG_SKIP_VOLATILE="${OMS_WG_SKIP_VOLATILE:-0}" \
+        OMS_WG_ARTIFACT_INDEX_COPY="${OMS_WG_ARTIFACT_INDEX_COPY:-}" python3 - "$transient_helper" <<'PY'
 import hashlib, importlib.util, os, re, stat, sys
 
 # Read passes (OMS_WG_SKIP_VOLATILE=1) leave out presence/cache files that
@@ -2885,14 +2886,53 @@ for base, dirs, files in os.walk(root):
         try:
             size = os.path.getsize(path)
             digest = hashlib.sha256()
-            with open(path, "rb") as f:
-                remaining = size
-                while remaining > 0:
-                    chunk = f.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    digest.update(chunk)
+            copy_path = os.environ.get("OMS_WG_ARTIFACT_INDEX_COPY")
+            if rel == "artifacts/index.jsonl" and copy_path:
+                with open(path, "rb") as f:
+                    size = 0
+                    try:
+                        saved = open(copy_path, "wb")
+                    except OSError:
+                        saved = None
+                        try:
+                            os.unlink(copy_path)
+                        except OSError:
+                            pass
+                    try:
+                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                            size += len(chunk)
+                            if saved is not None:
+                                try:
+                                    saved.write(chunk)
+                                except OSError:
+                                    try:
+                                        saved.close()
+                                    except OSError:
+                                        pass
+                                    saved = None
+                                    try:
+                                        os.unlink(copy_path)
+                                    except OSError:
+                                        pass
+                    finally:
+                        if saved is not None:
+                            try:
+                                saved.close()
+                            except OSError:
+                                try:
+                                    os.unlink(copy_path)
+                                except OSError:
+                                    pass
+            else:
+                with open(path, "rb") as f:
+                    remaining = size
+                    while remaining > 0:
+                        chunk = f.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        digest.update(chunk)
             rows.append("%s %s %d %s" % (rel, "IMMUTABLE" if immutable else "APPEND", size, digest.hexdigest()))
         except OSError:
             rows.append("%s UNREADABLE" % rel)
@@ -3318,6 +3358,7 @@ oms_worker_surface_snapshot_capture_once() {
       OMS_WG_GITMETA_RESIDUE_OUT="$dir/gitmeta-residue" \
     OMS_WG_GITMETA_MANAGED_PATHS_OUT="$dir/gitmeta-managed-paths" \
       OMS_WG_GITMETA_MANAGED_METADATA_OUT="$dir/gitmeta-managed-metadata" \
+      OMS_WG_ARTIFACT_INDEX_COPY="$dir/omsstate.artifact-index" \
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
     # Deterministic race coverage for the baseline consistency test. The
@@ -3392,10 +3433,9 @@ for current, directories, files in os.walk(root, followlinks=False):
         shutil.copyfile(source, target)
 PY
   fi
-  # Rows the index store may legitimately compact away; verified against the
-  # recorded prefix digest before use, so a later append here is harmless.
+  # Rows the index store may legitimately compact away; the snapshot scan
+  # hashes the same bytes it saves here as the compaction baseline.
   if [ -f "$repo/.oms/artifacts/index.jsonl" ] && [ ! -L "$repo/.oms/artifacts/index.jsonl" ]; then
-    cp "$repo/.oms/artifacts/index.jsonl" "$dir/omsstate.artifact-index" 2>/dev/null || true
     # Completion pins exist before the provider runs; a receipt created during the run pins nothing.
     python3 - "$OMS_COMMON_LIB_DIR" "$repo" "$dir/omsstate.completion-pins" <<'PY' 2>/dev/null || true
 import json, os, runpy, sys

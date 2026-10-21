@@ -32344,8 +32344,16 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
 test_worker_guard_accepts_only_artifact_index_compaction() {
   local project="$TMP/guard-index-compaction"
   local snap="$TMP/guard-index-compaction-snap"
+  local race_snap="$TMP/guard-index-compaction-race-snap"
+  local race_ready="$TMP/guard-index-compaction-race-ready"
+  local race_release="$TMP/guard-index-compaction-race-release"
+  local copy_target="$TMP/guard-index-copy-target"
+  local full_copy_target="$TMP/guard-index-copy-full"
   local index="$project/.oms/artifacts/index.jsonl"
   local changed
+  local copy_row
+  local snapshot_pid
+  local tries
   local i
 
   make_committed_repo "$project"
@@ -32356,6 +32364,20 @@ test_worker_guard_accepts_only_artifact_index_compaction() {
   done
   ( . "$ROOT/scripts/lib/oms-common.sh"
     oms_worker_surface_snapshot "$project" "$snap" ) || fail "index snapshot failed"
+
+  python3 - "$snap/omsstate" "$snap/omsstate.artifact-index" <<'PY' || fail "saved artifact index does not match its recorded snapshot digest"
+import hashlib, sys
+rows, saved = sys.argv[1:]
+with open(rows, encoding="utf-8") as handle:
+    row = next(line.split() for line in handle if line.startswith("artifacts/index.jsonl "))
+if row[1] != "APPEND":
+    raise SystemExit("artifact index snapshot row is not APPEND")
+size, expected = int(row[2]), row[3]
+with open(saved, "rb") as handle:
+    actual = hashlib.sha256(handle.read(size)).hexdigest()
+if actual != expected:
+    raise SystemExit("recorded size/digest differ from saved index prefix")
+PY
 
   # The store's compaction: oldest rows dropped, survivors intact, new rows last.
   { tail -n 4 "$index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index.new"
@@ -32499,6 +32521,82 @@ PY
       *) [ "$changed" = shared-state ] || fail "$name: must stay a violation, got: ${changed:-<none>}" ;;
     esac
   done
+
+  # Pause after the APPEND digest is captured, compact the live index, then
+  # resume the snapshot. Its saved compaction baseline must still match that
+  # recorded digest, so the legitimate store compaction remains accepted.
+  : > "$index"
+  for i in 1 2 3 4 5 6; do
+    printf '{"event_id":"race-e%s","kind":"ask"}\n' "$i" >> "$index"
+  done
+  rm -f "$race_ready" "$race_release"
+  (
+    OMS_SMOKE_RUNNER_ACTIVE=1 \
+      OMS_TEST_WG_SNAPSHOT_PAUSE_AFTER=omsstate \
+      OMS_TEST_WG_SNAPSHOT_READY="$race_ready" \
+      OMS_TEST_WG_SNAPSHOT_RELEASE="$race_release" \
+      bash -c '. "$1/scripts/lib/oms-common.sh"; oms_worker_surface_snapshot "$2" "$3"' \
+        _ "$ROOT" "$project" "$race_snap"
+  ) &
+  snapshot_pid=$!
+  tries=0
+  while [ ! -e "$race_ready" ] && [ "$tries" -lt 400 ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  if [ ! -e "$race_ready" ]; then
+    : > "$race_release"
+    wait "$snapshot_pid" || true
+    fail "snapshot did not reach the omsstate race barrier"
+  fi
+  { tail -n 4 "$index"; printf '{"event_id":"race-e7","kind":"ask"}\n'; } > "$index.new"
+  mv "$index.new" "$index"
+  : > "$race_release"
+  wait "$snapshot_pid" || fail "snapshot failed after the omsstate race barrier"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$race_snap" )"
+  [ -z "$changed" ] || fail "store compaction during the snapshot must be accepted, got: $changed"
+
+  # A failed copy open must not erase the source index's APPEND protection.
+  mkdir -p "$copy_target"
+  copy_row="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_WG_ARTIFACT_INDEX_COPY="$copy_target" oms_worker_surface_capture_one "$project" omsstate |
+      sed -n '/^artifacts\/index.jsonl /p' )"
+  case "$copy_row" in
+    'artifacts/index.jsonl APPEND '*) ;;
+    *) fail "artifact index copy failure must retain an APPEND row, got: ${copy_row:-<none>}" ;;
+  esac
+  python3 - "$index" "$copy_row" <<'PY' || fail "copy failure changed the artifact index source digest"
+import hashlib, sys
+path, row = sys.argv[1:]
+fields = row.split()
+with open(path, "rb") as handle:
+    data = handle.read()
+if int(fields[2]) != len(data) or fields[3] != hashlib.sha256(data).hexdigest():
+    raise SystemExit("APPEND row does not describe the bytes read from the source index")
+PY
+
+  # Where available, /dev/full makes buffered writes fail when the snapshot
+  # closes the copy. A temporary symlink keeps cleanup confined to TMP.
+  if [ -c /dev/full ]; then
+    ln -s /dev/full "$full_copy_target" || fail "could not prepare full-device copy failure fixture"
+    copy_row="$( . "$ROOT/scripts/lib/oms-common.sh"
+      OMS_WG_ARTIFACT_INDEX_COPY="$full_copy_target" oms_worker_surface_capture_one "$project" omsstate |
+        sed -n '/^artifacts\/index.jsonl /p' )"
+    case "$copy_row" in
+      'artifacts/index.jsonl APPEND '*) ;;
+      *) fail "artifact index write failure must retain an APPEND row, got: ${copy_row:-<none>}" ;;
+    esac
+    python3 - "$index" "$copy_row" <<'PY' || fail "write failure changed the artifact index source digest"
+import hashlib, sys
+path, row = sys.argv[1:]
+fields = row.split()
+with open(path, "rb") as handle:
+    data = handle.read()
+if int(fields[2]) != len(data) or fields[3] != hashlib.sha256(data).hexdigest():
+    raise SystemExit("APPEND row does not describe the bytes read from the source index")
+PY
+  fi
 }
 
 test_worker_guard_keeps_local_branch_refs_hard() {
