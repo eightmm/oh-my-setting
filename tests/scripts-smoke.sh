@@ -35109,6 +35109,7 @@ SH
 set -uo pipefail
 . "$BATCH_HELPER"
 . "$BATCH_DISPATCH"
+agent_memory_mktemp() { mktemp "${TMPDIR:-/tmp}/goal-batch-fixture.XXXXXX"; }
 ROOT="$MOCK_ROOT" REPO="$REPO"
 PLAN_FILE="$REPO/.oms/plan/tasks.json" PROGRESS="$REPO/.oms/plan/progress.jsonl"
 CONTRACT_ID=owner_11111111111111111111111111111111 MAX_PARALLEL_TASKS=2 ACCEPT_SNAPSHOT=fixture
