@@ -806,6 +806,9 @@ if git -C "$REPO" check-ignore -q .oms/locks/canonical-sync.d 2>/dev/null; then
   oms_canonical_call_acquire "$REPO" "${OMS_HARNESS_CALL_ID:-review-$$}" ||
     fail "canonical checkout sync is busy or review registration failed; retry after sync"
 fi
+# The read pass starts with candidate validation and guard snapshots, both of
+# which can import Python helpers from the reviewed source before providers run.
+export PYTHONDONTWRITEBYTECODE=1
 if [ -n "$CANDIDATE_PATCH" ]; then
   candidate_temp="$(mktemp -d)" || fail "mktemp failed"
   python3 - "$(ma_scripts_dir)/lib" "$REPO" "$MA_READ_SOURCE_REPO" "$CANDIDATE_PATCH" \
@@ -877,9 +880,6 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
 $(compgen -e)
 EOF
         printf 'unset owner environment: %s\n' "${verify_unset:-none}"
-      fi
-      if [ -n "${MA_READ_GUARD_DIR:-}" ]; then
-        export PYTHONDONTWRITEBYTECODE=1
       fi
       run_verify_with_timeout bash -c "$VERIFY_CMD"
     ) >> "$gate_verify_temp" 2>&1

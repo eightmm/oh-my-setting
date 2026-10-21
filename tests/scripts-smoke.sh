@@ -3760,6 +3760,7 @@ test_peer_review_gate_refuses_untracked_content() {
   local bin_dir="$TMP/review-gate-untracked-bin"
   local home_dir="$TMP/review-gate-untracked-home"
   local synthesis_artifact
+  local bytecode_paths
   local rc=0
 
   make_committed_repo "$project"
@@ -3807,14 +3808,15 @@ EOF
 test "\${PYTHONDONTWRITEBYTECODE:-}" = 1 || { echo 'bytecode environment missing' >&2; exit 65; }
 PYTHONPATH='$project' python3 -c 'import review_bytecode_probe'
 EOF
-  rm -rf "$project/__pycache__"
+  find "$project" -type d -name __pycache__ -prune -exec rm -rf {} +
   rc=0
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
     "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/import" \
     --providers claude --gate --verify 'test "$PYTHONDONTWRITEBYTECODE" = 1 && python3 -c "import review_bytecode_probe"' \
     --prompt "Review bytecode behavior" > "$TMP/review-gate-bytecode-out" 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "read pass importing a Python source module must complete without bytecode writes: $(cat "$TMP/review-gate-bytecode-out")"
-  [ ! -e "$project/__pycache__" ] || fail "read pass created Python bytecode under the reviewed source"
+  bytecode_paths="$(find "$project" \( -type d -name __pycache__ -o -type f -name '*.pyc' \) -print)"
+  [ -z "$bytecode_paths" ] || fail "read pass created Python bytecode under the reviewed source: $bytecode_paths"
 
   # Explicit bytecode writes remain ordinary source file mutations and must
   # still be rejected by the read guard.
