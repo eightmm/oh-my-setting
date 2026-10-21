@@ -34784,11 +34784,26 @@ WORKER
     [ "$mode" != serial ] || width=1
     [ "$mode" != cap ] || cap=1
     if [ "$mode" = failure ] || [[ "$mode" = retained* ]]; then cap=4; fi
-    out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
-      BATCH_MODE="$mode" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW="$([ "$mode" = recover ] || [ "$mode" = abandon ] && echo 1 || echo 0)" \
-      OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND="$([ "$mode" = land-recover ] || [ "$mode" = replay-recover ] || [ "$mode" = tamper ] && echo 1 || echo 0)" \
-      "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles "$cap" \
-      --max-parallel-tasks "$width" --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
+    if [ "$mode" = unreconciled ]; then
+      : > "$logs/calls"
+      OMS_AUTOPILOT_OWNER_ID="$owner" "$ROOT/scripts/agent-plan.sh" --repo "$project" \
+        claim --id t1 --provider codex >/dev/null || fail "could not create unreconciled claimed-task fixture"
+    fi
+    if [ "$mode" = parallel ] || [ "$mode" = unreconciled ]; then
+      HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+        BATCH_MODE="$mode" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW="$([ "$mode" = recover ] || [ "$mode" = abandon ] && echo 1 || echo 0)" \
+        OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND="$([ "$mode" = land-recover ] || [ "$mode" = replay-recover ] || [ "$mode" = tamper ] && echo 1 || echo 0)" \
+        "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles "$cap" \
+        --max-parallel-tasks "$width" --contract-id "$owner" ${flags[@]+"${flags[@]}"} \
+        >"$logs/driver.stdout" 2>"$logs/driver.stderr" || rc=$?
+      out="$(cat "$logs/driver.stdout" "$logs/driver.stderr")"
+    else
+      out="$(HOME="$TEST_HOME" PATH="$bin:$PATH" BATCH_REPO="$project" BATCH_EVENTS="$logs" \
+        BATCH_MODE="$mode" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW="$([ "$mode" = recover ] || [ "$mode" = abandon ] && echo 1 || echo 0)" \
+        OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND="$([ "$mode" = land-recover ] || [ "$mode" = replay-recover ] || [ "$mode" = tamper ] && echo 1 || echo 0)" \
+        "$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles "$cap" \
+        --max-parallel-tasks "$width" --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
+    fi
     if [ "$mode" = abandon ]; then
       [ "$rc" = 75 ] || fail "abandon fixture did not retain its batch: $out"
       python3 "$ROOT/scripts/lib/autopilot-receipt.py" write "$project/.oms/plan/autopilot-run.json" \
@@ -34824,6 +34839,11 @@ PY_TAMPER
         --max-parallel-tasks 2 --contract-id "$owner" ${flags[@]+"${flags[@]}"} 2>&1)" || rc=$?
     fi
     case "$mode" in
+      unreconciled)
+        [ "$rc" = 3 ] || fail "unreconciled claimed-task fixture should park ($rc): $out"
+        grep -Fq 'error: unreconciled active task outside batch' "$logs/driver.stderr" ||
+          fail "selection failure did not preserve its claimed-task diagnosis on stderr: $(cat "$logs/driver.stderr")"
+        ;;
       retained*)
         [ "$rc" = 3 ] || fail "$mode first worker failure should park ($rc): $out"
         [ "$(git -C "$project" log -1 --format=%s)" = verifiers ] || fail "$mode committed past the failed first worker"
@@ -34925,6 +34945,26 @@ PY_CLOSED
         ;;
       *)
         [ "$rc" = 0 ] || fail "$mode batch drive failed ($rc): $out"
+        if [ "$mode" = parallel ]; then
+          printf '%s\n' "$out" > "$logs/driver.out"
+          contains "$out" 'goal-drive: batch ' || fail "parallel batch start line is missing: $out"
+          contains "$out" 'width 2/2: t1 t2' || fail "parallel batch start line has wrong width/tasks: $out"
+          grep -Eq '^goal-drive: batch [^ ]+ done: t1 committed, t2 committed \([0-9]+s\)$' "$logs/driver.out" ||
+            fail "parallel batch completion line is missing committed outcomes: $out"
+          if grep -Fq 'DeprecationWarning' "$logs/driver.stderr"; then
+            fail "parallel batch summary emitted a Python deprecation warning on stderr: $(cat "$logs/driver.stderr")"
+          fi
+          if grep -Eq '^goal-drive: batch [^ ]+ width 1/2: t3($|; )' "$logs/driver.out"; then
+            fail "single-task batch should not print a parallel summary: $out"
+          fi
+        fi
+        if [ "$mode" = overlap ]; then
+          contains "$out" 'goal-drive: skipped t2: overlap' ||
+            fail "single-task batch hid the skipped-task reason: $out"
+        fi
+        if [ "$mode" = serial ]; then
+          contains "$out" 'goal-drive: batch ' && fail "serial run printed batch summary lines: $out"
+        fi
         [ "$(git -C "$project" log -3 --reverse --format=%s | tr '\n' '|')" = 'feat: t1|feat: t2|feat: t3|' ] ||
           fail "$mode changed integration order"
         [ "$(sort "$logs/calls" | tr '\n' ' ')" = 't1 t2 t3 ' ] || fail "$mode redispatched a completed patch"
@@ -35138,7 +35178,7 @@ PY
 
 # smoke-weight: 240
 test_goal_drive_parallel_batches() {
-  goal_drive_batch_cases replay-surface replay-floor python pytest replay-backward replay-forward replay-recover parallel shared overlap verifier serial cap recover land-recover tamper
+  goal_drive_batch_cases replay-surface replay-floor python pytest replay-backward replay-forward replay-recover parallel shared overlap verifier serial cap unreconciled recover land-recover tamper
   local project="$TMP/goal-batch-skip-candidates" out
   make_committed_repo "$project"
   mkdir -p "$project/checks" "$project/.oms/plan"

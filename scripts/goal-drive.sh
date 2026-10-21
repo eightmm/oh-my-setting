@@ -30,6 +30,7 @@ PROVIDER="codex"
 MAX_CYCLES=3
 MAX_PARALLEL_TASKS=1
 GOAL_BATCH_ID=""
+GOAL_BATCH_SELECT_LOG=""
 AUTO_REPAIR=0
 RUN_ID_OVERRIDE=""
 CONTRACT_ID=""
@@ -2196,6 +2197,14 @@ goal_batch_tool() {  # MODE [ARGS...]
     "$PLAN_FILE" "$PROGRESS" "$REPO" "$CONTRACT_ID" "$MAX_PARALLEL_TASKS" "$ACCEPT_SNAPSHOT" "$@" | tr -d '\r'
 }
 
+goal_batch_select_log_cleanup() {
+  if [ -n "${GOAL_BATCH_SELECT_LOG:-}" ]; then
+    rm -f "$GOAL_BATCH_SELECT_LOG" || true
+    GOAL_BATCH_SELECT_LOG=""
+  fi
+}
+trap 'goal_batch_select_log_cleanup' EXIT
+
 GOAL_BATCH_PIDS=()
 GOAL_BATCH_LOGS=()
 GOAL_BATCH_LAUNCHING=0
@@ -2289,7 +2298,7 @@ PY
 }
 
 goal_batch_dispatch() {
-  local ready selected remaining id lease prior_lease_epoch log pid rc=0 i provider dispatched=0 batch_cycle prepare_rc=0
+  local ready selected remaining id lease prior_lease_epoch log pid rc=0 i provider dispatched=0 batch_cycle prepare_rc=0 summary select_line select_skips=""
   local -a ids leases args
   remaining=$((MAX_CYCLES - RUN_ATTEMPTS))
   [ -z "$CONTRACT_ID" ] || remaining=$((MAX_CYCLES - CONTRACT_CYCLES))
@@ -2302,8 +2311,25 @@ goal_batch_dispatch() {
     ready="$(printf '%s' "$ready" | python3 -c 'import json,sys;d=json.load(sys.stdin);d["actionable"]=[];print(json.dumps(d))' | tr -d '\r')" ||
       park invalid-plan "cannot select retained reviews before new attempts"
   fi
-  selected="$(goal_batch_tool select "$ready" "$remaining")" || park invalid-batch "cannot select a safe task batch"
+  GOAL_BATCH_SELECT_LOG="$(agent_memory_mktemp)" || park internal "cannot allocate batch selection output"
+  selected="$(goal_batch_tool select "$ready" "$remaining" 2>"$GOAL_BATCH_SELECT_LOG")" || {
+    cat "$GOAL_BATCH_SELECT_LOG" >&2
+    park invalid-batch "cannot select a safe task batch"
+  }
+  while IFS= read -r select_line; do
+    case "$select_line" in
+      'goal-drive: skipped '*)
+        if [ -n "$select_skips" ]; then
+          select_skips="$select_skips"$'\n'"$select_line"
+        else
+          select_skips="$select_line"
+        fi
+        ;;
+      *) printf '%s\n' "$select_line" >&2 ;;
+    esac
+  done < "$GOAL_BATCH_SELECT_LOG"
   if [ -z "$selected" ]; then
+    [ -z "$select_skips" ] || printf '%s\n' "$select_skips" >&2
     [ "$remaining" -gt 0 ] || park cycles-exhausted "the task-attempt budget is exhausted"
     park tasks-exhausted "acceptance fails and the plan has no actionable task"
   fi
@@ -2411,6 +2437,21 @@ EOF_IDS
       goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
     fi
   done
+  if [ "${#ids[@]}" -gt 1 ]; then
+    summary="goal-drive: batch $GOAL_BATCH_ID width ${#ids[@]}/$MAX_PARALLEL_TASKS:"
+    for id in "${ids[@]}"; do summary="$summary $id"; done
+    while IFS= read -r id; do
+      case "$id" in
+        'goal-drive: skipped '*) summary="$summary; ${id#goal-drive: skipped }" ;;
+      esac
+    done <<EOF_SKIPS
+$select_skips
+EOF_SKIPS
+    printf '%s\n' "$summary"
+  elif [ -n "$select_skips" ]; then
+    printf '%s\n' "$select_skips" >&2
+  fi
+  goal_batch_select_log_cleanup
   goal_batch_wait_all || rc=$?
   trap - HUP INT TERM
   for log in "${GOAL_BATCH_LOGS[@]}"; do
@@ -2600,7 +2641,22 @@ while :; do
       task_id="$(goal_batch_tool next)" || park invalid-batch "the durable batch receipt cannot be reconciled"
       case "$task_id" in
         complete)
-          goal_batch_tool complete | progress_append || fail "cannot close completed batch"
+          batch_complete="$(goal_batch_tool complete)" || fail "cannot close completed batch"
+          printf '%s\n' "$batch_complete" | progress_append || fail "cannot close completed batch"
+          if summary="$(printf '%s\n' "$batch_complete" | python3 -c '
+import calendar, json, sys, time
+row=json.load(sys.stdin)
+if len(row["tasks"]) < 2:
+    raise SystemExit(0)
+started=calendar.timegm(time.strptime(row["ts"], "%Y-%m-%dT%H:%M:%SZ"))
+elapsed=max(0, int(time.time()-started))
+tasks=", ".join(item["id"] + " committed" for item in row["tasks"])
+print("goal-drive: batch %s done: %s (%ds)" % (row["batch_id"], tasks, elapsed))
+' 2>/dev/null | tr -d '\r')"; then
+            [ -z "$summary" ] || printf '%s\n' "$summary"
+          else
+            echo "goal-drive: warning: cannot format completed batch summary" >&2
+          fi
           GOAL_BATCH_ID=""
           break ;;
         failed:*)
