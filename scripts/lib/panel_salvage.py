@@ -154,7 +154,7 @@ def _latest(repo, task, attempt_id=None):
         execution = work_repository(execution)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise ValueError('recorded execution repository is unavailable') from error
-    return paths[-1], attempt.get('attempt_id') or record.get('attempt_id'), reason, execution
+    return paths[-1], attempt.get('attempt_id') or record.get('attempt_id'), reason, execution, record
 
 
 def _standalone(repo, attempt_id, artifact):
@@ -443,23 +443,54 @@ def record_provenance(repo, metadata):
 def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None):
     if attempt_id is not None and task is None:
         path, attempt, reason, execution = _standalone(repo, attempt_id, artifact)
+        indexed = None
         task = attempt_id
     else:
-        path, attempt, reason, execution = _latest(repo, task, attempt_id)
+        path, attempt, reason, execution, indexed = _latest(repo, task, attempt_id)
     if selected_repo is not None:
         selected = work_repository(selected_repo)
         if selected not in {Path(repo).resolve(strict=True), execution}:
             raise ValueError('selected repository is neither the room repository nor the recorded execution repository')
-    kept, common, base = _managed(execution, path)
-    patch, files, warnings = _capture(kept, common, base)
-    if _managed(execution, path) != (kept, common, base):
-        raise ValueError('kept worktree identity moved during capture')
+    try:
+        Path(path).lstat()
+    except FileNotFoundError as error:
+        if indexed is None:
+            raise ValueError('kept worktree is missing and no indexed patch is available') from error
+        base = indexed.get('base_sha', '')
+        if not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{7,64}', base):
+            raise ValueError('indexed patch has no valid recorded base')
+        patch = panel_results.verified_patch(repo, indexed)
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                   GIT_NO_LAZY_FETCH='1', GIT_OPTIONAL_LOCKS='0')
+        check_base = subprocess.run(['git', '-C', str(execution), 'rev-parse', '--verify',
+                                     base + '^{commit}'], capture_output=True, env=env,
+                                    timeout=15, check=False)
+        if check_base.returncode or not check_base.stdout.decode().replace('\r', '').strip().startswith(base):
+            raise ValueError('indexed patch recorded base is unavailable or does not match')
+        if not patch:
+            raise ValueError('indexed patch is empty')
+        paths = panel_results._patch_paths(patch)
+        if not paths:
+            raise ValueError('indexed patch has no file changes')
+        files = [{'path': name, 'before_bytes': None, 'after_bytes': None} for name in paths]
+        warnings = patch_encoding_warnings(patch)
+        recovered = True
+    else:
+        kept, common, base = _managed(execution, path)
+        patch, files, warnings = _capture(kept, common, base)
+        if _managed(execution, path) != (kept, common, base):
+            raise ValueError('kept worktree identity moved during capture')
+        recovered = False
     if not patch:
         raise ValueError('kept worktree has no changes')
     metadata = {'schema': 1, 'kind': 'oms-salvaged-patch', 'base_sha': base,
-                'salvaged_from': {'task': task, 'attempt': attempt, 'kept_path': str(kept), 'stop_reason': reason},
+                'salvaged_from': {'task': task, 'attempt': attempt, 'kept_path': str(path), 'stop_reason': reason,
+                                 **({'recovered_from_artifact': True} if recovered else {})},
                 'files': files, 'encoding_warnings': warnings,
                 'payload_sha256': hashlib.sha256(_payload(patch)).hexdigest()}
+    if recovered:
+        metadata['recovered_artifact'] = indexed.get('patch')
     # Publish provenance first: an artifact must never escape with only an
     # editable warning list. Repeated payloads retain every controller warning.
     metadata['provenance'] = record_provenance(repo, metadata)
@@ -577,8 +608,11 @@ def cli_main(arguments=None):
             print('patch: ' + result['patch_path'])
             print('metadata: ' + result['metadata_path'])
             print('patch bytes: ' + str(result['patch_bytes']))
-            for file in result['files']:
-                print('%s: %s -> %s bytes' % (file['path'], file['before_bytes'], file['after_bytes']))
+            if result['salvaged_from'].get('recovered_from_artifact'):
+                print('recovered from indexed patch %s (worktree missing)' % result['recovered_artifact'])
+            else:
+                for file in result['files']:
+                    print('%s: %s -> %s bytes' % (file['path'], file['before_bytes'], file['after_bytes']))
             for warning in result['encoding_warnings']:
                 print('WARNING: %s: %s %s' % (warning['file'], warning['kind'], warning.get('hunk', '')))
         return 0

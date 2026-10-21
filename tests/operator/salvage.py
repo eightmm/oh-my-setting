@@ -1,5 +1,6 @@
 # Salvage captures raw checkout bytes with a private index/config and owner-only admission.
 import contextlib
+import shutil
 import panel_salvage
 salvage_repo = temporary / 'salvage-repo'
 salvage_execution_repo = temporary / 'salvage-execution-repo'
@@ -122,6 +123,89 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
                 'execution_repo': str(scratch_execution_repo)}):
         scratch_salvaged = panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
         assert Path(scratch_salvaged['patch_path']).is_relative_to(salvage_repo)
+    # A stopped worker's indexed patch remains salvageable after EXIT cleanup removed its worktree.
+    recovered_patch, unused_files, unused_warnings = panel_salvage._capture(
+        scratch_tree, panel_salvage._common(panel_salvage._git_directory(scratch_tree)),
+        panel_salvage._managed(scratch_execution_repo, scratch_tree)[2])
+    scratch_log = '.oms/artifacts/delegate/scratch-stopped.md'
+    scratch_patch = '.oms/artifacts/delegate/scratch.patch'
+    (salvage_repo / scratch_log).parent.mkdir(parents=True, exist_ok=True)
+    (salvage_repo / scratch_log).write_text('worktree kept at %s\n' % scratch_tree)
+    (salvage_repo / scratch_patch).write_bytes(recovered_patch)
+    scratch_record = {'kind': 'delegate', 'task_id': 'scratch-task',
+                      'attempt_id': scratch_attempt['attempt_id'], 'exit': 124,
+                      'artifact': scratch_log,
+                      'artifact_sha256': hashlib.sha256((salvage_repo / scratch_log).read_bytes()).hexdigest(),
+                      'patch': scratch_patch,
+                      'patch_sha256': hashlib.sha256(recovered_patch).hexdigest(),
+                      'base_sha': panel_salvage._managed(scratch_execution_repo, scratch_tree)[2][:12]}
+    def recovered_query(repo, verb, *args):
+        return [scratch_attempt] if verb == 'agent-events' else {'rows': [scratch_record]}
+    scratch_git_pointer = scratch_tree / '.git'
+    scratch_git_before = scratch_git_pointer.read_bytes()
+    try:
+        scratch_git_pointer.write_bytes(b'gitdir: /missing-salvage-registration\n')
+        with patch.object(panel_results, '_query', side_effect=recovered_query), \
+                patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+                    'call': {'participant': 'call-abcdef0123456789', 'room': 'room-fixture',
+                             'task_id': 'scratch-task'}, 'execution_repo': str(scratch_execution_repo)}):
+            try:
+                panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+            except FileNotFoundError:
+                pass
+            else:
+                raise AssertionError('missing registration fell back while the worktree still existed')
+    finally:
+        scratch_git_pointer.write_bytes(scratch_git_before)
+    shutil.rmtree(scratch_tree.parent)
+    with patch.object(panel_results, '_query', side_effect=recovered_query), \
+            patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+                'call': {'participant': 'call-abcdef0123456789', 'room': 'room-fixture',
+                         'task_id': 'scratch-task'}, 'execution_repo': str(scratch_execution_repo)}):
+        recovered = panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        assert recovered['salvaged_from']['recovered_from_artifact'] is True
+        assert recovered['salvaged_from']['stop_reason'] == 'worker_authority_violation'
+        assert recovered['recovered_artifact'] == scratch_patch
+        assert all(row['before_bytes'] is None and row['after_bytes'] is None
+                   for row in recovered['files'])
+        saved_recovery = Path(recovered['patch_path'])
+        panel_salvage.admission(saved_recovery, True, True, repo=salvage_repo)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'scratch-task']) == 0
+        assert 'recovered from indexed patch %s (worktree missing)' % scratch_patch in output.getvalue()
+        assert ' -> ' not in output.getvalue()
+        provenance_files = {path: path.read_bytes()
+                            for path in (salvage_repo / '.oms/salvage-provenance').glob('*.json')}
+        original_indexed_patch = (salvage_repo / scratch_patch).read_bytes()
+        (salvage_repo / scratch_patch).write_bytes(recovered_patch + b'tampered\n')
+        try:
+            panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        except ValueError as error:
+            assert 'digest' in str(error), error
+        else:
+            raise AssertionError('tampered indexed patch was salvaged')
+        finally:
+            (salvage_repo / scratch_patch).write_bytes(original_indexed_patch)
+        with patch.dict(scratch_record, {'base_sha': 'f' * 12}):
+            try:
+                panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+            except ValueError as error:
+                assert 'recorded base' in str(error), error
+            else:
+                raise AssertionError('missing indexed patch base was accepted')
+            assert {path: path.read_bytes() for path in provenance_files} == provenance_files
+        (salvage_repo / scratch_patch).write_bytes(b'')
+        scratch_record['patch_sha256'] = hashlib.sha256(b'').hexdigest()
+        try:
+            panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        except ValueError as error:
+            assert 'empty' in str(error), error
+        else:
+            raise AssertionError('empty indexed patch was accepted')
+        assert {path: path.read_bytes() for path in provenance_files} == provenance_files
+        (salvage_repo / scratch_patch).write_bytes(original_indexed_patch)
+        scratch_record['patch_sha256'] = hashlib.sha256(original_indexed_patch).hexdigest()
     with patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
             'call': {'participant': 'call-0123456789abcdef', 'room': 'room-fixture',
                      'task_id': 'another-task'},
