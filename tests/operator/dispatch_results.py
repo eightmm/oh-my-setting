@@ -6,6 +6,76 @@ from unittest.mock import patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
+# Continuation checks the execution worktree's clean HEAD, not room metadata or dirty files.
+continuation_patch = b"--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-before\n+worker change\n"
+
+def continuation_git_repo(name):
+    repo = temporary / name
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    for key, value in (("user.name", "continuation fixture"), ("user.email", "continuation@example.com")):
+        subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
+    (repo / "shared.txt").write_text("before\n")
+    subprocess.run(["git", "-C", str(repo), "add", "shared.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    return repo, base
+
+def run_continuation_fixture(room_repo, work_repo, base):
+    import panel_results as continuation_results
+    call = {"attempt_id": "worker-attempt", "exit": 0, "patch": "patches/continued.patch",
+            "patch_sha256": "fixture-sha", "event_id": "fixture-event"}
+    previous = {"attempt_id": "worker-attempt", "parent_attempt_id": "parent", "terminal": True,
+                "refs": {"panel_access": "write", "panel_location": "repository", "panel_provider": "codex"}}
+    rows = [{"attempt_id": "parent", "terminal": False}, previous]
+    artifact = {"attempt_id": "worker-attempt", "kind": "delegate", "patch": call["patch"],
+                "patch_sha256": call["patch_sha256"], "event_id": call["event_id"], "base_sha": base}
+    brief = temporary / "continuation-regression-brief.md"
+    brief.write_text("Continue the task.\n")
+    with patch.object(panel, "work_repository", side_effect=lambda path: Path(path)), \
+         patch.object(panel, "owning_attempt", return_value=["parent"]), \
+         patch.object(panel, "events", return_value=json.dumps(rows)), \
+         patch.object(panel, "_rework_history", return_value=[previous]), \
+         patch.object(panel, "results", return_value={"rows": [{"calls": [call]}]}), \
+         patch.object(panel, "session_stored", return_value=False), \
+         patch.object(panel, "verified_patch", return_value=continuation_patch), \
+         patch.object(continuation_results, "_records", return_value=([], [artifact])):
+        materialized, _, note = dispatch.continuation(
+            room_repo, "codex", None, "continuation-regression", {"provider": "codex"}, brief, {},
+            work_repo=work_repo, patch_reference={})
+    text = Path(materialized).read_text()
+    Path(materialized).unlink()
+    return note, text
+
+# The room repository remains at the old base while the actual dispatch worktree conflicts.
+room_repo, continuation_base = continuation_git_repo("continuation-room-repo")
+work_repo = temporary / "continuation-work-repo"
+subprocess.run(["git", "clone", "-q", str(room_repo), str(work_repo)], check=True)
+(work_repo / "shared.txt").write_text("conflicting change\n")
+subprocess.run(["git", "-C", str(work_repo), "commit", "-qam", "conflicting drift"], check=True)
+assert subprocess.check_output(["git", "-C", str(room_repo), "rev-parse", "HEAD"], text=True).strip() == continuation_base
+try:
+    run_continuation_fixture(room_repo, work_repo, continuation_base)
+    raise AssertionError("conflicting worktree continuation was accepted")
+except ValueError as error:
+    assert "shared.txt" in str(error) and continuation_base in str(error), error
+
+# Dirty working-tree content must not affect an applicability check against a clean HEAD.
+dirty_repo, dirty_base = continuation_git_repo("continuation-dirty-repo")
+(dirty_repo / "other.txt").write_text("unrelated\n")
+subprocess.run(["git", "-C", str(dirty_repo), "add", "other.txt"], check=True)
+subprocess.run(["git", "-C", str(dirty_repo), "commit", "-qm", "unrelated drift"], check=True)
+(dirty_repo / "shared.txt").write_text("dirty conflict\n")
+dirty_note, _ = run_continuation_fixture(dirty_repo, dirty_repo, dirty_base)
+assert "differs from current HEAD" in dirty_note and "applies cleanly" in dirty_note, dirty_note
+
+# An abbreviated recorded base that resolves to HEAD is not drift.
+abbrev_repo, abbrev_base = continuation_git_repo("continuation-abbreviated-base-repo")
+exact_note, _ = run_continuation_fixture(abbrev_repo, abbrev_repo, abbrev_base)
+abbrev_note, _ = run_continuation_fixture(abbrev_repo, abbrev_repo, abbrev_base[:7])
+assert "differs from current HEAD" not in exact_note, exact_note
+assert "differs from current HEAD" not in abbrev_note, abbrev_note
+
 alias_repo = temporary / "alias-reservations"
 alias_repo.mkdir()
 with patch.object(dispatch.room, "records", return_value=[]):

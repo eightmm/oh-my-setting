@@ -231,23 +231,69 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
     return dict(route, provider=peer["provider"], binary=peer["binary"], model=model, effort=effort)
 
 
-def _patch_in_head(repo, body):
-    """True when reverse-applying the patch to HEAD's tree succeeds, i.e. HEAD already holds its result."""
+def _patch_in_head(repo, body, reverse=True, with_error=False):
+    """Check patch applicability on a scratch index rooted at HEAD, optionally in reverse."""
     with tempfile.TemporaryDirectory(prefix="oms-head-has-") as scratch:
         patch_file = Path(scratch) / "previous.patch"
         patch_file.write_bytes(body)
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(scratch) / "index"), GIT_CONFIG_GLOBAL=os.devnull,
                    GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
         git = ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false", "-C", str(repo)]
+        apply = ["apply", "--check"]
+        if reverse:
+            apply.append("-R")
+        apply.extend(["--cached", str(patch_file)])
         try:
-            return all(subprocess.run(git + argv, env=env, capture_output=True, check=False,
-                                      stdin=subprocess.DEVNULL, timeout=60).returncode == 0
-                       for argv in (["read-tree", "HEAD"], ["apply", "--check", "-R", "--cached", str(patch_file)]))
-        except (OSError, subprocess.SubprocessError):
-            return False
+            loaded = subprocess.run(git + ["read-tree", "HEAD"], env=env, capture_output=True,
+                                    text=True, errors="replace", check=False, stdin=subprocess.DEVNULL, timeout=60)
+            checked = (subprocess.run(git + apply, env=env, capture_output=True, text=True, errors="replace",
+                                      check=False, stdin=subprocess.DEVNULL, timeout=60)
+                       if loaded.returncode == 0 else loaded)
+            outcome = checked.returncode == 0
+            return (outcome, checked.stderr or checked.stdout) if with_error else outcome
+        except (OSError, subprocess.SubprocessError) as error:
+            return (False, str(error)) if with_error else False
 
 
-def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, patch_reference=None):
+def _continuation_base_note(repo, base, body, allow_stale_base=False):
+    """Check a carried continuation patch against HEAD without changing the repository."""
+    try:
+        base_result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", base + "^{commit}"],
+                                     capture_output=True, text=True, errors="replace", check=False,
+                                     stdin=subprocess.DEVNULL, timeout=60)
+        current = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "HEAD^{commit}"],
+                                 capture_output=True, text=True, errors="replace", check=False,
+                                 stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("could not resolve continuation base or current HEAD before continuing: %s" % error)
+    if base_result.returncode:
+        raise ValueError("recorded continuation base is not a commit")
+    if current.returncode:
+        raise ValueError("could not resolve current HEAD before continuing")
+    base = base_result.stdout.strip()
+    head = current.stdout.strip()
+    if head == base:
+        return ""
+    if allow_stale_base:
+        return ("continued patch base %s differs from current HEAD %s; proceeding because "
+                "--allow-stale-base was given" % (base, head))
+    applies, error = _patch_in_head(repo, body, reverse=False, with_error=True)
+    if not applies:
+        paths = []
+        for line in error.splitlines():
+            match = re.match(r"(?:error: )?([^:]+): (?:patch does not apply|already exists in working directory|does not exist in index)", line)
+            if match and match.group(1) not in paths:
+                paths.append(match.group(1))
+        detail = ", ".join(paths) if paths else (error.strip() or "git apply --check failed")[:300]
+        raise ValueError("continued patch base %s differs from current HEAD %s and does not apply cleanly (%s); "
+                         "refusing continuation. Recover by starting a fresh dispatch from current HEAD and "
+                         "including the prior patch as context (for example, --from-task). Use "
+                         "--allow-stale-base to keep the original-base continuation behavior." % (base, head, detail))
+    return "continued patch base %s differs from current HEAD %s; carried patch applies cleanly" % (base, head)
+
+
+def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, patch_reference=None,
+                 allow_stale_base=False):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
     from terminal_panel import MAX_PROMPT, _rework_history, clean, events, owning_attempt
     from terminal_panel import repository, results, session_stored, verified_patch, work_repository
@@ -332,6 +378,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                          % (task_id, last["attempt_id"]))
     patch = call.get("patch") if eligible_result else None
     where = ""
+    drift_note = ""
     if patch:
         # Pass write continuations a verified artifact reference. Legacy callers
         # without a materialization channel retain the bounded inline context.
@@ -358,10 +405,13 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                 where = (" Your previous patch (%s) is already part of the repository at HEAD; continue from it."
                          % name)
             else:
+                drift_note = _continuation_base_note(head_repo, base, body, allow_stale_base)
                 patch_reference.update(patch=patch, sha256=call.get("patch_sha256"), base=base)
                 where = (" The harness applies your previous patch (%s) at its original base before this round. "
                          "Continue from the applied changes; do not reapply it. The patch you return is against "
                          "that original base, not the current HEAD." % name)
+                if drift_note:
+                    where = " " + drift_note + "." + where
         elif body:
             excerpt = body.decode("utf-8", errors="replace")
             if len(excerpt.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 > MAX_PROMPT:
@@ -391,6 +441,8 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
         note = "no resumable session (%s); fresh worker transfers %s and %s" % (
             reason, "verified patch" if patch and body else "no patch",
             "recorded summary" if has_summary else "no verified summary")
+    if drift_note:
+        note += "; " + drift_note
     text = preamble + Path(brief).read_text(encoding="utf-8")
     if len(text.encode("utf-8")) > MAX_PROMPT:
         raise ValueError("brief plus continuation preamble exceeds the panel input contract")
@@ -438,7 +490,7 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
-             candidate=None):
+             candidate=None, allow_stale_base=False):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
     from terminal_panel import continuation, events, newest_route_model, provider_catalog, routing_status
     from terminal_panel import run_dispatch, safe_label, selected_route
@@ -484,7 +536,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             _require_assigned_route(repo, continue_task, route)
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
                                            child_environment(owner, repo), work_repo,
-                                           patch_reference=continuation_patch)
+                                           patch_reference=continuation_patch,
+                                           allow_stale_base=allow_stale_base)
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
