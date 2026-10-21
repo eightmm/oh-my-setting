@@ -1846,19 +1846,15 @@ nonguard["room"]["messages"][0]["text"] = "Call exit=1; parent acceptance pendin
 nonguard["room"]["call_results"]["builder"]["artifact"] = ".oms/artifacts/failed-output.md"
 next(a for a in nonguard["attempts"]["active_recent"] if a["attempt_id"] == "builder")["reason_code"] = None
 assert "failed: exit 1" in render(nonguard, "codex", 157, 40, view="graph", main_attempt="flow-attempt", navigation={})
-# Recent message rows keep a fixed text column for different sender lengths, including wide CJK names.
-aligned_recent = deepcopy(truth)
-aligned_recent["room"]["messages"] = [
-    {"id": "recent-a", "sender": "flow-main", "recipient": "all", "message_kind": "note",
-     "ts": stamp, "text": "TREE-A"},
-    {"id": "recent-b", "sender": "漢字送り手", "recipient": "all", "message_kind": "note",
-     "ts": stamp, "text": "TREE-B"},
+# Room messages stay in the Messages tab and do not add free text to Activity.
+message_tree = deepcopy(truth)
+message_tree["room"]["messages"] = [
+    {"id": "recent-note", "sender": "flow-main", "recipient": "all", "message_kind": "note",
+     "ts": stamp, "text": "TREE-MESSAGE-ONLY"},
 ]
-recent_tree = render(aligned_recent, "codex", 80, 40, view="tree", navigation={})
-recent_lines = [line for line in recent_tree.splitlines() if "TREE-" in line and "[" not in line]
-assert len(recent_lines) == 2, recent_tree
-recent_columns = [display_width(line[:line.index("TREE-")]) for line in recent_lines]
-assert recent_columns == [29, 29], (recent_columns, recent_lines)
+message_screen = render(message_tree, "codex", 130, 40, view="tree", navigation={"tab": "log"})
+activity_box = message_screen.split("╭─ Activity", 1)[1].split("╰─", 1)[0]
+assert "TREE-MESSAGE-ONLY" not in activity_box, activity_box
 # The tree never doubles "Now:" and a main with no readings gets one usage line instead of a box.
 tree_board = render(truth, "codex", 157, 40, view="tree", navigation={})
 assert "Now: 방 범위 선언" in tree_board and "Now: Now:" not in tree_board, tree_board
@@ -1869,7 +1865,7 @@ bare.pop("provider_status", None)
 bare_board = render(bare, "codex", 157, 40, view="tree", navigation={})
 assert bare_board.splitlines()[1] == "Claude -- │ Codex --" and "USAGE" not in bare_board, bare_board
 
-# The tree head bounds repository tasks to the five newest open tasks, then links to the full Plan tab.
+# The tree summarizes repository task states on one clickable Plan row.
 task_board = deepcopy(truth)
 task_board["room"]["repo_tasks"] = [
     {"id": "t-ready-activity", "title": "Ready activity", "state": "ready", "updated": "2026-10-10T00:00:00Z",
@@ -1883,16 +1879,26 @@ task_board["room"]["repo_tasks"] = [
     {"id": "t-ready-new", "title": "Newest ready", "state": "ready", "updated": "2026-10-10T06:00:00Z"},
 ]
 task_nav = {}
-task_text = render(task_board, "codex", 157, 40, view="tree", navigation=task_nav)
-task_hits = [hit["action"] for hit in task_nav["hits"] if hit["action"][0] == "task"]
-assert task_hits == [("task", ident) for ident in ("t-ready-new", "t-landing", "t-claimed", "t-running", "t-review")], task_hits
-assert "Recent landing" in task_text and "Closed done" not in task_text and "Closed blocked" not in task_text, task_text
-assert "1 more open · 1 done · 1 blocked · Plan tab for all" in task_text, task_text
-summary_line = next(i for i, line in enumerate(task_text.splitlines()) if "Plan tab for all" in line)
+task_text = render(task_board, "codex", 130, 40, view="tree", navigation=task_nav)
+assert "Repository tasks" not in task_text and "Recent landing" not in task_text, task_text
+assert "Plan · 1 running · 1 in review · 2 ready · 1 claimed · 1 landing · 1 done · 1 blocked · Plan tab" in task_text, task_text
+summary_line = next(i for i, line in enumerate(task_text.splitlines()) if "Plan tab" in line)
 summary_hit = next(hit for hit in task_nav["hits"] if hit["action"] == ("tab", "plan") and hit["y"] == summary_line + 1)
 assert choose(("click", summary_hit["x1"], summary_hit["y"]), task_nav) == ("tab", "plan")
 assert tab_event(("click", summary_hit["x1"], summary_hit["y"]), task_nav)
 assert task_nav["tab"] == "plan", task_nav
+narrow_task_text = render(task_board, "codex", 60, 40, view="tree", navigation={})
+narrow_summary = next(line.strip().strip("│ ") for line in narrow_task_text.splitlines() if "Plan tab" in line)
+assert narrow_summary.startswith("Plan · 1 running · 1 in review") and narrow_summary.endswith("Plan tab"), narrow_summary
+assert "…" not in narrow_summary, narrow_summary
+for columns in (31, 40):
+    selected_plan = {}
+    render(task_board, "codex", columns, 40, view="tree", navigation=selected_plan)
+    choose(("end",), selected_plan)
+    assert selected_plan["selected"] == ("tab", "plan"), selected_plan
+    selected_text = render(task_board, "codex", columns, 40, view="tree", navigation=selected_plan)
+    selected_summary = next(line.strip().strip("│ ") for line in selected_text.splitlines() if "Plan tab" in line)
+    assert selected_summary.endswith("Plan tab"), (columns, selected_summary)
 from dashboard_projection import fit, use_unicode
 use_unicode(True)
 assert fit("abcdefghij", 6) == "abcde…"
@@ -3331,10 +3337,12 @@ many_needs["room"]["repo_tasks"] = [{"id": "last-task", "title": "Last task", "s
 needs_nav = {}
 needs_picture = render(many_needs, "codex", 50, 50, view="tree", navigation=needs_nav)
 pinned_actions = [item["action"] for item in attention_rows]
-hit_actions = [hit["action"] for hit in sorted(needs_nav["hits"], key=lambda hit: hit["y"])]
-assert hit_actions.index(pinned_actions[0]) < hit_actions.index(("task", "last-task")), needs_picture
+plan_row = next(i + 1 for i, line in enumerate(needs_picture.splitlines()) if "Plan tab" in line)
+plan_hit = next(hit for hit in needs_nav["hits"] if hit["action"] == ("tab", "plan") and hit["y"] == plan_row)
+attention_hit = next(hit for hit in needs_nav["hits"] if hit["action"] == pinned_actions[0])
+assert attention_hit["y"] < plan_hit["y"], needs_picture
 choose(("end",), needs_nav)
-assert needs_nav["selected"] == ("task", "last-task"), needs_nav
+assert needs_nav["selected"] == ("tab", "plan"), needs_nav
 repeated_needs = deepcopy(many_needs)
 repeated_needs["room"]["participants"].append(deepcopy(next(
     member for member in repeated_needs["room"]["participants"] if member["participant"] == "builder")))
@@ -3379,6 +3387,16 @@ assert [item["row_id"][1] for item in ranked] == ["builder", "advisor", "ask-all
 assert [item["cls"] for item in ranked] == ["needs"] * 3 + ["failed"] * 2 + ["timed_out"] + ["decide"] * 2 + ["stale", "mail", "info"]
 assert [item["age"] for item in ranked[6:8]] == ["30m", "5m"] and not any(item["age"] for item in ranked[:6] + ranked[8:])
 assert ranked[8]["action"] == ("tab", "plan") and "Held t-ended" in ranked[8]["what"], ranked[8]
+# The narrow viewport keeps enough Attention rows to exercise scrolling after Activity was shortened.
+narrow_queue = deepcopy(queue)
+for seq in range(4):
+    ident = "narrow-failure-%s" % seq
+    narrow_queue["room"]["participants"].append(dict(
+        next(m for m in narrow_queue["room"]["participants"] if m["participant"] == "researcher"),
+        participant=ident, seq=70 + seq, label="Narrow failure %s" % seq))
+    narrow_queue["attempts"]["active_recent"].append({"attempt_id": ident, "state": "failed",
+        "updated_at": minutes_ago(1 + seq), "task_id": "t-narrow-%s" % seq,
+        "panel": {"room_id": "flow-room", "room_participant": ident, "role": "worker"}})
 # Counts drop zero classes; narrower widths shorten the class words, then keep only the total.
 full_header = "Attention 11 · 3 needs you · 2 failed · 1 timed out · 2 decide · 1 stale · 1 mail · 1 info"
 short_header = "Attention 11 · 3 you · 2 fail · 1 timeout · 2 dec · 1 stale · 1 mail · 1 info"
@@ -3436,34 +3454,36 @@ assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["unr
 assert graph_text.past_event(("up",), group_nav, "needs") and group_nav["selected"] == ("tab", "plan") and \
     picked_rows() == ["held, workers ended · t-ended · release or continue task"], picked_rows()
 for columns, rows_high in ((127, 40), (57, 40)):
+    fixture = queue if columns == 127 else narrow_queue
     tab_nav = {"tab": "needs", "dismissed": True}
-    tab_picture = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
-    assert tab_nav["tab_body_visible"] and any(label in tab_picture for label in ("Attention 11", "Attn 11")), tab_picture
+    tab_picture = render(fixture, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    expected_count = 11 if columns == 127 else 15
+    assert tab_nav["tab_body_visible"] and any(label in tab_picture for label in ("Attention %s" % expected_count, "Attn %s" % expected_count)), tab_picture
     assert "Enter finalize" in tab_picture and "answer request" in tab_picture, tab_picture
     # Arrows pick a row, Enter shows it in Detail; End reaches the last mail, the stale hold above it opens the Plan tab.
     assert panel.tab_event(("home",), tab_nav) and tab_nav["selected"] == ("result", "builder"), tab_nav
     assert panel.tab_event(("enter",), tab_nav) and tab_nav["tab"] == "needs" and \
         tab_nav["finalize_call"]["target"] == ("result", "builder"), tab_nav
-    shown = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    shown = render(fixture, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
     assert "Enter finalize" in "\n".join(shown.splitlines()[tab_nav["box"]["y1"] - 1:]), shown
     tab_nav["tab"] = "needs"
-    render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    render(fixture, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
     assert panel.tab_event(("end",), tab_nav) and tab_nav["needs_pick"] == ("message", "note-all"), tab_nav
     assert panel.tab_event(("up",), tab_nav) and tab_nav["selected"] == ("tab", "plan"), tab_nav
-    assert "Enter Finalize" in render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav,
+    assert "Enter Finalize" in render(fixture, "codex", columns, rows_high, view="graph", navigation=tab_nav,
                                   main_attempt="flow-attempt").splitlines()[-1]
     assert tab_nav["needs_view"]["scroll"] > 0 or columns == 127, tab_nav["needs_view"]
     assert panel.tab_event(("enter",), tab_nav) and tab_nav["finalize_call"]["task_id"] == "t-ended", tab_nav
     # A click on a queue row shows that call in Detail, and f opens its full result.
     tab_nav["tab"] = "needs"
     tab_nav["needs_view"]["scroll"] = 0
-    render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    render(fixture, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
     hit = next(h for h in tab_nav["hits"] if h.get("needs") and h["action"] == ("result", "advisor"))
     assert panel.tab_event(("click", hit["x1"], hit["y"]), tab_nav) and tab_nav["tab"] == "detail" and \
         tab_nav["preview"] == {"target": ("result", "advisor")} and "finalize_call" not in tab_nav, tab_nav
     # The footer names the tab's own keys; f is offered and works only on a call, not on a main's row.
     tab_nav["tab"] = "needs"
-    footer = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav,
+    footer = render(fixture, "codex", columns, rows_high, view="graph", navigation=tab_nav,
                     main_attempt="flow-attempt").splitlines()[-1]
     assert "Enter Detail" in footer and "f Full result" in footer and "Enter Show" not in footer, footer
     assert panel.tab_event(("home",), tab_nav) and panel.tab_event(("f",), tab_nav) and \
@@ -3654,7 +3674,7 @@ expanded_board = render(usage_board, "codex", 100, 28, view="tree")
 assert "USAGE" not in small_board and "USAGE" not in expanded_board
 
 # The compact goal banner and short-height fallback keep only the sections that
-# fit; usage stays unique, and task titles keep their navigation target while scrolling.
+# fit; usage stays unique, and the single Plan row keeps navigation while scrolling.
 boxed_room = deepcopy(usage_board)
 boxed_room["room"]["repo_tasks"] = [{"id": "layout", "state": "ready",
     "title": "Keep a long task title readable when the terminal has fewer columns than its description"}]
@@ -3672,10 +3692,10 @@ for columns, rows in ((108, 36), (100, 28), (42, 24), (32, 28)):
         choose((key,), boundary)
         assert any(hit["action"] == boundary["selected"] for hit in nav["hits"]), (key, nav)
     choose(("end",), nav)
-    assert nav["selected"] == ("task", "layout"), nav
+    assert nav["selected"] == ("tab", "plan"), nav
     scrolled = render(boxed_room, "codex", columns, rows, view="tree", navigation=nav)
     assert scrolled.count("╭") == scrolled.count("╰") == base_boxes + int(bool(nav.get("log_box"))), scrolled
-    assert any(hit["action"] == ("task", "layout") for hit in nav["hits"]), nav
+    assert any(hit["action"] == ("tab", "plan") for hit in nav["hits"]), nav
 assert "Claude W 0% left · C 100% used" in render(dict(usage_board, provider_status={"claude": {
     "weekly_used": 100, "context_left": 0}}), "claude", 32, 28, view="summary")
 empty_room = dict(usage_board, room={"id": "empty", "participants": []}, attempts={"active_recent": [], "recent": []})

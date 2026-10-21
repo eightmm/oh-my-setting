@@ -608,7 +608,8 @@ assert not any("Goal:" in line for line, _ in render_plan_rows(msg_report, {}, 8
 assert [row.split(" · ")[0].split()[-1] for row in plan_rows] == ["t-run", "t-rev", "t-rdy", "t-blk"], plan_rows
 assert "1 done · 0 cancelled" in plan and "t-ver" not in plan and "Goal:" not in plan and "make d" not in plan and "t-run · running 9h stale · Running one" in plan and "Opus 5.5 · make c" in plan, plan
 assert "t-rev · in review · Review one" in plan and "unclaimed · make e" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
-assert "in review · Review one" in render(msg_report, "codex", 120, 80, view="tree", navigation={"dismissed": True})
+activity_tree = render(msg_report, "codex", 120, 80, view="tree", navigation={"dismissed": True})
+assert "1 in review" in activity_tree and "Plan tab" in activity_tree and "Review one" not in activity_tree, activity_tree
 task_hits = [h["action"] for h in nav["hits"] if h["action"][0] == "task"]
 assert task_hits == [("task", t) for t in ("t-run", "t-rev", "t-rdy", "t-blk")], task_hits
 # Plan End focuses the closed summary even when the board reaps its own selection on repaint.
@@ -1177,7 +1178,8 @@ for columns, rows_high in ((42, 24), (50, 50)):
     last_picture = render_tree(last_attention, columns, rows_high, menu=True,
                                previous=last_error, navigation=last_nav)
     assert "Attention 1" in "\n".join(last_picture.splitlines()[:10]), last_picture
-    assert any(hit["action"] == ("task", "t-rev") for hit in last_nav["hits"]), last_picture
+    plan_row = next(i + 1 for i, line in enumerate(last_picture.splitlines()) if "Plan tab" in line)
+    assert any(hit["action"] == ("tab", "plan") and hit["y"] == plan_row for hit in last_nav["hits"]), last_picture
     assert last_nav["tab_strip_visible"] and len(last_picture.splitlines()) <= rows_high - 1, last_picture
     if rows_high == 50:
         assert last_nav["tab_body_visible"] and last_nav["box"]["y2"] - last_nav["box"]["y1"] - 1 >= min(dock_body_rows(rows_high), max(3, last_nav["dock_content_rows"])), last_nav

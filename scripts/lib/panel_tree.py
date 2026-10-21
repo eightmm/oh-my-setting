@@ -5,12 +5,12 @@ import re
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
-                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, worker_rows, wrapped,
+                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, worker_rows, wrapped,
                         role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
                         JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
-                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens, fixed_column)
+                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
 from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
-                       goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
+                       goal_banner, native_advisors, nodes, plan_idle,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
 
 
@@ -35,7 +35,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         navigation.get("room_poll_unknown") or navigation.get("capacity_stale") or report.get("capacity_stale")
         or room.get("error") or mapping(report.get("collection")).get("ok") is not True
         or main_occupied(report, members))
-    names = main_names(members)
     settled, _ = settler(report)
     classify = call_classifier(report)
     expanded = navigation.get("expanded_groups", set())
@@ -267,44 +266,27 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         idle = plan_idle(report) or 0
         if idle >= 7:
             add(sep.join(["Old plan", "idle %s days" % idle, verified]), "dim")
-    from room_view import clock_stamp, result_handoff
-    messages = [m for m in listing(room.get("messages")) if not result_handoff(room, m)]
-    for message in messages[-2:]:
-        sender = names.get(message.get("sender")) or next((model_name(m) for m in members
-                 if m["participant"] == message.get("sender")), clean(message.get("sender")) or "unknown")
-        add(fixed_column(clock_stamp(message.get("ts"))[-5:], 5) + " " + fixed_column(sender, 18) + sep +
-            (readable(message.get("text"), " ") or ""), "dim")
     tasks = listing(room.get("repo_tasks"))
-    open_states = {"ready", "claimed", "running", "review", "landing"}
-    open_tasks = [task for task in tasks if isinstance(task.get("state"), str) and task["state"] in open_states]
-    def task_activity(task):
-        return max((task[key] for key in ("updated", "updated_at", "claimed_at", "created", "created_at")
-                    if isinstance(task.get(key), str)), default="")
-    open_tasks = sorted(open_tasks, key=task_activity, reverse=True)
-    shown_tasks = open_tasks[:5]
     task_start = len(rows)
     if tasks:
-        add("Repository tasks", "worker", divider=True)
-        for task in shown_tasks:
-            action = ("task", task.get("id"))
-            add("%s%s%s" % ("in review" if task.get("state") == "review" else said(task.get("state")), sep,
-                             task.get("title") or task.get("id")),
-                tone(task.get("state")), action)
-        if len(tasks) > len(shown_tasks):
-            counts = {}
-            for task in tasks:
-                state = task.get("state") if isinstance(task.get("state"), str) else "unknown"
-                if state not in open_states:
-                    counts[state] = counts.get(state, 0) + 1
-            task_summary = []
-            if len(open_tasks) > len(shown_tasks):
-                task_summary.append("%s more open" % (len(open_tasks) - len(shown_tasks)))
-            for state in ("done", "blocked", "cancelled"):
-                if counts.get(state):
-                    task_summary.append("%s %s" % (counts.pop(state), state))
-            task_summary += ["%s %s" % (count, state) for state, count in sorted(counts.items())]
-            task_summary.append("Plan tab for all")
-            add(sep.join(task_summary), "dim", ("tab", "plan"))
+        counts = {}
+        for task in tasks:
+            state = task.get("state") if isinstance(task.get("state"), str) else "unknown"
+            counts[state] = counts.get(state, 0) + 1
+        state_order = ("running", "review", "ready", "claimed", "landing",
+                       "done", "blocked", "cancelled")
+        task_summary = ["Plan"]
+        for state in state_order:
+            if counts.get(state):
+                label = "in review" if state == "review" else state
+                task_summary.append("%s %s" % (counts.pop(state), label))
+        task_summary += ["%s %s" % (count, state) for state, count in sorted(counts.items())]
+        task_summary.append("Plan tab")
+        # The selected marker is prepended after clipping, so reserve its two columns here.
+        summary_width = max(0, content_width - 2)
+        while len(task_summary) > 2 and display_width(sep.join(task_summary)) > summary_width:
+            task_summary.pop(-2)
+        add(sep.join(task_summary), "dim", ("tab", "plan"))
     footer = menu_rows(width, 1, unicode, navigation.get("menu_help", False), managed,
                        occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []
     if navigation.get("notice"):
@@ -532,8 +514,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     for hit in dock_hits:
         target = hit["action"]
         if target[0] in {"result", "debate"} and target not in unique:
-            before_task = next((i for i, action in enumerate(unique) if action[0] == "task"), len(unique))
-            unique.insert(before_task, target)
+            before_plan = next((i for i, action in enumerate(unique) if action == ("tab", "plan")), len(unique))
+            unique.insert(before_plan, target)
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=body_budget,
                       room_id=room.get("id"), positions=positions, geometry=geometry, surface="tree", bands=bands,
                       tree_selected=selected,
