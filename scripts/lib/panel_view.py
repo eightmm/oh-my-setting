@@ -376,17 +376,28 @@ def clipped(text, width):
     return result
 
 
-def message_rows(text, width):
-    """Preserve message line breaks and wrap by cells without dropping spaces or adding ellipses."""
+def fixed_column(text, width):
+    """Clip and pad a label to a display-cell width."""
+    width = max(0, int(width))
+    value = clipped(text, width)
+    return value + " " * max(0, width - display_width(value))
+
+
+def message_rows(text, width, indent=None):
+    """Preserve message line breaks and wrap by cells with a hanging continuation indent."""
     rows = []
+    width = max(1, width)
     for line in str(text).splitlines():
         line = clipped(line, display_width(line))
+        hanging = max(0, int(indent)) if indent is not None else 0
+        if hanging > width // 2 or width - hanging < 2:
+            hanging = 0
         value, cells = "", 0
         for char in line:
             step = display_width(char)
             if value and cells + step > width:
                 rows.append(value)
-                value, cells = "", 0
+                value, cells = " " * hanging, hanging
             value += char
             cells += step
         rows.append(value)
@@ -555,7 +566,10 @@ def model_usage(report):
             PROVIDER_NAMES.get(row.get("provider"), "Unknown"), "attribution": attribution,
             "records": 0, "tokens": 0, "token_reports": 0, "cost": 0, "cost_reports": 0})
         item["records"] += 1
-        tokens, cost = count(row.get("tokens")), number(row.get("cost_usd"))
+        tokens = provider_usage_tokens(mapping(row.get("provider_usage")))
+        if tokens is None:
+            tokens = count(row.get("tokens"))
+        cost = number(row.get("cost_usd"))
         if tokens is not None:
             item["tokens"] += tokens
             item["token_reports"] += 1
@@ -570,6 +584,16 @@ def amount(value):
             str(value // 1000) + "." + str(value % 1000 // 100) + "k" if value >= 10000 else str(value))
 
 
+def provider_usage_tokens(usage):
+    """Return a comparable provider total when its input/output/cache contract is complete."""
+    parts = [count(usage.get(key)) for key in ("input_tokens", "output_tokens")]
+    if usage.get("cache_in_input") is False:
+        parts += [count(usage.get(key)) for key in ("cache_read_tokens", "cache_write_tokens")]
+    elif usage.get("cache_in_input") is not True:
+        return None
+    return sum(parts) if None not in parts else None
+
+
 def call_tokens(report, attempt_id, state, short=False):
     """One call's tokens: providers differ on cache, so a breakdown is summed to the same total."""
     if state in LIVE_STATES:
@@ -577,14 +601,10 @@ def call_tokens(report, attempt_id, state, short=False):
     operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
                       if attempt_id and item.get("attempt_id") == attempt_id), {})
     usage = mapping(operation.get("provider_usage"))
-    parts = [count(usage.get(key)) for key in ("input_tokens", "output_tokens")]
-    if usage.get("cache_in_input") is False:
-        parts += [count(usage.get(key)) for key in ("cache_read_tokens", "cache_write_tokens")]
-    elif usage.get("cache_in_input") is not True:
-        parts.append(None)
-    if None not in parts:
-        text = amount(sum(parts)) + " tok"
-        return text if short else text + " (out %s)" % amount(parts[1])
+    tokens = provider_usage_tokens(usage)
+    if tokens is not None:
+        text = amount(tokens) + " tok"
+        return text if short else text + " (out %s)" % amount(count(usage.get("output_tokens")))
     tokens = count(operation.get("tokens"))
     if tokens is None:
         tokens = next((count(item.get("tokens")) for item in listing(mapping(report.get("attempts")).get("recent"))
@@ -609,14 +629,6 @@ def usage_labels(report, costs=False):
             label += " / " + cost
         labels.append(label)
     return labels
-
-
-def usage_words(report, unicode=True, costs=False):
-    """usage_labels() in plain words for display; the labels themselves stay as other callers read them."""
-    mark = "×" if unicode else "x"
-    return [re.sub(r" (\S+) tok / (\d+)x", lambda m: " %s tokens %s%s" % (m.group(1), mark, m.group(2)),
-                   label.replace("(sel)", "").replace("(?)", " (model unconfirmed)"))
-            for label in usage_labels(report, costs)]
 
 
 def box_edge(title, width, unicode=True, kind="top", dashed=False):

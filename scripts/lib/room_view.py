@@ -6,7 +6,7 @@ import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
 from panel_view import (amount, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
-                        clipped, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
+                        clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
                         judgment_tag, judgment_tone, call_ending, ending_tag, call_tone)
@@ -1817,7 +1817,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 rows = attention_body(attention, width - 4, capacity, navigation, unicode)
             else:
                 summary = [("Messages: %s unread for live participants" % unread_total, None, False)]
-                rows = summary + messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
+                messages = messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
+                rows = summary + aligned_message_rows(report, messages, navigation, width - 4, unicode)
             return rows, first, plain
 
         rows, first, plain = body_rows(capacity, navigation)
@@ -1891,8 +1892,74 @@ def past_calls(pool, classify):
                   reverse=True)
 
 
+def aligned_message_rows(report, rows, navigation, width, unicode):
+    """Give each Messages row fixed time, kind and route columns before its text."""
+    state = mapping(navigation.get("messages_view"))
+    # By-call rows summarize calls instead of individual messages.
+    if state.get("filter") == 1:
+        return rows
+    room = mapping(report.get("room"))
+    source = state.get("log")
+    if source is None:
+        source = listing(room.get("messages"))
+    by_id = {str(mapping(message).get("id")): mapping(message) for message in source
+             if mapping(message).get("id") is not None}
+    if not by_id:
+        return rows
+    members = nodes(report)
+    index = {member.get("participant"): member for member in members}
+    mains = [member.get("participant") for member in members if member.get("role") == "main"]
+    successors = mapping(report.get("message_successors"))
+
+    def name_of(ident):
+        if ident == "all":
+            return "everyone"
+        member = index.get(ident)
+        return clean(member_identity(member), 100) if member else clean(ident, 40) or "unknown"
+
+    separator = " · " if unicode else " / "
+    column = min(50, max(0, width // 2))
+    if column < 10:
+        return rows
+    kind_width = min(8, max(1, column - 15)) if column >= 15 else 0
+    route_width = max(0, column - 14 - kind_width) if kind_width else 0
+    try:
+        from panel_messages import readable_text
+    except ImportError:
+        return rows
+    aligned = []
+    for row in rows:
+        text, target, selected = row[:3]
+        message = by_id.get(str(target[1])) if target and target[0] == "message" else None
+        if message is None or len(text) < 9:
+            aligned.append(row)
+            continue
+        sender = message.get("sender")
+        targets = listing(message.get("targets"))
+        recipient = message.get("recipient") or (targets[0] if len(targets) == 1 else "all")
+        addressed = message_address(recipient, members, successors, name_of)
+        if len(mains) == 1 and sender in mains:
+            route = addressed
+        elif len(mains) == 1 and recipient in mains and addressed == name_of(recipient):
+            route = name_of(sender)
+        else:
+            route = name_of(sender) + (" → " if unicode else " -> ") + addressed
+        route = route.replace(" · ", separator)
+        first = next((line for line in readable_text(message.get("text")).splitlines() if line.strip()), "")
+        first = clean(first, 300) or "(empty)"
+        prefix = text[:2] + fixed_column(text[2:7], 5) + " " + text[8] + " "
+        if kind_width:
+            kind = clean(message.get("message_kind"), 20) or "note"
+            prefix += fixed_column(kind, kind_width) + " " + fixed_column(route, route_width) + separator
+        else:
+            prefix += " " * max(0, column - display_width(prefix))
+        line = prefix + clipped(first, max(0, width - display_width(prefix)))
+        aligned.append((message_rows(line, width, indent=column)[0], target, selected) + tuple(row[3:]))
+    return aligned
+
+
 def past_body(past, width, capacity, navigation, labels, unicode):
-    """One row per past call: who, its task, how it ended and when; selecting one shows it in Detail."""
+    """One logical row per past call; long titles wrap under the text column."""
     sep = " · " if unicode else " / "
     groups = {}
     for c in past:
@@ -1917,20 +1984,35 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     view = navigation.setdefault("past_view", {})
     header = capacity >= 3
     page = max(1, capacity - int(header))
-    first = min(max(0, view.get("scroll", 0)), max(0, len(ids) - page))
     selected = navigation.get("selected")
-    if view.pop("reveal", False) and selected in ids:
-        at = ids.index(selected)
-        first = at if at < first else max(first, at - page + 1)
-    view.update(scroll=first, page=page)
-    rows = [("%s past call%s, newest first%sEnter shows one in Detail" % (len(ids), "" if len(ids) == 1 else "s", sep),
-             None, False)] if header else []
-    for call, target in entries[first:first + page]:
+
+    rendered_cache = {}
+
+    def render_entry(index):
+        call, target = entries[index]
         if call is None:
             text = "%s%s%s reviews %s" % (target[1], sep, len(groups[target[1]]),
                                          ("▾" if unicode else "v") if target[1] in expanded else ("▸" if unicode else ">"))
-            rows.append((clipped(text, width), target, target == selected))
-            continue
+            return [(clipped(text, width), target, target == selected)]
+        if width < 60:
+            end = clock_stamp(call.get("ended")) if call.get("ended") else call.get("_finished") or "unknown"
+            state = "timed_out" if call.get("exit") == 124 else call.get("state")
+            if call.get("_decided"):
+                code = call.get("exit")
+                state = "done" if code == 0 else "failed" if type(code) is int else "unknown"
+            acceptance = " [accepted]" if call.get("decision") == "accepted" else " [main decided]" if call.get("_decided") or call.get("decision") == "completed" else " [acceptance pending]"
+            if call_ending(call) == "cancelled":
+                acceptance = ""
+            tag = execution_tag(dict(call, state=state), unicode)
+            identity = clean(call.get("title")) or member_identity(call)
+            tail = tag
+            # A successful exit is redundant when it would hide the task; error tags keep their evidence.
+            if display_width(identity + tail) + 2 > width and tag == status_tag("done", exit_code=0, unicode=unicode):
+                tail = status_tag("done", unicode=unicode)
+            available = max(1, width - display_width(tail) - 2)
+            left = clipped(identity, available)
+            text = left + " " * max(2, width - display_width(left + tail)) + tail
+            return [(clipped(text, width), target, target == selected)]
         end = clock_stamp(call.get("ended")) if call.get("ended") else call.get("_finished") or "unknown"
         state = "timed_out" if call.get("exit") == 124 else call.get("state")
         if call.get("_decided"):
@@ -1940,22 +2022,61 @@ def past_body(past, width, capacity, navigation, labels, unicode):
         if call_ending(call) == "cancelled":
             acceptance = ""
         tag = execution_tag(dict(call, state=state), unicode)
-        identity = member_identity(call)
+        identity_width = min(18, max(1, width // 3))
+        identity = member_identity(call, False)
+        title = clean(call.get("title") or call.get("label") or call.get("task_id"), 300)
+        identity_column = fixed_column(identity, identity_width)
+        text_column = identity_width + display_width(sep)
         tails = [tag + acceptance + "  " + end, tag + acceptance + "  " + end[-5:], tag + acceptance]
-        tail = next((value for value in tails if display_width(identity + value) + 2 <= width), tails[-1])
-        if width < 60:
-            identity = clean(call.get("title")) or identity
-            tail = tag
-            # A successful exit is redundant when it would hide the task; error tags keep their evidence.
-            if display_width(identity + tail) + 2 > width and tag == status_tag("done", exit_code=0, unicode=unicode):
-                tail = status_tag("done", unicode=unicode)
-        available = max(1, width - display_width(tail) - 2)
-        if available < 12 and width >= 60:
+        tail = next((value for value in tails
+                     if display_width(identity_column + sep + title + "  " + value) <= width), tails[-1])
+        if width - text_column - display_width(tail) - 2 < 8:
             tail = tag + (" [decided]" if call.get("_decided") else "")
-            available = max(1, width - display_width(tail) - 2)
-        left = clipped(identity, available)
-        text = left + " " * max(2, width - display_width(left + tail)) + tail
-        rows.append((clipped(text, width), action(call), action(call) == selected))
+        text = identity_column + sep + title + "  " + tail
+        return [(line, target, target == selected) for line in message_rows(text, width, indent=text_column)]
+
+    def entry_rows(index):
+        if index not in rendered_cache:
+            rendered_cache[index] = render_entry(index)
+        return rendered_cache[index]
+
+    def visible_start(end):
+        used = 0
+        start = end
+        for index in range(end, -1, -1):
+            row_height = len(entry_rows(index))
+            if index < end and used + row_height > page:
+                break
+            start = index
+            used += min(row_height, page)
+            if used >= page:
+                break
+        return start
+
+    last_start = visible_start(len(entries) - 1) if entries else 0
+    first = min(max(0, view.get("scroll", 0)), last_start)
+    if view.pop("reveal", False) and selected in ids:
+        at = ids.index(selected)
+        if at < first:
+            first = at
+        else:
+            first = max(first, visible_start(at))
+    rows = [("%s past call%s, newest first%sEnter shows one in Detail" % (len(ids), "" if len(ids) == 1 else "s", sep),
+             None, False)] if header else []
+    body_rows, shown_entries = [], 0
+    for index in range(first, len(entries)):
+        rendered = entry_rows(index)
+        remaining = page - len(body_rows)
+        if len(rendered) > remaining:
+            if body_rows:
+                break
+            rendered = rendered[:remaining]
+        body_rows.extend(rendered)
+        shown_entries += 1
+        if len(body_rows) >= page:
+            break
+    view.update(scroll=first, page=max(1, shown_entries))
+    rows.extend(body_rows)
     return rows
 
 

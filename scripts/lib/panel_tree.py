@@ -1,12 +1,14 @@
 """Connected room tree and a frame-local map of navigation targets."""
 
+import re
+
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
-                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped,
+                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, worker_rows, wrapped,
                         role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
                         JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
-                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
+                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens, fixed_column)
 from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
@@ -251,16 +253,39 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     for message in messages[-2:]:
         sender = names.get(message.get("sender")) or next((model_name(m) for m in members
                  if m["participant"] == message.get("sender")), clean(message.get("sender")) or "unknown")
-        add(clock_stamp(message.get("ts"))[-5:] + " " + sender + sep + (readable(message.get("text"), " ") or ""), "dim")
+        add(fixed_column(clock_stamp(message.get("ts"))[-5:], 5) + " " + fixed_column(sender, 18) + sep +
+            (readable(message.get("text"), " ") or ""), "dim")
     tasks = listing(room.get("repo_tasks"))
+    open_states = {"ready", "claimed", "running", "review", "landing"}
+    open_tasks = [task for task in tasks if isinstance(task.get("state"), str) and task["state"] in open_states]
+    def task_activity(task):
+        return max((task[key] for key in ("updated", "updated_at", "claimed_at", "created", "created_at")
+                    if isinstance(task.get(key), str)), default="")
+    open_tasks = sorted(open_tasks, key=task_activity, reverse=True)
+    shown_tasks = open_tasks[:5]
     task_start = len(rows)
     if tasks:
         add("Repository tasks", "worker", divider=True)
-        for task in tasks:
+        for task in shown_tasks:
             action = ("task", task.get("id"))
             add("%s%s%s" % ("in review" if task.get("state") == "review" else said(task.get("state")), sep,
                              task.get("title") or task.get("id")),
                 tone(task.get("state")), action)
+        if len(tasks) > len(shown_tasks):
+            counts = {}
+            for task in tasks:
+                state = task.get("state") if isinstance(task.get("state"), str) else "unknown"
+                if state not in open_states:
+                    counts[state] = counts.get(state, 0) + 1
+            task_summary = []
+            if len(open_tasks) > len(shown_tasks):
+                task_summary.append("%s more open" % (len(open_tasks) - len(shown_tasks)))
+            for state in ("done", "blocked", "cancelled"):
+                if counts.get(state):
+                    task_summary.append("%s %s" % (counts.pop(state), state))
+            task_summary += ["%s %s" % (count, state) for state, count in sorted(counts.items())]
+            task_summary.append("Plan tab for all")
+            add(sep.join(task_summary), "dim", ("tab", "plan"))
     footer = menu_rows(width, 1, unicode, navigation.get("menu_help", False), managed,
                        occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []
     if navigation.get("notice"):
@@ -313,21 +338,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in alerts]
     head += needs_strip(report, width, unicode, ranked=ranked)
     pinned = len(head)
-    labels = usage_words(report, unicode)
-    if boxed and height >= 20 and labels and budget - len(head) >= 5:
-        if summary:
-            labels = labels[:2] + (["+%s models / expand for more" % (len(labels) - 2)] if len(labels) > 2 else [])
-        maximum = max(2, budget - len(head) - 9)
-        if len(labels) > maximum:
-            labels = labels[:maximum - 1] + ["+%s models / expand for more" % (len(labels) - maximum + 1)]
-        content = [("Model use, last 8 calls", "dim")] + [(line, None) for line in labels]
-        usage_boxed = width >= 76 and height >= 32
-        if usage_boxed:
-            head.append({"text": box_edge("USAGE", width, unicode), "style": "dim"})
-        head += [{"text": box_row(line, width, unicode) if usage_boxed else clipped(line, width),
-                  "style": style} for line, style in content]
-        if usage_boxed:
-            head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
     # The viewport owns its borders, so scrolling never leaves an open card.
     if boxed and budget - len(head) < 3:
         head = head[:pinned]
@@ -519,8 +529,36 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     return "\n".join(output)
 
 
-def render_detail(report, detail, width, height, navigation, managed=False):
+def _detail_line(line, color):
+    """Apply semantic colors to already sanitized detail text without changing plain output."""
+    if not color:
+        return line
+    colors, light = color_count(), light_theme()
+    if line.startswith(("## ", "OMS / ")) or re.match(r"^[A-Z][A-Za-z ]+:\s*$", line):
+        return paint(line, "main", color=True, colors=colors, light=light, bold=True)
+    key = re.match(r"^(Task|Outcome|Stage|Next|Changed files|Answer artifact|Result):(?=\s|$)", line)
+    if key:
+        value = line[key.end():]
+        painted_key = paint(key.group(1) + ":", "metadata", color=True, colors=colors, light=light)
+        status_roles = {"passed": "good", "pass": "good", "completed": "good", "accepted": "good", "ok": "good",
+                        "failed": "bad", "fail": "bad", "rejected": "bad", "blocked": "alert", "error": "bad",
+                        "running": "running", "pending": "running", "review": "running"}
+        status = re.fullmatch(r"(\s*)(passed|pass|completed|accepted|ok|failed|fail|rejected|blocked|error|running|pending|review)(\s*)",
+                              value, flags=re.I)
+        if status:
+            role = status_roles[status.group(2).lower()]
+            return (painted_key + status.group(1) +
+                    paint(status.group(2), role, color=True, colors=colors, light=light) + status.group(3))
+        line = painted_key + value
+    return re.sub(r"(?<![\w])(?:\.?[\w.-]+/)+[\w./-]+", lambda match: paint(
+        match.group(0), "dim", color=True, colors=colors, light=light), line)
+
+
+def render_detail(report, detail, width, height, navigation, managed=False, color=None):
     from panel_view import _result_blocks, _result_structured
+    if color is None:
+        from panel_render import terminal_style
+        color = terminal_style()[1]
     heading = [clipped("OMS / " + detail["title"], width), clipped(usage_line(report, width), width)]
     if "report" in detail:
         from panel_view import render_results
@@ -534,7 +572,11 @@ def render_detail(report, detail, width, height, navigation, managed=False):
     budget = max(0, height - len(heading) - 2)
     offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - budget))
     navigation.update(hits=[], items=[], offset=offset, viewport=budget, body_rows=len(body), bands=[])
-    lines = heading[:max(0, height - 2)] + body[offset:offset + budget]
+    heading_count = min(len(heading), max(0, height - 2))
+    lines = heading[:heading_count] + body[offset:offset + budget]
     lines += [clipped("%s-%s / %s rows" % (offset + 1, min(len(body), offset + budget), len(body)), width),
               clipped("Esc Back  PgUp/PgDn Scroll" + ("  F9 Chat/Board" if managed else "  q Quit"), width)]
+    if color and heading_count:
+        lines[0] = paint(lines[0], "main", color=True, colors=color_count(), light=light_theme())
+        lines[heading_count:-2] = [_detail_line(line, True) for line in lines[heading_count:-2]]
     return "\n".join(lines[-height:])

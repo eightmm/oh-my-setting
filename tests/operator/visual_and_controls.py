@@ -198,6 +198,12 @@ assert len(capture.splitlines()) == 30 and capture.isascii(), capture
 # Ending names come from typed result/lifecycle evidence, including a successful worker whose verification failed.
 from panel_view import call_ending, ending_tag, call_tone, attention_header
 from room_view import execution_tag, end_words, call_classifier, session_log, past_body, past_calls
+wrapped_past_call = {"participant": "past-wrap", "role": "worker", "model": "gpt-6-luna",
+                     "title": "A very long task title that should wrap below its text column",
+                     "state": "done", "exit": 0, "ended": "2026-10-20T00:00:00Z", "seq": 1}
+wrapped_past = past_body([wrapped_past_call], 76, 5, {}, {}, True)
+wrapped_past_call_index = next(i for i, row in enumerate(wrapped_past) if row[1] == ("result", "past-wrap"))
+assert wrapped_past[wrapped_past_call_index + 1][0].startswith(" " * 21), wrapped_past
 ending_fixture = {"collection": {"ok": True}, "repo": {"name": "endings"},
     "room": {"id": "endings", "participants": [{"participant": "ending-main", "role": "main", "joined": True,
         "model": "gpt-6.1-sol"}], "messages": [], "call_results": {}},
@@ -745,6 +751,21 @@ assert "(changed in round 2: (c) -> (a))" in " ".join(ascii_debate.replace("|", 
 from panel_messages import _rows, readable_text
 fenced_message = "before\n```bash\necho `kept`\n```\nafter"
 assert readable_text(fenced_message) == fenced_message, readable_text(fenced_message)
+aligned_message_report = deepcopy(msg_report)
+aligned_message_report["room"]["messages"] = [
+    {"id": "aligned-a", "sender": "m1", "recipient": "m2", "message_kind": "note",
+     "pending_for": [], "ts": "2026-10-12T19:18:00Z", "text": "ALIGN-A"},
+    {"id": "aligned-b", "sender": "漢字送り手", "recipient": "m2", "message_kind": "question",
+     "pending_for": [], "ts": "2026-10-12T19:19:00Z", "text": "ALIGN-B"},
+]
+aligned_message_nav = {"selected": ("chat", "m2"), "tab": "messages",
+                       "messages_view": {"filter": 2, "selected": None, "open": None, "scroll": 0}}
+aligned_message_text = render(aligned_message_report, "codex", 80, 60, view="graph",
+                              navigation=aligned_message_nav, main_attempt="a2")
+aligned_message_lines = [line for line in aligned_message_text.splitlines() if "ALIGN-" in line]
+assert len(aligned_message_lines) == 2, aligned_message_text
+aligned_message_columns = [display_width(line[:line.index("ALIGN-")]) for line in aligned_message_lines]
+assert aligned_message_columns == [aligned_message_columns[0]] * 2, (aligned_message_columns, aligned_message_lines)
 unread_message = [{"id": "tail-check", "sender": "peer", "recipient": "main",
                    "pending_for": ["main"], "text": "Unread body", "ts": "2026-10-12T00:00:00Z"}]
 # The row mark carries the read state (filled/hollow, ASCII */-) instead of a trailing word.
@@ -1573,13 +1594,20 @@ from panel_view import model_usage, usage_labels
 usage_view = deepcopy(tree)
 usage_view["operations"] = {"available": True, "recent": [
     {"event_id": "use1", "kind": "ask", "provider": "codex", "selected_model": "gpt-6-astra",
-     "served_model": "gpt-6-sol", "tokens": 120, "cost_usd": .25},
+     "served_model": "gpt-6-sol", "tokens": 7249, "cost_usd": .25,
+     "provider_usage": {"input_tokens": 100, "output_tokens": 20, "cache_in_input": True,
+                        "cache_read_tokens": 5000, "cache_write_tokens": 300}},
     {"event_id": "use2", "kind": "ask", "provider": "codex", "served_model": "gpt-6-sol"},
-    {"event_id": "use3", "kind": "ask", "provider": "codex", "selected_model": "gpt-6-sol", "tokens": 0},
+    {"event_id": "use3", "kind": "ask", "provider": "codex", "selected_model": "gpt-6-sol", "tokens": 77,
+     "provider_usage": {"input_tokens": 0, "output_tokens": 0, "cache_in_input": True}},
     {"event_id": "use4", "kind": "review", "provider": "claude", "selected_model": "claude-fable-5-1",
-     "tokens": 7, "cost_usd": .5, "model_attribution": "ambiguous"},
+     "tokens": 7, "cost_usd": .5, "model_attribution": "ambiguous",
+     "provider_usage": {"input_tokens": 1, "output_tokens": 7, "cache_in_input": False,
+                        "cache_read_tokens": 5, "cache_write_tokens": 3}},
     {"event_id": "use5", "kind": "delegate", "provider": "claude", "selected_model": "claude-opus-5-5",
-     "tokens": 9, "cost_usd": .1, "fallback_used": True},
+     "tokens": 9, "cost_usd": .1, "fallback_used": True,
+     "provider_usage": {"input_tokens": 2, "output_tokens": 9, "cache_in_input": False,
+                        "cache_read_tokens": 4, "cache_write_tokens": 3}},
     {"event_id": "owner", "kind": "owner-finalize", "tokens": 99999, "cost_usd": 100},
     {"event_id": "gate", "kind": "review-outcome", "tokens": 99999, "cost_usd": 100}]}
 usage_view["operations"]["recent"].append(deepcopy(usage_view["operations"]["recent"][0]))
@@ -1589,12 +1617,12 @@ assert len(groups) == 3 and sum(g["records"] for g in groups) == 5, groups
 served, selected, mixed = groups
 assert (served["name"], served["tokens"], served["token_reports"], served["records"]) == ("Sol 6", 120, 1, 2), groups
 assert selected["attribution"] == "selected" and selected["tokens"] == 0 and selected["token_reports"] == 1
-assert mixed["name"] == "Mixed models" and mixed["tokens"] == 16 and abs(mixed["cost"] - .6) < .000001
+assert mixed["name"] == "Mixed models" and mixed["tokens"] == 34 and abs(mixed["cost"] - .6) < .000001
 labels = " | ".join(usage_labels(usage_view, costs=True))
 assert "120+? tok" in labels and "$0.25+?" in labels and "Sol 6(sel) 0 tok" in labels, labels
 assert "Astra" not in labels and "Opus" not in labels and "$?" in labels, labels
-assert "USAGE" in render(usage_view, "codex", 100, 28)
-assert "USAGE" in render(usage_view, "claude", 42, 34, main_attempt="att_main")
+assert "USAGE" not in render(usage_view, "codex", 100, 28, view="tree")
+assert "USAGE" not in render(usage_view, "claude", 42, 34, main_attempt="att_main", view="tree")
 assert model_usage(usage_view) == model_usage({**usage_view, "attempts": {}})
 bad_usage = {"operations": {"recent": [{"kind": "ask", "tokens": True, "cost_usd": float("nan")}]}}
 assert "? tok" in usage_labels(bad_usage, costs=True)[0] and "$?" in usage_labels(bad_usage, costs=True)[0]

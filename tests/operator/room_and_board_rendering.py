@@ -1476,6 +1476,33 @@ choose(("pagedown",), page_nav)
 assert page_nav["band_offsets"]["calls"] == 3, page_nav["band_offsets"]
 # A results screen opened from the graph scrolls itself, not the graph's stale bands.
 from panel_tree import render_detail
+from panel_view import message_rows
+wrapped_message = message_rows("From S: " + "x" * 30, 18)
+assert len(wrapped_message) > 1 and not wrapped_message[1].startswith(" "), wrapped_message
+indented_message = message_rows("From S: " + "x" * 30, 18, indent=len("From S: "))
+assert len(indented_message) > 1 and indented_message[1].startswith(" " * len("From S: ")), indented_message
+assert all(display_width(line) <= 18 for line in indented_message), indented_message
+cjk_message = message_rows("漢字かな交じり文" * 4, 9)
+assert len(cjk_message) > 1 and all(display_width(line) <= 9 for line in cjk_message), cjk_message
+assert "".join(cjk_message) == "漢字かな交じり文" * 4, cjk_message
+late_colon = message_rows("first line\nthe panel already has a live main or unverified owner; if crashed: oms panel --release-main att_x", 50)
+assert len(late_colon) <= 4 and all(display_width(line) <= 50 for line in late_colon), late_colon
+assert "".join(late_colon) == "first linethe panel already has a live main or unverified owner; if crashed: oms panel --release-main att_x", late_colon
+long_prefix = message_rows("Last: " + "漢" * 20, 7, indent=6)
+assert all(display_width(line) <= 7 for line in long_prefix), long_prefix
+assert "".join(long_prefix) == "Last: " + "漢" * 20, long_prefix
+detail_fixture = {"title": "Failure", "text": "## Result\nNarrative mentions failed and ok.\nOutcome: failed\nStage: running"}
+colored_detail = render_detail({}, detail_fixture, 80, 20, {}, color=True)
+assert "\033[" in colored_detail and "\033[" in colored_detail.splitlines()[0], colored_detail
+assert re.search(r"\033\[[0-9;]*mOutcome:\033\[0m", colored_detail), colored_detail
+assert re.search(r"\033\[[0-9;]*mfailed\033\[0m", colored_detail), colored_detail
+assert "\033[" not in next(line for line in colored_detail.splitlines() if line.startswith("Narrative")), colored_detail
+assert "\033[" not in "\n".join(colored_detail.splitlines()[-2:]), colored_detail
+for tiny_height in (1, 2):
+    tiny_detail = render_detail({}, detail_fixture, 80, tiny_height, {}, color=True)
+    assert "\033[" not in tiny_detail, tiny_detail
+with patch.dict(os.environ, {"NO_COLOR": ""}):
+    assert "\033[" not in render_detail({}, detail_fixture, 80, 20, {}, color=True)
 page_nav["surface"] = "inbox"  # A reader opened from the inbox must still receive page and wheel events.
 page_nav["detail"] = {"title": "RECORDED RESULTS", "text": "\n".join("line %s" % n for n in range(300))}
 render_detail(flow, page_nav["detail"], 110, 30, page_nav)
@@ -1801,15 +1828,53 @@ nonguard["room"]["messages"][0]["text"] = "Call exit=1; parent acceptance pendin
 nonguard["room"]["call_results"]["builder"]["artifact"] = ".oms/artifacts/failed-output.md"
 next(a for a in nonguard["attempts"]["active_recent"] if a["attempt_id"] == "builder")["reason_code"] = None
 assert "failed: exit 1" in render(nonguard, "codex", 157, 40, view="graph", main_attempt="flow-attempt", navigation={})
+# Recent message rows keep a fixed text column for different sender lengths, including wide CJK names.
+aligned_recent = deepcopy(truth)
+aligned_recent["room"]["messages"] = [
+    {"id": "recent-a", "sender": "flow-main", "recipient": "all", "message_kind": "note",
+     "ts": stamp, "text": "TREE-A"},
+    {"id": "recent-b", "sender": "漢字送り手", "recipient": "all", "message_kind": "note",
+     "ts": stamp, "text": "TREE-B"},
+]
+recent_tree = render(aligned_recent, "codex", 80, 40, view="tree", navigation={})
+recent_lines = [line for line in recent_tree.splitlines() if "TREE-" in line and "[" not in line]
+assert len(recent_lines) == 2, recent_tree
+recent_columns = [display_width(line[:line.index("TREE-")]) for line in recent_lines]
+assert recent_columns == [29, 29], (recent_columns, recent_lines)
 # The tree never doubles "Now:" and a main with no readings gets one usage line instead of a box.
 tree_board = render(truth, "codex", 157, 40, view="tree", navigation={})
 assert "Now: 방 범위 선언" in tree_board and "Now: Now:" not in tree_board, tree_board
-assert "Model use, last 8 calls" in tree_board, tree_board
+assert "Model use, last 8 calls" not in tree_board and "USAGE" not in tree_board, tree_board
 bare = deepcopy(truth)
 bare.pop("operations")
 bare.pop("provider_status", None)
 bare_board = render(bare, "codex", 157, 40, view="tree", navigation={})
 assert bare_board.splitlines()[1] == "Claude -- │ Codex --" and "USAGE" not in bare_board, bare_board
+
+# The tree head bounds repository tasks to the five newest open tasks, then links to the full Plan tab.
+task_board = deepcopy(truth)
+task_board["room"]["repo_tasks"] = [
+    {"id": "t-ready-activity", "title": "Ready activity", "state": "ready", "updated": "2026-10-10T00:00:00Z",
+     "updated_at": "2026-10-10T03:30:00Z"},
+    {"id": "t-done", "title": "Closed done", "state": "done", "updated": "2026-10-10T01:00:00Z"},
+    {"id": "t-review", "title": "Recent review", "state": "review", "updated": "2026-10-10T04:00:00Z"},
+    {"id": "t-blocked", "title": "Closed blocked", "state": "blocked", "updated": "2026-10-10T00:30:00Z"},
+    {"id": "t-claimed", "title": "Recent claimed", "state": "claimed", "updated": "2026-10-10T05:00:00Z"},
+    {"id": "t-landing", "title": "Recent landing", "state": "landing", "updated": "2026-10-10T05:30:00Z"},
+    {"id": "t-running", "title": "Recent running", "state": "running", "updated": "2026-10-10T04:30:00Z"},
+    {"id": "t-ready-new", "title": "Newest ready", "state": "ready", "updated": "2026-10-10T06:00:00Z"},
+]
+task_nav = {}
+task_text = render(task_board, "codex", 157, 40, view="tree", navigation=task_nav)
+task_hits = [hit["action"] for hit in task_nav["hits"] if hit["action"][0] == "task"]
+assert task_hits == [("task", ident) for ident in ("t-ready-new", "t-landing", "t-claimed", "t-running", "t-review")], task_hits
+assert "Recent landing" in task_text and "Closed done" not in task_text and "Closed blocked" not in task_text, task_text
+assert "1 more open · 1 done · 1 blocked · Plan tab for all" in task_text, task_text
+summary_line = next(i for i, line in enumerate(task_text.splitlines()) if "Plan tab for all" in line)
+summary_hit = next(hit for hit in task_nav["hits"] if hit["action"] == ("tab", "plan") and hit["y"] == summary_line + 1)
+assert choose(("click", summary_hit["x1"], summary_hit["y"]), task_nav) == ("tab", "plan")
+assert tab_event(("click", summary_hit["x1"], summary_hit["y"]), task_nav)
+assert task_nav["tab"] == "plan", task_nav
 from dashboard_projection import fit, use_unicode
 use_unicode(True)
 assert fit("abcdefghij", 6) == "abcde…"
@@ -2619,8 +2684,8 @@ words["acceptance"] = {"available": True, "total": 6, "counts": {}, "complete": 
 words["plan"] = {"idle_days": 44}
 words["operations"] = {"recent": [{"kind": "call", "event_id": "w1", "selected_model": "gpt-6-sol", "tokens": 1100000}]}
 speech = render(words, "codex", 120, 60, view="tree", navigation={})
-assert "Old plan · idle 44 days · 0 of 6 tasks verified" in speech and "Model use, last 8 calls" in speech, speech
-assert "Model use, last 8 calls" in speech and "Sol 6 1.1m tokens ×1" in speech, speech
+assert "Old plan · idle 44 days · 0 of 6 tasks verified" in speech and "Model use, last 8 calls" not in speech, speech
+assert "USAGE" not in speech and "Sol 6 1.1m tokens ×1" not in speech, speech
 assert "unread for live participants" not in speech.splitlines()[0], speech
 for stale in ("PROVIDER LIMITS", "(sel)", " tok / ", "Plan:"):
     assert stale not in speech, (stale, speech)
@@ -2653,7 +2718,7 @@ def ended_stamp(n):
     import calendar
     local = time.localtime(calendar.timegm(time.strptime(ended["room"]["call_results"]["old-%02d" % n]["ts"], "%Y-%m-%dT%H:%M:%SZ")))
     return time.strftime("%H:%M" if local[:3] == time.localtime()[:3] else "%m-%d %H:%M", local)
-assert all(re.search(r"WORKER Luna 6 · Old job %02d\s+\[✓ finished: exit 0\] \[acceptance pending\]  %s " % (n, ended_stamp(n)), line + " ")
+assert all(re.search(r"WORKER Luna 6\s+· Old job %02d\s+\[✓ finished: exit 0\] \[acceptance pending\]  %s " % (n, ended_stamp(n)), line + " ")
            for line, n in zip(past_jobs, newest_first)), past_jobs
 # A worker that hit its wall clock says how to continue; later rounds of one task are numbered.
 timed = deepcopy(ended)
@@ -2860,15 +2925,17 @@ one_ended["room"]["participants"] = [m for m in one_ended["room"]["participants"
                                      if m["participant"] not in {"flow-other", "foreign-child", "unlinked-child"}]
 keys_nav = {"tab": "past"}
 render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
-# The five-row body cap leaves four call rows after the list heading.
-assert keys_nav["past_view"]["page"] == 4, keys_nav["past_view"]
+# Removing the usage box leaves extra list space; the Past reader still pages and preserves selection.
+assert keys_nav["past_view"]["page"] >= 4, keys_nav["past_view"]
 last_scroll = len(keys_nav["past_ids"]) - keys_nav["past_view"]["page"]
 picked = []
 for key in ("down", "down", "end", "up", "home"):
     assert panel.tab_event((key,), keys_nav), key
     render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
     picked.append((keys_nav["selected"][1], keys_nav["past_view"]["scroll"]))
-assert picked == [("old-13", 0), ("old-12", 0), ("old-01", last_scroll), ("old-02", last_scroll), ("old-13", 0)], picked
+end_scroll = picked[2][1]
+assert picked == [("old-13", 0), ("old-12", 0), ("old-01", end_scroll), ("old-02", end_scroll), ("old-13", 0)], picked
+assert end_scroll >= last_scroll, (end_scroll, last_scroll)
 assert panel.tab_event(("scroll", 3, 5, keys_nav["box"]["y1"] + 2), keys_nav)
 render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
 assert keys_nav["selected"] == ("result", "old-13") and keys_nav["past_view"]["scroll"] == 3, keys_nav
@@ -2885,6 +2952,15 @@ for columns in (28, 42):
         narrow_rows = [line for line in narrow_past.splitlines() if "finished" in line]
         assert narrow_rows and all(re.search(r"Old job \d{2}\b", line) for line in narrow_rows), narrow_rows
         assert len({re.search(r"Old job \d{2}\b", line)[0] for line in narrow_rows}) == len(narrow_rows), narrow_rows
+# Wrapped Past entries are paged by physical height so End always reaches the last call.
+wrapped_past_calls = [{"participant": "wrapped-%02d" % n, "role": "worker", "model": "gpt-6-luna",
+                       "title": "Wrapped title %02d " % n + "x" * 100, "state": "done", "exit": 0,
+                       "ended": "2026-10-20T00:%02d:00Z" % n, "seq": n} for n in range(6)]
+wrapped_past_navigation = {"tab": "past"}
+graph_text.past_body(wrapped_past_calls, 76, 5, wrapped_past_navigation, {}, True)
+assert graph_text.past_event(("end",), wrapped_past_navigation)
+wrapped_past_page = graph_text.past_body(wrapped_past_calls, 76, 5, wrapped_past_navigation, {}, True)
+assert any(row[1] == ("result", "wrapped-05") for row in wrapped_past_page), wrapped_past_page
 # Attention-only empties the whole Past list, owned and unowned calls alike.
 orphan_done = deepcopy(ended)
 next(a for a in orphan_done["attempts"]["active_recent"] if a["attempt_id"] == "unlinked-child")["state"] = "done"
@@ -3486,7 +3562,7 @@ usage_board["operations"] = {"recent": [{"kind": "call", "provider": "codex", "e
     "served_model": model, "tokens": 10} for model in ("gpt-6-sol", "gpt-6-astra", "gpt-6-luna")]}
 small_board = render(usage_board, "codex", 32, 28, view="summary")
 expanded_board = render(usage_board, "codex", 100, 28, view="tree")
-assert "+1 models" in small_board and "Luna 6 10 tok" in expanded_board
+assert "USAGE" not in small_board and "USAGE" not in expanded_board
 
 # The compact goal banner and short-height fallback keep only the sections that
 # fit; usage stays unique, and task titles keep their navigation target while scrolling.
@@ -3496,10 +3572,10 @@ boxed_room["room"]["repo_tasks"] = [{"id": "layout", "state": "ready",
 for columns, rows in ((108, 36), (100, 28), (42, 24), (32, 28)):
     nav = {}
     screen = render(boxed_room, "codex", columns, rows, view="tree", navigation=nav)
-    base_boxes = 3 if rows >= 36 and columns >= 108 else 2
+    base_boxes = 2
     expected_boxes = base_boxes + int(bool(nav.get("log_box")))
     assert screen.count("╭") == screen.count("╰") == expected_boxes, screen
-    assert screen.count("Model use, last 8 calls") == 1 and "USAGE recent8" not in screen, screen
+    assert "Model use, last 8 calls" not in screen and "USAGE" not in screen, screen
     assert "DECLARED SCOPES" not in screen, screen
     assert len(screen.splitlines()) <= rows and all(display_width(line) <= columns for line in screen.splitlines()), screen
     for key in ("home", "end"):
