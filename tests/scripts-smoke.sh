@@ -23321,13 +23321,22 @@ test_skill_router_auto_records_task_prompts() {
     fail "the same prompt on a new turn is a new request and must be recorded"
 }
 
-# smoke-weight: 70
+# smoke-weight: 34
 test_skill_router_auto_task_timeout_retries_owned_writer_once() {
   local d="$TMP/skill-router-auto-task-timeout"
   local foreign_pid
   local real_python
   local prompt='고칠 부분 확인하고 있으면 수정해줘'
   local scenario project bin_dir wrapper first second prompt_note
+
+  wait_auto_task_child_exit() {
+    local child_pid="$1" attempts=0
+    while kill -0 "$child_pid" 2>/dev/null; do
+      [ "$attempts" -lt 80 ] || return 1
+      sleep 0.1
+      attempts=$((attempts + 1))
+    done
+  }
 
   real_python="$(command -v python3)"
   sleep 120 &
@@ -23418,7 +23427,8 @@ PY
       [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
         fail "successful publication must be recorded exactly once"
       [ -s "$d/$scenario/child.pid" ] || fail "success case did not start its owned descendant"
-      sleep 8
+      wait_auto_task_child_exit "$(cat "$d/$scenario/child.pid")" ||
+        fail "a successful helper left a detached descendant writing"
       [ ! -e "$d/$scenario/child-wrote" ] || fail "a successful helper left a detached descendant writing"
       kill -0 "$foreign_pid" 2>/dev/null || fail "success cleanup killed or altered the unrelated process"
       continue
@@ -23427,7 +23437,8 @@ PY
       fail "$scenario timeout must not publish a successful route hash: $first"
     assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "timeout"'
     [ -s "$d/$scenario/child.pid" ] || fail "$scenario did not start its owned descendant"
-    sleep 8
+    wait_auto_task_child_exit "$(cat "$d/$scenario/child.pid")" ||
+      fail "$scenario left a timed-out descendant running"
     [ ! -e "$d/$scenario/child-wrote" ] || fail "$scenario left a timed-out descendant running"
     kill -0 "$foreign_pid" 2>/dev/null || fail "$scenario killed or altered the unrelated process"
 
