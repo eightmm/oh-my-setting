@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 
 # test.yml's full selection: lint, four focused lanes, four smoke shards, the
 # Linux copy lifecycle, the selector and the stable gate. An affected-only run
@@ -94,24 +95,34 @@ def run_scope(destination, run_id, sha, seconds):
     if not re.fullmatch(r"[1-9][0-9]*", run_id):
         print("CI scope needs a run id", file=sys.stderr)
         return 2
-    rc, output = gh(["run", "view", run_id, "--repo", repo_slug(destination),
-                     "--json", "headSha,status,conclusion,jobs"], seconds)
-    if rc:
-        return rc
-    try:
-        run = json.loads(output)
-        if (run["headSha"] != sha or run["status"] != "completed"
-                or run["conclusion"] != "success" or not isinstance(run["jobs"], list)):
-            raise ValueError("run is not a completed success for this commit")
-        results = {}
-        for job in run["jobs"]:
-            name, conclusion = job["name"], job["conclusion"]
-            if not isinstance(name, str) or name in results:
-                raise ValueError("unnamed or duplicate job")
-            results[name] = conclusion
-    except (ValueError, KeyError, TypeError) as exc:
-        print("CI scope evidence is invalid: %s" % exc, file=sys.stderr)
-        return 2
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    args = ["run", "view", run_id, "--repo", repo_slug(destination),
+            "--json", "headSha,status,conclusion,jobs"]
+    for attempt in range(3):
+        remaining = max(0.0, deadline - time.monotonic())
+        rc, output = gh(args, remaining if attempt else seconds)
+        if rc:
+            return rc
+        try:
+            run = json.loads(output)
+            if (run["headSha"] != sha or run["status"] != "completed"
+                    or run["conclusion"] != "success" or not isinstance(run["jobs"], list)):
+                raise ValueError("run is not a completed success for this commit")
+            results = {}
+            for job in run["jobs"]:
+                name, conclusion = job["name"], job["conclusion"]
+                if not isinstance(name, str) or name in results:
+                    raise ValueError("unnamed or duplicate job")
+                results[name] = conclusion
+        except (ValueError, KeyError, TypeError) as exc:
+            print("CI scope evidence is invalid: %s" % exc, file=sys.stderr)
+            return 2
+        unsettled = any(not isinstance(value, str) or not value.strip()
+                        or value in ("queued", "in_progress", "pending", "waiting")
+                        for value in results.values())
+        if not unsettled or attempt == 2 or deadline - time.monotonic() < 7:
+            break
+        time.sleep(5)
     if all(results.get(name) == "success" for name in FULL_JOBS):
         extra = [name for name, conclusion in results.items() if name not in FULL_JOBS
                  and not (conclusion == "success"
@@ -119,13 +130,19 @@ def run_scope(destination, run_id, sha, seconds):
         if not extra:
             print("full")
             return 0
-        print("CI scope is ambiguous: unexpected job results %s" % sorted(extra)[:5], file=sys.stderr)
+        details = sorted((name, results[name]) for name in extra)[:5]
+        print("CI scope is ambiguous: unexpected job results %s" % details, file=sys.stderr)
         return 2
     if results.get("lint") == "skipped" and results.get("affected_plan") == "success" \
             and results.get("gate") == "success":
         print("affected")
         return 0
-    print("CI scope is ambiguous: the full selection's jobs are not all successful", file=sys.stderr)
+    priority_jobs = ["lint", "affected_plan", "gate"] + [
+        name for name in FULL_JOBS if name not in ("lint", "affected_plan", "gate")]
+    broken = [(name, results[name] if name in results else "missing")
+              for name in priority_jobs if results.get(name) != "success"][:5]
+    print("CI scope is ambiguous: the full selection's jobs are not all successful %s"
+          % broken, file=sys.stderr)
     return 2
 
 

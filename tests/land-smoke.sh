@@ -474,9 +474,18 @@ if [ "$2" = view ]; then
   [ "${OMS_TEST_CI_SCOPE:-affected}" != error ] || exit 4
   sha="$(git -C "$OMS_TEST_LAND_REPO" rev-parse HEAD)"
   full='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)"'
+  count_file=/dev/null
   case "${OMS_TEST_CI_SCOPE:-affected}" in
     full|wrong-sha|failed-run|duplicate|extra-failure) jobs="$full" ;;
-    ambiguous) jobs='"lint","affected_plan","gate","focused (1/4)"' ;;
+    ambiguous|ambiguous-null) jobs='"lint","affected_plan","gate","focused (1/4)"' ;;
+    lagging)
+      count_file="$OMS_TEST_LAND_EVENTS.lagging-count"
+      count=0
+      [ ! -f "$count_file" ] || count="$(cat "$count_file")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$count_file"
+      jobs='"affected_plan","gate"'
+      ;;
     *) jobs='"affected_plan","gate"' ;;
   esac
   python3 -c 'import json, sys
@@ -484,13 +493,17 @@ sha, names, scope = sys.argv[1], json.loads("[" + sys.argv[2] + "]"), sys.argv[3
 rows = [{"name": name, "conclusion": "success"} for name in names]
 if "lint" not in names:
     rows.append({"name": "lint", "conclusion": "skipped"})
+if scope == "lagging" and open(sys.argv[4]).read().strip() == "1":
+    rows[0]["conclusion"] = None
+if scope == "ambiguous-null":
+    rows[2]["conclusion"] = None
 if scope == "duplicate":
     rows.append({"name": "gate", "conclusion": "success"})
 if scope == "extra-failure":
     rows.append({"name": "native (ubuntu-latest, auto)", "conclusion": "failure"})
 print(json.dumps({"headSha": "0" * 40 if scope == "wrong-sha" else sha, "status": "completed",
                   "conclusion": "failure" if scope == "failed-run" else "success", "jobs": rows}))' \
-    "$sha" "$jobs" "${OMS_TEST_CI_SCOPE:-affected}"
+    "$sha" "$jobs" "${OMS_TEST_CI_SCOPE:-affected}" "$count_file"
   exit 0
 fi
 echo ci >> "$OMS_TEST_LAND_EVENTS"
@@ -1285,6 +1298,16 @@ for key in sys.argv[1].split("."): r = r.get(key, {}) if isinstance(r, dict) els
 print(r if r != {} else "")' "$1"; }
 [ "$(land_field gate.scope)" = partial ] && [ "$(land_field ci.scope)" = affected ] ||
   fail "capped gate or affected CI was recorded as full proof"
+# Missing jobs and unsettled conclusions remain distinct in ambiguity details.
+query_rc=0
+query_sha="$(git -C "$repo" rev-parse HEAD)"
+OMS_TEST_CI_SCOPE=ambiguous-null OMS_TEST_CI_RESULT=success \
+  python3 "$ROOT/scripts/lib/ci-query.py" scope fixture/repo 1 "$query_sha" 0 \
+  > "$TMP/scope-diagnostics.out" 2>&1 || query_rc=$?
+[ "$query_rc" = 2 ] || fail "ambiguous diagnostics unexpectedly classified CI: $query_rc"
+grep -Fq "('gate', None)" "$TMP/scope-diagnostics.out" || fail "null conclusion was not diagnosed distinctly"
+grep -Fq "('focused (2/4)', 'missing')" "$TMP/scope-diagnostics.out" ||
+  fail "missing job was not diagnosed distinctly"
 # Unreadable, ambiguous or misattributed CI scope blocks the install; the retry
 # resumes and a full-selection run for the exact SHA installs it without
 # re-running the gate.
@@ -1296,7 +1319,17 @@ for scope in error ambiguous wrong-sha failed-run duplicate extra-failure; do
   fi
   [ "$(cat "$TMP/events")" = jobs ] || fail "a $scope CI scope installed or re-ran CI: $(cat "$TMP/events")"
   [ "$(land_field ci.scope)" = unknown ] || fail "a $scope CI scope was not recorded as unknown"
+  if [ "$scope" = ambiguous ]; then
+    scope_log="$(land_field log)"
+    grep -q 'focused (2/4)' "$scope_log" || fail "ambiguous stderr omitted the offending job from $scope_log"
+  fi
 done
+: > "$TMP/events"
+OMS_TEST_CI_SCOPE=lagging OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/scope-lagging.out" 2>&1 ||
+  fail "a lagging job conclusion did not settle: $(cat "$TMP/scope-lagging.out")"
+[ "$(land_field ci.scope)" = affected ] || fail "settled lagging scope was not recorded as affected"
+[ "$(cat "$TMP/events")" = "$(printf 'jobs\njobs')" ] || fail "lagging affected scope installed or re-ran CI"
 : > "$TMP/events"
 OMS_TEST_CI_SCOPE=full OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/scope-full.out" 2>&1 ||
