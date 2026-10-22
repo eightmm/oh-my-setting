@@ -21,6 +21,7 @@ import uuid
 import codex_app_notify
 from dashboard_projection import clean
 from call_ending import call_ending
+from panel_view import TERMINAL_STATES
 from peer_artifacts import artifact_sections_stream, debate_sections
 from work_journal import sanitize_multiline
 from path_scope import classify
@@ -33,6 +34,20 @@ ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z')
 REVISION = re.compile(r'[0-9a-f]{24}\Z')
 MAX_SUMMARY, MAX_RESULT = 8192, 32768
 MAX_DRAFT = 4096
+TERMINAL_FAILURE_STATES = TERMINAL_STATES - {'done'}
+
+
+def _reason_phrase(code):
+    phrases = {
+        'panel_call_interrupted': 'interrupted (caller exited or was signalled)',
+        'provider_failed': 'provider failed',
+    }
+    if not isinstance(code, str) or not code:
+        return None
+    safe_code = clean(code, 120) or 'unknown'
+    return phrases.get(code, 'stopped (%s)' % safe_code)
+
+
 MAX_VERIFY_OUTPUT = 8192
 
 
@@ -1730,6 +1745,10 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             break
         last = metadata_attempts[-1] if metadata_attempts else {}
         metadata = last.get('refs', {})
+        reason_code = last.get('reason_code')
+        terminal_failure = last.get('state') in TERMINAL_FAILURE_STATES
+        termination_reason = (_reason_phrase(reason_code)
+                              if terminal_failure and reason_code else None)
         calls = []
         for row in indexed[-30:]:
             if row.get('kind') not in ('ask', 'call', 'consult', 'delegate', 'review', 'ask-synthesis', 'patch-admit', 'patch-land'):
@@ -1822,6 +1841,14 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             representative = stages['main_decision']['state']
             action = ('review main decision' if failed_stage == 'main_decision' else
                       'record main decision' if stages['main_decision']['state'] == 'pending' else 'none')
+        if termination_reason and not result and not failed_stage:
+            representative = termination_reason
+            action = {
+                'cancelled': 'salvage or re-dispatch',
+                'failed': 'inspect failure and retry',
+                'abandoned': 'salvage or re-dispatch',
+                'timed_out': 'continue with --continue TASK_ID; at the revision-round cap use the owner override',
+            }[last['state']]
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),
                        'model': clean(metadata.get('panel_model'), 160), 'role': metadata.get('panel_role'),
@@ -1835,7 +1862,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                        'delivery': (delivery or {}).get('receipt', {}).get('status', 'not_requested'),
                        'delivery_unknown': (delivery or {}).get('receipt', {}).get('delivery_unknown', False),
                        'issue': issue, 'missing_result': result is None,
-                       'stages': stages, 'representative_state': representative, 'next_action': action})
+                       'stages': stages, 'representative_state': representative, 'next_action': action,
+                       'termination_reason': termination_reason})
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
             'coverage': ('all retained attempts' if task_id and not (_records_data or _tick or _shared)
                          else 'latest 300 attempts; attempt coverage may be incomplete')

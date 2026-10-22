@@ -2797,14 +2797,61 @@ with patch.dict(os.environ, environment, clear=True):
     ]
     for suffix, evidence, expected_state, expected_stage_state, expected_action in endings:
         item = dict(task_id="ending-" + suffix, kind="delegate", attempt_id="att-ending-" + suffix, **evidence)
-        with patch.object(saved, "_records", return_value=([], [item])):
+        attempt_evidence = {
+            "verify": ("failed", "verification_failed"),
+            "timeout": ("failed", "provider_timeout"),
+            "guard": ("failed", "worker_authority_violation"),
+        }.get(suffix)
+        attempts = ([{"attempt_id": item["attempt_id"], "task_id": item["task_id"], "state": attempt_evidence[0],
+                      "reason_code": attempt_evidence[1], "updated_at": "2026-10-22", "refs": {}}]
+                    if attempt_evidence else [])
+        with patch.object(saved, "_records", return_value=(attempts, [item])):
             projected = saved.results(project, task_id="ending-" + suffix)["rows"][0]
         assert projected["representative_state"] == expected_state, projected
         assert projected["next_action"] == expected_action, projected
+        if attempt_evidence:
+            assert projected["termination_reason"] == "stopped (%s)" % attempt_evidence[1], projected
         stage_name = "verify" if suffix == "verify" else "implement"
         assert projected["stages"][stage_name]["state"] == expected_stage_state, projected
         rendered = question_view.render_results({"rows": [projected]}, width=200)
         assert expected_state in rendered and expected_action in rendered, rendered
+    for code, expected, state in (("panel_call_interrupted", "interrupted (caller exited or was signalled)", "cancelled"),
+                                  ("provider_failed", "provider failed", "failed"),
+                                  ("odd\x1b[31m_code", "stopped (odd?[31m_code)", "cancelled"),
+                                  ("heartbeat_expired", None, "blocked")):
+        attempt = {"attempt_id": "att-no-artifact", "task_id": "reason-fallback", "state": state,
+                   "reason_code": code, "updated_at": "2026-10-22", "refs": {}}
+        with patch.object(saved, "_records", return_value=([attempt], [])):
+            projected = saved.results(project, task_id="reason-fallback")["rows"][0]
+        if state == "blocked":
+            assert projected["termination_reason"] is None, projected
+            assert projected["representative_state"] == "pending", projected
+            assert projected["next_action"] == "record main decision", projected
+        else:
+            assert projected["termination_reason"] == expected, projected
+            assert projected["representative_state"] == expected, projected
+            assert projected["next_action"] == ("salvage or re-dispatch" if state == "cancelled"
+                                                 else "inspect failure and retry"), projected
+        import panel_reader as result_reader
+        run_info = result_reader.render_view("Run info", {"rows": [projected]}, {}, width=200, color=False)
+        if expected:
+            assert "Termination reason: " + expected in run_info, run_info
+    accepted_attempt = {"attempt_id": "att-accepted-reason", "task_id": "accepted-reason",
+                        "state": "done", "reason_code": "owner_accepted", "updated_at": "2026-10-22", "refs": {}}
+    accepted_index = {"task_id": "accepted-reason", "kind": "panel-result", "artifact": "accepted-result.json"}
+    accepted_payload = {"outcome": "accepted", "revision": "a" * 24, "summary": "Accepted.", "evidence": []}
+    with patch.object(saved, "_records", return_value=([accepted_attempt], [accepted_index])), \
+            patch.object(saved, "_load_result", return_value=accepted_payload), \
+            patch.object(saved, "_last_delivery", return_value=None):
+        accepted_projection = saved.results(project, task_id="accepted-reason")["rows"][0]
+    assert accepted_projection["representative_state"] == "accepted", accepted_projection
+    assert accepted_projection["termination_reason"] is None, accepted_projection
+    council_attempt = {"attempt_id": "att-council-reason", "task_id": "council-reason",
+                       "state": "done", "reason_code": "council_complete", "updated_at": "2026-10-22", "refs": {}}
+    with patch.object(saved, "_records", return_value=([council_attempt], [])):
+        council_projection = saved.results(project, task_id="council-reason")["rows"][0]
+    assert council_projection["termination_reason"] is None, council_projection
+    assert council_projection["representative_state"] == "pending", council_projection
     patch_a, patch_b = "a" * 64, "b" * 64
     with patch.object(saved, "_records", return_value=([], [
             {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-a", "patch": "a.patch", "patch_sha256": patch_a},

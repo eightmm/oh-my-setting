@@ -229,6 +229,7 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
             lines.extend(wrapped(label + ": " + str(value or "not recorded"), max(8, width), 100))
         for label, value in (("Ending", (call.get("ending") or call.get("state") or row.get("process_state") or "")
                              .replace("_", " ")),
+                             ("Termination reason", row.get("termination_reason")),
                              ("Error", call.get("error") or call.get("error_lines") or row.get("issue")),
                              ("Kept worktree", call.get("worktree") or call.get("location") or row.get("location"))):
             if value:
