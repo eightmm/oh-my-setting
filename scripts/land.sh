@@ -477,7 +477,7 @@ run_job() {
   [ -z "$READY_FILE" ] || printf '0\n' > "$READY_FILE"
   local t0 rc=0
   if [ "$resume" -eq 0 ]; then
-    rset gate.rc=pending push.rc=pending ci.conclusion=skipped update.rc=skipped
+    rset gate.rc=pending push.rc=pending ci.conclusion=skipped update.rc=skipped update.reason=not-reached
     if [ "$IGNORE_SIBLINGS" -eq 1 ]; then
       rset siblings.ignored=true
     else
@@ -719,6 +719,7 @@ if sys.argv[3] == "1":
     print(json.dumps(r, ensure_ascii=False, sort_keys=True))
     sys.exit(0)
 state = r.get("state")
+receipt_state = state
 if state == "running" and active is True:
     state = "running (lock held)"
 elif state == "running" and active is False:
@@ -728,8 +729,11 @@ elif state == "running" and active is None:
 print("land %s: %s" % (str(r.get("sha", ""))[:7], state))
 if sys.argv[4] and r.get("sha") != sys.argv[4]:
     print("  note: newest land in this repository, not this worktree's HEAD %s" % sys.argv[4][:7])
-print("  active: %s" % ("unknown" if active is None else str(active).lower()))
-if u.get("rc") == "skipped":
+if receipt_state == "running" or active is True:
+    print("  active: %s" % ("unknown" if active is None else str(active).lower()))
+if u.get("rc") == "skipped" and state == "failed" and u.get("reason") == "not-reached":
+    print("  install: not reached (land failed before install)")
+elif u.get("rc") == "skipped":
     print("  install: skipped (%s)" % u.get("reason", "reason not recorded"))
 print("  gate: %s (%ss)  push: %s  update: %s  ci: %s%s" % (
     "ok" if g.get("rc") == 0 else g.get("rc", "-"), g.get("seconds", "-"),

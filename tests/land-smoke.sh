@@ -1067,6 +1067,12 @@ for ci_failure in auth timeout; do
   [ "$(( $(date +%s) - started ))" -lt 8 ] || fail "CI query did not obey the deadline"
   [ "$(cat "$TMP/events")" = ci ] || fail "CI query errors were polled repeatedly"
   grep -q 'CI query exit' "$TMP/query-fail.out" || fail "CI error reason missing"
+  grep -q '^  install: not reached (land failed before install)$' "$TMP/query-fail.out" ||
+    fail "failed land must say install was not reached: $(cat "$TMP/query-fail.out")"
+  ! grep -q 'reason not recorded' "$TMP/query-fail.out" ||
+    fail "failed land must not report an unrecorded install skip"
+  ! grep -q '^  active: unknown$' "$TMP/query-fail.out" ||
+    fail "terminal land must not report unknown lock activity"
   : > "$TMP/events"
   OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
     > "$TMP/query-resume.out" 2>&1 || fail "CI error could not resume"
