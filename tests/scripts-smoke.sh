@@ -3817,6 +3817,7 @@ test_peer_review_gate_refuses_untracked_content() {
   local home_dir="$TMP/review-gate-untracked-home"
   local bytecode_outside="$TMP/review-gate-bytecode-outside"
   local synthesis_artifact
+  local seat_artifact
   local rc=0
 
   make_committed_repo "$project"
@@ -3915,6 +3916,51 @@ EOF
   [ "$rc" = 2 ] || fail "read guard must reject modified pre-existing .pyc, got $rc: $(cat "$TMP/review-gate-modified-pyc-out")"
   contains "$(cat "$TMP/review-gate-modified-pyc-out")" "source repository protected surfaces: tracked" ||
     fail "guard did not identify modified baseline bytecode as a tracked mutation"
+  seat_artifact="$(find "$state_repo/.oms/artifacts/review/modified-pyc" -name 'claude-*.md' -print | head -n 1)"
+  [ -n "$seat_artifact" ] || fail "modified .pyc review did not preserve its seat artifact"
+  assert_file_contains "$seat_artifact" '## Exit'
+  assert_file_contains "$seat_artifact" 'read guard: error: read pass changed source repository protected surfaces: tracked'
+  synthesis_artifact="$(find "$state_repo/.oms/artifacts/review/modified-pyc" -name '_synthesis-*.md' -print | head -n 1)"
+  [ -n "$synthesis_artifact" ] || fail "modified .pyc review did not preserve its synthesis artifact"
+  assert_file_contains "$synthesis_artifact" '_answer withheld: read guard saw source repository tracked change'
+  python3 - "$state_repo/.oms/failures.jsonl" <<'PY_READ_GUARD_LEDGER'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8')]
+guard_rows = [row for row in rows if row.get('failure_code') == 'read_guard_changed']
+assert any('tracked' in row.get('summary', '') for row in guard_rows), rows
+assert not any('seat returned no answer' in row.get('summary', '') for row in rows), rows
+PY_READ_GUARD_LEDGER
+
+  # A failed provider is still a no-answer even if it also changed a protected
+  # surface; only a completed answer is recorded as read_guard_changed.
+  printf 'baseline bytecode' > "$project/preexisting/__pycache__/baseline.cpython-312.pyc"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  cat >> "$bin_dir/claude" <<EOF
+printf 'changed before failure' > '$project/preexisting/__pycache__/baseline.cpython-312.pyc'
+exit 71
+EOF
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=reviewer OMS_ROOM_REPO="$state_repo" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$state_repo/.oms/artifacts/review/modified-pyc-failed-provider" \
+    --providers claude --gate --no-verify --prompt "Reject failed provider with mutation" \
+    > "$TMP/review-gate-modified-pyc-failed-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "failed provider mutation must fail review, got $rc"
+  seat_artifact="$(find "$state_repo/.oms/artifacts/review/modified-pyc-failed-provider" -name 'claude-*.md' -print | head -n 1)"
+  [ -n "$seat_artifact" ] || fail "failed provider review did not preserve its seat artifact"
+  if grep -Fq 'read guard:' "$seat_artifact"; then
+    fail "failed provider must not be classified as a completed read-guard rejection"
+  fi
+  synthesis_artifact="$(find "$state_repo/.oms/artifacts/review/modified-pyc-failed-provider" -name '_synthesis-*.md' -print | head -n 1)"
+  assert_file_contains "$synthesis_artifact" '_no answer: provider exited 2; partial output withheld'
+  python3 - "$state_repo/.oms/failures.jsonl" <<'PY_FAILED_PROVIDER'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8')]
+assert any(row.get('cmd') == 'peer-review seat claude' and
+           row.get('failure_code') == 'provider_no_answer' for row in rows), rows
+assert not any(row.get('cmd') == 'peer-review read guard' and
+               row.get('failure_code') == 'read_guard_changed' and
+               'failed provider' in row.get('summary', '') for row in rows), rows
+PY_FAILED_PROVIDER
 
   # Verifier output is captured by the rebaseline and remains in the reviewed
   # tree; the provider starts only after that gate verification has completed.
@@ -4312,6 +4358,28 @@ EOF
   [ "$rc" = 3 ] || fail "provider call must be blocked when scanning fails, got $rc"
   assert_file_contains "$scan_project/call.error" "sensitive-content scan failed"
   [ ! -e "$scan_project/provider-called" ] || fail "provider ran after a scanner failure"
+}
+
+test_review_read_guard_failure_is_shared_and_keeps_reason() {
+  local project="$TMP/review-read-guard-ledger"
+  make_committed_repo "$project"
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    REPO="$project"
+    MA_KIND=review
+    ma_record_seat_failure claude 2 'error: read pass changed source repository protected surface: .oms control state'
+  ) || fail "read-guard failure ledger write failed"
+  python3 - "$project/.oms/failures.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8')]
+assert len(rows) == 1, rows
+row = rows[0]
+assert row.get('failure_code') == 'read_guard_changed', row
+assert row.get('cmd') == 'peer-review read guard', row
+assert 'concurrent writer' in row.get('next', '') and 're-run the review' in row.get('next', ''), row
+assert '.oms control state' in row.get('summary', ''), row
+assert 'seat returned no answer' not in row.get('summary', ''), row
+PY
 }
 
 test_peer_review_dry_run_artifacts() {

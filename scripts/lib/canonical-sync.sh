@@ -59,6 +59,61 @@ oms_canonical_call_release() {
   OMS_CANONICAL_CALL_ENTRY=""
 }
 
+oms_canonical_sync_live_entries() {  # REPO (read-only; malformed entries stay live)
+  local repo="$1" entry pid saved current
+  for entry in "$repo/.oms/locks/canonical-sync.d/"*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    if [ -d "$entry" ] && [ ! -L "$entry" ] &&
+      [ -f "$entry/pid" ] && [ ! -L "$entry/pid" ] && [ -r "$entry/pid" ] &&
+      [ -f "$entry/process-start" ] && [ ! -L "$entry/process-start" ] && [ -r "$entry/process-start" ]; then
+      pid="" saved="" current=""
+      IFS= read -r pid < "$entry/pid" || true
+      IFS= read -r saved < "$entry/process-start" || true
+      pid="${pid//$'\r'/}" saved="${saved//$'\r'/}"
+      case "$pid" in
+        ""|0|*[!0-9]*) ;;
+        *)
+          if [ -n "$saved" ]; then
+            current="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
+            current="${current//$'\r'/}"
+            if ! oms_file_lock_pid_alive "$pid" ||
+              { [ -n "$current" ] && [ "$current" != "$saved" ]; }; then
+              continue
+            fi
+          fi
+          ;;
+      esac
+    fi
+    printf '%s\n' "${entry##*/}"
+  done
+}
+
+oms_canonical_sync_live_review_entries() {  # REPO (uncertain owners stay live)
+  local repo="$1" name entry pid command
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case "$name" in review-*) printf '%s\n' "$name"; continue ;; esac
+    entry="$repo/.oms/locks/canonical-sync.d/$name"
+    if [ ! -d "$entry" ] || [ -L "$entry" ] ||
+      [ ! -f "$entry/pid" ] || [ -L "$entry/pid" ] || [ ! -r "$entry/pid" ]; then
+      printf '%s\n' "$name"
+      continue
+    fi
+    pid=""
+    IFS= read -r pid < "$entry/pid" || true
+    pid="${pid//$'\r'/}"
+    case "$pid" in
+      ""|0|*[!0-9]*) printf '%s\n' "$name"; continue ;;
+    esac
+    command="$(ps -p "$pid" -o command= 2>/dev/null | tr -d '\r' || true)"
+    case "$command" in
+      *peer-review.sh*|"") printf '%s\n' "$name" ;;
+    esac
+  done <<EOF
+$(oms_canonical_sync_live_entries "$repo")
+EOF
+}
+
 oms_canonical_sync_if_idle() {  # REPO COMMAND ARGS... (under gate)
   local repo="$1" entry pid saved current live="" count=0
   shift

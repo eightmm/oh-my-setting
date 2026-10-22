@@ -696,6 +696,25 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
             'finalized': finalized, 'superseded_attempts': superseded}, attempts, rows, related, selected, admissions
 
 
+def _live_review_read_passes(repo):
+    """Return canonical call IDs whose live owner is running peer-review."""
+    entries = Path(repo) / '.oms/locks/canonical-sync.d'
+    if not entries.exists() and not entries.is_symlink():
+        if entries.parent.exists() and not os.access(str(entries.parent), os.R_OK | os.X_OK):
+            return ['canonical-sync-registry']
+        return []
+    if entries.is_symlink() or not entries.is_dir() or not os.access(str(entries), os.R_OK | os.X_OK):
+        return ['canonical-sync-registry']
+    try:
+        live = subprocess.check_output(
+            ['bash', '-c', '. "$1"; oms_canonical_sync_live_review_entries "$2"',
+             'panel-live-reviews', str(ROOT / 'scripts/lib/canonical-sync.sh'), str(repo)],
+            stderr=subprocess.DEVNULL, text=True, timeout=30).replace('\r', '')
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ['canonical-sync-registry']
+    return sorted(name for name in live.splitlines() if name)
+
+
 def _review_preflight(repo, task_id, workers, rows, admissions=None):
     """Share scope and digest-bound review checks before application and acceptance."""
     if admissions is not None and any(not item for item in admissions):
@@ -1548,6 +1567,11 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         raise ValueError('--landed-commit requires --outcome accepted or completed')
     if isinstance(verify_timeout, bool) or not isinstance(verify_timeout, int) or not 1 <= verify_timeout <= 86400:
         raise ValueError('verify timeout must be between 1 and 86400 seconds')
+    live_reviews = _live_review_read_passes(repo)
+    if live_reviews:
+        print('deferred: %d review read passes running (%s); finalize again after they finish'
+              % (len(live_reviews), ', '.join(live_reviews)), file=sys.stderr)
+        raise SystemExit(75)
     summary = _safe_summary(summary_file, repo)
     refs = [_relative(repo, value) for value in (evidence or [])] if not isinstance(evidence, str) else [_relative(repo, evidence)]
     if len(refs) > 8:

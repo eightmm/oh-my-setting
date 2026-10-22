@@ -321,17 +321,20 @@ ma_read_guard_assert() {
     oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
     if [ "$name" = source ]; then
       if [ "$(oms_sha256_file "$MA_READ_SOURCE_HEAD_FILE")" != "$MA_READ_SOURCE_HEAD_SHA" ]; then
-        echo 'error: read pass changed source repository protected surface: HEAD' >&2
+        MA_READ_GUARD_DIAGNOSTIC='error: read pass changed source repository protected surface: HEAD'
+        echo "$MA_READ_GUARD_DIAGNOSTIC" >&2
         return 2
       fi
       ma_authority_state_snapshot "$root" "$MA_READ_GUARD_DIR/source/hooks-state.after" strict "$MA_READ_SOURCE_HOOKS_DIR" || return 2
       if [ "$(oms_sha256_file "$MA_READ_GUARD_DIR/source/hooks-state.after")" != "$MA_READ_SOURCE_HOOKS_SHA" ]; then
-        echo 'error: read pass changed source repository protected surface: hooks' >&2
+        MA_READ_GUARD_DIAGNOSTIC='error: read pass changed source repository protected surface: hooks'
+        echo "$MA_READ_GUARD_DIAGNOSTIC" >&2
         return 2
       fi
       ma_authority_state_snapshot "$root" "$MA_READ_GUARD_DIR/source/control-state.after" strict || return 2
       if [ "$(oms_sha256_file "$MA_READ_GUARD_DIR/source/control-state.after")" != "$MA_READ_SOURCE_CONTROL_SHA" ]; then
-        echo 'error: read pass changed source repository protected surface: .oms control state' >&2
+        MA_READ_GUARD_DIAGNOSTIC='error: read pass changed source repository protected surface: .oms control state'
+        echo "$MA_READ_GUARD_DIAGNOSTIC" >&2
         return 2
       fi
     fi
@@ -340,7 +343,8 @@ ma_read_guard_assert() {
     changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" "" "$execution" | tr -d '\r')" || return 2
     hard="" soft=""
     if [ -s "$MA_READ_GUARD_DIR/$name/state-detail" ]; then
-      echo "error: read pass changed $name shared-state files:" >&2
+      MA_READ_GUARD_DIAGNOSTIC="error: read pass changed $name shared-state files"
+      echo "$MA_READ_GUARD_DIAGNOSTIC:" >&2
       head -n 8 "$MA_READ_GUARD_DIR/$name/state-detail" | sed 's/^/  /' >&2
     fi
     for surface in $(printf '%s' "$changed" | tr ',' ' '); do
@@ -428,7 +432,9 @@ $named}"
       echo "warning: read pass observed $name repository changes: $soft; not attributable to the provider, review before landing" >&2
     fi
     if [ -n "$hard" ]; then
-      echo "error: read pass changed $name repository protected surfaces: $hard" >&2
+      MA_READ_GUARD_DIAGNOSTIC="error: read pass changed $name repository protected surfaces: $hard${MA_READ_GUARD_DIAGNOSTIC:+
+$MA_READ_GUARD_DIAGNOSTIC}"
+      echo "$MA_READ_GUARD_DIAGNOSTIC" >&2
       return 2
     fi
   done
@@ -2220,7 +2226,7 @@ ma_thread_append_nonanswer() {
 # advise threshold; the exit rides in --summary. Best-effort by construction — a
 # council must not fail because its bookkeeping did.
 ma_record_seat_failure() {
-  local provider="$1" status="$2" evidence
+  local provider="$1" status="$2" evidence guard_reason="${3:-}"
 
   # A dry run never called the provider. Durable failure memory must not carry a
   # failure that never happened.
@@ -2243,6 +2249,15 @@ ma_record_seat_failure() {
 ${MA_OUTBOUND_EVIDENCE:-}
 EOF
     "$(ma_scripts_dir)/fail-ledger.sh" "$@" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if [ -n "$guard_reason" ]; then
+    "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
+      --cmd "peer-${MA_KIND:-call} read guard" --exit "$status" \
+      --failure-code read_guard_changed \
+      --summary "read guard rejected completed $provider answer: $guard_reason" \
+      --next "a concurrent writer (often the owner's finalize) changed protected state; re-run the review" \
+      >/dev/null 2>&1 || true
     return 0
   fi
   "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
@@ -4093,6 +4108,9 @@ ma_run_routed_provider() {
   local native_session="" native_session_file=""
   local heartbeat_seconds="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
   local read_guard_tmp=""
+  local guard_reason_file="${4}.read-guard"
+  local provider_status=0
+  local guard_stderr=""
   local read_lifecycle_refused=0
   local -a start_args
   local -a usage_args
@@ -4187,7 +4205,31 @@ PY
   fi
   native_session_file="$(agent_memory_mktemp 2>/dev/null)" || native_session_file=""
   OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
-  ma_read_guard_assert || status=2
+  provider_status="$status"
+  if [ -n "$read_guard_tmp" ]; then
+    guard_stderr="$read_guard_tmp/post-check.stderr"
+    if ! ma_read_guard_assert 2>"$guard_stderr"; then
+      status=2
+      MA_READ_GUARD_DIAGNOSTIC="$(sed -n '/^error: read pass changed /{p;q;}' "$guard_stderr" | tr -d '\r')"
+      if [ "$provider_status" -eq 0 ] && [ -n "$MA_READ_GUARD_DIAGNOSTIC" ]; then
+        printf '%s\n' "$MA_READ_GUARD_DIAGNOSTIC" > "$guard_reason_file"
+      fi
+      cat "$guard_stderr" >&2
+    fi
+  elif [ -n "${MA_READ_GUARD_DIR:-}" ]; then
+    guard_stderr="$(mktemp "$MA_READ_GUARD_DIR/seat-check.XXXXXX")" || status=2
+    if [ -n "$guard_stderr" ]; then
+      if ! ma_read_guard_assert 2>"$guard_stderr"; then
+        status=2
+        MA_READ_GUARD_DIAGNOSTIC="$(sed -n '/^error: read pass changed /{p;q;}' "$guard_stderr" | tr -d '\r')"
+        if [ "$provider_status" -eq 0 ] && [ -n "$MA_READ_GUARD_DIAGNOSTIC" ]; then
+          printf '%s\n' "$MA_READ_GUARD_DIAGNOSTIC" > "$guard_reason_file"
+        fi
+      fi
+      cat "$guard_stderr" >&2
+      rm -f "$guard_stderr"
+    fi
+  fi
   if [ -n "$read_guard_tmp" ]; then
     rm -rf "$read_guard_tmp"
     MA_READ_GUARD_DIR=""
@@ -4512,6 +4554,9 @@ PY_SEAT
   # A panel provider fallback ran the call elsewhere; the row names who answered.
   provider="${OMS_PROVIDER_SELECTED:-$provider}"
   printf '\n\n## Exit\n\n%s\n' "$status" >> "$artifact"
+  if [ -s "${artifact}.read-guard" ]; then
+    printf '\nread guard: %s\n' "$(head -n 1 "${artifact}.read-guard" | tr -d '\r')" >> "$artifact"
+  fi
   ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" "$status" "$artifact" "" "$prompt_file" || true
   if [ "$status" -eq 0 ]; then
     echo "ok: $provider -> $artifact"
@@ -4682,7 +4727,7 @@ ma_council_call() {
 # dropped, dropped_names, nonanswers, nonanswer_names, failed, failed_names,
 # seat_quality, seat_reason, seat_exit.
 ma_run_round1() {
-  local provider artifact i provider_list quality rc
+  local provider artifact i provider_list quality rc guard_reason
   if [ "${DEBATE:-0}" -gt 0 ]; then
     ma_prepare_council_context || return 2
   fi
@@ -4738,7 +4783,9 @@ ma_run_round1() {
       # "2/3 providers succeeded".
       failed=$((failed + 1))
       failed_names+=("${provider_names[i]} (exit $rc)")
-      ma_record_seat_failure "${provider_names[i]}" "$rc"
+      guard_reason=""
+      [ ! -s "${artifacts[i]}.read-guard" ] || guard_reason="$(head -n 1 "${artifacts[i]}.read-guard" | tr -d '\r')"
+      ma_record_seat_failure "${provider_names[i]}" "$rc" "$guard_reason"
       continue
     fi
     artifacts[i]="$(ma_council_answer_artifact "${artifacts[i]}")"
@@ -5220,8 +5267,14 @@ ma_write_synthesis() {
       # The thread of record already names such seats (thread_append_nonanswer);
       # the synthesis must be as honest.
       if [ "${seat_exit[i]:-0}" != 0 ]; then
-        printf '_no answer: provider exited %s; partial output withheld (see %s)_\n\n' \
-          "${seat_exit[i]}" "$(basename "${artifacts[i]}")"
+        if [ -s "${artifacts[i]}.read-guard" ]; then
+          printf '_answer withheld: read guard saw %s change during the pass (see %s)_\n\n' \
+            "$(head -n 1 "${artifacts[i]}.read-guard" | sed 's/^error: read pass changed //;s/ protected surface: / /;s/ protected surfaces: / /' | tr -d '\r')" \
+            "$(basename "${artifacts[i]}")"
+        else
+          printf '_no answer: provider exited %s; partial output withheld (see %s)_\n\n' \
+            "${seat_exit[i]}" "$(basename "${artifacts[i]}")"
+        fi
         continue
       fi
       if [ -n "${seat_quality[i]:-}" ]; then

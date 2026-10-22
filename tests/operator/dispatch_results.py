@@ -1629,6 +1629,30 @@ call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 
      dict(environment, OMS_TASK_ID="panel-route-3", OMS_ATTEMPT_ID="att_panel_route_3_review",
           OMS_INDEX_REVIEW_OUTCOME_JSON=review_payload))
 assert json.loads(call(write_finalize))["outcome"] == "accepted"
+# A live canonical review call defers finalize before its result artifact is written.
+review_pass = project / ".oms/locks/canonical-sync.d/review-read-pass-fixture"
+review_pass.parent.mkdir(parents=True, exist_ok=True)
+review_owner_script = ('. "$1/scripts/lib/canonical-sync.sh"; '
+                       'oms_canonical_call_acquire "$2" "$3"; '
+                       'printf "ready\\n"; IFS= read -r release; oms_canonical_call_release')
+review_owner = subprocess.Popen(
+    ["bash", "-c", review_owner_script, "canonical-review-owner", str(root), str(project), review_pass.name],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+assert review_owner.stdout.readline().strip() == "ready"
+malformed_review = project / ".oms/locks/canonical-sync.d/review-malformed-fixture"
+malformed_review.mkdir()
+deferred_args = list(final_args)
+deferred_args[deferred_args.index("--task-id") + 1] = "finalize-review-read-pass"
+deferred_args[deferred_args.index("--outcome") + 1] = "completed"
+try:
+    deferred = subprocess.run(deferred_args, cwd=project, env=environment, capture_output=True, text=True)
+    assert deferred.returncode == 75 and \
+        "review-read-pass-fixture" in deferred.stderr and "review-malformed-fixture" in deferred.stderr, deferred.stderr
+    assert not any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-review-read-pass"
+                   for row in saved._records(project)[1]), "deferred finalize wrote a result"
+finally:
+    review_owner.communicate("release\n", timeout=10)
+    shutil.rmtree(malformed_review)
 # BEGIN reviewed-result acceptance composition (uses only disposable Git fixtures).
 accept_repo = temporary / "accept state repo"
 subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(project), str(accept_repo)], check=True)
@@ -2320,6 +2344,37 @@ receipt = {"schema": 1, "state": "passed", "sha": accept_sha, "remote": "origin"
            "ci": {"conclusion": "success"}}
 (receipt_dir / (accept_sha + "-fixture.json")).write_text(json.dumps(receipt))
 subprocess.run(["git", "-C", str(accept_execution), "update-ref", "refs/remotes/origin/main", accept_sha], check=True)
+# A live review defers a landed finalize before it can finish the plan or write
+# any result records/artifacts.
+landed_review = accept_repo / ".oms/locks/canonical-sync.d/review-live-landed-fixture"
+landed_review.parent.mkdir(parents=True, exist_ok=True)
+landed_owner = subprocess.Popen(
+    ["bash", "-c", review_owner_script, "canonical-review-owner", str(root), str(accept_repo), landed_review.name],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+assert landed_owner.stdout.readline().strip() == "ready"
+plan_before_deferred = json.loads(accept_call("agent-plan", "show", "--id", "accept-task",
+                                               execution=accept_execution).stdout)
+plan_bytes_before_deferred = (accept_repo / ".oms/plan/tasks.json").read_bytes()
+result_rows_before = [row for row in saved._records(accept_repo)[1]
+                      if row.get("kind") == "panel-result" and row.get("task_id") == "accept-task"]
+result_artifacts_dir = accept_repo / ".oms/artifacts/panel-results"
+result_artifacts_before = {path.name: path.read_bytes() for path in result_artifacts_dir.glob("result-*.json")}
+try:
+    deferred_landed = accept_call("panel", *accept_finalize, execution=accept_execution, check=False)
+    assert deferred_landed.returncode == 75 and landed_review.name in deferred_landed.stderr, deferred_landed.stderr
+    plan_after_deferred = json.loads(accept_call("agent-plan", "show", "--id", "accept-task",
+                                                  execution=accept_execution).stdout)
+    assert plan_after_deferred.get("state") == plan_before_deferred.get("state"), \
+        ("deferred landed finalize changed plan state", plan_before_deferred, plan_after_deferred)
+    assert (accept_repo / ".oms/plan/tasks.json").read_bytes() == plan_bytes_before_deferred, \
+        "deferred landed finalize changed the plan file"
+    assert [row for row in saved._records(accept_repo)[1]
+            if row.get("kind") == "panel-result" and row.get("task_id") == "accept-task"] == result_rows_before, \
+        "deferred landed finalize changed finalize records"
+    assert {path.name: path.read_bytes() for path in result_artifacts_dir.glob("result-*.json")} == \
+        result_artifacts_before, "deferred landed finalize wrote result artifacts"
+finally:
+    landed_owner.communicate("release\n", timeout=10)
 accept_admission_hook.write_text("printf 'verification failure\\n' > value.txt\n", encoding="utf-8")
 failed = accept_call("panel", *accept_finalize, execution=accept_execution, check=False)
 accept_admission_hook.unlink()
