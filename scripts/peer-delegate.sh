@@ -597,6 +597,8 @@ fi
 unset OMS_RESUME_SESSION
 if [ -n "$RESUME_SESSION" ]; then
   case "$TO" in claude|codex) ;; *) fail "--resume-session supports claude and codex" ;; esac
+else
+  unset OMS_RESUME_USAGE_BASELINE
 fi
 
 REPO="$(cd "$REPO" && pwd -P)"
@@ -2020,7 +2022,7 @@ verify_clean_env() {
       OMS_PANEL_*|OMS_ROOM_*|OMS_MODEL_*|OMS_REASONING_*|OMS_INDEX_*|OMS_STATE_REPO|\
       OMS_ATTEMPT_ID|OMS_PLAN_LEASE_ID|OMS_EXECUTOR_ID|OMS_TASK_ID|OMS_SOUL_SHA256|\
       OMS_WORKER_AUTHORITY_EXCLUSIVE|OMS_OPERATION_ID|OMS_DELEGATION_ID|\
-      OMS_PEER_TIMEOUT) unset "$name" ;;
+      OMS_PEER_TIMEOUT|OMS_RESUME_USAGE_BASELINE) unset "$name" ;;
     esac
   done
   export OMS_HARNESS_DELEGATE_DEPTH="$DELEGATE_DEPTH"

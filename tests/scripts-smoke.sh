@@ -11383,6 +11383,7 @@ test_delegate_resumes_native_session() {
   local bin_dir="$TMP/delegate-resume-bin"
   local home_dir="$TMP/delegate-resume-home"
   local log="$TMP/delegate-resume.log"
+  local verify_baseline="$TMP/delegate-resume-verify-baseline"
   local session=11111111-2222-3333-4444-555555555555
 
   make_committed_repo "$project"
@@ -11396,6 +11397,7 @@ esac
 encoded="$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
 {
   printf 'argv: %s\n' "$*"
+  printf 'resume-baseline: %s\n' "${OMS_RESUME_USAGE_BASELINE-unset}"
   [ -f "$HOME/.claude/projects/$encoded/$FIXTURE_SESSION.jsonl" ] && printf 'session-in-new-cwd\n'
   printf 'session-body: %s\n' "$(cat "$HOME/.claude/projects/$encoded/$FIXTURE_SESSION.jsonl" 2>/dev/null)"
   cat
@@ -11404,16 +11406,35 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"resumed"
 EOF
   chmod +x "$bin_dir/claude"
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_RESUME_USAGE_BASELINE='{"input_tokens":7}' \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
     "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
-    --artifact-dir "$project/artifacts" --no-verify --allow-no-change --resume-session "$session" \
+    --artifact-dir "$project/artifacts" --allow-no-change --resume-session "$session" \
+    --verify "printf '%s' \"\${OMS_RESUME_USAGE_BASELINE-unset}\" > '$verify_baseline'" \
     --prompt "Your earlier work was on abc; New instructions follow." >/dev/null ||
     fail "resumed delegate failed"
   assert_file_contains "$log" "--resume $session"
+  assert_file_contains "$log" 'resume-baseline: {"input_tokens":7}'
+  [ "$(cat "$verify_baseline")" = unset ] ||
+    fail "verify environment inherited the resume usage baseline"
   assert_file_contains "$log" "session-in-new-cwd"
   assert_file_contains "$log" "Your earlier work was on abc"
   grep -rqE "native_session\"?: ?\"$session\"" "$project/.oms/lifecycle" ||
     fail "resumed delegate did not record the native session"
+
+  verify_baseline="$project/verify-baseline"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_RESUME_USAGE_BASELINE='{"input_tokens":7}' \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
+    --artifact-dir "$project/artifacts" --allow-no-change \
+    --verify "printf '%s' \"\${OMS_RESUME_USAGE_BASELINE-unset}\" > '$verify_baseline'" \
+    --prompt "No session continuation" >/dev/null ||
+    fail "delegate with inherited baseline and no resume failed"
+  assert_file_contains "$log" 'resume-baseline: unset'
+  [ "$(cat "$verify_baseline")" = unset ] ||
+    fail "verify environment inherited the resume usage baseline"
+
   if "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" --no-verify \
       --resume-session '../x' --prompt p >/dev/null 2>&1; then
     fail "an unsafe session id must be rejected"
