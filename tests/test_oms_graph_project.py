@@ -346,6 +346,49 @@ class ProjectGraphTest(unittest.TestCase):
             }],
         )
 
+    def test_case_pattern_path_does_not_make_hub_consumers_depend_on_it(self) -> None:
+        self.write("scripts/lib/terminal_panel.py", "def main(): pass\n")
+        self.write("scripts/lib/real.sh", "#!/usr/bin/env bash\n")
+        self.write(
+            "scripts/check.sh",
+            "case $path in\n"
+            "  scripts/lib/terminal_panel.py|tests/operator/*) : ;;\n"
+            "  scripts/lib/real.sh) bash scripts/lib/real.sh ;;\n"
+            "esac\n",
+        )
+        self.write("tests/hub-consumer.sh", "test_hub() {\n  bash scripts/check.sh\n}\n")
+        raw_graph = self.graph()
+        graph = Graph(raw_graph)
+        self.assertFalse(any(
+            edge["source"] == "file:scripts/check.sh"
+            and edge["target"] == "file:scripts/lib/terminal_panel.py"
+            and edge["relation"] == "calls"
+            for edge in raw_graph["edges"]
+        ))
+        selected = affected_plan(graph, ["scripts/lib/terminal_panel.py"])
+        self.assertNotIn("tests/hub-consumer.sh", selected["tests"])
+        body_selected = affected_plan(graph, ["scripts/lib/real.sh"])
+        self.assertIn("tests/hub-consumer.sh", body_selected["tests"])
+
+    def test_python_stdin_heredoc_import_selects_shell_test_for_module_change(self) -> None:
+        self.write("scripts/lib/panel_metrics.py", "def collect(): pass\n")
+        self.write(
+            "tests/operator/shared-cache.sh",
+            "PYTHONDONTWRITEBYTECODE=1 python3 - \"$ROOT/scripts/lib\" <<'PY'\n"
+            "import panel_metrics\n"
+            "panel_metrics.collect()\n"
+            "PY\n",
+        )
+        raw_graph = self.graph()
+        graph = Graph(raw_graph)
+        imports = [edge for edge in raw_graph["edges"] if edge["source"] == "test:tests/operator/shared-cache.sh"
+                   and edge["target"] == "module:scripts/lib/panel_metrics.py"
+                   and edge["relation"] == "tests"]
+        self.assertEqual([(edge["confidence"]) for edge in imports], ["EXTRACTED"])
+        selected = affected_plan(graph, ["scripts/lib/panel_metrics.py"])
+        self.assertEqual(selected["mode"], "affected")
+        self.assertEqual(selected["tests"], ["tests/operator/shared-cache.sh"])
+
     def test_affected_plan_selects_existing_cases_but_fails_open_on_uncertainty(self) -> None:
         self.write("scripts/a.sh", "#!/usr/bin/env bash\n")
         self.write("scripts/middle.sh", "#!/usr/bin/env bash\nbash scripts/a.sh\n")

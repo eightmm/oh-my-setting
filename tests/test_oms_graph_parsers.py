@@ -10,12 +10,14 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from oms_graph.project.build import build, load_graph
+from oms_graph.project.parsers.shell import ShellParser
 
 
 class ResolutionPrecisionTest(unittest.TestCase):
@@ -40,12 +42,117 @@ class ResolutionPrecisionTest(unittest.TestCase):
     def targets(self, source: str, relation: str = "calls"):
         return sorted((edge["target"], edge["confidence"]) for edge in self.edges(relation) if edge["source"] == source)
 
+    def shell_refs(self, text: str):
+        return ShellParser().parse("tests/example.sh", text, "digest").refs
+
+    def test_case_patterns_do_not_become_calls_but_same_line_bodies_do(self) -> None:
+        refs = self.shell_refs(
+            "case $path in\n"
+            "  scripts/check.sh|scripts/lib/tool.py) bash scripts/run.sh ;;\n"
+            "esac\n"
+        )
+        calls = [ref["value"] for ref in refs if ref["relation"] == "calls" and ref["kind"] == "path"]
+        self.assertEqual(calls, ["scripts/run.sh"])
+
+    def test_uncertain_case_patterns_keep_path_edges(self) -> None:
+        cases = (
+            ("case $path in\n  'scripts/check.sh'|scripts/lib/tool.py) : ;;\nesac\n", "scripts/check.sh"),
+            ("case $path in\n  $(scripts/check.sh)|scripts/lib/tool.py) : ;;\nesac\n", "scripts/check.sh"),
+            ("case $path in\n  scripts/check.sh|\\\n    scripts/lib/tool.py) : ;;\nesac\n", "scripts/check.sh"),
+            ("scripts/check.sh|scripts/lib/tool.py) : ;;\n", "scripts/check.sh"),
+            (
+                "case x in\n  x)\n    (\n      scripts/real.sh)\n    ;;\n esac\n",
+                "scripts/real.sh",
+            ),
+            (
+                "case x in\n  x) : ;; esac\n (\n  scripts/real.sh)\n",
+                "scripts/real.sh",
+            ),
+            (
+                "case x in\n  x) case y in\n    scripts/check.sh) : ;;\n  esac ;;\nesac\n",
+                "scripts/check.sh",
+            ),
+            (
+                "case x in\n  x)\n    printf 'case esac'\n    scripts/check.sh)\n    ;;\nesac\n",
+                "scripts/check.sh",
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertTrue(any(
+                    ref.get("value") == expected and ref.get("relation") == "calls"
+                    for ref in self.shell_refs(text)
+                ))
+
+    def test_python_stdin_heredoc_emits_top_level_module_imports(self) -> None:
+        refs = self.shell_refs(
+            "run() {\n"
+            "  PYTHONDONTWRITEBYTECODE=1 python3 - \"$ROOT/scripts/lib\" <<'PY'\n"
+            "import panel_metrics, oms_graph.project.build as build\n"
+            "from oms_runtime.common import canonical_json as canon\n"
+            "def nested():\n"
+            "    import ignored\n"
+            "PY\n"
+            "}\n"
+        )
+        imports = [ref for ref in refs if ref["relation"] == "imports"]
+        self.assertEqual(
+            {(ref["value"], ref.get("imported", ""), ref["binding"], ref["line"], ref["from"])
+             for ref in imports},
+            {
+                ("panel_metrics", "", "panel_metrics", 3, "file:tests/example.sh"),
+                ("oms_graph.project.build", "", "build", 3, "file:tests/example.sh"),
+                ("oms_runtime.common", "canonical_json", "canon", 4, "file:tests/example.sh"),
+                ("panel_metrics", "", "panel_metrics", 3, "symbol:tests/example.sh::run"),
+                ("oms_graph.project.build", "", "build", 3, "symbol:tests/example.sh::run"),
+                ("oms_runtime.common", "canonical_json", "canon", 4, "symbol:tests/example.sh::run"),
+            },
+        )
+        tabbed = self.shell_refs(
+            "python3 - <<-'PY'\n"
+            "\timport panel_metrics\n"
+            "PY\n"
+        )
+        self.assertTrue(any(ref.get("value") == "panel_metrics" and ref.get("line") == 2 for ref in tabbed))
+        long_line = "#" + ("x" * 4100)
+        after_long_line = self.shell_refs(
+            "python3 - <<'PY'\n" + long_line + "\nimport panel_metrics\nPY\n"
+        )
+        self.assertTrue(any(
+            ref.get("value") == "panel_metrics" and ref.get("line") == 3
+            for ref in after_long_line
+        ))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.shell_refs('python3 <<PY\nprint("\\$HOME")\nPY\n')
+        self.assertFalse(any(issubclass(item.category, SyntaxWarning) for item in caught))
+
+    def test_non_python_heredoc_has_no_module_import_refs(self) -> None:
+        self.assertFalse(any(
+            ref["relation"] == "imports" and ref["kind"] == "module"
+            for ref in self.shell_refs("cat <<EOF\nimport panel_metrics\nEOF\n")
+        ))
+
     # -- Python receivers -------------------------------------------------
 
     def test_shell_command_words_never_link_to_python_functions(self) -> None:
-        self.write("lib/tool.py", "def git():\n    pass\n\ndef wait():\n    pass\n")
-        self.write("run.sh", "#!/bin/bash\ngit status\nwait\ncommand -v x\n")
+        self.write("scripts/lib/tool.py", "def git():\n    pass\n\ndef wait():\n    pass\n")
+        self.write(
+            "run.sh",
+            "#!/bin/bash\n"
+            "python3 - <<'PY'\n"
+            "import tool\n"
+            "from tool import git\n"
+            "PY\n"
+            "git status\nwait\ncommand -v x\n",
+        )
         self.assertEqual(self.targets("file:run.sh"), [])
+        self.assertTrue(any(
+            edge["source"] == "file:run.sh"
+            and edge["target"] == "module:scripts/lib/tool.py"
+            and edge["relation"] == "imports"
+            for edge in self.edges("imports")
+        ))
 
     def test_shell_bare_word_still_reaches_a_shell_function_by_name(self) -> None:
         self.write("lib/common.sh", "helper() {\n  echo hi\n}\n")

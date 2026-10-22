@@ -301,6 +301,9 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
         for ref in item.get("refs", []):
             if ref.get("relation") != "imports":
                 continue
+            if ref.get("heredoc_python"):
+                # Stdin imports add module dependencies but do not bind shell command words.
+                continue
             if ref.get("kind") == "module":
                 target_path = module_path(ref["value"], source_path)
                 submodule = submodule_path(ref["value"], ref.get("imported", ""), source_path)

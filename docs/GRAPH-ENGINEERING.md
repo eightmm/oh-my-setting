@@ -797,10 +797,16 @@ returns `{"revision", "counts": {"kind", "language", "confidence"}, "hubs": [{"i
 the text renderer consumes. The CLI adds the bounded canonical structural-
 assurance summary; it never returns the whole graph.
 
-Known limit: code embedded in shell heredocs (this repository's own
-`python3 - <<'PY'` blocks) is skipped by the shell parser, so the Python
-functions inside `agent-plan.sh` are not symbol nodes; the file and its
-shell functions are. `revision = sha256` over the
+Shell extraction skips literal static case-arm patterns only at an arm head
+(the first nonblank line after a clear `case ... in` or arm terminator), while
+scanning same-line arm bodies and later body lines normally. Quotes, command
+substitutions, continuations, nested cases, or other uncertain syntax keep the
+existing conservative extraction until a clear top-level case; Python stdin
+heredocs emit top-level module imports like Python files, scoped to the shell
+function when present; these add module dependency edges without binding shell
+command words to Python symbols. `<<-` strips body tabs while long skipped lines
+preserve import line numbers. Other heredocs remain skipped.
+Embedded Python functions are not shell symbol nodes. `revision = sha256` over the
 sorted `path\tsha256` lines plus `PARSER_VERSION` and `PROJECT_SCHEMA`.
 `manifest.json` carries `generated_at`, per-file digests, parser names,
 cache hits, skipped entries, and a path-free coverage summary (`parsed`,

@@ -6,7 +6,7 @@ GRAPH_PACKAGE_VERSION = "0.1.0"
 EXEC_SCHEMA = 1
 EVENTS_SCHEMA = 1
 PROJECT_SCHEMA = 2
-PARSER_VERSION = 4
+PARSER_VERSION = 6
 
 OUTCOMES = ("completed", "failed", "unverified", "partial", "blocked", "changes_requested", "approved", "skipped")
 NODE_KINDS = ("agent", "tool", "gate", "router", "subgraph", "terminal")
