@@ -41,6 +41,7 @@ context_pack_targets=""
 # index annotations when context compilation is disabled or fails early.
 unset OMS_INDEX_CONTEXT_MANIFEST_DIGEST OMS_INDEX_CONTEXT_BUNDLE_SHA256 \
   OMS_INDEX_CONTEXT_SELECTED_BYTES OMS_INDEX_CONTEXT_DEBT OMS_INDEX_REPAIR_REPLAY_JSON \
+  OMS_INDEX_PROVIDER_USAGE_JSON \
   OMS_INDEX_CONTEXT_MODE OMS_INDEX_CONTEXT_PREPARE_SECONDS OMS_INDEX_CONTEXT_ORIENTATION_BYTES \
   OMS_INDEX_CONTEXT_TASK_SHA256 OMS_INDEX_CONTEXT_VERIFICATION
 BRIEF_FILE=""
@@ -2840,11 +2841,17 @@ if len(details) > 8:
       --failure-code guard_parent_interference \
       --summary "$guard_failure_summary" --next "$guard_failure_hint") >/dev/null 2>&1 ||
       echo "warning: worker-authority breach was NOT recorded in the fail ledger; later commands will not remember it" >&2
+    guard_provider_usage_payload=""
+    if [ "$worker_provider_launched" = 1 ]; then
+      guard_provider_usage_payload="$(ma_artifact_provider_usage_json "$REPO" \
+        "${route_provider:-$TO}" "$artifact" 2>/dev/null)" || guard_provider_usage_payload=""
+    fi
     # Result readers relay the last Output before the last Exit, and the worker's
     # Output above was never closed. Paths stay in the local bullets above.
     printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs by snapshot (up to 8 sanitized lines):\n%s\nExecution-state details:\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
       "$worker_guard_changed" "$guard_metadata_details" "$guard_execution_details" "$guard_failure_hint" >> "$artifact"
-    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" ||
+    OMS_INDEX_PROVIDER_USAGE_JSON="$guard_provider_usage_payload" \
+      OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition
     exit 1

@@ -1385,6 +1385,41 @@ ma_artifact_index_native_python() {
   MSYS2_ARG_CONV_EXCL='*' python3 "$@"
 }
 
+# Capture usage while a delegate artifact still contains only provider output.
+# Some failure receipts append a later Output section before indexing, so their
+# final artifact cannot be used to recover the earlier provider section.
+ma_artifact_provider_usage_json() {  # REPO PROVIDER ARTIFACT
+  local repo="$1"
+  local provider="$2"
+  local artifact="$3"
+  local native_repo native_artifact native_telemetry_helper
+
+  repo="$(cd "$repo" && pwd -P)" || return 1
+  native_repo="$(ma_artifact_index_python_path "$repo")" || return 1
+  native_artifact="$(ma_artifact_index_python_path "$artifact")" || return 1
+  native_telemetry_helper="$(ma_artifact_index_python_path "$(ma_scripts_dir)/lib/artifact-telemetry.py")" || return 1
+  MSYS2_ARG_CONV_EXCL='*' python3 - "$native_repo" "$provider" \
+    "$native_artifact" "$native_telemetry_helper" <<'PY'
+import json, os, runpy, sys
+repo, provider, artifact, helper = sys.argv[1:]
+repo = os.path.realpath(repo)
+artifact = os.path.realpath(artifact)
+try:
+    if os.path.commonpath((repo, artifact)) != repo:
+        sys.exit(0)
+except ValueError:
+    sys.exit(0)
+row = {
+    "kind": "delegate",
+    "provider": provider,
+    "artifact": os.path.relpath(artifact, repo),
+}
+usage = runpy.run_path(helper)["artifact_usage_metrics"](repo, row)
+if usage is not None:
+    print(json.dumps({"provider": provider, "usage": usage}, separators=(",", ":")))
+PY
+}
+
 ma_append_artifact_index() {
   local repo="$1"
   local kind="$2"
@@ -1689,6 +1724,50 @@ if kind == "delegate" and repair_payload:
     if not valid_trace(repair_trace):
         sys.exit("error: invalid repair replay trace")
     row["repair_replay"] = repair_trace
+def parse_provider_usage_payload(payload, expected_provider):
+    if len(payload) > 16384:
+        return None, "payload exceeds 16KiB"
+    try:
+        envelope = json.loads(payload)
+    except ValueError:
+        return None, "payload is not JSON"
+    if (not isinstance(envelope, dict) or set(envelope) != {"provider", "usage"} or
+            envelope.get("provider") != expected_provider):
+        return None, "invalid provider attribution"
+    usage = envelope["usage"]
+    required = {
+        "reports", "measurement", "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_write_tokens", "tool_calls", "cache_in_input",
+    }
+    allowed = required | {"session_cumulative", "session_totals"}
+    if (not isinstance(usage, dict) or not required.issubset(usage) or
+            not set(usage).issubset(allowed) or type(usage.get("reports")) is not int or
+            usage["reports"] < 1 or usage.get("measurement") != "provider-reported"):
+        return None, "invalid shape"
+    counters = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "tool_calls")
+    if any(value is not None and (type(value) is not int or value < 0)
+           for value in (usage.get(name) for name in counters)):
+        return None, "invalid token or tool count"
+    if usage.get("cache_in_input") is not None and type(usage["cache_in_input"]) is not bool:
+        return None, "invalid cache_in_input"
+    if "session_cumulative" in usage and usage["session_cumulative"] is not True:
+        return None, "invalid session_cumulative"
+    if "session_totals" in usage:
+        totals = usage["session_totals"]
+        names = {"input_tokens", "output_tokens", "cached_input_tokens"}
+        if (not isinstance(totals, dict) or set(totals) != names or
+                any(type(value) is not int or value < 0 for value in totals.values())):
+            return None, "invalid session_totals"
+    return usage, ""
+
+provider_usage_payload = os.environ.get("OMS_INDEX_PROVIDER_USAGE_JSON", "")
+if provider_usage_payload:
+    provider_usage, usage_error = (parse_provider_usage_payload(provider_usage_payload, provider)
+                                   if kind == "delegate" else (None, "payload is only valid for delegates"))
+    if usage_error:
+        sys.stderr.write("warning: invalid provider usage payload; usage omitted (%s)\n" % usage_error)
+    else:
+        row["provider_usage"] = provider_usage
 review_payload = os.environ.get("OMS_INDEX_REVIEW_OUTCOME_JSON", "")
 if review_payload:
     if len(review_payload) > 16384:

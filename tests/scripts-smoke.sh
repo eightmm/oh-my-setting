@@ -11885,6 +11885,24 @@ EOF
 
 - started: 2026-07-01T00:00:10Z
 
+## Role
+
+Example output format:
+
+## Output
+
+usage detail: {"provider":"claude","input_tokens":1200,"output_tokens":900}
+tokens used
+2,100
+
+## Brief
+
+Quoted example from the task:
+
+usage detail: {"provider":"claude","input_tokens":8000,"output_tokens":7000}
+tokens used
+15,000
+
 ## Output
 
 tokens used
@@ -11978,6 +11996,15 @@ PY
   then
     fail "artifact telemetry JSON conflated or omitted recorded evidence"
   fi
+
+  python3 - "$project" "$index" "$ROOT/scripts/lib/artifact-telemetry.py" <<'PY' || fail "prompt examples were counted as delegate usage"
+import json, runpy, sys
+repo, index, helper = sys.argv[1:]
+row = next(row for row in map(json.loads, open(index)) if row.get("event_id") == "evt-delegate")
+telemetry = runpy.run_path(helper)
+assert telemetry["artifact_metrics"](repo, row)[2] == 3000, row
+assert telemetry["artifact_usage_metrics"](repo, row) is None, row
+PY
 
   human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
   contains "$human" 'retained window: 6/6 row(s)' ||
@@ -27802,6 +27829,7 @@ test_delegate_detects_a_worker_writing_outside_its_worktree() {
   local home_dir="$project/home"
   local out
   local rc
+  local planted_usage='{"provider":"codex","usage":{"reports":1,"measurement":"provider-reported","input_tokens":10,"output_tokens":999,"cache_read_tokens":null,"cache_write_tokens":null,"tool_calls":null,"cache_in_input":null}}'
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
@@ -27811,18 +27839,65 @@ test_delegate_detects_a_worker_writing_outside_its_worktree() {
 #!/usr/bin/env bash
 printf 'written by the worker\n' >> "$project/file.txt"
 echo "done"
+echo 'usage detail: {"provider":"codex","output_tokens":37}'
 EOF
   chmod +x "$bin_dir/codex"
 
   rc=0
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    OMS_WORKER_GUARD_STRICT=1 OMS_INDEX_PROVIDER_USAGE_JSON="$planted_usage" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "a worker writing to the primary tree should fail a strict run: $out"
   contains "$out" 'changed protected state outside its worktree: tracked' ||
     fail "the violation should name the surface: $out"
   contains "$out" 'worktree kept at' ||
     fail "the evidence worktree should be preserved: $out"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "guard-stopped delegate usage missing from artifact index"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = next(row for row in reversed(rows) if row.get("exit") == 1)
+assert row.get("provider_usage", {}).get("output_tokens") == 37, row
+PY
+
+  # The startup scrub must also protect ordinary rows, where there is no
+  # guard-specific capture assignment to replace a caller's annotation.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'delegated output\n' > worker-output.txt
+echo 'usage detail: {"provider":"codex","output_tokens":37}'
+EOF
+  chmod +x "$bin_dir/codex"
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_INDEX_PROVIDER_USAGE_JSON="$planted_usage" "$ROOT/scripts/peer-delegate.sh" \
+    --repo "$project" --to codex --prompt 'Normal delegate with usage' --no-verify 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || fail "normal delegate should succeed with a planted annotation, got $rc: $out"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "caller usage annotation replaced the provider usage"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = next(row for row in reversed(rows) if row.get("exit") == 0)
+assert row.get("provider_usage", {}).get("output_tokens") == 37, row
+PY
+
+  mkdir -p "$project/.oms/artifacts"
+  printf '# malformed usage fixture\n\n## Output\n\nworker failed\n' > "$project/.oms/artifacts/malformed-usage.md"
+  if ! OMS_INDEX_PROVIDER_USAGE_JSON='not-json' bash -c \
+    '. "$1"; ma_append_artifact_index "$2" delegate codex 1 "$3" "" "" ""' \
+    _ "$ROOT/scripts/lib/peer-common.sh" "$project" "$project/.oms/artifacts/malformed-usage.md" \
+    > "$project/malformed-index.out" 2> "$project/malformed-index.err"; then
+    fail "malformed provider usage should not prevent an index row"
+  fi
+  grep -Fq 'warning: invalid provider usage payload; usage omitted' "$project/malformed-index.err" ||
+    fail "malformed provider usage should warn before the row is retained"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "malformed usage row was omitted or annotated"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = rows[-1]
+assert row.get("artifact", "").endswith("/malformed-usage.md"), row
+assert row.get("exit") == 1 and "provider_usage" not in row, row
+PY
 
   # Detection, not prevention: say so by leaving the write visible.
   grep -Fq 'written by the worker' "$project/file.txt" ||
