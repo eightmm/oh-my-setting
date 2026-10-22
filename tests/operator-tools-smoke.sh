@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 # Focused regressions for the read-only collaboration dashboard. Every fixture
 # lives below TMP; no real provider is called.
@@ -74,6 +75,14 @@ for provider in claude codex; do
   chmod +x "$TMP/provider-standins/$provider"
 done
 PATH="$PATH:$TMP/provider-standins"
+# In-process controllers also need private durable state, not the operator's home.
+if [ -z "${OMS_FIXTURE_ROOT:-}" ]; then
+  OMS_FIXTURE_ROOT="$TMP/fixture-root"
+  (
+    umask 077
+    mkdir -p "$OMS_FIXTURE_ROOT/state"
+  )
+fi
 oms_smoke_use_fixture_root
 export OMS_LOCK_DIR="$TMP/locks"
 mkdir -p "$OMS_LOCK_DIR"
@@ -191,11 +200,222 @@ fi
 def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env):
     import errno
     import io
+    import panel_dispatch
     import signal
     import stat
     from contextlib import redirect_stderr
     from unittest.mock import Mock, patch
     from panel_routing import allocate
+    # Every interpreter, including the directly spawned supervisor, uses this
+    # fixture's durable state home rather than the invoking user's state.
+    os.environ["XDG_STATE_HOME"] = room_env["XDG_STATE_HOME"]
+    Path(os.environ["XDG_STATE_HOME"]).mkdir(mode=0o700, parents=True, exist_ok=True)
+    Path(os.environ["XDG_STATE_HOME"]).chmod(0o700)
+    if os.name == "posix":
+        durable_name = "call-" + panel.uuid.uuid4().hex[:16]
+        previous_umask = os.umask(0)
+        try:
+            durable_call = panel._prepare_dispatch_call(project, shared, durable_name, room_owner,
+                                                         execution_repo=project, task_id="durable-records")
+        finally:
+            os.umask(previous_umask)
+        durable_root = (Path(room_env["XDG_STATE_HOME"]) / "oh-my-setting/panel-control" /
+                        hashlib.sha256(str(project.resolve()).encode()).hexdigest() / "dispatch" / durable_name)
+        launch_file = durable_root / (durable_name + "-launch.json")
+        assert launch_file.is_file(), "dispatch launch was not stored under the durable per-call root"
+        envelope = json.loads(launch_file.read_text())
+        assert envelope["schema"] == 1 and envelope["record"]["call"] == durable_call, envelope
+        identity = json.loads((durable_root / "identity.json").read_text())
+        assert identity["schema"] == 1 and identity["repo"] == str(project.resolve()), identity
+        assert identity["room"] == shared and identity["participant"] == durable_name, identity
+        assert identity["parent"] == room_owner and identity["task_id"] == "durable-records", identity
+        assert identity["nonce"] == durable_call["nonce"] and identity["controller"]["pid"] == os.getpid(), identity
+        assert identity["controller"]["identity"], identity
+        assert identity["boot_id"] == (Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+                                       if sys.platform == "linux" else "unknown"), identity
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (launch_file, durable_root / "identity.json"))
+        assert stat.S_IMODE(durable_root.stat().st_mode) == 0o700
+        evidence_member = dict(participant=durable_name, parent=room_owner, joined=True, owns=["value.txt"])
+        with patch.object(panel, "_dispatch_call_record", return_value=durable_call), \
+                patch.object(panel, "_dispatch_released", return_value=False), \
+                patch.object(panel, "_settlement_delivery_pending", return_value=False), \
+                patch.object(panel, "_dispatch_pending", return_value=dict(
+                    durable_call, exit=1, task_id="durable-records")), \
+                patch.object(panel, "_dispatch_supervisor_receipt", side_effect=panel_dispatch.DispatchEvidenceError(
+                    durable_name, "supervisor receipt", "malformed record")), \
+                patch.object(panel, "events", return_value="[]"), \
+                patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as notice:
+            panel._reconcile_dispatch(project, shared, {"participants": [evidence_member]}, room_owner, room_owner)
+            report = notice.getvalue()
+        assert "dispatch reconciliation blocked: invalid supervisor receipt" in report, report
+        assert "Recovery: inspect records with: ls -la --" in report, report
+        probe = ("import json,sys; sys.path.insert(0,sys.argv[1]); import dispatch_supervisor as d; "
+                 "assert d.read(sys.argv[2],sys.argv[3])['call']==json.loads(sys.argv[4])")
+        fresh = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(project),
+                                durable_name + "-launch.json", json.dumps(durable_call)], capture_output=True, text=True)
+        assert fresh.returncode == 0, fresh.stderr
+        failures = []
+        # A worker can fabricate internally consistent evidence in its own state
+        # home. A fresh controller must discover records from its own environment.
+        forged_name = "call-" + panel.uuid.uuid4().hex[:16]
+        with patch.dict(os.environ, XDG_STATE_HOME=str(temporary / "worker-state")):
+            forged_call = panel._prepare_dispatch_call(project, shared, forged_name, room_owner)
+            forged_root = panel.dispatch_store.store(project) / (forged_name + "-launch.json")
+            forged_call["control_root"] = str(forged_root.parent)
+            diagnostic = project / panel._dispatch_call_path(forged_name)
+            diagnostic.write_bytes(panel.dispatch_store.encoded(forged_call))
+            anchor = panel.dispatch_store.read(project, forged_name + "-launch.json")
+            anchor.update(call=forged_call, generation=panel.dispatch_store.generation(diagnostic))
+            panel.dispatch_store.write(project, forged_name + "-launch.json", anchor)
+            panel._record_dispatch_pending(project, forged_call, 0, "forged-root", {"descendants": []})
+            panel.dispatch_store.write(project, forged_name + "-process.json", {"pid": os.getpid()})
+            panel.dispatch_store.write(project, forged_name + "-supervisor.json",
+                dict(pid=os.getpid(), all_reaped=True, exit=0,
+                     launch_sha256=panel._dispatch_exit_record(forged_call, 0)["launch_sha256"]))
+        probe = ("import json,sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); "
+                 "import terminal_panel as p; "
+                 "print(json.dumps(p._dispatch_call_finished(Path(sys.argv[2]),sys.argv[3],json.loads(sys.argv[4]))))")
+        args = [sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared,
+                json.dumps({"participant": forged_name, "parent": room_owner})]
+        for redirected in (True, False):
+            if not redirected:
+                diagnostic.unlink()
+            fresh = subprocess.run(args, capture_output=True, text=True)
+            assert fresh.returncode == 0, fresh.stderr
+            if json.loads(fresh.stdout):
+                failures.append("fresh reader settled forged records via repository redirect" if redirected else
+                                "fresh reader settled records outside its trusted root")
+        legacy_name = "call-" + panel.uuid.uuid4().hex[:16]
+        legacy_root = temporary / "legacy-state" / "dispatch"
+        with patch.object(panel.dispatch_store, "_legacy", return_value=legacy_root):
+            with panel.dispatch_store.Directory(legacy_root, create=True) as directory:
+                panel.dispatch_store._write(directory, legacy_name + "-process.json", {"pid": os.getpid()})
+            if panel._review_launch_state(project, legacy_name) != "launched":
+                failures.append("legacy process without launch was hidden instead of launched")
+            assert not panel._dispatch_call_finished(project, shared,
+                {"participant": legacy_name, "parent": room_owner}), "legacy process alone settled a call"
+        identity_file = durable_root / "identity.json"
+        original_identity, original_launch = identity_file.read_bytes(), launch_file.read_bytes()
+        try:
+            for missing_identity in (False, True):
+                null_launch = dict(envelope, launch=None)
+                launch_file.write_bytes(panel.dispatch_store.encoded(null_launch))
+                if missing_identity:
+                    identity_file.unlink()
+                try:
+                    panel.dispatch_store.read(project, durable_name + "-launch.json")
+                except (OSError, ValueError):
+                    pass
+                else:
+                    failures.append("durable read accepted missing identity and null launch")
+            try:
+                panel.dispatch_store.write(project, durable_name + "-process.json", {"pid": os.getpid()})
+            except (OSError, ValueError):
+                pass
+            else:
+                failures.append("durable write accepted missing identity")
+        finally:
+            identity_file.write_bytes(original_identity)
+            identity_file.chmod(0o600)
+            launch_file.write_bytes(original_launch)
+        assert not failures, "dispatch provenance regressions: " + "; ".join(failures)
+        unrelated = temporary / "unrelated-repo"
+        subprocess.run(["git", "init", "-q", str(unrelated)], check=True)
+        for unsafe_home in (project / "private-state", temporary / "execution-repo/private-state", unrelated / "state"):
+            execution = temporary / "execution-repo"
+            execution.mkdir(exist_ok=True)
+            with patch.dict(os.environ, XDG_STATE_HOME=str(unsafe_home)):
+                try:
+                    panel._prepare_dispatch_call(project, shared, "call-" + panel.uuid.uuid4().hex[:16], room_owner,
+                                                 execution_repo=execution)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("dispatch accepted a state root inside a repository")
+        shared_parent = temporary / "other-writable-parent"
+        shared_parent.mkdir(mode=0o775)
+        shared_parent.chmod(0o775)
+        try:
+            original_stat = Path.stat
+            def other_owned_stat(path, *args, **kwargs):
+                info = original_stat(path, *args, **kwargs)
+                if path == shared_parent:
+                    fields = list(info)
+                    fields[4] = os.getuid() + 1
+                    return os.stat_result(fields)
+                return info
+            with patch.object(Path, "stat", autospec=True, side_effect=other_owned_stat):
+                try:
+                    panel.dispatch_store._validate_state_ancestors(shared_parent / "state")
+                except ValueError as error:
+                    assert "unsafe writable dispatch state ancestor" in str(error), error
+                    assert "other-writable-parent" in str(error), error
+                    assert "XDG_STATE_HOME" in str(error) and "chmod" in str(error), error
+                else:
+                    raise AssertionError("dispatch accepted an other-writable non-sticky state ancestor")
+            try:
+                panel.dispatch_store._validate_state_ancestors(shared_parent / "state")
+            except ValueError as error:
+                assert "unsafe writable dispatch state ancestor" in str(error), error
+            else:
+                raise AssertionError("dispatch accepted a self-owned writable ancestor")
+            descriptor_child = shared_parent / "private-child"
+            descriptor_child.mkdir(mode=0o700)
+            descriptor_child.chmod(0o700)
+            try:
+                panel.dispatch_store.Directory(descriptor_child)
+            except ValueError as error:
+                assert "unsafe writable dispatch state ancestor" in str(error), error
+            else:
+                raise AssertionError("descriptor traversal accepted a self-owned writable ancestor")
+        finally:
+            shared_parent.chmod(0o700)
+        restricted_path = temporary / "restrictive-umask" / "state"
+        previous_umask = os.umask(0o400)
+        try:
+            try:
+                with panel.dispatch_store.Directory(restricted_path, create=True):
+                    pass
+            except ValueError as error:
+                assert "restrictive umask" in str(error), error
+                assert "owner rwx" in str(error), error
+                assert str(restricted_path.parent) in str(error), error
+            else:
+                raise AssertionError("restricted owner-read umask was not reported clearly")
+        finally:
+            os.umask(previous_umask)
+        with panel.dispatch_store.Directory(restricted_path, create=True) as directory:
+            assert stat.S_IMODE(os.fstat(directory.fd).st_mode) == 0o700
+        original = launch_file.read_bytes()
+        launch_file.unlink()
+        target = temporary / "linked-dispatch-record"
+        target.write_bytes(original)
+        target.chmod(0o600)
+        launch_file.symlink_to(target)
+        try:
+            panel.dispatch_store.read(project, durable_name + "-launch.json")
+        except (OSError, ValueError):
+            pass
+        else:
+            raise AssertionError("dispatch followed a symlinked record")
+        launch_file.unlink()
+        launch_file.write_bytes(original)
+        launch_file.chmod(0o600)
+        actual_fstat = os.fstat
+        def foreign_record(fd):
+            info = actual_fstat(fd)
+            return type("ForeignOwner", (), dict(st_mode=info.st_mode, st_nlink=info.st_nlink,
+                                                  st_uid=os.getuid() + 1))() if stat.S_ISREG(info.st_mode) else info
+        with patch.object(panel.dispatch_store.os, "fstat", side_effect=foreign_record):
+            try:
+                panel.dispatch_store.read(project, durable_name + "-launch.json")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("dispatch accepted a foreign-owned record")
+        if sys.platform == "linux":
+            with patch.object(panel.subprocess, "Popen", side_effect=AssertionError("metadata spawned a PID probe")):
+                panel.dispatch_store.write(project, durable_name + "-process.json", {"pid": 2147483647})
     main = {"attempt_id": "round-main", "terminal": False}
     history = [dict(attempt_id="round-%d" % i, task_id="round-task", parent_attempt_id="round-main",
                     sequence=i, state="review", refs={"panel_role": "worker", "panel_access": "write"})
@@ -460,8 +680,8 @@ CONTINUATION
         assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0, "parent subreaper state unreadable"
 
         @contextmanager
-        def recorded_fixture(task, body=None):
-            name = "call-" + panel.uuid.uuid4().hex[:16]
+        def recorded_fixture(task, body=None, member_id=None):
+            name = member_id or "call-" + panel.uuid.uuid4().hex[:16]
             room.join(project, shared, name, "codex", "worker", parent=room_owner)
             room.scope(project, shared, name, ["value.txt"])
             member = room.participant(room.status(project, shared), name)
@@ -519,6 +739,195 @@ CONTINUATION
                 if current and not current["terminal"]:
                     panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "cancelled",
                                  "--reason-code", "fixture_complete")
+
+        def mark_stale_boot_records(name, suffixes=("launch", "process", "pending", "supervisor")):
+            for suffix in suffixes:
+                record_name = name + "-" + suffix + ".json"
+                record_path = (Path(room_env["XDG_STATE_HOME"]) / "oh-my-setting/panel-control" /
+                               hashlib.sha256(str(project.resolve()).encode()).hexdigest() / "dispatch" /
+                               name / record_name)
+                envelope = json.loads(record_path.read_text())
+                envelope["boot_id"] = "00000000-0000-0000-0000-000000000000"
+                record_path.write_bytes(panel.dispatch_store.encoded(envelope))
+
+        with recorded_fixture("malformed-same-boot-dispatch") as fixture:
+            name, member, call = (fixture[key] for key in ("name", "member", "call"))
+            state_member = (Path(room_env["XDG_STATE_HOME"]) / "oh-my-setting/panel-control" /
+                            hashlib.sha256(str(project.resolve()).encode()).hexdigest() / "dispatch" / name)
+            panel.dispatch_store.write(project, name + "-supervisor.json", {})
+            with patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as notice:
+                panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                report = notice.getvalue()
+            assert "dispatch reconciliation blocked: invalid supervisor receipt" in report, report
+            assert "Recovery: inspect records with: ls -la --" in report, report
+            current = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
+                                              "--json", output=True))
+            assert current["state"] == "working" and not current["terminal"], current
+            (state_member / (name + "-process.json")).write_bytes(b"{")
+            with patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as notice:
+                panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                report = notice.getvalue()
+            assert "dispatch reconciliation blocked: invalid process binding" in report, report
+            assert "Recovery: inspect records with: ls -la --" in report, report
+
+        with recorded_fixture("stale-boot-dispatch") as fixture:
+            name, member, call = (fixture[key] for key in ("name", "member", "call"))
+            if sys.platform == "linux":
+                state_member = (Path(room_env["XDG_STATE_HOME"]) / "oh-my-setting/panel-control" /
+                                hashlib.sha256(str(project.resolve()).encode()).hexdigest() / "dispatch" / name)
+                for suffix in ("pending", "supervisor", "process"):
+                    (state_member / (name + "-" + suffix + ".json")).unlink()
+                mark_stale_boot_records(name, ("launch",))
+                assert panel.dispatch_store.stale_boot(project, name + "-launch.json")
+                panel._record_dispatch_pending(project, call, 0, task_id="stale-evidence-test",
+                                               evidence={"descendants": []})
+                mark_stale_boot_records(name, ("pending",))
+
+                def assert_bad_stale_evidence(label, reason):
+                    try:
+                        finished = panel._dispatch_call_finished(project, shared, member)
+                    except panel_dispatch.DispatchEvidenceError:
+                        finished = False
+                    assert not finished, label + " exit evidence incorrectly settled the call"
+                    with patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as notice:
+                        panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                        report = notice.getvalue()
+                    assert label in report, report
+                    assert reason in report, report
+                    assert "Recovery:" in report and "ls -la --" in report, report
+                    assert str(state_member) in report and "retry the dispatch" in report, report
+                    current = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
+                                                      "--json", output=True))
+                    assert current["state"] == "working" and not current["terminal"], current
+
+                supervisor_path = state_member / (name + "-supervisor.json")
+                process_path = state_member / (name + "-process.json")
+                panel.dispatch_store.write(project, name + "-supervisor.json", {})
+                assert_bad_stale_evidence("supervisor receipt", "malformed record")
+                valid_process = {"pid": os.getpid(), "identity": panel.dispatch_store.process_identity()["identity"],
+                                 "group": os.getpid()}
+                panel.dispatch_store.write(project, name + "-process.json", valid_process)
+                receipt = {"launch_sha256": "0" * 64, "pid": os.getpid(), "all_reaped": True, "exit": 0}
+                panel.dispatch_store.write(project, name + "-supervisor.json", receipt)
+                assert_bad_stale_evidence("supervisor receipt", "bound to another launch")
+                supervisor_path.unlink()
+                envelope = json.loads(process_path.read_text())
+                envelope["launch"] = dict(envelope["launch"], nonce="foreign-launch")
+                process_path.write_bytes(panel.dispatch_store.encoded(envelope))
+                assert_bad_stale_evidence("process binding", "malformed or foreign record")
+                for path in (supervisor_path, process_path, state_member / (name + "-pending.json")):
+                    if path.exists():
+                        path.unlink()
+                assert panel._dispatch_supervisor_snapshot(project, call) is None, \
+                    "stale supervisor identity remained signalable"
+                assert panel._review_launch_state(project, name) == "interrupted", \
+                    "stale reviewer process counted as launched"
+                assert panel._dispatch_pending(project, call)["exit"] == 143, \
+                    "stale dispatch did not settle with interrupted status"
+                assert panel._dispatch_call_finished(project, shared, member), \
+                    "stale process record blocked interrupted settlement"
+                panel._settle_dispatch(project, shared, name, 0)
+                assert panel.dispatch_store.read(project, name + "-settled.json")["exit"] == 143, \
+                    "missing exit evidence did not settle as interrupted"
+                settled = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
+                                                  "--json", output=True))
+                assert settled["terminal"] and settled["state"] == "cancelled", settled
+                panel.dispatch_store.write(project, name + "-process.json",
+                                           {"pid": os.getpid(),
+                                            "identity": panel.dispatch_store.process_identity()["identity"],
+                                            "group": os.getpid()})
+                panel.dispatch_store.write(project, name + "-supervisor.json",
+                                           {"launch_sha256": panel._dispatch_exit_record(call, 0)["launch_sha256"],
+                                            "pid": os.getpid() + 1, "all_reaped": True, "exit": 0})
+                with patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as released_notice:
+                    panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                assert "dispatch reconciliation blocked" not in released_notice.getvalue(), \
+                    "released member still reported stale invalid evidence"
+                for suffix in ("process", "supervisor"):
+                    (state_member / (name + "-" + suffix + ".json")).unlink()
+
+                orphan_name = "call-orphan-fixture"
+                orphan_path = panel.dispatch_store._root(project) / orphan_name
+                orphan_path.mkdir(mode=0o700)
+                orphan_path.chmod(0o700)
+                with patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as orphan_notice:
+                    panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                    first_notice = orphan_notice.getvalue()
+                assert "orphan dispatch member " + orphan_name + " has no identity" in first_notice, first_notice
+                assert "remove it with: rm -r --" in first_notice, first_notice
+                assert orphan_path.is_dir(), "orphan member was automatically removed"
+                with patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as orphan_notice:
+                    panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                assert orphan_name not in orphan_notice.getvalue(), "orphan warning repeated"
+
+        if sys.platform == "linux":
+            with recorded_fixture("stale-boot-dispatch-success") as fixture:
+                name, member, call, process = (fixture[key] for key in ("name", "member", "call", "process"))
+                fixture["release"].touch()
+                timeout = int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90"))
+                assert process.wait(timeout=timeout) == 0, "successful stale-boot fixture did not exit"
+                panel._record_dispatch_pending(project, call, 0, "stale-boot-dispatch-success",
+                                               {"descendants": []})
+                receipt = panel._dispatch_supervisor_receipt(project, call)
+                assert receipt and receipt["all_reaped"] and receipt["exit"] == 0, receipt
+                state_member = (Path(room_env["XDG_STATE_HOME"]) / "oh-my-setting/panel-control" /
+                                hashlib.sha256(str(project.resolve()).encode()).hexdigest() / "dispatch" / name)
+                receipt["all_reaped"], receipt["exit"] = False, 7
+                panel.dispatch_store.write(project, name + "-supervisor.json", receipt)
+                mark_stale_boot_records(name, ("launch", "pending"))
+                mark_stale_boot_records(name, ("process", "supervisor"))
+                pending = panel._dispatch_pending(project, call)
+                assert pending["exit"] == 7, "stale boot discarded the persisted provider exit"
+                assert panel._dispatch_supervisor_snapshot(project, call) is None, \
+                    "stale supervisor identity remained signalable"
+                assert panel._dispatch_call_finished(project, shared, member), \
+                    "stale successful call was not treated as finished"
+                with patch.dict(os.environ, room_env, clear=True):
+                    panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                settled = panel.dispatch_store.read(project, name + "-settled.json")
+                assert settled["exit"] == 7, "stale settlement discarded the provider exit"
+                current = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
+                                                  "--json", output=True))
+                assert current["terminal"] and current["state"] == "failed", current
+
+            with recorded_fixture("stale-boot-dispatch-pending-zero") as fixture:
+                name, member, call, process = (fixture[key] for key in ("name", "member", "call", "process"))
+                fixture["release"].touch()
+                timeout = int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90"))
+                assert process.wait(timeout=timeout) == 0, "successful pending-zero fixture did not exit"
+                panel._record_dispatch_pending(project, call, 0, "stale-boot-pending-zero",
+                                               {"descendants": []})
+                state_member = (Path(room_env["XDG_STATE_HOME"]) / "oh-my-setting/panel-control" /
+                                hashlib.sha256(str(project.resolve()).encode()).hexdigest() / "dispatch" / name)
+                for suffix in ("process", "supervisor"):
+                    (state_member / (name + "-" + suffix + ".json")).unlink()
+                mark_stale_boot_records(name, ("launch", "pending"))
+                pending = panel._dispatch_pending(project, call)
+                assert pending["exit"] == 0, "stale boot discarded the pending successful exit"
+                panel._settle_dispatch(project, shared, name, pending["exit"])
+                assert panel.dispatch_store.read(project, name + "-settled.json")["exit"] == 0, \
+                    "stale settlement discarded the pending successful exit"
+
+            with recorded_fixture("stale-boot-dispatch-disappears") as fixture:
+                name, member, call = (fixture[key] for key in ("name", "member", "call"))
+                original_stale_boot = panel.dispatch_store.stale_boot
+                disappeared = {"done": False}
+
+                def disappear_supervisor_once(repo, record_name):
+                    if record_name == name + "-supervisor.json" and not disappeared["done"]:
+                        disappeared["done"] = True
+                        raise FileNotFoundError(record_name)
+                    return original_stale_boot(repo, record_name)
+
+                with patch.object(panel.dispatch_store, "stale_boot", side_effect=disappear_supervisor_once), \
+                        patch.dict(os.environ, room_env, clear=True), redirect_stderr(io.StringIO()) as notice:
+                    panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                    report = notice.getvalue()
+                assert disappeared["done"], "supervisor disappearance race was not exercised"
+                assert "dispatch reconciliation blocked" not in report, report
+                current = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
+                                                  "--json", output=True))
+                assert not current["terminal"], "missing supervisor evidence settled the call prematurely"
 
         # Public artifacts never replace positive controller proof, even with terminal ledger rows.
         with recorded_fixture("cancel-selected-call") as fixture:
@@ -847,6 +1256,57 @@ CONTINUATION
             assert len([row for row in room.records(project, shared)
                         if row.get("room_event", {}).get("kind") == "call-result"
                         and row["room_event"].get("call_id") == name]) == 1
+
+        with recorded_fixture("legacy-tmp-records", member_id="call-reviewer") as fixture:
+            name, call, process = (fixture[key] for key in ("name", "call", "process"))
+            fixture["release"].touch()
+            assert process.wait(timeout=5) == 0
+            panel._record_dispatch_pending(project, call, 0, "legacy-tmp-records", {"descendants": []})
+            legacy = (Path("/tmp") / ("oms-dispatch-" + str(os.getuid())) /
+                      hashlib.sha256(str(project.resolve()).encode()).hexdigest())
+            legacy.parent.mkdir(mode=0o700, exist_ok=True)
+            legacy.mkdir(mode=0o700, exist_ok=True)
+            saved = {}
+            for suffix in ("launch", "process", "pending", "supervisor"):
+                record_name = name + "-" + suffix + ".json"
+                saved[record_name] = panel.dispatch_store.read(project, record_name)
+                path = legacy / record_name
+                with path.open("x") as stream:
+                    json.dump(saved[record_name], stream)
+                path.chmod(0o600)
+            private = panel.dispatch_store.store(project) / (name + "-launch.json")
+            supervisor_record = json.loads((private.parent / (name + "-supervisor.json")).read_text())
+            assert supervisor_record["supervisor"]["pid"] == process.pid
+            assert supervisor_record["supervisor"]["identity"] == fixture["supervisor"]["identity"]
+            assert supervisor_record["writer"] == supervisor_record["supervisor"]
+            private.parent.rename(temporary / (name + "-durable-archive"))
+            try:
+                assert panel._dispatch_call_finished(project, shared, fixture["member"]), "legacy /tmp call did not settle"
+                panel._settle_dispatch(project, shared, name, 0)
+                assert panel._dispatch_released(project, call), "legacy call settlement was not readable"
+                durable_settlement = (Path(room_env["XDG_STATE_HOME"]) / "oh-my-setting/panel-control" /
+                                      hashlib.sha256(str(project.resolve()).encode()).hexdigest() / "dispatch" /
+                                      name / (name + "-settled.json"))
+                assert durable_settlement.is_file(), "legacy settlement was not written to durable storage"
+                assert not (legacy / (name + "-settled.json")).exists(), "legacy settlement modified the read-only store"
+                assert not list(legacy.glob("settlement-*.json")), "settlement claim modified the legacy store"
+                assert panel._dispatch_call_record(project, shared, fixture["member"]) is not None, "legacy call record disappeared"
+                with patch.dict(os.environ, room_env, clear=True):
+                    panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+                delivered = room.status(project, shared)
+                assert any(message["id"] == "result-" + name for message in delivered["messages"]), "legacy result was not delivered"
+                claim_path = panel.dispatch_store.store(project) / panel._settlement_claim_path(name)
+                assert claim_path.is_file(), "legacy delivery claim was not written durably"
+                assert not list(legacy.glob("settlement-*.json")), "legacy store received a settlement claim"
+                for record_name, record_value in saved.items():
+                    assert panel.dispatch_store.read(project, record_name) == record_value, "legacy record changed: " + record_name
+                assert panel._dispatch_call_record(project, shared, fixture["member"]) is not None, "legacy call record was hidden"
+                pending_path = legacy / (name + "-pending.json")
+                pending_path.unlink()
+                assert not panel._dispatch_call_finished(project, shared, fixture["member"]), "missing legacy pending record proved exit"
+            finally:
+                for path in legacy.glob(name + "-*.json"):
+                    path.unlink()
 
         already_delivered = "call-legacy-result-present"
         room.join(project, shared, already_delivered, "codex", "worker", parent=room_owner)

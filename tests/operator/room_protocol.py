@@ -1077,10 +1077,12 @@ sensitive_summary = "pass" + "word=fixture-value"
 # exercises the real containment and attempt transition contract.
 real_test_settle = panel._settle_dispatch
 panel._settle_dispatch = lambda repo, room_id, member, status: None
-room.join(project, shared, "screen-call", "codex", "worker", parent=room_owner)
+screen_call = "call-0000000000000008"
+room.join(project, shared, screen_call, "codex", "worker", parent=room_owner)
+panel._prepare_dispatch_call(project, shared, screen_call, room_owner, task_id="screen-task")
 with patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": sensitive_summary}]}]}):
-    panel.deliver_result(project, shared, "screen-call", room_owner, "screen-task", 143)
-screened = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-screen-call")
+    panel.deliver_result(project, shared, screen_call, room_owner, "screen-task", 143)
+screened = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + screen_call)
 assert "Call exit=143" in screened["text"] and "--results --task-id screen-task" in screened["text"]
 assert sensitive_summary not in screened["text"]
 missing_summary_call = "call-0000000000000006"
@@ -1123,6 +1125,7 @@ exit_record = json.loads(panel._read(project, panel._dispatch_call_path(missing_
 assert exit_record["output_log"] == output_log
 zero_summary_call = "call-0000000000000007"
 room.join(project, shared, zero_summary_call, "codex", "worker", parent=room_owner)
+panel._prepare_dispatch_call(project, shared, zero_summary_call, room_owner, task_id="screen-task")
 with patch.object(panel, "results", side_effect=AttributeError("invalid patch summary")):
     panel.deliver_result(project, shared, zero_summary_call, room_owner, "screen-task", 0)
 zero_fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + zero_summary_call)
@@ -1133,8 +1136,8 @@ import io
 from contextlib import redirect_stderr
 conflict = io.StringIO()
 with redirect_stderr(conflict):
-    panel.deliver_result(project, shared, "screen-call", room_owner, "screen-task", 1)
-assert "message-id conflict: result-screen-call" in conflict.getvalue()
+    panel.deliver_result(project, shared, screen_call, room_owner, "screen-task", 1)
+assert "message-id conflict: result-" + screen_call in conflict.getvalue()
 panel._settle_dispatch = real_test_settle
 
 _operator_block("cross-repository-dispatch")
@@ -1681,6 +1684,7 @@ def exercise_main_lineage():
             workers[0]["refs"]["panel_room_participant"] = legacy_name
             refuse_exit()
             if os.name == "posix":
+                panel.dispatch_store.initialize(project, legacy_name, legacy)
                 panel.dispatch_store.write(project, legacy_name + "-launch.json", legacy_anchor)
                 refuse_exit()
                 legacy_receipt = completion(legacy)

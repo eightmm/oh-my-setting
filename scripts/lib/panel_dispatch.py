@@ -1257,7 +1257,7 @@ def _dispatch_recorded_gone(records):
 
 
 def _dispatch_call_path(member, exited=False):
-    if not re.fullmatch(r"call-[0-9a-f]{16}", member or ""):
+    if not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", member or ""):
         raise ValueError("invalid dispatch call identity")
     return ".oms/artifacts/panel-" + member + ("-exit" if exited else "") + ".json"
 
@@ -1336,6 +1336,7 @@ def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution
             "backend": "subreaper" if sys.platform == "linux" else "unsupported"}
     if task_id is not None:
         call["task_id"] = task_id
+    dispatch_store.initialize(repo, member, call, execution_repo)
     path = Path(repo) / _dispatch_call_path(member)
     # The existing durable writer anchors parents, refuses links and creates 0600.
     # Even an empty precreated file must refuse launch, rather than become evidence.
@@ -1388,10 +1389,14 @@ def _dispatch_call_record(repo, room_id, member):
             return None
         fields = {"schema", "kind", "room", "participant", "parent"}
         if call["schema"] == 2:
+            # Accept older control_root diagnostics without using them for discovery.
             required = fields | {"nonce", "backend"}
-            if (set(call) not in (required, required | {"task_id"}) or data != dispatch_store.encoded(call)
+            if (not required <= set(call) or set(call) - required - {"task_id", "control_root"}
+                    or data != dispatch_store.encoded(call)
                     or not isinstance(call["nonce"], str) or not re.fullmatch(r"[0-9a-f]{32}", call["nonce"])
                     or call["backend"] not in {"subreaper", "unsupported"}
+                    or "control_root" in call and (not isinstance(call["control_root"], str)
+                                                    or not os.path.isabs(call["control_root"]))
                     or "task_id" in call and (not isinstance(call["task_id"], str)
                                                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", call["task_id"]))
                     or set(anchor) - {"call", "generation", "verify", "execution_repo", "rework"}
@@ -1429,9 +1434,30 @@ def _record_dispatch_pending(repo, call, status, task_id, evidence):
         pass
 
 
+class DispatchEvidenceError(ValueError):
+    def __init__(self, participant, record, reason):
+        self.participant = participant
+        self.record = record
+        self.reason = reason
+        super().__init__("%s for %s: %s" % (record, participant, reason))
+
+
 def _dispatch_pending(repo, call):
     from terminal_panel import _dispatch_exit_record
-    pending = dispatch_store.read(repo, call["participant"] + "-pending.json")
+    try:
+        pending = dispatch_store.read(repo, call["participant"] + "-pending.json")
+    except FileNotFoundError:
+        # A launch anchored in a prior boot is sufficient to settle an attempt
+        # interrupted before its controller could publish pending evidence.
+        if not dispatch_store.stale_boot(repo, call["participant"] + "-launch.json"):
+            raise
+        status = _dispatch_stale_exit(repo, call, None)
+        if status is None:
+            status = 143
+        task_id = call.get("task_id") or call["participant"]
+        return dict(call, exit=status, task_id=task_id, forced=False,
+                    descendants=None, launch_sha256=_dispatch_exit_record(call, status)["launch_sha256"],
+                    recovered=True)
     if (not isinstance(pending, dict) or set(pending) != set(call) | {"exit", "task_id", "forced", "descendants", "launch_sha256"}
             or any(pending[key] != value for key, value in call.items())
             or type(pending["exit"]) is not int or type(pending["forced"]) is not bool
@@ -1439,30 +1465,89 @@ def _dispatch_pending(repo, call):
             or not isinstance(pending["task_id"], str)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", pending["task_id"])):
         raise ValueError("invalid pending call record")
+    stale = any(_dispatch_stale_boot(repo, call, suffix)
+                for suffix in ("-launch.json", "-process.json", "-pending.json", "-supervisor.json"))
+    if stale:
+        exit_status = _dispatch_stale_exit(repo, call, pending)
+        if exit_status is None:
+            exit_status = 143
+        pending = dict(pending, exit=exit_status,
+                       launch_sha256=_dispatch_exit_record(call, exit_status)["launch_sha256"])
     return pending
 
 
-def _dispatch_supervisor_snapshot(repo, call):
+def _dispatch_stale_boot(repo, call, suffix):
+    try:
+        return dispatch_store.stale_boot(repo, call["participant"] + suffix)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, TypeError):
+        record = {"-supervisor.json": "supervisor receipt", "-process.json": "process binding",
+                  "-launch.json": "launch receipt", "-pending.json": "pending record"}.get(suffix, "dispatch record")
+        raise DispatchEvidenceError(call["participant"], record, "malformed or foreign record")
+
+
+def _dispatch_supervisor_snapshot(repo, call, allow_stale=False):
     from terminal_panel import _dispatch_exit_record
     if call["schema"] == 2 and call["backend"] != "subreaper":
         return None
-    receipt = dispatch_store.read(repo, call["participant"] + "-supervisor.json")
-    binding = dispatch_store.read(repo, call["participant"] + "-process.json")
-    digest = _dispatch_exit_record(call, 0)["launch_sha256"]
-    if (not isinstance(receipt, dict) or not isinstance(binding, dict)
-            or set(receipt) != {"launch_sha256", "pid", "all_reaped", "exit"}
-            or set(binding) not in ({"pid"}, {"pid", "identity", "group"})
-            or type(binding["pid"]) is not int or binding["pid"] <= 0
-            or set(binding) == {"pid", "identity", "group"}
-            and (not isinstance(binding["identity"], str) or not binding["identity"]
-                 or type(binding["group"]) is not int or binding["group"] != binding["pid"])
-            or type(receipt["pid"]) is not int or receipt["pid"] <= 0
-            or receipt["launch_sha256"] != digest or receipt["pid"] != binding["pid"]
-            or call["schema"] == 1 and binding["pid"] != call["pid"]
-            or type(receipt["all_reaped"]) is not bool
-            or receipt["exit"] is not None and type(receipt["exit"]) is not int):
+    if (not allow_stale and (_dispatch_stale_boot(repo, call, "-process.json")
+                             or _dispatch_stale_boot(repo, call, "-supervisor.json"))):
         return None
+    errors = []
+    try:
+        receipt = dispatch_store.read(repo, call["participant"] + "-supervisor.json")
+    except FileNotFoundError:
+        receipt = None
+    except (OSError, ValueError, TypeError):
+        receipt = None
+        errors.append(DispatchEvidenceError(call["participant"], "supervisor receipt",
+                                            "malformed or foreign record"))
+    try:
+        binding = dispatch_store.read(repo, call["participant"] + "-process.json")
+    except FileNotFoundError:
+        binding = None
+    except (OSError, ValueError, TypeError):
+        binding = None
+        errors.append(DispatchEvidenceError(call["participant"], "process binding",
+                                            "malformed or foreign record"))
+    if errors:
+        raise errors[0]
+    if (receipt is not None and
+            (not isinstance(receipt, dict) or set(receipt) != {"launch_sha256", "pid", "all_reaped", "exit"}
+             or type(receipt.get("pid")) is not int or receipt["pid"] <= 0
+             or type(receipt.get("all_reaped")) is not bool
+             or receipt.get("exit") is not None and type(receipt["exit"]) is not int)):
+        raise DispatchEvidenceError(call["participant"], "supervisor receipt", "malformed record")
+    digest = _dispatch_exit_record(call, 0)["launch_sha256"]
+    if receipt is not None and receipt["launch_sha256"] != digest:
+        raise DispatchEvidenceError(call["participant"], "supervisor receipt", "bound to another launch")
+    if (binding is not None and
+            (not isinstance(binding, dict) or set(binding) not in ({"pid"}, {"pid", "identity", "group"})
+             or type(binding.get("pid")) is not int or binding["pid"] <= 0
+             or set(binding) == {"pid", "identity", "group"}
+             and (not isinstance(binding["identity"], str) or not binding["identity"]
+                  or type(binding["group"]) is not int or binding["group"] != binding["pid"]))):
+        raise DispatchEvidenceError(call["participant"], "process binding", "malformed record")
+    if receipt is None or binding is None:
+        return None
+    if (receipt["pid"] != binding["pid"]
+            or call["schema"] == 1 and binding["pid"] != call["pid"]):
+        raise DispatchEvidenceError(call["participant"], "process binding", "does not match the launch receipt")
     return receipt, binding
+
+
+def _dispatch_stale_exit(repo, call, pending):
+    snapshot = _dispatch_supervisor_snapshot(repo, call, allow_stale=True)
+    if snapshot:
+        receipt, unused_binding = snapshot
+        if type(receipt["exit"]) is int:
+            return receipt["exit"]
+    # run_dispatch starts with status 1; a zero pending status can only be
+    # recorded after it observed the child exit, even without a reaped receipt.
+    if pending and pending["exit"] == 0:
+        return 0
+    return None
 
 
 def _dispatch_supervisor_receipt(repo, call):
@@ -1576,7 +1661,7 @@ def cancel_selected_call(repo, state, navigation, main_attempt, send=False):
         return "Call cancellation could not be verified; call was not signalled"
 
 
-def _dispatch_call_finished(repo, room_id, member):
+def _dispatch_call_finished(repo, room_id, member, report_evidence=False):
     from terminal_panel import _dispatch_call_record, _dispatch_group_gone, _dispatch_pending
     from terminal_panel import _dispatch_session_gone, _dispatch_supervisor_receipt
     call = _dispatch_call_record(repo, room_id, member)
@@ -1584,6 +1669,9 @@ def _dispatch_call_finished(repo, room_id, member):
         return False
     try:
         _dispatch_pending(repo, call)
+        if any(_dispatch_stale_boot(repo, call, suffix)
+               for suffix in ("-launch.json", "-process.json", "-pending.json", "-supervisor.json")):
+            return True
         receipt = _dispatch_supervisor_receipt(repo, call)
         if not (receipt and receipt["all_reaped"] and type(receipt["exit"]) is int):
             return False
@@ -1592,6 +1680,10 @@ def _dispatch_call_finished(repo, room_id, member):
             return (panel_terminals.process_gone(call["pid"], call["identity"])
                     and _dispatch_group_gone(call["pid"]) and _dispatch_session_gone(call["pid"]))
         return True
+    except DispatchEvidenceError:
+        if report_evidence:
+            raise
+        return False
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return False
 
@@ -1611,6 +1703,15 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
     from terminal_panel import _dispatch_call_finished, _dispatch_call_record, _dispatch_pending
     from terminal_panel import _dispatch_released, _settlement_delivery_pending, deliver_result, events
     rows = json.loads(events(repo, "list", "--json", output=True))
+    import shlex
+    for orphan in dispatch_store.orphan_members(repo):
+        reported = getattr(_reconcile_dispatch, "_reported_orphans", set())
+        if orphan not in reported:
+            location = dispatch_store._root(repo) / orphan
+            print("orphan dispatch member %s has no identity; remove it with: rm -r -- %s"
+                  % (orphan, shlex.quote(str(location))), file=sys.stderr)
+            reported.add(orphan)
+            _reconcile_dispatch._reported_orphans = reported
     for member in state["participants"]:
         if not member.get("joined") or member.get("parent") != caller:
             continue
@@ -1621,14 +1722,33 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
         if not call:
             continue
         try:
-            pending = _dispatch_pending(repo, call)
-            if (not live and (not member.get("owns") or _dispatch_released(repo, call))
+            released = _dispatch_released(repo, call)
+            if (not live and (not member.get("owns") or released)
                     and not _settlement_delivery_pending(repo, room_id, member["participant"])):
                 continue
-            if (any(row.get("task_id") != pending["task_id"] for row in live)
-                    or not _dispatch_call_finished(repo, room_id, member)):
+            pending = _dispatch_pending(repo, call)
+            task_id = pending["task_id"]
+            if pending.get("recovered") and not call.get("task_id") and live:
+                task_ids = {row.get("task_id") for row in live}
+                if len(task_ids) == 1 and None not in task_ids:
+                    task_id = next(iter(task_ids))
+            if (any(row.get("task_id") != task_id for row in live)
+                    or not _dispatch_call_finished(repo, room_id, member, report_evidence=True)):
                 continue
-            deliver_result(repo, room_id, member["participant"], caller, pending["task_id"], pending["exit"])
+            deliver_result(repo, room_id, member["participant"], caller, task_id, pending["exit"])
+        except DispatchEvidenceError as error:
+            if released:
+                continue
+            reported = getattr(_reconcile_dispatch, "_reported_evidence_errors", set())
+            key = (error.participant, error.record, error.reason)
+            if key not in reported:
+                location = dispatch_store._root(repo, error.participant) / error.participant
+                print("dispatch reconciliation blocked: invalid %s for %s (%s)"
+                      % (error.record, error.participant, error.reason), file=sys.stderr)
+                print("Recovery: inspect records with: ls -la -- %s; then retry the dispatch after "
+                      "restoring trusted evidence." % shlex.quote(str(location)), file=sys.stderr)
+                reported.add(key)
+                _reconcile_dispatch._reported_evidence_errors = reported
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             # Missing pending records describe calls still running in another dispatch controller.
             continue
@@ -1795,6 +1915,15 @@ def _settle_dispatch(repo, room_id, member, status):
     participant = room.participant(room.status(repo, room_id), member)
     if not _dispatch_call_finished(repo, room_id, participant):
         raise ValueError("dispatch containment receipt unavailable")
+    call = _dispatch_call_record(repo, room_id, participant)
+    if not call:
+        raise ValueError("dispatch launch changed during settlement")
+    stale = any(dispatch_store.stale_boot(repo, member + suffix)
+                for suffix in ("-launch.json", "-process.json", "-pending.json", "-supervisor.json"))
+    if stale:
+        pending = _dispatch_pending(repo, call)
+        exit_status = _dispatch_stale_exit(repo, call, pending)
+        status = 143 if exit_status is None else exit_status
     rows = json.loads(events(repo, "list", "--json", output=True))
     for row in rows:
         refs = row.get("refs", {})
@@ -1805,9 +1934,6 @@ def _settle_dispatch(repo, room_id, member, status):
                             "--reason-code", "panel_call_interrupted", "--actor", "panel-dispatch")
     # Room scope declarations belong to their participant. Mark controller release
     # privately instead of impersonating the child to mutate its declaration.
-    call = _dispatch_call_record(repo, room_id, participant)
-    if not call:
-        raise ValueError("dispatch launch changed during settlement")
     dispatch_store.write(repo, member + "-settled.json",
                          {"released": True, "exit": status,
                           "launch_sha256": _dispatch_exit_record(call, 0)["launch_sha256"]})
@@ -2109,6 +2235,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                            brief=_read_dispatch_brief(recorded_brief).decode("utf-8")) if access == "write" else None)
             launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
                                              task_id=task_id)
+            env["XDG_STATE_HOME"] = dispatch_store.pinned_state_home(repo, control_member)
             command = argv
             if launch and launch["backend"] == "subreaper":
                 digest = _dispatch_exit_record(launch, 0)["launch_sha256"]

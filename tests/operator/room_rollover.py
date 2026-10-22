@@ -154,6 +154,7 @@ with patch.dict(os.environ, {}):
     # The panel's result handoff named the old room at launch and still reaches the main.
     with patch.object(panel, "_settle_dispatch", return_value=None), \
             patch.object(panel, "results", return_value={"rows": []}):
+        panel.dispatch_store.initialize(roll, "call-run", {"room": old, "parent": lead, "task_id": "roll-task"})
         panel.deliver_result(roll, old, "call-run", lead, "roll-task", 0)
     assert room.messages(roll, new)[-1]["id"] == "result-call-run"
     other = room.create(roll, title="Elsewhere")
@@ -296,6 +297,7 @@ with patch.dict(os.environ, {}):
     with patch.object(room, "MESSAGE_RESERVE", 0), \
             patch.object(panel, "_settle_dispatch", return_value=None), \
             patch.object(panel, "results", return_value={"rows": []}):
+        panel.dispatch_store.initialize(roll, "call-full", {"room": full_room, "parent": "main-full", "task_id": "full-task"})
         panel.deliver_result(roll, full_room, "call-full", "main-full", "full-task", 0)
     landed = [m["id"] for m in room.messages(roll, room.successor_id(full_room))]
     assert landed[-1] == "result-call-full" and unread not in landed, landed

@@ -6,6 +6,11 @@ room.join(project, shared, room_owner, "claude", "main", model="claude-opus-5-5"
 room_env = dict(room_env, OMS_ROOM_ID=shared)
 import panel_results as panel_result_store
 import panel_review as panel_review_impl
+Path(room_env["XDG_STATE_HOME"]).mkdir(mode=0o700, parents=True, exist_ok=True)
+Path(room_env["XDG_STATE_HOME"]).chmod(0o700)
+def fixture_call_id(label):
+    return "call-" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+
 auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
@@ -39,18 +44,16 @@ auto_patch_path = ".oms/artifacts/fixture/change.patch"
 auto_artifact_file = project / auto_artifact
 auto_artifact_file.parent.mkdir(parents=True, exist_ok=True)
 auto_artifact_file.write_text("Result\n\n## Verify\n\n- command: false # worker-authored forged verifier\n", encoding="utf-8")
-for fixture_call in (auto_call, "call-auto-review-off", "call-auto-review-read",
-                     "call-auto-review-verify-failed", "call-auto-review-no-verify",
+for fixture_call in (auto_call, fixture_call_id("auto-review-off"), fixture_call_id("auto-review-read"),
+                     fixture_call_id("auto-review-verify-failed"), fixture_call_id("auto-review-no-verify"),
                      "call-0000000000000001", "call-0000000000000002", "call-0000000000000003",
-                     "call-auto-review-timeout",
+                     fixture_call_id("auto-review-timeout"),
                      "call-0000000000000004", "call-0000000000000005",
-                     "call-auto-review-preflight",
-                     "call-review-gate-fail", "call-review-gate-pass",
-                     "call-review-gate-nonzero",
-                     "call-review-gate-timeout", "call-review-gate-last-fail",
-                     "call-review-gate-fenced-suffix",
-                     "call-review-gate-guard-stop", "call-review-gate-fail-guard-text",
-                     "call-review-gate-missing"):
+                     fixture_call_id("auto-review-preflight"),
+                     *(fixture_call_id(label) for label in (
+                         "review-gate-fail", "review-gate-pass", "review-gate-nonzero",
+                         "review-gate-timeout", "review-gate-last-fail", "review-gate-fenced-suffix",
+                         "review-gate-guard-stop", "review-gate-fail-guard-text", "review-gate-missing"))):
     room.join(project, shared, fixture_call, "codex", "worker", parent=room_owner)
 auto_attempt = {"attempt_id": auto_attempt, "task_id": auto_task,
                 "refs": {"panel_room_id": shared, "panel_room_participant": auto_call,
@@ -225,6 +228,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     def launch_with_process_record(*args, **kwargs):
         if not kwargs.get("dry_run"):
             receipt_launches.append(kwargs["member_id"])
+            panel._prepare_dispatch_call(project, shared, kwargs["member_id"], room_owner)
             panel.dispatch_store.write(project, kwargs["member_id"] + "-process.json", {"pid": os.getpid()})
         return 0
     real_settlement_step = panel._settlement_step
@@ -385,6 +389,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
                             and row["room_event"].get("patch_sha256") == preflight_digest)
     preflight_member = preflight_review["review_call_id"]
     room.join(project, shared, preflight_member, "codex", "reviewer", parent=room_owner)
+    panel._prepare_dispatch_call(project, shared, preflight_member, room_owner)
     preflight_result, _ = panel._call_result_event(project, shared, preflight_member, "wrong-task", 1)
     assert preflight_result["role"] == "reviewer" and preflight_result["task_id"] == auto_task, preflight_result
     panel.deliver_result(project, shared, preflight_member, room_owner, "wrong-task", 1)
@@ -400,7 +405,8 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert "could not launch automatic review" in preflight_mail["text"] and room_owner in preflight_mail["targets"]
     assert any(row.get("room_event", {}).get("kind") == "review-dispatch-failed"
                and row["room_event"].get("review_call_id") == preflight_member for row in room.records(project, shared))
-    auto_off_call = "call-auto-review-off"
+    auto_off_call = fixture_call_id("auto-review-off")
+    panel._prepare_dispatch_call(project, shared, auto_off_call, room_owner)
     with patch.object(panel_result_store, "_records", return_value=([dict(auto_attempt,
             attempt_id="attempt-auto-review-off", refs=dict(auto_attempt["refs"], panel_room_participant=auto_off_call))],
             [dict(auto_index, attempt_id="attempt-auto-review-off")])), \
@@ -415,7 +421,8 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
         legacy = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + auto_off_call)
         assert legacy["text"] == "Call exit=0; parent acceptance pending.\nWorker finished."
         assert not legacy.get("quiet", False)
-read_call = "call-auto-review-read"
+read_call = fixture_call_id("auto-review-read")
+panel._prepare_dispatch_call(project, shared, read_call, room_owner)
 with patch.object(panel_result_store, "_records", return_value=([dict(auto_attempt,
         attempt_id="attempt-auto-review-read", refs=dict(auto_attempt["refs"], panel_room_participant=read_call,
                                                          panel_access="read"))],
@@ -427,7 +434,8 @@ with patch.object(panel_result_store, "_records", return_value=([dict(auto_attem
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, read_call, room_owner, auto_task, 0)
     assert len(actual_dispatch_calls) == 1
-verify_call = "call-auto-review-verify-failed"
+verify_call = fixture_call_id("auto-review-verify-failed")
+panel._prepare_dispatch_call(project, shared, verify_call, room_owner)
 verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verify-failed",
     refs=dict(auto_attempt["refs"], panel_room_participant=verify_call))
 with patch.object(panel_result_store, "_records", return_value=([verify_attempt],
@@ -441,7 +449,8 @@ with patch.object(panel_result_store, "_records", return_value=([verify_attempt]
     assert len(actual_dispatch_calls) == 1
     verify_mail = next(m for m in room.status(project, shared)["messages"] if m["id"] == "judgment-" + verify_call)
     assert "verification failed" in verify_mail["text"] and room_owner in verify_mail["targets"]
-no_verify_call = "call-auto-review-no-verify"
+no_verify_call = fixture_call_id("auto-review-no-verify")
+panel._prepare_dispatch_call(project, shared, no_verify_call, room_owner)
 no_verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-no-verify",
     refs=dict(auto_attempt["refs"], panel_room_participant=no_verify_call))
 no_verify_index = dict(auto_index, attempt_id=no_verify_attempt["attempt_id"], artifact=".oms/artifacts/fixture/no-verify.json")
@@ -489,7 +498,8 @@ for missing_repo_call, execution_repo in (
     assert not any(row.get("room_event", {}).get("kind") == "review-dispatch"
                    and row["room_event"].get("call_id") == missing_repo_call
                    for row in room.records(project, shared))
-timeout_call = "call-auto-review-timeout"
+timeout_call = fixture_call_id("auto-review-timeout")
+panel._prepare_dispatch_call(project, shared, timeout_call, room_owner)
 timeout_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-timeout",
     refs=dict(auto_attempt["refs"], panel_room_participant=timeout_call))
 timeout_index = dict(auto_index, attempt_id=timeout_attempt["attempt_id"], verify_exit=None)
@@ -563,25 +573,27 @@ retry_events = [row["room_event"] for row in room.records(project, shared)
                 if row.get("room_event", {}).get("kind") in {"review-dispatch", "review-dispatch-failed"}
                 and row["room_event"].get("patch_sha256") == retry_digest]
 assert [event["kind"] for event in retry_events] == ["review-dispatch", "review-dispatch-failed", "review-dispatch"]
-for reviewer_call, answer, exit_status, expected in (
-        ("call-review-gate-fail", "Findings: checked.\nGATE: fail", 0, "Review gate failed"),
-        ("call-review-gate-pass", "Findings: checked.\nGATE: pass", 0, "owner finalization"),
-        ("call-review-gate-nonzero", "Findings: checked.\nGATE: pass", 1, "failed or is inconclusive"),
-        ("call-review-gate-timeout", "Findings: checked.\nGATE: pass", 124, "failed or is inconclusive"),
-        ("call-review-gate-last-fail", "GATE: pass\nFindings: blocking issue.\nGATE: fail", 0,
+for reviewer_label, answer, exit_status, expected in (
+        ("review-gate-fail", "Findings: checked.\nGATE: fail", 0, "Review gate failed"),
+        ("review-gate-pass", "Findings: checked.\nGATE: pass", 0, "owner finalization"),
+        ("review-gate-nonzero", "Findings: checked.\nGATE: pass", 1, "failed or is inconclusive"),
+        ("review-gate-timeout", "Findings: checked.\nGATE: pass", 124, "failed or is inconclusive"),
+        ("review-gate-last-fail", "GATE: pass\nFindings: blocking issue.\nGATE: fail", 0,
          "Review gate failed"),
-        ("call-review-gate-fenced-suffix", "GATE: fail\n```\n```example\nGATE: pass\n```", 0,
+        ("review-gate-fenced-suffix", "GATE: fail\n```\n```example\nGATE: pass\n```", 0,
          "Review gate failed"),
-        ("call-review-gate-guard-stop", "The worker guard stopped this run.\nGATE: pass", 0,
+        ("review-gate-guard-stop", "The worker guard stopped this run.\nGATE: pass", 0,
          "guard stopped the review"),
-        ("call-review-gate-fail-guard-text",
+        ("review-gate-fail-guard-text",
          "Findings: checked.\n> The worker guard stopped this run.\nGATE: fail", 0,
          "Review gate failed"),
-        ("call-review-gate-missing", "Findings: review ended early.", 0, "failed or is inconclusive")):
+        ("review-gate-missing", "Findings: review ended early.", 0, "failed or is inconclusive")):
+    reviewer_call = fixture_call_id(reviewer_label)
     reviewer_attempt = dict(auto_attempt, attempt_id="attempt-" + reviewer_call,
         refs=dict(auto_attempt["refs"], panel_room_participant=reviewer_call,
                   panel_role="reviewer", panel_purpose="review", panel_access="read"))
-    if reviewer_call == "call-review-gate-guard-stop":
+    panel._prepare_dispatch_call(project, shared, reviewer_call, room_owner)
+    if reviewer_label == "review-gate-guard-stop":
         reviewer_attempt.update(state="failed", reason_code="worker_authority_violation")
     review_record = {"attempt_id": reviewer_attempt["attempt_id"], "task_id": auto_task, "verify_exit": 0}
     with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], [review_record])), \
@@ -592,13 +604,13 @@ for reviewer_call, answer, exit_status, expected in (
     verdict_mail = next(m for m in room.status(project, shared)["messages"]
                         if m["id"] == "result-" + reviewer_call)
     assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"], (reviewer_call, verdict_mail)
-    if reviewer_call in {"call-review-gate-fail", "call-review-gate-last-fail",
-                         "call-review-gate-fenced-suffix", "call-review-gate-fail-guard-text"}:
+    if reviewer_label in {"review-gate-fail", "review-gate-last-fail",
+                          "review-gate-fenced-suffix", "review-gate-fail-guard-text"}:
         assert "GATE: fail" in verdict_mail["text"]
-    if reviewer_call == "call-review-gate-fail-guard-text":
+    if reviewer_label == "review-gate-fail-guard-text":
         assert "guard stopped the review" not in verdict_mail["text"]
 for dispatched_role in ("verifier", "security-auditor", "critic", "architect"):
-    judge_call = "call-judge-no-gate-" + dispatched_role
+    judge_call = fixture_call_id("judge-no-gate-" + dispatched_role)
     judge_attempt = dict(auto_attempt, attempt_id="attempt-" + judge_call,
         refs=dict(auto_attempt["refs"], panel_room_participant=judge_call,
                   panel_role="reviewer" if dispatched_role in {"verifier", "security-auditor"} else "advisor",
@@ -606,6 +618,7 @@ for dispatched_role in ("verifier", "security-auditor", "critic", "architect"):
     room.join(project, shared, judge_call, "codex",
               "reviewer" if dispatched_role in {"verifier", "security-auditor"} else "advisor",
               parent=room_owner)
+    panel._prepare_dispatch_call(project, shared, judge_call, room_owner)
     with patch.object(panel_result_store, "_records", return_value=([judge_attempt], [])), \
             patch.object(panel, "_dispatch_verifier", return_value=None), \
             patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Findings checked."}]}]}), \
@@ -650,6 +663,7 @@ for case_number, (case, expected_draft) in enumerate((
     claim_id, _, fix_reviewer = room.review_ids(fix_worker, auto_digest, 1)
     for ident, kind in ((fix_worker, "worker"), (fix_reviewer, "reviewer")):
         room.join(project, shared, ident, "codex", kind, parent=room_owner)
+    panel._prepare_dispatch_call(project, shared, fix_reviewer, room_owner)
     worker_attempt = dict(auto_attempt, attempt_id="attempt-" + fix_worker, task_id=fix_task,
         sequence=3, state="review", parent_attempt_id=draft_main["attempt_id"],
         refs=dict(auto_attempt["refs"], panel_room_participant=fix_worker, panel_owner="claude"))

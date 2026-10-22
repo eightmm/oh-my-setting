@@ -546,6 +546,8 @@ def _review_launch_state(repo, member):
     except FileNotFoundError:
         try:
             dispatch_store.read(repo, member + "-launch.json")
+            if dispatch_store.stale_boot(repo, member + "-launch.json"):
+                return "interrupted"
             return "possible"
         except FileNotFoundError:
             return "absent"
@@ -557,6 +559,12 @@ def _review_launch_state(repo, member):
         set(process) == {"pid"} or set(process) == {"pid", "identity", "group"}
         and isinstance(process.get("identity"), str) and bool(process["identity"])
         and type(process.get("group")) is int and process["group"] == process["pid"])
+    if valid:
+        try:
+            if dispatch_store.stale_boot(repo, member + "-process.json"):
+                return "interrupted"
+        except (OSError, ValueError, KeyError, TypeError):
+            return "unknown"
     return "launched" if valid else "unknown"
 
 
@@ -760,6 +768,10 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                 # Unreadable launch evidence keeps the reservation; a later retry decides.
                 review_delivered = False
                 auto_review_done = False
+            elif pending_claim and launch == "interrupted":
+                _settlement_step(repo, member, claim, "review_launch", False)
+                review_delivered = False
+                auto_review_done = _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
             elif pending_claim and launch == "possible":
                 # Past the spawn point a reviewer may exist: never relaunch, hand the review to the main.
                 review_delivered = False

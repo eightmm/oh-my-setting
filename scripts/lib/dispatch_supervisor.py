@@ -9,6 +9,9 @@ import ctypes
 import hashlib
 import json
 import os
+import re
+import uuid
+import panel_terminals
 from pathlib import Path
 import signal
 import stat
@@ -22,70 +25,413 @@ def encoded(value):
     return json.dumps(value, sort_keys=True, allow_nan=False).encode('utf-8')
 
 
-def store(repo):
-    # Deliberately outside the worker's repository and artifact namespaces.
-    uid = str(os.getuid()) if hasattr(os, 'getuid') else hashlib.sha256(str(Path.home()).encode()).hexdigest()[:16]
-    temporary_root = Path('/tmp') if os.name == 'posix' else Path(tempfile.gettempdir())
-    root = temporary_root / ('oms-dispatch-' + uid)
-    if Path(repo).resolve() == root.resolve() or Path(repo).resolve() in root.resolve().parents:
-        raise ValueError('dispatch controller state must be outside the repository')
-    digest = hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()
-    for directory in (root, root / digest):
+# Schema 1 wraps the unchanged caller payload. identity.json is immutable launch
+# metadata; boot identity stays explicit even where process identities include it.
+RECORD_SCHEMA = 1
+_PINNED = {}
+_MEMBERS = {}
+
+
+def _valid_boot(value):
+    return isinstance(value, str) and (value == 'unknown' or bool(re.fullmatch(
+        r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', value)))
+
+
+def boot_id():
+    if sys.platform == 'linux':
         try:
-            directory.mkdir(mode=0o700)
-        except FileExistsError:
+            value = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            if _valid_boot(value):
+                return value
+        except OSError:
             pass
-        info = directory.lstat()
-        if (not stat.S_ISDIR(info.st_mode) or os.name == "posix" and info.st_mode & 0o077
-                or hasattr(os, 'getuid') and info.st_uid != os.getuid()):
-            raise ValueError('unsafe dispatch controller directory')
-    return root / digest
+    return 'unknown'
+
+
+def _validate_state_ancestors(path):
+    """Validate permissions on existing dispatch state ancestors."""
+    for ancestor in (Path(path),) + tuple(Path(path).parents):
+        try:
+            info = ancestor.stat()
+        except FileNotFoundError:
+            continue
+        # Writable ancestors are unsafe regardless of owner; only a root-owned
+        # sticky directory prevents another group member renaming our child.
+        root_uid = os.stat('/').st_uid
+        if info.st_mode & 0o022:
+            if not (info.st_mode & stat.S_ISVTX and info.st_uid == root_uid):
+                name = ancestor.name or ancestor.anchor
+                raise ValueError(
+                    'unsafe writable dispatch state ancestor %r; set XDG_STATE_HOME to a private directory or chmod %r'
+                    % (name, name))
+
+
+def process_identity():
+    pid = os.getpid()
+    return {'pid': pid, 'identity': panel_terminals._process_helpers().process_identity(pid) or 'unknown'}
+
+
+def _member(repo, name, value=None):
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9._-]+', name):
+        raise ValueError('invalid dispatch controller filename')
+    match = re.fullmatch(r'(call-[A-Za-z0-9][A-Za-z0-9._-]{0,159})-(?:launch|process|pending|supervisor|settled)\.json', name)
+    if match:
+        return match[1]
+    if not re.fullmatch(r'settlement-[0-9a-f]{64}\.json', name):
+        raise ValueError('invalid dispatch controller filename')
+    key = (str(Path(repo).resolve()), name)
+    member = value.get('member') if isinstance(value, dict) else _MEMBERS.get(key)
+    if member is None:
+        directory = _root(repo)
+        try:
+            with Directory(directory, create=False) as source:
+                for candidate in os.listdir(source.fd):
+                    if (re.fullmatch(r'call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}', candidate)
+                            and name == 'settlement-' + hashlib.sha256(candidate.encode()).hexdigest() + '.json'):
+                        member = candidate
+                        break
+        except FileNotFoundError:
+            pass
+    if member is None:
+        try:
+            with _legacy_directory(repo) as source:
+                member = source.read(name).get('member')
+        except FileNotFoundError:
+            pass
+    if (not isinstance(member, str) or not re.fullmatch(r'call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}', member)
+            or name != 'settlement-' + hashlib.sha256(member.encode()).hexdigest() + '.json'):
+        raise FileNotFoundError('dispatch settlement owner unavailable')
+    _MEMBERS[key] = member
+    return member
+
+
+def _root(repo, member=None, execution_repo=None):
+    repo = Path(repo).resolve()
+    key = (str(repo), member)
+    if member is not None and key in _PINNED:
+        return _PINNED[key]
+    # Only this controller's environment selects the namespace, never repository bytes.
+    base = panel_terminals.state_home()
+    # A controller may sanitize its environment between calls. Keep its already
+    # resolved namespace when the explicit setting disappears; never switch to /tmp.
+    if not os.environ.get('XDG_STATE_HOME'):
+        pinned = _PINNED.get((str(repo), None))
+        if pinned is not None:
+            base = pinned.parents[3]
+    root = base / 'oh-my-setting/panel-control' / hashlib.sha256(str(repo).encode()).hexdigest() / 'dispatch'
+    resolved = root.resolve()
+    _validate_state_ancestors(resolved)
+    for forbidden in (repo, Path(execution_repo).resolve() if execution_repo else repo):
+        if resolved == forbidden or forbidden in resolved.parents:
+            raise ValueError('dispatch controller state must be outside the repository')
+    # Recognize worktree indirection files and checkout/bare HEAD markers without
+    # spawning another process during launch. An empty .git sandbox sentinel
+    # alone is not a repository.
+    for ancestor in (resolved,) + tuple(resolved.parents):
+        marker = ancestor / '.git'
+        if (marker.is_file() or marker.is_symlink() or (marker / 'HEAD').exists()
+                or (ancestor / 'HEAD').is_file() and (ancestor / 'objects').is_dir()):
+            raise ValueError('dispatch controller state must be outside every repository')
+    if member is not None:
+        _PINNED[key] = root
+        _PINNED[(str(repo), None)] = root
+    return root
+
+
+class Directory(panel_terminals.Store):
+    """Reuse the managed-control file checks and anchor every directory component."""
+
+    def file(self, name, flags=os.O_RDONLY, create=False):
+        # Dispatch member IDs use the bounded panel-call contract, including
+        # uppercase letters, underscores, and dots.
+        if not re.fullmatch(r'[A-Za-z0-9._-]+', name):
+            raise ValueError('invalid private filename')
+        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_CREAT if create else 0),
+                     0o600, dir_fd=self.fd)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid() or info.st_mode & 0o077):
+            os.close(fd)
+            raise ValueError('unsafe private file')
+        return fd
+
+    def __init__(self, path, create=False):
+        panel_terminals.supported()
+        path = Path(path)
+        self.path = path
+        if not path.is_absolute() or '..' in path.parts:
+            raise ValueError('invalid dispatch controller root')
+        self.fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            private = False
+            component_path = Path('/')
+            for name in path.parts[1:]:
+                component_path = component_path / name
+                if name == 'oh-my-setting':
+                    info = os.fstat(self.fd)
+                    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                        raise ValueError('unsafe dispatch state home')
+                private = private or name == 'oh-my-setting'
+                created = False
+                if create:
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=self.fd)
+                        os.fsync(self.fd)
+                        created = True
+                    except FileExistsError:
+                        pass
+                try:
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.fd)
+                except PermissionError as error:
+                    if created:
+                        os.rmdir(name, dir_fd=self.fd)
+                        raise ValueError('restrictive umask prevented opening new dispatch directory %r; '
+                                         'run with a umask that preserves owner rwx permissions'
+                                         % component_path) from error
+                    raise
+                if created:
+                    os.fchmod(child, 0o700)
+                info = os.fstat(child)
+                root_uid = os.stat('/').st_uid
+                if info.st_mode & 0o022 and not (info.st_mode & stat.S_ISVTX and info.st_uid == root_uid):
+                    os.close(child)
+                    raise ValueError('unsafe writable dispatch state ancestor %r; set XDG_STATE_HOME to a private directory or chmod %r'
+                                     % (name, name))
+                # The state home and every OMS directory must belong to the invoking owner.
+                check = private or name == path.parts[-1]
+                if check and (info.st_uid != os.getuid() or info.st_mode & (0o077 if private else 0o022)):
+                    os.close(child)
+                    raise ValueError('unsafe dispatch controller directory')
+                os.close(self.fd)
+                self.fd = child
+        except BaseException:
+            self.close()
+            raise
+
+
+def _legacy(repo):
+    uid = str(os.getuid())
+    base = Path('/tmp') if os.name == 'posix' else Path(tempfile.gettempdir())
+    return base / ('oms-dispatch-' + uid) / hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()
+
+
+def _legacy_directory(repo):
+    # Check the private UID directory too; never create missing legacy state.
+    path = _legacy(repo)
+    with Directory(path.parent) as parent:
+        info = os.fstat(parent.fd)
+        if info.st_mode & 0o077 or info.st_uid != os.getuid():
+            raise ValueError('unsafe legacy dispatch directory')
+    return Directory(path)
+
+
+def _record_exists(repo, path, name, legacy):
+    try:
+        with (_legacy_directory(repo) if legacy else Directory(path)) as directory:
+            fd = directory.file(name)
+            os.close(fd)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _location(repo, member, name=None):
+    path = _root(repo, member) / member
+    if name is not None and _record_exists(repo, path, name, False):
+        return path, False
+    legacy_path = _legacy(repo)
+    try:
+        with _legacy_directory(repo):
+            if name is None or _record_exists(repo, legacy_path, name, True):
+                return legacy_path, True
+    except FileNotFoundError:
+        pass
+    try:
+        with Directory(path):
+            return path, False
+    except FileNotFoundError:
+        return path, False
+
+
+class RecordPaths:
+    """Resolve historical flat logical names for private diagnostic callers."""
+
+    def __init__(self, repo):
+        self.repo = repo
+
+    def __truediv__(self, name):
+        member = _member(self.repo, name)
+        path, unused = _location(self.repo, member, name)
+        return path / name
+
+
+def store(repo):
+    return RecordPaths(repo)
+
+
+def initialize(repo, member, call, execution_repo=None):
+    root = _root(repo, member, execution_repo)
+    identity = dict(schema=RECORD_SCHEMA, repo=str(Path(repo).resolve()), room=call['room'],
+                    participant=member, parent=call['parent'], task_id=call.get('task_id'),
+                    nonce=call.get('nonce'), boot_id=boot_id(), controller=process_identity(),
+                    root=str(root / member))
+    with Directory(root / member, create=True) as directory:
+        _write(directory, 'identity.json', identity, exclusive=True)
+    return identity
+
+
+def orphan_members(repo):
+    """Return member directories whose creation crashed before identity was written."""
+    root = _root(repo)
+    try:
+        with Directory(root) as directory:
+            names = os.listdir(directory.fd)
+    except FileNotFoundError:
+        return []
+    result = []
+    for member in names:
+        if not re.fullmatch(r'call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}', member):
+            continue
+        try:
+            with Directory(root / member) as directory:
+                directory.read('identity.json')
+        except FileNotFoundError:
+            result.append(member)
+    return result
+
+
+def pinned_state_home(repo, member):
+    return str(_root(repo, member).parents[3])
+
+
+def _valid_process(value):
+    return (isinstance(value, dict) and set(value) == {'pid', 'identity'}
+            and type(value['pid']) is int and value['pid'] > 0
+            and isinstance(value['identity'], str) and bool(value['identity']))
+
+
+def _identity(directory, repo, member):
+    try:
+        identity = directory.read('identity.json')
+    except FileNotFoundError as error:
+        raise ValueError('dispatch launch identity unavailable') from error
+    if (set(identity) != {'schema', 'repo', 'room', 'participant', 'parent', 'task_id',
+                         'nonce', 'boot_id', 'controller', 'root'}
+            or type(identity['schema']) is not int or identity['schema'] != RECORD_SCHEMA
+            or identity['repo'] != str(Path(repo).resolve()) or identity['participant'] != member
+            or identity['root'] != str(directory.path)
+            or not _valid_boot(identity['boot_id']) or not _valid_process(identity['controller'])
+            or any(identity[key] is not None and not isinstance(identity[key], str)
+                   for key in ('room', 'parent', 'task_id', 'nonce'))):
+        raise ValueError('invalid dispatch launch identity')
+    return identity
 
 
 def read(repo, name):
-    path = store(repo) / name
-    fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
-    with os.fdopen(fd, 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or os.name == "posix" and info.st_mode & 0o077
-                or hasattr(os, 'getuid') and info.st_uid != os.getuid()):
-            raise ValueError('unsafe dispatch controller record')
-        data = stream.read(65537)
-    if len(data) > 65536:
+    member = _member(repo, name)
+    path, legacy = _location(repo, member, name)
+    with (_legacy_directory(repo) if legacy else Directory(path)) as directory:
+        value = directory.read(name)
+        if legacy:
+            return value
+        if (set(value) != {'schema', 'repo', 'participant', 'launch', 'boot_id', 'writer', 'supervisor', 'record'}
+                or type(value['schema']) is not int or value['schema'] != RECORD_SCHEMA
+                or value['repo'] != str(Path(repo).resolve()) or value['participant'] != member
+                or value['launch'] != _identity(directory, repo, member)
+                or not _valid_boot(value['boot_id']) or not _valid_process(value['writer'])
+                or value['supervisor'] is not None and not _valid_process(value['supervisor'])):
+            raise ValueError('invalid dispatch controller envelope')
+        return value['record']
+
+
+def stale_boot(repo, name):
+    """Report old-boot evidence; assumes state home is not shared across hosts."""
+    current = boot_id()
+    if current == 'unknown':
+        # On non-Linux systems (or when Linux boot metadata is unreadable), keep
+        # the existing PID and process-identity checks unchanged.
+        return False
+    member = _member(repo, name)
+    path, legacy = _location(repo, member, name)
+    if legacy:
+        return False
+    try:
+        read(repo, name)
+    except FileNotFoundError:
+        return False
+    with Directory(path) as directory:
+        envelope = directory.read(name)
+        identity = _identity(directory, repo, member)
+        recorded = (envelope.get('boot_id'), identity.get('boot_id'))
+        return any(value != 'unknown' and value != current for value in recorded)
+
+
+def _write(directory, name, value, exclusive=False):
+    raw = encoded(value)
+    if len(raw) > 65536:
         raise ValueError('dispatch controller record too large')
-    return json.loads(data)
-
-
-def sync_directory(directory):
-    if os.name == 'posix':
-        fd = os.open(str(directory), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    # Refuse existing unsafe files, including on replace; never heal links or
+    # foreign ownership into trusted controller evidence.
+    try:
+        fd = directory.file(name)
+    except FileNotFoundError:
+        pass
+    else:
+        os.close(fd)
+    if exclusive:
+        fd = directory.file(name, os.O_WRONLY | os.O_EXCL, create=True)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.fsync(directory.fd)
+        return
+    temporary = 'tmp-' + uuid.uuid4().hex
+    fd = directory.file(temporary, os.O_WRONLY | os.O_EXCL, create=True)
+    os.fchmod(fd, 0o600)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd)
+        os.fsync(directory.fd)
+    finally:
         try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            os.unlink(temporary, dir_fd=directory.fd)
+        except FileNotFoundError:
+            pass
 
 
 def write(repo, name, value, exclusive=False):
-    directory = store(repo)
-    if exclusive:
-        fd = os.open(str(directory / name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'wb') as stream:
-            stream.write(encoded(value))
-            stream.flush()
-            os.fsync(stream.fileno())
-        sync_directory(directory)
-        return
-    fd, temporary = tempfile.mkstemp(dir=str(directory))
+    member = _member(repo, name, value)
+    path = _root(repo, member) / member
     try:
-        with os.fdopen(fd, 'wb') as stream:
-            stream.write(encoded(value))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, str(directory / name))
-        sync_directory(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        with Directory(path):
+            pass
+    except FileNotFoundError:
+        # Legacy files stay read-only; initialize the durable envelope from the
+        # original launch record before writing any new evidence.
+        with _legacy_directory(repo) as legacy:
+            launch = legacy.read(member + '-launch.json')
+        call = launch.get('call') if isinstance(launch, dict) else None
+        if not isinstance(call, dict):
+            raise ValueError('legacy dispatch launch call unavailable')
+        initialize(repo, member, call)
+    with Directory(path) as directory:
+        supervisor = None
+        if name.endswith(('-process.json', '-supervisor.json')) and isinstance(value, dict):
+            pid = value.get('pid')
+            if type(pid) is int and pid > 0:
+                # The parent already captured its child's start identity.
+                # Re-observing a PID-only legacy binding could name a reuse.
+                supervisor = dict(pid=pid, identity=value.get('identity') or (
+                    process_identity()['identity'] if pid == os.getpid() else 'unknown'))
+        value = dict(schema=RECORD_SCHEMA, repo=str(Path(repo).resolve()), participant=member,
+                     launch=_identity(directory, repo, member), boot_id=boot_id(), writer=process_identity(),
+                     supervisor=supervisor, record=value)
+        _write(directory, name, value, exclusive)
 
 
 def generation(path):
