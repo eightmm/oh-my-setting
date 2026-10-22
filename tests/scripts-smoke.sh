@@ -75,7 +75,6 @@ mkdir -p "$TEST_HOME" "$TEST_CWD"
 # (CI has none, dev machines vary — this is exactly what hid the
 # default-branch / no-identity bugs), pin a committer identity and a stable
 # locale/timezone. Tests must not depend on ambient host state.
-export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME="oms-test" GIT_AUTHOR_EMAIL="test@example.com"
 export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
 export LC_ALL=C LANG=C TZ=UTC
@@ -15862,6 +15861,48 @@ PY
   out="$(cd "$repo" && PYTHONPATH="$TMP/affected-python-inherited" OMS_AFFECTED_MARKER="$selected" bash scripts/check.sh --affected --no-lint --changed-from "$base" --changed-to HEAD 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "affected Python test failure was swallowed: $out"
   contains "$out" 'selected failure propagated' || fail "selected Python failure was not reported: $out"
+}
+
+test_check_ci_parity_panel_dispatch_runs_full_operator_suite() {
+  local repo="$TMP/panel-dispatch-selector" base marker out
+  make_committed_repo "$repo"
+  mkdir -p "$repo/scripts/lib" "$repo/tests"
+  printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
+  cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+    "$ROOT/scripts/lib/check-parallel.sh" "$repo/scripts/lib/"
+  cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
+  cat > "$repo/scripts/graph.sh" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/operator-tools-smoke.sh"],"test_cases":[]}
+JSON
+SH
+  chmod +x "$repo/scripts/graph.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/source-distribution-smoke.sh"
+  cat > "$repo/tests/operator-tools-smoke.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$OMS_OPERATOR_MARKER"
+SH
+  printf '# panel dispatch fixture\n' > "$repo/scripts/lib/panel_dispatch.py"
+  git -C "$repo" add .gitignore scripts tests
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m baseline >/dev/null
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  printf '# selector change\n' >> "$repo/scripts/lib/panel_dispatch.py"
+  git -C "$repo" add scripts/lib/panel_dispatch.py
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m panel_dispatch >/dev/null
+  marker="$TMP/panel-dispatch-selector.marker"
+  if out="$(cd "$repo" && OMS_OPERATOR_MARKER="$marker" OMS_OPERATOR_JOBS=4 \
+      bash scripts/check.sh --affected --ci-parity --no-lint \
+        --changed-from "$base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "panel_dispatch affected selection failed: $out"
+  fi
+  [ "$(cat "$marker")" = '--jobs 4' ] ||
+    fail "panel_dispatch.py selector should run the full operator suite (--jobs 4); ran: $(cat "$marker" 2>/dev/null || true)"
+  printf 'panel_dispatch.py selector: %s\n' "$(cat "$marker")"
 }
 
 test_check_gate_hard_fails_without_shellcheck() {

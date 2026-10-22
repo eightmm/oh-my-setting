@@ -1122,7 +1122,7 @@ if [ "$RUN_QUICK" = 1 ]; then
     # Tier routing picks among installed providers, so these are the inputs
     # that let a fixture pass only where a provider CLI exists (f698ac9).
     case "$path" in
-      config/panel-routing.json|scripts/lib/provider-registry.sh|scripts/lib/panel_routing.py|scripts/lib/panel_view.py|scripts/lib/terminal_panel.py|tests/operator-tools-smoke.sh|tests/operator/*)
+      config/panel-routing.json|scripts/lib/provider-registry.sh|scripts/lib/panel_*.py|scripts/lib/room_view.py|scripts/lib/terminal_panel.py|tests/operator-tools-smoke.sh|tests/operator/*)
         quick_routing=1
         ;;
     esac

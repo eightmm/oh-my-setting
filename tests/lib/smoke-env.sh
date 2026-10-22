@@ -6,6 +6,9 @@ unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID
 # An admission or gate verify budget set by the caller is not the fixtures' own.
 unset OMS_PEER_VERIFY_TIMEOUT
 unset NVM_BIN NVM_DIR
+# Match CI's hermetic Git configuration. Fixtures that need commits must set
+# their own identity; ambient developer identity must never make them pass.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
 # Fixtures choose their tools through PATH; runtime activation must not undo it.
 export OMS_TEST_PROVIDER_PATH_ONLY=1
 for oms_smoke_inherited in $(compgen -e); do
