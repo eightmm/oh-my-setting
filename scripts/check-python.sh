@@ -13,8 +13,179 @@ case "${1:-}" in -h|--help) echo "usage: check-python.sh [PATH...] (default: all
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$@" <<'PY'
 import ast
+import builtins
 import pathlib
+import symtable
 import sys
+
+
+class ModuleBindings(ast.NodeVisitor):
+    """Collect names that are visible at module scope without entering functions."""
+    def __init__(self):
+        self.names = set()
+        self.dynamic = False
+
+    def bind_target(self, target):
+        if isinstance(target, ast.Name):
+            self.names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                self.bind_target(item)
+        elif isinstance(target, ast.Starred):
+            self.bind_target(target.value)
+
+    def visit_FunctionDef(self, node):
+        self.names.add(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in node.args.defaults + node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node):
+        self.names.add(node.name)
+        for expr in node.decorator_list + node.bases + [kw.value for kw in node.keywords]:
+            self.visit(expr)
+
+    def visit_Import(self, node):
+        self.names.update(alias.asname or alias.name.split('.')[0] for alias in node.names)
+
+    def visit_ImportFrom(self, node):
+        if any(alias.name == '*' for alias in node.names):
+            self.dynamic = True
+        self.names.update(alias.asname or alias.name for alias in node.names if alias.name != '*')
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, (ast.Store, ast.Param)):
+            self.names.add(node.id)
+
+    def visit_Global(self, node):
+        # Function-level global writes are added from the symbol table below.
+        pass
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name) and node.func.id in ('globals', 'vars'):
+            self.dynamic = True
+        if (isinstance(node.func, ast.Name) and node.func.id == 'setattr' and
+                node.args and isinstance(node.args[0], ast.Subscript) and
+                isinstance(node.args[0].value, ast.Attribute) and
+                isinstance(node.args[0].value.value, ast.Name) and
+                node.args[0].value.value.id == 'sys' and node.args[0].value.attr == 'modules'):
+            self.dynamic = True
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node):
+        self.bind_target(node.target)
+        self.visit(node.value)
+
+    def visit_comprehension(self, node):
+        self.visit(node.iter)
+        for condition in node.ifs:
+            self.visit(condition)
+
+    def visit_ExceptHandler(self, node):
+        if node.name:
+            self.names.add(node.name)
+        for stmt in node.body:
+            self.visit(stmt)
+
+
+def undefined_globals(tree, source, filename):
+    bindings = ModuleBindings()
+    bindings.visit(tree)
+    if '__getattr__' in bindings.names:
+        bindings.dynamic = True
+    table = symtable.symtable(source, filename, 'exec')
+
+    scope_nodes = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            key = ('function', node.name, node.lineno)
+        elif isinstance(node, ast.ClassDef):
+            key = ('class', node.name, node.lineno)
+        elif isinstance(node, ast.Lambda):
+            key = ('function', 'lambda', node.lineno)
+        else:
+            continue
+        scope_nodes[key] = node
+
+    def scopes(scope):
+        yield scope
+        for child in scope.get_children():
+            yield from scopes(child)
+
+    # A global assignment anywhere in the module makes that name a module
+    # binding, regardless of whether its writer appears before its reader.
+    for scope in scopes(table):
+        for symbol in scope.get_symbols():
+            if symbol.is_global() and symbol.is_assigned():
+                bindings.names.add(symbol.get_name())
+
+    class ScopeLoads(ast.NodeVisitor):
+        def __init__(self, root, name):
+            self.root = root
+            self.name = name
+            self.lines = []
+
+        def visit_Name(self, node):
+            if node.id == self.name and isinstance(node.ctx, ast.Load):
+                self.lines.append(node.lineno)
+
+        def visit_FunctionDef(self, node):
+            if node is self.root:
+                for stmt in node.body:
+                    self.visit(stmt)
+                return
+            for expr in node.decorator_list + node.args.defaults + node.args.kw_defaults:
+                if expr is not None:
+                    self.visit(expr)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node):
+            if node is self.root:
+                for stmt in node.body:
+                    self.visit(stmt)
+                return
+            for expr in node.decorator_list + node.bases + [kw.value for kw in node.keywords]:
+                self.visit(expr)
+
+        def visit_Lambda(self, node):
+            if node is self.root:
+                self.visit(node.body)
+
+    def read_line(scope, name):
+        node = scope_nodes.get((scope.get_type(), scope.get_name(), scope.get_lineno()))
+        if node is not None:
+            visitor = ScopeLoads(node, name)
+            visitor.visit(node)
+            if visitor.lines:
+                return min(visitor.lines)
+        return scope.get_lineno()
+
+    def inspect(scope):
+        if scope is not table:
+            for symbol in scope.get_symbols():
+                if (symbol.is_global() and symbol.is_referenced() and
+                        not symbol.is_declared_global() and symbol.get_name() not in bindings.names):
+                    yield symbol.get_name(), read_line(scope, symbol.get_name())
+        for child in scope.get_children():
+            yield from inspect(child)
+
+    problems = list(inspect(table))
+    if bindings.dynamic:
+        return []
+    # The operator smoke fixtures are source fragments deliberately exec'd by
+    # tests/operator/runner.py into one shared namespace, so their globals are
+    # supplied by sibling fragments and the runner rather than module bindings.
+    if pathlib.Path(filename).resolve().parent == pathlib.Path('tests/operator').resolve():
+        return []
+    allowed = set(dir(builtins)) | {'__file__', '__name__', '__package__', '__loader__',
+                                    '__spec__', '__builtins__', '__doc__', '__cached__'}
+    return sorted(set((name, line) for name, line in problems if name not in allowed and
+                      not (name.startswith('__') and name.endswith('__'))))
 
 failed = 0
 checked = 0
@@ -35,8 +206,11 @@ for directory in sys.argv[1:]:
         checked += 1
         try:
             source = path.read_text(encoding="utf-8")
-            ast.parse(source, filename=str(path), mode="exec", feature_version=9)
+            tree = ast.parse(source, filename=str(path), mode="exec", feature_version=9)
             compile(source, str(path), "exec")
+            for name, line in undefined_globals(tree, source, str(path)):
+                failed = 1
+                print("error: %s:%d: undefined name %s" % (path, line, name), file=sys.stderr)
         except (OSError, SyntaxError, UnicodeError, ValueError) as exc:
             failed = 1
             print("error: %s: %s" % (path, exc), file=sys.stderr)

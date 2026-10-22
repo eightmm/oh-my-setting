@@ -16171,7 +16171,7 @@ EOF
 # Every .sh here is linted; the Python helpers had nothing, and one of them now
 # decides what the installer may delete.
 test_python_helpers_are_syntax_checked() {
-  local out dir="$TMP/selected-python"
+  local out dir="$TMP/selected-python" undefined="$TMP/undefined-global.py" defined="$TMP/defined-global.py"
 
   out="$(cd "$ROOT" && bash scripts/check-python.sh 2>&1)" ||
     fail "python syntax gate should pass: $out"
@@ -16188,6 +16188,35 @@ test_python_helpers_are_syntax_checked() {
   if bash "$ROOT/scripts/check-python.sh" "$dir/missing.py" >/dev/null 2>&1; then
     fail "missing selected Python passed"
   fi
+  cat > "$undefined" <<'EOF'
+def first():
+  hidden = 1
+
+def second():
+  return hidden
+EOF
+  if out="$(bash "$ROOT/scripts/check-python.sh" "$undefined" 2>&1)"; then
+    fail "function-local name used by another function passed"
+  fi
+  contains "$out" "$undefined:5: undefined name hidden" ||
+    fail "undefined-name diagnostic must identify the read line: $out"
+  cat > "$defined" <<'EOF'
+def read_before_writer():
+  def nested_reader():
+    return written
+  return written
+
+def write_global():
+  global written
+  written = len(())
+
+def read_later_before_definition():
+  return later
+
+later = 1
+EOF
+  bash "$ROOT/scripts/check-python.sh" "$defined" >/dev/null ||
+    fail "builtin, later module binding, nested reader, or later global write was rejected"
 }
 
 test_ci_status_reports_conclusion() {
