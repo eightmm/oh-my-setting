@@ -31719,6 +31719,19 @@ PY
     fi
   done
 
+  # Transcript retention is owner bookkeeping: panel_activity.py prunes old
+  # call captures and removes its .transcript-* staging files in either mode.
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-transcript-$transient_mode"
+    make_guard_repo "$transient"
+    mkdir -p "$transient/.oms/panel-state/dispatch-logs"
+    printf 'display capture\n' > "$transient/.oms/panel-state/dispatch-logs/call-0123456789abcdef.transcript"
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" run_guarded_worker "$transient" \
+      "rm -f '$transient/.oms/panel-state/dispatch-logs/call-0123456789abcdef.transcript'; printf 'staging\\n' > '$transient/.oms/panel-state/dispatch-logs/.transcript-abc123_4'; rm -f '$transient/.oms/panel-state/dispatch-logs/.transcript-abc123_4'")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode transcript retention bookkeeping should pass: $result"
+  done
+
   # The same producer-shaped regular-file staging names may be created after
   # capture; pre-existing parent directories isolate file classification.
   for transient_mode in 0 1; do
@@ -31751,7 +31764,7 @@ PY
   # every expected violation is asserted independently.
   local control expected control_body
   for transient_mode in 0 1; do
-    for control in stable-session malformed wrong-dir task plan symlink jsonl hint-date hint-content hint-link sqlite-wrong-dir sqlite-link sqlite-database; do
+    for control in stable-session malformed wrong-dir task plan symlink jsonl hint-date hint-content hint-link sqlite-wrong-dir sqlite-link sqlite-database transcript-log transcript-link transcript-name; do
       transient="$TMP/guard-state-transient-control-$transient_mode-$control"
       make_guard_repo "$transient"
       case "$control" in
@@ -31836,6 +31849,27 @@ PY
           rel="work-journal/index.sqlite3"
           expected="$rel was deleted"
           mkdir -p "$transient/.oms/work-journal"
+          : > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        transcript-log)
+          rel="panel-state/dispatch-logs/call-0123456789abcdef.log"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/panel-state/dispatch-logs"
+          : > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        transcript-link)
+          rel="panel-state/dispatch-logs/call-0123456789abcdef.transcript"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/panel-state/dispatch-logs"
+          ln -s target "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        transcript-name)
+          rel="panel-state/dispatch-logs/other.transcript"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/panel-state/dispatch-logs"
           : > "$transient/.oms/$rel"
           control_body="rm -f '$transient/.oms/$rel'"
           ;;

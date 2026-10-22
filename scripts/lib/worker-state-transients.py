@@ -52,6 +52,12 @@ def is_internal_atomic_temp(root, rel):
                 name,
             )
         )
+    elif parent == "panel-state/dispatch-logs":
+        # panel_activity.py owns retained transcript rotation and staging files.
+        matched = (
+            re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.transcript", name) or
+            re.fullmatch(r"\.transcript-[a-z0-9_]{8}", name)
+        )
     else:
         matched = None
 
