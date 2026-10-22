@@ -66,13 +66,26 @@ class ModuleBindings(ast.NodeVisitor):
         pass
 
     def visit_Call(self, node):
-        if isinstance(node.func, ast.Name) and node.func.id in ('globals', 'vars'):
+        if (isinstance(node.func, ast.Attribute) and node.func.attr in
+                ('setdefault', 'update', '__setitem__') and
+                isinstance(node.func.value, ast.Call) and
+                isinstance(node.func.value.func, ast.Name) and
+                node.func.value.func.id in ('globals', 'vars') and not node.func.value.args and
+                not node.func.value.keywords):
             self.dynamic = True
         if (isinstance(node.func, ast.Name) and node.func.id == 'setattr' and
                 node.args and isinstance(node.args[0], ast.Subscript) and
                 isinstance(node.args[0].value, ast.Attribute) and
                 isinstance(node.args[0].value.value, ast.Name) and
                 node.args[0].value.value.id == 'sys' and node.args[0].value.attr == 'modules'):
+            self.dynamic = True
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node):
+        namespace = node.value
+        if (isinstance(node.ctx, ast.Store) and isinstance(namespace, ast.Call) and
+                isinstance(namespace.func, ast.Name) and namespace.func.id in ('globals', 'vars') and
+                not namespace.args and not namespace.keywords):
             self.dynamic = True
         self.generic_visit(node)
 
@@ -176,20 +189,21 @@ def undefined_globals(tree, source, filename):
 
     problems = list(inspect(table))
     if bindings.dynamic:
-        return []
+        return [], 'dynamic namespace'
     # The operator smoke fixtures are source fragments deliberately exec'd by
     # tests/operator/runner.py into one shared namespace, so their globals are
     # supplied by sibling fragments and the runner rather than module bindings.
     if pathlib.Path(filename).resolve().parent == pathlib.Path('tests/operator').resolve():
-        return []
+        return [], 'operator-fixture directory'
     allowed = set(dir(builtins)) | {'__file__', '__name__', '__package__', '__loader__',
                                     '__spec__', '__builtins__', '__doc__', '__cached__'}
     return sorted(set((name, line) for name, line in problems if name not in allowed and
-                      not (name.startswith('__') and name.endswith('__'))))
+                      not (name.startswith('__') and name.endswith('__')))), None
 
 failed = 0
 checked = 0
 seen = set()
+skipped = []
 for directory in sys.argv[1:]:
     root = pathlib.Path(directory)
     if not root.exists():
@@ -208,9 +222,12 @@ for directory in sys.argv[1:]:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path), mode="exec", feature_version=9)
             compile(source, str(path), "exec")
-            for name, line in undefined_globals(tree, source, str(path)):
+            problems, skip_reason = undefined_globals(tree, source, str(path))
+            for name, line in problems:
                 failed = 1
                 print("error: %s:%d: undefined name %s" % (path, line, name), file=sys.stderr)
+            if skip_reason:
+                skipped.append((str(path), skip_reason))
         except (OSError, SyntaxError, UnicodeError, ValueError) as exc:
             failed = 1
             print("error: %s: %s" % (path, exc), file=sys.stderr)
@@ -220,5 +237,23 @@ if not checked:
     raise SystemExit(1)
 if failed:
     raise SystemExit(1)
-print("python-syntax: ok (%d files)" % checked)
+summary = "python-syntax: ok (%d files)" % checked
+if skipped:
+    dynamic_names = [pathlib.Path(path).name for path, reason in skipped
+                     if reason == 'dynamic namespace']
+    operator_count = sum(1 for _, reason in skipped
+                         if reason == 'operator-fixture directory')
+    names = []
+    dynamic_capacity = 5 - (1 if operator_count else 0)
+    if len(dynamic_names) > dynamic_capacity:
+        dynamic_capacity -= 1
+        names.extend(dynamic_names[:dynamic_capacity])
+        names.append('…')
+    else:
+        names.extend(dynamic_names)
+    if operator_count:
+        names.append('tests/operator/* (%d)' % operator_count)
+    summary = "python-syntax: ok (%d files; undefined-name rule skipped %d: %s)" % (
+        checked, len(skipped), ', '.join(names))
+print(summary)
 PY

@@ -16192,11 +16192,11 @@ EOF
 # Every .sh here is linted; the Python helpers had nothing, and one of them now
 # decides what the installer may delete.
 test_python_helpers_are_syntax_checked() {
-  local out dir="$TMP/selected-python" undefined="$TMP/undefined-global.py" defined="$TMP/defined-global.py"
+  local out dir="$TMP/selected-python" undefined="$TMP/undefined-global.py" defined="$TMP/defined-global.py" vars_file="$TMP/vars-args.py" globals_file="$TMP/globals-write.py" pop_file="$TMP/globals-pop.py" del_file="$TMP/globals-del.py" isolated_repo="$TMP/python-skip-repo" isolated_checker isolated_operator isolated_dynamic
 
   out="$(cd "$ROOT" && bash scripts/check-python.sh 2>&1)" ||
     fail "python syntax gate should pass: $out"
-  printf '%s' "$out" | grep >/dev/null -E 'python-syntax: ok \([0-9]+ files\)' ||
+  printf '%s' "$out" | grep >/dev/null -E 'python-syntax: ok \([0-9]+ files([;)]|$)' ||
     fail "python syntax gate must report what it checked: $out"
   mkdir -p "$dir"
   printf 'valid = 1\n' > "$dir/good.py"
@@ -16238,6 +16238,61 @@ later = 1
 EOF
   bash "$ROOT/scripts/check-python.sh" "$defined" >/dev/null ||
     fail "builtin, later module binding, nested reader, or later global write was rejected"
+  cat > "$vars_file" <<'EOF'
+def inspect_args(args):
+  options = vars(args)
+  return absent_name
+EOF
+  if out="$(bash "$ROOT/scripts/check-python.sh" "$vars_file" 2>&1)"; then
+    fail "vars(args) must not disable undefined-name checks"
+  fi
+  contains "$out" "$vars_file:3: undefined name absent_name" ||
+    fail "vars(args) undefined name diagnostic missing: $out"
+  cat > "$globals_file" <<'EOF'
+globals()['provided_later'] = 1
+def read_dynamic_name():
+  return external_name
+EOF
+  out="$(bash "$ROOT/scripts/check-python.sh" "$globals_file" 2>&1)" ||
+    fail "dynamic module namespace write should skip undefined-name check"
+  contains "$out" 'undefined-name rule skipped 1: globals-write.py' ||
+    fail "dynamic module must be named in skip summary: $out"
+  cat > "$pop_file" <<'EOF'
+globals().pop("optional_name", None)
+def read_missing():
+  return absent_after_pop
+EOF
+  if out="$(bash "$ROOT/scripts/check-python.sh" "$pop_file" 2>&1)"; then
+    fail "globals().pop must not disable undefined-name checks"
+  fi
+  contains "$out" "$pop_file:3: undefined name absent_after_pop" ||
+    fail "globals().pop must preserve undefined-name diagnostic: $out"
+  cat > "$del_file" <<'EOF'
+del globals()['optional_name']
+def read_missing():
+  return absent_after_del
+EOF
+  if out="$(bash "$ROOT/scripts/check-python.sh" "$del_file" 2>&1)"; then
+    fail "del globals()['name'] must not disable undefined-name checks"
+  fi
+  contains "$out" "$del_file:3: undefined name absent_after_del" ||
+    fail "del globals()['name'] must preserve undefined-name diagnostic: $out"
+
+  isolated_checker="$isolated_repo/scripts/check-python.sh"
+  isolated_operator="$isolated_repo/tests/operator/fixture.py"
+  isolated_dynamic="$isolated_repo/tests/dynamic.py"
+  mkdir -p "$isolated_repo/scripts" "$isolated_repo/tests/operator"
+  cp "$ROOT/scripts/check-python.sh" "$isolated_checker"
+  printf 'def fixture():\n  return sibling_binding\n' > "$isolated_operator"
+  cat > "$isolated_dynamic" <<'EOF'
+globals()['provided_later'] = 1
+def read_dynamic_name():
+  return external_name
+EOF
+  out="$(bash "$isolated_checker" "$isolated_operator" "$isolated_dynamic" 2>&1)" ||
+    fail "isolated operator fixture should be syntax checked with exemption: $out"
+  [ "$out" = 'python-syntax: ok (2 files; undefined-name rule skipped 2: dynamic.py, tests/operator/* (1))' ] ||
+    fail "dynamic and operator skips must be summarized together: $out"
 }
 
 test_ci_status_reports_conclusion() {
