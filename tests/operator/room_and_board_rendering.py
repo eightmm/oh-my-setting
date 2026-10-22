@@ -229,6 +229,32 @@ assert "tok" not in review_line and "12.0k tok" in implement_line, (review_line,
 selected_result = render(finished_usage_tree, "codex", 100, 40, view="tree",
                          navigation={"selected": ("result", "layout-builder")})
 assert "12.0k tok (out 4000)" in selected_result, selected_result
+from panel_view import amount, call_tokens, plan_tail_columns
+cache_report = {"operations": {"recent": [{"attempt_id": "cache-result", "provider_usage": {
+    "input_tokens": 13851552, "output_tokens": 50304, "cache_read_tokens": 13356160,
+    "cache_in_input": True}}]}}
+assert call_tokens(cache_report, "cache-result", "done", True) == "13.9m tok · 96% cached"
+assert call_tokens(cache_report, "cache-result", "done") == (
+    "13.9m tok (cached input 13.4m, new input 495.4k, output 50.3k)")
+claude_cache_report = {"operations": {"recent": [{"attempt_id": "claude-cache", "provider_usage": {
+    "input_tokens": 9000, "output_tokens": 1000, "cache_read_tokens": 90000,
+    "cache_write_tokens": 1000, "cache_in_input": False}}]}}
+assert call_tokens(claude_cache_report, "claude-cache", "done", True) == "101.0k tok · 90% cached"
+assert call_tokens(claude_cache_report, "claude-cache", "done") == (
+    "101.0k tok (cached input 90.0k, new input 10.0k, output 1000)")
+no_cache_report = {"operations": {"recent": [{"attempt_id": "no-cache", "provider_usage": {
+    "input_tokens": 9000, "output_tokens": 1000, "cache_in_input": True}}]}}
+assert call_tokens(no_cache_report, "no-cache", "done", True) == "10.0k tok"
+threshold_plan = plan_tail_columns([[('[done]', 'status'), ("13.9m tok · 96% cached", "metadata"),
+                                    ("3m", "metadata")]], 44, prefix_width=10, optional=(1,))
+assert 1 in threshold_plan["active"] and threshold_plan["rows"][0][1][0] == "13.9m tok", threshold_plan
+assert amount(12950) == "12.9k", amount(12950)
+inconsistent_report = {"operations": {"recent": [{"attempt_id": "inconsistent-cache", "provider_usage": {
+    "input_tokens": 4000, "output_tokens": 1000, "cache_read_tokens": 5000,
+    "cache_in_input": True}}]}}
+assert call_tokens(inconsistent_report, "inconsistent-cache", "done", True) == "5000 tok · 100% cached"
+assert call_tokens(inconsistent_report, "inconsistent-cache", "done") == (
+    "5000 tok (cached input 4000, new input 0, output 1000)")
 selected_unknown = render(ambiguous_usage_tree, "codex", 100, 40, view="tree",
                           navigation={"selected": ("result", "layout-review-a")})
 assert "tokens unreported" in selected_unknown, selected_unknown
@@ -1767,7 +1793,7 @@ with tempfile.TemporaryDirectory() as activity_root:
                   "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}},
               {"type": "assistant", "message": {"id": "msg-one", "usage": {"input_tokens": 1000,
                   "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}}],
-             "~6800 tok")):
+             "~6800 tok · 21% cached")):
         usage_stream = activity_repo / (provider + "-usage.jsonl")
         usage_events = event if isinstance(event, list) else [event]
         usage_stream.write_text("\n".join(json.dumps(item) for item in usage_events) + "\n", encoding="utf-8")
@@ -1787,7 +1813,9 @@ with tempfile.TemporaryDirectory() as activity_root:
         assert expected in live_picture, (provider, live_picture)
         selected_live = render(live_report, provider, 100, 30, view="tree",
                                navigation={"selected": ("result", call_id)})
-        assert expected + " so far" in selected_live, (provider, selected_live)
+        selected_expected = ("~6800 tok so far · 21% cached (cached input 600, new input 2200, output 4000)"
+                             if provider == "claude" else "~12.3k tok so far")
+        assert selected_expected in selected_live, (provider, selected_live)
         if provider == "codex":
             usage_stream.write_text(json.dumps({"type": "turn.completed", "usage": {
                 "total_token_usage": {"input_tokens": 10000, "output_tokens": 2300}}}) + "\n", encoding="utf-8")
@@ -1797,7 +1825,9 @@ with tempfile.TemporaryDirectory() as activity_root:
                            "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}}
             with usage_stream.open("a", encoding="utf-8") as output:
                 output.write(json.dumps(result_event) + "\n")
-            assert call_tokens(live_report, attempt_id, "working", True) == "~10.1k tok", "Claude result total"
+            assert call_tokens(live_report, attempt_id, "working", True) == "~10.1k tok · 1% cached", "Claude result total and cache share"
+            assert call_tokens(live_report, attempt_id, "working") == (
+                "~10.1k tok so far · 1% cached (cached input 100, new input 9000, output 1000)")
         usage_stream.write_text(json.dumps({"type": "message_start"}) + "\n", encoding="utf-8")
         assert call_tokens(live_report, attempt_id, "working", True) == "", provider
         assert expected not in render(live_report, provider, 100, 30, view="tree"), provider
@@ -1836,8 +1866,8 @@ with tempfile.TemporaryDirectory() as activity_root:
     claude_long_report = {"repo": {"path": str(activity_repo)}, "attempts": {"active_recent": [{
         "attempt_id": claude_long_attempt, "state": "working", "panel": {
             "role": "worker", "room_id": "live-usage-room", "room_participant": claude_long_call}}]}}
-    assert call_tokens(claude_long_report, claude_long_attempt, "working", True) == "~1900 tok", \
-        "Claude usage must retain messages before the 256 KiB tail and deduplicate IDs"
+    assert call_tokens(claude_long_report, claude_long_attempt, "working", True) == "~1900 tok · 6% cached", \
+        "Claude usage must retain messages before the 256 KiB tail, deduplicate IDs and report cache share"
     cache_call = "call-live-cache"
     cache_stream = activity_repo / "cache-usage.jsonl"
     cache_stream.write_text(json.dumps({"type": "token_count", "info": {

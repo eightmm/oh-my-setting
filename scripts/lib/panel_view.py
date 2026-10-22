@@ -393,6 +393,12 @@ def plan_tail_columns(rows, content_width, prefix_width=0, optional=(), min_gap=
     budget = max(0, content_width - prefix_width)
     def size():
         return sum(widths[n] for n in active) + min_gap * max(0, len(active) - 1)
+    # Preserve the total while dropping the cached-share suffix in narrow panes.
+    for n in optional:
+        if n in active and size() + min_gap + 1 > budget:
+            for row in rows:
+                row[n] = (re.sub(r" · [0-9]+% cached$", "", row[n][0]), row[n][1])
+            widths[n] = max(display_width(row[n][0]) for row in rows)
     for n in optional:
         if size() + min_gap + 1 <= budget:
             break
@@ -645,6 +651,56 @@ def amount(value):
             str(value // 1000) + "." + str(value % 1000 // 100) + "k" if value >= 10000 else str(value))
 
 
+def _cache_amount(value):
+    if value >= 1000000:
+        rounded = (value + 50000) // 100000
+        return "%s.%sm" % (rounded // 10, rounded % 10)
+    if value >= 10000:
+        rounded = (value + 50) // 100
+        if rounded // 10 >= 1000:
+            return "1.0m"
+        return "%s.%sk" % (rounded // 10, rounded % 10)
+    return str(value)
+
+
+def _cache_input_breakdown(usage):
+    cache_read = count(usage.get("cache_read_tokens"))
+    input_tokens = count(usage.get("input_tokens"))
+    output_tokens = count(usage.get("output_tokens"))
+    if cache_read is None or input_tokens is None or output_tokens is None:
+        return None
+    if usage.get("cache_in_input") is False:
+        cache_write = count(usage.get("cache_write_tokens"))
+        if cache_write is None:
+            return None
+        input_total = input_tokens + cache_read + cache_write
+    elif usage.get("cache_in_input") is True:
+        input_total = input_tokens
+    else:
+        return None
+    cache_read = min(cache_read, input_total)
+    share = max(0, min(100, cache_read * 100 // input_total)) if input_total else 0
+    return cache_read, input_total - cache_read, output_tokens, share
+
+
+def _usage_label(usage, total, short=False, live=False):
+    label = ("~" if live else "") + amount(total) + " tok"
+    if live and not short:
+        label += " so far"
+    parts = _cache_input_breakdown(usage)
+    if parts is not None:
+        cache_read, new_input, output_tokens, share = parts
+        if short or live:
+            label += " · %s%% cached" % share
+        if not short:
+            label += " (cached input %s, new input %s, output %s)" % (
+                _cache_amount(cache_read), _cache_amount(new_input), _cache_amount(output_tokens))
+        return label
+    if not short and not live:
+        label += " (out %s)" % amount(count(usage.get("output_tokens")))
+    return label
+
+
 def provider_usage_tokens(usage):
     """Return a comparable provider total when its input/output/cache contract is complete."""
     parts = [count(usage.get(key)) for key in ("input_tokens", "output_tokens")]
@@ -658,8 +714,7 @@ def provider_usage_tokens(usage):
 def call_tokens(report, attempt_id, state, short=False):
     """One call's tokens: providers differ on cache, so a breakdown is summed to the same total."""
     if state in LIVE_STATES:
-        live = _live_call_tokens(report, attempt_id)
-        return (live + " so far" if live and not short else live) or ""
+        return _live_call_tokens(report, attempt_id, short=short) or ""
     call_rows = [item for row in listing(report.get("rows")) for item in listing(mapping(row).get("calls"))]
     operation = next((item for item in call_rows
                       if attempt_id and item.get("attempt_id") == attempt_id), {})
@@ -670,10 +725,9 @@ def call_tokens(report, attempt_id, state, short=False):
     session_total = usage.get("session_cumulative") is True
     tokens = provider_usage_tokens(usage)
     if tokens is not None:
-        text = amount(tokens) + " tok"
         if session_total:
-            return text + " (session total)"
-        return text if short else text + " (out %s)" % amount(count(usage.get("output_tokens")))
+            return amount(tokens) + " tok (session total)"
+        return _usage_label(usage, tokens, short=short)
     tokens = count(operation.get("tokens"))
     if tokens is None:
         tokens = next((count(item.get("tokens")) for item in listing(mapping(report.get("attempts")).get("recent"))
@@ -683,7 +737,7 @@ def call_tokens(report, attempt_id, state, short=False):
     return amount(tokens) + (" tok (session total)" if session_total else " tok")
 
 
-def _live_call_tokens(report, attempt_id):
+def _live_call_tokens(report, attempt_id, short=False):
     if not attempt_id:
         return ""
     attempts = listing(mapping(report.get("attempts")).get("active_recent")) + listing(
@@ -697,8 +751,11 @@ def _live_call_tokens(report, attempt_id):
         usage = panel_activity.live_usage(_repo_root(report), call)
     except (ImportError, OSError, TypeError, ValueError):
         return ""
-    tokens = provider_usage_tokens(mapping(usage))
-    return "~" + amount(tokens) + " tok" if tokens is not None else ""
+    usage = mapping(usage)
+    tokens = provider_usage_tokens(usage)
+    if tokens is None:
+        return ""
+    return _usage_label(usage, tokens, short=short, live=True)
 
 
 def usage_labels(report, costs=False):

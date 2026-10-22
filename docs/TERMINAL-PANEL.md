@@ -548,7 +548,9 @@ including earlier work. Recent outcomes and successful native process exit do
 not establish acceptance of a task.
 
 Each worker and reviewer row shows `~12.3k tok` while a call runs and
-`12.3k tok` when it finishes. Input, cache and output are summed when the provider
+`12.3k tok` when it finishes, with the cached share appended when available
+(for example, `13.9m tok · 96% cached`). Selected details show cached input, new
+input and output separately. Input, cache and output are summed when the provider
 reports a breakdown, so Claude and Codex compare. Unknown usage leaves the row
 cell blank; missing data is never shown as 0. Narrow panes keep the short form
 or drop it before clipping the call's name.
