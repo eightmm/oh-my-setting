@@ -1167,6 +1167,9 @@ if [ "$RUN_QUICK" = 1 ]; then
   # graph selection to reach this suite otherwise.
   # Sharded like CI and the other two call sites; the single-process run is not a CI shape.
   [ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"
+  if [ "$CI_PARITY" = 1 ] && [ "$quick_routing" = 1 ] && [ "$(uname -s 2>/dev/null)" = Linux ]; then
+    stage panel-workspaces bash tests/panel-workspaces-smoke.sh
+  fi
 fi
 
 affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
@@ -1179,6 +1182,7 @@ affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
       ;;
     tests/seat-reliability-smoke.sh) [ "$quick_seats" = 1 ]; return ;;
     tests/operator-tools-smoke.sh) [ "$CI_PARITY" = 1 ] && [ "$quick_routing" = 1 ]; return ;;
+    tests/panel-workspaces-smoke.sh) [ "$CI_PARITY" = 1 ] && [ "$quick_routing" = 1 ] && [ "$(uname -s 2>/dev/null)" = Linux ]; return ;;
   esac
   return 1
 }

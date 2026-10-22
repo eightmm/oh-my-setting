@@ -15961,9 +15961,9 @@ PY
 }
 
 test_check_ci_parity_panel_dispatch_runs_full_operator_suite() {
-  local repo="$TMP/panel-dispatch-selector" base marker out
+  local repo="$TMP/panel-dispatch-selector" base marker workspace_marker unrelated_base uname_bin out
   make_committed_repo "$repo"
-  mkdir -p "$repo/scripts/lib" "$repo/tests"
+  mkdir -p "$repo/scripts/lib" "$repo/tests" "$repo/bin"
   printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
   cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
   cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
@@ -15971,9 +15971,15 @@ test_check_ci_parity_panel_dispatch_runs_full_operator_suite() {
   cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
   cat > "$repo/scripts/graph.sh" <<'SH'
 #!/usr/bin/env bash
-cat <<'JSON'
+if [ "${OMS_GRAPH_PANEL_TESTS:-0}" = 1 ]; then
+  cat <<'JSON'
+{"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/operator-tools-smoke.sh","tests/panel-workspaces-smoke.sh"],"test_cases":[]}
+JSON
+else
+  cat <<'JSON'
 {"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/operator-tools-smoke.sh"],"test_cases":[]}
 JSON
+fi
 SH
   chmod +x "$repo/scripts/graph.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/source-distribution-smoke.sh"
@@ -15981,8 +15987,17 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$OMS_OPERATOR_MARKER"
 SH
+  cat > "$repo/tests/panel-workspaces-smoke.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'ran\n' >> "$OMS_PANEL_WORKSPACES_MARKER"
+SH
+  cat > "$repo/bin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$OMS_FIXTURE_UNAME"
+SH
+  chmod +x "$repo/bin/uname"
   printf '# panel dispatch fixture\n' > "$repo/scripts/lib/panel_dispatch.py"
-  git -C "$repo" add .gitignore scripts tests
+  git -C "$repo" add .gitignore scripts tests bin
   git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m baseline >/dev/null
   base="$(git -C "$repo" rev-parse HEAD)"
 
@@ -15990,7 +16005,10 @@ SH
   git -C "$repo" add scripts/lib/panel_dispatch.py
   git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m panel_dispatch >/dev/null
   marker="$TMP/panel-dispatch-selector.marker"
-  if out="$(cd "$repo" && OMS_OPERATOR_MARKER="$marker" OMS_OPERATOR_JOBS=4 \
+  workspace_marker="$TMP/panel-workspaces-selector.marker"
+  uname_bin="$repo/bin"
+  if out="$(cd "$repo" && PATH="$uname_bin:$PATH" OMS_FIXTURE_UNAME=Linux OMS_GRAPH_PANEL_TESTS=1 \
+      OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
       bash scripts/check.sh --affected --ci-parity --no-lint \
         --changed-from "$base" --changed-to HEAD 2>&1)"; then
     :
@@ -15999,6 +16017,48 @@ SH
   fi
   [ "$(cat "$marker")" = '--jobs 4' ] ||
     fail "panel_dispatch.py selector should run the full operator suite (--jobs 4); ran: $(cat "$marker" 2>/dev/null || true)"
+  [ "$(cat "$workspace_marker" 2>/dev/null)" = 'ran' ] ||
+    fail "panel_dispatch.py selector should run panel-workspaces"
+
+  rm -f "$workspace_marker"
+  if out="$(cd "$repo" && PATH="$uname_bin:$PATH" OMS_FIXTURE_UNAME=Linux OMS_GRAPH_PANEL_TESTS=0 \
+      OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+      bash scripts/check.sh --affected --ci-parity --no-lint \
+        --changed-from "$base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "Linux omitted-selection affected run failed: $out"
+  fi
+  [ "$(cat "$workspace_marker" 2>/dev/null)" = 'ran' ] ||
+    fail "Linux quick routing should run panel-workspaces when graph omits it"
+  [ "$(wc -l < "$workspace_marker" | tr -d ' ')" = 1 ] ||
+    fail "Linux quick routing should run panel-workspaces exactly once"
+
+  rm -f "$workspace_marker"
+  if out="$(cd "$repo" && PATH="$uname_bin:$PATH" OMS_FIXTURE_UNAME=Darwin OMS_GRAPH_PANEL_TESTS=1 \
+      OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+      bash scripts/check.sh --affected --ci-parity --no-lint \
+        --changed-from "$base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "non-Linux affected selection failed: $out"
+  fi
+  [ "$(cat "$workspace_marker" 2>/dev/null)" = 'ran' ] ||
+    fail "non-Linux panel-workspaces selection should not be marked as already run: $out"
+
+  unrelated_base="$(git -C "$repo" rev-parse HEAD)"
+  printf 'unrelated\n' > "$repo/README-fixture.txt"
+  git -C "$repo" add README-fixture.txt
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m unrelated >/dev/null
+  rm -f "$workspace_marker"
+  if out="$(cd "$repo" && OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+      bash scripts/check.sh --affected --ci-parity --no-lint \
+        --changed-from "$unrelated_base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "unrelated affected selection failed: $out"
+  fi
+  [ ! -e "$workspace_marker" ] || fail "unrelated change should not run panel-workspaces"
   printf 'panel_dispatch.py selector: %s\n' "$(cat "$marker")"
 }
 
