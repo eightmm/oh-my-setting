@@ -305,6 +305,12 @@ def _codex_resume_usage_baseline(usage):
     return json.dumps(dict(zip(fields, values)), separators=(",", ":"))
 
 
+def _stopped_write_continuation(last, eligible_result):
+    refs = last.get("refs", {})
+    return (refs.get("panel_access") == "write" and not eligible_result
+            and refs.get("panel_location", "").startswith("worktree:"))
+
+
 def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, patch_reference=None,
                  allow_stale_base=False):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
@@ -384,13 +390,28 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     eligible_result = (linked_call and not call.get("guard")
                        and call.get("reason_code") != "worker_authority_violation"
                        and (successful_call or verified_failure))
-    if (last.get("refs", {}).get("panel_access") == "write" and not eligible_result
-            and last.get("refs", {}).get("panel_location", "").startswith("worktree:")):
-        raise ValueError("stopped write work is not transferred by --continue; first run oms panel --salvage %s "
-                         "--attempt %s, inspect the recovery, then include recovered work in a fresh dispatch brief"
-                         % (task_id, last["attempt_id"]))
+    empty_salvage = False
+    stopped_write = _stopped_write_continuation(last, eligible_result)
+    if stopped_write:
+        import panel_salvage
+        payload_sha = panel_salvage._empty_provenance_identity(task_id, last.get("attempt_id"))
+        relative = panel_salvage._empty_provenance_path(task_id, last.get("attempt_id"))
+        try:
+            provenance = panel_salvage._provenance(
+                panel_salvage._read(Path(repo), relative, panel_salvage.MAX_EVIDENCE, True), payload_sha)
+            empty_salvage = any(
+                row.get("salvaged_from", {}).get("task") == task_id
+                and row.get("salvaged_from", {}).get("attempt") == last.get("attempt_id")
+                and row.get("salvaged_from", {}).get("outcome") == "nothing_to_recover"
+                for row in provenance["records"])
+        except (OSError, ValueError, TypeError):
+            empty_salvage = False
+        if not empty_salvage:
+            raise ValueError("stopped write work is not transferred by --continue; first run oms panel --salvage %s "
+                             "--attempt %s, inspect the recovery, then include recovered work in a fresh dispatch brief"
+                             % (task_id, last["attempt_id"]))
     patch = call.get("patch") if eligible_result else None
-    where = ""
+    where = " The previous stopped attempt was recorded as having no patch to recover." if empty_salvage else ""
     drift_note = ""
     if patch:
         # Pass write continuations a verified artifact reference. Legacy callers

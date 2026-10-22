@@ -200,11 +200,119 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
         try:
             panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
         except ValueError as error:
-            assert 'empty' in str(error), error
+            assert str(error) == ('nothing to recover for %s; --continue scratch-task may now resume the session '
+                                  'without a patch' % scratch_attempt['attempt_id']), error
         else:
             raise AssertionError('empty indexed patch was accepted')
-        assert {path: path.read_bytes() for path in provenance_files} == provenance_files
+        empty_record_path = salvage_repo / panel_salvage._empty_provenance_path(
+            'scratch-task', scratch_attempt['attempt_id'])
+        empty_record = json.loads(empty_record_path.read_text())
+        outcome = next(row['salvaged_from'] for row in empty_record['records']
+                       if row['salvaged_from'].get('attempt') == scratch_attempt['attempt_id'])
+        assert outcome['outcome'] == 'nothing_to_recover'
+        assert outcome['task'] == 'scratch-task'
+        # A delegate-located missing worktree with no indexed patch metadata is also empty salvage.
+        scratch_record.pop('patch')
+        scratch_record.pop('patch_sha256')
+        try:
+            panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        except ValueError as error:
+            assert 'nothing to recover for %s' % scratch_attempt['attempt_id'] in str(error), error
+        else:
+            raise AssertionError('missing indexed patch metadata was not recorded as empty salvage')
+        empty_record = json.loads(empty_record_path.read_text())
+        outcomes = [row['salvaged_from'] for row in empty_record['records']
+                    if row['salvaged_from'].get('attempt') == scratch_attempt['attempt_id']]
+        assert any(row.get('reason', '').startswith('no kept worktree or indexed patch')
+                   for row in outcomes), outcomes
+        assert str(panel_salvage._worktree_root().resolve(strict=True)) in outcomes[-1]['reason']
+        def assert_partial_patch_evidence(task_id, attempt_id, evidence):
+            attempt = dict(scratch_attempt, task_id=task_id, attempt_id=attempt_id,
+                           refs=dict(scratch_attempt['refs']))
+            record = dict(scratch_record, task_id=task_id, attempt_id=attempt_id,
+                          base_sha=scratch_record['base_sha'], **evidence)
+            receipt = salvage_repo / panel_salvage._empty_provenance_path(task_id, attempt_id)
+            with patch.object(panel_results, '_query', side_effect=lambda repo, verb, *args:
+                              [attempt] if verb == 'agent-events' else {'rows': [record]}), \
+                    patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+                        'call': {'participant': attempt['refs']['panel_room_participant'],
+                                 'room': attempt['refs']['panel_room_id'], 'task_id': task_id,
+                                 'attempt_id': attempt_id},
+                        'execution_repo': str(scratch_execution_repo)}):
+                try:
+                    panel_salvage.salvage(salvage_repo, task_id, scratch_execution_repo)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError('partial indexed patch evidence was recorded as empty salvage')
+            assert not receipt.exists(), receipt
+        assert_partial_patch_evidence('partial-digest-task', 'att_partial_digest',
+                                      {'patch_sha256': '1' * 64})
+        assert_partial_patch_evidence('partial-external-task', 'att_partial_external',
+                                      {'patch_external': {'name': 'worker.patch', 'owned': False},
+                                       'patch_sha256': '2' * 64})
+        empty_input = temporary / 'admission-empty.patch'
+        empty_input.write_bytes(b'')
+        panel_salvage.admission(empty_input, repo=salvage_repo)
+        assert not (salvage_repo / panel_salvage._provenance_path(
+            hashlib.sha256(panel_salvage._payload(b'')).hexdigest())).exists()
+        # A non-delegate worktree ref without artifact path evidence remains unlocatable and refused.
+        original_log = (salvage_repo / scratch_log).read_bytes()
+        original_location = scratch_attempt['refs']['panel_location']
+        (salvage_repo / scratch_log).write_text('worker stopped without a kept path\n')
+        scratch_record['artifact_sha256'] = hashlib.sha256((salvage_repo / scratch_log).read_bytes()).hexdigest()
+        scratch_attempt['refs']['panel_location'] = 'worktree:outside-temp/work'
+        try:
+            panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        except ValueError as error:
+            assert 'no recorded kept worktree path' in str(error), error
+        else:
+            raise AssertionError('unlocated non-delegate worktree was recorded as empty salvage')
+        finally:
+            (salvage_repo / scratch_log).write_bytes(original_log)
+            scratch_record['artifact_sha256'] = hashlib.sha256(original_log).hexdigest()
+            scratch_attempt['refs']['panel_location'] = original_location
+        # Public continuation resumes the stopped native session with an explicit no-patch note.
+        import panel_dispatch
+        import terminal_panel
+        continuation_brief = temporary / 'empty-salvage-brief.md'
+        continuation_brief.write_text('Continue safely.\n')
+        parent = {'attempt_id': 'empty-parent', 'terminal': False, 'refs': {}}
+        worker = dict(scratch_attempt, parent_attempt_id='empty-parent',
+                      refs=dict(scratch_attempt['refs'], panel_access='write', panel_provider='codex',
+                                native_session='fixture-session'))
+        with patch.object(panel_salvage.panel_results, '_query', side_effect=lambda repo, verb, *args:
+                          [scratch_attempt] if verb == 'agent-events' else {'rows': [scratch_record]}), \
+                patch.object(terminal_panel, 'owning_attempt', return_value=[parent]), \
+                patch.object(terminal_panel, 'events', return_value=json.dumps([parent, worker])), \
+                patch.object(terminal_panel, '_rework_history', return_value=[worker]), \
+                patch.object(terminal_panel, 'results', return_value={'rows': [{'calls': []}]}), \
+                patch.object(terminal_panel, 'session_stored', return_value=True):
+            materialized, resumed, note = panel_dispatch.continuation(
+                salvage_repo, 'codex', 'main', 'scratch-task', {'provider': 'codex'}, continuation_brief,
+                {'OMS_ROOM_REPO': str(salvage_repo)}, work_repo=salvage_repo, patch_reference={})
+            assert resumed == 'fixture-session'
+            assert 'no patch transferred' in note, note
+            assert 'no patch to recover' in Path(materialized).read_text()
+            Path(materialized).unlink()
+        # An unrelated stopped write attempt has no empty-salvage receipt and remains refused.
+        worker['attempt_id'] = 'att_unrecovered'
+        worker['task_id'] = 'unrecovered-task'
+        try:
+            with patch.object(terminal_panel, 'owning_attempt', return_value=[parent]), \
+                    patch.object(terminal_panel, 'events', return_value=json.dumps([parent, worker])), \
+                    patch.object(terminal_panel, '_rework_history', return_value=[worker]), \
+                    patch.object(terminal_panel, 'results', return_value={'rows': [{'calls': []}]}):
+                panel_dispatch.continuation(salvage_repo, 'codex', 'main', 'unrecovered-task',
+                                            {'provider': 'codex'}, continuation_brief, {}, work_repo=salvage_repo,
+                                            patch_reference={})
+        except ValueError as error:
+            assert '--salvage unrecovered-task' in str(error), error
+        else:
+            raise AssertionError('unrecorded stopped write attempt continued')
+        assert all(path.read_bytes() == data for path, data in provenance_files.items())
         (salvage_repo / scratch_patch).write_bytes(original_indexed_patch)
+        scratch_record['patch'] = scratch_patch
         scratch_record['patch_sha256'] = hashlib.sha256(original_indexed_patch).hexdigest()
     with patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
             'call': {'participant': 'call-0123456789abcdef', 'room': 'room-fixture',

@@ -122,9 +122,18 @@ def _latest(repo, task, attempt_id=None):
     matches = re.findall(r'^(?:error: )?worktree kept(?: at|:) (.+)$|^- worktree: (/.+)$', text, re.M)
     paths = [a or b for a, b in matches]
     location = attempt.get('refs', {}).get('panel_location', '')
+    delegate_path = None
     if location.startswith('worktree:oh-my-setting-delegate.'):
-        root = _worktree_root()
-        paths.append(str(root / location[len('worktree:'):]))
+        relative = location[len('worktree:'):]
+        components = relative.split('/')
+        if (components[0].startswith('oh-my-setting-delegate.') and len(components) > 1 and
+                all(part not in {'', '.', '..'} and '\\' not in part and ':' not in part
+                    for part in components)):
+            root = _worktree_root().resolve(strict=True)
+            candidate = Path(_native_path(root / relative)).resolve(strict=False)
+            if candidate != root and root in candidate.parents:
+                delegate_path = str(candidate)
+                paths.append(delegate_path)
     if not paths:
         raise ValueError('latest delegate has no recorded kept worktree path')
     paths = [str(_native_path(value)) for value in paths]
@@ -154,7 +163,8 @@ def _latest(repo, task, attempt_id=None):
         execution = work_repository(execution)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise ValueError('recorded execution repository is unavailable') from error
-    return paths[-1], attempt.get('attempt_id') or record.get('attempt_id'), reason, execution, record
+    return (paths[-1], attempt.get('attempt_id') or record.get('attempt_id'), reason,
+            execution, record, bool(delegate_path and paths[-1] == delegate_path))
 
 
 def _standalone(repo, attempt_id, artifact):
@@ -440,13 +450,46 @@ def record_provenance(repo, metadata):
     return relative
 
 
+def _empty_provenance_identity(task, attempt):
+    identity = json.dumps([task, attempt], ensure_ascii=True, separators=(',', ':')).encode()
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _empty_provenance_path(task, attempt):
+    return '.oms/salvage-provenance/empty-' + _empty_provenance_identity(task, attempt) + '.json'
+
+
+def record_empty_salvage(repo, task, attempt, reason):
+    """Persist a controller finding that a stopped attempt has no patch to recover."""
+    panel_results._owner()
+    reason = '%s (delegate worktree root: %s)' % (reason, _worktree_root().resolve(strict=True))
+    payload_sha = _empty_provenance_identity(task, attempt)
+    relative = _empty_provenance_path(task, attempt)
+    record = {'salvaged_from': {'task': task, 'attempt': attempt,
+                                'outcome': 'nothing_to_recover', 'reason': reason},
+              'encoding_warnings': []}
+
+    def append(old):
+        value = _provenance(old, payload_sha)
+        if record not in value['records']:
+            value['records'].append(record)
+        return (json.dumps(value, ensure_ascii=True, sort_keys=True) + '\n').encode()
+
+    target = panel_results.DURABLE['canonical_repo_path'](str(repo), relative, 'salvage provenance', True)
+    panel_results.DURABLE['atomic_mutate'](target, append, str(repo), missing_ok=True,
+                                         create_parent=True, max_input=MAX_EVIDENCE,
+                                         max_output=MAX_EVIDENCE, label='salvage provenance')
+    return relative
+
+
 def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None):
     if attempt_id is not None and task is None:
         path, attempt, reason, execution = _standalone(repo, attempt_id, artifact)
         indexed = None
         task = attempt_id
+        delegate_worktree = False
     else:
-        path, attempt, reason, execution, indexed = _latest(repo, task, attempt_id)
+        path, attempt, reason, execution, indexed, delegate_worktree = _latest(repo, task, attempt_id)
     if selected_repo is not None:
         selected = work_repository(selected_repo)
         if selected not in {Path(repo).resolve(strict=True), execution}:
@@ -454,8 +497,12 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
     try:
         Path(path).lstat()
     except FileNotFoundError as error:
-        if indexed is None:
-            raise ValueError('kept worktree is missing and no indexed patch is available') from error
+        if not delegate_worktree:
+            raise ValueError('kept worktree is missing and is not a recorded OMS delegate worktree') from error
+        if indexed is None or not any(key in indexed for key in ('patch', 'patch_sha256', 'patch_external')):
+            record_empty_salvage(repo, task, attempt, 'no kept worktree or indexed patch')
+            raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
+                             % (attempt, task)) from error
         base = indexed.get('base_sha', '')
         if not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{7,64}', base):
             raise ValueError('indexed patch has no valid recorded base')
@@ -469,7 +516,9 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
         if check_base.returncode or not check_base.stdout.decode().replace('\r', '').strip().startswith(base):
             raise ValueError('indexed patch recorded base is unavailable or does not match')
         if not patch:
-            raise ValueError('indexed patch is empty')
+            record_empty_salvage(repo, task, attempt, 'indexed patch is empty')
+            raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
+                             % (attempt, task))
         paths = panel_results._patch_paths(patch)
         if not paths:
             raise ValueError('indexed patch has no file changes')
