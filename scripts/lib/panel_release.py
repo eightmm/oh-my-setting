@@ -141,6 +141,11 @@ def heartbeat_fresh(row):
     return ages[0] < int(interval) or ages[1] < int(ttl)
 
 
+def heartbeat_blocks(row):
+    """The wrapper writes the heartbeat and holds the session lease, so its proven exit makes freshness moot."""
+    return heartbeat_fresh(row) and not identity_gone(row.get("refs") or {}, "wrapper")
+
+
 def prove_host_absent(refs, attempt, tagged=None, server=None, _tmux=None):
     host = refs.get("panel_host")
     if host == "inline":
@@ -205,7 +210,7 @@ def release(repo, attempt):
     if not isinstance(attempt, str) or not ID.fullmatch(attempt):
         raise ValueError("invalid panel main attempt identifier")
     row = main_attempt(repo, attempt)
-    if heartbeat_fresh(row):
+    if heartbeat_blocks(row):
         raise ValueError("main liveness unproven; heartbeat is fresh or attempt is pending")
     with _lock(repo, "panel-main-start", timeout=3), _lock(repo, "panel-main-session", timeout=.1):
         return release_held(repo, attempt)
@@ -214,7 +219,7 @@ def release(repo, attempt):
 def release_held(repo, attempt):
     """Re-prove and abandon one main; the caller holds the panel-main-session lease every start takes."""
     row = main_attempt(repo, attempt)
-    if heartbeat_fresh(row):
+    if heartbeat_blocks(row):
         raise ValueError("main liveness unproven; heartbeat is fresh or attempt is pending")
     prove_host_absent(row["refs"], attempt)
     prove_native_absent(row)
@@ -257,7 +262,7 @@ def classify(attempts, windows=None, max_probes=None):
                 "state": row["state"], "age": age_label(row.get("updated_at")),
                 "label": clean(refs.get("panel_label") or "", 160)}
         try:
-            if heartbeat_fresh(row):
+            if heartbeat_blocks(row):
                 continue
             if refs.get("panel_role") != "main":
                 raise ValueError("main liveness unproven; panel main role binding unavailable")

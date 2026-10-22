@@ -1771,7 +1771,7 @@ try:
             (pi_launcher, {}, [], "Pi child termination unconfirmed; separate recovery required"),
             (pi_alive, {}, [], "Pi child termination unconfirmed; separate recovery required"),
             (working_release, {"OMS_RELEASE_SOCKET": release_socket + ".other"}, [], "tmux server ownership changed"),
-            (working_release, {"OMS_RELEASE_NOW": str(time.time())}, [], "liveness unproven"),
+            (inline_alive, {"OMS_RELEASE_NOW": str(time.time())}, [], "heartbeat is fresh"),
             (worker_release, {}, [], "requires a panel-main"),
             (wrong_role, {}, [], "requires a panel-main"),
             (starting_release, {}, [], "requires a panel-main"),
@@ -1877,14 +1877,21 @@ try:
             assert all("verification pending" in row["reason"] for row in limited["unverifiable"])
             pending_capacity = panel_health.render({"dead_mains": limited}, 220, 40)
             assert "verification pending" in pending_capacity and "oms panel --release-main cap-2" not in pending_capacity
+        # A fresh heartbeat hides only a main whose heartbeat writer, the wrapper, may still run (restart right after a crash).
+        stale_classes = panel_release.classify(rows)
         with patch.object(panel_release.time, "time", return_value=release_now - 600):
-            assert panel_release.classify(rows) == {"releasable": [], "unverifiable": []}, "fresh attempt appeared as dead"
-        young = dict(next(row for row in rows if row["attempt_id"] == working_release),
-                     created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 30)))
-        assert panel_release.classify([young]) == {"releasable": [], "unverifiable": []}
-        fresh = dict(young, created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 600)),
-                     last_heartbeat_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 1)))
-        assert panel_release.classify([fresh]) == {"releasable": [], "unverifiable": []}
+            fresh_classes = panel_release.classify(rows)
+        released = {row["attempt"] for row in fresh_classes["releasable"]}
+        assert released and released == {row["attempt"] for row in stale_classes["releasable"]}, (stale_classes, fresh_classes)
+        assert inline_alive not in {row["attempt"] for row in fresh_classes["unverifiable"]}, "fresh live wrapper appeared as dead"
+        for source, hidden in ((inline_alive, True), (working_release, False)):
+            young = dict(next(row for row in rows if row["attempt_id"] == source),
+                         created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 30)))
+            fresh = dict(young, created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 600)),
+                         last_heartbeat_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 1)))
+            for row in (young, fresh):
+                found = panel_release.classify([row])
+                assert (found == {"releasable": [], "unverifiable": []}) is hidden, (source, found)
         with patch.dict(os.environ, OMS_RELEASE_PANE=working_release):
             assert working_release not in {row["attempt"] for row in panel_release.dead_mains(release_repo)["releasable"]}
         for row, offered in ((next(row for row in rows if row["attempt_id"] == working_release), True),

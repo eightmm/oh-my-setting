@@ -886,7 +886,7 @@ def live_main_refusal(repo, history=None):
             return True
         if (row.get("refs") or {}).get("panel_role") == "main":
             try:
-                return panel_release.heartbeat_fresh(row)
+                return panel_release.heartbeat_blocks(row)
             except ValueError:
                 pass
         return False
