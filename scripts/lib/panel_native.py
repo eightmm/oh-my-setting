@@ -818,6 +818,40 @@ def panel_mains():
     return next(([name] for name in names if name in MAIN_HARNESSES and main_installed(name)), [])
 
 
+def _resume_crashed_main(repo, provider):
+    """Offer a stored conversation only when release classification proves its main dead."""
+    if not provider or provider == "pi" or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    try:
+        import panel_release
+        from terminal_panel import SESSION_ID, clean, safe_label, session_stored
+        rows = json.loads(panel_release.events(repo, "list", "--json"))
+        releasable = panel_release.classify(rows)["releasable"]
+        by_attempt = {row.get("attempt_id"): row for row in rows if isinstance(row, dict)}
+        candidates = []
+        for item in releasable:
+            row = by_attempt.get(item.get("attempt"))
+            refs = (row or {}).get("refs") or {}
+            session = refs.get("native_session")
+            if (row and row.get("provider") == provider and refs.get("panel_harness") == provider
+                    and isinstance(session, str) and re.fullmatch(SESSION_ID, session)
+                    and session_stored(provider, session)):
+                candidates.append(row)
+        if not candidates:
+            return None
+        row = max(candidates, key=lambda value: value.get("updated_at") or "")
+        refs = row.get("refs") or {}
+        label = safe_label(refs.get("panel_label")) or "previous conversation"
+        label = clean(label, 80)
+        age = panel_release.age_label(row.get("updated_at")) or "unknown"
+        print("Previous %s main ended unexpectedly (last active %s ago: %s)." % (provider, age, label))
+        print("Enter = start a new main (tasks, results and room records carry over); r = resume")
+        answer = input("> ").replace("\r", "").strip()
+        return refs["native_session"] if answer in ("r", "R") else None
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, EOFError):
+        return None
+
+
 def add_main_window(repo, session, launch, view, attention_only, env, resume=None, model=None, task=None):
     from terminal_panel import bind_window, board_split, launch_command, native_repository, tmux_command
     from terminal_panel import watch_shell
@@ -1268,6 +1302,7 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
     from terminal_panel import _lock, bind_main_keys, construct_panel, legacy_session, resolve_session
     from terminal_panel import session_owner, split_panel, tmux_command
     chosen_room = os.environ.get("OMS_ROOM_ID")
+    panel_mains_override = None
     session, owner = resolve_session(repo, wait=retry)
     legacy = legacy_session(repo) if owner is None else None
     if legacy and session_owner(legacy) in ("", str(repo)):
@@ -1275,12 +1310,39 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
         subprocess.run(tmux_command("set-option", "-t", "=" + session + ":", "@oms_panel_repo", owner), check=True)
     if owner is not None and owner != str(repo):
         raise ValueError("tmux session %s is not this checkout's OMS panel; close it or use --layout inline" % session)
+    resume_provider = launch
+    auto_resume = False
+    if owner is None and not launch and not resume:
+        panel_mains_override = panel_mains()
+        if panel_mains_override:
+            resume_provider = panel_mains_override[0]
+            resume = _resume_crashed_main(repo, resume_provider)
+            auto_resume = bool(resume)
+    if owner is None and resume and resume_provider:
+        from terminal_panel import _native_resume_binding
+        try:
+            _, bound_rooms = _native_resume_binding(resume_provider, repo, resume)
+        except ValueError as error:
+            if auto_resume and "native resume ownership discovery is incomplete" in str(error):
+                raise ValueError(str(error) + "; press Enter at the prompt to start a new main") from error
+            raise
+        if len(bound_rooms) > 1:
+            raise ValueError("native session is bound to multiple rooms; resume refused")
+        if bound_rooms:
+            bound_room = next(iter(bound_rooms))
+            selected_room = room.resolve(repo, chosen_room)
+            if selected_room and not room.same_room(repo, selected_room, bound_room):
+                raise ValueError("native session is bound to another room; resume refused")
+            if not selected_room:
+                chosen_room = bound_room
+                os.environ["OMS_ROOM_ID"] = chosen_room
     env = os.environ.copy()
     env["OMS_PANEL_SESSION"] = session
     bind_main_keys()
     try:
         with _lock(repo, "panel-main-start", timeout=3):
-            pane = construct_panel(repo, session, owner, env, view, attention_only, launch, resume, model, task)
+            pane = construct_panel(repo, session, owner, env, view, attention_only, launch, resume, model, task,
+                                   panel_mains_override=panel_mains_override)
     except (OSError, subprocess.CalledProcessError):
         if owner is None and retry:
             for unused in range(20):
@@ -1300,7 +1362,8 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
     return result
 
 
-def construct_panel(repo, session, owner, env, view, attention_only, launch, resume, model, task):
+def construct_panel(repo, session, owner, env, view, attention_only, launch, resume, model, task,
+                    panel_mains_override=None):
     # Recheck after taking the construction lock: another caller may have created it while we waited.
     from terminal_panel import MAX_LIVE_MAINS, _lock, add_main_window, bind_window, board_split
     from terminal_panel import check_legacy_main, clean, ensure_room, launch_command, live_main_refusal
@@ -1329,7 +1392,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                 subprocess.run(tmux_command("select-pane", "-t", pane), check=True)
         else:
             # A new panel opens one preferred main and retains a separate control window.
-            mains = [] if launch else panel_mains()
+            mains = [] if launch else (panel_mains() if panel_mains_override is None else panel_mains_override)
             if launch or mains:
                 with _lock(repo, "panel-main-session", timeout=.1):
                     check_legacy_main(repo)
@@ -1354,9 +1417,10 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             board_split(pane, repo, watch_shell(repo, launch), main_watch=bool(launch))
             subprocess.run(tmux_command("select-pane", "-t", pane), check=True)
             opened = []
-            for provider in mains:
+            for index, provider in enumerate(mains):
                 try:
-                    opened.append(add_main_window(repo, session, provider, view, attention_only, env))
+                    opened.append(add_main_window(repo, session, provider, view, attention_only, env,
+                                                  resume if index == 0 else None))
                 except (OSError, subprocess.CalledProcessError) as error:
                     # The control window stays usable; a main that failed to open can be started from it.
                     print("%s main not opened: %s" % (provider, clean(str(error), 120)), file=sys.stderr)

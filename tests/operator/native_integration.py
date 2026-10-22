@@ -1615,6 +1615,163 @@ import panel_host
 import panel_terminals
 import codex_harness
 import io
+from contextlib import ExitStack, nullcontext
+from types import SimpleNamespace
+
+# Restart prompt accepts only a stored native session from a proof-classified crash.
+import terminal_panel as restart_panel
+restart_row = {"attempt_id": "crashed-main", "provider": "claude", "terminal": False,
+               "state": "blocked", "updated_at": "2026-10-22T00:00:00Z",
+               "refs": {"panel_harness": "claude", "native_session": "session_123",
+                        "panel_label": "Recovered work"}}
+restart_classified = {"releasable": [{"attempt": "crashed-main"}], "unverifiable": []}
+def restart_output(tty):
+    output = io.StringIO()
+    output.isatty = lambda: tty
+    return output
+for answer, stored, tty, provider, expected in (
+        ("r", True, True, "claude", "session_123"),
+        ("", True, True, "claude", None),
+        ("r", True, False, "claude", None),
+        ("r", False, True, "claude", None),
+        ("r", True, True, "pi", None)):
+    with patch.object(panel_release, "events", autospec=True, return_value=json.dumps([restart_row])), \
+            patch.object(panel_release, "classify", return_value=restart_classified), \
+            patch.object(restart_panel, "session_stored", return_value=stored), \
+            patch.object(restart_panel, "safe_label", return_value="Recovered work"), \
+            patch.object(restart_panel.sys, "stdin", SimpleNamespace(isatty=lambda: tty)), \
+            patch.object(restart_panel.sys, "stdout", restart_output(tty)), \
+            patch("builtins.input", return_value=answer) as restart_input:
+        chosen = panel_native._resume_crashed_main(Path("."), provider)
+    assert chosen == expected, (answer, stored, tty, provider, chosen)
+    assert restart_input.called == (tty and provider != "pi" and stored)
+with patch.object(panel_release, "events", return_value=json.dumps([restart_row])), \
+        patch.object(panel_release, "classify", return_value={"releasable": [], "unverifiable": []}), \
+        patch.object(restart_panel.sys, "stdin", SimpleNamespace(isatty=lambda: True)), \
+        patch.object(restart_panel.sys, "stdout", restart_output(True)), \
+        patch("builtins.input") as deliberate_input:
+    assert panel_native._resume_crashed_main(Path("."), "claude") is None
+    assert not deliberate_input.called
+with patch.object(restart_panel, "session_owner", return_value=None), \
+        patch.object(restart_panel, "panel_mains", return_value=["claude"]), \
+        patch.object(restart_panel, "_lock", side_effect=lambda *args, **kwargs: nullcontext()), \
+        patch.object(restart_panel, "check_legacy_main"), patch.object(restart_panel, "ensure_room", return_value="room"), \
+        patch.object(restart_panel, "panel_shell", return_value="shell"), \
+        patch.object(restart_panel, "native_repository", return_value=Path(".")), \
+        patch.object(restart_panel, "tmux_command", return_value=["tmux"]), \
+        patch.object(restart_panel.subprocess, "check_output", return_value="%1"), \
+        patch.object(restart_panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
+        patch.object(restart_panel, "board_split"), patch.object(restart_panel, "watch_shell", return_value="watch"), \
+        patch.object(restart_panel, "add_main_window", return_value="%2") as first_auto_main:
+    restart_panel.construct_panel(Path("."), "oms-fixture", None, {}, "auto", False,
+                                  None, "session_123", None, None)
+assert first_auto_main.call_args.args[6] == "session_123", first_auto_main.call_args
+
+# Plain new-panel resume keeps the native session's existing room. Explicit launch/resume
+# uses the same binding, while existing panels and non-resume launches skip the chooser.
+def restart_split_case(owner=None, launch=None, resume=None, bound_rooms=("room-A",),
+                       chooser="spy", construct="stub", selected_room="", binding_error=None):
+    captured = {}
+    def record_construct(*args, **kwargs):
+        captured["construct"] = args
+        captured["construct_kwargs"] = kwargs
+        return "%1"
+    def record_window(*args):
+        captured["window"] = args
+        return "%2"
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {"OMS_ROOM_ID": selected_room}))
+        native_mains = stack.enter_context(patch.object(panel_native, "panel_mains", return_value=["claude"]))
+        terminal_mains = stack.enter_context(patch.object(restart_panel, "panel_mains", return_value=["claude"]))
+        chooser_call = None
+        if chooser == "spy":
+            chooser_call = stack.enter_context(patch.object(panel_native, "_resume_crashed_main",
+                                                             return_value="session_123"))
+        else:
+            stack.enter_context(patch.object(panel_release, "events", autospec=True,
+                                               return_value=json.dumps([restart_row])))
+            stack.enter_context(patch.object(panel_release, "classify", return_value=restart_classified))
+            stack.enter_context(patch.object(restart_panel, "session_stored", return_value=True))
+            stack.enter_context(patch.object(restart_panel, "safe_label", return_value="Recovered work"))
+            stack.enter_context(patch.object(restart_panel.sys, "stdin", SimpleNamespace(isatty=lambda: True)))
+            stack.enter_context(patch.object(restart_panel.sys, "stdout", restart_output(True)))
+            stack.enter_context(patch("builtins.input", return_value="r"))
+        binding = stack.enter_context(patch.object(
+            restart_panel, "_native_resume_binding",
+            side_effect=binding_error if binding_error is not None else None,
+            return_value=([], set(bound_rooms))))
+        stack.enter_context(patch.object(restart_panel, "resolve_session", return_value=("oms-fixture", owner)))
+        stack.enter_context(patch.object(restart_panel, "legacy_session", return_value=None))
+        stack.enter_context(patch.object(restart_panel, "session_owner", return_value=owner))
+        lock = stack.enter_context(patch.object(restart_panel, "_lock", return_value=nullcontext()))
+        bind_keys = stack.enter_context(patch.object(restart_panel, "bind_main_keys"))
+        if construct == "stub":
+            stack.enter_context(patch.object(restart_panel, "construct_panel", side_effect=record_construct))
+        else:
+            stack.enter_context(patch.object(restart_panel, "check_legacy_main"))
+            stack.enter_context(patch.object(restart_panel, "ensure_room",
+                                             side_effect=lambda repo: os.environ["OMS_ROOM_ID"]))
+            stack.enter_context(patch.object(restart_panel, "panel_shell", return_value="shell"))
+            stack.enter_context(patch.object(restart_panel, "native_repository", return_value=Path(".")))
+            stack.enter_context(patch.object(restart_panel.subprocess, "check_output", return_value="%1"))
+            stack.enter_context(patch.object(restart_panel.subprocess, "run",
+                                             return_value=subprocess.CompletedProcess([], 0)))
+            stack.enter_context(patch.object(restart_panel, "board_split"))
+            stack.enter_context(patch.object(restart_panel, "watch_shell", return_value="watch"))
+            stack.enter_context(patch.object(restart_panel, "add_main_window", side_effect=record_window))
+        stack.enter_context(patch.object(restart_panel, "tmux_command", return_value=["tmux"]))
+        tmux_attach = stack.enter_context(patch.object(restart_panel.subprocess, "call", return_value=0))
+        if chooser == "spy":
+            stack.enter_context(patch.object(restart_panel.sys, "stdout", restart_output(False)))
+        try:
+            result = panel_native.split_panel(Path("."), launch=launch, resume=resume)
+        except ValueError as error:
+            captured["error"] = error
+            result = None
+        captured["result"] = result
+        captured["room_after"] = os.environ.get("OMS_ROOM_ID")
+        captured["chooser"] = chooser_call
+        captured["binding"] = binding
+        captured["native_mains"] = native_mains
+        captured["terminal_mains"] = terminal_mains
+        captured["lock"] = lock
+        captured["bind_keys"] = bind_keys
+        captured["tmux_attach"] = tmux_attach
+        return captured
+
+restart_split = restart_split_case(chooser="real", construct="real")
+assert restart_split["result"] == 0, restart_split
+assert restart_split["binding"].call_args.args == ("claude", Path("."), "session_123")
+assert restart_split["window"][5]["OMS_ROOM_ID"] == "room-A", restart_split
+assert restart_split["window"][6] == "session_123", restart_split
+for owner, launch, resume in ((str(Path(".")), None, None), (None, "claude", None),
+                              (None, "claude", "explicit-session")):
+    guarded = restart_split_case(owner, launch, resume)
+    assert not guarded["chooser"].called, (owner, launch, resume)
+    assert guarded["result"] == 0, guarded
+explicit_resume = restart_split_case(None, "claude", "explicit-session")
+assert not explicit_resume["chooser"].called
+assert explicit_resume["construct"][3]["OMS_ROOM_ID"] == "room-A", explicit_resume
+assert explicit_resume["construct"][7] == "explicit-session", explicit_resume
+multiple_rooms = restart_split_case(bound_rooms=("room-A", "room-B"))
+assert str(multiple_rooms["error"]) == "native session is bound to multiple rooms; resume refused", multiple_rooms
+for conflicting in (restart_split_case(None, "claude", "explicit-session", selected_room="room-B"),
+                    restart_split_case(None, None, None, selected_room="room-B")):
+    assert str(conflicting.get("error")) == (
+        "native session is bound to another room; resume refused"), str(conflicting.get("error"))
+    assert conflicting["room_after"] == "room-B", conflicting["room_after"]
+    assert "construct" not in conflicting, conflicting.keys()
+    assert not conflicting["lock"].called and not conflicting["bind_keys"].called, (
+        conflicting["lock"].called, conflicting["bind_keys"].called)
+    assert not conflicting["tmux_attach"].called, conflicting["tmux_attach"].called
+assert restart_split["native_mains"].call_count + restart_split["terminal_mains"].call_count == 1, (
+    restart_split["native_mains"].call_count, restart_split["terminal_mains"].call_count)
+incomplete_binding = ValueError("native resume ownership discovery is incomplete; inspect existing sessions")
+incomplete_resume = restart_split_case(binding_error=incomplete_binding)
+assert str(incomplete_resume.get("error")) == (
+    "native resume ownership discovery is incomplete; inspect existing sessions; "
+    "press Enter at the prompt to start a new main"), str(incomplete_resume.get("error"))
+assert "construct" not in incomplete_resume and not incomplete_resume["bind_keys"].called, incomplete_resume.keys()
 release_repo = temporary / "release-main"
 release_repo.mkdir()
 subprocess.run(["git", "init", "-q", str(release_repo)], check=True)
