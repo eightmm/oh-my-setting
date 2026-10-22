@@ -31683,6 +31683,12 @@ PY
     "hooks/relay/claude.json.abc123_4.tmp"
     "hooks/.oms-replace.abc12345"
     "memory/.oms-replace.abc123"
+    "work-journal/index.sqlite3-journal"
+    "work-journal/index.sqlite3-wal"
+    "work-journal/index.sqlite3-shm"
+    "memory/memory.sqlite3-journal"
+    "memory/memory.sqlite3-wal"
+    "memory/memory.sqlite3-shm"
     "plan/tmpabc123_4"
     "plan/.tasks.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.archive.json.tmp"
     "plan/.tasks.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.retire-intent.json.tmp"
@@ -31745,7 +31751,7 @@ PY
   # every expected violation is asserted independently.
   local control expected control_body
   for transient_mode in 0 1; do
-    for control in stable-session malformed wrong-dir task plan symlink jsonl hint-date hint-content hint-link; do
+    for control in stable-session malformed wrong-dir task plan symlink jsonl hint-date hint-content hint-link sqlite-wrong-dir sqlite-link sqlite-database; do
       transient="$TMP/guard-state-transient-control-$transient_mode-$control"
       make_guard_repo "$transient"
       case "$control" in
@@ -31810,6 +31816,27 @@ PY
           expected="$rel was deleted"
           mkdir -p "$transient/.oms/hooks"
           ln -s target "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        sqlite-wrong-dir)
+          rel="plan/index.sqlite3-journal"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/plan"
+          : > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        sqlite-link)
+          rel="work-journal/index.sqlite3-journal"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/work-journal"
+          ln -s target "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        sqlite-database)
+          rel="work-journal/index.sqlite3"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/work-journal"
+          : > "$transient/.oms/$rel"
           control_body="rm -f '$transient/.oms/$rel'"
           ;;
         jsonl)

@@ -39,7 +39,11 @@ def is_internal_atomic_temp(root, rel):
     elif parent == "hooks":
         matched = re.fullmatch(r"\.oms-replace\.[a-z0-9_]{8}", name)
     elif parent == "memory":
-        matched = re.fullmatch(r"\.oms-replace\.[A-Za-z0-9]{6}", name)
+        # SQLite creates and deletes its rollback/WAL sidecars on its own.
+        matched = (re.fullmatch(r"\.oms-replace\.[A-Za-z0-9]{6}", name) or
+                   re.fullmatch(r"memory\.sqlite3-(?:journal|wal|shm)", name))
+    elif parent == "work-journal":
+        matched = re.fullmatch(r"index\.sqlite3-(?:journal|wal|shm)", name)
     elif parent == "plan":
         matched = (
             re.fullmatch(r"tmp[a-z0-9_]{8}", name) or
