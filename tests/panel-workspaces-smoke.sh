@@ -77,7 +77,7 @@ for value in ('48.2k tok', '12.3k tok', '700 tok'):
     check(any(value in line for line in usage_board.splitlines()), 'token total missing from column: ' + value + usage_board)
 detail_board = panel_view.render(usage_report, 'claude', 110, 40,
                                  navigation={'selected': ('result', 'att_rev')})
-check('(out 9149)' in detail_board, 'provider output detail missing from Detail view: ' + detail_board)
+check('output 9149)' in detail_board, 'provider output detail missing from Detail view: ' + detail_board)
 check('Fix parser · tokens pending' not in usage_board and 'No report · tokens unreported' not in usage_board,
       'unknown token filler leaked into row identity')
 check(' 0 tok' not in usage_board and 'tokens 0' not in usage_board, 'missing tokens rendered as zero')
