@@ -16,15 +16,23 @@ from oms_graph.errors import GraphError
 
 HAVE_GIT = shutil.which("git") is not None
 
-# The gate scrubs the invoking session's own harness identity (scripts/check.sh);
-# a fixture that inherits OMS_HARNESS_CHILD=1 loses agent-plan init/add and
-# fails from inside a harness-mediated run while passing from an operator shell.
+# The gate scrubs invoking-session state; fixtures need the same boundary when
+# their shared environment is built directly from a bound worker or reviewer.
 SCRUBBED = (
     "OMS_HARNESS_CHILD", "OMS_HARNESS_ORIGIN", "OMS_HARNESS_PARENT_AGENT",
     "OMS_HARNESS_CALL_ID", "OMS_STATE_REPO", "OMS_ATTEMPT_ID", "OMS_PLAN_LEASE_ID",
     "OMS_LEASE_ID", "OMS_EXECUTOR_ID", "OMS_SOUL_SHA256", "OMS_APPROVAL_ID",
     "OMS_LANDING_ID", "OMS_WORKER_AUTHORITY_EXCLUSIVE",
+    "OMS_HOOK_AGENT",
 )
+
+
+def scrub_fixture_env(env: dict) -> None:
+    for name in SCRUBBED:
+        env.pop(name, None)
+    for name in tuple(env):
+        if name.startswith(("OMS_ROOM_", "OMS_PANEL_")):
+            env.pop(name, None)
 
 CHECK_SCRIPT = """#!/usr/bin/env bash
 set -euo pipefail
@@ -493,8 +501,7 @@ class AdapterEndToEndTest(unittest.TestCase):
 
     def _env(self) -> dict:
         env = dict(self._saved_env) if hasattr(self, "_saved_env") else dict(os.environ)
-        for name in SCRUBBED:
-            env.pop(name, None)
+        scrub_fixture_env(env)
         env["HOME"] = str(self.home)
         # peer-delegate loads NVM_DIR before execution; keep discovery hermetic.
         env["NVM_DIR"] = str(self.home / ".nvm")

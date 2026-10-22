@@ -30,7 +30,7 @@ from oms_graph.errors import GraphError
 from oms_graph.project.affected import affected_plan, changed_entries, changed_test_hunks
 from oms_graph.project.build import build, load_graph
 from oms_graph.project.query import Graph
-from test_oms_graph_adapter import CHECK_SCRIPT, FAKE_CODEX, SCRUBBED, agent_node
+from test_oms_graph_adapter import CHECK_SCRIPT, FAKE_CODEX, agent_node, scrub_fixture_env
 
 HAVE_GIT = shutil.which("git") is not None
 
@@ -217,8 +217,7 @@ class GraphRepoFixture:
 
     def _env(self) -> dict:
         env = dict(self._saved_env)
-        for name in SCRUBBED:
-            env.pop(name, None)
+        scrub_fixture_env(env)
         env["HOME"] = str(self.home)
         # peer-delegate loads NVM_DIR before execution; keep discovery hermetic.
         env["NVM_DIR"] = str(self.home / ".nvm")

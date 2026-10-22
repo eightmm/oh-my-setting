@@ -27,23 +27,19 @@ unset NVM_BIN NVM_DIR
 # nor managed Python activation may restore the invoking host's tool paths.
 export OMS_TEST_PROVIDER_PATH_ONLY=1
 
-# The same hermeticity applies to the harness's own session identity. A
-# harness child (council seat, delegated worker) inherits capability
-# variables, and OMS_HARNESS_CHILD=1 suppresses auto-task creation by design
-# — so autonomy fixtures fail from inside any harness-mediated call while
-# passing from an operator shell: the gate lies to the harness itself
-# (recorded 2026-08-10, a seat-run verify went red in 81s on a green tree).
-# The invoking session is not part of any fixture; a suite that needs child
-# semantics sets the variables explicitly.
+# The invoking session's room and panel bindings are never part of a fixture.
+# Harness identity and hook state are also removed; suites set needed values explicitly.
 unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
   OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
   OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
   OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_HARNESS_DELEGATE_DEPTH \
-  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT \
-  OMS_HOOK_AGENT OMS_PANEL_ENTRYPOINT OMS_PANEL_SESSION OMS_PANEL_MAIN_ATTEMPT \
-  OMS_PANEL_CALL_ID OMS_PANEL_REPO OMS_PANEL_RESULTS OMS_PANEL_DISPATCH OMS_PANEL_ROLE \
-  OMS_PANEL_WORKLOAD OMS_PANEL_PURPOSE OMS_PANEL_LABEL OMS_PANEL_HOST OMS_PANEL_VIEW \
+  OMS_HOOK_AGENT \
   HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID
+while IFS= read -r oms_scrub_name; do
+  case "$oms_scrub_name" in
+    OMS_ROOM_*|OMS_PANEL_*) unset "$oms_scrub_name" ;;
+  esac
+done < <(compgen -e)
 
 # Keep lock/capability caches out of the invoking user's HOME. Several focused
 # suites intentionally create temporary repos but use shared lifecycle helpers;
