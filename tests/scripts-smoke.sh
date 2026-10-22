@@ -30906,6 +30906,7 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
   local project="$TMP/guard-sibling-dead"
   local managed_root="$TMP/guard-sibling-dead-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local sleep_pid start_id metadata
   local result
 
   make_guard_repo "$project"
@@ -30919,6 +30920,41 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
     fail "a sibling whose marker died must stay a hard gitmeta violation: $result"
   contains "$result" 'outside its worktree: gitmeta' ||
     fail "a dead-marker sibling should be named as gitmeta: $result"
+
+  # A reused live PID must not revive an old marker. Damage to its HEAD file
+  # must remain visible to both snapshots instead of disappearing as an
+  # exempt sibling. The separate sleep process keeps kill -0 positive.
+  sleep 60 &
+  sleep_pid=$!
+  start_id="$(bash -c '. "$1/scripts/lib/file-lock.sh"; oms_file_lock_process_start_token "$2"' \
+    _ "$ROOT" "$sleep_pid" 2>/dev/null || true)"
+  [ -n "$start_id" ] || {
+    kill "$sleep_pid" 2>/dev/null || true
+    wait "$sleep_pid" 2>/dev/null || true
+    fail "could not read a process-start token for the live sibling fixture"
+  }
+  metadata="$(git -C "$sibling_parent/wt" rev-parse --git-dir)"
+  case "$metadata" in /*) ;; *) metadata="$project/$metadata" ;; esac
+  printf 'kind=oh-my-setting-temp\npid=%s\nprocess-start=stale:%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
+    "$sleep_pid" "$start_id" "$project" "$sibling_parent/wt" \
+    > "$sibling_parent/.oh-my-setting-tmp"
+  if OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    oms_worker_gitmeta_is_live_managed_worktree "$2" "$3" "$2"
+  ' _ "$ROOT" "$project" "$metadata/HEAD"; then
+    kill "$sleep_pid" 2>/dev/null || true
+    wait "$sleep_pid" 2>/dev/null || true
+    fail "a reused live pid must not exempt a sibling with a stale process-start"
+  fi
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "rm -f '$metadata/HEAD'")"
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
+  [ "${result%%\t*}" != 0 ] ||
+    fail "a live reused pid must not exempt a sibling with a stale process-start: $result"
+  contains "$result" 'outside its worktree: gitmeta' ||
+    fail "a stale process-start sibling must remain visible as gitmeta: $result"
 }
 
 test_worker_guard_softens_a_sibling_that_finished_kept() {

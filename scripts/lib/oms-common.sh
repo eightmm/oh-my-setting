@@ -1574,7 +1574,7 @@ oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE [
   marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
   [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
   oms_worker_marker_pid_is_positive_decimal "$marker_pid" || return 1
-  [ "$allow_kept" = kept ] || kill -0 "$marker_pid" 2>/dev/null || return 1
+  [ "$allow_kept" = kept ] || oms_harness_marker_owner_alive "$marker" || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
 
@@ -1645,7 +1645,7 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
   marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
   [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
   oms_worker_marker_pid_is_positive_decimal "$marker_pid" || return 1
-  kill -0 "$marker_pid" 2>/dev/null || return 1
+  oms_harness_marker_owner_alive "$marker" || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
   oms_worker_same_repository "$repo_physical" "$marker_repo" || return 1

@@ -52,13 +52,37 @@ oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
   local owner_pid="${4:-$$}"
 
   [ -d "$dir" ] || return 0
+  local process_start=""
+  process_start="$(oms_file_lock_process_start_token "$owner_pid" 2>/dev/null || true)"
+  process_start="${process_start//$'\r'/}"
   {
     printf 'kind=oh-my-setting-temp\n'
     printf 'pid=%s\n' "$owner_pid"
+    [ -z "$process_start" ] || printf 'process-start=%s\n' "$process_start"
     printf 'repo=%s\n' "$repo"
     printf 'worktree=%s\n' "$worktree"
     printf 'temporary=1\n'
   } > "$dir/.oh-my-setting-tmp"
+}
+
+# PID liveness alone can mistake a later process for a dead marker owner.
+# Preserve legacy markers and hosts that cannot read a start token.
+oms_harness_marker_owner_alive() {  # MARKER
+  local marker="$1"
+  local pid=""
+  local marker_start=""
+  local current_start=""
+
+  pid="$(oms_harness_read_marker_value "$marker" pid)"
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  case "$pid" in *[1-9]*) ;; *) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  marker_start="$(oms_harness_read_marker_value "$marker" process-start)"
+  marker_start="${marker_start//$'\r'/}"
+  [ -n "$marker_start" ] || return 0
+  current_start="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
+  current_start="${current_start//$'\r'/}"
+  [ -z "$current_start" ] || [ "$current_start" = "$marker_start" ]
 }
 
 oms_harness_read_marker_value() {
@@ -739,7 +763,6 @@ oms_harness_tmp_residue_count() {
   local base
   local dir
   local marker
-  local pid
   local temporary
   local listings=""
   local count=0
@@ -757,8 +780,7 @@ oms_harness_tmp_residue_count() {
       [ "$(oms_harness_read_marker_value "$marker" kind)" = "oh-my-setting-temp" ] || continue
       temporary="$(oms_harness_read_marker_value "$marker" temporary)"
       [ "$temporary" = "1" ] || continue
-      pid="$(oms_harness_read_marker_value "$marker" pid)"
-      oms_file_lock_pid_alive "$pid" && continue
+      oms_harness_marker_owner_alive "$marker" && continue
       # Kept work is not residue: counting it would warn with a remedy that
       # cannot act on it.
       OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
@@ -777,7 +799,6 @@ oms_harness_cleanup_temp_dirs() {
   local base
   local dir
   local marker
-  local pid
   local safe
   local temporary
   local proof
@@ -796,8 +817,7 @@ oms_harness_cleanup_temp_dirs() {
       [ "$(oms_harness_read_marker_value "$marker" kind)" = "oh-my-setting-temp" ] || continue
       temporary="$(oms_harness_read_marker_value "$marker" temporary)"
       [ "$temporary" = "1" ] || continue
-      pid="$(oms_harness_read_marker_value "$marker" pid)"
-      oms_file_lock_pid_alive "$pid" && continue
+      oms_harness_marker_owner_alive "$marker" && continue
 
       safe=0
       marker_text="$(cat "$marker" 2>/dev/null)"
@@ -833,7 +853,7 @@ oms_harness_cleanup_temp_dirs() {
             [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ] ||
             [ ! -f "$marker" ] || [ -L "$marker" ] ||
             [ "$(cat "$marker" 2>/dev/null)" != "$marker_text" ] ||
-            oms_file_lock_pid_alive "$pid"; then
+            oms_harness_marker_owner_alive "$marker"; then
           printf 'kept: %s (dead harness temp dir; worktree changed during cleanup)\n' "$dir"
           OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
           continue

@@ -227,7 +227,7 @@ cmd_list() {
     [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || continue
     read_marker "$dir" || continue
     case "$M_PID" in ""|*[!0-9]*) continue ;; esac
-    kill -0 "$M_PID" 2>/dev/null || continue
+    oms_harness_marker_owner_alive "$dir/.oh-my-setting-tmp" || continue
     oms_harness_safe_residue_worktree "$ROOT_DIR" "$dir" "$M_REPO" "$M_WORKTREE" || continue
     [ -z "$REPO_PHYSICAL" ] || [ "$REPO_PHYSICAL" = "$OMS_HARNESS_SAFE_RESIDUE_REPO" ] || continue
     printf '%s\towner=%s\trepo=%s\n' "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" "$M_PID" \
