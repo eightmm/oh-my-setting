@@ -42,7 +42,7 @@ outside the repo:
   push    git push --no-verify REMOTE VERIFIED_SHA:TARGET, only if HEAD and the tree
           are unchanged since the gate started
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
-          seconds (default 1500; 0 skips; needs gh)
+          seconds (default 2700; 0 skips; needs gh)
   update  only after CI success plus full proof for the SHA: a full local
           gate (gate.scope=full) or a CI run whose jobs show the full
           selection (ci.scope=full; an affected-only or unreadable run
@@ -87,7 +87,7 @@ resumes CI/install only. Concurrent jobs wait up to OMS_LOCK_TIMEOUT (default
 EOF
 }
 
-REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=1500
+REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=2700
 SIBLING_WAIT=1800 IGNORE_SIBLINGS=0 HANDOFF_TO="" SYNC_TO=""
 MODE=start JSON=0 ACTIVE_EXIT=0 STAMP="" READY_FILE=""
 while [ "$#" -gt 0 ]; do
