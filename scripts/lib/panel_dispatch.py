@@ -472,8 +472,14 @@ def moved_main(repo, owner, env):
 
 
 def scope_overlaps(repo, room_id, state, caller, scopes):
-    """Other mains' and live write calls' declared scopes that overlap these; coordination, not a lock."""
+    """Other mains', live write calls' and unresolved finished patches' scopes; coordination, not a lock."""
     from terminal_panel import _dispatch_call_finished
+    review_state = state.get("scope_review_state", {})
+    if not isinstance(review_state, dict):
+        review_state = {}
+    call_results = review_state.get("call_results", {})
+    attempts = review_state.get("room_attempts", {})
+    finalized = review_state.get("finalized")
     found = []
     for other in state["participants"]:
         if not other["joined"] or other["participant"] == caller or not other.get("owns"):
@@ -481,6 +487,21 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
         if other.get("parent"):
             # Terminal attempts describe outcomes, not the lifetime of provider descendants.
             if _dispatch_call_finished(repo, room_id, other):
+                result = call_results.get(other["participant"], {}) if isinstance(call_results, dict) else {}
+                attempt = attempts.get(other["participant"], {}) if isinstance(attempts, dict) else {}
+                task_id = result.get("task_id") if isinstance(result, dict) else None
+                if (not task_id and isinstance(attempt, dict)):
+                    task_id = attempt.get("task_id")
+                pending_patch = (isinstance(finalized, dict) and isinstance(task_id, str) and task_id
+                                 and task_id not in finalized and isinstance(result, dict)
+                                 and result.get("task_id") == task_id and result.get("patch")
+                                 and result.get("needs_review") is True and isinstance(attempt, dict)
+                                 and attempt.get("task_id") == task_id and attempt.get("state") == "review")
+                if pending_patch:
+                    found += [{"participant": other["participant"], "role": other["role"],
+                               "scope": theirs, "status": "finished, patch awaiting decision"}
+                              for theirs in other["owns"]
+                              if any(room.overlaps(mine, theirs) for mine in scopes)]
                 continue
         elif other["role"] != "main":
             continue
@@ -1859,6 +1880,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     caller = env.get("OMS_ROOM_PARTICIPANT")
     if room_id:
         state = room.project(room.records(repo, room_id))
+        scope_review_state = None
         caller = caller or (record.get("refs", {}).get("panel_room_participant", parent) if parent
                             else moved[1] if moved else None)
         candidates = active_mains(repo, room_id, state, owner, caller=caller, attempt=parent)
@@ -1879,7 +1901,17 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         if not dry_run and access == "write" and continuation_patch is None:
             from review_backlog import warning_for
             try:
-                notice = warning_for(snapshot(repo, room_id)[0], caller)
+                report = snapshot(repo, room_id)[0]
+                notice = warning_for(report, caller)
+                report_room = report.get("room", {}) if isinstance(report, dict) else {}
+                finalized = report.get("finalized") if isinstance(report, dict) else None
+                if (isinstance(report_room, dict) and room.same_room(repo, report_room.get("id"), room_id)
+                        and isinstance(finalized, dict)):
+                    scope_review_state = {
+                        "call_results": report_room.get("call_results", {}),
+                        "room_attempts": report.get("room_attempts", {}),
+                        "finalized": finalized,
+                    }
             except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
                 notice = None  # throughput policy fails open; an unreadable backlog never blocks work
             if notice:
@@ -1894,10 +1926,15 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             _reconcile_dispatch(repo, room_id, state, caller, parent)
             state = room.project(room.records(repo, room_id))
         if scopes:
-            found = scope_overlaps(repo, room_id, state, caller, scopes)
+            overlap_state = dict(state)
+            if scope_review_state is not None:
+                overlap_state["scope_review_state"] = scope_review_state
+            found = scope_overlaps(repo, room_id, overlap_state, caller, scopes)
             if found:
                 print("Scope overlap (coordinate before editing): " + ", ".join(
-                    "%s %s" % (item["participant"], item["scope"]) for item in found), file=sys.stderr)
+                    "%s %s%s" % (item["participant"], item["scope"],
+                                  " (" + item["status"] + ")" if item.get("status") else "")
+                    for item in found), file=sys.stderr)
             if dry_run:
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0

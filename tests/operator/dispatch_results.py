@@ -6,6 +6,28 @@ from unittest.mock import patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
+# A finished write call keeps its declared scope in the advisory while its patch awaits a decision.
+finished_worker = {"participant": "W1", "joined": True, "parent": "main", "role": "worker",
+                   "owns": ["src/shared.py"]}
+finished_room = {"participants": [finished_worker]}
+finished_scope_state = {
+    "call_results": {"W1": {"task_id": "finished-patch-task", "patch": ".oms/artifacts/patches/W1.patch",
+                             "needs_review": True}},
+    "room_attempts": {"W1": {"task_id": "finished-patch-task", "state": "review"}},
+    "finalized": {},
+}
+with patch.object(panel, "_dispatch_call_finished", return_value=True), \
+        patch.object(panel, "_dispatch_call_record", side_effect=AssertionError("unexpected call-record lookup")), \
+        patch.object(panel, "results", side_effect=AssertionError("unexpected full result lookup")):
+    overlap_room = dict(finished_room, scope_review_state=finished_scope_state)
+    overlap = dispatch.scope_overlaps(temporary, "room", overlap_room, "main", ["src/shared.py"])
+    assert overlap == [{"participant": "W1", "role": "worker", "scope": "src/shared.py",
+                        "status": "finished, patch awaiting decision"}], overlap
+    finalized_scope_state = dict(finished_scope_state, finalized={"finished-patch-task": "rejected"})
+    finalized_room = dict(finished_room, scope_review_state=finalized_scope_state)
+    assert dispatch.scope_overlaps(temporary, "room", finalized_room, "main", ["src/shared.py"]) == []
+    assert dispatch.scope_overlaps(temporary, "room", finished_room, "main", ["src/shared.py"]) == []
+
 # Continuation checks the execution worktree's clean HEAD, not room metadata or dirty files.
 continuation_patch = b"--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-before\n+worker change\n"
 
