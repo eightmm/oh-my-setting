@@ -100,13 +100,21 @@ manifest() {
 }
 
 noncanonical="$(awk '
+  pending_weight && $0 !~ /^test_[[:alnum:]_]+\(\) \{/ {
+    print "smoke-weight line " pending_weight " is not directly above a test definition"
+  }
+  { pending_weight = 0 }
+  /^# smoke-weight: [0-9]+$/ { pending_weight = NR }
   /^[[:space:]]*(function[[:space:]]+)?test_[[:alnum:]_]+[[:space:]]*\(\)[[:space:]]*\{/ &&
-    $0 !~ /^test_[[:alnum:]_]+\(\) \{/ { print NR ":" $0 }
+    $0 !~ /^test_[[:alnum:]_]+\(\) \{/ { print "noncanonical smoke test definition (use test_name() {): " NR ":" $0 }
   /^[[:space:]]*function[[:space:]]+test_[[:alnum:]_]+[[:space:]]*\{/ {
-    print NR ":" $0
+    print "noncanonical smoke test definition (use test_name() {): " NR ":" $0
+  }
+  END {
+    if (pending_weight) print "smoke-weight line " pending_weight " is not directly above a test definition"
   }
 ' "$SUITE")"
-[ -z "$noncanonical" ] || fail "noncanonical smoke test definition (use test_name() {): $noncanonical"
+[ -z "$noncanonical" ] || fail "$noncanonical"
 [ "$(grep -Fxc '# SMOKE_TEST_CALLS_BEGIN' "$SUITE")" = "1" ] ||
   fail "smoke suite must contain exactly one # SMOKE_TEST_CALLS_BEGIN sentinel"
 [ "$(grep -Fxc '# SMOKE_TEST_CALLS_END' "$SUITE")" = "1" ] ||

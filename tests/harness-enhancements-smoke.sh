@@ -106,6 +106,22 @@ EOF
     "$ROOT/tests/run-smoke-shard.sh" --list >/dev/null 2>&1; then
     fail "function-style test definitions should fail closed instead of being omitted"
   fi
+  cat > "$TMP/orphaned-smoke-weight.sh" <<'EOF'
+# smoke-weight: 240
+smoke_helper() {
+  :
+}
+test_visible() {
+  :
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_visible
+# SMOKE_TEST_CALLS_END
+EOF
+  if OMS_SMOKE_SUITE="$TMP/orphaned-smoke-weight.sh" \
+    "$ROOT/tests/run-smoke-shard.sh" --list >/dev/null 2>&1; then
+    fail "smoke weights above helpers should fail closed"
+  fi
 }
 
 test_artifact_resolution_and_dashboard_statuses() {

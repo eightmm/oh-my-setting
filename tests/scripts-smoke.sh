@@ -35896,7 +35896,6 @@ assert task["state"] == "claimed" and task["lease_id"] == sys.argv[2],task
 PY
 }
 
-# smoke-weight: 240
 goal_drive_batch_verifier_deadline() {
   local helper="$TMP/goal-provider-phase-wall.sh" out
 
@@ -35909,6 +35908,7 @@ goal_drive_batch_verifier_deadline() {
     fail "a 1-second provider and 90-second verifier need a 155-second outer wall, got $out"
 }
 
+# smoke-weight: 240
 test_goal_drive_parallel_batches() {
   local project="$TMP/goal-batch-skip-candidates" out
   goal_drive_batch_verifier_deadline
