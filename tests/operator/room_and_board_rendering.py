@@ -3869,7 +3869,16 @@ listed.append(event("a-second", "review", "2026-01-03T00:00:00Z", who="gone-seco
 live_row = event("a-live", "working", "2026-01-03T00:00:00Z", who="gone-live")
 live_row["refs"]["panel_lease_id"] = "lease-live"
 listed.append(live_row)
+review_attempt = event("r466-attempt", "done", "2026-01-05T00:00:00Z", who="r466-review", role="reviewer")
+review_attempt.update(task_id="gate-panel-workspaces-1022", parent_attempt_id="panel-main-attempt")
+listed.append(review_attempt)
+index_usage = {"reports": 1, "measurement": "provider-reported", "input_tokens": 12,
+               "output_tokens": 3710, "cache_read_tokens": 102994, "cache_write_tokens": 19603,
+               "cache_in_input": False}
+indexed = [{"kind": "review", "task_id": "gate-panel-workspaces-1022", "attempt_id": "r466-attempt",
+            "provider_usage": index_usage}]
 members = [{"participant": "gone-review", "role": "worker", "joined": True},
+           {"participant": "r466-review", "role": "reviewer", "joined": True},
            {"participant": "gone-second", "role": "worker", "joined": True},
            {"participant": "gone-live", "role": "worker", "joined": True, "parent": "flow-attempt"},
            {"participant": "flow-main", "role": "main", "joined": True}]
@@ -3881,6 +3890,7 @@ def fake_run(command, **kwargs):
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
+        patch("panel_results._records", return_value=(listed, indexed)), \
         patch.object(panel, "results", return_value={"rows": []}), \
         patch.object(panel, "outcomes", return_value={}), \
         patch.object(panel.subprocess, "run", side_effect=fake_run):
@@ -3895,11 +3905,17 @@ assert got["room_attempts"] == {"gone-review": {"state": "failed", "attempt_id":
                     "provider_usage": {"input_tokens": 999, "output_tokens": 0, "cache_read_tokens": None,
                         "cache_write_tokens": None, "cache_in_input": True, "session_cumulative": False}},
     "gone-live": {"state": "working", "attempt_id": "a-live", "updated_at": "2026-01-03T00:00:00Z",
-                  "task_id": "t-a-live", "lease_id": "lease-live"}}, got.get("room_attempts")
+                  "task_id": "t-a-live", "lease_id": "lease-live"},
+    "r466-review": {"state": "done", "attempt_id": "r466-attempt", "updated_at": "2026-01-05T00:00:00Z",
+                    "task_id": "gate-panel-workspaces-1022", "lease_id": None,
+                    "provider_usage": {"input_tokens": 12, "output_tokens": 3710, "cache_read_tokens": 102994,
+                        "cache_write_tokens": 19603, "cache_in_input": False, "session_cumulative": False}}}, got.get("room_attempts")
 snapshot_nodes = {m["participant"]: m for m in graph_text.nodes(got)}
 assert snapshot_nodes["gone-live"]["lease_id"] == "lease-live", snapshot_nodes["gone-live"]
 assert snapshot_nodes["gone-review"]["tokens"] == "909 tok", snapshot_nodes["gone-review"]
 assert snapshot_nodes["gone-second"]["tokens"] == "999 tok", snapshot_nodes["gone-second"]
+from panel_view import call_tokens
+assert call_tokens(got, "r466-attempt", "done", True) == "126.3k tok · 84% cached", got["room_attempts"]
 got["plan"] = {"tasks": [{"id": "t-a-live", "state": "running", "claimed_by": "flow-attempt",
                             "lease_id": "lease-live", "claimed_at": "2026-01-03T00:00:01Z"}]}
 assert graph_text.held_split(got) == (set(), set()), graph_text.held_split(got)

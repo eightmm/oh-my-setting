@@ -625,11 +625,25 @@ def snapshot(repo, room_id=None, _tick=None):
                     # Members outside the 8 + 8 row dashboard projection keep their real state from the full projection.
                     attempt_rows = _tick.attempts()
                     if isinstance(attempt_rows, list):
+                        from dashboard_projection import project_usage
+                        records = getattr(_tick, "records", None)
+                        indexed_rows = []
+                        if callable(records):
+                            try:
+                                indexed_rows = records()[1]
+                            except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError,
+                                    subprocess.SubprocessError):
+                                pass
                         calls = {m["participant"]: m.get("role") for m in state["room"].get("predecessor_calls", [])}
                         calls.update((m["participant"], m.get("role")) for m in state["room"]["participants"]
                                      if m.get("joined"))
+                        indexed_usage = {}
+                        for indexed in indexed_rows:
+                            attempt_id = indexed.get("attempt_id")
+                            usage = project_usage(indexed.get("provider_usage"))
+                            if attempt_id and usage:
+                                indexed_usage[(attempt_id, indexed.get("task_id"))] = usage
                         linked = {}
-                        from dashboard_projection import project_usage
                         for row in attempt_rows:
                             # The ledger keeps panel identity in refs; the dashboard projection lifts it into "panel".
                             refs = row.get("refs") or {}
@@ -638,12 +652,13 @@ def snapshot(repo, room_id=None, _tick=None):
                                     and refs.get("panel_role") == calls[who]
                                     and row.get("attempt_id") and row.get("state")
                                     and str(row.get("updated_at") or "") >= str(linked.get(who, {}).get("updated_at") or "")):
+                                usage = project_usage(row.get("provider_usage")) or indexed_usage.get(
+                                    (row["attempt_id"], row.get("task_id")))
                                 linked[who] = {"state": row["state"], "attempt_id": row["attempt_id"],
                                                "updated_at": row.get("updated_at"), "task_id": row.get("task_id"),
                                                "lease_id": refs.get("panel_lease_id"),
                                                **({"tokens": row["tokens"]} if "tokens" in row else {}),
-                                               **({"provider_usage": project_usage(row.get("provider_usage"))}
-                                                  if row.get("provider_usage") else {}),
+                                               **({"provider_usage": usage} if usage else {}),
                                                **({"alias": refs["panel_alias"]} if refs.get("panel_alias") else {}),
                                                **({"access": "write"} if refs.get("panel_access") == "write" else {})}
                         state["room_attempts"] = linked
