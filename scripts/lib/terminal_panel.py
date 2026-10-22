@@ -471,6 +471,8 @@ def main(argv=None):
         parser.error("task exceeds the panel input contract")
     if args.watch and (args.launch or args.json or args.dry_run):
         parser.error("--watch is a read-only view; cannot combine with launch, JSON or dry-run")
+    if args.continue_task and (args.dispatch not in WRITERS or not args.brief_file or args.prompt or args.task_id):
+        parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no --prompt or --task-id")
     # A main names itself on every panel call; reading results accepts that identity without filtering by it.
     if args.owner is not None and not (args.watch or args.dispatch or args.council or args.accept or args.finalize or args.results):
         parser.error("--owner requires --watch, --dispatch, --council, --accept, --finalize or --results")
@@ -497,8 +499,6 @@ def main(argv=None):
         parser.error("--task-id requires a task operation")
     if args.main and not args.dispatch:
         parser.error("--main requires --dispatch")
-    if args.continue_task and (args.dispatch not in WRITERS or not args.brief_file or args.prompt or args.task_id):
-        parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no --prompt or --task-id")
     if args.allow_stale_base and not args.continue_task:
         parser.error("--allow-stale-base requires --continue")
     if args.scope and (args.dispatch not in WRITERS or args.access != "write"):

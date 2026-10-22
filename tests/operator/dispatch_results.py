@@ -1672,6 +1672,12 @@ def accept_call(verb, *arguments, check=True, execution=None, env=None):
     if check:
         assert result.returncode == 0, (verb, arguments, result.stdout, result.stderr)
     return result
+continue_error = "--continue requires a write-capable --dispatch role with --brief-file, and takes no --prompt or --task-id"
+for continue_options in (
+        ("--continue", "continued-task", "--owner", "claude", "--brief-file", "unused.md", "--access", "write"),
+        ("--continue", "continued-task", "--brief-file", "unused.md", "--access", "write")):
+    invalid_continue = accept_call("panel", *continue_options, execution=accept_repo, check=False)
+    assert invalid_continue.returncode == 2 and continue_error in invalid_continue.stderr, invalid_continue.stderr
 with patch.dict(os.environ, accept_env, clear=True):
     room.create(accept_repo, "accept-room", "Acceptance composition")
     room.join(accept_repo, "accept-room", "accept-main", "codex", "main")
