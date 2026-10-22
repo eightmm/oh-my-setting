@@ -440,6 +440,41 @@ test_consumer_sibling() {
         self.assertEqual(plan["mode"], "affected")
         self.assertEqual([row["name"] for row in plan["test_cases"]], ["test_first"])
 
+    def test_cli_runnable_glob_selects_operator_section_fragment(self) -> None:
+        (self.repo / "lib").mkdir()
+        (self.repo / "tests" / "operator").mkdir(parents=True)
+        self._write(self.repo / "lib" / "dispatch.py", "def dispatch():\n    return True\n")
+        self._write(self.repo / "lib" / "other.py", "def other():\n    return True\n")
+        self._write(self.repo / "tests" / "operator" / "dispatch_results.py",
+                    "from lib.dispatch import dispatch\n\nassert dispatch()\n")
+        self._write(self.repo / "tests" / "test_other.py", "from lib.other import other\n\ndef test_other():\n    assert other()\n")
+        self.git("add", "lib/dispatch.py", "lib/other.py", "tests/operator/dispatch_results.py", "tests/test_other.py")
+        self.git("commit", "-qm", "add operator fragment")
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        self._write(self.repo / "lib" / "dispatch.py", "def dispatch():\n    return False\n")
+        self._write(self.repo / "lib" / "other.py", "def other():\n    return False\n")
+        self.git("add", "lib/dispatch.py", "lib/other.py")
+        self.git("commit", "-qm", "change operator dependency")
+        build(self.repo, state=self.state)
+
+        def run(runnable):
+            argv = ["--repo", str(self.repo), "project", "affected", "--base", self.base,
+                    "--head", "HEAD", "--json"]
+            if runnable:
+                argv.extend(["--runnable", "tests/operator/*"])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(cli.main(argv), 0)
+            return json.loads(output.getvalue())
+
+        without_option = run(False)
+        with_option = run(True)
+        self.assertEqual(without_option["mode"], "full")
+        self.assertTrue(any(reason.startswith("no-tests:") for reason in without_option["reasons"]))
+        self.assertEqual(with_option["mode"], "affected")
+        self.assertEqual(set(with_option["tests"]), {"tests/operator/dispatch_results.py", "tests/test_other.py"})
+
     def test_non_utf8_test_diff_fails_open(self) -> None:
         path = "tests/test_feature.py"
         self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],

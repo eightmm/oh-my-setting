@@ -161,9 +161,10 @@ def _documentation_path(path: str) -> bool:
             or pure.name.upper().startswith(("README.", "CHANGELOG.", "CONTRIBUTING.")))
 
 
-def _runnable_test(path: str) -> bool:
+def _runnable_test(path: str, runnable_patterns: Sequence[str] = ()) -> bool:
     pure = Path(path)
-    return path.endswith(".sh") or (pure.name.startswith("test_") and path.endswith(".py"))
+    return (path.endswith(".sh") or (pure.name.startswith("test_") and path.endswith(".py"))
+            or _boundary(path, runnable_patterns))
 
 
 def _revision_text(repo: Path, revision: str, path: str) -> Optional[str]:
@@ -353,6 +354,7 @@ def affected_plan(
     head: str = "HEAD",
     depth: int = 0,
     boundary_patterns: Sequence[str] = DEFAULT_BOUNDARIES,
+    runnable_patterns: Sequence[str] = (),
     workspace_exact: bool = True,
 ) -> Dict[str, Any]:
     """Select positive test evidence or require the broader project gate."""
@@ -407,7 +409,7 @@ def affected_plan(
     result = blast_radius(index, seed_paths, depth=None if depth == 0 else depth,
                           confidences=("EXTRACTED",),
                           seed_ids=sorted(containment_seeds | path_consumer_seeds | module_consumer_seeds))
-    tests = [path for path in result["tests"] if _runnable_test(path)]
+    tests = [path for path in result["tests"] if _runnable_test(path, runnable_patterns)]
     test_paths = set(tests)
     test_cases = [row for row in result["test_cases"] if row["path"] in test_paths]
     reasons = []

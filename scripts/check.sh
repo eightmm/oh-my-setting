@@ -896,10 +896,12 @@ prepare_affected_gate() {
     AFFECTED_REASONS=scoped-contracts
     # Prose is checked directly by skill-manifest and documentation references.
     # Runtime prompt/GC/lifecycle suites do not validate the changed guidance.
+  # The operator-path mapping below dispatches these fragments to operator-tools.
   elif ! bash scripts/graph.sh project affected \
       --base "$QUICK_FROM" --head "$QUICK_TO" \
       --guard 'scripts/graph.sh' --guard 'scripts/lib/oms_graph/**' \
-      --guard 'tests/graph-smoke.sh' --json > "$plan_json" 2> "$graph_err"; then
+      --guard 'tests/graph-smoke.sh' \
+      --runnable 'tests/operator/*' --json > "$plan_json" 2> "$graph_err"; then
     AFFECTED_MODE=full
     AFFECTED_REASONS=graph-error
     echo "affected: Project Graph failed; running the complete test gate" >&2

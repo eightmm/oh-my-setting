@@ -126,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     affected.add_argument("--depth", type=int, default=0,
                           help="reverse dependency depth; 0 follows the complete closure")
     affected.add_argument("--guard", action="append", default=[], help="additional always-full path glob")
+    affected.add_argument("--runnable", action="append", default=[], help="additional runnable test path glob")
     affected.add_argument("--json", action="store_true")
     context = project_sub.add_parser("context")
     context.add_argument("--task", required=True)
@@ -461,6 +462,7 @@ def _project_affected(args: argparse.Namespace, repo: Path, state: Path) -> int:
         head=args.head,
         depth=args.depth,
         boundary_patterns=boundaries,
+        runnable_patterns=tuple(getattr(args, "runnable", ())),
         workspace_exact=project_affected.workspace_matches_head(repo, args.head),
     )
     result["base"] = args.base
