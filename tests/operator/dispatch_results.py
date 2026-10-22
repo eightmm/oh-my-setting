@@ -52,7 +52,7 @@ room_repo, continuation_base = continuation_git_repo("continuation-room-repo")
 work_repo = temporary / "continuation-work-repo"
 subprocess.run(["git", "clone", "-q", str(room_repo), str(work_repo)], check=True)
 (work_repo / "shared.txt").write_text("conflicting change\n")
-subprocess.run(["git", "-C", str(work_repo), "commit", "-qam", "conflicting drift"], check=True)
+subprocess.run(["git", "-c", "user.name=continuation fixture", "-c", "user.email=continuation@example.com", "-C", str(work_repo), "commit", "-qam", "conflicting drift"], check=True)
 assert subprocess.check_output(["git", "-C", str(room_repo), "rev-parse", "HEAD"], text=True).strip() == continuation_base
 try:
     run_continuation_fixture(room_repo, work_repo, continuation_base)
@@ -64,7 +64,7 @@ except ValueError as error:
 dirty_repo, dirty_base = continuation_git_repo("continuation-dirty-repo")
 (dirty_repo / "other.txt").write_text("unrelated\n")
 subprocess.run(["git", "-C", str(dirty_repo), "add", "other.txt"], check=True)
-subprocess.run(["git", "-C", str(dirty_repo), "commit", "-qm", "unrelated drift"], check=True)
+subprocess.run(["git", "-c", "user.name=continuation fixture", "-c", "user.email=continuation@example.com", "-C", str(dirty_repo), "commit", "-qm", "unrelated drift"], check=True)
 (dirty_repo / "shared.txt").write_text("dirty conflict\n")
 dirty_note, _ = run_continuation_fixture(dirty_repo, dirty_repo, dirty_base)
 assert "differs from current HEAD" in dirty_note and "applies cleanly" in dirty_note, dirty_note
