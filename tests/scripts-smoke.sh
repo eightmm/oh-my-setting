@@ -27984,6 +27984,10 @@ test_delegate_execution_config_guard_runs_before_git_capture() {
   local home_dir="$project/home"
   local marker="$project/marker-fired"
   local base_config="$TMP/worker-exec-config.base"
+  local source_clone="$project/source-clone"
+  local source_snapshot="$TMP/worker-exec-config-source-snapshot"
+  local source_detail="$TMP/worker-exec-config-source-detail"
+  local source_sha source_out source_detail_line
   local out rc=0 mode
 
   make_committed_repo "$project"
@@ -27995,7 +27999,7 @@ test_delegate_execution_config_guard_runs_before_git_capture() {
   # subsections. Each worker also edits the primary tree: a vulnerable guard
   # would run the planted command while trying to capture that mutation.
   for mode in fsmonitor diff-external diff-driver-escaped diff-driver-tab \
-    filter-quoted filter-dotted filter-tab includeif includeif-tab hook-config; do
+    filter-quoted filter-dotted filter-tab includeif includeif-tab hook-config staged-index; do
     cat > "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
@@ -28030,6 +28034,9 @@ case "$mode" in
     ;;
   hook-config)
     printf '\n[hook "x"]\n\tcommand = $bin_dir/marker\n\tevent = post-checkout\n' >> "$project/.git/config"
+    ;;
+  staged-index)
+    git -C "$project" add file.txt
     ;;
 esac
 echo done
@@ -28067,10 +28074,43 @@ assert sys.argv[3] not in answer, "config value leaked into the delegate artifac
 PY
         fail "execution-state detail should be recorded without config values"
     fi
+    if [ "$mode" = staged-index ]; then
+      contains "$out" 'execution-state canonical index' ||
+        fail "execution-state detail should name the canonical index: $out"
+      python3 - "$project" <<'PY' || fail "canonical index detail missing from fail ledger"
+import json, sys
+from pathlib import Path
+rows = [json.loads(line) for line in (Path(sys.argv[1]) / '.oms/failures.jsonl').read_text().splitlines()]
+row = [item for item in rows if item.get('failure_code') == 'guard_parent_interference'][-1]
+assert 'execution-state canonical index' in row['summary'], row
+PY
+    fi
     # Restore raw trusted bytes without asking Git to parse hostile config.
     cp "$base_config" "$project/.git/config"
+    git -c core.fsmonitor=false -c diff.external= -C "$project" reset -q -- file.txt
     git -c core.fsmonitor=false -c diff.external= -C "$project" checkout -- file.txt
   done
+
+  # The same snapshot diagnostics are used for the linked source clone. Keep
+  # its component label tied to the role rather than the canonical repository.
+  git -C "$project" worktree add -q -b guard-source-index "$source_clone"
+  . "$ROOT/scripts/lib/oms-common.sh"
+  oms_git_execution_state_snapshot "$source_clone" "$source_snapshot" ||
+    fail "could not snapshot source clone execution state"
+  source_sha="$(oms_sha256_file "$source_snapshot")"
+  printf 'source index mutation\n' >> "$source_clone/file.txt"
+  git -C "$source_clone" add file.txt
+  rc=0
+  source_out="$(oms_git_execution_state_assert_unchanged "$source_clone" \
+    "$source_snapshot" "$source_sha" "source clone" "$source_detail" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "source clone index mutation passed execution-state guard"
+  contains "$source_out" 'component=execution-state source index' ||
+    fail "source clone index detail did not name its component: $source_out"
+  source_detail_line="$(printf '%s\n' "$source_out" | grep -F 'component=execution-state source index' | head -n 1)"
+  case "$source_detail_line" in
+    *canonical*)
+      fail "source clone index detail incorrectly named canonical repository: $source_out" ;;
+  esac
 
   # A snapshot error crosses the registry-lock subshell. It must stop before
   # the provider, with the snapshot's diagnostic retained for the caller.

@@ -608,7 +608,7 @@ for row in rows:
             current_index = "unreadable"
         if current_index == expected:
             continue
-        kind = "hidden index flag/index signature"
+        kind = "index staged entries or flags changed"
     else:
         current = raw_signature(path)
         if current == expected:
@@ -632,7 +632,14 @@ for row in rows:
                     if len(delta) > 8:
                         kind += ",additional keys omitted"
     name = basename if re.fullmatch(r"[A-Za-z0-9._-]+", basename) else "[unusual path]"
-    print("snapshot=%s path=%s kind=%s" % (role, name, kind))
+    component = {"canonical repository": "execution-state canonical",
+                 "worker worktree": "execution-state worktree",
+                 "source clone": "execution-state source"}.get(role, "execution-state")
+    if basename == "config":
+        component += " config"
+    elif basename == "index":
+        component += " index"
+    print("snapshot=%s path=%s kind=%s component=%s" % (role, name, kind, component))
 PY
 }
 

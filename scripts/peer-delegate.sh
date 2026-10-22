@@ -2813,7 +2813,7 @@ if len(details) > 8:
         "$worker_guard_dir/execution-state-worktree-detail" \
         "$worker_source_guard_dir/execution-state-source-detail"; do
         [ -s "$guard_detail_file" ] || continue
-        cat "$guard_detail_file"
+        tr -d '\r' < "$guard_detail_file"
       done
     )"
     if [ -n "$guard_execution_details" ] || [ -n "$guard_metadata_details" ]; then
@@ -2830,7 +2830,7 @@ if len(details) > 8:
       } >> "$artifact"
     fi
     guard_failure_hint="Protected surfaces changed outside this worker's worktree during the run. The guard does not identify the actor; concurrent causes can include the parent editing shared Git metadata or the plan, or another worker adding or removing a worktree on this repository. Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change."
-    guard_failure_summary="worker guard stopped run; changed surfaces: $worker_guard_changed; changed paths/refs: $guard_metadata_details"
+    guard_failure_summary="worker guard stopped run; changed surfaces: $worker_guard_changed; execution-state: $guard_execution_details; changed paths/refs: $guard_metadata_details"
     guard_failure_summary="${guard_failure_summary:0:1200}"
     # The breach is loud now (this run exits 1), but a later patch-land or
     # inbox read only knows what these two rows remember. If either write
