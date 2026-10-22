@@ -308,9 +308,60 @@ PY
   fi
 }
 
+ma_read_guard_gitmeta_replacement_only() {  # STATE_SNAPSHOT_DIR
+  local dir="$1"
+  [ -s "$dir/gitmeta-managed-replaced" ] &&
+    [ -f "$dir/gitmeta-now" ] && [ -f "$dir/gitmeta-admin-now" ] || return 1
+  python3 - "$dir/gitmeta" "$dir/gitmeta-now" \
+    "$dir/gitmeta-admin-now" "$dir/gitmeta-managed-replaced" <<'PY'
+import re
+import sys
+
+def lines(path):
+    with open(path, encoding="utf-8", errors="replace") as stream:
+        return set(stream.read().splitlines())
+
+before, after, admin = (lines(path) for path in sys.argv[1:4])
+replaced = lines(sys.argv[4])
+changed = before ^ after
+pattern = re.compile(
+    r"^(?:worktree-dir worktrees/([^/]+)|"
+    r"worktree worktrees/([^/]+)/(HEAD|gitdir|commondir) [0-9a-f]+)$"
+)
+changed_slots = set()
+changed_fields = {}
+for line in changed:
+    match = pattern.fullmatch(line)
+    if not match:
+        raise SystemExit(1)
+    slot = match.group(1) or match.group(2)
+    field = match.group(3) or "worktree-dir"
+    if "worktrees/" + slot not in replaced:
+        raise SystemExit(1)
+    changed_slots.add("worktrees/" + slot)
+    changed_fields.setdefault(slot, set()).add(field)
+if not replaced or changed_slots != replaced:
+    raise SystemExit(1)
+for slot in replaced:
+    name = slot[len("worktrees/"):]
+    slot_lines = lambda rows: {
+        line for line in rows
+        if line == "worktree-dir " + slot or any(
+            line.startswith(kind + " " + slot + "/")
+            for kind in ("worktree", "worktree-link", "worktree-entry")
+        )
+    }
+    if slot_lines(after) != slot_lines(admin):
+        raise SystemExit(1)
+    if not changed_fields[name].intersection(("gitdir", "commondir")):
+        raise SystemExit(1)
+PY
+}
+
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
   local root name digest changed surface hard soft execution named
+  local replacement_softened
   MA_READ_GUARD_DIAGNOSTIC=""
   ma_read_guard_purge_new_bytecode || return 2
   # A linked source's HEAD also appears in the state's Git metadata. Diagnose
@@ -340,8 +391,14 @@ ma_read_guard_assert() {
     fi
     oms_git_assert_safe_execution_config "$root" diff-read || return 2
     oms_git_assert_plain_index "$root" || return 2
+    # These are outputs of the forthcoming surface diff, not baseline state.
+    # Discard a prior assertion's proof so an early classifier failure cannot
+    # reuse stale replacement evidence.
+    rm -f "$MA_READ_GUARD_DIR/$name/gitmeta-now" \
+      "$MA_READ_GUARD_DIR/$name/gitmeta-managed-replaced" || return 2
     changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" "" "$execution" | tr -d '\r')" || return 2
     hard="" soft=""
+    replacement_softened=0
     if [ -s "$MA_READ_GUARD_DIR/$name/state-detail" ]; then
       MA_READ_GUARD_DIAGNOSTIC="error: read pass changed $name shared-state files"
       echo "$MA_READ_GUARD_DIAGNOSTIC:" >&2
@@ -349,8 +406,17 @@ ma_read_guard_assert() {
     fi
     for surface in $(printf '%s' "$changed" | tr ',' ' '); do
       # Source content/control changes stay hard; only attributed foreign Git
-      # activity gets the same relief as on the state side.
-      if { [ "$name" = state ] || [ "$surface" = foreign-ref ] || [ "$surface" = foreign-worktree ]; } &&
+      # activity gets the same relief as on the state side. Bare state-side
+      # gitmeta is softened only when each replaced slot's gitmeta-now lines
+      # match its gitmeta-admin-now lines captured during validation.
+      if [ "$name" = state ] && [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
+        [ "$surface" = gitmeta ] &&
+        ma_read_guard_gitmeta_replacement_only "$MA_READ_GUARD_DIR/$name"; then
+        if [ "$replacement_softened" != 1 ]; then
+          soft="${soft:+$soft, }gitmeta-managed-replaced"
+          replacement_softened=1
+        fi
+      elif { [ "$name" = state ] || [ "$surface" = foreign-ref ] || [ "$surface" = foreign-worktree ]; } &&
         oms_worker_surface_is_soft "$surface" &&
         [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ]; then
         soft="${soft:+$soft, }$surface"

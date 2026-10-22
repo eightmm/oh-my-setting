@@ -32295,6 +32295,278 @@ $body"
       contains "$result" 'outside its worktree: gitmeta' || fail "foreign $field mutation was not named: $result"
     done
   done
+
+  local read_root="$TMP/guard-read-managed-replacement-root"
+  local read_old="$read_root/oh-my-setting-delegate.old"
+  local read_new="$read_root/oh-my-setting-delegate.new"
+  local read_cleanup="$read_root/oh-my-setting-delegate.cleanup"
+  local read_kept="$read_root/oh-my-setting-delegate.kept"
+  local read_old_admin read_old_gitdir read_slot read_surface read_snapshot="$TMP/guard-read-managed-replacement-snapshot"
+  (
+    . "$ROOT/scripts/lib/harness-residue.sh"
+    . "$ROOT/scripts/lib/peer-common.sh"
+    REPO="$wt" MA_READ_SOURCE_REPO="$source"
+    export REPO MA_READ_SOURCE_REPO
+    export OMS_DELEGATE_WORKTREE_ROOT="$read_root"
+    local read_rc=0 read_out read_common
+    ma_read_guard_begin "$read_snapshot/planted" ||
+      fail "read planted-entry snapshot failed"
+    read_common="$(git -C "$wt" rev-parse --git-common-dir)"
+    case "$read_common" in /*) ;; *) read_common="$wt/$read_common" ;; esac
+    mkdir -p "$read_common/worktrees/planted"
+    printf 'x\n' > "$read_common/worktrees/planted/gitdir"
+    read_out="$(ma_read_guard_assert 2>&1)" || read_rc=$?
+    rm -rf "$read_common/worktrees/planted"
+    [ "$read_rc" = 2 ] || fail "read guard accepted a planted worktree entry: $read_out"
+    contains "$read_out" 'gitmeta worktrees/' ||
+      fail "planted read metadata should remain hard: $read_out"
+
+    make_live_managed_sibling "$wt" "$read_cleanup"
+    sed 's/^pid=.*/pid=999999999/' "$read_cleanup/.oh-my-setting-tmp" \
+      > "$read_cleanup/.oh-my-setting-tmp.dead"
+    mv "$read_cleanup/.oh-my-setting-tmp.dead" "$read_cleanup/.oh-my-setting-tmp"
+    ma_read_guard_begin "$read_snapshot/cleanup" ||
+      fail "read cleanup snapshot failed"
+    git -C "$wt" worktree remove --force "$read_cleanup/wt"
+    rm -rf "$read_cleanup"
+    read_rc=0
+    read_out="$(ma_read_guard_assert 2>&1)" || read_rc=$?
+    [ "$read_rc" = 0 ] || fail "read guard rejected managed sibling cleanup: $read_out"
+    contains "$read_out" 'sibling-cleanup' ||
+      fail "read guard lost state-side sibling-cleanup relief: $read_out"
+
+    eval "$(declare -f oms_worker_gitmeta_admin_changes_are_safe |
+      sed '1s/oms_worker_gitmeta_admin_changes_are_safe/ma_read_guard_real_admin_changes_are_safe/')"
+    oms_worker_gitmeta_admin_changes_are_safe() {
+      local status=0
+      ma_read_guard_real_admin_changes_are_safe "$@" || status=$?
+      if [ "${MA_READ_GUARD_TEST_FORCE_KEPT_LABEL:-0}" = 1 ]; then
+        # shellcheck disable=SC2034  # read by the wrapped guard function
+        OMS_WG_GITMETA_ADMIN_QUIET=0
+      fi
+      return "$status"
+    }
+    export MA_READ_GUARD_TEST_FORCE_KEPT_LABEL=1
+    ma_read_guard_begin "$read_snapshot/kept" ||
+      fail "read kept-sibling snapshot failed"
+    make_live_managed_sibling "$wt" "$read_kept"
+    read_rc=0
+    read_out="$(ma_read_guard_assert 2>&1)" || read_rc=$?
+    [ "$read_rc" = 0 ] || fail "read guard rejected a newly kept managed sibling: $read_out"
+    contains "$read_out" 'kept-sibling' ||
+      fail "read guard lost state-side kept-sibling relief: $read_out"
+    unset MA_READ_GUARD_TEST_FORCE_KEPT_LABEL
+    git -C "$wt" worktree remove --force "$read_kept/wt"
+    rm -rf "$read_kept"
+
+    make_live_managed_sibling "$wt" "$read_old"
+    read_old_admin="$(git -C "$read_old/wt" rev-parse --git-dir)"
+    case "$read_old_admin" in /*) ;; *) read_old_admin="$wt/$read_old_admin" ;; esac
+    read_slot="${read_old_admin##*/}"
+    read_old_gitdir="$(cat "$read_old_admin/gitdir")"
+    sed 's/^pid=.*/pid=999999999/' "$read_old/.oh-my-setting-tmp" \
+      > "$read_old/.oh-my-setting-tmp.dead"
+    mv "$read_old/.oh-my-setting-tmp.dead" "$read_old/.oh-my-setting-tmp"
+    ma_read_guard_begin "$read_snapshot" || fail "read replacement snapshot failed"
+    git -C "$wt" worktree remove --force "$read_old/wt"
+    rm -rf "$read_old"
+    make_live_managed_sibling "$wt" "$read_new"
+    [ "$(git -C "$read_new/wt" rev-parse --git-dir)" = "$read_old_admin" ] ||
+      fail "managed replacement fixture did not reuse the same admin slot"
+    [ "$(cat "$read_old_admin/gitdir")" != "$read_old_gitdir" ] ||
+      fail "managed replacement fixture did not change the slot gitdir"
+
+    # Force the ordinary sibling classifiers to decline after running their
+    # real captures. This exercises the raw-gitmeta fallback when concurrent
+    # admin churn prevents a complete sibling classification; the final
+    # capture still contains only the positively validated replacement.
+    eval "$(declare -f oms_worker_gitmeta_only_added_removed_siblings |
+      sed '1s/oms_worker_gitmeta_only_added_removed_siblings/ma_read_guard_real_only_added_removed_siblings/')"
+    eval "$(declare -f oms_worker_gitmeta_only_kept_siblings |
+      sed '1s/oms_worker_gitmeta_only_kept_siblings/ma_read_guard_real_only_kept_siblings/')"
+    oms_worker_gitmeta_only_added_removed_siblings() {
+      local status=0
+      if [ "${MA_READ_GUARD_TEST_PLANT_AFTER_ADMIN:-0}" = 1 ] &&
+        [ ! -e "$MA_READ_GUARD_TEST_PLANTED_WORKTREE" ]; then
+        mkdir -p "${MA_READ_GUARD_TEST_PLANTED_WORKTREE%/wt}" || return 1
+        git -C "$MA_READ_GUARD_TEST_REPO" worktree add --quiet --detach \
+          "$MA_READ_GUARD_TEST_PLANTED_WORKTREE" HEAD || return 1
+      fi
+      if [ "${MA_READ_GUARD_TEST_REPLACE_AFTER_ADMIN:-0}" = 1 ] &&
+        [ ! -e "$MA_READ_GUARD_TEST_SLOT_REPLACEMENT" ]; then
+        git -C "$MA_READ_GUARD_TEST_REPO" worktree remove --force \
+          "$MA_READ_GUARD_TEST_MANAGED_WORKTREE" || return 1
+        rm -rf "$MA_READ_GUARD_TEST_MANAGED_PARENT" || return 1
+        mkdir -p "${MA_READ_GUARD_TEST_SLOT_REPLACEMENT%/wt}" || return 1
+        git -C "$MA_READ_GUARD_TEST_REPO" worktree add --quiet --detach \
+          "$MA_READ_GUARD_TEST_SLOT_REPLACEMENT" HEAD || return 1
+      fi
+      ma_read_guard_real_only_added_removed_siblings "$@" || status=$?
+      [ "${MA_READ_GUARD_TEST_FORCE_RAW_GITMETA:-0}" != 1 ] || return 1
+      return "$status"
+    }
+    oms_worker_gitmeta_only_kept_siblings() {
+      local status=0
+      ma_read_guard_real_only_kept_siblings "$@" || status=$?
+      [ "${MA_READ_GUARD_TEST_FORCE_RAW_GITMETA:-0}" != 1 ] || return 1
+      return "$status"
+    }
+    export MA_READ_GUARD_TEST_FORCE_RAW_GITMETA=1
+    read_surface="$(oms_worker_surface_diff "$wt" "$MA_READ_GUARD_DIR/state" "" "$source" | tr -d '\r')"
+    [ "$read_surface" = gitmeta ] ||
+      fail "managed replacement repro did not emit bare gitmeta: $read_surface"
+    grep -Fxq "worktrees/$read_slot" "$MA_READ_GUARD_DIR/state/gitmeta-managed-replaced" ||
+      fail "bare-gitmeta repro lacks validated same-slot proof: $read_surface"
+    read_rc=0
+    read_out="$(ma_read_guard_assert 2>&1)" || read_rc=$?
+    [ "$read_rc" = 0 ] || fail "read guard rejected managed slot replacement: $read_out"
+    grep -Fxq "worktrees/$read_slot" "$MA_READ_GUARD_DIR/state/gitmeta-managed-replaced" ||
+      fail "read guard skipped the validated replacement record ($(cat "$MA_READ_GUARD_DIR/state/gitmeta-managed-replaced")): $read_out"
+    contains "$read_out" 'state repository changes: gitmeta-managed-replaced' ||
+      fail "read guard did not name the narrow replacement relief: $read_out"
+
+    # A distinct unmanaged entry in the final surface capture invalidates the
+    # replacement-only proof even though the managed slot itself was validated.
+    local planted_root="$TMP/guard-read-planted-alongside-replacement"
+    local planted="$planted_root/wt"
+    local planted_old_admin planted_new_admin planted_entry_slot planted_replacement_slot
+    local planted_old="$read_root/oh-my-setting-delegate.planted-old"
+    local planted_new="$read_root/oh-my-setting-delegate.planted-new"
+    make_live_managed_sibling "$wt" "$planted_old"
+    planted_old_admin="$(git -C "$planted_old/wt" rev-parse --git-dir)"
+    planted_old_admin="${planted_old_admin//$'\r'/}"
+    case "$planted_old_admin" in /*) ;; *) planted_old_admin="$wt/$planted_old_admin" ;; esac
+    sed 's/^pid=.*/pid=999999999/' "$planted_old/.oh-my-setting-tmp" \
+      > "$planted_old/.oh-my-setting-tmp.dead"
+    mv "$planted_old/.oh-my-setting-tmp.dead" "$planted_old/.oh-my-setting-tmp"
+    ma_read_guard_begin "$read_snapshot/planted-alongside" ||
+      fail "planted replacement snapshot failed"
+    git -C "$wt" worktree remove --force "$planted_old/wt"
+    rm -rf "$planted_old"
+    make_live_managed_sibling "$wt" "$planted_new"
+    planted_new_admin="$(git -C "$planted_new/wt" rev-parse --git-dir)"
+    planted_new_admin="${planted_new_admin//$'\r'/}"
+    case "$planted_new_admin" in /*) ;; *) planted_new_admin="$read_root/$planted_new_admin" ;; esac
+    [ "$planted_new_admin" = "$planted_old_admin" ] ||
+      fail "planted replacement fixture did not reuse the managed admin slot"
+    planted_replacement_slot="${planted_new_admin##*/}"
+    export MA_READ_GUARD_TEST_PLANT_AFTER_ADMIN=1
+    export MA_READ_GUARD_TEST_PLANTED_WORKTREE="$planted"
+    export MA_READ_GUARD_TEST_REPO="$wt"
+    read_rc=0
+    read_out="$(ma_read_guard_assert 2>&1)" || read_rc=$?
+    unset MA_READ_GUARD_TEST_PLANT_AFTER_ADMIN
+    [ "$read_rc" = 2 ] || fail "read guard accepted planted metadata alongside replacement: $read_out"
+    planted_admin="$(git -C "$planted" rev-parse --git-dir)"
+    planted_admin="${planted_admin//$'\r'/}"
+    planted_entry_slot="${planted_admin##*/}"
+    grep -Fxq "worktrees/$planted_replacement_slot" "$MA_READ_GUARD_DIR/state/gitmeta-managed-replaced" ||
+      fail "planted replacement case lost the managed replacement proof for $planted_replacement_slot: $read_out"
+    grep -Fq "worktrees/$planted_entry_slot" "$MA_READ_GUARD_DIR/state/gitmeta-now" ||
+      fail "planted replacement case did not retain the late planted-entry capture: $read_out"
+    if grep -Fq "worktrees/$planted_entry_slot" "$MA_READ_GUARD_DIR/state/gitmeta-admin-now"; then
+      fail "planted replacement case appeared in the early admin capture: $read_out"
+    fi
+    ma_read_guard_gitmeta_replacement_only "$MA_READ_GUARD_DIR/state" &&
+      fail "planted replacement unexpectedly passed the replacement-only proof"
+    git -C "$wt" worktree remove --force "$planted"
+    git -C "$wt" worktree remove --force "$planted_new/wt"
+    rm -rf "$planted_root" "$planted_new"
+
+    # Isolate the capture race: after the early managed-slot validation,
+    # replace that same slot with an unmanaged checkout and leave no other
+    # post-capture admin entry to make the final delta hard on its own.
+    local takeover_root="$TMP/guard-read-admin-capture-takeover"
+    local takeover="$takeover_root/wt"
+    local takeover_old="$read_root/oh-my-setting-delegate.takeover-old"
+    local takeover_new="$read_root/oh-my-setting-delegate.takeover-new"
+    local takeover_old_admin takeover_new_admin takeover_slot takeover_admin
+    local takeover_admin_rows="$TMP/guard-read-takeover-admin-rows"
+    local takeover_final_rows="$TMP/guard-read-takeover-final-rows"
+    make_live_managed_sibling "$wt" "$takeover_old"
+    takeover_old_admin="$(git -C "$takeover_old/wt" rev-parse --git-dir)"
+    takeover_old_admin="${takeover_old_admin//$'\r'/}"
+    case "$takeover_old_admin" in /*) ;; *) takeover_old_admin="$wt/$takeover_old_admin" ;; esac
+    sed 's/^pid=.*/pid=999999999/' "$takeover_old/.oh-my-setting-tmp" \
+      > "$takeover_old/.oh-my-setting-tmp.dead"
+    mv "$takeover_old/.oh-my-setting-tmp.dead" "$takeover_old/.oh-my-setting-tmp"
+    ma_read_guard_begin "$read_snapshot/admin-capture-takeover" ||
+      fail "admin-capture takeover snapshot failed"
+    git -C "$wt" worktree remove --force "$takeover_old/wt"
+    rm -rf "$takeover_old"
+    make_live_managed_sibling "$wt" "$takeover_new"
+    takeover_new_admin="$(git -C "$takeover_new/wt" rev-parse --git-dir)"
+    takeover_new_admin="${takeover_new_admin//$'\r'/}"
+    case "$takeover_new_admin" in /*) ;; *) takeover_new_admin="$wt/$takeover_new_admin" ;; esac
+    [ "$takeover_new_admin" = "$takeover_old_admin" ] ||
+      fail "admin-capture fixture did not reuse the managed admin slot"
+    takeover_slot="${takeover_new_admin##*/}"
+    export MA_READ_GUARD_TEST_REPLACE_AFTER_ADMIN=1
+    export MA_READ_GUARD_TEST_MANAGED_WORKTREE="$takeover_new/wt"
+    export MA_READ_GUARD_TEST_MANAGED_PARENT="$takeover_new"
+    export MA_READ_GUARD_TEST_SLOT_REPLACEMENT="$takeover"
+    export MA_READ_GUARD_TEST_REPO="$wt"
+    read_rc=0
+    read_out="$(ma_read_guard_assert 2>&1)" || read_rc=$?
+    unset MA_READ_GUARD_TEST_REPLACE_AFTER_ADMIN
+    unset MA_READ_GUARD_TEST_MANAGED_WORKTREE MA_READ_GUARD_TEST_MANAGED_PARENT
+    unset MA_READ_GUARD_TEST_SLOT_REPLACEMENT
+    [ "$read_rc" = 2 ] ||
+      fail "read guard accepted unmanaged content replacing the validated slot after admin capture: $read_out"
+    takeover_admin="$(git -C "$takeover" rev-parse --git-dir)"
+    takeover_admin="${takeover_admin//$'\r'/}"
+    case "$takeover_admin" in /*) ;; *) takeover_admin="$wt/$takeover_admin" ;; esac
+    [ "${takeover_admin##*/}" = "$takeover_slot" ] ||
+      fail "admin-capture fixture did not replace the validated slot in place"
+    grep -Fxq "worktrees/$takeover_slot" "$MA_READ_GUARD_DIR/state/gitmeta-managed-replaced" ||
+      fail "admin-capture takeover lost its early validated replacement proof: $read_out"
+    grep -E "^worktree-dir worktrees/$takeover_slot$|^worktree worktrees/$takeover_slot/(HEAD|gitdir|commondir) " \
+      "$MA_READ_GUARD_DIR/state/gitmeta-admin-now" > "$takeover_admin_rows" ||
+      fail "admin-capture takeover lacks early slot lines"
+    grep -E "^worktree-dir worktrees/$takeover_slot$|^worktree worktrees/$takeover_slot/(HEAD|gitdir|commondir) " \
+      "$MA_READ_GUARD_DIR/state/gitmeta-now" > "$takeover_final_rows" ||
+      fail "admin-capture takeover lacks late slot lines"
+    if cmp -s "$takeover_admin_rows" "$takeover_final_rows"; then
+      fail "admin-capture takeover did not change the validated slot's late content"
+    fi
+    git -C "$wt" worktree remove --force "$takeover"
+    rm -rf "$takeover_root" "$takeover_new"
+    unset MA_READ_GUARD_TEST_FORCE_RAW_GITMETA
+    unset MA_READ_GUARD_TEST_PLANTED_WORKTREE MA_READ_GUARD_TEST_REPO
+
+    git -C "$wt" worktree remove --force "$read_new/wt"
+    rm -rf "$read_new"
+
+    local unmanaged="$TMP/guard-read-unmanaged-replacement/wt"
+    local managed_old="$read_root/oh-my-setting-delegate.unmanaged"
+    make_live_managed_sibling "$wt" "$managed_old"
+    ma_read_guard_begin "$read_snapshot/unmanaged" ||
+      fail "unmanaged replacement snapshot failed"
+    git -C "$wt" worktree remove --force "$managed_old/wt"
+    mkdir -p "${unmanaged%/wt}"
+    git -C "$wt" worktree add --quiet --detach "$unmanaged" HEAD
+    read_rc=0
+    read_out="$(ma_read_guard_assert 2>&1)" || read_rc=$?
+    [ "$read_rc" = 2 ] || fail "read guard accepted unmanaged slot replacement: $read_out"
+    contains "$read_out" 'gitmeta' || fail "unmanaged slot rejection lost gitmeta: $read_out"
+    git -C "$wt" worktree remove --force "$unmanaged"
+
+    local strict_old="$read_root/oh-my-setting-delegate.strict-old"
+    local strict_new="$read_root/oh-my-setting-delegate.strict-new"
+    make_live_managed_sibling "$wt" "$strict_old"
+    sed 's/^pid=.*/pid=999999999/' "$strict_old/.oh-my-setting-tmp" \
+      > "$strict_old/.oh-my-setting-tmp.dead"
+    mv "$strict_old/.oh-my-setting-tmp.dead" "$strict_old/.oh-my-setting-tmp"
+    ma_read_guard_begin "$read_snapshot/strict" || fail "strict replacement snapshot failed"
+    git -C "$wt" worktree remove --force "$strict_old/wt"
+    rm -rf "$strict_old"
+    make_live_managed_sibling "$wt" "$strict_new"
+    read_rc=0
+    read_out="$(OMS_WORKER_GUARD_STRICT=1 ma_read_guard_assert 2>&1)" || read_rc=$?
+    [ "$read_rc" = 2 ] || fail "strict read guard accepted managed slot replacement: $read_out"
+    contains "$read_out" 'sibling-cleanup' && contains "$read_out" 'kept-sibling' ||
+      fail "strict replacement rejection lost the hard metadata classifications: $read_out"
+  ) || fail "read guard managed worktree replacement cases failed"
 }
 
 test_shared_memory_context_ranked_recall() {
@@ -33194,15 +33466,6 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     [ "$rc" = 2 ] || fail "read guard softened a branch write without foreign HEAD evidence: $out"
     contains "$out" 'ref refs/heads/oms/other-main' ||
       fail "a read-guard refs stop should name the changed ref: $out"
-    ma_read_guard_begin "$snap/read-gitmeta" || fail "read gitmeta snapshot failed"
-    mkdir -p "$project/.git/worktrees/planted"
-    printf 'x\n' > "$project/.git/worktrees/planted/gitdir"
-    rc=0
-    out="$(ma_read_guard_assert 2>&1)" || rc=$?
-    rm -rf "$project/.git/worktrees/planted"
-    [ "$rc" = 2 ] || fail "read guard accepted a planted worktree entry: $out"
-    contains "$out" 'gitmeta worktrees/' ||
-      fail "a read-guard gitmeta stop should name the changed entry: $out"
     ma_read_guard_begin "$snap/read-source" || fail "read source protection snapshot failed"
     printf 'source mutation\n' >> "$read_source/file.txt"
     rc=0
