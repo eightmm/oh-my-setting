@@ -535,7 +535,7 @@ EOF
   [ -z "$(find "$lock_dir" -maxdepth 1 -type f \
     -name '*.json.*.lock' -print -quit 2>/dev/null)" ] ||
     fail "gc left a permanent per-marker flock inode"
-  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_LOCK_DIR="$lock_dir" \
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_LOCK_DIR="$lock_dir" XDG_STATE_HOME="$TMP/delegate-marker-set-lock-state" \
     PATH="$bin_dir:/usr/bin:/bin" python3 - "$ROOT" "$project" <<'OBSERVATION'
 import os, sys, json, subprocess
 from pathlib import Path
