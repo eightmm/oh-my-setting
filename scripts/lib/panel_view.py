@@ -721,6 +721,9 @@ def call_tokens(report, attempt_id, state, short=False):
     if not operation:
         operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
                           if attempt_id and item.get("attempt_id") == attempt_id), {})
+    if not operation:
+        operation = next((item for item in mapping(report.get("room_attempts")).values()
+                          if attempt_id and item.get("attempt_id") == attempt_id), {})
     usage = mapping(operation.get("provider_usage"))
     session_total = usage.get("session_cumulative") is True
     tokens = provider_usage_tokens(usage)

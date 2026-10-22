@@ -119,6 +119,7 @@ alias_registry = json.loads((alias_repo / ".oms/artifacts/panel-aliases.json").r
 reserved_aliases = [row["alias"] for row in alias_registry["reservations"]]
 assert aliases[1] not in reserved_aliases and aliases[0] in reserved_aliases, alias_registry
 assert dispatch.ROLE_ALIAS_LETTERS["worker"] == "W"
+
 warning_plan = temporary / "dispatch-warning-plan"
 (warning_plan / ".oms/plan").mkdir(parents=True)
 (warning_plan / ".oms/plan/tasks.json").write_text(
@@ -145,6 +146,63 @@ for task, scopes, expected in (("missing", None, 1), ("verified", None, 0), ("mi
                           brief="scope is not parsed from this prose", verify=None, task_id=task,
                           dry_run=True, scopes=scopes)
     assert warning.getvalue().count("WARN:") == expected, warning.getvalue()
+
+# A continuation keeps the latest write call's alias when a reviewer has since
+# written a newer call row for the same task.
+continued_brief = temporary / "continued-writer-brief.md"
+continued_brief.write_text("Continue the writer round.\n")
+continuation_rows = [
+    {"attempt_id": "writer-round-1", "task_id": "continued-task",
+     "refs": {"panel_alias": "B211", "panel_room_id": "continued-room", "panel_access": "write"}},
+    {"attempt_id": "review-round-1", "task_id": "continued-task",
+     "refs": {"panel_alias": "R444", "panel_room_id": "continued-room", "panel_access": "read"}},
+]
+continued_alias = {}
+with patch.object(panel, "selected_route", return_value=warning_route), \
+        patch.object(panel, "safe_label", side_effect=lambda value: value), \
+        patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "continued-room"}), \
+        patch.object(dispatch.room, "resolve", return_value="continued-room"), \
+        patch.object(dispatch.room, "same_room", return_value=True), \
+        patch.object(panel, "events", return_value=json.dumps(continuation_rows)), \
+        patch.object(dispatch, "_require_assigned_route"), \
+        patch.object(panel, "continuation", return_value=(continued_brief, None, "continued")), \
+        patch.object(dispatch, "_task_findings_brief", side_effect=lambda repo, tasks, brief: brief), \
+        patch.object(panel, "routing_status", return_value={}), \
+        patch.object(panel, "alternate_route", return_value=None), \
+        patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: continued_alias.update(alias=args[17])):
+    dispatch.dispatch(warning_plan, "codex", "builder", "light", "write", "implement",
+                      brief="unused.md", continue_task="continued-task")
+assert continued_alias.get("alias") == "B211", continued_alias
+
+# A judge-only history is not a writer alias inheritance. Explicit aliases on
+# that continuation still go through the reservation/collision check.
+judge_only_rows = [{"attempt_id": "judge-round-1", "task_id": "judge-task",
+                    "refs": {"panel_alias": "R444", "panel_room_id": "continued-room", "panel_access": "read"}},
+                   {"attempt_id": "other-writer", "task_id": "other-task",
+                    "refs": {"panel_alias": "B211", "panel_room_id": "continued-room", "panel_access": "write"}}]
+continuation_options = {}
+continued_brief.write_text("Continue the judge-only task.\n")
+with patch.object(panel, "selected_route", return_value=warning_route), \
+        patch.object(panel, "safe_label", side_effect=lambda value: value), \
+        patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "continued-room"}), \
+        patch.object(dispatch.room, "resolve", return_value="continued-room"), \
+        patch.object(dispatch.room, "same_room", return_value=True), \
+        patch.object(panel, "events", return_value=json.dumps(judge_only_rows)), \
+        patch.object(dispatch, "_require_assigned_route"), \
+        patch.object(panel, "continuation", return_value=(continued_brief, None, "continued")), \
+        patch.object(dispatch, "_task_findings_brief", side_effect=lambda repo, tasks, brief: brief), \
+        patch.object(panel, "routing_status", return_value={}), \
+        patch.object(panel, "alternate_route", return_value=None), \
+        patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: continuation_options.update(kwargs)):
+    dispatch.dispatch(warning_plan, "codex", "builder", "light", "write", "implement",
+                      brief="unused.md", continue_task="judge-task", alias="B211")
+assert continuation_options.get("continue_call") is False, continuation_options
+try:
+    with patch.object(dispatch.room, "records", return_value=[]):
+        dispatch._reserve_alias(alias_repo, "continued-room", "worker", "B211", judge_only_rows)
+    raise AssertionError("explicit alias owned by another task was accepted")
+except ValueError as error:
+    assert "already used" in str(error), error
 try:
     panel.run_dispatch(root, "codex", "worker", "read", "inspect", None,
                        "bash tests/scripts-smoke.sh --only test_oms_allowlist_stays_in_sync_with_scripts",

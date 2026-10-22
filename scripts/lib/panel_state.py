@@ -640,6 +640,7 @@ def snapshot(repo, room_id=None, _tick=None):
                                 linked[who] = {"state": row["state"], "attempt_id": row["attempt_id"],
                                                "updated_at": row.get("updated_at"), "task_id": row.get("task_id"),
                                                "lease_id": refs.get("panel_lease_id"),
+                                               **({key: row[key] for key in ("tokens", "provider_usage") if key in row}),
                                                **({"alias": refs["panel_alias"]} if refs.get("panel_alias") else {}),
                                                **({"access": "write"} if refs.get("panel_access") == "write" else {})}
                         state["room_attempts"] = linked

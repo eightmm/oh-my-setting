@@ -229,6 +229,29 @@ assert "tok" not in review_line and "12.0k tok" in implement_line, (review_line,
 selected_result = render(finished_usage_tree, "codex", 100, 40, view="tree",
                          navigation={"selected": ("result", "layout-builder")})
 assert "12.0k tok (out 4000)" in selected_result, selected_result
+
+# Calls outside the eight-row attempt window retain tokens from their own
+# full-projection attempt rows.
+old_call_usage = deepcopy(room_view)
+old_call_usage["room"]["participants"] = []
+old_call_usage["attempts"] = {"active_recent": [], "recent": []}
+old_call_usage["room_attempts"] = {}
+for index in range(10):
+    participant = "old-call-%d" % index
+    attempt_id = "old-attempt-%d" % index
+    old_call_usage["room"]["participants"].append({
+        "participant": participant, "provider": "codex", "model": "gpt-6-luna",
+        "role": "worker", "parent": child["participant"], "joined": True, "seq": index + 1,
+    })
+    old_call_usage["room_attempts"][participant] = {
+        "attempt_id": attempt_id, "state": "failed", "task_id": "old-task-%d" % index,
+        "tokens": 321 + index, "provider_usage": {"input_tokens": 321 + index,
+        "output_tokens": 0, "cache_in_input": True},
+    }
+old_calls = projected_nodes(old_call_usage)
+oldest_call = next(call for call in old_calls if call["participant"] == "old-call-0")
+assert oldest_call["tokens"] == "321 tok", oldest_call
+
 from panel_view import amount, call_tokens, plan_tail_columns
 cache_report = {"operations": {"recent": [{"attempt_id": "cache-result", "provider_usage": {
     "input_tokens": 13851552, "output_tokens": 50304, "cache_read_tokens": 13356160,
@@ -3809,18 +3832,28 @@ assert graph_text.held_split(gone) == (set(), set()), graph_text.held_split(gone
 # snapshot() links full-projection rows only on the room, participant and role identity, newest row winning.
 from unittest.mock import patch
 import room as room_module
-def event(attempt, state, at, room_id="flow-room", who="gone-review", role="worker"):
+def event(attempt, state, at, room_id="flow-room", who="gone-review", role="worker", tokens=None):
     # The real ledger row shape: panel identity lives in refs, not in a "panel" mapping.
-    return {"attempt_id": attempt, "state": state, "updated_at": at, "task_id": "t-" + attempt,
-            "refs": {"panel_room_id": room_id, "panel_room_participant": who, "panel_role": role}}
-listed = [event("a-old", "working", "2026-01-01T00:00:00Z"), event("a-new", "review", "2026-01-02T00:00:00Z"),
+    row = {"attempt_id": attempt, "state": state, "updated_at": at, "task_id": "t-" + attempt,
+           "refs": {"panel_room_id": room_id, "panel_room_participant": who, "panel_role": role}}
+    if tokens is not None:
+        row["tokens"] = tokens
+        row["provider_usage"] = {"input_tokens": tokens, "output_tokens": 0, "cache_in_input": True}
+    return row
+listed = [event("a-old", "working", "2026-01-01T00:00:00Z", tokens=111), event("a-new", "review", "2026-01-02T00:00:00Z", tokens=222),
           event("a-room", "failed", "2026-01-03T00:00:00Z", room_id="other-room"),
           event("a-who", "failed", "2026-01-03T00:00:00Z", who="someone-else"),
           event("a-role", "failed", "2026-01-03T00:00:00Z", role="advisor")]
+# These newer full-ledger records push the usage-bearing rows beyond both
+# eight-row dashboard windows; the room snapshot still links each call's row.
+listed.extend(event("window-%02d" % index, "failed", "2026-01-04T00:00:%02dZ" % index,
+                    who="gone-review", tokens=900 + index) for index in range(10))
+listed.append(event("a-second", "review", "2026-01-03T00:00:00Z", who="gone-second", tokens=999))
 live_row = event("a-live", "working", "2026-01-03T00:00:00Z", who="gone-live")
 live_row["refs"]["panel_lease_id"] = "lease-live"
 listed.append(live_row)
 members = [{"participant": "gone-review", "role": "worker", "joined": True},
+           {"participant": "gone-second", "role": "worker", "joined": True},
            {"participant": "gone-live", "role": "worker", "joined": True, "parent": "flow-attempt"},
            {"participant": "flow-main", "role": "main", "joined": True}]
 def fake_run(command, **kwargs):
@@ -3836,12 +3869,18 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
         patch.object(panel.subprocess, "run", side_effect=fake_run):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, got.get("land")
-assert got["room_attempts"] == {"gone-review": {"state": "review", "attempt_id": "a-new",
-    "updated_at": "2026-01-02T00:00:00Z", "task_id": "t-a-new", "lease_id": None},
+assert got["room_attempts"] == {"gone-review": {"state": "failed", "attempt_id": "window-09",
+    "updated_at": "2026-01-04T00:00:09Z", "task_id": "t-window-09", "lease_id": None,
+    "tokens": 909, "provider_usage": {"input_tokens": 909, "output_tokens": 0, "cache_in_input": True}},
+    "gone-second": {"state": "review", "attempt_id": "a-second", "updated_at": "2026-01-03T00:00:00Z",
+                    "task_id": "t-a-second", "lease_id": None, "tokens": 999,
+                    "provider_usage": {"input_tokens": 999, "output_tokens": 0, "cache_in_input": True}},
     "gone-live": {"state": "working", "attempt_id": "a-live", "updated_at": "2026-01-03T00:00:00Z",
                   "task_id": "t-a-live", "lease_id": "lease-live"}}, got.get("room_attempts")
 snapshot_nodes = {m["participant"]: m for m in graph_text.nodes(got)}
 assert snapshot_nodes["gone-live"]["lease_id"] == "lease-live", snapshot_nodes["gone-live"]
+assert snapshot_nodes["gone-review"]["tokens"] == "909 tok", snapshot_nodes["gone-review"]
+assert snapshot_nodes["gone-second"]["tokens"] == "999 tok", snapshot_nodes["gone-second"]
 got["plan"] = {"tasks": [{"id": "t-a-live", "state": "running", "claimed_by": "flow-attempt",
                             "lease_id": "lease-live", "claimed_at": "2026-01-03T00:00:01Z"}]}
 assert graph_text.held_split(got) == (set(), set()), graph_text.held_split(got)
@@ -3849,10 +3888,10 @@ assert graph_text.held_split(got) == (set(), set()), graph_text.held_split(got)
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
-        patch.object(panel, "outcomes", side_effect=lambda repo, ids, _shared=False, _tick=None: {"t-a-new": "accepted"} if "t-a-new" in ids else {}), \
+        patch.object(panel, "outcomes", side_effect=lambda repo, ids, _shared=False, _tick=None: {"t-window-09": "accepted"} if "t-window-09" in ids else {}), \
         patch.object(panel.subprocess, "run", side_effect=fake_run):
     got, _ = panel.snapshot(Path("."), "flow-room")
-assert got.get("finalized") == {"t-a-new": "accepted"}, got.get("finalized")
+assert got.get("finalized") == {"t-window-09": "accepted"}, got.get("finalized")
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \

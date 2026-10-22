@@ -552,18 +552,22 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             if refs.get("panel_alias") and room.same_room(repo, refs.get("panel_room_id"), room_id):
                 call_rows.append(attempt)
     if continue_task:
+        inherited_writer_alias = False
         matches = {row.get("task_id") for row in call_rows
                    if row.get("refs", {}).get("panel_alias") == continue_task and row.get("task_id")}
         if matches:
             if len(matches) != 1:
                 raise ValueError("call alias does not resolve to exactly one task in this room")
             continue_task = next(iter(matches))
-        continued = next((row for row in reversed(call_rows) if row.get("task_id") == continue_task), None)
+        continued = next((row for row in reversed(call_rows)
+                          if row.get("task_id") == continue_task
+                          and row.get("refs", {}).get("panel_access") == "write"), None)
         if continued:
             existing_alias = continued.get("refs", {}).get("panel_alias")
             if alias is not None and existing_alias and alias != existing_alias:
                 raise ValueError("--continue keeps the continued call's alias")
             alias = existing_alias or alias
+            inherited_writer_alias = bool(existing_alias)
     resume = None
     resume_usage_baseline = None
     temporary = None
@@ -615,7 +619,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         if continuation_patch is not None:
             options["continuation_patch"] = continuation_patch
         if continue_task:
-            options["continue_call"] = True
+            options["continue_call"] = inherited_writer_alias
         if resume_usage_baseline:
             options["resume_usage_baseline"] = resume_usage_baseline
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
