@@ -16093,7 +16093,7 @@ printf '%s\n' "$*" > "$OMS_OPERATOR_MARKER"
 SH
   cat > "$repo/tests/panel-workspaces-smoke.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'ran\n' >> "$OMS_PANEL_WORKSPACES_MARKER"
+printf 'ran\n' >> "$PANEL_WORKSPACES_FIXTURE_MARKER"
 SH
   cat > "$repo/bin/uname" <<'SH'
 #!/usr/bin/env bash
@@ -16112,7 +16112,7 @@ SH
   workspace_marker="$TMP/panel-workspaces-selector.marker"
   uname_bin="$repo/bin"
   if out="$(cd "$repo" && PATH="$uname_bin:$PATH" OMS_FIXTURE_UNAME=Linux OMS_GRAPH_PANEL_TESTS=1 \
-      OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+      OMS_OPERATOR_MARKER="$marker" PANEL_WORKSPACES_FIXTURE_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
       bash scripts/check.sh --affected --ci-parity --no-lint \
         --changed-from "$base" --changed-to HEAD 2>&1)"; then
     :
@@ -16126,7 +16126,7 @@ SH
 
   rm -f "$workspace_marker"
   if out="$(cd "$repo" && PATH="$uname_bin:$PATH" OMS_FIXTURE_UNAME=Linux OMS_GRAPH_PANEL_TESTS=0 \
-      OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+      OMS_OPERATOR_MARKER="$marker" PANEL_WORKSPACES_FIXTURE_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
       bash scripts/check.sh --affected --ci-parity --no-lint \
         --changed-from "$base" --changed-to HEAD 2>&1)"; then
     :
@@ -16140,7 +16140,7 @@ SH
 
   rm -f "$workspace_marker"
   if out="$(cd "$repo" && PATH="$uname_bin:$PATH" OMS_FIXTURE_UNAME=Darwin OMS_GRAPH_PANEL_TESTS=1 \
-      OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+      OMS_OPERATOR_MARKER="$marker" PANEL_WORKSPACES_FIXTURE_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
       bash scripts/check.sh --affected --ci-parity --no-lint \
         --changed-from "$base" --changed-to HEAD 2>&1)"; then
     :
@@ -16155,7 +16155,7 @@ SH
   git -C "$repo" add README-fixture.txt
   git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m unrelated >/dev/null
   rm -f "$workspace_marker"
-  if out="$(cd "$repo" && OMS_OPERATOR_MARKER="$marker" OMS_PANEL_WORKSPACES_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+  if out="$(cd "$repo" && OMS_OPERATOR_MARKER="$marker" PANEL_WORKSPACES_FIXTURE_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
       bash scripts/check.sh --affected --ci-parity --no-lint \
         --changed-from "$unrelated_base" --changed-to HEAD 2>&1)"; then
     :
