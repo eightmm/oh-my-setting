@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+from collections import OrderedDict
 from pathlib import Path
 
 _CACHE = {}
@@ -32,6 +33,9 @@ _TRANSCRIPT_BYTES = 8 * 1024 * 1024
 _TRANSCRIPT_KEEP = 128
 _TRANSCRIPT_DAYS = 30
 _TRANSCRIPT_MARKER = b'{"oms_transcript_truncated":true}\n'
+_TRANSCRIPT_CACHE = OrderedDict()
+_TRANSCRIPT_CACHE_LOCK = threading.Lock()
+_TRANSCRIPT_CACHE_LIMIT = 8
 
 
 def _provider_home_path(path):
@@ -697,8 +701,19 @@ def prune_transcripts(repo):
     """Bound completed captures only; live pointers and retained summaries are untouched."""
     directory = _dispatch_directory(repo)
     rows = []
+    stale_temporary = []
     with os.scandir(directory) as entries:
         for entry in entries:
+            if entry.name.startswith(".transcript-"):
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                        (not hasattr(os, "getuid") or info.st_uid == os.getuid()) and
+                        info.st_mtime < time.time() - 3600):
+                    stale_temporary.append(entry.path)
+                continue
             if not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.transcript", entry.name):
                 continue
             try:
@@ -708,6 +723,11 @@ def prune_transcripts(repo):
             if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
                     (not hasattr(os, "getuid") or info.st_uid == os.getuid())):
                 rows.append((info.st_mtime, entry.path))
+    for path in stale_temporary:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
     cutoff = time.time() - _TRANSCRIPT_DAYS * 86400
     for index, (stamp, path) in enumerate(sorted(rows, reverse=True)):
         if index >= _TRANSCRIPT_KEEP or stamp < cutoff:
@@ -840,16 +860,30 @@ def transcript_lines(repo, call):
     try:
         path = os.path.join(_dispatch_directory(repo), call + ".transcript")
         info = os.lstat(path)
-        if os.name == "posix" and info.st_mode & 0o077:
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                hasattr(os, "getuid") and info.st_uid != os.getuid() or
+                os.name == "posix" and info.st_mode & 0o077):
             raise OSError("unsafe transcript permissions")
+        key = (path, info.st_size, getattr(info, "st_mtime_ns", int(info.st_mtime * 1e9)))
+        with _TRANSCRIPT_CACHE_LOCK:
+            cached = _TRANSCRIPT_CACHE.get(key)
+            if cached is not None:
+                _TRANSCRIPT_CACHE.move_to_end(key)
+                return list(cached)
         raw = _transcript_tail(path)
         text = _transcript_documents(raw)
         safe = "\n".join("".join("?" if char != "\t" and unicodedata.category(char)[0] == "C" else char
                                 for char in line) for line in text.splitlines())
         try:
-            return _redact_transcript(safe) or ["No transcript events recorded"]
+            result = _redact_transcript(safe) or ["No transcript events recorded"]
         except (OSError, subprocess.SubprocessError):
             return ["transcript unavailable: secret scanner failed"]
+        with _TRANSCRIPT_CACHE_LOCK:
+            _TRANSCRIPT_CACHE[key] = tuple(result)
+            _TRANSCRIPT_CACHE.move_to_end(key)
+            while len(_TRANSCRIPT_CACHE) > _TRANSCRIPT_CACHE_LIMIT:
+                _TRANSCRIPT_CACHE.popitem(last=False)
+        return result
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         return ["transcript not captured"]
 
@@ -861,7 +895,10 @@ def record_summary(repo, call, stream, provider="", access=""):
         return False
     try:
         parsed = _summarize_stream(stream)
-        _retain_transcript(repo, call, stream)
+        try:
+            _retain_transcript(repo, call, stream)
+        except (OSError, TypeError, ValueError):
+            pass
         data = {
             "schema": 1,
             "available": True,

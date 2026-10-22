@@ -152,6 +152,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
             choice = read_field("oms> ")
             if navigation.get("detail"):
                 navigation.pop("detail", None)
+                navigation.pop("transcript_back", None)
                 navigation["offset"] = 0
                 if choice == "q":
                     return "9"
@@ -174,6 +175,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                         return "f"
                     target = navigation.pop("open_call", None)
                     if target:
+                        navigation.pop("transcript_back", None)
                         width = max(1, shutil.get_terminal_size().columns)
                         navigate(repo, target, cache.get("state", {}), navigation, width)
                         if navigation.get("opening"):
@@ -207,9 +209,11 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     if navigation.get("detail"):
                         if event[0] == "q":
                             navigation.pop("detail", None)
+                            navigation.pop("transcript_back", None)
                             navigation["offset"] = 0
                             return "9"
                         navigation.pop("detail", None)
+                        navigation.pop("transcript_back", None)
                         navigation["offset"] = 0
                     return "9" if event[0] == "u" else event[0]
                 if event[0] == "escape":
@@ -231,6 +235,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     continue  # Ignored input; repainting would only flicker text the person is selecting.
                 action = choose(event, navigation)
                 if action:
+                    navigation.pop("transcript_back", None)
                     width = max(1, shutil.get_terminal_size().columns)
                     navigate(repo, action, cache.get("state", {}), navigation, width)
                     if navigation.get("opening"):

@@ -199,6 +199,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def close_detail():
+        navigation.pop("detail", None)
+        navigation.pop("transcript_back", None)
+
     def interrupted(number, unused):
         from terminal_panel import NativeShutdown
         for signum in saved_handlers:
@@ -521,7 +525,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         elif event[0] in {"g", "t", "b", "v"}:
                             if event[0] in {"g", "t"}:
                                 reset_group_view(navigation)
-                            navigation.pop("detail", None)
+                            close_detail()
                             navigation["offset"] = 0
                             if event[0] == "b":
                                 filtered = not filtered

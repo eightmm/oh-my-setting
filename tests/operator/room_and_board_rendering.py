@@ -2186,9 +2186,22 @@ with tempfile.TemporaryDirectory() as activity_root:
         positions = [transcript.index(part) for part in ("First message", "check-example", "example.py", "Final report")]
         assert positions == sorted(positions), transcript
         assert sensitive_line not in transcript and "[redacted]" in transcript, transcript
+        with panel_activity._TRANSCRIPT_CACHE_LOCK:
+            panel_activity._TRANSCRIPT_CACHE.clear()
+        with patch.object(panel_activity, "_transcript_tail", wraps=panel_activity._transcript_tail) as transcript_read, \
+                patch.object(panel_activity, "_redact_transcript", wraps=panel_activity._redact_transcript) as transcript_mask:
+            assert panel_activity.transcript_lines(activity_repo, transcript_call) == panel_activity.transcript_lines(
+                activity_repo, transcript_call)
+        assert transcript_read.call_count == transcript_mask.call_count == 1
         retained = log_dir / (transcript_call + ".transcript")
         assert retained.stat().st_mode & 0o777 == 0o600
         assert not retained.is_symlink()
+        linked_cache = log_dir / "transcript-cache-hardlink"
+        os.link(retained, linked_cache)
+        assert panel_activity.transcript_lines(activity_repo, transcript_call) == ["transcript not captured"]
+        linked_cache.unlink()
+        with patch.object(panel_activity.os, "getuid", return_value=retained.stat().st_uid + 1):
+            assert panel_activity.transcript_lines(activity_repo, transcript_call) == ["transcript not captured"]
         with patch.object(panel, "results_snapshot", return_value=({"rows": []}, ([], []))):
             rendered_transcript = panel_nav.render_call_view(activity_repo, transcript_call, "Transcript", 100)
         assert "[Transcript]" in rendered_transcript and "Final report" in rendered_transcript, rendered_transcript
@@ -2200,15 +2213,43 @@ with tempfile.TemporaryDirectory() as activity_root:
         assert "  literal indentation" in transcript_screen and "Final report" in transcript_screen, transcript_screen
         assert panel_nav.tab_event(("escape",), transcript_nav)
         assert "detail" not in transcript_nav and transcript_nav["band_offsets"]["detail"] == 3
+        replacement_nav = {"opening": ("result", transcript_call),
+                           "transcript_back": ({"title": "OLD"}, 2)}
+        assert panel_nav.finish_opening(replacement_nav, (("result", transcript_call),
+               {"transcript": transcript, "rows": []}, None))
+        assert "transcript_back" not in replacement_nav and replacement_nav["detail"]["title"] == "RECORDED RESULTS"
+        transcript_nav.update(detail={"title": "MESSAGES"}, preview={"target": ("result", transcript_call),
+                           "report": {"transcript": transcript}})
+        assert panel_nav.tab_event(("x",), transcript_nav)
+        assert "First message" in transcript_nav["detail"]["text"]
+        transcript_nav["detail"] = {"title": "NEW CALL"}
+        assert not panel_nav.tab_event(("escape",), transcript_nav)
+        assert "transcript_back" not in transcript_nav and transcript_nav["detail"]["title"] == "NEW CALL"
+        unrelated_detail = {"surface": "graph", "tab": "detail", "detail": {"title": "MESSAGES"},
+                            "preview": {"target": ("result", transcript_call),
+                                        "report": {"transcript": transcript}}}
+        assert panel_nav.tab_event(("x",), unrelated_detail)
+        assert "First message" in unrelated_detail["detail"]["text"]
+        loading_nav = {"surface": "graph", "tab": "detail", "preview": {"target": ("result", transcript_call)}}
+        assert panel_nav.tab_event(("x",), loading_nav) and loading_nav["notice"] == "Transcript is still loading"
+        loading_nav["preview"].update(error="Result evidence unavailable", report={})
+        assert panel_nav.tab_event(("x",), loading_nav) and loading_nav["notice"] == "Result evidence unavailable"
+    transcript_nav.pop("detail", None)
+    transcript_nav.pop("transcript_back", None)
     transcript_nav["reader_open"] = True
     with patch.object(panel_reader, "close_reader", return_value=True) as closed_transcript_reader:
         assert panel_nav.tab_event(("x",), transcript_nav)
     assert closed_transcript_reader.call_count == 1 and not transcript_nav.get("reader_open")
     assert panel_nav.tab_event(("escape",), transcript_nav)
     assert panel_activity.transcript_lines(activity_repo, "call-uncaptured") == ["transcript not captured"]
+    with patch.object(panel, "call_results", return_value=evidence):
+        uncaptured_evidence = panel_nav.read_evidence(activity_repo, ("result", "call-uncaptured"))[1]
+    assert all(line != "x Transcript" for line in uncaptured_evidence["activity_what_it_did"])
     oversized_source = activity_repo / "oversized-transcript"
+    oversized_masked = "ghp_" + "B" * 24
     oversized_source.write_bytes(b"x" * (8 * 1024 * 1024) + b"\n" + json.dumps({
-        "type": "item.completed", "item": {"type": "agent_message", "text": "Tail retained"}}).encode() + b"\n")
+        "type": "item.completed", "item": {"type": "agent_message",
+        "text": "Tail retained\n" + oversized_masked}}).encode() + b"\n")
     assert panel_activity.record_summary(activity_repo, "call-transcript-large", oversized_source)
     oversized_retained = log_dir / "call-transcript-large.transcript"
     assert oversized_retained.stat().st_size <= 8 * 1024 * 1024
@@ -2219,6 +2260,13 @@ with tempfile.TemporaryDirectory() as activity_root:
     os.utime(old_transcript, (1, 1))
     panel_activity.prune_transcripts(activity_repo)
     assert not old_transcript.exists(), "age pruning must work below the count limit"
+    stale_temp = log_dir / ".transcript-crashed"
+    stale_temp.write_text("incomplete")
+    os.utime(stale_temp, (time.time() - 3601, time.time() - 3601))
+    fresh_temp = log_dir / ".transcript-active"
+    fresh_temp.write_text("active")
+    panel_activity.prune_transcripts(activity_repo)
+    assert not stale_temp.exists() and fresh_temp.exists()
     with patch.object(panel_activity, "_TRANSCRIPT_KEEP", 2):
         panel_activity.prune_transcripts(activity_repo)
     assert len(list(log_dir.glob("*.transcript"))) == 2
@@ -2227,12 +2275,18 @@ with tempfile.TemporaryDirectory() as activity_root:
     linked_transcript = log_dir / "call-transcript-link.transcript"
     linked_transcript.symlink_to(protected_transcript)
     assert panel_activity.transcript_lines(activity_repo, "call-transcript-link") == ["transcript not captured"]
-    assert not panel_activity.record_summary(activity_repo, "call-transcript-link", oversized_source)
+    assert panel_activity.record_summary(activity_repo, "call-transcript-link", oversized_source)
+    assert panel_activity.read_summary(activity_repo, "call-transcript-link")["available"] is True
     assert protected_transcript.read_text() == "unchanged"
     hardlink_transcript = log_dir / "call-transcript-hardlink.transcript"
     os.link(protected_transcript, hardlink_transcript)
-    assert not panel_activity.record_summary(activity_repo, "call-transcript-hardlink", oversized_source)
+    assert panel_activity.record_summary(activity_repo, "call-transcript-hardlink", oversized_source)
+    assert panel_activity.read_summary(activity_repo, "call-transcript-hardlink")["available"] is True
     assert protected_transcript.read_text() == "unchanged"
+    failed_transcript_call = "call-transcript-save-failed"
+    with patch.object(panel_activity, "_retain_transcript", side_effect=OSError("disk full")):
+        assert panel_activity.record_summary(activity_repo, failed_transcript_call, oversized_source)
+    assert panel_activity.read_summary(activity_repo, failed_transcript_call)["available"] is True
     private_home = activity_repo / "fake-provider-home"
     provider_stream = private_home / ".codex" / "stream"
     provider_stream.parent.mkdir(parents=True)
@@ -2240,8 +2294,12 @@ with tempfile.TemporaryDirectory() as activity_root:
     with patch.dict(os.environ, {"HOME": str(private_home)}):
         assert not panel_activity.record_summary(activity_repo, "call-transcript-home", provider_stream)
         assert panel_activity.transcript_lines(private_home / ".codex", "call-private") == ["transcript not captured"]
+    scanner_retry_call = "call-transcript-scanner-retry"
+    assert panel_activity.record_summary(activity_repo, scanner_retry_call, oversized_source)
     with patch.object(panel_activity.subprocess, "run", side_effect=subprocess.TimeoutExpired("scanner", 5)):
-        assert "secret scanner failed" in panel_activity.transcript_lines(activity_repo, "call-transcript-large")[0]
+        assert "secret scanner failed" in panel_activity.transcript_lines(activity_repo, scanner_retry_call)[0]
+    recovered_transcript = panel_activity.transcript_lines(activity_repo, scanner_retry_call)
+    assert "[redacted]" in recovered_transcript and oversized_masked not in "\n".join(recovered_transcript)
     assert "output excerpt truncated" in panel_activity._transcript_excerpt("한" * 8192)
     assert len(panel_activity._transcript_excerpt("한" * 8192).split("\n")[0].encode()) <= 8192
     assert __import__("panel_input").TerminalInput().decode(b"x") == [("x",)]
@@ -3152,6 +3210,30 @@ with patch.object(panel, "BackgroundRead", ImmediateRead), \
 opened.assert_called_once()
 assert opened.call_args.args[0] == "%1" and shlex.split(opened.call_args.args[1])[-4:] == [
     "--mail", "flow-main", "--room", "flow-room"], opened.call_args
+# Closing a transcript with each board control must release its Back state so x can reopen it.
+watch_nav_after_transcript = []
+def transcript_watch_tab(event, navigation):
+    if event[0] == "x" and "preview" not in navigation:
+        navigation["preview"] = {"target": ("result", "flow-call"), "report": {"transcript": "watch transcript"}}
+    consumed = panel_nav.tab_event(event, navigation)
+    if event[0] == "x":
+        watch_nav_after_transcript.append((bool(navigation.get("detail", {}).get("_transcript_view")),
+                                           "transcript_back" in navigation))
+    return consumed
+with patch.object(panel, "BackgroundRead", ImmediateRead), \
+        patch.object(panel, "read_panel", return_value=(mail_flow, 0, "codex", "flow-attempt", "graph", False, "flow-room")), \
+        patch.object(panel, "tab_event", side_effect=transcript_watch_tab), \
+        patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "terminal_style", return_value=(True, False, False)), \
+        patch.object(panel, "provider_availability", return_value={}), \
+        patch.object(panel, "main_installed", return_value=False), patch.object(panel, "mark_window"), \
+        patch.object(panel, "reload_ready", return_value=False), \
+        patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((120, 44))), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch("panel_input.TerminalInput", return_value=BatchInput([[('x',)], [('g',)], [('x',)], [('t',)], [('x',)],
+                                                                   [('b',)], [('x',)], [('v',)], [('x',)], [('q',)]])):
+    assert panel.watch(project, "codex", view="graph", no_animation=True) == 0
+assert watch_nav_after_transcript == [(True, True)] * 5, watch_nav_after_transcript
 # End main mail reader assertions.
 assert not any(line.startswith("Scope:") for line in lines)
 scoped_main = graph_text.detail(dict(main, owns=["scripts/lib", "docs"]), {}, 76, people, {}, everyone={"flow-main": team})[0]

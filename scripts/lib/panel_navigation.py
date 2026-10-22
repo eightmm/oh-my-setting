@@ -415,8 +415,11 @@ def read_evidence(repo, target, state=None):
             from panel_activity import read_summary, summary_lines, transcript_lines
             running_calls = _running_activity_calls(state)
             evidence["activity_snapshot"] = _read_activity_snapshot(repo, target[1], running_calls)
-            evidence["activity_what_it_did"] = summary_lines(read_summary(repo, target[1])) + ["x Transcript"]
-            evidence["transcript"] = "\n".join(transcript_lines(repo, target[1]))
+            transcript = transcript_lines(repo, target[1])
+            evidence["activity_what_it_did"] = summary_lines(read_summary(repo, target[1]))
+            if transcript != ["transcript not captured"]:
+                evidence["activity_what_it_did"].append("x Transcript")
+            evidence["transcript"] = "\n".join(transcript)
         return target, evidence, None
     except Exception as error:
         return target, {}, clean(str(error), 120) or "Result evidence unavailable"
@@ -436,6 +439,7 @@ def finish_opening(navigation, report, generation=None):
         navigation["notice"] = error
     else:
         navigation.pop("notice", None)
+        navigation.pop("transcript_back", None)
         navigation["detail"] = {"title": "RECORDED RESULTS", "transcript": evidence.get("transcript"), "report": dict(
             evidence, rows=[r for r in evidence.get("rows", []) if r.get("calls")])}
         if evidence.get("activity_what_it_did"):
@@ -695,6 +699,9 @@ def tab_event(event, navigation):
     tab = navigation.get("tab") if navigation.get("tab") in names else "log"
     kind = event[0]
     if kind == "escape" and "transcript_back" in navigation:
+        if not (navigation.get("detail") or {}).get("_transcript_view"):
+            navigation.pop("transcript_back", None)
+            return False
         detail, offset = navigation.pop("transcript_back")
         if detail is None:
             navigation.pop("detail", None)
@@ -706,9 +713,12 @@ def tab_event(event, navigation):
         detail = navigation.get("detail") or {}
         preview = navigation.get("preview") or {}
         evidence = preview.get("report") or {}
-        text = detail.get("transcript") if detail else evidence.get("transcript")
         target = preview.get("target") or (None,)
+        text = detail.get("transcript") if detail.get("transcript") is not None else evidence.get("transcript")
         if "transcript_back" not in navigation and (text is not None or target[0] == "result"):
+            if text is None:
+                navigation["notice"] = preview.get("error") or "Transcript is still loading"
+                return True
             # The watcher's Esc closes an open reader first; close it here so Back returns in one key.
             if navigation.get("reader_open"):
                 try:
@@ -722,7 +732,8 @@ def tab_event(event, navigation):
             text = text or "transcript not captured"
             # Keep literal indentation and embedded markdown intact in the board's structured reader.
             fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", text)), default=0))
-            navigation["detail"] = {"title": "TRANSCRIPT", "text": fence + "\n" + text + "\n" + fence}
+            navigation["detail"] = {"title": "TRANSCRIPT", "text": fence + "\n" + text + "\n" + fence,
+                                    "_transcript_view": True}
             navigation["offset"] = 0
             return True
     if navigation.get("surface") not in {"graph", "tree"} or navigation.get("detail"):
