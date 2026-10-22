@@ -761,7 +761,7 @@ assert write_metrics['failed_and_undecided']['first_failing_stage'] == {'verify'
 assert write_metrics['provider_failed_categories']['capacity'] == 1, write_metrics
 # provider_failed without metadata and a provider failure followed by verify are both counted
 assert write_metrics['provider_failed_categories']['unknown'] == 2, write_metrics
-assert write_metrics['telemetry']['context_modes'] == {'graph': {'attempts': 1, 'done': 0}, 'unrecorded': {'attempts': 7, 'done': 1}}, write_metrics
+assert write_metrics['telemetry']['context_modes'] == {'graph': {'attempts': 1, 'done': 0}, 'no artifact row': {'attempts': 2, 'done': 1}, 'unrecorded': {'attempts': 5, 'done': 0}}, write_metrics
 assert write_metrics['telemetry']['claude_fork_subagents'] == 'not_recorded', write_metrics
 assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
 assert expected_metrics['metric_scope']['completion']['coverage']['attempt_limit'] == 1000, expected_metrics
@@ -791,7 +791,8 @@ assert 'completion: 2/6 (33.3%)' in metric_text.getvalue(), metric_text.getvalue
 assert 'awaiting review: n=' in metric_text.getvalue(), metric_text.getvalue()
 assert 'coverage:' in metric_text.getvalue() and 'until ' in metric_text.getvalue(), metric_text.getvalue()
 assert 'peer-delegate write attempts: 8' in metric_text.getvalue(), metric_text.getvalue()
-assert 'context modes (done/attempts)=graph 0/1, unrecorded 1/7;' in metric_text.getvalue(), metric_text.getvalue()
+assert 'context modes (done/attempts)=graph 0/1, no artifact row 1/2, unrecorded 0/5' in metric_text.getvalue(), metric_text.getvalue()
+assert 'fork subagents' not in metric_text.getvalue(), metric_text.getvalue()
 metric_json = io.StringIO()
 with redirect_stdout(metric_json):
     assert panel.main(['--repo', str(metric_repo), '--metrics', '--json']) == 0

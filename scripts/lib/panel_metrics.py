@@ -600,8 +600,11 @@ def aggregate(repo, since=None, now=None):
     # peer-delegate indexes its context_mode on the delegate artifact row.
     context_modes = {}
     for attempt in delegate_writes:
-        mode = next((row.get("context_mode") for row in calls_by_attempt.get(attempt.get("attempt_id"), [])
-                     if row.get("kind") == "delegate" and isinstance(row.get("context_mode"), str)), "unrecorded")
+        delegate_rows = [row for row in calls_by_attempt.get(attempt.get("attempt_id"), [])
+                         if row.get("kind") == "delegate"]
+        mode = next((row.get("context_mode") for row in delegate_rows
+                     if isinstance(row.get("context_mode"), str)),
+                    "unrecorded" if delegate_rows else "no artifact row")
         entry = context_modes.setdefault(mode, {"attempts": 0, "done": 0})
         entry["attempts"] += 1
         entry["done"] += attempt.get("state") == "done"
@@ -795,7 +798,7 @@ def metrics_text(report):
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("reason_code", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("first_failing_stage", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("undecided_age_buckets", {}), sort_keys=True)),
-        "provider failure categories: %s; context modes (done/attempts)=%s; Claude fork subagents=not recorded (refs.claude_fork_subagents)" % (
+        "provider failure categories: %s; context modes (done/attempts)=%s" % (
             json.dumps(report.get("write_attempts", {}).get("provider_failed_categories", {}), sort_keys=True),
             ", ".join("%s %d/%d" % (mode, entry["done"], entry["attempts"]) for mode, entry in
                       report.get("write_attempts", {}).get("telemetry", {}).get("context_modes", {}).items()) or "none"),
