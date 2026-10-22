@@ -18324,6 +18324,9 @@ test_delegate_repair_retries_failed_verify() {
   local rc=0
   local verify_script="$TMP/delegate-repair-no-change-verify.sh"
   local plan_worktree_root="$project/plan-no-change-worktrees"
+  local signal_worktree_root="$project/signal-worktrees"
+  local filter_marker="$project/signal-filter-ran"
+  local signal_pid signal_kept
 
   python3 - "$ROOT/scripts/lib" <<'PY' || fail "repair replay policy contract failed"
 import copy, sys
@@ -18512,6 +18515,91 @@ EOF
   kept="$(sed -n 's/^worktree kept: //p' "$project/capture-fail.out" | head -1)"
   kept="${kept%% *}"
   [ -f "$kept/precious.txt" ] || fail "the kept worktree lost the worker's file: $(cat "$project/capture-fail.out")"
+
+  # TERM after the provider edits but before capture must retain the only copy.
+  mkdir -p "$signal_worktree_root"
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}:\${2:-}" in --version:|--help:|exec:--help) echo 'fixture --effort low medium high'; exit 0 ;; esac
+cat >/dev/null
+if [ "\${SIGNAL_FILTER:-0}" = 1 ]; then
+  printf 'file.txt filter=probe\\n' > .gitattributes
+  git config filter.probe.clean "touch '$filter_marker' && cat"
+  printf 'next\\n' > file.txt
+elif [ "\${SIGNAL_CLEAN:-0}" != 1 ]; then
+  printf 'interrupted edit\\n' > interrupted.txt
+fi
+printf '%s\\n' "\$PWD" > "$project/signal-worker.path"
+touch "$project/signal-worker.ready"
+sleep 60
+EOF
+  chmod +x "$bin_dir/codex"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_DELEGATE_WORKTREE_ROOT="$signal_worktree_root" \
+    PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model --no-verify --prompt 'Wait after edit' \
+    > "$project/signal.out" 2>&1 &
+  signal_pid=$!
+  for i in $(seq 1 100); do
+    [ -f "$project/signal-worker.ready" ] && break
+    kill -0 "$signal_pid" 2>/dev/null || fail "delegate exited before the signal fixture edited files"
+    sleep 0.1
+  done
+  [ -f "$project/signal-worker.ready" ] || fail "signal fixture worker did not start"
+  kill -TERM "$signal_pid" 2>/dev/null || fail "could not TERM the active delegate"
+  rc=0
+  wait "$signal_pid" || rc=$?
+  [ "$rc" = 143 ] || fail "TERM should exit 143, got $rc"
+  grep -Fq 'worktree kept: ' "$project/signal.out" ||
+    fail "TERM before patch capture must report the retained worktree: $(cat "$project/signal.out")"
+  signal_kept="$(sed -n 's/^worktree kept: //p' "$project/signal.out" | head -1)"
+  signal_kept="${signal_kept%% *}"
+  [ -f "$signal_kept/interrupted.txt" ] ||
+    fail "TERM cleanup removed the worker's uncaptured edit: $(cat "$project/signal.out")"
+  [ "$(cat "$project/signal-worker.path")" = "$signal_kept" ] ||
+    fail "reported recovery path does not identify the worker worktree"
+
+  rm -f "$project/signal-worker.ready"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_DELEGATE_WORKTREE_ROOT="$signal_worktree_root" \
+    SIGNAL_FILTER=1 PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" --model fixture-model \
+    --no-verify --prompt 'Probe filter on signal' > "$project/signal-filter.out" 2>&1 &
+  signal_pid=$!
+  for i in $(seq 1 100); do
+    [ -f "$project/signal-worker.ready" ] && break
+    kill -0 "$signal_pid" 2>/dev/null || fail "filter delegate exited before the worker planted its filter"
+    sleep 0.1
+  done
+  [ -f "$project/signal-worker.ready" ] || fail "filter signal fixture worker did not start"
+  kill -TERM "$signal_pid" 2>/dev/null || fail "could not TERM the filter delegate"
+  rc=0
+  wait "$signal_pid" || rc=$?
+  [ "$rc" = 143 ] || fail "filter TERM should exit 143, got $rc"
+  [ ! -e "$filter_marker" ] || fail "signal cleanup ran the worker's configured clean filter"
+  git -C "$project" config --unset filter.probe.clean ||
+    fail "could not remove the filter config planted by the signal fixture"
+
+  rm -f "$project/signal-worker.ready"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_DELEGATE_WORKTREE_ROOT="$signal_worktree_root" \
+    SIGNAL_CLEAN=1 PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" --model fixture-model \
+    --no-verify --prompt 'Wait without edits' > "$project/signal-clean.out" 2>&1 &
+  signal_pid=$!
+  for i in $(seq 1 100); do
+    [ -f "$project/signal-worker.ready" ] && break
+    kill -0 "$signal_pid" 2>/dev/null || fail "clean delegate exited before the signal fixture started"
+    sleep 0.1
+  done
+  [ -f "$project/signal-worker.ready" ] || fail "clean signal fixture worker did not start"
+  kill -TERM "$signal_pid" 2>/dev/null || fail "could not TERM the clean delegate"
+  rc=0
+  wait "$signal_pid" || rc=$?
+  [ "$rc" = 143 ] || fail "clean TERM should exit 143, got $rc"
+  grep -Fq 'worktree kept: ' "$project/signal-clean.out" ||
+    fail "a clean worktree should be kept when a provider launched without capture"
+  signal_kept="$(sed -n 's/^worktree kept: //p' "$project/signal-clean.out" | head -1)"
+  signal_kept="${signal_kept%% *}"
+  [ -d "$signal_kept" ] || fail "clean signal path was reported but not kept"
 
   # Seed complete, distinct historical fixture episodes without provider calls.
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY'

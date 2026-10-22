@@ -63,6 +63,8 @@ ALLOW_RESTRUCTURE=0
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
 KEEP_WORKTREE=0
+patch_capture_complete=0
+worker_provider_launched=0
 INCLUDE_MEMORY=0
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=0
@@ -1022,6 +1024,12 @@ cleanup_signal() {
   local code="$1"
   trap - EXIT HUP INT TERM
   ma_kill_jobs
+  if [ "$worker_provider_launched" = 1 ] && [ "$patch_capture_complete" = 0 ] &&
+    [ "$worktree_created" = 1 ]; then
+    KEEP_WORKTREE=1
+    echo "worktree kept: $worktree" >&2
+    [ -z "$artifact" ] || printf '\n- worktree kept: %s\n' "$worktree" >> "$artifact"
+  fi
   cleanup "$code"
   exit "$code"
 }
@@ -1868,6 +1876,8 @@ run_worker() {
   local local_authority_detail=""
   local authority_line=""
   worker_status=0
+  patch_capture_complete=0
+  worker_provider_launched=0
   if ! worker_worktree_require_identity "provider launch"; then
     worker_status=125
     route_retry_terminal=1
@@ -1890,6 +1900,7 @@ run_worker() {
   fi
   OMS_LAST_ATTEMPT_ID=""
   OMS_LAST_ATTEMPT_OWNED=0
+  worker_provider_launched=1
   ma_run_routed_provider "$TO" "$WORKER_ACCESS" "$prompt" "$artifact" "$worktree" \
     peer-delegate "$REPO" "$timestamp" || worker_status=$?
   if [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; then
@@ -2399,6 +2410,8 @@ elif ! capture_patch; then
   worker_status=125
   route_retry_terminal=1
   [ -z "$patch_file" ] || : > "$patch_file"
+else
+  patch_capture_complete=1
 fi
 
 # A worker can exit 0 having produced only its own reason for doing nothing —
@@ -2604,6 +2617,7 @@ if [ "$DRY_RUN" != "1" ]; then
       [ -z "$patch_file" ] || : > "$patch_file"
       break
     fi
+    patch_capture_complete=1
     if [ -n "$VERIFY_CMD" ]; then
       printf '\n\n## Verify (repair %s)\n\n- command: %s\n\n' "$repair_used" "$VERIFY_CMD" >> "$artifact"
       run_verify
