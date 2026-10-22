@@ -9,6 +9,9 @@ acceptance bypass; no fabricated landing receipt; no `done` from prose.
 from __future__ import annotations
 
 import ast
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -22,8 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from oms_graph import events, runner
+from oms_graph import cli, events, runner
 from oms_graph.errors import GraphError
+from oms_graph.project.affected import affected_plan, changed_entries, changed_test_hunks
+from oms_graph.project.build import build, load_graph
+from oms_graph.project.query import Graph
 from test_oms_graph_adapter import CHECK_SCRIPT, FAKE_CODEX, SCRUBBED, agent_node
 
 HAVE_GIT = shutil.which("git") is not None
@@ -270,6 +276,372 @@ class GraphRepoFixture:
         out = subprocess.run(["git", "-C", str(self.repo), "rev-list", "--count", "HEAD"],
                              env=self._env(), capture_output=True, text=True, check=True)
         return int(out.stdout.strip())
+
+
+@unittest.skipUnless(HAVE_GIT, "git is required to drive plan-run")
+class AffectedTestEditTest(GraphRepoFixture, unittest.TestCase):
+    """Test-only edits narrow to cases; shared setup edits retain file scope."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / "tests").mkdir()
+        self._write(self.repo / "tests" / "test_feature.py", """def helper():
+    return 1
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 1
+
+    def helper_between(self):
+        return True
+
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self._write(self.repo / "tests" / "scripts-smoke.sh", """test_shell_first() {
+  :
+}
+
+test_shell_second() {
+  :
+}
+""")
+        self.git("add", "tests/test_feature.py", "tests/scripts-smoke.sh")
+        self.git("commit", "-qm", "test baseline")
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        self.state = self.tmp / "graph-state"
+
+    def _selection(self):
+        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                       env=self._env(), text=True).strip()
+        build(self.repo, state=self.state)
+        entries = changed_entries(self.repo, self.base, head)
+        hunks = changed_test_hunks(self.repo, self.base, head, entries)
+        changes = [dict(row) for row in entries]
+        self.assertEqual(json.loads(json.dumps(entries)),
+                         [{"path": row["path"], "status": row["status"]} for row in entries])
+        return affected_plan(Graph(load_graph(self.repo, state=self.state)),
+                             [row["path"] for row in changes], changes=changes,
+                             test_hunks=hunks, repo=self.repo, base=self.base, head=head), changes
+
+    def _commit_edit(self, text: str):
+        self._write(self.repo / "tests" / "test_feature.py", text)
+        self.git("add", "tests/test_feature.py")
+        self.git("commit", "-qm", "test edit")
+        return self._selection()[0]
+
+    def test_body_and_weight_edits_select_only_their_case(self) -> None:
+        body = self._commit_edit("""def helper():
+    return 1
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 2
+
+    def helper_between(self):
+        return True
+
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(body["tests"], ["tests/test_feature.py"])
+        self.assertEqual(body["mode"], "affected")
+        self.assertEqual([row["name"] for row in body["test_cases"]], ["test_first"])
+        self.assertEqual(body["test_cases"][0]["id"],
+                         "symbol:tests/test_feature.py::TestFeature.test_first")
+        self.assertEqual({row["path"] for row in body["test_cases"]}, {"tests/test_feature.py"})
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        weight = self._commit_edit("""def helper():
+    return 1
+
+class TestFeature:
+    # smoke-weight: 5
+    def test_first(self):
+        assert helper() == 2
+
+    def helper_between(self):
+        return True
+
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(weight["tests"], ["tests/test_feature.py"])
+        self.assertEqual(weight["mode"], "affected")
+        self.assertEqual([row["name"] for row in weight["test_cases"]], ["test_first"])
+        self.assertEqual({row["path"] for row in weight["test_cases"]}, {"tests/test_feature.py"})
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        shell = self._write_shell_edit("""test_shell_first() {
+  printf 'changed\\n'
+}
+
+test_shell_second() {
+  :
+}
+""")
+        self.assertEqual(shell["tests"], ["tests/scripts-smoke.sh"])
+        self.assertEqual([row["name"] for row in shell["test_cases"]], ["test_shell_first"])
+        self.assertEqual(shell["test_cases"][0]["id"],
+                         "symbol:tests/scripts-smoke.sh::test_shell_first")
+
+    def test_narrowed_edits_keep_shell_path_consumers(self) -> None:
+        consumer = "tests/harness-consumer-smoke.sh"
+        self._write(self.repo / consumer, '''test_reads_feature() {
+  grep -F "test_first" "$ROOT/tests/test_feature.py" >/dev/null
+}
+
+test_consumer_sibling() {
+  :
+}
+''')
+        self.git("add", consumer)
+        self.git("commit", "-qm", "add path-reading test")
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+
+        feature = self.repo / "tests" / "test_feature.py"
+        body = self._commit_edit(feature.read_text(encoding="utf-8").replace(
+            "assert helper() == 1", "assert helper() == 2", 1))
+        expected_tests = {"tests/test_feature.py", consumer}
+        expected_cases = {
+            ("tests/test_feature.py", "test_first"),
+            (consumer, "test_reads_feature"),
+        }
+        self.assertEqual(body["mode"], "affected")
+        self.assertEqual(set(body["tests"]), expected_tests)
+        self.assertEqual({(row["path"], row["name"]) for row in body["test_cases"]}, expected_cases)
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        weight = self._commit_edit(feature.read_text(encoding="utf-8").replace(
+            "# smoke-weight: 2", "# smoke-weight: 5", 1))
+        self.assertEqual(weight["mode"], "affected")
+        self.assertEqual(set(weight["tests"]), expected_tests)
+        self.assertEqual({(row["path"], row["name"]) for row in weight["test_cases"]}, expected_cases)
+
+    def test_cli_affected_passes_hunks_for_narrow_selection(self) -> None:
+        feature = self.repo / "tests" / "test_feature.py"
+        self._write(feature, feature.read_text(encoding="utf-8").replace(
+            "assert helper() == 1", "assert helper() == 2", 1))
+        self.git("add", "tests/test_feature.py")
+        self.git("commit", "-qm", "edit test body")
+        build(self.repo, state=self.state)
+        args = argparse.Namespace(base=self.base, head="HEAD", guard=(), depth=0,
+                                  json=True, pretty=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli._project_affected(args, self.repo, self.state), 0)
+        plan = json.loads(output.getvalue())
+        self.assertEqual(plan["mode"], "affected")
+        self.assertEqual([row["name"] for row in plan["test_cases"]], ["test_first"])
+
+    def test_non_utf8_test_diff_fails_open(self) -> None:
+        path = "tests/test_feature.py"
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        feature = self.repo / path
+        feature.write_bytes(feature.read_bytes() + b"# invalid utf8: \xff\n")
+        self.git("add", path)
+        self.git("commit", "-qm", "add invalid utf8 comment")
+        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                       env=self._env(), text=True).strip()
+        changes = changed_entries(self.repo, self.base, head)
+        self.assertEqual(changed_test_hunks(self.repo, self.base, head, changes)[path], ())
+
+    def _write_shell_edit(self, text: str):
+        self._write(self.repo / "tests" / "scripts-smoke.sh", text)
+        self.git("add", "tests/scripts-smoke.sh")
+        self.git("commit", "-qm", "shell test edit")
+        return self._selection()[0]
+
+    def test_helper_and_mixed_edits_keep_whole_file_selection(self) -> None:
+        helper = self._commit_edit("""def helper():
+    return 2
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 1
+
+    def helper_between(self):
+        return True
+
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(helper["tests"], ["tests/test_feature.py"])
+        self.assertEqual([row["name"] for row in helper["test_cases"]], ["test_first", "test_second"])
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        mixed = self._commit_edit("""def helper():
+    return 3
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 2
+
+    def helper_between(self):
+        return True
+
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(mixed["tests"], ["tests/test_feature.py"])
+        self.assertEqual([row["name"] for row in mixed["test_cases"]], ["test_first", "test_second"])
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        deleted_helper = self._commit_edit("""def helper():
+    return 3
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 2
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(deleted_helper["tests"], ["tests/test_feature.py"])
+        self.assertEqual([row["name"] for row in deleted_helper["test_cases"]], ["test_first", "test_second"])
+
+    def test_shebang_edit_keeps_whole_file_selection(self) -> None:
+        plan = self._write_shell_edit("""#!/usr/bin/env bash
+test_shell_first() {
+  :
+}
+
+test_shell_second() {
+  :
+}
+""")
+        self.assertEqual(plan["tests"], ["tests/scripts-smoke.sh"])
+        self.assertEqual([row["name"] for row in plan["test_cases"]],
+                         ["test_shell_first", "test_shell_second"])
+
+    def test_case_edit_with_adjacent_helper_deletion_keeps_whole_file_selection(self) -> None:
+        self._write(self.repo / "tests" / "test_feature.py", """class TestFeature:
+    def test_first(self):
+        assert True
+    def helper_between(self):
+        return True
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.git("add", "tests/test_feature.py")
+        self.git("commit", "-qm", "adjacent helper baseline")
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+
+        plan = self._commit_edit("""class TestFeature:
+    def test_first(self):
+        assert False
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(plan["tests"], ["tests/test_feature.py"])
+        self.assertEqual([row["name"] for row in plan["test_cases"]], ["test_first", "test_second"])
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        removed = self._commit_edit("""def helper():
+    return 3
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 2
+""")
+        self.assertEqual(removed["tests"], ["tests/test_feature.py"])
+        self.assertEqual([row["name"] for row in removed["test_cases"]], ["test_first"])
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        added = self._commit_edit("""def helper():
+    return 3
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 2
+
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(added["tests"], ["tests/test_feature.py"])
+        self.assertEqual([row["name"] for row in added["test_cases"]], ["test_first", "test_second"])
+
+    def test_narrowed_case_keeps_cross_file_dependents(self) -> None:
+        self._write(self.repo / "tests" / "test_dependent.py", """from test_feature import TestFeature
+
+class TestDependent:
+    def test_calls_first(self):
+        TestFeature.test_first(None)
+
+    def test_construct(self):
+        TestFeature().test_first()
+""")
+        self._write(self.repo / "tests" / "test_inherited.py", """import unittest
+from test_feature import TestFeature
+
+class TestInherited(TestFeature, unittest.TestCase):
+    pass
+""")
+        self.git("add", "tests/test_dependent.py", "tests/test_inherited.py")
+        self.git("commit", "-qm", "dependent test baseline")
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        plan = self._commit_edit("""def helper():
+    return 1
+
+class TestFeature:
+    # smoke-weight: 2
+    def test_first(self):
+        assert helper() == 2
+
+    def helper_between(self):
+        return True
+
+    def test_second(self):
+        assert self.helper_between()
+""")
+        self.assertEqual(plan["tests"], ["tests/test_dependent.py", "tests/test_feature.py",
+                                          "tests/test_inherited.py"])
+        self.assertEqual({(row["path"], row["name"]) for row in plan["test_cases"]}, {
+            ("tests/test_dependent.py", "test_calls_first"),
+            ("tests/test_dependent.py", "test_construct"),
+            ("tests/test_feature.py", "test_first"),
+        })
+
+    def test_missing_test_containment_keeps_whole_file_selection(self) -> None:
+        path = "tests/test_feature.py"
+        feature = self.repo / path
+        self._write(feature, feature.read_text(encoding="utf-8").replace(
+            "assert helper() == 1", "assert helper() == 2", 1))
+        self.git("add", path)
+        self.git("commit", "-qm", "edit test body")
+        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                       env=self._env(), text=True).strip()
+        build(self.repo, state=self.state)
+        changes = changed_entries(self.repo, self.base, head)
+        graph_data = load_graph(self.repo, state=self.state)
+        case_id = "symbol:tests/test_feature.py::TestFeature.test_first"
+        graph_data["edges"] = [edge for edge in graph_data["edges"]
+                                if not (edge["relation"] == "contains" and edge["target"] == case_id)]
+        plan = affected_plan(
+            Graph(graph_data), [row["path"] for row in changes], changes=changes,
+            test_hunks=changed_test_hunks(self.repo, self.base, head, changes),
+            repo=self.repo, base=self.base, head=head,
+        )
+        self.assertEqual(plan["tests"], [path])
+        self.assertEqual([row["name"] for row in plan["test_cases"]], ["test_first", "test_second"])
 
 
 @unittest.skipUnless(HAVE_GIT, "git is required to drive plan-run")

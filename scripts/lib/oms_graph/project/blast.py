@@ -51,8 +51,9 @@ def blast_radius(
     depth: Optional[int] = 3,
     relations: Sequence[str] = DEFAULT_RELATIONS,
     confidences: Sequence[str] = (),
+    seed_ids: Sequence[str] = (),
 ) -> Dict[str, Any]:
-    """Reverse dependents plus path coverage for the requested seeds."""
+    """Reverse dependents plus path coverage for path and symbol seeds."""
     if depth is not None and depth < 0:
         raise GraphError("blast depth must be zero or greater")
     index = graph if isinstance(graph, Graph) else Graph(graph)
@@ -63,6 +64,12 @@ def blast_radius(
             if node.get("path") == path:
                 seeds.append(ident)
                 matched_paths.add(path)
+    for ident in seed_ids:
+        node = index.nodes.get(ident)
+        if node is not None:
+            seeds.append(ident)
+            if node.get("path"):
+                matched_paths.add(str(node["path"]))
     seeds = sorted(set(seeds))
     seen = {ident: {"id": ident, "distance": 0, "via": ""} for ident in seeds}
     queue = deque(seeds)

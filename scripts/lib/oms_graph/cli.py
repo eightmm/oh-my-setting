@@ -449,11 +449,16 @@ def _project_blast(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 def _project_affected(args: argparse.Namespace, repo: Path, state: Path) -> int:
     changes = project_affected.changed_entries(repo, args.base, args.head)
+    test_hunks = project_affected.changed_test_hunks(repo, args.base, args.head, changes)
     boundaries = tuple(project_affected.DEFAULT_BOUNDARIES) + tuple(args.guard)
     result = project_affected.affected_plan(
         _index(repo, state)[1],
         [row["path"] for row in changes],
         changes=changes,
+        test_hunks=test_hunks,
+        repo=repo,
+        base=args.base,
+        head=args.head,
         depth=args.depth,
         boundary_patterns=boundaries,
         workspace_exact=project_affected.workspace_matches_head(repo, args.head),
