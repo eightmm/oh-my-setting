@@ -726,7 +726,7 @@ def call_tokens(report, attempt_id, state, short=False):
     tokens = provider_usage_tokens(usage)
     if tokens is not None:
         if session_total:
-            return amount(tokens) + " tok (session total)"
+            return amount(tokens) + (" tok*" if short else " tok (session total)")
         return _usage_label(usage, tokens, short=short)
     tokens = count(operation.get("tokens"))
     if tokens is None:

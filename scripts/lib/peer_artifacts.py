@@ -248,7 +248,7 @@ def record_native_session(session) -> None:
 
 
 def usage_footer(provider: str, usages: list[dict], cost=None, tool_calls=None,
-                 session_cumulative: bool = False) -> list[str]:
+                 session_cumulative: bool = False, session_totals=None) -> list[str]:
     """Provider-reported observation only; missing fields are not zero cost.
 
     tool_calls counts the seat's own tool items in its stream: exploration,
@@ -268,6 +268,11 @@ def usage_footer(provider: str, usages: list[dict], cost=None, tool_calls=None,
            "tool_calls": tool_calls if type(tool_calls) is int and tool_calls >= 0 else None}
     if session_cumulative:
         row["session_cumulative"] = True
+    if provider == "codex" and isinstance(session_totals, dict):
+        keys = ("input_tokens", "output_tokens", "cached_input_tokens")
+        values = [session_totals.get(key) for key in keys]
+        if all(type(value) is int and value >= 0 for value in values):
+            row["session_totals"] = dict(zip(keys, values))
     if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
         row["reported_cost_usd"] = cost
     # Retain the historical tokens-used field and its meaning for consumers.

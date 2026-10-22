@@ -294,6 +294,17 @@ def _continuation_base_note(repo, base, body, allow_stale_base=False):
     return "continued patch base %s differs from current HEAD %s; carried patch applies cleanly" % (base, head)
 
 
+def _codex_resume_usage_baseline(usage):
+    totals = usage.get("session_totals") if isinstance(usage, dict) else None
+    if not isinstance(totals, dict):
+        return None
+    fields = ("input_tokens", "output_tokens", "cached_input_tokens")
+    values = [totals.get(key) for key in fields]
+    if not all(type(value) is int and value >= 0 for value in values):
+        return None
+    return json.dumps(dict(zip(fields, values)), separators=(",", ":"))
+
+
 def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, patch_reference=None,
                  allow_stale_base=False):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
@@ -428,6 +439,11 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     resume = session if (session and ran == route["provider"]
                          and session_stored(route["provider"], session)) else None
     if resume:
+        if route["provider"] == "codex":
+            usage = call.get("provider_usage")
+            baseline = _codex_resume_usage_baseline(usage)
+            if baseline:
+                env["OMS_RESUME_USAGE_BASELINE"] = baseline
         preamble = ("Your earlier work was on %s; the repository is now at %s.%s New instructions follow.\n\n"
                     % (old, head, where))
         note = "continuing %s in its native session; %s" % (task_id, "verified patch carried forward" if patch and body else
@@ -549,6 +565,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 raise ValueError("--continue keeps the continued call's alias")
             alias = existing_alias or alias
     resume = None
+    resume_usage_baseline = None
     temporary = None
     temporaries = []
     continuation_patch = {} if continue_task and access == "write" else None
@@ -557,10 +574,13 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             raise ValueError("--continue takes a write-capable role and --brief-file, not --prompt or --task-id")
         if access == "write":
             _require_assigned_route(repo, continue_task, route)
+        continuation_env = child_environment(owner, repo)
+        continuation_env.pop("OMS_RESUME_USAGE_BASELINE", None)
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
-                                           child_environment(owner, repo), work_repo,
+                                           continuation_env, work_repo,
                                            patch_reference=continuation_patch,
                                            allow_stale_base=allow_stale_base)
+        resume_usage_baseline = continuation_env.get("OMS_RESUME_USAGE_BASELINE")
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
@@ -596,6 +616,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             options["continuation_patch"] = continuation_patch
         if continue_task:
             options["continue_call"] = True
+        if resume_usage_baseline:
+            options["resume_usage_baseline"] = resume_usage_baseline
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                             dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias, **options)
     finally:
@@ -1780,7 +1802,7 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
-                 candidate=None, continuation_patch=None, continue_call=False):
+                 candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
     from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
@@ -1833,6 +1855,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
     env = child_environment(owner, repo)
+    env.pop("OMS_RESUME_USAGE_BASELINE", None)
+    if resume_usage_baseline:
+        env["OMS_RESUME_USAGE_BASELINE"] = resume_usage_baseline
     if continuation_patch:
         env["OMS_PANEL_CONTINUATION"] = json.dumps(continuation_patch, separators=(",", ":"))
     if access == "write" and not env.get("OMS_PEER_TIMEOUT"):

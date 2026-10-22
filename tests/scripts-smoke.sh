@@ -12857,6 +12857,17 @@ assert usage["input_tokens"] == 6 and usage["output_tokens"] == 5, usage
 assert usage["cache_read_tokens"] == 20 and usage["cache_write_tokens"] == 4, usage
 assert not usage.get("session_cumulative"), usage
 PY
+  cat > "$project/resumed-partial-stream" <<'EOF'
+{"type":"assistant","message":{"id":"partial-1","usage":{"input_tokens":6,"cache_read_input_tokens":20},"content":[]}}
+{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":900,"output_tokens":700}}
+EOF
+  OMS_RESUME_SESSION=resumed-session bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/resumed-partial-stream"
+  python3 - "$project/resumed-partial-stream" <<'PY' || fail 'Claude partial stream usage must retain missing fields'
+import json, sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+usage = json.loads(next(line[14:] for line in lines if line.startswith("usage detail: ")))
+assert usage["input_tokens"] == 6 and usage["output_tokens"] is None, usage
+PY
 }
 
 test_codex_jsonl_carries_stop_reason() {
@@ -12873,7 +12884,8 @@ test_codex_jsonl_carries_stop_reason() {
 import json, os, pathlib, subprocess, sys
 root, project = map(pathlib.Path, sys.argv[1:])
 common = '{"type":"thread.started","thread_id":"thread-resume"}\n'
-def run(name, stream, resumed):
+project.mkdir(parents=True, exist_ok=True)
+def run(name, stream, resumed=False, baseline=None):
     path = project / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(stream, encoding="utf-8")
@@ -12882,24 +12894,35 @@ def run(name, stream, resumed):
         env["OMS_RESUME_SESSION"] = "resume-session"
     else:
         env.pop("OMS_RESUME_SESSION", None)
+    if baseline is not None:
+        env["OMS_RESUME_USAGE_BASELINE"] = json.dumps(baseline)
+    else:
+        env.pop("OMS_RESUME_USAGE_BASELINE", None)
     subprocess.run(["bash", "-c", '. "$1/scripts/lib/peer-common.sh"; ma_codex_jsonl_to_text "$2"', "_", str(root), str(path)], env=env, check=True)
     lines = path.read_text(encoding="utf-8").splitlines()
     return int(lines[lines.index("tokens used") + 1]), json.loads(next(line[14:] for line in lines if line.startswith("usage detail: ")))
-prior = {"input_tokens": 1000, "output_tokens": 0, "cached_input_tokens": 900}
-last = {"input_tokens": 100, "output_tokens": 0, "cached_input_tokens": 90}
-intermediate = {"input_tokens": 1200, "output_tokens": 0, "cached_input_tokens": 1000}
-final = {"input_tokens": 1300, "output_tokens": 0, "cached_input_tokens": 1100}
-events = common + json.dumps({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":prior,"last_token_usage":last}}}) + "\n"
-events += json.dumps({"type":"turn.completed","usage":intermediate}) + "\n"
-events += json.dumps({"type":"turn.completed","usage":final}) + "\n"
-resume_result = run("resume.jsonl", events, True)
-assert resume_result == (300, {"cache_in_input": True, "cache_read_tokens": 200, "cache_write_tokens": None, "input_tokens": 300, "output_tokens": 0, "provider": "codex", "reported_cost_usd": None, "tool_calls": 0}), resume_result
-fresh = common + json.dumps({"type":"turn.completed","usage":intermediate}) + "\n"
-fresh += json.dumps({"type":"turn.completed","usage":final}) + "\n"
-tokens, detail = run("fresh.jsonl", fresh, False)
-assert tokens == 1300 and detail["input_tokens"] == 1300 and not detail.get("session_cumulative"), (tokens, detail)
-tokens, detail = run("unknown-baseline.jsonl", common + json.dumps({"type":"turn.completed","usage":final}) + "\n", True)
-assert tokens == 1300 and detail["session_cumulative"] is True, (tokens, detail)
+def completed(usage):
+    return common + json.dumps({"type":"turn.completed","usage":usage}) + "\n"
+fresh_total = {"input_tokens": 1300, "output_tokens": 50, "cached_input_tokens": 1100}
+round2_total = {"input_tokens": 1500, "output_tokens": 70, "cached_input_tokens": 1200}
+round3_total = {"input_tokens": 1750, "output_tokens": 100, "cached_input_tokens": 1400}
+fresh_tokens, fresh_detail = run("chain-fresh.jsonl", completed(fresh_total))
+assert fresh_tokens == 1350 and fresh_detail["session_totals"] == fresh_total, (fresh_tokens, fresh_detail)
+round2_tokens, round2_detail = run("chain-round2.jsonl", completed(round2_total), True, fresh_detail["session_totals"])
+assert round2_tokens == 220 and round2_detail["input_tokens"] == 200 and round2_detail["output_tokens"] == 20, (round2_tokens, round2_detail)
+assert round2_detail["session_totals"] == round2_total and not round2_detail.get("session_cumulative"), round2_detail
+round3_tokens, round3_detail = run("chain-round3.jsonl", completed(round3_total), True, round2_detail["session_totals"])
+assert round3_tokens == 280 and round3_detail["input_tokens"] == 250 and round3_detail["output_tokens"] == 30, (round3_tokens, round3_detail)
+assert round3_detail["session_totals"] == round3_total and not round3_detail.get("session_cumulative"), round3_detail
+preserved = project / "event-msg-evidence.jsonl"
+preserved.write_text(common + json.dumps({"type":"event_msg","payload":{"type":"diagnostic","message":"keep this evidence"}}) + "\n", encoding="utf-8")
+subprocess.run(["bash", "-c", '. "$1/scripts/lib/peer-common.sh"; ma_codex_jsonl_to_text "$2"', "_", str(root), str(preserved)], env=dict(os.environ), check=True)
+assert any("diagnostic" in line for line in preserved.read_text(encoding="utf-8").splitlines()), preserved.read_text()
+tokens, detail = run("unknown-baseline.jsonl", completed(round3_total), True)
+assert tokens == 1850 and detail["session_cumulative"] is True, (tokens, detail)
+negative_baseline = {"input_tokens": -100, "output_tokens": -10, "cached_input_tokens": -50}
+tokens, detail = run("negative-baseline.jsonl", completed(round3_total), True, negative_baseline)
+assert tokens == 1850 and detail["session_cumulative"] is True, (tokens, detail)
 PY
 
   make_committed_repo "$project"

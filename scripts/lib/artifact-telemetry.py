@@ -142,6 +142,12 @@ def artifact_usage_metrics(repo: str, row: dict[str, object]) -> Optional[dict]:
     for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "tool_calls"):
         values = [integer(report.get(key)) for report in measured]
         result[key] = sum(values) if all(value is not None for value in values) else None
+    session_totals = measured[-1].get("session_totals") if measured else None
+    if isinstance(session_totals, dict):
+        keys = ("input_tokens", "output_tokens", "cached_input_tokens")
+        values = [integer(session_totals.get(key)) for key in keys]
+        if all(value is not None for value in values):
+            result["session_totals"] = dict(zip(keys, values))
     flags = [report.get("cache_in_input") for report in measured]
     result["cache_in_input"] = flags[0] if type(flags[0]) is bool and all(flag is flags[0] for flag in flags) else None
     return result

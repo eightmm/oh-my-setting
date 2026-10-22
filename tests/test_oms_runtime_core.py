@@ -1600,6 +1600,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             'cache_read_tokens': 900, 'cache_write_tokens': None,
             'cache_in_input': True, 'reported_cost_usd': None,
             'tool_calls': 0, 'session_cumulative': True,
+            'session_totals': {'input_tokens': 1300, 'output_tokens': 100, 'cached_input_tokens': 900},
         }
         artifact.write_text(
             '# call\n\n## Output\n\nAnswer.\n\ntokens used\n1400\n'
@@ -1610,15 +1611,109 @@ class RuntimeFixture(RuntimeFixtureBase):
         row = {'artifact': '.oms/artifacts/resumed-session.md', 'provider': 'codex', 'kind': 'call'}
         usage = telemetry['artifact_usage_metrics'](str(self.repo), row)
         self.assertTrue(usage['session_cumulative'], usage)
+        self.assertEqual(usage['session_totals'], detail['session_totals'])
 
         from panel_view import call_tokens, model_usage
         call = dict(row, attempt_id='resumed-call', selected_model='gpt-6-sol',
                     tokens=1400, provider_usage=usage)
         report = {'operations': {'recent': [call]}}
         self.assertEqual(call_tokens(report, 'resumed-call', 'success'), '1400 tok (session total)')
+        self.assertEqual(call_tokens(report, 'resumed-call', 'success', short=True), '1400 tok*')
         model = model_usage(report)[0]
         self.assertEqual(model['tokens'], 0)
         self.assertEqual(model['token_reports'], 0)
+
+    def test_continuation_dispatch_passes_usage_baseline_to_child(self) -> None:
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        import panel_dispatch as dispatch
+        import terminal_panel as panel
+
+        baseline_row = {'input_tokens': 200, 'output_tokens': 20, 'cached_input_tokens': 100,
+                        'session_totals': {'input_tokens': 1500, 'output_tokens': 70,
+                                           'cached_input_tokens': 1200}}
+        self.assertEqual(dispatch._codex_resume_usage_baseline(baseline_row),
+                         '{"input_tokens":1500,"output_tokens":70,"cached_input_tokens":1200}')
+        self.assertIsNone(dispatch._codex_resume_usage_baseline({'input_tokens': 200, 'output_tokens': 20}))
+
+        binary_dir = Path(self.tmp.name) / 'bin'
+        binary_dir.mkdir()
+        binary = binary_dir / 'codex'
+        child_capture = Path(self.tmp.name) / 'child-env-baseline'
+        binary.write_text('#!/bin/sh\nprintf %s "$OMS_RESUME_USAGE_BASELINE" > "$OMS_TEST_CAPTURE"\nexit 0\n',
+                          encoding='utf-8')
+        binary.chmod(0o755)
+        brief = self.repo / 'continuation.md'
+        brief.write_text('continue this task\n', encoding='utf-8')
+        baseline = json.dumps({'input_tokens': 1300, 'output_tokens': 100,
+                               'cached_input_tokens': 900}, separators=(',', ':'))
+        inherited_baseline = json.dumps({'input_tokens': 9000, 'output_tokens': 800,
+                                         'cached_input_tokens': 7000}, separators=(',', ':'))
+        predecessor_usage = [{'session_totals': {'input_tokens': 1300, 'output_tokens': 100,
+                                                 'cached_input_tokens': 900}}]
+        captured = {}
+
+        route = {'provider': 'codex', 'binary': 'codex', 'model': 'gpt-6-sol', 'effort': 'medium',
+                 'kind': 'worker', 'role': 'worker', 'workload': 'deep', 'access': 'read',
+                 'purpose': 'investigate'}
+
+        def child_environment(provider, repo):
+            env = {'PATH': os.environ['PATH'], 'OMS_AGENT': provider, 'OMS_PANEL_REPO': str(repo),
+                   'OMS_TEST_CAPTURE': str(child_capture)}
+            if 'OMS_RESUME_USAGE_BASELINE' in os.environ:
+                env['OMS_RESUME_USAGE_BASELINE'] = os.environ['OMS_RESUME_USAGE_BASELINE']
+            return env
+
+        def continuation(repo, owner, main, task_id, selected_route, prior_brief, env, *args, **kwargs):
+            current_baseline = dispatch._codex_resume_usage_baseline(predecessor_usage[0])
+            if current_baseline:
+                env['OMS_RESUME_USAGE_BASELINE'] = current_baseline
+            return prior_brief, 'native-session', 'continuing fixture'
+
+        def popen(command, **kwargs):
+            if 'env' in kwargs:
+                captured.update(command=command, env=kwargs['env'])
+            return real_popen(command, **kwargs)
+
+        real_popen = subprocess.Popen
+        def dispatch_once():
+            brief.write_text('continue this task\n', encoding='utf-8')
+            with patch.dict(os.environ, {'PATH': str(binary_dir) + os.pathsep + os.environ.get('PATH', ''),
+                                         'OMS_ROOM_REPO': '',
+                                         'OMS_RESUME_USAGE_BASELINE': inherited_baseline}), \
+                 patch.object(panel, 'selected_route', return_value=route), \
+                 patch.object(panel, 'child_environment', side_effect=child_environment), \
+                 patch.object(panel, 'continuation', side_effect=continuation), \
+                 patch.object(panel, 'native_repository', return_value=self.repo), \
+                 patch.object(panel, 'routed_command', return_value=[str(binary), '--repo', str(self.repo)]), \
+                 patch.object(panel, '_validate_dispatch_verifier'), \
+                 patch.object(panel, '_prepare_dispatch_call', return_value=None), \
+                 patch.object(panel, '_observe_dispatch_session'), \
+                 patch.object(panel, '_observe_dispatch_descendants'), \
+                 patch.object(panel, '_stop_dispatch', return_value=True), \
+                 patch.object(panel, '_print_dispatch_next_ready'), \
+                 patch.object(panel, 'moved_main', return_value=[]), \
+                 patch.object(panel, 'plan_link', return_value=None), \
+                 patch.object(dispatch, '_task_findings_brief', return_value=brief), \
+                 patch.object(dispatch.room, 'resolve', return_value=None), \
+                 patch.object(dispatch.subprocess, 'Popen', side_effect=popen), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                return dispatch.dispatch(
+                    self.repo, 'codex', 'worker', 'deep', 'read', 'investigate',
+                    brief=brief, continue_task='task-fixture', target='codex', dry_run=False)
+
+        status = dispatch_once()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured['env']['OMS_RESUME_USAGE_BASELINE'], baseline)
+        self.assertEqual(child_capture.read_text(encoding='utf-8'), baseline)
+
+        predecessor_usage[0] = {'input_tokens': 200, 'output_tokens': 20, 'cached_input_tokens': 100}
+        status = dispatch_once()
+
+        self.assertEqual(status, 0)
+        self.assertNotIn('OMS_RESUME_USAGE_BASELINE', captured['env'])
+        self.assertEqual(child_capture.read_text(encoding='utf-8'), '')
 
     def test_seat_no_answer_is_not_classified_by_exit_code(self) -> None:
         # A seat that produced nothing is a distinct, recoverable failure, but
