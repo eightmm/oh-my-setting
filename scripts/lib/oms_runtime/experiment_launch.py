@@ -10,6 +10,8 @@ from pathlib import Path
 from .common import CoreError, install_root, read_json
 from .experiment_contract import validate
 
+RESEARCH_NOTE_MAX_CHARS = 1600
+
 
 def launch(repo: Path, args) -> int:
     names = ('question', 'hypothesis', 'prediction', 'baseline', 'metric', 'success', 'change')
@@ -46,14 +48,8 @@ def launch(repo: Path, args) -> int:
         raise CoreError('--reason (required with --no-gate) is required')
     note = ' | '.join('%s: %s' % (label, fields[name])
                       for label, name in zip('QHPBMSC', names))
-    try:
-        limit = int(os.environ.get('OMS_RESEARCH_NOTE_MAX_CHARS', '1600'))
-        if limit <= 0:
-            raise ValueError
-    except ValueError:
-        raise CoreError('OMS_RESEARCH_NOTE_MAX_CHARS must be a positive integer')
-    if len(note.encode('utf-8')) > limit:
-        raise CoreError('pre-registration note exceeds %d bytes; shorten the fields' % limit)
+    if len(note.encode('utf-8')) > RESEARCH_NOTE_MAX_CHARS:
+        raise CoreError('pre-registration note exceeds %d bytes; shorten the fields' % RESEARCH_NOTE_MAX_CHARS)
 
     scripts = install_root() / 'scripts'
     with tempfile.TemporaryDirectory(prefix='oms-experiment-') as scratch:

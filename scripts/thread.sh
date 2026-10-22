@@ -23,8 +23,8 @@ MODEL=""
 ARTIFACT=""
 QUALITY=""
 SUMMARY=""
-MAX_BYTES="${OMS_THREAD_CONTEXT_BYTES:-6000}"
-MAX_TURNS="${OMS_THREAD_CONTEXT_TURNS:-12}"
+MAX_BYTES=6000
+MAX_TURNS=12
 AS_JSON=0
 ALL=0
 STALE=0
@@ -86,8 +86,8 @@ Options:
                   reason for doing nothing (denied tool, no login). Non-ok turns
                   are marked in context and show.
   --summary TEXT  Closing summary (close).
-  --max-bytes N   Context byte budget (default: 6000, OMS_THREAD_CONTEXT_BYTES).
-  --turns N       Context turn limit (default: 12, OMS_THREAD_CONTEXT_TURNS).
+  --max-bytes N   Context byte budget (default: 6000).
+  --turns N       Context turn limit (default: 12).
   --all           list: include closed threads.
   --live          new: opt this conversation into existing prompt/edit hooks.
   --notes-only    context: human/coordinator notes and decisions, not answers

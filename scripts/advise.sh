@@ -28,7 +28,7 @@ INCLUDE_SESSION=0
 PREVIEW=0
 SESSION_ID=""
 ALLOW_SENSITIVE=0
-STRATEGY="${OMS_ADVISOR_STRATEGY:-decision-advisor}"
+STRATEGY="decision-advisor"
 INCLUDE_STRATEGY=1
 PASSTHROUGH=()
 
@@ -81,7 +81,6 @@ Options:
 
 Environment:
   OMS_ADVISOR_PROVIDER   Default advisor provider (overridden by --to).
-  OMS_ADVISOR_STRATEGY   Default strategy profile.
   OMS_AGENT              Caller identity; the default advisor avoids it.
 EOF
 }
