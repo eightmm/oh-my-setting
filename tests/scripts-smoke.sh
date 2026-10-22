@@ -5176,7 +5176,7 @@ test_peer_ask_print_timeout() {
     --prompt "Ask with custom print timeout" >/dev/null
 }
 
-# smoke-weight: 20
+# smoke-weight: 21
 test_peer_ask_debate_dry_run() {
   local project="$TMP/ask-debate"
   local artifact_dir="$project/artifacts"
@@ -17669,6 +17669,7 @@ make_patch_repo() {
   git -C "$repo" branch -q -D feat
 }
 
+# smoke-weight: 12
 test_patch_admit_admits_clean_patch() {
   local repo="$TMP/admit-clean"
   local SH="$ROOT/scripts/patch-admit.sh"
@@ -18409,7 +18410,7 @@ EOF
   fi
 }
 
-# smoke-weight: 20
+# smoke-weight: 72
 test_delegate_repair_retries_failed_verify() {
   local project="$TMP/delegate-repair"
   local kept
@@ -19593,6 +19594,7 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
     fail "a patch that adds assertions must still be ADMITTED"
 }
 
+# smoke-weight: 10
 test_patch_admit_detects_encoding_loss_from_patch_hunks() {
   local project="$TMP/admit-encoding-loss"
   local report
@@ -20783,7 +20785,7 @@ test_delegation_liveness_in_state() {
   printf '%s' "$out" | grep >/dev/null -E "d2.*live" || fail "a live-pid delegation must show as live"
 }
 
-# smoke-weight: 15
+# smoke-weight: 22
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
   local gc_err="$project/gc.err"
@@ -30043,7 +30045,7 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
     fail "strict remote-ref violation should be named: $result"
 }
 
-# smoke-weight: 30
+# smoke-weight: 40
 test_worker_guard_still_fails_on_a_local_branch_ref_change() {
   local project="$TMP/guard-hard-local-ref"
   local head
@@ -30084,6 +30086,7 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
   contains "$result" 'outside its worktree: refs' || fail "remote target ref was not hard: $result"
 }
 
+# smoke-weight: 183
 test_worker_guard_reports_foreign_checkout_ref_moves() {
   local project="$TMP/guard-foreign-ref"
   local sibling="$TMP/guard-foreign-ref-sibling"
@@ -30762,7 +30765,7 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
     fail "rewriting the worker's own linked-worktree registration must stop the worker: $result"
 }
 
-# smoke-weight: 20
+# smoke-weight: 47
 test_worker_guard_exempts_a_live_sibling_mid_creation() {
   local project="$TMP/guard-sibling-creation"
   local managed_root="$TMP/guard-sibling-creation-root"
@@ -30968,6 +30971,7 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
     fail "a stale process-start sibling must remain visible as gitmeta: $result"
 }
 
+# smoke-weight: 16
 test_worker_guard_softens_a_sibling_that_finished_kept() {
   local project="$TMP/guard-sibling-kept"
   local managed_root="$TMP/guard-sibling-kept-root"
@@ -31016,6 +31020,7 @@ git -C SIB -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m
 # sibling new to the baseline is reported softly; strict mode and a sibling on
 # a branch stay hard. A same-UID worker could forge this shape too, so it is
 # false-positive relief for cooperative runs, not attribution.
+# smoke-weight: 83
 test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   local project="$TMP/guard-sibling-late"
   local managed_root="$TMP/guard-sibling-late-root"
@@ -31426,7 +31431,7 @@ test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
   fi
 }
 
-# smoke-weight: 12
+# smoke-weight: 24
 test_worker_guard_softens_cleanup_of_a_dead_kept_sibling() {
   local project="$TMP/guard-sibling-cleanup"
   local managed_root="$TMP/guard-sibling-cleanup-root"
@@ -31516,7 +31521,7 @@ test_worker_guard_reports_a_bounded_scan() {
     fail "a truncated scan must say so: $out"
 }
 
-# smoke-weight: 80
+# smoke-weight: 206
 test_worker_guard_rejects_any_worker_authority_state_change() {
   local project="$TMP/guard-state"
   local result
@@ -32144,7 +32149,7 @@ EOF
   fi
 }
 
-# smoke-weight: 20
+# smoke-weight: 88
 test_worker_guard_sees_submodule_and_worktree_metadata() {
   local project="$TMP/guard-submodule"
   local source="$TMP/guard-submodule-src"
@@ -33054,7 +33059,7 @@ test_worker_guard_spends_its_budget_on_untracked_before_ignored() {
   esac
 }
 
-# smoke-weight: 25
+# smoke-weight: 67
 test_worker_guard_splits_remote_tracking_and_stash_refs() {
   local project="$TMP/guard-remote-refs"
   local snap="$TMP/guard-remote-refs-snap"
@@ -33828,7 +33833,7 @@ test_task_verify_survives_a_gate_with_no_failure_line() {
     fail "a silent passing gate must verify, not abort"
 }
 
-# smoke-weight: 40
+# smoke-weight: 57
 test_delegate_interactive_conversation() {
   local fixture="$TMP/delegate-interactive" case_dir project scenario provider
   mkdir -p "$fixture/bin"
@@ -35919,7 +35924,7 @@ goal_drive_batch_verifier_deadline() {
     fail "a 1-second provider and 90-second verifier need a 155-second outer wall, got $out"
 }
 
-# smoke-weight: 240
+# smoke-weight: 626
 test_goal_drive_parallel_batches() {
   local project="$TMP/goal-batch-skip-candidates" out
   goal_drive_batch_verifier_deadline
@@ -35967,7 +35972,7 @@ PY
     fail "pytest verifier did not join disjoint tasks: $out"
 }
 
-# smoke-weight: 73
+# smoke-weight: 197
 test_goal_drive_parallel_failure_recovery() {
   goal_drive_batch_cases retained retained-retry failure abandon
   goal_drive_prebatch_rollback_cases

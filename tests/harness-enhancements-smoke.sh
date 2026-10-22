@@ -71,7 +71,7 @@ test_smoke_shards_partition_every_definition() {
   # The cost weights keep the heaviest tests apart, and the shard holding the
   # heaviest one carries fewer tests to make up for it.
   local heavy_a heavy_b fewest
-  heavy_a="$(grep -lx test_agent_plan_lifecycle "$TMP"/shard-[1-4])"
+  heavy_a="$(grep -lx test_goal_drive_parallel_batches "$TMP"/shard-[1-4])"
   heavy_b="$(grep -lx test_worker_guard_rejects_any_worker_authority_state_change "$TMP"/shard-[1-4])"
   [ -n "$heavy_a" ] && [ "$heavy_a" != "$heavy_b" ] || fail "the two heaviest smoke tests share a shard"
   fewest="$(wc -l "$TMP"/shard-[1-4] | sort -n | head -n 1 | awk '{print $2}')"
