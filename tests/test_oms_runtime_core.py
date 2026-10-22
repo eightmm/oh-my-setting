@@ -1592,6 +1592,34 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertIsNone(fallback['served_model'])
         self.assertAlmostEqual(fallback['cost_usd'], 0.1)
 
+    def test_session_cumulative_artifact_usage_is_not_added_as_call_tokens(self) -> None:
+        artifact = self.repo / '.oms' / 'artifacts' / 'resumed-session.md'
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        detail = {
+            'provider': 'codex', 'input_tokens': 1300, 'output_tokens': 100,
+            'cache_read_tokens': 900, 'cache_write_tokens': None,
+            'cache_in_input': True, 'reported_cost_usd': None,
+            'tool_calls': 0, 'session_cumulative': True,
+        }
+        artifact.write_text(
+            '# call\n\n## Output\n\nAnswer.\n\ntokens used\n1400\n'
+            'usage detail: ' + json.dumps(detail, sort_keys=True) + '\n\n## Exit\n\n0\n',
+            encoding='utf-8',
+        )
+        telemetry = runpy.run_path(str(ROOT / 'scripts' / 'lib' / 'artifact-telemetry.py'))
+        row = {'artifact': '.oms/artifacts/resumed-session.md', 'provider': 'codex', 'kind': 'call'}
+        usage = telemetry['artifact_usage_metrics'](str(self.repo), row)
+        self.assertTrue(usage['session_cumulative'], usage)
+
+        from panel_view import call_tokens, model_usage
+        call = dict(row, attempt_id='resumed-call', selected_model='gpt-6-sol',
+                    tokens=1400, provider_usage=usage)
+        report = {'operations': {'recent': [call]}}
+        self.assertEqual(call_tokens(report, 'resumed-call', 'success'), '1400 tok (session total)')
+        model = model_usage(report)[0]
+        self.assertEqual(model['tokens'], 0)
+        self.assertEqual(model['token_reports'], 0)
+
     def test_seat_no_answer_is_not_classified_by_exit_code(self) -> None:
         # A seat that produced nothing is a distinct, recoverable failure, but
         # exit 3 is not what makes it one: goal-drive parks and failed

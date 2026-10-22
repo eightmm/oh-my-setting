@@ -625,8 +625,10 @@ def model_usage(report):
             PROVIDER_NAMES.get(row.get("provider"), "Unknown"), "attribution": attribution,
             "records": 0, "tokens": 0, "token_reports": 0, "cost": 0, "cost_reports": 0})
         item["records"] += 1
-        tokens = provider_usage_tokens(mapping(row.get("provider_usage")))
-        if tokens is None:
+        usage = mapping(row.get("provider_usage"))
+        session_total = usage.get("session_cumulative") is True
+        tokens = None if session_total else provider_usage_tokens(usage)
+        if tokens is None and not session_total:
             tokens = count(row.get("tokens"))
         cost = number(row.get("cost_usd"))
         if tokens is not None:
@@ -665,9 +667,12 @@ def call_tokens(report, attempt_id, state, short=False):
         operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
                           if attempt_id and item.get("attempt_id") == attempt_id), {})
     usage = mapping(operation.get("provider_usage"))
+    session_total = usage.get("session_cumulative") is True
     tokens = provider_usage_tokens(usage)
     if tokens is not None:
         text = amount(tokens) + " tok"
+        if session_total:
+            return text + " (session total)"
         return text if short else text + " (out %s)" % amount(count(usage.get("output_tokens")))
     tokens = count(operation.get("tokens"))
     if tokens is None:
@@ -675,7 +680,7 @@ def call_tokens(report, attempt_id, state, short=False):
                        if attempt_id and item.get("attempt_id") == attempt_id), None)
     if tokens is None:
         return "tok n/a" if short else "tokens unreported"
-    return amount(tokens) + " tok"
+    return amount(tokens) + (" tok (session total)" if session_total else " tok")
 
 
 def _live_call_tokens(report, attempt_id):

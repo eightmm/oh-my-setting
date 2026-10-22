@@ -2319,6 +2319,8 @@ messages = []
 stream_seen = False
 last_stop = None
 tool_calls = 0
+stream_usages = []
+stream_usage_indexes = {}
 for line in raw.splitlines():
     candidate = line.strip()
     if candidate.startswith("{") and '"type"' in candidate:
@@ -2343,6 +2345,17 @@ for line in raw.splitlines():
             # user echoes or delegated messages. Partial deltas are not enabled.
             if doc.get("type") == "assistant" and not doc.get("parent_tool_use_id"):
                 message = doc.get("message")
+                if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                    message_id = message.get("id")
+                    if isinstance(message_id, str):
+                        usage_index = stream_usage_indexes.get(message_id)
+                        if usage_index is None:
+                            stream_usage_indexes[message_id] = len(stream_usages)
+                            stream_usages.append(message["usage"])
+                        else:
+                            stream_usages[usage_index] = message["usage"]
+                    else:
+                        stream_usages.append(message["usage"])
                 if isinstance(message, dict) and message.get("stop_reason"):
                     last_stop = message
                 content = message.get("content", []) if isinstance(message, dict) else []
@@ -2400,10 +2413,19 @@ for name in served:
 usage = envelope.get("usage")
 usage = usage if isinstance(usage, dict) else {}
 import os
-# Claude Code 2.1.277+ resumed results carry the restored session spend.
 cost = None if os.environ.get("OMS_RESUME_SESSION") else envelope.get("total_cost_usd")
+resumed = bool(os.environ.get("OMS_RESUME_SESSION"))
+# Stream assistant usage is per API response for this invocation. The final
+# result envelope does not expose a prior-session baseline, so a resumed call
+# without stream usage is explicitly marked cumulative instead of guessed.
+if resumed and stream_usages:
+    usage = {key: sum(row[key] for row in stream_usages
+                      if type(row.get(key)) is int and row[key] >= 0)
+             for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+             if any(type(row.get(key)) is int and row[key] >= 0 for row in stream_usages)}
 out.extend(usage_footer("claude", [usage], cost,
-                        tool_calls=tool_calls if stream_seen else None))
+                        tool_calls=tool_calls if stream_seen else None,
+                        session_cumulative=resumed and not stream_usages))
 tmp = path + ".envelope"
 with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")
@@ -2440,6 +2462,8 @@ KNOWN = {
 events = []
 others = []
 session = None
+resume_baseline = None
+resume_baseline_seen = False
 for line in raw.splitlines():
     candidate = line.strip()
     doc = None
@@ -2452,6 +2476,15 @@ for line in raw.splitlines():
         events.append(doc)
         if doc["type"] == "thread.started" and isinstance(doc.get("thread_id"), str):
             session = doc["thread_id"]
+        continue
+    if isinstance(doc, dict) and doc.get("type") == "event_msg":
+        payload = doc.get("payload")
+        if isinstance(payload, dict) and payload.get("type") == "token_count" and not resume_baseline_seen:
+            resume_baseline_seen = True
+            info = payload.get("info")
+            usage = info.get("total_token_usage") if isinstance(info, dict) else None
+            if isinstance(usage, dict):
+                resume_baseline = usage
         continue
     others.append(line)
 if not events:
@@ -2521,7 +2554,30 @@ out.extend(errors)
 if served:
     out.append("served model")
     out.append("+".join(sorted(served)))
-out.extend(usage_footer("codex", usages, tool_calls=tool_calls))
+resumed = bool(os.environ.get("OMS_RESUME_SESSION"))
+session_cumulative = False
+if usages:
+    # Use the final turn.completed report for fresh totals and resume deltas.
+    usages = [usages[-1]]
+if resumed and usages:
+    final_usage = usages[0]
+    baseline = resume_baseline
+    if baseline is not None:
+        delta = {}
+        for key in ("input_tokens", "output_tokens", "cached_input_tokens"):
+            end, start = final_usage.get(key), baseline.get(key)
+            if type(end) is not int or type(start) is not int or end < start:
+                delta = None
+                break
+            delta[key] = end - start
+        if delta is None:
+            session_cumulative = True
+        else:
+            usages = [delta]
+    else:
+        session_cumulative = True
+out.extend(usage_footer("codex", usages, tool_calls=tool_calls,
+                        session_cumulative=session_cumulative))
 tmp = path + ".envelope"
 with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")

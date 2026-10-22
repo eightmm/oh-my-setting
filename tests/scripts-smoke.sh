@@ -12663,7 +12663,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end
 EOF
   chmod +x "$bin_dir/claude"
 
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=reviewer "$ROOT/scripts/agent-call.sh" \
+  env -u OMS_RESUME_SESSION HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=reviewer "$ROOT/scripts/agent-call.sh" \
     --repo "$project" --artifact-dir "$artifact_dir" --to claude \
     --prompt "Envelope probe" >/dev/null
 
@@ -12693,16 +12693,18 @@ assert row['provider_usage']['cache_read_tokens'] == 100, row
 assert row['provider_usage']['cache_write_tokens'] == 50, row
 assert row['provider_usage']['cache_in_input'] is False, row
 assert row['provider_usage'].get('tool_calls') is None, row  # no stream, no tool count
+assert not row['provider_usage'].get('session_cumulative'), row
 PY
-  # A resumed call's total_cost_usd restores the session's earlier spend, so
-  # summing it across attempts would double-count: the cost reads as unreported.
+  # Resume changes token accounting without re-recording the restored session
+  # cost; the served-model attribution remains available on the index row.
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_RESUME_SESSION=resumed-session \
     "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
     --prompt "Envelope resume probe" >/dev/null
-  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "a resumed claude call must report no cost and unchanged tokens"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "a resumed claude call must suppress cumulative cost and retain model/token usage"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 row = [r for r in rows if r.get("provider") == "claude"][-1]
+assert row["served_model"] == "claude-opus-5", row
 assert row.get("cost_usd") is None, row
 assert row["tokens"] == 15, row
 PY
@@ -12840,6 +12842,21 @@ assert {key: value for key, value in json_usage.items() if key != "tool_calls"} 
        {key: value for key, value in stream_usage.items() if key != "tool_calls"}, (json_usage, stream_usage)
 assert json_usage["tool_calls"] is None and stream_usage["tool_calls"] == 1, (json_usage, stream_usage)
 PY
+  cat > "$project/resumed-stream" <<'EOF'
+{"type":"assistant","message":{"id":"resume-1","usage":{"input_tokens":4,"output_tokens":3,"cache_read_input_tokens":12,"cache_creation_input_tokens":2},"content":[{"type":"text","text":"Resumed answer."}]}}
+{"type":"assistant","message":{"id":"resume-1","usage":{"input_tokens":6,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":4},"content":[{"type":"text","text":"Resumed answer."}]}}
+{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Resumed answer.","usage":{"input_tokens":900,"output_tokens":700,"cache_read_input_tokens":800,"cache_creation_input_tokens":400}}
+EOF
+  OMS_RESUME_SESSION=resumed-session bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/resumed-stream"
+  python3 - "$project/resumed-stream" <<'PY' || fail 'Claude resumed stream usage must count this call only'
+import json, sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+assert lines[lines.index("tokens used") + 1] == "11", lines
+usage = json.loads(next(line[14:] for line in lines if line.startswith("usage detail: ")))
+assert usage["input_tokens"] == 6 and usage["output_tokens"] == 5, usage
+assert usage["cache_read_tokens"] == 20 and usage["cache_write_tokens"] == 4, usage
+assert not usage.get("session_cumulative"), usage
+PY
 }
 
 test_codex_jsonl_carries_stop_reason() {
@@ -12848,6 +12865,42 @@ test_codex_jsonl_carries_stop_reason() {
   local home_dir="$project/home"
   local artifact_dir="$project/artifacts"
   local artifact quality
+
+  # The resumed event stream begins with the prior session total and closes
+  # with the cumulative total after this call. A fresh call still reports its
+  # final usage unchanged.
+  python3 - "$ROOT" "$project" <<'PY' || fail "codex resumed usage must exclude earlier rounds"
+import json, os, pathlib, subprocess, sys
+root, project = map(pathlib.Path, sys.argv[1:])
+common = '{"type":"thread.started","thread_id":"thread-resume"}\n'
+def run(name, stream, resumed):
+    path = project / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(stream, encoding="utf-8")
+    env = dict(os.environ)
+    if resumed:
+        env["OMS_RESUME_SESSION"] = "resume-session"
+    else:
+        env.pop("OMS_RESUME_SESSION", None)
+    subprocess.run(["bash", "-c", '. "$1/scripts/lib/peer-common.sh"; ma_codex_jsonl_to_text "$2"', "_", str(root), str(path)], env=env, check=True)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return int(lines[lines.index("tokens used") + 1]), json.loads(next(line[14:] for line in lines if line.startswith("usage detail: ")))
+prior = {"input_tokens": 1000, "output_tokens": 0, "cached_input_tokens": 900}
+last = {"input_tokens": 100, "output_tokens": 0, "cached_input_tokens": 90}
+intermediate = {"input_tokens": 1200, "output_tokens": 0, "cached_input_tokens": 1000}
+final = {"input_tokens": 1300, "output_tokens": 0, "cached_input_tokens": 1100}
+events = common + json.dumps({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":prior,"last_token_usage":last}}}) + "\n"
+events += json.dumps({"type":"turn.completed","usage":intermediate}) + "\n"
+events += json.dumps({"type":"turn.completed","usage":final}) + "\n"
+resume_result = run("resume.jsonl", events, True)
+assert resume_result == (300, {"cache_in_input": True, "cache_read_tokens": 200, "cache_write_tokens": None, "input_tokens": 300, "output_tokens": 0, "provider": "codex", "reported_cost_usd": None, "tool_calls": 0}), resume_result
+fresh = common + json.dumps({"type":"turn.completed","usage":intermediate}) + "\n"
+fresh += json.dumps({"type":"turn.completed","usage":final}) + "\n"
+tokens, detail = run("fresh.jsonl", fresh, False)
+assert tokens == 1300 and detail["input_tokens"] == 1300 and not detail.get("session_cumulative"), (tokens, detail)
+tokens, detail = run("unknown-baseline.jsonl", common + json.dumps({"type":"turn.completed","usage":final}) + "\n", True)
+assert tokens == 1300 and detail["session_cumulative"] is True, (tokens, detail)
+PY
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"

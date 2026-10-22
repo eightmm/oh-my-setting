@@ -135,10 +135,14 @@ def artifact_usage_metrics(repo: str, row: dict[str, object]) -> Optional[dict]:
     if not reports:
         return None
     result = {"reports": len(reports), "measurement": "provider-reported"}
+    cumulative = [report for report in reports if report.get("session_cumulative") is True]
+    measured = cumulative[-1:] if cumulative else reports
+    if cumulative:
+        result["session_cumulative"] = True
     for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "tool_calls"):
-        values = [integer(report.get(key)) for report in reports]
+        values = [integer(report.get(key)) for report in measured]
         result[key] = sum(values) if all(value is not None for value in values) else None
-    flags = [report.get("cache_in_input") for report in reports]
+    flags = [report.get("cache_in_input") for report in measured]
     result["cache_in_input"] = flags[0] if type(flags[0]) is bool and all(flag is flags[0] for flag in flags) else None
     return result
 
