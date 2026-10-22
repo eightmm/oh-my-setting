@@ -18557,6 +18557,18 @@ EOF
     fail "TERM cleanup removed the worker's uncaptured edit: $(cat "$project/signal.out")"
   [ "$(cat "$project/signal-worker.path")" = "$signal_kept" ] ||
     fail "reported recovery path does not identify the worker worktree"
+  signal_artifact="$(ls -t "$artifact_dir"/codex-*.md | head -1)"
+  python3 - "$signal_artifact" "$signal_kept" "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "signal artifact/index does not expose one digest-valid salvage path"
+import hashlib, json, re, sys
+artifact, kept, index = sys.argv[1:]
+body = open(artifact, 'rb').read()
+text = body.decode('utf-8')
+paths = re.findall(r'^- worktree: (/.*)$', text, re.M)
+assert paths == [kept], paths
+rows = [json.loads(line) for line in open(index) if line.strip()]
+record = next(row for row in reversed(rows) if row.get('artifact', '').endswith('/' + artifact.rsplit('/', 1)[-1]))
+assert hashlib.sha256(body).hexdigest() == record['artifact_sha256'], record
+PY
 
   rm -f "$project/signal-worker.ready"
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_DELEGATE_WORKTREE_ROOT="$signal_worktree_root" \

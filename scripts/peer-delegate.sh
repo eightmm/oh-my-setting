@@ -1028,7 +1028,12 @@ cleanup_signal() {
     [ "$worktree_created" = 1 ]; then
     KEEP_WORKTREE=1
     echo "worktree kept: $worktree" >&2
-    [ -z "$artifact" ] || printf '\n- worktree kept: %s\n' "$worktree" >> "$artifact"
+    if [ -n "$artifact" ]; then
+      printf '\n- worktree: %s\n' "$worktree" >> "$artifact"
+      # Signal cleanup exits before the normal index append. Record only after
+      # the recovery path is in the artifact so its indexed digest is final.
+      OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "${verify_status:-}" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" || true
+    fi
   fi
   cleanup "$code"
   exit "$code"
