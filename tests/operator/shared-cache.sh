@@ -776,6 +776,12 @@ for decided, waiting in (('completed', 0), ('pending', None)):
         settled_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
     count = settled_metrics['pending']['awaiting_admission']['count']
     assert count == 0 if waiting == 0 else count > 0, (decided, settled_metrics['pending'])
+# Admission evidence can conservatively retain IDs, but plan closures are authoritative.
+with patch.object(panel_results, 'pending_admissions', side_effect=lambda repo, ids, _tick=None: set(ids)), \
+        patch.object(panel_results, 'outcomes', side_effect=lambda repo, ids, **k: {}):
+    settled_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+admission_count = settled_metrics['pending']['awaiting_admission']['count']
+assert admission_count == 3, settled_metrics['pending']
 assert expected_metrics['interventions'] == {'manual_clears': 1, 'cancels': 1,
                                               'owner_finalized_failures': 1, 'total': 3}, expected_metrics
 metric_text = io.StringIO()

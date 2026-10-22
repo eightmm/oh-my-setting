@@ -701,7 +701,10 @@ def aggregate(repo, since=None, now=None):
     review_tasks = [task for task in tasks if task.get("state") == "review"]
     review_ages = [_stamp(task.get("updated_at") or task.get("claimed_at")) for task in review_tasks]
     try:
-        admission_ids = settled_pending_admissions(repo, [task.get("id") for task in tasks if task.get("id")])
+        closed_states = {"done", "blocked", "cancelled"}
+        admission_ids = settled_pending_admissions(
+            repo, [task.get("id") for task in tasks
+                   if task.get("id") and task.get("state") not in closed_states])
     except (OSError, ValueError, KeyError, TypeError):
         admission_ids = set()
         incomplete = True
