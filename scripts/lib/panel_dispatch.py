@@ -394,6 +394,19 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     stopped_write = _stopped_write_continuation(last, eligible_result)
     if stopped_write:
         import panel_salvage
+        recovery_evidence = panel_salvage._attempt_recovery_evidence(
+            repo, task_id, last.get("attempt_id"), call, last, head_repo)
+        if recovery_evidence:
+            if all(item.startswith(".oms/salvage-provenance/") for item in recovery_evidence):
+                message = ("recoverable delegate evidence exists for task %s and was already salvaged; "
+                           "stopped write work is not transferred by --continue; inspect the recovery, then include "
+                           "recovered work in a fresh dispatch brief: %s" %
+                           (task_id, ", ".join(recovery_evidence)))
+            else:
+                message = ("recoverable delegate evidence exists for task %s; run oms panel --salvage %s "
+                           "--attempt %s and inspect: %s" %
+                           (task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
+            panel_salvage._raise_recovery_evidence(recovery_evidence, message)
         payload_sha = panel_salvage._empty_provenance_identity(task_id, last.get("attempt_id"))
         relative = panel_salvage._empty_provenance_path(task_id, last.get("attempt_id"))
         try:

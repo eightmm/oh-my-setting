@@ -459,6 +459,128 @@ def _empty_provenance_path(task, attempt):
     return '.oms/salvage-provenance/empty-' + _empty_provenance_identity(task, attempt) + '.json'
 
 
+def _attempt_recovery_evidence(repo, task, attempt, indexed=None, attempt_row=None, execution=None):
+    """Name any durable patch or registered checkout that prevents empty salvage."""
+    repo = Path(repo)
+    evidence = []
+    indexed_rows = [indexed] if isinstance(indexed, dict) else []
+    indexed_elsewhere_patch_paths = set()
+    try:
+        rows = panel_results._query(repo, 'artifact-index', 'list', '1000000').get('rows', [])
+        indexed_elsewhere_patch_paths = {
+            row.get('patch') for row in rows
+            if isinstance(row.get('patch'), str) and row.get('patch').startswith('.oms/artifacts/')
+            and isinstance(row.get('attempt_id'), str) and row.get('attempt_id') != attempt
+        }
+        indexed_rows.extend(row for row in rows if row.get('task_id') == task
+                            and row.get('attempt_id') == attempt)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        raise ValueError('cannot verify delegate recovery evidence; refusing empty salvage') from error
+    indexed_patch_paths = set()
+    for row in indexed_rows:
+        patch = row.get('patch')
+        if isinstance(patch, str) and patch.startswith('.oms/artifacts/'):
+            indexed_patch_paths.add(patch)
+            path = repo / patch
+            if path.is_file() and not path.is_symlink() and path.stat().st_size:
+                evidence.append(patch)
+
+    if attempt_row is None:
+        try:
+            rows = panel_results._query(repo, 'agent-events', 'list')
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            raise ValueError('cannot verify delegate recovery evidence; refusing empty salvage') from error
+        matches = [row for row in rows if row.get('task_id') == task and row.get('attempt_id') == attempt]
+        attempt_row = matches[0] if len(matches) == 1 else {}
+    refs = attempt_row.get('refs', {})
+    provider = refs.get('panel_provider') or attempt_row.get('provider')
+    slug = re.sub(r'[^a-z0-9]+', '-', str(task).lower()).strip('-')[:48]
+    created = attempt_row.get('created_at', '')
+    if not indexed_patch_paths and isinstance(provider, str) and re.fullmatch(r'[a-z0-9_-]+', provider) and slug:
+        try:
+            from datetime import datetime, timedelta
+            started = datetime.strptime(created, '%Y-%m-%dT%H:%M:%SZ')
+            low, high = started - timedelta(minutes=5), started + timedelta(minutes=5)
+            artifact_dir = repo / '.oms/artifacts/delegate'
+            for path in artifact_dir.glob('%s-%s-*.patch' % (provider, slug)):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                relative = path.relative_to(repo).as_posix()
+                if relative in indexed_elsewhere_patch_paths:
+                    continue
+                match = re.fullmatch(r'%s-%s-(\d{8}T\d{6}Z)-(\d+)\.patch' %
+                                     (re.escape(provider), re.escape(slug)), path.name)
+                if match and path.stat().st_size:
+                    stamp = datetime.strptime(match.group(1), '%Y%m%dT%H%M%SZ')
+                    if low <= stamp <= high:
+                        evidence.append(relative)
+        except (TypeError, ValueError, OSError):
+            pass
+
+    if execution is not None:
+        location = attempt_row.get('refs', {}).get('panel_location', '')
+        parts = location[len('worktree:'):].split('/') if location.startswith('worktree:') else []
+        expected_parent = parts[0] if len(parts) == 2 and parts[-1] == 'wt' else None
+        if expected_parent:
+            env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+            env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_CONFIG_SYSTEM=os.devnull, GIT_OPTIONAL_LOCKS='0')
+            try:
+                listed = subprocess.run(['git', '-C', str(execution), 'worktree', 'list', '--porcelain'],
+                                        capture_output=True, text=True, env=env, timeout=15, check=False)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise ValueError('cannot verify registered delegate worktrees; refusing empty salvage') from error
+            if listed.returncode:
+                raise ValueError('cannot verify registered delegate worktrees; refusing empty salvage')
+            for block in listed.stdout.split('\n\n'):
+                entry = next((line[9:] for line in block.splitlines() if line.startswith('worktree ')), None)
+                if entry:
+                    entry_path = _native_path(entry)
+                    if (entry_path.is_dir() and entry_path.name == 'wt'
+                            and entry_path.parent.name == expected_parent):
+                        evidence.append('registered worktree: ' + str(entry_path))
+
+    provenance_dir = repo / '.oms/salvage-provenance'
+    if provenance_dir.is_dir():
+        for path in provenance_dir.glob('*.json'):
+            if path.name.startswith('empty-') or path.is_symlink():
+                continue
+            relative = path.relative_to(repo).as_posix()
+            try:
+                raw = _read(repo, relative, MAX_EVIDENCE)
+                parsed = json.loads(raw)
+            except (OSError, ValueError, TypeError):
+                # An unreadable file cannot be attributed safely to this attempt.
+                continue
+            records = parsed.get('records') if isinstance(parsed, dict) else None
+            belongs = (isinstance(records, list) and any(
+                isinstance(row, dict) and isinstance(row.get('salvaged_from'), dict)
+                and row['salvaged_from'].get('task') == task
+                and row['salvaged_from'].get('attempt') == attempt for row in records))
+            if not belongs:
+                continue
+            try:
+                payload_sha = path.stem
+                if not re.fullmatch(r'[0-9a-f]{64}', payload_sha):
+                    raise ValueError('invalid provenance filename')
+                _provenance(raw, payload_sha)
+            except (OSError, ValueError, TypeError):
+                evidence.append('unreadable provenance: ' + relative)
+            else:
+                # The controller record itself ties this task and attempt; do not
+                # scan and hash every salvage artifact just to rediscover it.
+                evidence.append(relative)
+    return list(dict.fromkeys(evidence))
+
+
+def _raise_recovery_evidence(evidence, message):
+    unreadable = [item.partition(': ')[2] for item in evidence
+                  if item.startswith('unreadable provenance: ')]
+    if unreadable:
+        raise ValueError('unreadable salvage provenance file: %s' % ', '.join(unreadable))
+    raise ValueError(message)
+
+
 def record_empty_salvage(repo, task, attempt, reason):
     """Persist a controller finding that a stopped attempt has no patch to recover."""
     panel_results._owner()
@@ -500,6 +622,10 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
         if not delegate_worktree:
             raise ValueError('kept worktree is missing and is not a recorded OMS delegate worktree') from error
         if indexed is None or not any(key in indexed for key in ('patch', 'patch_sha256', 'patch_external')):
+            evidence = _attempt_recovery_evidence(repo, task, attempt, indexed, execution=execution)
+            if evidence:
+                _raise_recovery_evidence(evidence, 'recoverable delegate evidence prevents empty salvage: %s' %
+                                         ', '.join(evidence))
             record_empty_salvage(repo, task, attempt, 'no kept worktree or indexed patch')
             raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
                              % (attempt, task)) from error
@@ -516,6 +642,10 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
         if check_base.returncode or not check_base.stdout.decode().replace('\r', '').strip().startswith(base):
             raise ValueError('indexed patch recorded base is unavailable or does not match')
         if not patch:
+            evidence = _attempt_recovery_evidence(repo, task, attempt, indexed, execution=execution)
+            if evidence:
+                _raise_recovery_evidence(evidence, 'recoverable delegate evidence prevents empty salvage: %s' %
+                                         ', '.join(evidence))
             record_empty_salvage(repo, task, attempt, 'indexed patch is empty')
             raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
                              % (attempt, task))

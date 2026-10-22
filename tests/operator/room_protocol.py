@@ -1521,7 +1521,7 @@ def salvage_error(evidence):
     try:
         panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"}, brief, room_env)
     except ValueError as error:
-        assert "first run oms panel --salvage" in str(error), error
+        assert "oms panel --salvage room-inspection" in str(error), error
     else:
         raise AssertionError("unverified stopped write call did not require salvage")
     finally:
