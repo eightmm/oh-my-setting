@@ -13,21 +13,22 @@ ROOT = HERE.parent.parent
 SOURCE = ROOT / "tests/operator-tools-smoke.sh"
 # The integration chains retain order within their own files. Everything else
 # starts with a fresh process, directory and explicitly declared fixture.
+# Measured 2026-10-22/23; buckets follow measured section cost.
 SECTIONS = (
     ("core/dashboard", 0, "dashboard.sh"),
     ("core/visual-and-controls", 1, "visual_and_controls.py"),
     ("core/room-protocol", 0, "room_protocol.py"),
-    ("core/room-and-board-rendering", 2, "room_and_board_rendering.py"),
-    ("core/native-integration", 3, "native_integration.py"),
-    ("shared-cache", 1, "shared-cache.sh"),
+    ("core/room-and-board-rendering", 1, "room_and_board_rendering.py"),
+    ("core/native-integration", 2, "native_integration.py"),
+    ("shared-cache", 2, "shared-cache.sh"),
     ("native-pty", 1, "native_pty.py"),
-    ("dispatch-exit", 2, None),
-    ("worker-leases", 3, "worker_leases.py"),
-    ("dispatch-results", 1, "dispatch_results.py"),
-    ("salvage", 1, "salvage.py"),
+    ("dispatch-exit", 3, None),
+    ("worker-leases", 1, "worker_leases.py"),
+    ("dispatch-results", 2, "dispatch_results.py"),
+    ("salvage", 2, "salvage.py"),
     ("scratch-state", 2, "scratch_state.py"),
-    ("auto-review", 1, "auto_review.py"),
-    ("room-rollover", 2, "room_rollover.py"),
+    ("auto-review", 3, "auto_review.py"),
+    ("room-rollover", 3, "room_rollover.py"),
 )
 
 
