@@ -766,8 +766,11 @@ def _owned_task(repo, execution, owner, task_id):
     main = active_mains(repo, ident, state, owner, caller=caller, attempt=main_id).get(caller)
     if state['closed'] or not main or main['attempt_id'] != main_id:
         raise ValueError('accept/finish requires the current owning room main')
-    plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
-                      object_pairs_hook=PlanBinding.unique_fields)
+    try:
+        plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
+                          object_pairs_hook=PlanBinding.unique_fields)
+    except (OSError, TypeError, ValueError) as error:
+        raise ValueError('plan task %s is unavailable: %s' % (task_id, error)) from error
     stored = plan.get('tasks', {}).get(task_id)
     if not isinstance(stored, dict):
         raise ValueError('plan task is unavailable')
@@ -991,6 +994,174 @@ def _accept_record(snapshot, base, tree, commit):
             'tree': tree, 'base': base, 'review_gate': snapshot['review_gate']}
 
 
+def _accepted_prefix(repo, execution, landings):
+    """Canonical accepts in this clone's unpublished first-parent lineage."""
+    if (os.environ.get('OMS_HARNESS_CHILD') == '1' or
+            os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') != '0'):
+        raise ValueError('panel acceptance prefix derivation is parent-only')
+    from panel_dispatch import PlanBinding
+    from land_receipts import pushed_receipts
+    execution = _execution_repo(repo, execution)
+    def same_checkout(value):
+        if not isinstance(value, str) or not value:
+            return False
+        if os.name == 'nt' and re.match(r'^/[A-Za-z]/', value):
+            value = value[1] + ':' + value[2:]
+        return (os.path.isabs(value) and
+                os.path.normcase(os.path.realpath(value)) == os.path.normcase(str(execution)))
+
+    def valid_foreign_checkout(value):
+        if not isinstance(value, str) or not value:
+            return False
+        if os.name == 'nt' and re.match(r'^/[A-Za-z]/', value):
+            value = value[1] + ':' + value[2:]
+        return os.path.isabs(value) and not same_checkout(value)
+
+    panel_intents = [row for row in landings if row.get('event') == 'intent'
+                     and row.get('panel_accept') == 'true' and row.get('_has_abandoned') is not True]
+    local_intents = [row for row in panel_intents if same_checkout(row.get('worktree'))]
+    try:
+        plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
+                          object_pairs_hook=PlanBinding.unique_fields)
+    except (OSError, TypeError, ValueError) as error:
+        task_id = next((row.get('task') for row in local_intents if row.get('task')), None)
+        if task_id:
+            raise ValueError('panel acceptance record unavailable for task %s: %s'
+                             % (task_id, error)) from error
+        raise
+    if not isinstance(plan, dict):
+        task_id = next((row.get('task') for row in local_intents if row.get('task')), None)
+        if task_id:
+            raise ValueError('panel acceptance record unavailable for task ' + str(task_id))
+        raise ValueError('panel acceptance plan is malformed')
+    tasks = plan.get('tasks')
+    if not isinstance(tasks, dict):
+        task_id = next((row.get('task') for row in local_intents if row.get('task')), None)
+        if task_id:
+            raise ValueError('panel acceptance record unavailable for task ' + str(task_id))
+        raise ValueError('panel acceptance plan tasks are malformed')
+    accepted = [(ident, task, task.get('panel_accept')) for ident, task in tasks.items()
+                if isinstance(task, dict) and 'panel_accept' in task]
+    if not accepted and not local_intents:
+        return []
+
+    # The shell helper owns the receipt namespace, including Git Bash path
+    # spelling. A passed clone-local publication resets even unfinalized tasks.
+    directory = subprocess.check_output(['bash', '-c',
+        '. "$1"; panel_receipts=$(oms_land_state_dir "$2") || exit; '
+        'if [ "$3" = nt ]; then cygpath -w "$panel_receipts"; '
+        'else printf "%s\\n" "$panel_receipts"; fi',
+        'panel-prefix', str(ROOT / 'scripts/lib/land-receipts.sh'), str(execution), os.name],
+        text=True, timeout=30).replace('\r', '').rstrip('\n')
+    chain_rows = _git(execution, 'rev-list', '--first-parent', '--parents', '--max-count=10000',
+                      'HEAD').decode().splitlines()
+    chain = [line.split()[0] for line in chain_rows if line.split()]
+    parents = {parts[0]: parts[1] if len(parts) > 1 else ''
+               for parts in (line.split() for line in chain_rows) if parts}
+    landed = set()
+    for sha, _, raw in pushed_receipts(directory, '', lambda path: _read(
+            Path(path).parent, Path(path).name, 1024 * 1024)):
+        receipt = json.loads(raw)
+        if (receipt.get('schema') == 1 and receipt.get('state') == 'passed'
+                and isinstance(receipt.get('gate'), dict) and type(receipt['gate'].get('rc')) is int
+                and receipt['gate']['rc'] == 0 and isinstance(receipt.get('ci'), dict)
+                and receipt['ci'].get('conclusion') in ('success', 'skipped')):
+            landed.add(sha)
+    boundary = next((index for index, sha in enumerate(chain) if sha in landed), len(chain))
+    if boundary == len(chain) == 10000:
+        raise ValueError('panel acceptance lineage exceeds replay limit')
+    pending = {sha: index for index, sha in enumerate(chain[:boundary])}
+    prefix = []
+    replayed = set()
+    for commit in chain[:boundary]:
+        parent = parents.get(commit, '')
+        if not parent:
+            continue
+        local = [row for row in local_intents if row.get('base_sha') == parent]
+        recorded = [(ident, task, record) for ident, task, record in accepted
+                    if isinstance(record, dict) and record.get('commit') == commit]
+        handled_local = set()
+        for ident, task, record in recorded:
+            local_match = [row for row in local if row.get('task') == ident
+                           and row.get('plan_id') == record.get('plan_id')
+                           and row.get('lease') == record.get('lease_id')
+                           and row.get('base_sha') == record.get('base')
+                           and row.get('patch_sha') == record.get('patch_sha256')]
+            foreign_match = [row for row in panel_intents
+                             if valid_foreign_checkout(row.get('worktree'))
+                             and row.get('task') == ident
+                             and row.get('plan_id') == record.get('plan_id')
+                             and row.get('lease') == record.get('lease_id')
+                             and row.get('base_sha') == parent
+                             and row.get('patch_sha') == record.get('patch_sha256')]
+            if not local_match:
+                if any(row.get('task') == ident for row in local):
+                    raise ValueError('panel acceptance lineage changed: ' + ident)
+                if foreign_match:
+                    # Canonical task and journal evidence bind this commit to another clone.
+                    continue
+                raise ValueError('panel acceptance landing evidence missing for task ' + ident)
+            if len(local_match) != 1:
+                raise ValueError('panel acceptance landing evidence is ambiguous for task ' + ident)
+            intent = local_match[0]
+            handled_local.add(id(intent))
+            required = {'schema', 'task_id', 'plan_id', 'lease_id', 'candidate_event_id',
+                        'candidate_attempt_id', 'patch_sha256', 'artifact', 'patch', 'commit',
+                        'tree', 'base', 'review_gate'}
+            if (set(record) != required or record.get('schema') != 1 or record.get('task_id') != ident
+                    or record.get('commit') != commit or record.get('plan_id') != plan.get('plan_id')
+                    or record.get('lease_id') != task.get('lease_id')
+                    or task.get('review_lease_id') != task.get('lease_id')
+                    or task.get('state') not in ('review', 'done')
+                    or intent.get('plan_id') != record.get('plan_id')
+                    or intent.get('lease') != record.get('lease_id')
+                    or intent.get('base_sha') != record.get('base')
+                    or intent.get('patch_sha') != record.get('patch_sha256')
+                    or record.get('base') != parent
+                    or _git(execution, 'rev-parse', commit + '^{tree}').decode().strip() != record.get('tree')):
+                raise ValueError('panel acceptance lineage changed for task ' + ident)
+            verify = task.get('verify')
+            if not isinstance(verify, str) or not verify or '\0' in verify:
+                raise ValueError('invalid panel prefix verifier for task ' + ident)
+            try:
+                patch = _read(repo, record.get('patch'), 16 * 1024 * 1024)
+                if hashlib.sha256(patch).hexdigest() != record.get('patch_sha256'):
+                    raise ValueError('patch digest changed')
+                _ensure_accept_tree(execution, record, patch)
+            except (OSError, TypeError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                raise ValueError('panel acceptance patch evidence invalid for task %s: %s'
+                                 % (ident, error)) from error
+            prefix.append((pending[commit], dict(id=ident, verify=verify, panel_accept=record)))
+            replayed.add((ident, commit))
+
+        for intent in local:
+            if id(intent) not in handled_local:
+                task_id = intent.get('task') or intent.get('landing_id') or 'unknown'
+                raise ValueError('panel acceptance record missing for task ' + str(task_id))
+
+        if local and not recorded:
+            intent = local[0]
+            task_id = intent.get('task') or intent.get('landing_id') or 'unknown'
+            raise ValueError('panel acceptance record missing for task ' + str(task_id))
+
+    for ident, task, record in accepted:
+        if not isinstance(record, dict):
+            continue
+        commit = record.get('commit')
+        if commit not in pending or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', str(commit)):
+            continue
+        if (ident, commit) not in replayed:
+            parent = parents.get(commit, '')
+            foreign = [row for row in panel_intents if valid_foreign_checkout(row.get('worktree'))
+                       and row.get('base_sha') == parent and row.get('task') == ident
+                       and row.get('plan_id') == record.get('plan_id')
+                       and row.get('lease') == record.get('lease_id')
+                       and row.get('patch_sha') == record.get('patch_sha256')]
+            if not foreign:
+                raise ValueError('panel acceptance landing evidence missing for task ' + ident)
+    return [item for _, item in sorted(prefix, key=lambda item: item[0], reverse=True)]
+
+
 def _accepted_review_snapshot(repo, execution, owner, task_id, verify, record, landed_commit):
     task = _owned_task(repo, execution, owner, task_id)
     finished_retry = (task.get('state') == 'done' and isinstance(task.get('landing'), dict)
@@ -1115,6 +1286,7 @@ def _tree_patch_id(execution, base, tree):
 
 
 def _replay_patch_tree(execution, base, patch):
+    _owner()
     with tempfile.TemporaryDirectory(prefix='oms-panel-accepted-tree-') as directory:
         patch_path = Path(directory) / 'candidate.patch'
         patch_path.write_bytes(patch)

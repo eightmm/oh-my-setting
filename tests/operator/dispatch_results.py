@@ -1713,6 +1713,202 @@ assert not subprocess.check_output(["git", "-C", str(hook_repo), "status", "--po
 assert hook_accept["sha"] == subprocess.check_output(["git", "-C", str(hook_repo), "rev-parse", "HEAD"],
                                                       text=True).strip()
 
+# Successive ordinary accepts must preserve the already accepted verifier,
+# even without a goal batch or a finalized/published first task.
+prefix_repo, prefix_env = prepare_accept_clone("accept cumulative scratch")
+prefix_execution = Path(accept_call("scratch-worktree", "add", "--owner-pid", str(os.getpid()),
+                                     execution=prefix_repo, env=prefix_env).stdout.strip())
+accept_call("panel", *accept_options, execution=prefix_execution, env=prefix_env)
+prefix_first_sha = subprocess.check_output(["git", "-C", str(prefix_execution), "rev-parse", "HEAD"],
+                                          text=True).strip()
+for sibling, contents in (("breaks-first", "broken\n"), ("independent", "old\naccepted\n")):
+    sibling_verify = "test -f sibling.txt"
+    accept_call("agent-plan", "add", "--id", sibling, "--title", sibling,
+                "--allowed", "value.txt,sibling.txt", "--verify", sibling_verify,
+                execution=prefix_repo, env=prefix_env)
+    accept_call("agent-plan", "claim", "--id", sibling, "--provider", "codex", execution=prefix_repo, env=prefix_env)
+    sibling_task = json.loads(accept_call("agent-plan", "evidence-snapshot", "--id", sibling,
+                                         execution=prefix_repo, env=prefix_env).stdout)
+    accept_call("agent-plan", "start", "--id", sibling, "--lease-id", sibling_task["lease_id"],
+                execution=prefix_repo, env=prefix_env)
+    sibling_worker = accept_call("agent-events", "start", "--provider", "local", "--tool", "peer-delegate",
+        "--task-id", sibling, "--parent-attempt-id", prefix_env["OMS_PANEL_MAIN_ATTEMPT"],
+        "--ref", "panel_role=worker", "--ref", "panel_access=write",
+        "--ref", "panel_lease_id=" + sibling_task["lease_id"],
+        "--then", "starting", "--then", "working", "--then", "verifying", "--then", "review",
+        execution=prefix_repo, env=prefix_env).stdout.strip()
+    sibling_artifact = prefix_repo / (".oms/artifacts/fixture/" + sibling + ".md")
+    sibling_artifact.write_text("## Output\nReviewed sibling.\n## Exit\n0\n")
+    sibling_patch = sibling_artifact.with_suffix(".patch")
+    (prefix_execution / "value.txt").write_text(contents)
+    (prefix_execution / "sibling.txt").write_text("independent\n")
+    subprocess.run(["git", "-C", str(prefix_execution), "add", "-N", "sibling.txt"], check=True)
+    sibling_patch.write_bytes(subprocess.check_output(["git", "-C", str(prefix_execution), "diff", "--binary"]))
+    (prefix_execution / "value.txt").write_text("old\naccepted\n")
+    (prefix_execution / "sibling.txt").unlink()
+    subprocess.run(["git", "-C", str(prefix_execution), "reset", "--", "sibling.txt"], check=True,
+                   stdout=subprocess.DEVNULL)
+    sibling_digest = hashlib.sha256(sibling_patch.read_bytes()).hexdigest()
+    sibling_env = dict(prefix_env, OMS_TASK_ID=sibling, OMS_ATTEMPT_ID=sibling_worker,
+                       OMS_INDEX_PLAN_ID=sibling_task["plan_id"])
+    call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" delegate local 0 "$3" "$4"',
+          "sibling-fixture", str(root / "scripts/lib/peer-common.sh"), str(prefix_repo),
+          str(sibling_artifact), str(sibling_patch)], sibling_env)
+    sibling_review = json.dumps({"gate_verify_exit": 0, "candidate": {"patch_sha256": sibling_digest},
+                                 "seats": [{"verdict": "pass"}]})
+    call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 0 "$3"',
+          "sibling-fixture", str(root / "scripts/lib/peer-common.sh"), str(prefix_repo), str(sibling_artifact)],
+         dict(sibling_env, OMS_INDEX_REVIEW_OUTCOME_JSON=sibling_review))
+    sibling_result = accept_call("panel", "--accept", sibling, "--message", "fix: " + sibling,
+                                 "--verify", sibling_verify, execution=prefix_execution, env=prefix_env, check=False)
+    if sibling == "breaks-first":
+        assert sibling_result.returncode != 0, "ordinary sibling acceptance broke accept-task without replay"
+        assert "accept-task" in sibling_result.stderr, sibling_result.stderr
+        assert subprocess.check_output(["git", "-C", str(prefix_execution), "rev-parse", "HEAD"],
+                                       text=True).strip() == prefix_first_sha
+        assert not subprocess.check_output(["git", "-C", str(prefix_execution), "status", "--porcelain"])
+    else:
+        assert sibling_result.returncode == 0, sibling_result.stderr
+        reports = list((prefix_repo / ".oms/artifacts/admit").glob("*.md"))
+        assert any("- verify-prefix-accept-task: PASS" in report.read_text()
+                   for report in reports), "accepted sibling did not replay A"
+
+import runpy
+prefix_capture = runpy.run_path(str(root / "scripts/lib/landing-capture.py"))
+prefix_raw_landings = prefix_capture["rows"](prefix_repo)
+prefix_landings = prefix_capture["panel_accept_intents"](prefix_raw_landings)
+round2_audit_failures = []
+with patch.dict(os.environ, prefix_env, clear=True):
+    prefix_context = prefix_capture["batch_prefix"](prefix_repo, prefix_execution, "breaks-first")
+    assert [item["id"] for item in prefix_context["checks"]] == ["accept-task", "independent"]
+    accepted_intent = next(row for row in prefix_raw_landings
+                           if row.get("event") == "intent" and row.get("task") == "accept-task")
+    abandoned_intent = dict(accepted_intent, landing_id="land-prefix-abandoned", event="intent")
+    receipt_fields = ("landing_id", "patch", "patch_sha", "base_sha", "task", "lease",
+                      "plan_receipt_sha", "plan_done_receipt_sha", "approval", "approval_version")
+    receipt_identity = dict(schema=1, **{name: abandoned_intent.get(name, "") for name in receipt_fields})
+    abandoned_sha = hashlib.sha256(json.dumps(receipt_identity, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    abandoned_intent["receipt_sha"] = abandoned_sha
+    abandoned_terminal = dict(abandoned_intent, event="abandoned")
+    abandoned_log = prefix_raw_landings + [abandoned_intent, abandoned_terminal]
+    projected_abandoned = prefix_capture["panel_accept_intents"](abandoned_log)
+    assert next(row for row in projected_abandoned if row["landing_id"] == "land-prefix-abandoned")[
+        "_has_abandoned"] is True
+    with patch.dict(prefix_capture["batch_prefix"].__globals__, {"rows": lambda _repo: abandoned_log}):
+        abandoned_context = prefix_capture["batch_prefix"](prefix_repo, prefix_execution, "breaks-first")
+    assert abandoned_context["checks"] == prefix_context["checks"]
+    with patch.dict(os.environ, OMS_HARNESS_CHILD="1", OMS_HARNESS_DELEGATE_DEPTH="0"), \
+            patch.object(saved, "_replay_patch_tree", side_effect=AssertionError("Git tree replay ran in child")) as replay:
+        assert prefix_capture["batch_prefix"](prefix_repo, prefix_execution, "") == {"batches": [], "checks": []}
+        try:
+            prefix_capture["batch_prefix"](prefix_repo, prefix_execution, "breaks-first")
+        except ValueError as error:
+            if "parent-only" not in str(error):
+                round2_audit_failures.append("child derivation was not refused at the parent-only boundary: %s" % error)
+        else:
+            round2_audit_failures.append("panel prefix derivation ran in a harness child")
+        assert not replay.called
+        with patch.object(saved, "_execution_repo", side_effect=lambda repo, execution: Path(execution)), \
+                patch.object(saved, "_replay_patch_tree",
+                             side_effect=AssertionError("Git tree replay ran in child")) as replay:
+            try:
+                saved._accepted_prefix(prefix_repo, prefix_execution, prefix_landings)
+            except ValueError as error:
+                if "parent-only" not in str(error):
+                    round2_audit_failures.append("direct child prefix derivation lacked a parent-only refusal: %s" % error)
+            except AssertionError as error:
+                round2_audit_failures.append("direct child prefix derivation called the tree writer: %s" % error)
+            else:
+                round2_audit_failures.append("direct panel prefix derivation ran in a harness child")
+            if replay.called:
+                round2_audit_failures.append("direct child prefix derivation called the tree writer")
+    # Shared canonical evidence in another clone must not supply replay commands.
+    foreign_landings = [dict(row, worktree=str(prefix_repo)) for row in prefix_landings]
+    assert saved._accepted_prefix(prefix_repo, prefix_execution, foreign_landings) == []
+    prefix_read = saved._read
+    def missing_accept_record(repo, relative, *args, **kwargs):
+        raw = prefix_read(repo, relative, *args, **kwargs)
+        if relative == ".oms/plan/tasks.json":
+            value = json.loads(raw)
+            value["tasks"]["accept-task"].pop("panel_accept")
+            return json.dumps(value).encode()
+        return raw
+    with patch.object(saved, "_read", side_effect=missing_accept_record):
+        try:
+            saved._accepted_prefix(prefix_repo, prefix_execution, prefix_landings)
+        except ValueError as error:
+            if "accept-task" not in str(error):
+                round2_audit_failures.append("missing panel_accept record did not name its task: %s" % error)
+        else:
+            round2_audit_failures.append("journaled acceptance without its task record was ignored")
+    def unreadable_accept_record(repo, relative, *args, **kwargs):
+        if relative == ".oms/plan/tasks.json":
+            raise ValueError("fixture task record is unreadable")
+        return prefix_read(repo, relative, *args, **kwargs)
+    with patch.object(saved, "_read", side_effect=unreadable_accept_record):
+        try:
+            prefix_capture["batch_prefix"](prefix_repo, prefix_execution, "breaks-first")
+        except ValueError as error:
+            if "accept-task" not in str(error):
+                round2_audit_failures.append("unreadable panel_accept record did not name its task: %s" % error)
+        else:
+            round2_audit_failures.append("unreadable panel_accept record was ignored")
+    with patch.dict(os.environ, prefix_env, clear=True), \
+            patch.object(saved, "_read", side_effect=unreadable_accept_record):
+        try:
+            saved._owned_task(prefix_repo, prefix_execution, "codex", "accept-task")
+        except ValueError as error:
+            if "accept-task" not in str(error):
+                round2_audit_failures.append("unreadable owner task record did not name its task: %s" % error)
+        else:
+            round2_audit_failures.append("unreadable owner task record was ignored")
+    accept_patch_path = json.loads(prefix_read(prefix_repo, ".oms/plan/tasks.json"))["tasks"][
+        "accept-task"]["panel_accept"]["patch"]
+    def unreadable_accept_patch(repo, relative, *args, **kwargs):
+        if relative == accept_patch_path:
+            raise ValueError("fixture patch evidence is missing")
+        return prefix_read(repo, relative, *args, **kwargs)
+    with patch.object(saved, "_read", side_effect=unreadable_accept_patch):
+        try:
+            saved._accepted_prefix(prefix_repo, prefix_execution, prefix_landings)
+        except ValueError as error:
+            if "accept-task" not in str(error):
+                round2_audit_failures.append("missing patch evidence did not name its task: %s" % error)
+        else:
+            round2_audit_failures.append("unreadable accepted patch evidence was ignored")
+    def changed_prefix_record(repo, relative, *args, **kwargs):
+        raw = prefix_read(repo, relative, *args, **kwargs)
+        if relative == ".oms/plan/tasks.json":
+            value = json.loads(raw)
+            value["tasks"]["accept-task"]["panel_accept"]["base"] = "0" * 40
+            return json.dumps(value).encode()
+        return raw
+    with patch.object(saved, "_read", side_effect=changed_prefix_record):
+        try:
+            saved._accepted_prefix(prefix_repo, prefix_execution, prefix_landings)
+            raise AssertionError("changed canonical acceptance lineage was ignored")
+        except ValueError as error:
+            assert "lineage changed: accept-task" in str(error), error
+    prefix_parameters = ("test -f sibling.txt", "0", "breaks-first", "0", "0", "", "0", "0")
+    prefix_binding = prefix_capture["admission_binding"](prefix_repo, prefix_execution, *prefix_parameters)
+    prefix_receipt_dir = Path(call(["bash", "-c", '. "$1"; oms_land_state_dir "$2"', "prefix-receipt",
+        str(root / "scripts/lib/land-receipts.sh"), str(prefix_execution)], prefix_env).strip())
+    prefix_receipt_dir.mkdir(parents=True, exist_ok=True)
+    prefix_head = subprocess.check_output(["git", "-C", str(prefix_execution), "rev-parse", "HEAD"],
+                                          text=True).strip()
+    prefix_receipt = {"schema": 1, "state": "passed", "sha": prefix_head,
+                      "gate": {"rc": 0}, "push": {"rc": 0, "moved": 1}, "ci": {"conclusion": "success"}}
+    prefix_receipt_file = prefix_receipt_dir / (prefix_head + "-fixture.json")
+    prefix_receipt_file.write_text(json.dumps(dict(prefix_receipt, state="failed")))
+    assert prefix_capture["batch_prefix"](prefix_repo, prefix_execution, "breaks-first") == prefix_context
+    skipped_ci_receipt = dict(prefix_receipt, ci={"conclusion": "skipped"})
+    prefix_receipt_file.write_text(json.dumps(skipped_ci_receipt))
+    assert prefix_capture["batch_prefix"](prefix_repo, prefix_execution, "breaks-first")["checks"] == []
+    reset_binding = prefix_capture["admission_binding"](prefix_repo, prefix_execution, *prefix_parameters)
+    assert reset_binding["batch_prefix_sha256"] != prefix_binding["batch_prefix_sha256"]
+assert not round2_audit_failures, round2_audit_failures
+
 # A lifecycle heartbeat during patch-land admission changes the worker's
 # activity fields but must not invalidate the reviewed authority.
 heartbeat_repo, heartbeat_env = prepare_accept_clone("accept heartbeat race")

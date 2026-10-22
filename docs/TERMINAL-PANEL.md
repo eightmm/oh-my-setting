@@ -924,8 +924,9 @@ Accepted results also require a passing automatic reviewer gate for each landed 
 For one reviewed worker result, the owning room main runs
 `oms panel --accept TASK --repo INTEGRATION_CLONE --message 'fix: description' --verify CMD`
 (optionally `--expected-patch-sha256 DIGEST`). It admits the unique candidate, commits only
-its patch, and records plan review: **committed locally; publication pending**. Run
-`oms land --repo INTEGRATION_CLONE` explicitly, then add `--repo INTEGRATION_CLONE
+its patch, and records plan review: **committed locally; publication pending**.
+Successive accepts replay earlier canonical acceptances' verifiers in the same clone before the candidate verifier, refuse candidates naming the earlier task they break, and reset the replay set once those commits are landed.
+Run `oms land --repo INTEGRATION_CLONE` explicitly, then add `--repo INTEGRATION_CLONE
 --landed-commit SHA` to `--finalize`: publication proof finishes the plan before recording
 its result. Verification runs in that execution clone; evidence remains in the canonical
 state repository. Only clones recognized by the existing repository resolver are supported.

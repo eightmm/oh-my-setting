@@ -75,6 +75,62 @@ def rows(repo):
     return result
 
 
+def panel_accept_intents(log):
+    """Project terminal status from exact journal receipts for panel accepts."""
+    receipt_fields = (
+        'landing_id', 'patch', 'patch_sha', 'base_sha', 'task', 'lease',
+        'plan_receipt_sha', 'plan_done_receipt_sha', 'approval', 'approval_version',
+    )
+
+    def canonical(row):
+        values = {'schema': 1}
+        for name in receipt_fields:
+            value = row.get(name, '')
+            if not isinstance(value, str):
+                return None
+            values[name] = value
+        raw = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        return values, hashlib.sha256(raw.encode()).hexdigest()
+
+    intents = {}
+    order = []
+    terminals = {}
+    for row in log:
+        landing_id = row.get('landing_id')
+        if not isinstance(landing_id, str) or not landing_id:
+            continue
+        if row.get('event') == 'intent':
+            if landing_id not in intents:
+                intents[landing_id] = row
+                order.append(landing_id)
+        elif row.get('event') in ('complete', 'abandoned'):
+            terminals.setdefault(landing_id, []).append(row)
+
+    result = []
+    for landing_id in order:
+        intent = intents[landing_id]
+        if intent.get('panel_accept') != 'true':
+            continue
+        expected = canonical(intent)
+        receipt_sha = expected[1] if expected is not None else ''
+        exact = set()
+        if expected is not None:
+            for terminal in terminals.get(landing_id, []):
+                if terminal.get('schema') != 1:
+                    continue
+                terminal_values = canonical(terminal)
+                if (terminal_values == expected
+                        and terminal.get('panel_accept', '') == intent.get('panel_accept', '')
+                        and terminal.get('plan_id', '') == intent.get('plan_id', '')
+                        and terminal.get('receipt_sha') == receipt_sha
+                        and terminal.get('worktree') == intent.get('worktree')):
+                    exact.add(terminal.get('event'))
+        result.append(dict(intent, _receipt_sha=receipt_sha,
+                           _has_complete='complete' in exact,
+                           _has_abandoned='abandoned' in exact))
+    return result
+
+
 def append(repo, event, reservation, **extra):
     row = dict(schema=1, event=event, landing_id=reservation['landing_id'],
                ts=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), managed_capture=reservation, **extra)
@@ -323,11 +379,22 @@ def find(repo, capture=None, landing=None):
 def batch_prefix(repo, execution_repo, task):
     if not task:
         return {"batches": [], "checks": []}
+    if (os.environ.get('OMS_HARNESS_CHILD') == '1' or
+            os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') != '0'):
+        raise ValueError('batch prefix derivation is parent-only')
     helper = runpy.run_path(str(HERE / 'autopilot-receipt.py'))
     state = Path(repo) / '.oms/plan'
     try:
-        return helper['goal_batch_command'](str(state / 'tasks.json'), str(state / 'progress.jsonl'),
-                                           execution_repo, '', 1, '', 'prefix', [task])
+        from panel_results import _accepted_prefix
+        accepted = _accepted_prefix(repo, execution_repo, panel_accept_intents(rows(repo)))
+        context = helper['goal_batch_command'](str(state / 'tasks.json'), str(state / 'progress.jsonl'),
+                                              execution_repo, '', 1, '', 'prefix', [task])
+        if accepted:
+            context['panel_accepts'] = accepted
+            seen = {check['id'] for check in context['checks']}
+            context['checks'].extend({'id': item['id'], 'verify': item['verify']}
+                                     for item in accepted if item['id'] not in seen)
+        return context
     except helper['ReceiptError'] as exc:
         raise ValueError(str(exc)) from exc
 

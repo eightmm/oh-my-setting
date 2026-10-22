@@ -835,6 +835,7 @@ PY
         prefix_failed=1
         timeout_note="$(ma_verify_timeout_note "$prefix_exit")"
         record "verify-prefix-$prefix_id" "FAIL" "$prefix_verify${timeout_note:+ — $timeout_note}"
+        echo "patch-admit: earlier task $prefix_id verifier failed; candidate refused" >&2
         verify_out="$prefix_out"
       fi
       prefix_index=$((prefix_index + 1))
@@ -843,7 +844,7 @@ PY
       if [ "$preverify_failed" = 1 ]; then
         record "verify" "SKIP" "pre-verification policy or integrity gate failed"
       elif [ "$prefix_failed" = 1 ]; then
-        record "verify" "SKIP" "batch prefix verification failed"
+        record "verify" "SKIP" "earlier task prefix verification failed"
       else
         verify_started="$(date +%s)"
         if verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
@@ -929,6 +930,7 @@ EOF
                   prefix_exit=$?
                   timeout_note="$(ma_verify_timeout_note "$prefix_exit")"
                   record "verify-prefix-floor-$prefix_id" "FAIL" "$prefix_verify${timeout_note:+ — $timeout_note}"
+                  echo "patch-admit: earlier task $prefix_id verifier failed with HEAD checks restored; candidate refused" >&2
                   floor_verify_out="$prefix_out"
                 fi
                 prefix_index=$((prefix_index + 1))
