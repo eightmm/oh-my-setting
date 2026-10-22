@@ -7104,8 +7104,9 @@ finally:
         os.environ['OMS_PEER_VERIFY_TIMEOUT'] = saved_timeout
     else:
         os.environ.pop('OMS_PEER_VERIFY_TIMEOUT', None)
+# Bundle-screening shells inherit BASH_ENV before the bounded verifier starts.
 slow_shell_init = repo / '.oms/artifacts/verifier-budget-env.sh'
-slow_shell_init.write_text('''if [ "${OMS_COMPLETION_PHASE:-}" = verify ]; then
+slow_shell_init.write_text('''if [ "${OMS_COMPLETION_PHASE:-}" = verify ] && [ "$0" != completion-screen ]; then
   printf started > .oms/artifacts/verifier-budget-launched
   sleep 3
 fi
@@ -7124,7 +7125,7 @@ assert plan()['tasks'][timed_bundle['task_id']]['state'] == 'review'
 assert {path.name for path in completion_dir.glob('*.json')} == receipts_before_timeout, 'timeout published a completion receipt'
 for invalid_budget in ('not-a-duration', '25h'):
     verifier_marker.unlink(missing_ok=True)
-    invalid_bundle = setup(command=slow_command)
+    invalid_bundle = timed_bundle
     before_invalid = plan_path.read_bytes()
     invalid_env = dict(timeout_env, OMS_PEER_VERIFY_TIMEOUT=invalid_budget)
     invalid_error = invoke(invalid_bundle, extra=invalid_env, ok=False)
@@ -7140,8 +7141,15 @@ assert (repo / '.oms/artifacts/index.jsonl').read_bytes() == producer_index_befo
 external_receipt = json.loads((repo / plan()['tasks'][failed_external['task_id']]['completion_receipt']['path']).read_bytes())
 assert external_receipt['snapshot']['evidence']['index']['exit'] == 17
 assert external_receipt['snapshot']['evidence']['child_provenance_asserted'] is False
+# Reuse unchanged reviewed reports; each refusal still runs the real controller.
+negative_reports = {}
 for flaw in ('foreign-index', 'failed-without-review', 'product-deliverable', 'foreign-owner', 'missing-reviewer', 'unsupported-authorship'):
-    bad = setup(main_report=True, producer_exit=17 if flaw == 'failed-without-review' else 0)
+    producer_exit = 17 if flaw == 'failed-without-review' else 0
+    if producer_exit not in negative_reports:
+        negative_reports[producer_exit] = setup(main_report=True, producer_exit=producer_exit)
+    bad = copy.deepcopy(negative_reports[producer_exit])
+    prior_plan = plan_path.read_bytes()
+    bad['plan_sha256'] = h(prior_plan)
     if flaw == 'foreign-index':
         row = register('call-import', 'foreign-task', bad['main_research']['artifact']['path'])
         bad['main_research']['index_event_id'] = row['event_id']
@@ -7166,6 +7174,7 @@ for flaw in ('foreign-index', 'failed-without-review', 'product-deliverable', 'f
     unchanged = plan_path.read_bytes()
     invoke(bad, action='accept-main-research', ok=False)
     assert plan_path.read_bytes() == unchanged
+    plan_path.write_bytes(prior_plan)
 
 
 # Partial legacy lineage requires exact reviewed adoption in both directions.
@@ -7959,7 +7968,7 @@ for source, mode in ((events, 'missing'), (events, 'duplicate'),
     source.write_bytes(original_stream)
 # Stop immediately before plan replacement; actual competing writers must
 # enter their own lock wait, then append only after completed publication.
-barrier_bundle = setup()
+barrier_bundle = sequence_candidate
 barrier_ready = injection / 'publication-ready'; barrier_release = injection / 'publication-release'
 room_wait = injection / 'room-wait'; lifecycle_wait = injection / 'lifecycle-wait'
 (injection / 'sitecustomize.py').write_text('''import inspect, os, time
