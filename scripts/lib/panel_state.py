@@ -629,6 +629,7 @@ def snapshot(repo, room_id=None, _tick=None):
                         calls.update((m["participant"], m.get("role")) for m in state["room"]["participants"]
                                      if m.get("joined"))
                         linked = {}
+                        from dashboard_projection import project_usage
                         for row in attempt_rows:
                             # The ledger keeps panel identity in refs; the dashboard projection lifts it into "panel".
                             refs = row.get("refs") or {}
@@ -640,7 +641,9 @@ def snapshot(repo, room_id=None, _tick=None):
                                 linked[who] = {"state": row["state"], "attempt_id": row["attempt_id"],
                                                "updated_at": row.get("updated_at"), "task_id": row.get("task_id"),
                                                "lease_id": refs.get("panel_lease_id"),
-                                               **({key: row[key] for key in ("tokens", "provider_usage") if key in row}),
+                                               **({"tokens": row["tokens"]} if "tokens" in row else {}),
+                                               **({"provider_usage": project_usage(row.get("provider_usage"))}
+                                                  if row.get("provider_usage") else {}),
                                                **({"alias": refs["panel_alias"]} if refs.get("panel_alias") else {}),
                                                **({"access": "write"} if refs.get("panel_access") == "write" else {})}
                         state["room_attempts"] = linked

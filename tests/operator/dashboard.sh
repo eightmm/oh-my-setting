@@ -317,7 +317,8 @@ assert (call["model_attribution"], call["fallback_reason"], call["tokens"], call
     "transport", "other", 120, 0.25), call
 assert call["verify_exit"] is None and subject["verify_exit"] == 0, (call, subject)
 assert call["provider_usage"] == {"input_tokens": 5, "output_tokens": 2, "cache_read_tokens": 7,
-                                  "cache_write_tokens": 1, "cache_in_input": False}, call
+                                  "cache_write_tokens": 1, "cache_in_input": False,
+                                  "session_cumulative": False}, call
 # Unknown model, tokens and cost stay unknown rather than turning into zero.
 for key in ("selected_model", "served_model", "route_class", "tokens", "cost_usd", "provider_usage"):
     assert subject[key] is None, (key, subject)
@@ -456,8 +457,10 @@ assert report["operations"]["recent"][4]["fallback_reason"] == "other"
 assert report["operations"]["recent"][5]["route_class"] is None
 assert report["operations"]["recent"][6]["status"] == "success"
 # Malformed usage counts degrade to null instead of a made-up zero; a non-mapping usage is absent.
-assert report["operations"]["recent"][7]["provider_usage"] == dict.fromkeys(
-    ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cache_in_input")), report["operations"]["recent"][7]
+assert report["operations"]["recent"][7]["provider_usage"] == {
+    "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
+    "cache_write_tokens": None, "cache_in_input": None, "session_cumulative": False,
+}, report["operations"]["recent"][7]
 assert report["operations"]["recent"][6]["provider_usage"] is None
 json.dumps(report, allow_nan=False)
 assert report["task"] is None and report["attention"] is None and report["acceptance"] is None, report

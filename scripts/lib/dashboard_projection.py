@@ -158,7 +158,8 @@ def project_usage(value):
         return None
     return {**{key: count(usage.get(key)) for key in (
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")},
-        "cache_in_input": usage.get("cache_in_input") if isinstance(usage.get("cache_in_input"), bool) else None}
+        "cache_in_input": usage.get("cache_in_input") if isinstance(usage.get("cache_in_input"), bool) else None,
+        "session_cumulative": usage.get("session_cumulative") is True}
 
 
 def project_operations(rows, error):

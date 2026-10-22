@@ -259,6 +259,22 @@ cache_report = {"operations": {"recent": [{"attempt_id": "cache-result", "provid
 assert call_tokens(cache_report, "cache-result", "done", True) == "13.9m tok · 96% cached"
 assert call_tokens(cache_report, "cache-result", "done") == (
     "13.9m tok (cached input 13.4m, new input 495.4k, output 50.3k)")
+session_usage = {"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 30,
+                 "cache_write_tokens": 4, "cache_in_input": False, "session_cumulative": True,
+                 "provider_private_detail": "must not reach the board"}
+from dashboard_projection import project_usage
+projected_session_usage = project_usage(session_usage)
+assert set(projected_session_usage) == {"input_tokens", "output_tokens", "cache_read_tokens",
+                                        "cache_write_tokens", "cache_in_input", "session_cumulative"}
+recent_session_report = {"operations": {"recent": [{"attempt_id": "same-session-call",
+                                                      "provider_usage": session_usage}]}}
+room_session_report = {"room_attempts": {"call-session": {"attempt_id": "same-session-call",
+                                                            "provider_usage": projected_session_usage}}}
+recent_session_label = call_tokens(recent_session_report, "same-session-call", "done")
+room_session_label = call_tokens(room_session_report, "same-session-call", "done")
+assert recent_session_label == room_session_label == "154 tok (session total)", (
+    recent_session_label, room_session_label)
+assert "provider_private_detail" not in room_session_report["room_attempts"]["call-session"]["provider_usage"]
 claude_cache_report = {"operations": {"recent": [{"attempt_id": "claude-cache", "provider_usage": {
     "input_tokens": 9000, "output_tokens": 1000, "cache_read_tokens": 90000,
     "cache_write_tokens": 1000, "cache_in_input": False}}]}}
@@ -3838,7 +3854,8 @@ def event(attempt, state, at, room_id="flow-room", who="gone-review", role="work
            "refs": {"panel_room_id": room_id, "panel_room_participant": who, "panel_role": role}}
     if tokens is not None:
         row["tokens"] = tokens
-        row["provider_usage"] = {"input_tokens": tokens, "output_tokens": 0, "cache_in_input": True}
+        row["provider_usage"] = {"input_tokens": tokens, "output_tokens": 0,
+                                  "cache_in_input": True, "ledger_private_detail": "discard me"}
     return row
 listed = [event("a-old", "working", "2026-01-01T00:00:00Z", tokens=111), event("a-new", "review", "2026-01-02T00:00:00Z", tokens=222),
           event("a-room", "failed", "2026-01-03T00:00:00Z", room_id="other-room"),
@@ -3871,10 +3888,12 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
 assert got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, got.get("land")
 assert got["room_attempts"] == {"gone-review": {"state": "failed", "attempt_id": "window-09",
     "updated_at": "2026-01-04T00:00:09Z", "task_id": "t-window-09", "lease_id": None,
-    "tokens": 909, "provider_usage": {"input_tokens": 909, "output_tokens": 0, "cache_in_input": True}},
+    "tokens": 909, "provider_usage": {"input_tokens": 909, "output_tokens": 0, "cache_read_tokens": None,
+        "cache_write_tokens": None, "cache_in_input": True, "session_cumulative": False}},
     "gone-second": {"state": "review", "attempt_id": "a-second", "updated_at": "2026-01-03T00:00:00Z",
                     "task_id": "t-a-second", "lease_id": None, "tokens": 999,
-                    "provider_usage": {"input_tokens": 999, "output_tokens": 0, "cache_in_input": True}},
+                    "provider_usage": {"input_tokens": 999, "output_tokens": 0, "cache_read_tokens": None,
+                        "cache_write_tokens": None, "cache_in_input": True, "session_cumulative": False}},
     "gone-live": {"state": "working", "attempt_id": "a-live", "updated_at": "2026-01-03T00:00:00Z",
                   "task_id": "t-a-live", "lease_id": "lease-live"}}, got.get("room_attempts")
 snapshot_nodes = {m["participant"]: m for m in graph_text.nodes(got)}
