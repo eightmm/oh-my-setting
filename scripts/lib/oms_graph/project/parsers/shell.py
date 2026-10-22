@@ -62,7 +62,7 @@ class ShellParser(Parser):
                 scoped["from"] = node_id("function", path, current_function)
                 result.refs.append(scoped)
 
-        for number, raw in enumerate(text.splitlines(), 1):
+        for number, raw in enumerate((line.rstrip("\r") for line in text.split("\n")), 1):
             if len(raw) > 4096:
                 pending_comments = []
                 continue

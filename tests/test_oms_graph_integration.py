@@ -453,6 +453,52 @@ test_consumer_sibling() {
         changes = changed_entries(self.repo, self.base, head)
         self.assertEqual(changed_test_hunks(self.repo, self.base, head, changes)[path], ())
 
+    def test_glob_char_path_does_not_mix_sibling_hunks(self) -> None:
+        literal_path = "tests/test_feature[1].py"
+        sibling_path = "tests/test_feature1.py"
+        for path, value in ((literal_path, 1), (sibling_path, 10)):
+            self._write(self.repo / path, "def test_case():\n    assert %d == 0\n" % value)
+        self.git("add", literal_path, sibling_path)
+        self.git("commit", "-qm", "add glob-like test names")
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        self._write(self.repo / literal_path, "def test_case():\n    assert 1 == 2\n")
+        self._write(self.repo / sibling_path, "def test_case():\n    assert 10 == 20\n")
+        self.git("add", literal_path, sibling_path)
+        self.git("commit", "-qm", "edit glob-like test names")
+        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                       env=self._env(), text=True).strip()
+        changes = changed_entries(self.repo, self.base, head)
+        hunks = changed_test_hunks(self.repo, self.base, head, changes)
+        self.assertEqual([line for _, line in hunks[literal_path][0]["old_lines"]],
+                         ["    assert 1 == 0"])
+        self.assertEqual([line for _, line in hunks[literal_path][0]["new_lines"]],
+                         ["    assert 1 == 2"])
+
+    def test_form_feed_inside_case_preserves_narrow_selection(self) -> None:
+        path = self.repo / "tests" / "test_feature.py"
+        source = path.read_text(encoding="utf-8").replace(
+            "assert helper() == 1", 'assert "left\fside" == "left\fside"', 1)
+        self._write(path, source)
+        self.git("add", "tests/test_feature.py")
+        self.git("commit", "-qm", "add form feed to test body")
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        self._write(path, path.read_text(encoding="utf-8").replace(
+            'assert "left\fside" == "left\fside"',
+            'assert "left\fside" == "right\fside"', 1))
+        self.git("add", "tests/test_feature.py")
+        self.git("commit", "-qm", "edit after form feed")
+        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                       env=self._env(), text=True).strip()
+        changes = changed_entries(self.repo, self.base, head)
+        hunks = changed_test_hunks(self.repo, self.base, head, changes)
+        self.assertEqual([line for _, line in hunks["tests/test_feature.py"][0]["old_lines"]],
+                         ['        assert "left\fside" == "left\fside"'])
+        plan, _ = self._selection()
+        self.assertEqual(plan["mode"], "affected")
+        self.assertEqual([row["name"] for row in plan["test_cases"]], ["test_first"])
+
     def _write_shell_edit(self, text: str):
         self._write(self.repo / "tests" / "scripts-smoke.sh", text)
         self.git("add", "tests/scripts-smoke.sh")

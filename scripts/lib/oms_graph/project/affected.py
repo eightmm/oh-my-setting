@@ -42,8 +42,8 @@ def _test_diff_hunks(repo: Path, base: str, head: str, path: str) -> Sequence[Di
     """Read exact changed lines on both sides; an unreadable diff fails open."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--no-ext-diff", "--no-color", "--unified=0",
-             base, head, "--", path],
+            ["git", "-C", str(repo), "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+             "--unified=0", base, head, "--", ":(literal)" + path],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -57,7 +57,10 @@ def _test_diff_hunks(repo: Path, base: str, head: str, path: str) -> Sequence[Di
     hunks: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     old_line = new_line = 0
-    for raw in diff_text.splitlines():
+    for raw in diff_text.split("\n"):
+        if raw.startswith("diff --git "):
+            current = None
+            continue
         match = _HUNK_RE.match(raw)
         if match:
             old_line, old_count, new_line, new_count = match.groups()
@@ -180,7 +183,7 @@ def _revision_text(repo: Path, revision: str, path: str) -> Optional[str]:
 
 
 def _test_ranges(nodes: Sequence[Mapping[str, Any]], path: str, text: str) -> Optional[Dict[tuple, Dict[str, Any]]]:
-    lines = text.splitlines()
+    lines = text.split("\n")
     ranges = {}
     for node in nodes:
         name = str(node.get("name", ""))
