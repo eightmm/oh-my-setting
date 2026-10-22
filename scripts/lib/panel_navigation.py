@@ -412,10 +412,11 @@ def read_evidence(repo, target, state=None):
     try:
         evidence = call_results(repo, target)
         if target[0] == "result":
-            from panel_activity import read_summary, summary_lines
+            from panel_activity import read_summary, summary_lines, transcript_lines
             running_calls = _running_activity_calls(state)
             evidence["activity_snapshot"] = _read_activity_snapshot(repo, target[1], running_calls)
-            evidence["activity_what_it_did"] = summary_lines(read_summary(repo, target[1]))
+            evidence["activity_what_it_did"] = summary_lines(read_summary(repo, target[1])) + ["x Transcript"]
+            evidence["transcript"] = "\n".join(transcript_lines(repo, target[1]))
         return target, evidence, None
     except Exception as error:
         return target, {}, clean(str(error), 120) or "Result evidence unavailable"
@@ -435,7 +436,7 @@ def finish_opening(navigation, report, generation=None):
         navigation["notice"] = error
     else:
         navigation.pop("notice", None)
-        navigation["detail"] = {"title": "RECORDED RESULTS", "report": dict(
+        navigation["detail"] = {"title": "RECORDED RESULTS", "transcript": evidence.get("transcript"), "report": dict(
             evidence, rows=[r for r in evidence.get("rows", []) if r.get("calls")])}
         if evidence.get("activity_what_it_did"):
             navigation["detail"]["what_it_did"] = evidence["activity_what_it_did"]
@@ -556,6 +557,10 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
     def reader_text(value):
         return panel_reader.ReaderText(value, artifact=(call.get("attempt_id"), call.get("artifact")),
                                        updated_at=call.get("ts") or row.get("updated_at"))
+    if view == "Transcript":
+        from panel_activity import transcript_lines
+        return reader_text(panel_reader.render_view(view, report, call, width=width, heading=heading,
+                                                     transcript=transcript_lines(repo, participant)))
     if view in ("Summary", "Raw", "Run info"):
         if call.get("kind") == "review":
             call = dict(call)
@@ -689,6 +694,37 @@ def tab_event(event, navigation):
     names = navigation.get("visible_tabs", [key for key, unused in TABS if key != "needs"])
     tab = navigation.get("tab") if navigation.get("tab") in names else "log"
     kind = event[0]
+    if kind == "escape" and "transcript_back" in navigation:
+        detail, offset = navigation.pop("transcript_back")
+        if detail is None:
+            navigation.pop("detail", None)
+        else:
+            navigation["detail"] = detail
+        navigation["offset"] = offset
+        return True
+    if kind == "x":
+        detail = navigation.get("detail") or {}
+        preview = navigation.get("preview") or {}
+        evidence = preview.get("report") or {}
+        text = detail.get("transcript") if detail else evidence.get("transcript")
+        target = preview.get("target") or (None,)
+        if "transcript_back" not in navigation and (text is not None or target[0] == "result"):
+            # The watcher's Esc closes an open reader first; close it here so Back returns in one key.
+            if navigation.get("reader_open"):
+                try:
+                    panel_reader.close_reader(os.environ.get("TMUX_PANE", ""))
+                except (OSError, subprocess.SubprocessError):
+                    navigation["notice"] = "Close the Results reader before opening Transcript"
+                    return True
+                navigation.pop("reader_open", None)
+                navigation.pop("reader_target", None)
+            navigation["transcript_back"] = (navigation.get("detail"), navigation.get("offset", 0))
+            text = text or "transcript not captured"
+            # Keep literal indentation and embedded markdown intact in the board's structured reader.
+            fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", text)), default=0))
+            navigation["detail"] = {"title": "TRANSCRIPT", "text": fence + "\n" + text + "\n" + fence}
+            navigation["offset"] = 0
+            return True
     if navigation.get("surface") not in {"graph", "tree"} or navigation.get("detail"):
         return False
     log_box = navigation.get("log_box") or {}

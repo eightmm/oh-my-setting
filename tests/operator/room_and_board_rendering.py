@@ -1384,6 +1384,12 @@ assert "showing earlier content" in output and "first" in output and "second" in
 slow_started = time.time()
 output, unused = read_page(lambda width: (time.sleep(3), "late")[1], iter([[("q",)]]))
 assert time.time() - slow_started < 2 and "Reading recorded result…" in output, output
+transcript_views = []
+output, unused = read_page(lambda width, view: (transcript_views.append(view) or panel_reader.render_view(
+    view, {}, {}, width=width, transcript=["First transcript line", "  indented edit"])),
+    iter([[("x",)], [("escape",)], [("q",)]]), size=(100, 12))
+assert transcript_views == ["Summary", "Transcript", "Summary"], transcript_views
+assert "  indented edit" in output and "[Transcript]" in output, output
 selected_views = []
 def switching_reader(width, view):
     selected_views.append(view)
@@ -2114,6 +2120,101 @@ with tempfile.TemporaryDirectory() as activity_root:
     assert panel_nav.finish_opening(finished_nav, arrived)
     finished = render_detail({}, finished_nav["detail"], 90, 30, {}, color=False)
     assert "What it did:" in finished and "b.py" in finished and "Commands run: 1 passed, 0 failed" in finished, finished
+    # Finished streams retain ordered provider evidence independently of the temporary output.
+    sensitive_line = "gh" + "p_" + "A" * 24
+    for provider in ("codex", "claude"):
+        transcript_call = "call-transcript-" + provider
+        transcript_source = activity_repo / (provider + "-transcript-output")
+        if provider == "codex":
+            transcript_docs = [
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "First message\n  literal indentation\n```\n" + sensitive_line}},
+                {"type": "item.completed", "item": {"type": "command_execution", "command": "check-example",
+                 "exit_code": 7, "aggregated_output": "command output excerpt"}},
+                {"type": "item.completed", "item": {"type": "file_change", "changes": [
+                    {"path": "example.py", "diff": "@@ -1 +1 @@\n-old\n+new"}]}},
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "Final report"}},
+            ]
+        else:
+            transcript_docs = [
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "First message\n  literal indentation\n```\n" + sensitive_line}]}},
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "transcript-bash", "name": "Bash",
+                 "input": {"command": "check-example"}}]}},
+                {"type": "user", "tool_use_result": {"exit_code": 7}, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "transcript-bash", "is_error": True,
+                     "content": "command output excerpt"}]}},
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit",
+                 "input": {"file_path": "example.py", "old_string": "old", "new_string": "new"}}]}},
+                {"type": "result", "result": "Final report"},
+            ]
+        transcript_source.write_text("".join(json.dumps(doc) + "\n" for doc in transcript_docs))
+        assert panel_activity.record_summary(activity_repo, transcript_call, transcript_source, provider)
+        assert panel_activity.finish_pointer(activity_repo, transcript_call)
+        transcript_source.unlink()
+        transcript = "\n".join(panel_activity.transcript_lines(activity_repo, transcript_call))
+        assert all(part in transcript for part in ("First message", "check-example", "exit 7", "command output excerpt",
+                                                   "example.py", "-old", "+new", "Final report")), transcript
+        positions = [transcript.index(part) for part in ("First message", "check-example", "example.py", "Final report")]
+        assert positions == sorted(positions), transcript
+        assert sensitive_line not in transcript and "[redacted]" in transcript, transcript
+        retained = log_dir / (transcript_call + ".transcript")
+        assert retained.stat().st_mode & 0o777 == 0o600
+        assert not retained.is_symlink()
+        with patch.object(panel, "results_snapshot", return_value=({"rows": []}, ([], []))):
+            rendered_transcript = panel_nav.render_call_view(activity_repo, transcript_call, "Transcript", 100)
+        assert "[Transcript]" in rendered_transcript and "Final report" in rendered_transcript, rendered_transcript
+        transcript_nav = {"surface": "graph", "tab": "detail", "preview": {"target": ("result", transcript_call),
+                          "report": {"transcript": transcript}}, "band_offsets": {"detail": 3}}
+        assert panel_nav.tab_event(("x",), transcript_nav)
+        assert "First message" in transcript_nav["detail"]["text"]
+        transcript_screen = render_detail({}, transcript_nav["detail"], 100, 100, {}, color=False)
+        assert "  literal indentation" in transcript_screen and "Final report" in transcript_screen, transcript_screen
+        assert panel_nav.tab_event(("escape",), transcript_nav)
+        assert "detail" not in transcript_nav and transcript_nav["band_offsets"]["detail"] == 3
+    transcript_nav["reader_open"] = True
+    with patch.object(panel_reader, "close_reader", return_value=True) as closed_transcript_reader:
+        assert panel_nav.tab_event(("x",), transcript_nav)
+    assert closed_transcript_reader.call_count == 1 and not transcript_nav.get("reader_open")
+    assert panel_nav.tab_event(("escape",), transcript_nav)
+    assert panel_activity.transcript_lines(activity_repo, "call-uncaptured") == ["transcript not captured"]
+    oversized_source = activity_repo / "oversized-transcript"
+    oversized_source.write_bytes(b"x" * (8 * 1024 * 1024) + b"\n" + json.dumps({
+        "type": "item.completed", "item": {"type": "agent_message", "text": "Tail retained"}}).encode() + b"\n")
+    assert panel_activity.record_summary(activity_repo, "call-transcript-large", oversized_source)
+    oversized_retained = log_dir / "call-transcript-large.transcript"
+    assert oversized_retained.stat().st_size <= 8 * 1024 * 1024
+    oversized_text = "\n".join(panel_activity.transcript_lines(activity_repo, "call-transcript-large"))
+    assert "truncated" in oversized_text and "Tail retained" in oversized_text, oversized_text
+    old_transcript = log_dir / "call-transcript-old.transcript"
+    old_transcript.write_text("old")
+    os.utime(old_transcript, (1, 1))
+    panel_activity.prune_transcripts(activity_repo)
+    assert not old_transcript.exists(), "age pruning must work below the count limit"
+    with patch.object(panel_activity, "_TRANSCRIPT_KEEP", 2):
+        panel_activity.prune_transcripts(activity_repo)
+    assert len(list(log_dir.glob("*.transcript"))) == 2
+    protected_transcript = activity_repo / "protected-transcript"
+    protected_transcript.write_text("unchanged")
+    linked_transcript = log_dir / "call-transcript-link.transcript"
+    linked_transcript.symlink_to(protected_transcript)
+    assert panel_activity.transcript_lines(activity_repo, "call-transcript-link") == ["transcript not captured"]
+    assert not panel_activity.record_summary(activity_repo, "call-transcript-link", oversized_source)
+    assert protected_transcript.read_text() == "unchanged"
+    hardlink_transcript = log_dir / "call-transcript-hardlink.transcript"
+    os.link(protected_transcript, hardlink_transcript)
+    assert not panel_activity.record_summary(activity_repo, "call-transcript-hardlink", oversized_source)
+    assert protected_transcript.read_text() == "unchanged"
+    private_home = activity_repo / "fake-provider-home"
+    provider_stream = private_home / ".codex" / "stream"
+    provider_stream.parent.mkdir(parents=True)
+    provider_stream.write_text("private")
+    with patch.dict(os.environ, {"HOME": str(private_home)}):
+        assert not panel_activity.record_summary(activity_repo, "call-transcript-home", provider_stream)
+        assert panel_activity.transcript_lines(private_home / ".codex", "call-private") == ["transcript not captured"]
+    with patch.object(panel_activity.subprocess, "run", side_effect=subprocess.TimeoutExpired("scanner", 5)):
+        assert "secret scanner failed" in panel_activity.transcript_lines(activity_repo, "call-transcript-large")[0]
+    assert "output excerpt truncated" in panel_activity._transcript_excerpt("한" * 8192)
+    assert len(panel_activity._transcript_excerpt("한" * 8192).split("\n")[0].encode()) <= 8192
+    assert __import__("panel_input").TerminalInput().decode(b"x") == [("x",)]
     transition_call = "call-6123456789abcdef"
     transition_stream = activity_repo / "codex-finished-live-call.jsonl"
     transition_stream.write_text("\n".join(json.dumps(row) for row in [

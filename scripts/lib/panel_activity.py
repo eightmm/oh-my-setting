@@ -5,8 +5,12 @@ import math
 import os
 import re
 import stat
+import subprocess
+import tempfile
 import threading
 import time
+import unicodedata
+from pathlib import Path
 
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
@@ -24,6 +28,10 @@ _SUMMARY_MAX_BYTES = 64 * 1024 * 1024
 _MAX_PENDING_TOOL_RESULTS = 4096
 _UNAVAILABLE_POINTER = "unavailable"
 _CACHE_MISS = object()
+_TRANSCRIPT_BYTES = 8 * 1024 * 1024
+_TRANSCRIPT_KEEP = 128
+_TRANSCRIPT_DAYS = 30
+_TRANSCRIPT_MARKER = b'{"oms_transcript_truncated":true}\n'
 
 
 def _provider_home_path(path):
@@ -602,9 +610,18 @@ def _summary_path(repo, call):
 
 
 def _dispatch_directory(repo, create=False):
-    directory = os.path.join(os.path.realpath(repo), ".oms", "panel-state", "dispatch-logs")
-    if create:
-        os.makedirs(directory, mode=0o700, exist_ok=True)
+    directory = os.path.realpath(repo)
+    for name in (".oms", "panel-state", "dispatch-logs"):
+        directory = os.path.join(directory, name)
+        if _provider_home_path(directory):
+            raise OSError("unsafe dispatch output directory")
+        if create:
+            try:
+                os.mkdir(directory, mode=0o700)
+            except FileExistsError:
+                pass
+        if not stat.S_ISDIR(os.lstat(directory).st_mode):
+            raise OSError("unsafe dispatch output directory")
     info = os.lstat(directory)
     if (not stat.S_ISDIR(info.st_mode) or
             os.name == "posix" and (info.st_mode & 0o077 or
@@ -631,6 +648,212 @@ def _write_private(path, data):
         os.close(fd)
 
 
+def _transcript_tail(path):
+    if _provider_home_path(path):
+        raise OSError("unsafe transcript source")
+    info = os.lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+            hasattr(os, "getuid") and info.st_uid != os.getuid()):
+        raise OSError("unsafe transcript source")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as source:
+        opened = os.fstat(source.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or
+                (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+            raise OSError("transcript source changed")
+        size = opened.st_size
+        start = max(0, size - (_TRANSCRIPT_BYTES - len(_TRANSCRIPT_MARKER))) if size > _TRANSCRIPT_BYTES else 0
+        source.seek(start)
+        raw = source.read(min(size, _TRANSCRIPT_BYTES))
+        if start:
+            # The first retained byte may be inside a JSON document or a UTF-8 character.
+            raw = _TRANSCRIPT_MARKER + raw.partition(b"\n")[2]
+        return raw
+
+
+def _retain_transcript(repo, call, stream):
+    raw = _transcript_tail(stream)
+    directory = _dispatch_directory(repo, create=True)
+    target = os.path.join(directory, call + ".transcript")
+    try:
+        old = os.lstat(target)
+    except FileNotFoundError:
+        old = None
+    if old is not None and (not stat.S_ISREG(old.st_mode) or old.st_nlink != 1 or
+                           hasattr(os, "getuid") and old.st_uid != os.getuid()):
+        raise OSError("unsafe retained transcript")
+    fd, temporary = tempfile.mkstemp(prefix=".transcript-", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as destination:
+            destination.write(raw)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    prune_transcripts(repo)
+
+
+def prune_transcripts(repo):
+    """Bound completed captures only; live pointers and retained summaries are untouched."""
+    directory = _dispatch_directory(repo)
+    rows = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.transcript", entry.name):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                    (not hasattr(os, "getuid") or info.st_uid == os.getuid())):
+                rows.append((info.st_mtime, entry.path))
+    cutoff = time.time() - _TRANSCRIPT_DAYS * 86400
+    for index, (stamp, path) in enumerate(sorted(rows, reverse=True)):
+        if index >= _TRANSCRIPT_KEEP or stamp < cutoff:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+
+def _transcript_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_transcript_text(item.get("text", "")) for item in value if isinstance(item, dict))
+    return json.dumps(value, ensure_ascii=False) if value is not None else ""
+
+
+def _transcript_documents(raw):
+    """Reuse provider event classification while retaining the bodies omitted from activity cards."""
+    lines, tools = [], {}
+    for raw_line in raw.decode("utf-8", "replace").splitlines():
+        try:
+            doc = json.loads(raw_line)
+        except ValueError:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("oms_transcript_truncated"):
+            lines.append("[transcript truncated: retained last 8 MiB; earlier events unavailable]")
+            continue
+        parsed, unused_results = _document_events(doc)
+        item = doc.get("item") or {}
+        if doc.get("type") == "item.completed" and isinstance(item, dict):
+            kind = item.get("type")
+            if kind in ("agent_message", "reasoning", "summary"):
+                lines.extend(["Assistant:" if kind == "agent_message" else "Reasoning:",
+                              _transcript_text(item.get("text") or item.get("summary"))])
+            elif kind == "command_execution":
+                lines.extend(["Command: " + _text(item.get("command")) + " / exit " + str(item.get("exit_code", "unknown")),
+                              _transcript_excerpt(item.get("aggregated_output"))])
+            elif kind == "file_change":
+                for change in item.get("changes", []) if isinstance(item.get("changes"), list) else []:
+                    if isinstance(change, dict):
+                        lines.extend(["Edit: " + _text(change.get("path")), _transcript_text(change.get("diff") or change.get("patch"))])
+            else:
+                for event in parsed:
+                    lines.append("Tool: " + event["text"] + " / status " + str(item.get("status", "unknown")))
+                if parsed:
+                    lines.extend([_transcript_text(item.get("arguments")), _transcript_excerpt(item.get("result") or item.get("error"))])
+        elif doc.get("type") in ("assistant", "user"):
+            message = doc.get("message")
+            content = message.get("content", []) if isinstance(message, dict) else doc.get("content", [])
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("type")
+                if kind in ("text", "thinking") and doc.get("type") == "assistant":
+                    lines.extend(["Assistant:" if kind == "text" else "Reasoning:", _text(block.get("text") or block.get("thinking"))])
+                elif kind == "tool_use":
+                    inputs = block.get("input")
+                    inputs = inputs if isinstance(inputs, dict) else {}
+                    name = block.get("name")
+                    prefix = "Command: " + _text(inputs.get("command")) if name in ("Bash", "bash") else "Tool: " + str(name)
+                    tools[block.get("id")] = len(lines)
+                    lines.append(prefix + " / status pending")
+                    if name in ("Edit", "Write", "MultiEdit"):
+                        lines.append("Edit: " + _text(inputs.get("file_path")))
+                        edits = inputs.get("edits", []) if name == "MultiEdit" else [inputs]
+                        for edit in edits if isinstance(edits, list) else []:
+                            if not isinstance(edit, dict):
+                                continue
+                            if edit.get("file_path"):
+                                lines.append("Edit: " + _text(edit["file_path"]))
+                            if name == "Write":
+                                lines.append(_text(edit.get("content")))
+                            else:
+                                lines.extend(["@@ edit @@", "\n".join("-" + line for line in _text(edit.get("old_string")).splitlines()),
+                                              "\n".join("+" + line for line in _text(edit.get("new_string")).splitlines())])
+                    elif name not in ("Bash", "bash"):
+                        lines.append(_transcript_text(inputs))
+                elif kind == "tool_result":
+                    index = tools.get(block.get("tool_use_id"))
+                    result = doc.get("tool_use_result")
+                    code = result.get("exit_code") if isinstance(result, dict) else None
+                    status = ("exit " + str(code) if type(code) is int else
+                              "status failed" if block.get("is_error") is True else
+                              "status succeeded" if block.get("is_error") is False else "status unknown")
+                    if index is not None:
+                        lines[index] = lines[index].removesuffix(" / status pending") + " / " + status
+                    lines.extend(["Tool result: " + status, _transcript_excerpt(block.get("content"))])
+        elif doc.get("type") == "result" and isinstance(doc.get("result"), str):
+            lines.extend(["Final report:", doc["result"]])
+    return "\n".join(lines)
+
+
+def _transcript_excerpt(value):
+    text = _transcript_text(value)
+    raw = text.encode("utf-8", "replace")
+    return raw[:8192].decode("utf-8", "ignore") + ("\n[output excerpt truncated]" if len(raw) > 8192 else "")
+
+
+def _redact_transcript(text):
+    scanner = str(Path(__file__).with_name("agent-memory-common.sh"))
+    # Use the outbound scanner's canonical secret patterns; a scanner failure hides the display.
+    result = subprocess.run(["bash", "-c", '\n'.join((
+        '. "$1" || exit 2',
+        'pattern=$(agent_memory_secret_re) || exit 2',
+        'matches=$(LC_ALL=C grep -nEi "$pattern")',
+        'status=$?',
+        '[ "$status" -le 1 ] || exit 2',
+        'printf "%s\\n" "$matches" | cut -d: -f1',
+    )), "panel-transcript", scanner], input=text, text=True, capture_output=True, timeout=5, check=False)
+    if result.returncode:
+        raise OSError("transcript secret scanner failed")
+    masked = {int(line) for line in result.stdout.splitlines() if line.isdigit()}
+    lines, private_block = [], False
+    for index, line in enumerate(text.splitlines(), 1):
+        if index in masked and ("-----" + "BEGIN") in line:
+            private_block = True
+        lines.append("[redacted]" if index in masked or private_block else line)
+        if private_block and ("-----" + "END") in line:
+            private_block = False
+    return lines
+
+
+def transcript_lines(repo, call):
+    """Read only an OMS-retained private capture, never a provider home or a live pointer."""
+    if _summary_path(repo, call) is None:
+        return ["transcript not captured"]
+    try:
+        path = os.path.join(_dispatch_directory(repo), call + ".transcript")
+        info = os.lstat(path)
+        if os.name == "posix" and info.st_mode & 0o077:
+            raise OSError("unsafe transcript permissions")
+        raw = _transcript_tail(path)
+        text = _transcript_documents(raw)
+        safe = "\n".join("".join("?" if char != "\t" and unicodedata.category(char)[0] == "C" else char
+                                for char in line) for line in text.splitlines())
+        try:
+            return _redact_transcript(safe) or ["No transcript events recorded"]
+        except (OSError, subprocess.SubprocessError):
+            return ["transcript unavailable: secret scanner failed"]
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return ["transcript not captured"]
+
+
 def record_summary(repo, call, stream, provider="", access=""):
     """Save a compact summary before provider JSONL is converted in place."""
     path = _summary_path(repo, call)
@@ -638,6 +861,7 @@ def record_summary(repo, call, stream, provider="", access=""):
         return False
     try:
         parsed = _summarize_stream(stream)
+        _retain_transcript(repo, call, stream)
         data = {
             "schema": 1,
             "available": True,

@@ -22,6 +22,7 @@ BOARD = "OMS_PANEL_READER_BOARD"  # set only in a reader's command; its --result
 PANE = re.compile(r"%[0-9]+\Z")
 SHARE, MIN_ROWS, MIN_CHAT = 62, 8, 5
 VIEWS = ("Summary", "Raw", "Events", "Diff", "Run info")
+READER_VIEWS = VIEWS + ("Transcript",)
 PATCH_LIMIT = 65536
 EVENT_TAIL_BYTES = 1024 * 1024
 SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -101,7 +102,7 @@ def event_tail(repo, attempt_id, maximum=EVENT_TAIL_BYTES):
 
 
 def render_view(view, report, call, events=(), patch=None, width=100, timeline_truncated=False,
-                patch_error=False, heading=None, color=None):
+                patch_error=False, heading=None, color=None, transcript=()):
     """Render one bounded, read-only view for a recorded call."""
     from dashboard_projection import display_width
     from panel_view import (call_identity, clipped, light_theme, paint, role_style, status_tag,
@@ -110,12 +111,14 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
     color = sys.stdout.isatty() if color is None else color
     colors = 256 if "256color" in os.environ.get("TERM", "") else 16
     light = light_theme()
-    def ink(value, token, bold=False):
-        return paint(value, token, color=color, colors=colors, light=light, bold=bold)
-    selected = VIEWS.index(view)
-    labels = [("[" + name + "]" if i == selected else name) for i, name in enumerate(VIEWS)]
+    def ink(value, style_name, bold=False):
+        return paint(value, style_name, color=color, colors=colors, light=light, bold=bold)
+    selected = READER_VIEWS.index(view)
+    labels = [("[" + name + "]" if i == selected else name) for i, name in enumerate(READER_VIEWS)]
     tabs = "  ".join(ink(name, "metadata", bold=i == selected)
                       for i, name in enumerate(labels))
+    if display_width("  ".join(labels)) > width:
+        tabs = clipped("Tab: [" + view + "]", width)
     row = next(iter(report.get("rows", [])), {})
     model = row.get("model") or call.get("served_model") or call.get("selected_model") or call.get("requested_model")
     purpose = row.get("purpose") or call.get("purpose")
@@ -131,6 +134,10 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
             "dim")
     chrome = [tabs, title, ink(state, tone)]
     lines = []
+    if view == "Transcript":
+        for line in transcript or ["transcript not captured"]:
+            lines.extend(_result_structured(line, max(8, width)))
+        return "\n".join(chrome + lines)
     if view == "Summary":
         if not row:
             lines.extend(("No result recorded yet", "Run info: no result or attempt row was retained."))
@@ -417,10 +424,10 @@ def page(render, board, on_refresh=None):
     """Scroll `render(width)` until q, Esc or the end of input, or until the board pane is gone (a reader never
     outlives its board); focus then returns to the board."""
     offset, shown, lines, drawn, alive = 0, None, ["[⟳ loading] Reading recorded result…"], None, time.monotonic() + 2
-    view = "Summary"
+    view, previous_view = "Summary", "Summary"
     refresh, read = 0, {}
     title, state, tabs = "Call result", "[⟳ loading]", "  ".join(
-        "[" + name + "]" if name == view else name for name in VIEWS)
+        "[" + name + "]" if name == view else name for name in READER_VIEWS)
     updated, notice, query, matches, full_lines, searching = None, "", None, [], None, False
     artifact, source_time, zoomed, trusted_style = None, None, False, False
 
@@ -470,7 +477,8 @@ def page(render, board, on_refresh=None):
                             points = [i for i in sections() if i <= offset]
                             anchor = plain(lines[points[-1]]).strip() if points else None
                             within = offset - points[-1] if points else 0
-                            if content and plain(content[0]).startswith(("[Summary]  ", "Summary  ")) and (
+                            if content and (plain(content[0]).startswith("Tab: [") or
+                                    plain(content[0]).startswith(("[Summary]  ", "Summary  ")) and
                                     "Events" in plain(content[0]) and "Diff" in plain(content[0])):
                                 tabs = content[0]
                                 title = content[1] if len(content) > 1 else "Call result"
@@ -515,10 +523,10 @@ def page(render, board, on_refresh=None):
                         frame = [title, state, tabs, ""] + body + [footer]
                         # Keep a single bottom region; the key hint is part of it.
                         hint = ("Tab View  r Raw  e Events  d Diff  i " + ("Info" if size[0] < 120 else "Run info") +
-                                "  [ ] Section  o Outline  "
+                                "  x Transcript  [ ] Section  o Outline  "
                                 "/ Search  n/N Match  " + ("z Zoom  " if size[0] < 120 or zoomed else "") + "q/Esc close")
                         if len(hint) > size[0]:
-                            hint = "q/Esc close  Tab View  r Raw  e Events  d Diff  i Info  / Search"
+                            hint = "q/Esc close  Tab View  x Transcript  / Search"
                         frame.append(hint)
                     fit_line = styled_clip if trusted_style else clipped
                     sys.stdout.write("\033[H\033[2J" + "\n".join(fit_line(line, size[0]) for line in frame[:size[1]]))
@@ -539,14 +547,20 @@ def page(render, board, on_refresh=None):
                             notice = "Search: " + query
                         drawn = None
                         continue
+                    if kind == "escape" and view == "Transcript":
+                        view = previous_view
+                        lines, offset, shown, drawn, updated = ["Reading recorded result…"], 0, None, None, None
+                        continue
                     if kind in ("q", "escape", "eof"):
                         return 0
                     if kind == "repaint":
                         shown = drawn = None
-                    if kind in ("tab", "r", "e", "d", "i"):
-                        view = {"r": "Raw", "e": "Events", "d": "Diff", "i": "Run info"}.get(
-                            kind, VIEWS[(VIEWS.index(view) + 1) % len(VIEWS)])
-                        tabs = "  ".join("[" + name + "]" if name == view else name for name in VIEWS)
+                    if kind in ("tab", "r", "e", "d", "i", "x"):
+                        if view != "Transcript":
+                            previous_view = view
+                        view = {"r": "Raw", "e": "Events", "d": "Diff", "i": "Run info", "x": "Transcript"}.get(
+                            kind, READER_VIEWS[(READER_VIEWS.index(view) + 1) % len(READER_VIEWS)])
+                        tabs = "  ".join("[" + name + "]" if name == view else name for name in READER_VIEWS)
                         lines, offset, shown, drawn, updated, notice, full_lines = (
                             ["[⟳ loading] Reading recorded result…"], 0, None, None, None, "", None)
                     if kind in ("[", "]"):

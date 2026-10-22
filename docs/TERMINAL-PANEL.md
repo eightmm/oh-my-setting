@@ -18,6 +18,8 @@ command help. The panel uses existing OMS state, authentication and front doors.
 Without `--repo`, the panel resolves the current Git top-level and refuses a non-repository with exit 2; `--providers`, `--routes` and `--help` remain available anywhere, and explicit `--repo PATH` also accepts a non-repository directory.
 The sidebar reads OMS state; it does not replace the providers' native conversation or authentication.
 
+Finished dispatch calls keep an owner-only OMS transcript beside their activity summary in `.oms/panel-state/dispatch-logs/`. In a call's Detail press `x` for Transcript, or select Transcript (`x` or Tab) in its Results reader; arrows, Page Up/Down and search in the reader navigate the captured assistant messages, commands and tool results, edit content and final report. Esc returns. Secret-shaped lines are masked using the outbound scanner patterns. Each capture keeps at most the last 8 MiB with a truncation marker; captures older than 30 days or beyond the newest 128 are pruned when another capture finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show “transcript not captured”; provider homes are never read.
+
 ## Quick start
 
 1. Run `oms` in a terminal. The control window is the inbox; the panel starts at most one live main, using Claude by default. Pi is the explicit alternative (`OMS_PANEL_MAIN=pi` or the Pi start key).
