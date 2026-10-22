@@ -713,8 +713,13 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         reason = ("verification failed" if verify_failed else
                   "worker guard stopped the call" if guard_stop else
                   "worker exited with status %s" % status)
+        verify_exit = (result_event or {}).get("verify_exit")
+        verify_needs_salvage = (verify_failed and type(verify_exit) is int and verify_exit >= 124)
+        salvage = ((status != 0 and not verify_failed) or verify_needs_salvage or guard_stop) \
+            and (result_event or {}).get("access") == "write"
+        recovery = " Recover its edits: oms panel --salvage %s." % task_id if salvage else ""
         _judgment_mail(repo, room_id, member, caller, task_id,
-                       "Task %s needs judgment: %s (exit %s)." % (task_id, reason, status))
+                       "Task %s needs judgment: %s (exit %s).%s" % (task_id, reason, status, recovery))
     auto_review_done = bool(result_event and policy_available and not (result_event.get("needs_review") and status == 0
                                                   and not guard_stop
                                                   and result_event.get("verify_status") != "failed"

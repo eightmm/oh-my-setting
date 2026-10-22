@@ -434,6 +434,23 @@ with patch.object(panel_result_store, "_records", return_value=([dict(auto_attem
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, read_call, room_owner, auto_task, 0)
     assert len(actual_dispatch_calls) == 1
+read_timeout_call = fixture_call_id("auto-review-read-timeout")
+panel._prepare_dispatch_call(project, shared, read_timeout_call, room_owner)
+room.join(project, shared, read_timeout_call, "codex", "worker", parent=room_owner)
+read_timeout_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-read-timeout",
+    refs=dict(auto_attempt["refs"], panel_room_participant=read_timeout_call, panel_access="read"))
+with patch.object(panel_result_store, "_records", return_value=([read_timeout_attempt],
+        [dict(auto_index, attempt_id=read_timeout_attempt["attempt_id"])])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker timed out."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, read_timeout_call, room_owner, auto_task, 124)
+read_timeout_mail = next(m for m in room.status(project, shared)["messages"]
+                         if m["id"] == "judgment-" + read_timeout_call)
+assert "worker exited with status 124" in read_timeout_mail["text"]
+assert "oms panel --salvage " not in read_timeout_mail["text"]
 verify_call = fixture_call_id("auto-review-verify-failed")
 panel._prepare_dispatch_call(project, shared, verify_call, room_owner)
 verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verify-failed",
@@ -449,6 +466,24 @@ with patch.object(panel_result_store, "_records", return_value=([verify_attempt]
     assert len(actual_dispatch_calls) == 1
     verify_mail = next(m for m in room.status(project, shared)["messages"] if m["id"] == "judgment-" + verify_call)
     assert "verification failed" in verify_mail["text"] and room_owner in verify_mail["targets"]
+assert "oms panel --salvage " not in verify_mail["text"]
+verify_timeout_call = fixture_call_id("auto-review-verifier-timeout")
+panel._prepare_dispatch_call(project, shared, verify_timeout_call, room_owner)
+room.join(project, shared, verify_timeout_call, "codex", "worker", parent=room_owner)
+verify_timeout_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verifier-timeout",
+    refs=dict(auto_attempt["refs"], panel_room_participant=verify_timeout_call, panel_access="write"))
+with patch.object(panel_result_store, "_records", return_value=([verify_timeout_attempt],
+        [dict(auto_index, attempt_id=verify_timeout_attempt["attempt_id"], verify_exit=124)])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Verifier timed out."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, verify_timeout_call, room_owner, auto_task, 1)
+verify_timeout_mail = next(m for m in room.status(project, shared)["messages"]
+                           if m["id"] == "judgment-" + verify_timeout_call)
+assert "verification failed" in verify_timeout_mail["text"]
+assert "Recover its edits: oms panel --salvage %s." % auto_task in verify_timeout_mail["text"]
 no_verify_call = fixture_call_id("auto-review-no-verify")
 panel._prepare_dispatch_call(project, shared, no_verify_call, room_owner)
 no_verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-no-verify",
@@ -501,7 +536,7 @@ for missing_repo_call, execution_repo in (
 timeout_call = fixture_call_id("auto-review-timeout")
 panel._prepare_dispatch_call(project, shared, timeout_call, room_owner)
 timeout_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-timeout",
-    refs=dict(auto_attempt["refs"], panel_room_participant=timeout_call))
+    refs=dict(auto_attempt["refs"], panel_room_participant=timeout_call, panel_access="write"))
 timeout_index = dict(auto_index, attempt_id=timeout_attempt["attempt_id"], verify_exit=None)
 with patch.object(panel_result_store, "_records", return_value=([timeout_attempt], [timeout_index])), \
         patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
@@ -516,6 +551,7 @@ timeout_messages = room.status(project, shared)["messages"]
 timeout_mail = next(m for m in timeout_messages if m["id"] == "judgment-" + timeout_call)
 timeout_handoff = next(m for m in timeout_messages if m["id"] == "result-" + timeout_call)
 assert "worker exited with status 124" in timeout_mail["text"] and room_owner in timeout_mail["targets"]
+assert "Recover its edits: oms panel --salvage %s." % auto_task in timeout_mail["text"]
 assert not timeout_handoff.get("quiet") and timeout_mail["seq"] < timeout_handoff["seq"]
 plan_verify_call = "call-0000000000000004"
 plan_verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-plan-verify",
