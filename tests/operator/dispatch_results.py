@@ -1062,6 +1062,23 @@ assert {(row["attempt"], row["pending_reason"]) for row in report["pending"]} ==
     (new_worker["attempt_id"], "newer_than_decision"),
     (late_review_worker["attempt_id"], "newer_than_decision")}, report
 assert settle_apply.call_count == 1
+# If lifecycle evidence cannot be read, an unknown review-entry time must not
+# fall back to creation time and settle work that may have entered review late.
+import runpy
+run_path = runpy.run_path
+def unreadable_events(path, *args, **kwargs):
+    loaded = run_path(path, *args, **kwargs)
+    if str(path).endswith("scripts/lib/agent-events.py"):
+        def fail_read(_path):
+            raise OSError("fixture lifecycle ledger unavailable")
+        loaded["read_rows"] = fail_read
+    return loaded
+with patch.object(runpy, "run_path", side_effect=unreadable_events), \
+        patch.object(review_settlement, "_stopped", return_value=True):
+    unreadable_lifecycle = review_settlement._settle(project, [late_review_worker], [],
+        {main_attempts["codex"]}, {"elsewhere-task": (decision, result_row)}, apply=False)
+assert unreadable_lifecycle["pending"][0]["attempt"] == late_review_ident, unreadable_lifecycle
+assert unreadable_lifecycle["pending"][0]["pending_reason"] == "lifecycle_unreadable", unreadable_lifecycle
 # Exercise persistence and lifecycle writes: settlement must not mint another
 # result revision or notification when an identical finalize is retried.
 exit_artifact = project / ".oms/artifacts/settlement-exit.md"

@@ -136,12 +136,14 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
                        and not isinstance(read_plan(repo)[0].get("plan_id"), str))
     lifecycle = __import__("runpy").run_path(str(saved.ROOT / "scripts/lib/agent-events.py"))
     state_since = {}
+    lifecycle_unreadable = False
     try:
         for row in lifecycle["read_rows"](lifecycle["event_path"](repo)):
             if row.get("event_type") == "attempt.state_changed":
                 state_since[(row["attempt_id"], row.get("to_state"))] = row["ts"]
     except (OSError, ValueError, KeyError, lifecycle["OpsError"]):
         state_since = {}
+        lifecycle_unreadable = True
     by_id = {a["attempt_id"]: a for a in attempts}
     for ident in explicit:
         row = by_id.get(ident, {})
@@ -219,6 +221,9 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
             # Both ledgers use second-resolution UTC timestamps, so equality
             # remains pending rather than settling ambiguous newer work.
             review_since = state_since.get((ident, "review"))
+            if review_since is None and lifecycle_unreadable:
+                report["pending"].append(dict(item, pending_reason="lifecycle_unreadable"))
+                continue
             work_since = review_since if review_since is not None else attempt.get("created_at", "")
             if work_since >= result_row.get("ts", ""):
                 report["pending"].append(dict(item, pending_reason="newer_than_decision"))
