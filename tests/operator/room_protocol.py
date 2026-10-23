@@ -250,6 +250,10 @@ for owner in panel.PROVIDERS:
         "one at a time when the trigger applies"))
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert all(token in panel.bootstrap(owner, project) for token in (
+        "oms graph project (find, api PATH, blast, affected", "oms_project_graph_* MCP tools where available",
+        "oms graph project api PATH before reading a large file whole", "oms inbox",
+        "oms panel --results", "oms room updates", "oms session-handoff", "oms agent-memory recall"))
+    assert all(token in panel.bootstrap(owner, project) for token in (
         "one notification per call", "a new write dispatch is refused", "same turn", "--continue"))
     assert all(phrase in panel.bootstrap(owner, project) for phrase in (
         "consumers in the worker brief", "drives the public entry point"))
@@ -326,6 +330,7 @@ pi_argv = panel.native_command("pi", project, task=option_text, room_id="pi-room
 assert pi_argv[:4] == ["bash", str(panel.ENTRY), "harness", "pi"], pi_argv
 assert pi_argv[pi_argv.index("--model") + 1] == "gpt-6.1-sol"
 assert "--append-system-prompt" in pi_argv and "--owner codex" in pi_argv[pi_argv.index("--append-system-prompt") + 1]
+assert "oms graph project api PATH before reading a large file whole" in pi_argv[pi_argv.index("--append-system-prompt") + 1]
 assert json.dumps(option_text) in pi_argv[-1] and pi_argv[-2] == "--", pi_argv
 assert "pi-room" in pi_argv[pi_argv.index("--append-system-prompt") + 1]
 try:

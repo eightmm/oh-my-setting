@@ -146,6 +146,7 @@ def bootstrap(provider, repo):
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
         "separable files or steps into as many non-overlapping workers run in parallel as the work allows, and keep scope, briefs, "
         "architecture, integration, review and patch admission in the sole main. "
+        "For lookups, use oms graph project (find, api PATH, blast, affected; or oms_project_graph_* MCP tools where available) for relationships, callers, impact and test coverage, oms graph project api PATH before reading a large file whole, and oms inbox, oms panel --results or oms room updates for current state; when resuming, use oms session-handoff and oms agent-memory recall. "
         "Wait on each dispatched call separately (one notification per call); review, admit or re-dispatch it "
         "as soon as it finishes, never batch-wait for a wave. Start the next "
         "ready plan task or follow-up round in the same turn; a new write dispatch is refused while your results "
