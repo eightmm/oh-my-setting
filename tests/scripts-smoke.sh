@@ -6728,8 +6728,166 @@ test_agent_plan_lock_single_winner() {
   [ "$winners" = 1 ] || fail "exactly one worker should claim P1, got $winners"
 }
 
-# smoke-weight: 300
-test_agent_plan_lifecycle() {
+agent_plan_lifecycle_completion_prelude() {
+  cat <<'PY'
+import copy
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import stat
+import subprocess
+import sys
+import time
+import shutil
+root, repo = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'scripts/lib'))
+engine = runpy.run_path(str(root / 'scripts/lib/plan-receipt.py'))
+plan_path = repo / '.oms/plan/tasks.json'
+env = dict(os.environ)
+for name in list(env):
+    if name.startswith('OMS_'):
+        env.pop(name)
+env['OMS_LOCK_DIR'] = str(repo / '.oms/private-fixture-locks')
+
+def call(script, *args, extra=None, ok=True):
+    result = subprocess.run(['bash', str(root / 'scripts' / script), '--repo', str(repo), *args],
+                            env=dict(env, **(extra or {})), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=40)
+    if ok and result.returncode:
+        raise AssertionError((args, result.returncode, result.stderr.decode()))
+    if not ok and not result.returncode:
+        raise AssertionError(('accepted invalid completion', args))
+    return (result.stdout + (result.stderr if not ok else b'')).decode().strip()
+
+def ap(*args, **kwargs):
+    return call('agent-plan.sh', *args, **kwargs)
+
+def h(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def ref(path):
+    return {'path': path, 'sha256': h((repo / path).read_bytes())}
+
+def entry(path):
+    target = repo / path
+    if not target.exists():
+        return {'path': path, 'state': 'absent', 'mode': None, 'sha256': None}
+    return dict(ref(path), state='file', mode='100755' if target.stat().st_mode & stat.S_IXUSR else '100644')
+
+def plan():
+    return json.loads(plan_path.read_bytes())
+
+def index():
+    return [json.loads(line) for line in (repo / '.oms/artifacts/index.jsonl').read_bytes().splitlines()]
+
+def register(kind, task, artifact, attempt='', patch='', base='', exitcode=0):
+    extra = dict(env, OMS_TASK_ID=task, OMS_INDEX_PLAN_ID=plan()['plan_id'],
+                 OMS_ATTEMPT_ID=attempt, OMS_INDEX_BASE_SHA=base, OMS_FIXTURE_INDEX_EXIT=str(exitcode))
+    result = subprocess.run(['bash', '-c', '. "$1"; ma_append_artifact_index "$2" "$3" codex "$OMS_FIXTURE_INDEX_EXIT" "$4" "$5"',
+                             'fixture', str(root / 'scripts/lib/peer-common.sh'), str(repo), kind,
+                             str(repo / artifact), str(repo / patch) if patch else ''],
+                            env=extra, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return index()[-1]
+
+ap('init', '--goal', 'typed local completions', '--accept', 'printf accepted > .oms/acceptance-ran')
+(repo / 'verify.sh').write_text("test -s file.txt\nprintf '%s\\n' 'bounded verifier output'\n")
+(repo / 'obsolete.txt').write_text('Old product to delete\n')
+subprocess.run(['git', '-C', str(repo), 'add', 'verify.sh', 'obsolete.txt'], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture verifier'], env=env, check=True)
+base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+room = json.loads(call('room.sh', 'new', '--topic', 'Private completion fixture', '--json'))['id']
+# Native initial enrollment uses the new attempt ID and omits the ref.
+main = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+            '--ref', 'panel_room_id=' + room, '--ref', 'panel_role=main',
+            '--then', 'starting', '--then', 'working')
+participant = main
+call('room.sh', 'join', '--id', room, '--participant', participant, '--provider', 'codex', '--role', 'main')
+
+env.update(OMS_ROOM_ID=room, OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
+counter = 0
+def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex', main_report=False, producer_exit=0):
+    global counter
+    read_base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+    counter += 1
+    tid = 'research%d' % counter
+    ap('add', '--id', tid, '--title', 'Inspect all original obligations', '--allowed', 'file.txt,verify.sh',
+       '--verify', '' if empty_verify else command,
+       '--role', 'analysis-worker' if main_report else '',
+       '--assignment', json.dumps({'provider': claim_provider, 'workload': 'routine'}))
+    ap('claim', '--id', tid, '--provider', 'codex',
+       extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
+    artifact = '.oms/artifacts/research/%s.md' % tid
+    (repo / artifact).parent.mkdir(parents=True, exist_ok=True)
+    read_result = subprocess.run(['bash', '-c', 'cat file.txt verify.sh; exit %d' % producer_exit], cwd=str(repo),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    assert read_result.returncode == producer_exit, read_result.stderr
+    (repo / artifact).write_bytes(read_result.stdout)
+    attempt, ancillary = '', ''
+    if not main_report:
+        attempt = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'peer-ask',
+                   '--task-id', tid, '--parent-attempt-id', main, '--ref', 'panel_access=read',
+                   '--then', 'starting', '--then', 'working')
+        call('agent-events.sh', 'transition', '--attempt', attempt, '--state', 'verifying',
+         '--then', 'review', '--then', 'done')
+        ancillary = '.oms/artifacts/research/%s.patch' % tid
+        (repo / ancillary).write_bytes(b'')
+    row = register('call-import' if main_report else 'ask', tid, artifact, attempt,
+                   patch=ancillary, base=read_base[:7], exitcode=producer_exit)
+    ap('review', '--id', tid, '--artifact', artifact)
+    current = plan()
+    task = current['tasks'][tid]
+    bundle = {'schema': 1, 'kind': 'research-accepted', 'plan_id': current['plan_id'], 'task_id': tid,
+              'task_sha256': engine['digest'](task), 'plan_sha256': h(plan_path.read_bytes()),
+              'state': task['state'], 'lease_id': task['lease_id'],
+              'owner': {'provider': task['provider'], 'participant': participant, 'parent_provider': 'codex'},
+              'original_contract': engine['projection'](task), 'review_summary': 'Reviewed full original task contract',
+              'reviewed_obligations': ['inspect'], 'requirements': [
+                  {'id': 'inspect', 'obligation': task['title'], 'deliverable': 'Complete source findings',
+                   'source_paths': ['file.txt', 'verify.sh'], 'evidence': [ref(artifact)]}],
+              'base_commit': read_base, 'source_envelope': ['file.txt', 'verify.sh'],
+              'source_manifest': [entry('file.txt'), entry('verify.sh')],
+              'verifier': {'command': command, 'files': [entry('verify.sh')],
+                           'adopted': empty_verify, 'review_summary': 'Reviewed verifier and actual frozen inputs'},
+              'research': {'classification': 'research-only', 'artifact': ref(artifact),
+                           'index_event_id': row['event_id'], 'attempt_id': attempt, 'parent_attempt_id': main}}
+    for script in ('drift.py', 'source-drift.sh', 'append-proof.py'):
+        if script in command:
+            bundle['source_envelope'].append(script)
+            bundle['source_manifest'].append(entry(script))
+            bundle['verifier']['files'].append(entry(script))
+    if main_report:
+        bundle.pop('research')
+        bundle['kind'] = 'main-research-accepted'
+        bundle['reviewer'] = {'kind': 'native-panel-main'}
+        bundle['main_research'] = {'classification': 'research-only', 'provenance': 'main-reviewed-external',
+            'artifact': ref(artifact), 'index_event_id': row['event_id'], 'original_deliverable': task['title'],
+            'read_only_contract': 'original-report-only', 'original_producer_status':
+                {key: row.get(key) for key in ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}}
+        if producer_exit:
+            bundle['main_research'].update(provenance='main-reviewed-external',
+                failed_producer_review='The external command failed; current main independently reviewed its report and source')
+        return bundle
+    bundle['legacy_adoption'] = {'artifact': ref(artifact), 'original_contract': bundle['original_contract'],
+                                 'review_summary': 'Current explicit adoption of missing legacy producer binding'}
+    return bundle
+
+def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payload=None):
+    path = '.oms/artifacts/completion-bundle.json'
+    raw = json.dumps(bundle).encode() if payload is None else payload
+    (repo / path).write_bytes(raw)
+    return ap(action, '--id', bundle['task_id'], '--lease-id', bundle['lease_id'],
+              '--expected-state', bundle['state'], '--expected-plan-sha256', bundle['plan_sha256'],
+              '--expected-task-sha256', bundle['task_sha256'], '--completion-bundle', path,
+              '--expected-completion-bundle-sha256', h(raw), *flags, extra=extra, ok=ok)
+PY
+}
+
+# smoke-weight: 47
+test_agent_plan_lifecycle_landing_and_main_research() {
   local d="$TMP/agent-plan-life"
   local child_repo="$TMP/agent-plan-child-completion"
   local SH="$ROOT/scripts/agent-plan.sh"
@@ -6994,161 +7152,7 @@ assert row["state"] == "done" and row["landing"]["kind"] == "commit", row
   # admitted landing. Self-reported exit/landing labels are not fixtures.
   local completion_repo="$TMP/completion-contract"
   make_committed_repo "$completion_repo"
-  python3 - "$ROOT" "$completion_repo" <<'PY' || fail "typed local completion contract failed"
-import copy
-import datetime
-import hashlib
-import json
-import os
-from pathlib import Path
-import runpy
-import stat
-import subprocess
-import sys
-import time
-import shutil
-root, repo = map(Path, sys.argv[1:])
-sys.path.insert(0, str(root / 'scripts/lib'))
-engine = runpy.run_path(str(root / 'scripts/lib/plan-receipt.py'))
-plan_path = repo / '.oms/plan/tasks.json'
-env = dict(os.environ)
-for name in list(env):
-    if name.startswith('OMS_'):
-        env.pop(name)
-env['OMS_LOCK_DIR'] = str(repo / '.oms/private-fixture-locks')
-
-def call(script, *args, extra=None, ok=True):
-    result = subprocess.run(['bash', str(root / 'scripts' / script), '--repo', str(repo), *args],
-                            env=dict(env, **(extra or {})), stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, timeout=40)
-    if ok and result.returncode:
-        raise AssertionError((args, result.returncode, result.stderr.decode()))
-    if not ok and not result.returncode:
-        raise AssertionError(('accepted invalid completion', args))
-    return (result.stdout + (result.stderr if not ok else b'')).decode().strip()
-
-def ap(*args, **kwargs):
-    return call('agent-plan.sh', *args, **kwargs)
-
-def h(raw):
-    return hashlib.sha256(raw).hexdigest()
-
-def ref(path):
-    return {'path': path, 'sha256': h((repo / path).read_bytes())}
-
-def entry(path):
-    target = repo / path
-    if not target.exists():
-        return {'path': path, 'state': 'absent', 'mode': None, 'sha256': None}
-    return dict(ref(path), state='file', mode='100755' if target.stat().st_mode & stat.S_IXUSR else '100644')
-
-def plan():
-    return json.loads(plan_path.read_bytes())
-
-def index():
-    return [json.loads(line) for line in (repo / '.oms/artifacts/index.jsonl').read_bytes().splitlines()]
-
-def register(kind, task, artifact, attempt='', patch='', base='', exitcode=0):
-    extra = dict(env, OMS_TASK_ID=task, OMS_INDEX_PLAN_ID=plan()['plan_id'],
-                 OMS_ATTEMPT_ID=attempt, OMS_INDEX_BASE_SHA=base, OMS_FIXTURE_INDEX_EXIT=str(exitcode))
-    result = subprocess.run(['bash', '-c', '. "$1"; ma_append_artifact_index "$2" "$3" codex "$OMS_FIXTURE_INDEX_EXIT" "$4" "$5"',
-                             'fixture', str(root / 'scripts/lib/peer-common.sh'), str(repo), kind,
-                             str(repo / artifact), str(repo / patch) if patch else ''],
-                            env=extra, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
-    assert result.returncode == 0, result.stderr
-    return index()[-1]
-
-ap('init', '--goal', 'typed local completions', '--accept', 'printf accepted > .oms/acceptance-ran')
-(repo / 'verify.sh').write_text("test -s file.txt\nprintf '%s\\n' 'bounded verifier output'\n")
-(repo / 'obsolete.txt').write_text('Old product to delete\n')
-subprocess.run(['git', '-C', str(repo), 'add', 'verify.sh', 'obsolete.txt'], check=True)
-subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture verifier'], env=env, check=True)
-base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
-room = json.loads(call('room.sh', 'new', '--topic', 'Private completion fixture', '--json'))['id']
-# Native initial enrollment uses the new attempt ID and omits the ref.
-main = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
-            '--ref', 'panel_room_id=' + room, '--ref', 'panel_role=main',
-            '--then', 'starting', '--then', 'working')
-participant = main
-call('room.sh', 'join', '--id', room, '--participant', participant, '--provider', 'codex', '--role', 'main')
-
-env.update(OMS_ROOM_ID=room, OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
-counter = 0
-def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex', main_report=False, producer_exit=0):
-    global counter
-    read_base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
-    counter += 1
-    tid = 'research%d' % counter
-    ap('add', '--id', tid, '--title', 'Inspect all original obligations', '--allowed', 'file.txt,verify.sh',
-       '--verify', '' if empty_verify else command,
-       '--role', 'analysis-worker' if main_report else '',
-       '--assignment', json.dumps({'provider': claim_provider, 'workload': 'routine'}))
-    ap('claim', '--id', tid, '--provider', 'codex',
-       extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
-    artifact = '.oms/artifacts/research/%s.md' % tid
-    (repo / artifact).parent.mkdir(parents=True, exist_ok=True)
-    read_result = subprocess.run(['bash', '-c', 'cat file.txt verify.sh; exit %d' % producer_exit], cwd=str(repo),
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    assert read_result.returncode == producer_exit, read_result.stderr
-    (repo / artifact).write_bytes(read_result.stdout)
-    attempt, ancillary = '', ''
-    if not main_report:
-        attempt = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'peer-ask',
-                   '--task-id', tid, '--parent-attempt-id', main, '--ref', 'panel_access=read',
-                   '--then', 'starting', '--then', 'working')
-        call('agent-events.sh', 'transition', '--attempt', attempt, '--state', 'verifying',
-         '--then', 'review', '--then', 'done')
-        ancillary = '.oms/artifacts/research/%s.patch' % tid
-        (repo / ancillary).write_bytes(b'')
-    row = register('call-import' if main_report else 'ask', tid, artifact, attempt,
-                   patch=ancillary, base=read_base[:7], exitcode=producer_exit)
-    ap('review', '--id', tid, '--artifact', artifact)
-    current = plan()
-    task = current['tasks'][tid]
-    bundle = {'schema': 1, 'kind': 'research-accepted', 'plan_id': current['plan_id'], 'task_id': tid,
-              'task_sha256': engine['digest'](task), 'plan_sha256': h(plan_path.read_bytes()),
-              'state': task['state'], 'lease_id': task['lease_id'],
-              'owner': {'provider': task['provider'], 'participant': participant, 'parent_provider': 'codex'},
-              'original_contract': engine['projection'](task), 'review_summary': 'Reviewed full original task contract',
-              'reviewed_obligations': ['inspect'], 'requirements': [
-                  {'id': 'inspect', 'obligation': task['title'], 'deliverable': 'Complete source findings',
-                   'source_paths': ['file.txt', 'verify.sh'], 'evidence': [ref(artifact)]}],
-              'base_commit': read_base, 'source_envelope': ['file.txt', 'verify.sh'],
-              'source_manifest': [entry('file.txt'), entry('verify.sh')],
-              'verifier': {'command': command, 'files': [entry('verify.sh')],
-                           'adopted': empty_verify, 'review_summary': 'Reviewed verifier and actual frozen inputs'},
-              'research': {'classification': 'research-only', 'artifact': ref(artifact),
-                           'index_event_id': row['event_id'], 'attempt_id': attempt, 'parent_attempt_id': main}}
-    for script in ('drift.py', 'source-drift.sh', 'append-proof.py'):
-        if script in command:
-            bundle['source_envelope'].append(script)
-            bundle['source_manifest'].append(entry(script))
-            bundle['verifier']['files'].append(entry(script))
-    if main_report:
-        bundle.pop('research')
-        bundle['kind'] = 'main-research-accepted'
-        bundle['reviewer'] = {'kind': 'native-panel-main'}
-        bundle['main_research'] = {'classification': 'research-only', 'provenance': 'main-reviewed-external',
-            'artifact': ref(artifact), 'index_event_id': row['event_id'], 'original_deliverable': task['title'],
-            'read_only_contract': 'original-report-only', 'original_producer_status':
-                {key: row.get(key) for key in ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}}
-        if producer_exit:
-            bundle['main_research'].update(provenance='main-reviewed-external',
-                failed_producer_review='The external command failed; current main independently reviewed its report and source')
-        return bundle
-    bundle['legacy_adoption'] = {'artifact': ref(artifact), 'original_contract': bundle['original_contract'],
-                                 'review_summary': 'Current explicit adoption of missing legacy producer binding'}
-    return bundle
-
-def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payload=None):
-    path = '.oms/artifacts/completion-bundle.json'
-    raw = json.dumps(bundle).encode() if payload is None else payload
-    (repo / path).write_bytes(raw)
-    return ap(action, '--id', bundle['task_id'], '--lease-id', bundle['lease_id'],
-              '--expected-state', bundle['state'], '--expected-plan-sha256', bundle['plan_sha256'],
-              '--expected-task-sha256', bundle['task_sha256'], '--completion-bundle', path,
-              '--expected-completion-bundle-sha256', h(raw), *flags, extra=extra, ok=ok)
-
+  { agent_plan_lifecycle_completion_prelude; cat <<'PY'
 # Actual main review is a separate provenance kind and needs no child attempt.
 main_report = setup(main_report=True)
 assert not main_report['main_research']['original_producer_status']['attempt_id']
@@ -7463,6 +7467,18 @@ if os.name == 'posix' and Path('/proc/self').is_dir():
         shutil.rmtree(directory)
     print('Desktop main READ: real controller plus synthetic native approval lifecycle passed')
 
+PY
+  } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
+}
+
+# smoke-weight: 50
+test_agent_plan_lifecycle_read_validation() {
+  local XDG_STATE_HOME="$TMP/agent-plan-life-read-state"
+  export XDG_STATE_HOME
+  # A fresh plan and native owner keep this test independent across shards.
+  local completion_repo="$TMP/completion-read-validation"
+  make_committed_repo "$completion_repo"
+  { agent_plan_lifecycle_completion_prelude; cat <<'PY'
 # Existing native and literal conditional contracts remain usable without a rewrite.
 for command in ('git diff --check', 'if test -f verify.sh; then bash verify.sh; fi',
                 'bash verify.sh && for oms_terminal_suite in verify.sh; do if test -f "$oms_terminal_suite"; then bash "$oms_terminal_suite" || exit; fi; done'):
@@ -7714,6 +7730,29 @@ assert 'bounded verifier output' not in json.dumps(receipt)
 
 assert 'landing' not in done and 'landed_commit' not in done
 stable = plan_path.read_bytes(); invoke(bundle); assert plan_path.read_bytes() == stable
+PY
+  } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
+}
+
+# smoke-weight: 62
+test_agent_plan_lifecycle_receipt_history() {
+  local XDG_STATE_HOME="$TMP/agent-plan-life-history-state"
+  export XDG_STATE_HOME
+  local completion_repo="$TMP/completion-receipt-history"
+  make_committed_repo "$completion_repo"
+  { agent_plan_lifecycle_completion_prelude; cat <<'PY'
+# Historical reader probes start from independently accepted reports.
+main_report = setup(main_report=True)
+invoke(main_report, action='accept-main-research')
+bundle = setup(claim_provider='claude')
+invoke(bundle)
+done = plan()['tasks'][bundle['task_id']]
+receipt = json.loads((repo / done['completion_receipt']['path']).read_bytes())
+stable = plan_path.read_bytes()
+events = repo / '.oms/lifecycle/events.jsonl'
+room_events = repo / '.oms/threads' / (room + '.jsonl')
+injection = repo / '.oms/test-injection'; injection.mkdir()
+
 # Evicted index rows are recoverable only from an existing immutable receipt.
 index_file = repo / '.oms/artifacts/index.jsonl'
 before_eviction = index_file.read_bytes()
@@ -8225,6 +8264,38 @@ for path in (".oms/artifacts/index.jsonl", ".oms/lifecycle/events.jsonl"):
 appended = setup('bash verify.sh; python3 append-proof.py')
 invoke(appended)
 (repo / 'append-proof.py').unlink()
+PY
+  } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
+}
+
+# smoke-weight: 50
+test_agent_plan_lifecycle_satisfaction() {
+  local XDG_STATE_HOME="$TMP/agent-plan-life-satisfaction-state"
+  export XDG_STATE_HOME
+  local completion_repo="$TMP/completion-satisfaction"
+  make_committed_repo "$completion_repo"
+  { agent_plan_lifecycle_completion_prelude; cat <<'PY'
+# Preserve an accepted READ across product replacement and owner departure.
+initial = setup(claim_provider='claude')
+invoke(initial)
+events = repo / '.oms/lifecycle/events.jsonl'
+room_events = repo / '.oms/threads' / (room + '.jsonl')
+injection = repo / '.oms/test-injection'; injection.mkdir()
+(injection / 'sitecustomize.py').write_text('''import datetime, os, time
+if os.environ.get("OMS_FIXTURE_TIMESTAMP"):
+    stamp = os.environ["OMS_FIXTURE_TIMESTAMP"]
+    original = time.strftime
+    time.strftime = lambda fmt, *args: stamp if fmt == "%Y-%m-%dT%H:%M:%SZ" else original(fmt, *args)
+    previous = datetime.datetime
+    class Fixed(previous):
+        @classmethod
+        def now(cls, tz=None):
+            value = previous.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+    datetime.datetime = Fixed
+''')
+clock_source = (injection / 'sitecustomize.py').read_text()
+
 # A satisfied original retains failed/rejected evidence and reason history;
 # successor provenance comes from the real patch-land command, never labels.
 ap('add', '--id', 'original', '--title', 'Deliver complete source product', '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
@@ -8485,7 +8556,7 @@ call('thread.sh', 'close', '--id', room, '--summary', 'Private owner epoch close
 ap('show', '--id', initial['task_id']); ap('status', '--json')
 invoke(recycled, ok=False)
 PY
-
+  } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
 }
 
 test_agent_plan_cancellation_is_closed_not_verified_and_cas_fenced() {
