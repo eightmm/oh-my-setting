@@ -348,7 +348,7 @@ assert fresh_state["agent_operations"]["executing"] == 1, fresh_state
 assert "agent-review-fresh" in {item["code"] for item in fresh_inbox["items"]}, fresh_inbox
 assert aged_state["agent_operations"]["review_aged"] == 1, aged_state
 aged = next(item for item in aged_inbox["items"] if item["code"] == "agent-review-aged")
-assert aged["count"] == 1 and aged["command"] == "oms panel --settle-review", aged
+assert aged["count"] == 1 and aged["command"].startswith("oms panel --repo ") and aged["command"].endswith(" --settle-review"), aged
 assert "3d" in invalid_text, invalid_text
 assert corrupt_state["agent_operations"]["healthy"] is False, corrupt_state
 assert corrupt_state["agent_operations"]["review_aged"] == 0, corrupt_state

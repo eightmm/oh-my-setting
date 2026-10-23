@@ -297,7 +297,7 @@ import json, os
 items = {i["code"]: i for i in json.loads(os.environ["OMS_T_INBOX"])["items"]}
 item = items["unpushed-head"]
 assert item["priority"] == "P2", item
-assert item["command"] == "git push", item
+assert item["command"].startswith("git -C ") and item["command"].endswith(" push"), item
 PY
 }
 

@@ -26734,12 +26734,12 @@ t = json.load(sys.stdin)["threads"]
 assert t["open"] == 3 and t["stale_open"] == 1, t
 ' || fail "repo-state should separate stale open threads from the total"
   out="$("$ROOT/scripts/inbox.sh" --repo "$project")"
-  contains "$out" 'oms thread list --stale' ||
+  contains "$out" "oms thread --repo $project list --stale" ||
     fail "inbox should point at the stale triage: $out"
   printf '%s' "$out" | grep >/dev/null -E '1 open cross-agent thread' ||
     fail "inbox should count only stale threads: $out"
   out="$(OMS_THREAD_ATTENTION=0 "$ROOT/scripts/inbox.sh" --repo "$project")"
-  if contains "$out" 'thread'; then
+  if contains "$out" 'cross-agent thread'; then
     fail "OMS_THREAD_ATTENTION=0 should drop the thread advisory: $out"
   fi
 
