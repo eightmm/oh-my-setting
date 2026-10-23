@@ -206,7 +206,6 @@ def send(repo: Path, text: str) -> int:
 
 
 def _safe_message(text: str, repo: Path, maximum: int = 2399) -> str:
-    text = text[:max(8192, maximum)]
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     text = "".join(c if c == "\n" or not unicodedata.category(c).startswith("C") else " " for c in text)
     text = re.sub(r"(?i)\b(password|token|api[_-]?key|secret)\s*[:=]\s*\S+", "[redacted]", text)
@@ -216,8 +215,28 @@ def _safe_message(text: str, repo: Path, maximum: int = 2399) -> str:
     for path in (str(Path.home()), str(repo.resolve())):
         if path and path != "/":
             text = text.replace(path, "[path]")
-    return sanitize_multiline(text, maximum,
-                              maximum if maximum > 2399 else MAX_TEXT_BYTES).rstrip("\n") + "\n"
+    # Sanitize every complete line before limiting the overall notification.
+    line_maximum = maximum if maximum > 2399 else MAX_TEXT_BYTES
+    sanitized = sanitize_multiline(text, sys.maxsize, line_maximum)
+    message = sanitized.rstrip("\n") + "\n"
+    if len(message.encode("utf-8")) <= maximum:
+        return message
+
+    lines = sanitized.splitlines()
+    last_index = next((index for index in range(len(lines) - 1, -1, -1)
+                       if lines[index].strip()), None)
+    if last_index is None:
+        return message
+    last_line = lines[last_index]
+    ending = ("…\n" + last_line + "\n").encode("utf-8")
+    body = "\n".join(lines[:last_index])
+    if len(ending) + (1 if body else 0) > maximum:
+        return sanitize_multiline(text, maximum, line_maximum).rstrip("\n") + "\n"
+
+    body_bytes = body.encode("utf-8")
+    prefix_budget = maximum - len(ending) - (1 if body else 0)
+    prefix = body_bytes[:prefix_budget].decode("utf-8", errors="ignore").rstrip("\n")
+    return prefix + ("\n" if prefix else "") + "…\n" + last_line + "\n"
 
 
 @contextlib.contextmanager

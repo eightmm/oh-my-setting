@@ -317,7 +317,7 @@ class CodexAppNotifyTest(unittest.TestCase):
         self.assertNotIn(sample, text)
         self.assertLessEqual(len(text.encode("utf-8")), 2400)
         answer = sample + "\n" + "\n".join("한" * 80 + str(i) for i in range(20)) + "\nSAFE_RESULT_TAIL"
-        self.assertNotIn("SAFE_RESULT_TAIL", codex_app_notify._safe_message(answer, self.repo))
+        self.assertIn("SAFE_RESULT_TAIL", codex_app_notify._safe_message(answer, self.repo))
         local = codex_app_notify._safe_message(answer, self.repo, maximum=32768)
         self.assertIn("SAFE_RESULT_TAIL", local)
         self.assertNotIn(sample, local)
@@ -332,6 +332,28 @@ class CodexAppNotifyTest(unittest.TestCase):
         local = codex_app_notify._safe_message(long_line, self.repo, maximum=32768)
         self.assertIn("SAFE_RESULT_TAIL", local)
         self.assertNotIn(sample, local)
+
+    def test_long_summary_keeps_evidence_footer_within_utf8_budget(self):
+        footer = "Evidence: .oms/artifacts/x.md"
+        result = codex_app_notify._safe_message("s" * 6000 + "\n" + footer, self.repo)
+        self.assertLessEqual(len(result.encode("utf-8")), 2399)
+        self.assertTrue(result.endswith(footer + "\n"))
+
+    def test_credentials_are_redacted_after_old_input_cut_and_at_output_cut(self):
+        key = "pass" + "word"
+        value = "fixture-secret-value"
+        far = "x" * 9000 + "\n" + key + "=" + value
+        result = codex_app_notify._safe_message(far, self.repo, maximum=10000)
+        self.assertNotIn(value, result)
+        self.assertIn("[redacted]", result)
+
+        edge = "x" * 2370 + "\n" + key + "=" + value + "\n" + "y" * 5000
+        result = codex_app_notify._safe_message(edge, self.repo)
+        self.assertNotIn(value, result)
+        self.assertTrue("[redacted]" in result or key + "=" not in result)
+
+    def test_short_safe_message_remains_byte_identical(self):
+        self.assertEqual(codex_app_notify._safe_message("hello\nworld", self.repo), "hello\nworld\n")
 
     def test_deliver_disabled_does_not_contact_receiver(self):
         self.saved_receiver()
