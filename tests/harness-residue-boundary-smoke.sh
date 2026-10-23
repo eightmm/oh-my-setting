@@ -24,6 +24,29 @@ mkdir -p "$HOME" "$TMPDIR" "$OMS_LOCK_DIR"
 repo="$TMP/repo"
 victim="$TMP/unrelated-linked-worktree"
 mkdir -p "$repo"
+real_git() { command git "$@"; }
+fail_worktree_remove_path=""
+replace_parent_after_remove=""
+replace_parent_decoy=""
+git() {
+  if [ -n "$fail_worktree_remove_path" ]; then
+    case "$*" in
+      *"worktree remove"*"$fail_worktree_remove_path"*) return 1 ;;
+    esac
+  fi
+  if [ -n "$replace_parent_after_remove" ]; then
+    case "$*" in
+      *"worktree remove"*"$replace_parent_after_remove/wt"*)
+        real_git "$@" || return $?
+        mv "$replace_parent_after_remove" "$replace_parent_after_remove.original" || return $?
+        ln -s "$replace_parent_decoy" "$replace_parent_after_remove" || return $?
+        replace_parent_after_remove=""
+        return 0
+        ;;
+    esac
+  fi
+  real_git "$@"
+}
 git -C "$repo" init -q
 git -C "$repo" config user.name test
 git -C "$repo" config user.email test@example.com
@@ -234,6 +257,14 @@ delegate_run() {  # NAME TASK STATE [OUTCOME]: dirty delegate worktree, its run 
   run_pid=$((run_pid + 1))
   dead_residue "$dir"
   sed "s/^pid=.*/pid=$run_pid/" "$dir/.oh-my-setting-tmp" > "$TMP/marker" && mv "$TMP/marker" "$dir/.oh-my-setting-tmp"
+  mkdir -p "$dir/worker-guard" "$dir/.oms-panel-fixtures.fixture/tmux"
+  printf 'guard snapshot\n' > "$dir/worker-guard/files"
+  printf 'fixture state\n' > "$dir/.oms-panel-fixtures.fixture/tmux/state"
+  # Other fixed parent files emitted by peer-delegate.sh when those paths run.
+  for parent_file in continuation.patch continuation-base graph-context.json \
+      graph-context.log worker-guard-snapshot.error; do
+    : > "$dir/$parent_file"
+  done
   printf 'work %s\n' "$1" > "$dir/wt-${dir##*.}/new-$1.txt"
   printf 'edit %s\n' "$1" >> "$dir/wt-${dir##*.}/file.txt"
   mkdir -p "$art" "$repo/.oms/artifacts/panel-results"
@@ -418,6 +449,8 @@ git -C "$repo" config --unset filter.sentinel.smudge
 eval "real_$(declare -f oms_harness_classify_dead_residue)"
 mutate_after=""
 relist_after=""
+add_sibling_after=""
+target_classification_calls=0
 # shellcheck disable=SC2317
 oms_harness_classify_dead_residue() {
   real_oms_harness_classify_dead_residue "$@" || return 1
@@ -430,6 +463,15 @@ oms_harness_classify_dead_residue() {
       --ref "panel_location=worktree:oh-my-setting-delegate.$relist_after/wt-$relist_after" --then starting >/dev/null
     relist_after=""
   fi
+  if [ -n "$add_sibling_after" ] && [ "$2" = "$add_sibling_after" ]; then
+    target_classification_calls=$((target_classification_calls + 1))
+  fi
+  if [ -n "$add_sibling_after" ] && [ "$2" = "$add_sibling_after" ] &&
+      [ "$target_classification_calls" = 2 ] &&
+      [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+    : > "$add_sibling_after/sibling"
+    add_sibling_after=""
+  fi
 }
 delegate_run raced task-raced "done"
 mutate_after="$TMPDIR/oh-my-setting-delegate.raced/wt-raced/new-raced.txt"
@@ -438,6 +480,65 @@ mutate_after=""  # kept_with consumed it in a pipeline subshell
 delegate_run relisted task-relisted "done"
 relist_after=relisted
 kept_with relisted "worktree changed during cleanup" "a run recorded between classification and removal must keep the worktree"
+delegate_run sibling-race task-sibling-race "done"
+add_sibling_after="$TMPDIR/oh-my-setting-delegate.sibling-race"
+target_classification_calls=0
+sibling_marker="$TMPDIR/oh-my-setting-delegate.sibling-race/.oh-my-setting-tmp"
+sibling_marker_text="$(cat "$sibling_marker")"
+out="$(cleanup_out 0; printf 'counts: kept=%s removed=%s\n' \
+  "$OMS_HARNESS_RESIDUE_KEPT" "$OMS_HARNESS_RESIDUE_REMOVED")"
+printf '%s\n' "$out" | grep >/dev/null -Ex \
+  "kept: $TMPDIR/oh-my-setting-delegate\.sibling-race \((new entries appeared|dead harness temp dir; worktree changed) during cleanup\)" ||
+  fail "a sibling created after validation must keep the residue directory: $out"
+printf '%s\n' "$out" | grep >/dev/null -Fx 'counts: kept=1 removed=0' ||
+  fail "a sibling racing cleanup must increment the kept counter: $out"
+[ -f "$TMPDIR/oh-my-setting-delegate.sibling-race/sibling" ] ||
+  fail "cleanup removed a sibling created after validation"
+[ -f "$sibling_marker" ] && [ "$(cat "$sibling_marker")" = "$sibling_marker_text" ] ||
+  fail "cleanup did not restore the original marker after rmdir failed"
+[ ! -e "$TMPDIR/oh-my-setting-delegate.sibling-race/wt" ] ||
+  fail "git did not remove the validated checkout before rmdir"
+drop delegate.sibling-race
+
+delegate_run remove-fails task-remove-fails "done"
+fail_worktree_remove_path="$TMPDIR/oh-my-setting-delegate.remove-fails/wt-remove-fails"
+out="$(cleanup_out 0; printf 'counts: kept=%s removed=%s\n' \
+  "$OMS_HARNESS_RESIDUE_KEPT" "$OMS_HARNESS_RESIDUE_REMOVED")"
+fail_worktree_remove_path=""
+printf '%s\n' "$out" | grep >/dev/null -Fx \
+  "kept: $TMPDIR/oh-my-setting-delegate.remove-fails (worktree removal failed)" ||
+  fail "a failed git worktree removal must keep the residue directory: $out"
+printf '%s\n' "$out" | grep >/dev/null -Fx 'counts: kept=1 removed=0' ||
+  fail "a failed worktree removal must increment the kept counter: $out"
+[ -d "$TMPDIR/oh-my-setting-delegate.remove-fails/wt-remove-fails" ] ||
+  fail "cleanup removed a checkout git refused to remove"
+[ -f "$TMPDIR/oh-my-setting-delegate.remove-fails/.oh-my-setting-tmp" ] ||
+  fail "cleanup removed the marker after git refused to remove the checkout"
+drop delegate.remove-fails
+
+delegate_run symlink-race task-symlink-race "done"
+replace_parent_decoy="$TMP/decoy-parent"
+mkdir -p "$replace_parent_decoy/worker-guard" \
+  "$replace_parent_decoy/.oms-panel-fixtures.x"
+printf 'keep guard\n' > "$replace_parent_decoy/worker-guard/keep"
+printf 'keep fixture\n' > "$replace_parent_decoy/.oms-panel-fixtures.x/keep"
+printf 'keep marker\n' > "$replace_parent_decoy/.oh-my-setting-tmp"
+replace_parent_after_remove="$TMPDIR/oh-my-setting-delegate.symlink-race"
+out="$(cleanup_out 0; printf 'counts: kept=%s removed=%s\n' \
+  "$OMS_HARNESS_RESIDUE_KEPT" "$OMS_HARNESS_RESIDUE_REMOVED")"
+printf '%s\n' "$out" | grep >/dev/null -F \
+  "kept: $replace_parent_after_remove (" ||
+  fail "cleanup did not keep a parent replaced after git removal: $out"
+printf '%s\n' "$out" | grep >/dev/null -Fx 'counts: kept=1 removed=0' ||
+  fail "a replaced parent must increment the kept counter: $out"
+[ -L "$replace_parent_after_remove" ] || fail "cleanup removed the replacement parent symlink"
+[ "$(cat "$replace_parent_decoy/worker-guard/keep")" = 'keep guard' ] ||
+  fail "cleanup deleted through the replacement parent into worker-guard"
+[ "$(cat "$replace_parent_decoy/.oms-panel-fixtures.x/keep")" = 'keep fixture' ] ||
+  fail "cleanup deleted through the replacement parent into panel fixtures"
+[ "$(cat "$replace_parent_decoy/.oh-my-setting-tmp")" = 'keep marker' ] ||
+  fail "cleanup deleted or rewrote the decoy marker"
+drop delegate.symlink-race
 unset -f oms_harness_classify_dead_residue
 eval "$(declare -f real_oms_harness_classify_dead_residue | sed '1s/^real_//')"
 

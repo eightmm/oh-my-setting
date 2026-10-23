@@ -779,8 +779,8 @@ oms_harness_cleanup_dead_locks() {
   done
 }
 
-# A residue parent is removable only when it contains the validated checkout
-# and `.oh-my-setting-tmp`, the only metadata this file creates in that parent.
+# A residue parent is removable only when it contains the validated checkout,
+# `.oh-my-setting-tmp` and the fixed delegate metadata cleanup removes by name.
 # Unknown siblings may hold unpreserved work, even when the marker-selected
 # checkout is otherwise safe to remove.
 # The remedy cannot be `oms scratch-worktree remove`: that runs git worktree
@@ -792,7 +792,7 @@ oms_harness_keep_unverifiable_residue() {  # DIR [VALIDATED_WORKTREE]
     [ -e "$child" ] || [ -L "$child" ] || continue
     leaf="${child##*/}"
     case "$leaf" in
-      .oh-my-setting-tmp) continue ;;
+      .oh-my-setting-tmp|worker-guard|.oms-panel-fixtures.*|continuation.patch|continuation-base|graph-context.json|graph-context.log|worker-guard-snapshot.error) continue ;;
       *) ;;
     esac
     if [ -n "${2:-}" ] && [ "$leaf" = "${2##*/}" ]; then
@@ -866,6 +866,8 @@ oms_harness_cleanup_temp_dirs() {
   local temporary
   local proof
   local marker_text
+  local physical_dir
+  local fixture
   local listings=""
 
   listings="$(mktemp -d "$(oms_harness_tmp_base)/oms-residue-listing.XXXXXX" 2>/dev/null)" || listings=""
@@ -875,6 +877,7 @@ oms_harness_cleanup_temp_dirs() {
       [ -d "$dir" ] || continue
       # Only act on directories this user owns (see count function).
       [ -O "$dir" ] && [ ! -L "$dir" ] || continue
+      physical_dir="$(oms_harness_physical_dir "$dir")" || continue
       marker="$dir/.oh-my-setting-tmp"
       [ -f "$marker" ] && [ ! -L "$marker" ] || continue
       [ "$(oms_harness_read_marker_value "$marker" kind)" = "oh-my-setting-temp" ] || continue
@@ -927,11 +930,44 @@ oms_harness_cleanup_temp_dirs() {
       if [ "$safe" = 1 ]; then
         # Both arguments are physical paths established above. In particular,
         # the remove target is the expected residue child, never marker input.
-        git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree remove --force \
-          "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" >/dev/null 2>&1 || true
+        if ! git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree remove --force \
+            "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" >/dev/null 2>&1; then
+          printf 'kept: %s (worktree removal failed)\n' "$dir"
+          OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
+          continue
+        fi
         git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree prune >/dev/null 2>&1 || true
       fi
-      rm -rf "$dir"
+      if ! (
+        cd "$dir" 2>/dev/null || exit 1
+        [ "$(pwd -P)" = "$physical_dir" ] || exit 1
+        rm -rf ./worker-guard 2>/dev/null || true
+        for fixture in ./.oms-panel-fixtures.*; do
+          [ -e "$fixture" ] || [ -L "$fixture" ] || continue
+          rm -rf "$fixture" 2>/dev/null || true
+        done
+        rm -f ./continuation.patch ./continuation-base \
+          ./graph-context.json ./graph-context.log \
+          ./worker-guard-snapshot.error 2>/dev/null || true
+        rm -f ./.oh-my-setting-tmp 2>/dev/null || true
+      ); then
+        printf 'kept: %s (directory changed during cleanup)\n' "$dir"
+        OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
+        continue
+      fi
+      if ! rmdir "$dir" 2>/dev/null; then
+        (
+          cd "$dir" 2>/dev/null || exit 1
+          [ "$(pwd -P)" = "$physical_dir" ] || exit 1
+          if [ ! -e ./.oh-my-setting-tmp ] && [ ! -L ./.oh-my-setting-tmp ]; then
+            (umask 077; set -C; printf '%s\n' "$marker_text" > ./.oh-my-setting-tmp) \
+              2>/dev/null || true
+          fi
+        ) || true
+        printf 'kept: %s (new entries appeared during cleanup)\n' "$dir"
+        OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
+        continue
+      fi
       printf 'removed: %s (dead harness temp dir)\n' "$dir"
       OMS_HARNESS_RESIDUE_REMOVED=$((OMS_HARNESS_RESIDUE_REMOVED + 1))
     done
