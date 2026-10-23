@@ -169,7 +169,7 @@ with patch.dict(os.environ, {"OMS_ROOM_ID": mail_room, "OMS_ROOM_PARTICIPANT": "
         assert "BODY" not in result.stdout, result.stdout
         if script == "inbox":
             item = next(item for item in report["items"] if item["code"] == "pending-room-mail")
-            assert item["count"] == 2 and item["command"] == mail["command"], item
+            assert item["count"] == 2 and item["command"].startswith("OMS_ROOM_REPO=") and item["command"].endswith(" " + mail["command"]), item
     assert (repo / ".oms/threads/mail-room.jsonl").read_bytes() == before
     import shlex
     reader = subprocess.run([str(root / "scripts/oms")] + shlex.split(mail["command"])[1:],

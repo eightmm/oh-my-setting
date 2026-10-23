@@ -108,4 +108,4 @@ fi
 
 OMS_INBOX_JSON="$AS_JSON" OMS_INBOX_SAFE="$safe_actions" \
 OMS_INBOX_THREADS="${OMS_THREAD_ATTENTION:-1}" \
-python3 "$ROOT/scripts/lib/inbox_projection.py" "$tmp/state.json"
+python3 "$ROOT/scripts/lib/inbox_projection.py" "$tmp/state.json" "$REPO"

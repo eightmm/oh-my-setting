@@ -245,10 +245,14 @@ operator_core_block dashboard
 before="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
 bash "$ROOT/scripts/state.sh" --repo "$repo" --json > "$TMP/shared-state.json"
 bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json > "$TMP/inbox.json"
-python3 - "$TMP/shared-state.json" "$TMP/inbox.json" "$ROOT" <<'PY' || fail "inbox projection failed"
+python3 - "$TMP/shared-state.json" "$TMP/inbox.json" "$ROOT" "$repo" <<'PY' || fail "inbox projection failed"
 import copy
+import contextlib
+import io
 import json
 import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[3]) / "scripts/lib"))
@@ -256,17 +260,185 @@ from inbox_projection import project_inbox
 
 snapshot = json.load(open(sys.argv[1], encoding="utf-8"))
 inbox = json.load(open(sys.argv[2], encoding="utf-8"))
-assert project_inbox(snapshot, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0") == inbox
+repo = os.path.realpath(sys.argv[4])
+assert project_inbox(snapshot, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0",
+                     repo_path=repo) == inbox
 assert inbox["items"][0]["priority"] == "P1", inbox
+priorities = [item["priority"] for item in inbox["items"]]
+assert priorities == sorted(priorities), priorities
 assert "runtime-evidence-missing" in [item["code"] for item in inbox["items"]]
+assert all(repo in item["command"] for item in inbox["items"]), inbox["items"]
+recommended_state = copy.deepcopy(snapshot)
+recommended_state.setdefault("runtime", {})["next_actions"] = [
+    {"id": "show-evidence", "command": "oms runtime evidence show"}]
+assert project_inbox(recommended_state, repo_path=repo)["recommended_actions"][0]["command"] == (
+    "oms runtime --repo " + shlex.quote(repo) + " evidence show")
+inbox_command_state = copy.deepcopy(snapshot)
+inbox_command_state.setdefault("runtime", {})["next_actions"] = [
+    {"id": "show-inbox", "command": "oms inbox"}]
+inbox_command = project_inbox(inbox_command_state, repo_path=repo)["recommended_actions"][0]["command"]
+assert shlex.split(inbox_command) == ["oms", "inbox", "--repo", repo], inbox_command
+relative_repo_state = copy.deepcopy(snapshot)
+relative_repo_state.setdefault("runtime", {})["next_actions"] = [
+    {"id": "repair-empty-plan", "command": "oms plan-from-spec --repo ."},
+    {"id": "repair-empty-plan-equals", "command": "oms plan-from-spec --repo=."}]
+relative_commands = [action["command"] for action in project_inbox(
+    relative_repo_state, repo_path=repo)["recommended_actions"]]
+assert shlex.split(relative_commands[0]) == ["oms", "plan-from-spec", "--repo", repo], relative_commands
+assert shlex.split(relative_commands[1]) == ["oms", "plan-from-spec", "--repo=" + repo], relative_commands
+mailbox_repo = "/tmp/--repo .$(printf INJECTED)"
+mailbox_args = ["oms", "room", "updates", "--repo", mailbox_repo,
+                "--id", "room-fixture", "--participant", "call-fixture"]
+mailbox_state = copy.deepcopy(snapshot)
+mailbox_state["room_mail"] = {"bound": True, "healthy": True, "pending": 1,
+                              "oldest_age_seconds": 0,
+                              "command": shlex.join(mailbox_args)}
+mailbox_report = project_inbox(mailbox_state, repo_path=mailbox_repo)
+mailbox_item = next(item for item in mailbox_report["items"] if item["code"] == "pending-room-mail")
+anchored_mailbox_args = ["OMS_ROOM_REPO=" + mailbox_repo] + mailbox_args
+assert shlex.split(mailbox_item["command"]) == anchored_mailbox_args, mailbox_item
+assert shlex.quote(mailbox_repo) in mailbox_item["command"], mailbox_item
+mailbox_json = json.loads(json.dumps(mailbox_report))
+assert shlex.split(next(item for item in mailbox_json["items"]
+                        if item["code"] == "pending-room-mail")["command"]) == anchored_mailbox_args
+printed_mail = io.StringIO()
+with contextlib.redirect_stdout(printed_mail):
+    project_inbox_module = __import__("inbox_projection")
+    project_inbox_module.print_inbox(mailbox_report)
+displayed_mail = next(line.split("  next: ", 1)[1] for line in printed_mail.getvalue().splitlines()
+                      if "  next: " in line and "room-fixture" in line)
+assert shlex.split(displayed_mail) == anchored_mailbox_args, displayed_mail
+assert "$(printf INJECTED)" in shlex.quote(mailbox_repo)
+unsafe_repositories = ["/tmp/repo\x1b[2J", "/tmp/repo\nname", "/tmp/repo\u200bname"]
+from inbox_projection import COMMAND_HIDDEN_NOTICE
+for unsafe_repo in unsafe_repositories:
+    unsafe_args = ["oms", "room", "updates", "--repo", unsafe_repo,
+                   "--id", "room-fixture", "--participant", "call-fixture"]
+    unsafe_state = copy.deepcopy(snapshot)
+    unsafe_state["room_mail"] = dict(mailbox_state["room_mail"],
+                                     command=shlex.join(unsafe_args))
+    unsafe_state["plan"] = {"stale": [{}]}
+    unsafe_state["ci"] = {"state": "unpushed", "ahead": 1}
+    unsafe_report = project_inbox(unsafe_state, repo_path=unsafe_repo)
+    unsafe_item = next(item for item in unsafe_report["items"]
+                       if item["code"] == "pending-room-mail")
+    unsafe_command = unsafe_item["command"]
+    assert shlex.split(unsafe_command) == ["OMS_ROOM_REPO=" + unsafe_repo] + unsafe_args, unsafe_command
+    unsafe_json = json.loads(json.dumps(unsafe_report))
+    json_command = next(item["command"] for item in unsafe_json["items"]
+                        if item["code"] == "pending-room-mail")
+    assert shlex.split(json_command) == ["OMS_ROOM_REPO=" + unsafe_repo] + unsafe_args
+    plan_command = next(item["command"] for item in unsafe_report["items"]
+                        if item["code"] == "stale-plan-claim")
+    git_command = next(item["command"] for item in unsafe_report["items"]
+                       if item["code"] == "unpushed-head")
+    assert shlex.split(plan_command) == ["oms", "agent-plan", "--repo", unsafe_repo, "reclaim"]
+    assert shlex.split(git_command) == ["git", "-C", unsafe_repo, "push"]
+    json_commands = {item["code"]: shlex.split(item["command"]) for item in unsafe_json["items"]}
+    assert json_commands["stale-plan-claim"] == ["oms", "agent-plan", "--repo", unsafe_repo, "reclaim"]
+    assert json_commands["unpushed-head"] == ["git", "-C", unsafe_repo, "push"]
+    terminal = io.StringIO()
+    with contextlib.redirect_stdout(terminal):
+        project_inbox_module.print_inbox(unsafe_report)
+    terminal_text = terminal.getvalue()
+    assert COMMAND_HIDDEN_NOTICE in terminal_text and unsafe_command not in terminal_text
+    assert "oms room updates" not in terminal_text and "oms agent-plan" not in terminal_text
+    assert "git push" not in terminal_text and "\x1b" not in terminal_text
+conflicting_env = dict(os.environ, OMS_ROOM_REPO="/tmp/conflicting-repository")
+mail_probe = """oms() {
+  printf '%s\\0' "$OMS_ROOM_REPO"
+  while [ "$#" -gt 1 ]; do
+    if [ "$1" = --repo ]; then printf '%s\\0' "$2"; return; fi
+    shift
+  done
+}
+""" + displayed_mail
+mail_result = subprocess.run(["bash", "-c", mail_probe], env=conflicting_env,
+                             cwd="/tmp", stdout=subprocess.PIPE, check=True).stdout
+assert mail_result == os.fsencode(mailbox_repo) + b"\0" + os.fsencode(mailbox_repo) + b"\0", mail_result
+inbox_probe = """oms() { printf '%s\\0' "$PWD" "$OMS_ROOM_REPO" "$@"; }
+""" + inbox_command
+inbox_result = subprocess.run(["bash", "-c", inbox_probe], env=conflicting_env,
+                              cwd="/tmp", stdout=subprocess.PIPE, check=True).stdout
+assert inbox_result == (b"/tmp\0/tmp/conflicting-repository\0inbox\0--repo\0" +
+                        os.fsencode(repo) + b"\0"), inbox_result
+
+runtime_command = project_inbox(recommended_state, repo_path=repo)["recommended_actions"][0]["command"]
+runtime_probe = """oms() {
+  printf '%s\\0' "$PWD" "$OMS_ROOM_REPO"
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --repo ]; then printf '%s\\0' "$2"; return; fi
+    shift
+  done
+}
+""" + runtime_command
+runtime_result = subprocess.run(["bash", "-c", runtime_probe], env=conflicting_env,
+                                cwd="/tmp", stdout=subprocess.PIPE, check=True).stdout
+assert runtime_result == (b"/tmp\0/tmp/conflicting-repository\0" + os.fsencode(repo) + b"\0"), runtime_result
+
+git_state = copy.deepcopy(snapshot)
+git_state.setdefault("runtime", {})["next_actions"] = [
+    {"id": "git-status", "command": "git status --short"}]
+git_command = project_inbox(git_state, repo_path=repo)["recommended_actions"][0]["command"]
+assert shlex.split(git_command) == ["git", "-C", repo, "status", "--short"], git_command
+git_probe = """git() { printf '%s\\0' "$PWD" "$@"; }
+""" + git_command
+git_result = subprocess.run(["bash", "-c", git_probe], env=conflicting_env,
+                            cwd="/tmp", stdout=subprocess.PIPE, check=True).stdout
+assert git_result == b"/tmp\0-C\0" + os.fsencode(repo) + b"\0status\0--short\0", git_result
+
+fallback_state = copy.deepcopy(snapshot)
+fallback_state.setdefault("runtime", {})["next_actions"] = [
+    {"id": "fallback-probe", "command": "oms ci-status"}]
+fallback_command = project_inbox(fallback_state, repo_path=repo)["recommended_actions"][0]["command"]
+assert fallback_command == "cd " + shlex.quote(repo) + " && oms ci-status", fallback_command
+fallback_probe = """oms() { printf '%s\\0' "$PWD" "$OMS_ROOM_REPO" "$@"; }
+""" + fallback_command
+fallback_result = subprocess.run(["bash", "-c", fallback_probe], env=conflicting_env,
+                                 cwd="/tmp", stdout=subprocess.PIPE, check=True).stdout
+assert fallback_result.split(bytes((0,))) == [os.fsencode(repo), b"/tmp/conflicting-repository", b"ci-status", b""], fallback_result
 snapshot["threads"] = {"stale_open": 2}
 original = copy.deepcopy(snapshot)
-assert any(item["code"] == "stale-threads" for item in project_inbox(snapshot)["items"])
-muted = project_inbox(snapshot, include_threads=False, safe_actions=["reclaimed-stale-plan"])
+thread_item = next(item for item in project_inbox(snapshot, repo_path=repo)["items"]
+                   if item["code"] == "stale-threads")
+thread_command = thread_item["command"]
+assert shlex.split(thread_command) == ["oms", "thread", "--repo", repo, "list", "--stale"], thread_command
+thread_probe = """oms() { printf '%s\\0' "$PWD" "$OMS_ROOM_REPO" "$@"; }
+""" + thread_command
+thread_result = subprocess.run(["bash", "-c", thread_probe], env=conflicting_env,
+                                cwd="/tmp", stdout=subprocess.PIPE, check=True).stdout
+assert thread_result == (b"/tmp\0/tmp/conflicting-repository\0thread\0--repo\0" +
+                         os.fsencode(repo) + b"\0list\0--stale\0"), thread_result
+muted = project_inbox(snapshot, include_threads=False, safe_actions=["reclaimed-stale-plan"], repo_path=repo)
 assert not any(item["code"] == "stale-threads" for item in muted["items"])
 assert muted["safe_actions"] == ["reclaimed-stale-plan"]
 assert snapshot == original
 PY
+read_repo="$TMP/inbox repo with spaces"
+mkdir -p "$read_repo"
+git -C "$read_repo" init -q
+blocked_attempt="$(bash "$ROOT/scripts/agent-events.sh" --repo "$read_repo" start \
+  --provider codex --tool dashboard-fixture)" || fail "blocked inbox fixture start failed"
+bash "$ROOT/scripts/agent-events.sh" --repo "$read_repo" transition \
+  --attempt "$blocked_attempt" --state blocked >/dev/null || fail "blocked inbox fixture transition failed"
+bash "$ROOT/scripts/inbox.sh" --repo "$read_repo" --json > "$TMP/read-inbox.json" || \
+  fail "separate repository inbox query failed"
+suggested_read="$(python3 - "$TMP/read-inbox.json" "$read_repo" <<'PY'
+import json, sys
+inbox = json.load(open(sys.argv[1], encoding="utf-8"))
+import shlex
+repo = shlex.quote(sys.argv[2])
+item = next(item for item in inbox["items"] if item["code"] == "agent-blocked")
+assert "--repo " + repo in item["command"], item
+print(item["command"])
+PY
+)"
+PATH="$ROOT/scripts:$PATH" bash -c "$suggested_read" > "$TMP/suggested-inside.txt" || \
+  fail "suggested inbox read failed inside its repository"
+(cd "$TMP" && PATH="$ROOT/scripts:$PATH" bash -c "$suggested_read") > "$TMP/suggested-outside.txt" || \
+  fail "suggested inbox read failed outside its repository"
+cmp -s "$TMP/suggested-inside.txt" "$TMP/suggested-outside.txt" || \
+  fail "suggested inbox read changed when run from another directory"
 after="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
 [ "$before" = "$after" ] || fail "attention queries mutated the fixture repository"
 
@@ -299,8 +471,16 @@ inbox = json.load(open(sys.argv[3], encoding="utf-8"))
 raw = open(sys.argv[1], encoding="utf-8").read() + open(sys.argv[2], encoding="utf-8").read()
 for forbidden in ("PRIVATE GOAL", "SECRET FALLBACK CONTENT", "PRIVATE-VERIFY-EXIT",
                   "PRIVATE LIFECYCLE CONTENT", "PRIVATE APPROVAL SUMMARY",
-                  "PRIVATE PATCH PATH", "change.patch", "PRIVATE-USAGE-KEY", sys.argv[4]):
+                  "PRIVATE PATCH PATH", "change.patch", "PRIVATE-USAGE-KEY"):
     assert forbidden not in raw, forbidden
+report_without_commands = json.loads(json.dumps(report))
+for item in report_without_commands.get("attention", {}).get("items", []):
+    item["command"] = ""
+for action in report_without_commands.get("attention", {}).get("next", []):
+    action["command"] = ""
+assert sys.argv[4] not in json.dumps(report_without_commands), "dashboard leaked repository outside commands"
+text_before_attention = open(sys.argv[2], encoding="utf-8").read().split("attention:", 1)[0]
+assert sys.argv[4] not in text_before_attention, "dashboard leaked repository outside attention commands"
 assert report["schema"] == 1 and report["kind"] == "oms-dashboard", report
 assert report["collection"] == {"ok": True, "sources": {"state": "ok", "artifacts": "ok", "attempts": "ok"}}
 assert report["goal"] == {"text": "operator fixture", "source": "plan"}, report["goal"]
@@ -412,7 +592,9 @@ grep -Fq 'COLLECTION FAILED attempts: exit 2' "$TMP/dash-corrupt.txt" ||
   fail "dashboard hid the failed lifecycle collection: $(cat "$TMP/dash-corrupt.txt")"
 grep -Fq 'attempts: UNAVAILABLE (lifecycle stream invalid)' "$TMP/dash-corrupt.txt" ||
   fail "dashboard showed attempts from an invalid stream"
-! grep -Fq "$corrupt" "$TMP/dash-corrupt.txt" || fail "dashboard leaked the repo path"
+corrupt_text_before_attention="$(sed '/^attention:/,$d' "$TMP/dash-corrupt.txt")"
+! printf '%s' "$corrupt_text_before_attention" | grep -Fq "$corrupt" || \
+  fail "dashboard leaked the repo path outside recovery commands"
 
 # Missing state and oversized listings, through the pure projection.
 snap="$TMP/dash-snap"
@@ -473,7 +655,7 @@ PY
 # A live view must fit a normal terminal without scrolling its goal away.
 # Keep route and acceptance information visible when old details are omitted.
 PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib/dashboard_projection.py" "$TMP/dash.json" "$snap" <<'PY' || fail "dashboard bounds/contract regression"
-import json, runpy, subprocess, sys
+import copy, json, runpy, shlex, subprocess, sys
 from pathlib import Path
 module = runpy.run_path(sys.argv[1])
 assert module["panel_metadata"]({"refs": {"panel_role": "researcher",
@@ -489,8 +671,26 @@ text = module["render"](report, 100, interval=5, height=24)
 assert len(text.splitlines()) <= 24, text
 assert "model=gpt-test route=explicit" in text, text
 assert "acceptance:" in text and "attention:" in text and "detail line(s) hidden" in text, text
-assert all(module["display_width"](line) <= 100 for line in text.splitlines())
+assert sum(max(1, (module["display_width"](line) + 99) // 100)
+           for line in text.splitlines()) <= 24, text
 assert module["display_width"](module["fit"]("한글" * 30, 40)) <= 40
+long_command = "oms room updates --repo /canonical/repository --id room-123456789 --participant call-abcdefghijklmnopqrstuvwxyz"
+report["attention"] = {"actionable": 1, "items": [{"priority": "P1", "code": "mail",
+    "summary": "pending", "command": long_command}], "omitted": 0, "next": []}
+standalone = module["render"](report, 60)
+standalone_lines = standalone.splitlines()
+command_label = next(i for i, line in enumerate(standalone_lines) if line.strip() == "next:")
+assert standalone_lines[command_label + 1] == long_command, standalone
+assert module["display_width"](standalone_lines[command_label + 1]) > 60, standalone
+operation = report["operations"]["recent"][0]
+operation["task_id"] = "task-full-123"
+op_text = module["render"](report, 100)
+op_line = next(line for line in op_text.splitlines() if "task-full-123" in line)
+assert op_line.index("task-full-123") < op_line.index("model=")
+assert module["display_width"](op_line) <= 100, op_line
+narrow_text = module["render"](report, 60)
+narrow_row = next(line for line in narrow_text.splitlines() if "task-full-123" in line)
+assert "task=task-full-123" in narrow_row and module["display_width"](narrow_row) <= 60, narrow_row
 snap = Path(sys.argv[3])
 original_artifacts = (snap / "artifacts.json").read_bytes()
 (snap / "artifacts.json").write_text('{"schema":1,"rows":{}}')
@@ -506,6 +706,120 @@ cli = subprocess.run([sys.executable, "-B", sys.argv[1], str(snap), "--width", "
 assert cli.returncode == 0, cli.stderr
 assert len(cli.stdout.splitlines()) <= 23, cli.stdout
 assert "acceptance:" in cli.stdout and "attention:" in cli.stdout
+state = json.load(open(Path(sys.argv[2]).parent / "shared-state.json", encoding="utf-8"))
+state.setdefault("plan", {})["stale"] = [{}]
+state.setdefault("artifacts", {}).setdefault("counts", {})["unresolved"] = 1
+(snap / "state.json").write_text(json.dumps(state), encoding="utf-8")
+base = Path(sys.argv[2]).parent
+long_repo = str(base / ("repo  " + "r" * 32))
+assert len(long_repo) == len(str(base)) + 1 + len("repo  " + "r" * 32)
+Path(long_repo).mkdir()
+rebuilt = module["build"](snap, "inspected elsewhere", repo_path=long_repo)
+quoted_repo = shlex.quote(long_repo)
+plan_command = next(item["command"] for item in rebuilt["attention"]["items"]
+                    if item["code"] == "stale-plan-claim")
+artifact_command = next(item["command"] for item in rebuilt["attention"]["items"]
+                        if item["code"] == "unresolved-artifacts")
+assert "--repo " + quoted_repo in plan_command, plan_command
+assert len(artifact_command) > 200 and artifact_command.endswith("resolve-recovered --dry-run"), artifact_command
+assert artifact_command in json.dumps(rebuilt), "dashboard JSON truncated a runnable command"
+assert "--repo " + quoted_repo in artifact_command and "repo  " in artifact_command, artifact_command
+minimal = copy.deepcopy(rebuilt)
+minimal["attempts"] = {"available": True, "total": 0, "active": 0, "by_state": {},
+                       "active_recent": [], "recent": []}
+minimal["delegations"] = []
+minimal["operations"] = {"available": True, "recent": [], "omitted": 0}
+minimal["reviews"] = {"passed": 0, "failed": 0, "unknown": 0, "outcomes": 0, "seat_answers": 0}
+minimal["acceptance"] = None
+minimal["task"] = None
+minimal["attention"] = {"actionable": 0, "items": [], "omitted": 0,
+    "next": [{"id": "initialize_project", "authority": "repo_write", "command": artifact_command}]}
+narrow = module["render"](minimal, 40)
+narrow_lines = narrow.splitlines()
+assert "initialize_project" in narrow and "repo_write" in narrow, narrow
+command_start = next(i for i, line in enumerate(narrow_lines) if line == artifact_command)
+assert command_start > 0 and "next decision: initialize_project" in narrow_lines[command_start - 1], narrow
+assert "resolve-recovered --dry-run" in narrow_lines[command_start], narrow
+assert long_repo in narrow and "repo  " in narrow, narrow
+for unsafe_repo in ("/tmp/repo\x1b[2J", "/tmp/repo\nname", "/tmp/repo\u200bname"):
+    unsafe_args = ["oms", "room", "updates", "--repo", unsafe_repo,
+                   "--id", "room-fixture", "--participant", "call-fixture"]
+    unsafe_state = {"room_mail": {
+        "bound": True, "healthy": True, "pending": 1, "oldest_age_seconds": 0,
+        "command": shlex.join(unsafe_args)},
+        "plan": {"stale": [{}]}, "ci": {"state": "unpushed", "ahead": 1}}
+    unsafe_inbox = module["project_inbox"](unsafe_state, repo_path=unsafe_repo)
+    unsafe_dashboard = copy.deepcopy(minimal)
+    unsafe_dashboard["attention"] = {"actionable": 1,
+        "items": [{"priority": item["priority"], "code": item["code"],
+                   "summary": item["summary"], "command": item["command"]}
+                  for item in unsafe_inbox["items"]],
+        "omitted": 0, "next": []}
+    unsafe_terminal = module["render"](unsafe_dashboard, 160)
+    assert module["COMMAND_HIDDEN_NOTICE"] in unsafe_terminal, unsafe_terminal
+    assert "oms room updates" not in unsafe_terminal and "oms agent-plan" not in unsafe_terminal
+    assert "git push" not in unsafe_terminal
+    assert "\x1b" not in unsafe_terminal, unsafe_terminal
+terminal_command = module["render"](minimal, 160)
+terminal_lines = terminal_command.splitlines()
+decision_prefix = "next decision: initialize_project (repo_write):"
+command_start = next(i for i, line in enumerate(terminal_lines) if line.startswith(decision_prefix))
+assert terminal_lines[command_start + 1] == artifact_command, terminal_command
+assert long_repo in terminal_command and "repo  " in terminal_command, terminal_command
+nbsp_repo = str(base / "repo\u00a0's name")
+Path(nbsp_repo).mkdir()
+nbsp_report = module["build"](snap, "inspected with NBSP", repo_path=nbsp_repo)
+nbsp_item = next(item for item in nbsp_report["attention"]["items"]
+                 if item["code"] == "stale-plan-claim")
+assert r"\xc2\xa0" in nbsp_item["command"] and "\u00a0" not in nbsp_item["command"], nbsp_item
+nbsp_terminal = module["render"](nbsp_report, 160)
+nbsp_lines = nbsp_terminal.splitlines()
+nbsp_summary = next(i for i, line in enumerate(nbsp_lines) if "stale-plan-claim" in line)
+assert nbsp_lines[nbsp_summary + 1].strip() == "next:", nbsp_terminal
+nbsp_display = nbsp_lines[nbsp_summary + 2]
+assert nbsp_display == nbsp_item["command"], (nbsp_display, nbsp_item)
+nbsp_probe = """oms() { printf '%s\\0' "$@"; }
+""" + nbsp_display
+nbsp_result = subprocess.run(["bash", "-c", nbsp_probe], stdout=subprocess.PIPE, check=True).stdout
+assert nbsp_result == (b"agent-plan\0--repo\0" + nbsp_repo.encode("utf-8") + b"\0reclaim\0"), nbsp_result
+height_limited = module["render"](minimal, 60, height=23)
+height_lines = height_limited.splitlines()
+terminal_rows = sum(max(1, (module["display_width"](line) + 59) // 60) for line in height_lines)
+assert terminal_rows <= 23, (terminal_rows, height_limited)
+diagnostic = copy.deepcopy(minimal)
+diagnostic["acceptance"] = {"available": True, "total": 1,
+    "counts": {"failed": 1}, "note": "fixture", "criteria": [{
+        "status": "failed", "id": "criterion-1", "source": "test",
+        "text": "failed criteria remains visible"}], "omitted": 0}
+diagnostic["operations"] = {"available": True, "omitted": 0, "recent": [{
+    "provider": "codex", "kind": "delegate", "task_id": None,
+    "selected_model": "gpt-test", "route_class": "explicit", "fallback_used": False,
+    "fallback_reason": None, "exit": 0, "status": "success", "served_model": "gpt-test",
+    "tokens": 1, "ts": "2026-08-01T00:00:10Z"}]}
+huge_repo = str(base / ("p" * 100) / ("q" * 100) / ("repo  " + "r" * 100))
+huge_inbox = module["project_inbox"](
+    {"artifacts": {"counts": {"unresolved": 1}}}, repo_path=huge_repo)
+huge_command = next(item["command"] for item in huge_inbox["items"]
+                    if item["code"] == "unresolved-artifacts")
+diagnostic["attention"] = {"actionable": 1, "items": [{"priority": "P1",
+    "code": "unresolved-artifacts", "summary": "long repository command",
+    "command": huge_command}], "omitted": 0, "next": []}
+diagnostic_text = module["render"](diagnostic, 60, height=23)
+diagnostic_rows = sum(max(1, (module["display_width"](line) + 59) // 60)
+                      for line in diagnostic_text.splitlines())
+assert diagnostic_rows <= 23, (diagnostic_rows, diagnostic_text)
+assert "failed criteria remains visible" in diagnostic_text, diagnostic_text
+assert "route=explicit" in diagnostic_text, diagnostic_text
+assert "omitted for space" in diagnostic_text and "oms inbox --json" in diagnostic_text, diagnostic_text
+short_limited = module["render"](minimal, 60, height=10)
+short_lines = short_limited.splitlines()
+short_rows = sum(max(1, (module["display_width"](line) + 59) // 60) for line in short_lines)
+assert short_rows <= 10 and "omitted for space" in short_limited, short_limited
+for budget in (2, 3):
+    tiny = module["render"](diagnostic, 20, height=budget)
+    tiny_lines = tiny.splitlines()
+    assert len(tiny_lines) <= budget, (budget, tiny)
+    assert all(module["display_width"](line) <= 20 for line in tiny_lines), (budget, tiny)
 PY
 
 # Arguments: watch-only options, a sensible interval floor, and no JSON stream.

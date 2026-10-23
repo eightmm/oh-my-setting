@@ -13,12 +13,14 @@ import json
 import math
 import os
 import re
+import shlex
 import sys
 import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from inbox_projection import project_inbox  # noqa: E402
+from inbox_projection import (COMMAND_HIDDEN_NOTICE, has_invisible_characters,
+                              project_inbox)  # noqa: E402
 from thread_live import DURABLE, _load, safe_path  # noqa: E402
 
 PLAN_READER = _load("plan-retire.py")["bounded_regular"]
@@ -46,6 +48,52 @@ def clean(value, limit=MAX_LABEL):
                    for ch in str(value) if ch not in "\ufe0e\ufe0f")
     text = " ".join(text.split())
     return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def clean_command(value):
+    """Requote shell words without exposing terminal controls or changing bytes."""
+    if value is None:
+        return None
+    original = str(value)
+    if has_invisible_characters(original):
+        return original
+
+    def unsafe(char):
+        return unicodedata.category(char)[0] == "C" or (
+            ord(char) > 127 and (char.isspace() or unicodedata.category(char)[0] == "Z"))
+
+    def quote_argument(argument):
+        argument = str(argument)
+        if not any(unsafe(char) for char in argument):
+            return shlex.quote(argument)
+        escaped = []
+        for char in argument:
+            if unsafe(char):
+                escaped.extend("\\x%02x" % byte for byte in char.encode("utf-8", "surrogateescape"))
+            elif char == "\\":
+                escaped.append("\\\\")
+            elif char == "'":
+                escaped.append("\\'")
+            else:
+                escaped.append(char)
+        return "$'" + "".join(escaped) + "'"
+
+    lexer = shlex.shlex(original, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = list(lexer)
+    output = []
+    operators = {";", "&&", "||", "|", "&"}
+    for token in tokens:
+        if token in operators:
+            output.append(token)
+            continue
+        assignment = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", token)
+        if assignment:
+            output.append(assignment.group(1) + "=" + quote_argument(assignment.group(2)))
+        else:
+            output.append(quote_argument(token))
+    return " ".join(output)
 
 
 def count(value):
@@ -364,13 +412,16 @@ def build(directory, repo_name, repo_path="", now=None):
     } for row in sorted((row for row in listing(state.get("delegations")) if isinstance(row, dict)),
                         key=lambda row: row.get("live") is not True)[:5]]
     report["acceptance"] = project_acceptance(runtime)
-    inbox = project_inbox(state, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0")
+    inbox = project_inbox(state, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0",
+                          repo_path=repo_path or os.getcwd())
     report["attention"] = {
         "actionable": inbox["actionable"],
-        "items": [{key: clean(item.get(key), 200) for key in ("priority", "code", "summary", "command")}
+        "items": [{key: clean_command(item.get(key)) if key == "command" else clean(item.get(key), 200)
+                   for key in ("priority", "code", "summary", "command")}
                   for item in inbox["items"][:MAX_ROWS]],
         "omitted": max(0, len(inbox["items"]) - MAX_ROWS),
-        "next": [{key: clean(action.get(key), 200) for key in ("id", "authority", "command")}
+        "next": [{key: clean_command(action.get(key)) if key == "command" else clean(action.get(key), 200)
+                  for key in ("id", "authority", "command")}
                  for action in inbox["recommended_actions"][:1]],
     }
     return report
@@ -436,9 +487,19 @@ def wrap_label(text, width, limit, max_chars=400):
 
 def render(report, width, interval=None, height=None):
     lines = []
+    command_groups = set()
 
-    def add(text, priority=0):
-        lines.append((text, priority))
+    def add(text, priority=0, clip=True, group=None):
+        lines.append((text, priority, clip, group))
+
+    def add_command(prefix, command, priority=0, group=None):
+        """Print a complete command verbatim after its separate label."""
+        group = group if group is not None else object()
+        command_groups.add(group)
+        add(prefix.rstrip(), priority, clip=False, group=group)
+        if has_invisible_characters(command):
+            command = COMMAND_HIDDEN_NOTICE
+        add(command, priority, clip=False, group=group)
     repo = report["repo"]
     head = "%s@%s" % (repo["branch"] or "?", repo["head"] or "?")
     refresh = "  refresh=%ss" % interval if interval else ""
@@ -521,12 +582,12 @@ def render(report, width, interval=None, height=None):
             route = row["route_class"] or "unrecorded"
             if row["fallback_used"] or row["fallback_reason"]:
                 route += " fallback=%s" % (row["fallback_reason"] or "yes")
-            add("  %s %s model=%s route=%s exit=%s %s served=%s tokens=%s at=%s%s" % (
+            add("  %s %s%s model=%s route=%s exit=%s %s served=%s tokens=%s at=%s" % (
                 fit(row["provider"] or "unknown", 12), fit(row["kind"] or "unknown", 16),
+                " task=" + row["task_id"] if row["task_id"] else "",
                 fit(unknown(row["selected_model"]), 28), route, unknown(row["exit"]),
                 row["status"], unknown(row["served_model"], "unreported"),
-                unknown(row["tokens"]), row["ts"],
-                " task=" + row["task_id"] if row["task_id"] else ""),
+                unknown(row["tokens"]), row["ts"]),
                 1 if row["selected_model"] else 2)
         if operations["omitted"]:
             add("  ... %d older operation(s) in window" % operations["omitted"])
@@ -556,18 +617,55 @@ def render(report, width, interval=None, height=None):
     if attention is not None:
         add("attention: %d item(s)" % attention["actionable"])
         for index, item in enumerate(attention["items"]):
-            add("  %s %s: %s" % (item["priority"], item["code"], item["summary"]), 1 if index == 0 else 2)
-            add("     next: %s" % item["command"], 3)
+            priority = 1 if index == 0 else 2
+            group = object()
+            add("  %s %s: %s" % (item["priority"], item["code"], item["summary"]),
+                priority, group=group)
+            add_command("     next: ", item["command"], 3, group=group)
         if attention["omitted"]:
             add("  ... %d more (oms inbox)" % attention["omitted"])
         for action in attention["next"]:
-            add("next decision: %s (%s): %s" % (action["id"], action["authority"], action["command"]))
-    if height and len(lines) > height:
-        selected = sorted(sorted(range(len(lines)), key=lambda i: (lines[i][1], i))[:height - 1])
-        omitted = len(lines) - len(selected)
-        lines = [lines[i] for i in selected]
-        lines.append(("... %d detail line(s) hidden; single snapshot or --json shows more" % omitted, 0))
-    return "\n".join(fit(line, width) for line, _ in lines)
+            add_command("next decision: %s (%s): " % (action["id"], action["authority"]),
+                        action["command"])
+    terminal_width = max(1, width)
+    def row_cost(line):
+        if line[2]:
+            return 1
+        return max(1, (display_width(line[0]) + terminal_width - 1) // terminal_width)
+
+    if height and sum(row_cost(line) for line in lines) > height:
+        groups = {}
+        for index, line in enumerate(lines):
+            key = line[3] if line[3] is not None else ("line", index)
+            entry = groups.setdefault(key, {"indices": [], "cost": 0, "priority": line[1]})
+            entry["indices"].append(index)
+            entry["cost"] += row_cost(line)
+            entry["priority"] = min(entry["priority"], line[1])
+        indicator_rows = 1
+        selected, remaining = set(), max(0, height - indicator_rows)
+        for key, entry in sorted(groups.items(), key=lambda item: (item[1]["priority"], item[1]["indices"][0])):
+            if entry["cost"] > remaining:
+                continue
+            selected.add(key)
+            remaining -= entry["cost"]
+        omitted = len(lines) - sum(len(groups[key]["indices"]) for key in selected)
+        omitted_commands = sum(1 for key in groups if key in command_groups and key not in selected)
+        if omitted_commands:
+            suffix = "" if omitted_commands == 1 else "s"
+            concise = "... %d command%s omitted for space; see oms inbox --json" % (
+                omitted_commands, suffix)
+            detailed = "... %d command%s omitted for space; %d detail line(s) hidden; see oms inbox --json" % (
+                omitted_commands, suffix, omitted)
+            indicator = detailed if display_width(detailed) <= width else concise
+            indicator_line = (indicator, 0, True, None)
+        else:
+            indicator = "... %d detail line(s) hidden; single snapshot or --json shows more" % omitted
+            indicator_line = (indicator, 0, True, None)
+        lines = [line for index, line in enumerate(lines)
+                 if (line[3] if line[3] is not None else ("line", index)) in selected]
+        lines.append(indicator_line)
+    return "\n".join(line if not clip or display_width(line) <= width else fit(line, width)
+                     for line, _, clip, _ in lines)
 
 
 def main(argv=None):
