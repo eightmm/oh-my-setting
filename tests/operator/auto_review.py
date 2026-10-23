@@ -748,7 +748,8 @@ fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the ca
 fix_findings = "\n".join(fix_finding_blocks)
 original_fix_notice = panel._review_fix_notice
 for case_number, (case, expected_draft) in enumerate((
-        ("failed-gate", True), ("truncated-summary", True), ("multiline-verify", True),
+        ("failed-gate", True), ("round-two", True), ("round-three", True),
+        ("truncated-summary", True), ("multiline-verify", True),
         ("notice-limit", True), ("notice-exact-limit", True),
         ("private-verifier", False),
         ("missing-candidate", False), ("wrong-candidate-digest", False),
@@ -766,11 +767,20 @@ for case_number, (case, expected_draft) in enumerate((
     panel._prepare_dispatch_call(project, shared, fix_reviewer, room_owner)
     worker_attempt = dict(auto_attempt, attempt_id="attempt-" + fix_worker, task_id=fix_task,
         sequence=3, state="review", parent_attempt_id=draft_main["attempt_id"],
+        created_at="2026-10-14T00:00:03Z",
         refs=dict(auto_attempt["refs"], panel_room_participant=fix_worker, panel_owner="claude"))
     reviewer_attempt = dict(worker_attempt, attempt_id="attempt-" + fix_reviewer,
         refs=dict(worker_attempt["refs"], panel_room_participant=fix_reviewer, panel_role="reviewer",
                   panel_access="read", panel_location="worktree:oms-fixture-candidate-tmp/tmp.candidate"))
-    fix_history = [draft_main, worker_attempt, reviewer_attempt]
+    fix_history = [draft_main]
+    if case in {"round-two", "round-three"}:
+        rounds = 2 if case == "round-two" else 3
+        for round_index in range(1, rounds):
+            fix_history.append(dict(worker_attempt,
+                attempt_id="attempt-%s-prior-%d" % (fix_worker, round_index),
+                created_at="2026-10-14T00:00:%02dZ" % round_index,
+                refs=dict(worker_attempt["refs"], panel_room_participant="call-prior-%016x" % round_index)))
+    fix_history.extend([worker_attempt, reviewer_attempt])
     if case == "stale-review":
         fix_history.append(dict(worker_attempt, attempt_id="attempt-later-worker", sequence=4,
                                 refs=dict(worker_attempt["refs"], panel_room_participant="later-worker")))
@@ -838,6 +848,8 @@ for case_number, (case, expected_draft) in enumerate((
     draft_mail = [m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + fix_reviewer]
     assert len(draft_mail) == 1 and room_owner in draft_mail[0]["targets"], draft_mail
     assert draft_mail[0]["message_kind"] == "handoff" and room_owner in draft_mail[0]["pending_for"]
+    if case == "failed-gate":
+        assert "(review round 1)" in draft_mail[0]["text"]
     assert fix_reviewer in room.status(project, shared)["call_results"]
     assert not any(m["id"] == "judgment-" + fix_reviewer for m in room.status(project, shared)["messages"])
     assert draft_file.exists() == expected_draft, (case, draft_mail)
@@ -853,6 +865,15 @@ for case_number, (case, expected_draft) in enumerate((
         continue
     if expected_draft:
         draft_text = draft_file.read_text(encoding="utf-8")
+        if case == "round-two":
+            assert "(review round 2)" in draft_mail[0]["text"]
+            assert "## Design check before another fix round" not in draft_text
+            assert "consider whether the design is the problem" not in draft_mail[0]["text"]
+        elif case == "round-three":
+            assert "(review round 3)" in draft_mail[0]["text"]
+            assert "## Design check before another fix round" in draft_text
+            assert "the owner checks whether the design is the problem" in draft_text
+            assert "consider whether the design is the problem" in draft_mail[0]["text"]
         assert fix_task in draft_text and original_fix_brief in draft_text, draft_text
         for finding in fix_finding_blocks:
             relative_finding = (finding.replace(str(project) + "/", "").replace(str(fix_execution) + "/", "")
