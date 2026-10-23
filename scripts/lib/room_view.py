@@ -5,7 +5,7 @@ import re
 import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
-from panel_view import (amount, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
+from panel_view import (amount, token_amount, token_pair, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
                         plan_tail_columns, format_tail_row, clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
@@ -724,8 +724,9 @@ def native_tokens(entry):
     total, output, live, agents = (valid_count(entry.get(key)) for key in ("tokens", "output", "live", "agents"))
     spent = ""
     if total is not None:
-        spent = amount(total) + ("+" if entry.get("partial") is True else "") + " tok"
-        spent += " (out %s)" % amount(output) if output is not None else ""
+        partial = entry.get("partial") is True
+        spent = (token_pair(total - output, output, partial) if output is not None and total >= output
+                 else amount(total) + ("+" if partial else "") + " tok")
     crowd = "%s/%s agents live" % (live, agents) if live is not None and agents else ""
     return " · ".join(part for part in (crowd, spent) if part)
 
@@ -780,10 +781,6 @@ def native_running(calls):
 
 def advisor_stats(call):
     duration, tokens = "", []
-    def token_amount(value):
-        rounded = value if value < 1000 else (value + 50) // 100 * 100
-        return ("%s.%sk" % (rounded // 1000, rounded % 1000 // 100) if 1000 <= rounded < 10000
-                else amount(rounded))
     if isinstance(call.get("_elapsed"), int) and call["_elapsed"] >= 0:
         seconds = call["_elapsed"]
         duration = "%sm%02ds" % divmod(seconds, 60) if seconds >= 60 else "%ss" % seconds

@@ -1748,7 +1748,7 @@ token_calls = {'rows': [{'task_id': 'token-result', 'summary': 'Recorded result'
                                    {'kind': 'review', 'exit': 0, 'state': 'done', 'attempt_id': 'no-usage',
                                     'served_model': 'claude-opus-5-5'}]}]}
 token_text = render_results(token_calls, 160)
-assert 'Luna 6 / delegate / exit 0 / 1.8m tok (out 120.0k)' in token_text, token_text
+assert 'Luna 6 / delegate / exit 0 / 1.7m in / 120.0k out' in token_text, token_text
 assert 'Luna 6 / call / exit 0 / 1.8m tok' in token_text, token_text
 assert 'Opus 5.5 / review / exit 0' in token_text and 'Opus 5.5 / review / exit 0 /' not in token_text, token_text
 from dashboard_projection import ELLIPSIS, use_unicode

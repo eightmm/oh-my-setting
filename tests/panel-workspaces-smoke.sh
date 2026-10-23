@@ -73,11 +73,12 @@ usage_report = {'repo': {'name': 'r', 'path': '/tmp/r'}, 'collection': {'ok': Tr
                     ('att_rev', None, 'reviewer', 'review', 'Check diff'), ('att_codex', None, 'worker', 'implement', 'Plain total'),
                     ('att_late', 700, 'worker', 'implement', 'Attempt total'), ('att_none', None, 'worker', 'implement', 'No report'))]}}
 usage_board = panel_view.render(usage_report, 'claude', 110, 40)
-for value in ('48.2k tok', '12.3k tok', '700 tok'):
+for value in ('39.1k in / 9.1k out', '12.3k tok', '700 tok'):
     check(any(value in line for line in usage_board.splitlines()), 'token total missing from column: ' + value + usage_board)
 detail_board = panel_view.render(usage_report, 'claude', 110, 40,
                                  navigation={'selected': ('result', 'att_rev')})
-check('output 9149)' in detail_board, 'provider output detail missing from Detail view: ' + detail_board)
+check('9.1k out · 97% cached (cached 38.0k, new 1051)' in detail_board,
+      'provider output detail missing from Detail view: ' + detail_board)
 check('Fix parser · tokens pending' not in usage_board and 'No report · tokens unreported' not in usage_board,
       'unknown token filler leaked into row identity')
 check(' 0 tok' not in usage_board and 'tokens 0' not in usage_board, 'missing tokens rendered as zero')

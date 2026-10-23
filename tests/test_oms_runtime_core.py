@@ -1635,8 +1635,10 @@ class RuntimeFixture(RuntimeFixtureBase):
         call = dict(row, attempt_id='resumed-call', selected_model='gpt-6-sol',
                     tokens=1400, provider_usage=usage)
         report = {'operations': {'recent': [call]}}
-        self.assertEqual(call_tokens(report, 'resumed-call', 'success'), '1400 tok (session total)')
-        self.assertEqual(call_tokens(report, 'resumed-call', 'success', short=True), '1400 tok*')
+        self.assertEqual(call_tokens(report, 'resumed-call', 'success'),
+                         '1.3k in / 100 out · 69% cached (cached 900, new 400) (session total)')
+        self.assertEqual(call_tokens(report, 'resumed-call', 'success', short=True),
+                         '1.3k in / 100 out · 69% cached*')
         model = model_usage(report)[0]
         self.assertEqual(model['tokens'], 0)
         self.assertEqual(model['token_reports'], 0)

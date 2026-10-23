@@ -1446,7 +1446,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     assert panel_chats._usage[str(tokens_log)]["offset"] == tokens_log.stat().st_size
     assert (agent["tokens"], agent["output"], agent["partial"]) == (2478 + 8, 466, False), agent
     text, nav = sub_board(panel_chats.native_subagents([claude_main]), "log")
-    assert "2486 tok (out 466)" in text, text
+    assert "2.0k in / 466 out" in text, text
     # Absent cache counts are zero; a malformed count leaves the total partial instead of looking complete.
     sparse = json.dumps({"type": "assistant", "message": {"id": "s1", "usage": {"input_tokens": 100, "output_tokens": 5}}})
     sparse_log = write_agent("t3", description="Sparse", lines=[sparse])
@@ -1519,7 +1519,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     write_agent("huge", description="Huge", lines=[usage_line("m1", 1, 0, 0, 5), huge_line("no id", 2, 0, 0, 10)])
     agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["huge"]
     assert (agent["tokens"], agent["partial"]) == (6, True), agent
-    assert "6+ tok" in sub_board(panel_chats.native_subagents([claude_main]), "log")[0]
+    assert "1+ in / 5 out" in sub_board(panel_chats.native_subagents([claude_main]), "log")[0]
     for leftover in agents_dir.glob("agent-*"):
         leftover.unlink()
     # A workflow row adds phase and approximate counts when its journal tail parses, and only its name otherwise.
@@ -1565,7 +1565,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     assert flows["wf_r1"]["title"] == "Workflow wf_r1 · phase Review · agents ~2 started · ~1 done", flows
     text, nav = sub_board(found, "detail", ("chat", "adv-main"))
     assert "SUBAGENTS (2)" in text and "Native agents active: 0 · workflows active: 2" in text, text
-    assert "1/2 agents live · 27 tok (out 16)" in text, text
+    assert "1/2 agents live · 11 in / 16 out" in text, text
     write_journal("wf_r1", started, age=3 * 3600)
     assert "wf_r1" not in shown(panel_chats.native_subagents([claude_main]))["workflows"]
     # No session directory, or an unreadable transcript index, leaves the board as it was.

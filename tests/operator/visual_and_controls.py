@@ -1722,7 +1722,7 @@ usage_view = deepcopy(tree)
 usage_view["operations"] = {"available": True, "recent": [
     {"event_id": "use1", "kind": "ask", "provider": "codex", "selected_model": "gpt-6-astra",
      "served_model": "gpt-6-sol", "tokens": 7249, "cost_usd": .25,
-     "provider_usage": {"input_tokens": 100, "output_tokens": 20, "cache_in_input": True,
+     "provider_usage": {"input_tokens": 12300, "output_tokens": 2100, "cache_in_input": True,
                         "cache_read_tokens": 5000, "cache_write_tokens": 300}},
     {"event_id": "use2", "kind": "ask", "provider": "codex", "served_model": "gpt-6-sol"},
     {"event_id": "use3", "kind": "ask", "provider": "codex", "selected_model": "gpt-6-sol", "tokens": 77,
@@ -1742,11 +1742,12 @@ usage_view["attempts"]["recent"] = [{"attempt_id": "use1", "tokens": 50000, "sta
 groups = model_usage(usage_view)
 assert len(groups) == 3 and sum(g["records"] for g in groups) == 5, groups
 served, selected, mixed = groups
-assert (served["name"], served["tokens"], served["token_reports"], served["records"]) == ("Sol 6", 120, 1, 2), groups
+assert (served["name"], served["tokens"], served["token_reports"], served["records"]) == ("Sol 6", 14400, 1, 2), groups
 assert selected["attribution"] == "selected" and selected["tokens"] == 0 and selected["token_reports"] == 1
 assert mixed["name"] == "Mixed models" and mixed["tokens"] == 34 and abs(mixed["cost"] - .6) < .000001
 labels = " | ".join(usage_labels(usage_view, costs=True))
-assert "120+? tok" in labels and "$0.25+?" in labels and "Sol 6(sel) 0 tok" in labels, labels
+assert "12.3k+? in / 2.1k out" in labels and "$0.25+?" in labels and "Sol 6(sel) 0 in / 0 out" in labels, labels
+assert "Mixed models 18 in / 16 out" in labels, labels
 assert "Astra" not in labels and "Opus" not in labels and "$?" in labels, labels
 assert "USAGE" not in render(usage_view, "codex", 100, 28, view="tree")
 assert "USAGE" not in render(usage_view, "claude", 42, 34, main_attempt="att_main", view="tree")

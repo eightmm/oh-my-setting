@@ -107,8 +107,8 @@ for columns, rows in ((76, 30), (110, 44)):
     for glyphs in (True, False):
         native_screen = render(native_report, "claude", columns, rows, view="tree", unicode=glyphs)
         assert "SUBAGENTS (2)" in native_screen, native_screen
-        assert "2465 tok (out 450)" in native_screen and "3/5 agents live" in native_screen, native_screen
-        assert "120.0k+ tok (out 20.0k)" in native_screen, native_screen
+        assert "2.0k in / 450 out" in native_screen and "3/5 agents live" in native_screen, native_screen
+        assert "100.0k+ in / 20.0k out" in native_screen, native_screen
         assert all(display_width(line) <= columns for line in native_screen.splitlines()), native_screen
 # A window whose main is not the Claude main shows none of that main's agents (not even as unlinked calls).
 cross_report = deepcopy(native_report)
@@ -209,9 +209,9 @@ finished_band = render(finished_usage_tree, "codex", 120, 40, view="graph", navi
 finished_band_rows = [finished_band[hit["y"] - 1] for hit in finished_band_nav["hits"]
                       if hit.get("tree") and hit["action"][0] == "result"
                       and hit["action"][1] in {"layout-review-a", "layout-review-b", "layout-builder", "layout-awaiting"}]
-assert len(finished_band_rows) == 4 and all("12.0k tok" in row for row in finished_band_rows), finished_band_rows
+assert len(finished_band_rows) == 4 and all("8.0k in / 4.0k out" in row for row in finished_band_rows), finished_band_rows
 finished_list = render(finished_usage_tree, "codex", 120, 40, view="list")
-assert finished_list.count("12.0k tok") >= 4, finished_list
+assert finished_list.count("8.0k in / 4.0k out") >= 4, finished_list
 ambiguous_usage_tree = deepcopy(layout_tree)
 ambiguous_attempts = ambiguous_usage_tree["attempts"]["active_recent"]
 review_attempt = next(item for item in ambiguous_attempts if item["attempt_id"] == "layout-review-a")
@@ -225,10 +225,10 @@ ambiguous_usage_tree["rows"] = [{"task_id": "shared-stage-task", "calls": [
 ambiguous_picture = render(ambiguous_usage_tree, "codex", 120, 40, view="tree")
 review_line = next(line for line in ambiguous_picture.splitlines() if "layout-review-a" in line)
 implement_line = next(line for line in ambiguous_picture.splitlines() if "layout-builder" in line)
-assert "tok" not in review_line and "12.0k tok" in implement_line, (review_line, implement_line)
+assert "tok" not in review_line and "8.0k in / 4.0k out" in implement_line, (review_line, implement_line)
 selected_result = render(finished_usage_tree, "codex", 100, 40, view="tree",
                          navigation={"selected": ("result", "layout-builder")})
-assert "12.0k tok (out 4000)" in selected_result, selected_result
+assert "8.0k in / 4.0k out" in selected_result, selected_result
 
 # Calls outside the eight-row attempt window retain tokens from their own
 # full-projection attempt rows.
@@ -250,15 +250,15 @@ for index in range(10):
     }
 old_calls = projected_nodes(old_call_usage)
 oldest_call = next(call for call in old_calls if call["participant"] == "old-call-0")
-assert oldest_call["tokens"] == "321 tok", oldest_call
+assert oldest_call["tokens"] == "321 in / 0 out", oldest_call
 
 from panel_view import amount, call_tokens, plan_tail_columns
 cache_report = {"operations": {"recent": [{"attempt_id": "cache-result", "provider_usage": {
     "input_tokens": 13851552, "output_tokens": 50304, "cache_read_tokens": 13356160,
     "cache_in_input": True}}]}}
-assert call_tokens(cache_report, "cache-result", "done", True) == "13.9m tok · 96% cached"
+assert call_tokens(cache_report, "cache-result", "done", True) == "13.9m in / 50.3k out · 96% cached"
 assert call_tokens(cache_report, "cache-result", "done") == (
-    "13.9m tok (cached input 13.4m, new input 495.4k, output 50.3k)")
+    "13.9m in / 50.3k out · 96% cached (cached 13.4m, new 495.4k)")
 session_usage = {"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 30,
                  "cache_write_tokens": 4, "cache_in_input": False, "session_cumulative": True,
                  "provider_private_detail": "must not reach the board"}
@@ -272,28 +272,32 @@ room_session_report = {"room_attempts": {"call-session": {"attempt_id": "same-se
                                                             "provider_usage": projected_session_usage}}}
 recent_session_label = call_tokens(recent_session_report, "same-session-call", "done")
 room_session_label = call_tokens(room_session_report, "same-session-call", "done")
-assert recent_session_label == room_session_label == "154 tok (session total)", (
+assert recent_session_label == room_session_label == (
+    "134 in / 20 out · 22% cached (cached 30, new 104) (session total)"), (
     recent_session_label, room_session_label)
 assert "provider_private_detail" not in room_session_report["room_attempts"]["call-session"]["provider_usage"]
 claude_cache_report = {"operations": {"recent": [{"attempt_id": "claude-cache", "provider_usage": {
     "input_tokens": 9000, "output_tokens": 1000, "cache_read_tokens": 90000,
     "cache_write_tokens": 1000, "cache_in_input": False}}]}}
-assert call_tokens(claude_cache_report, "claude-cache", "done", True) == "101.0k tok · 90% cached"
+assert call_tokens(claude_cache_report, "claude-cache", "done", True) == "100.0k in / 1.0k out · 90% cached"
 assert call_tokens(claude_cache_report, "claude-cache", "done") == (
-    "101.0k tok (cached input 90.0k, new input 10.0k, output 1000)")
+    "100.0k in / 1.0k out · 90% cached (cached 90.0k, new 10.0k)")
 no_cache_report = {"operations": {"recent": [{"attempt_id": "no-cache", "provider_usage": {
     "input_tokens": 9000, "output_tokens": 1000, "cache_in_input": True}}]}}
-assert call_tokens(no_cache_report, "no-cache", "done", True) == "10.0k tok"
-threshold_plan = plan_tail_columns([[('[done]', 'status'), ("13.9m tok · 96% cached", "metadata"),
+assert call_tokens(no_cache_report, "no-cache", "done", True) == "9.0k in / 1.0k out"
+fallback_report = {"operations": {"recent": [{"attempt_id": "total-output-fallback", "tokens": 9000,
+    "provider_usage": {"output_tokens": 1000}}]}}
+assert call_tokens(fallback_report, "total-output-fallback", "done") == "8.0k in / 1.0k out"
+threshold_plan = plan_tail_columns([[('[done]', 'status'), ("13.9m in / 50.3k out · 96% cached", "metadata"),
                                     ("3m", "metadata")]], 44, prefix_width=10, optional=(1,))
-assert 1 in threshold_plan["active"] and threshold_plan["rows"][0][1][0] == "13.9m tok", threshold_plan
+assert 2 in threshold_plan["active"] and 1 not in threshold_plan["active"], threshold_plan
 assert amount(12950) == "12.9k", amount(12950)
 inconsistent_report = {"operations": {"recent": [{"attempt_id": "inconsistent-cache", "provider_usage": {
     "input_tokens": 4000, "output_tokens": 1000, "cache_read_tokens": 5000,
     "cache_in_input": True}}]}}
-assert call_tokens(inconsistent_report, "inconsistent-cache", "done", True) == "5000 tok · 100% cached"
+assert call_tokens(inconsistent_report, "inconsistent-cache", "done", True) == "4.0k in / 1.0k out · 100% cached"
 assert call_tokens(inconsistent_report, "inconsistent-cache", "done") == (
-    "5000 tok (cached input 4000, new input 0, output 1000)")
+    "4.0k in / 1.0k out · 100% cached (cached 4000, new 0)")
 selected_unknown = render(ambiguous_usage_tree, "codex", 100, 40, view="tree",
                           navigation={"selected": ("result", "layout-review-a")})
 assert "tokens unreported" in selected_unknown, selected_unknown
@@ -310,7 +314,7 @@ one_call_sibling_tree["rows"] = [{"task_id": "one-call-sibling-task", "calls": [
 one_call_sibling_picture = render(one_call_sibling_tree, "codex", 120, 40, view="tree")
 one_call_review_line = next(line for line in one_call_sibling_picture.splitlines() if "layout-review-a" in line)
 one_call_builder_line = next(line for line in one_call_sibling_picture.splitlines() if "layout-builder" in line)
-assert "tok" not in one_call_review_line and "12.0k tok" in one_call_builder_line, \
+assert "tok" not in one_call_review_line and "8.0k in / 4.0k out" in one_call_builder_line, \
     (one_call_review_line, one_call_builder_line)
 selected_main_tree = deepcopy(layout_tree)
 next(item for item in selected_main_tree["attempts"]["active_recent"]
@@ -1840,7 +1844,7 @@ with tempfile.TemporaryDirectory() as activity_root:
     for call_id, attempt_id, provider, event, expected in (
             ("call-live-codex", "attempt-live-codex", "codex",
              {"type": "event_msg", "payload": {"type": "token_count", "info": {
-                 "total_token_usage": {"input_tokens": 10000, "output_tokens": 2300}}}}, "~12.3k tok"),
+                 "total_token_usage": {"input_tokens": 10000, "output_tokens": 2300}}}}, "~10.0k in / 2.3k out"),
             ("call-live-claude", "attempt-live-claude", "claude",
              [{"type": "assistant", "message": {"id": "msg-one", "usage": {"input_tokens": 1000,
                   "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}},
@@ -1848,7 +1852,7 @@ with tempfile.TemporaryDirectory() as activity_root:
                   "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}},
               {"type": "assistant", "message": {"id": "msg-one", "usage": {"input_tokens": 1000,
                   "output_tokens": 2000, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 100}, "content": []}}],
-             "~6800 tok · 21% cached")):
+             "~2.8k in / 4.0k out · 21% cached")):
         usage_stream = activity_repo / (provider + "-usage.jsonl")
         usage_events = event if isinstance(event, list) else [event]
         usage_stream.write_text("\n".join(json.dumps(item) for item in usage_events) + "\n", encoding="utf-8")
@@ -1868,8 +1872,8 @@ with tempfile.TemporaryDirectory() as activity_root:
         assert expected in live_picture, (provider, live_picture)
         selected_live = render(live_report, provider, 100, 30, view="tree",
                                navigation={"selected": ("result", call_id)})
-        selected_expected = ("~6800 tok so far · 21% cached (cached input 600, new input 2200, output 4000)"
-                             if provider == "claude" else "~12.3k tok so far")
+        selected_expected = ("~2.8k in / 4.0k out so far · 21% cached (cached 600, new 2200)"
+                             if provider == "claude" else "~10.0k in / 2.3k out so far")
         assert selected_expected in selected_live, (provider, selected_live)
         if provider == "codex":
             usage_stream.write_text(json.dumps({"type": "turn.completed", "usage": {
@@ -1880,9 +1884,9 @@ with tempfile.TemporaryDirectory() as activity_root:
                            "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}}
             with usage_stream.open("a", encoding="utf-8") as output:
                 output.write(json.dumps(result_event) + "\n")
-            assert call_tokens(live_report, attempt_id, "working", True) == "~10.1k tok · 1% cached", "Claude result total and cache share"
+            assert call_tokens(live_report, attempt_id, "working", True) == "~9.1k in / 1.0k out · 1% cached", "Claude result total and cache share"
             assert call_tokens(live_report, attempt_id, "working") == (
-                "~10.1k tok so far · 1% cached (cached input 100, new input 9000, output 1000)")
+                "~9.1k in / 1.0k out so far · 1% cached (cached 100, new 9000)")
         usage_stream.write_text(json.dumps({"type": "message_start"}) + "\n", encoding="utf-8")
         assert call_tokens(live_report, attempt_id, "working", True) == "", provider
         assert expected not in render(live_report, provider, 100, 30, view="tree"), provider
@@ -1902,7 +1906,7 @@ with tempfile.TemporaryDirectory() as activity_root:
     codex_multi_report = {"repo": {"path": str(activity_repo)}, "attempts": {"active_recent": [{
         "attempt_id": codex_multi_attempt, "state": "working", "panel": {
             "role": "worker", "room_id": "live-usage-room", "room_participant": codex_multi_call}}]}}
-    assert call_tokens(codex_multi_report, codex_multi_attempt, "working", True) == "~450 tok", \
+    assert call_tokens(codex_multi_report, codex_multi_attempt, "working", True) == "~360 in / 90 out", \
         "Codex completed turn usage must accumulate across turns"
     claude_long_call = "call-live-claude-long"
     claude_long_attempt = "attempt-live-claude-long"
@@ -1921,7 +1925,7 @@ with tempfile.TemporaryDirectory() as activity_root:
     claude_long_report = {"repo": {"path": str(activity_repo)}, "attempts": {"active_recent": [{
         "attempt_id": claude_long_attempt, "state": "working", "panel": {
             "role": "worker", "room_id": "live-usage-room", "room_participant": claude_long_call}}]}}
-    assert call_tokens(claude_long_report, claude_long_attempt, "working", True) == "~1900 tok · 6% cached", \
+    assert call_tokens(claude_long_report, claude_long_attempt, "working", True) == "~1.6k in / 300 out · 6% cached", \
         "Claude usage must retain messages before the 256 KiB tail, deduplicate IDs and report cache share"
     cache_call = "call-live-cache"
     cache_stream = activity_repo / "cache-usage.jsonl"
@@ -1968,24 +1972,24 @@ with tempfile.TemporaryDirectory() as activity_root:
     with patch.object(panel_activity, "_read_usage", side_effect=track_usage_read) as usage_reader:
         with patch.object(panel_activity, "_usage", wraps=panel_activity._usage) as usage_parser:
             first_frame = render(incremental_report, "codex", 100, 30, view="tree")
-            assert "~12 tok" in first_frame, first_frame
+            assert "~10 in / 2 out" in first_frame, first_frame
             first_count = usage_parser.call_count
             second_usage_line = json.dumps(codex_total_event(29, 3)) + "\n"
             with incremental_stream.open("a", encoding="utf-8") as output:
                 output.write(second_usage_line)
             second_frame = render(incremental_report, "codex", 100, 30, view="tree")
-            assert "~32 tok" in second_frame, second_frame
+            assert "~29 in / 3 out" in second_frame, second_frame
             assert usage_parser.call_count == first_count + 1, usage_parser.call_count
         assert [call.args[2] for call in usage_reader.call_args_list] == [0, first_usage_bytes], \
             usage_reader.call_args_list
         truncated_line = json.dumps(codex_total_event(4, 1)) + "\n"
         incremental_stream.write_text(truncated_line, encoding="utf-8")
-        assert "~5 tok" in render(incremental_report, "codex", 100, 30, view="tree")
+        assert "~4 in / 1 out" in render(incremental_report, "codex", 100, 30, view="tree")
         replacement_stream = activity_repo / "incremental-replacement.jsonl"
         replacement_line = json.dumps(codex_total_event(6, 1)) + "\n"
         replacement_stream.write_text(replacement_line, encoding="utf-8")
         os.replace(replacement_stream, incremental_stream)
-        assert "~7 tok" in render(incremental_report, "codex", 100, 30, view="tree")
+        assert "~6 in / 1 out" in render(incremental_report, "codex", 100, 30, view="tree")
         assert [call.args[2] for call in usage_reader.call_args_list[2:]] == [0, 0], \
             usage_reader.call_args_list
         assert read_sizes == [first_usage_bytes, len(second_usage_line.encode("utf-8")),
@@ -3676,7 +3680,7 @@ for unicode_tree in (True, False):
                             navigation=layout_nav)
     layout_rows = visible_tree_rows(layout_picture)
     finished_tree_rows = visible_tree_rows(render(finished_usage_tree, "codex", 100, 40, view="tree", unicode=unicode_tree))
-    assert all("12.0k tok" in next(line for line in finished_tree_rows if ident in line)
+    assert all("8.0k in / 4.0k out" in next(line for line in finished_tree_rows if ident in line)
                for ident in ("layout-review-a", "layout-review-b", "layout-builder", "layout-awaiting")), finished_tree_rows
     first_heading = next(line for line in layout_rows if "REVIEWERS (2)" in line)
     activity_heading = next(line for line in layout_rows if "Activity" in line and "calls" in line)
@@ -3931,10 +3935,10 @@ assert got["room_attempts"] == {"gone-review": {"state": "failed", "attempt_id":
                         "cache_write_tokens": 19603, "cache_in_input": False, "session_cumulative": False}}}, got.get("room_attempts")
 snapshot_nodes = {m["participant"]: m for m in graph_text.nodes(got)}
 assert snapshot_nodes["gone-live"]["lease_id"] == "lease-live", snapshot_nodes["gone-live"]
-assert snapshot_nodes["gone-review"]["tokens"] == "909 tok", snapshot_nodes["gone-review"]
-assert snapshot_nodes["gone-second"]["tokens"] == "999 tok", snapshot_nodes["gone-second"]
+assert snapshot_nodes["gone-review"]["tokens"] == "909 in / 0 out", snapshot_nodes["gone-review"]
+assert snapshot_nodes["gone-second"]["tokens"] == "999 in / 0 out", snapshot_nodes["gone-second"]
 from panel_view import call_tokens
-assert call_tokens(got, "r466-attempt", "done", True) == "126.3k tok · 84% cached", got["room_attempts"]
+assert call_tokens(got, "r466-attempt", "done", True) == "122.6k in / 3.7k out · 84% cached", got["room_attempts"]
 got["plan"] = {"tasks": [{"id": "t-a-live", "state": "running", "claimed_by": "flow-attempt",
                             "lease_id": "lease-live", "claimed_at": "2026-01-03T00:00:01Z"}]}
 assert graph_text.held_split(got) == (set(), set()), graph_text.held_split(got)

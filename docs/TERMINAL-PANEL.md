@@ -555,10 +555,12 @@ records. `REPO ACCEPT` and repo attention belong to shared repository state,
 including earlier work. Recent outcomes and successful native process exit do
 not establish acceptance of a task.
 
-Each worker and reviewer row shows `~12.3k tok` while a call runs and
-`12.3k tok` when it finishes, with the cached share appended when available
-(for example, `13.9m tok · 96% cached`). Selected details show cached input, new
-input and output separately. Input, cache and output are summed when the provider
+Each worker and reviewer row shows input and output separately while a call runs
+and when it finishes (for example, `~12.3k in / 2.3k out` and
+`12.3k in / 2.3k out`). The cached share is appended when available, such as
+`13.9m in / 50.3k out · 96% cached`; selected details add cached and new input
+(for example, `cached 13.4m, new 495.4k`). When output usage is unavailable, the
+row falls back to `N tok`. Input, cache and output are summed when the provider
 reports a breakdown, so Claude and Codex compare. Unknown usage leaves the row
 cell blank; missing data is never shown as 0. Narrow panes keep the short form
 or drop it before clipping the call's name.
@@ -568,9 +570,9 @@ read-only rows under it while their files were written in the last 10 minutes;
 they are not panel workers. The panel reads Claude's transcripts under
 `.claude/projects/<project>/<session>/subagents/`, matching the session by the
 room's stored hash, so no session id is kept. An Agent-tool row shows its
-transcript's total and output tokens (`2465 tok (out 450)`); a workflow row
+transcript's input and output tokens (`2.0k in / 450 out`); a workflow row
 shows the summed tokens of the agent transcripts under its run directory and
-how many of them are live (`3/5 agents live · 120.0k+ tok (out 20.0k)`). Only
+how many of them are live (`3/5 agents live · 100.0k+ in / 20.0k out`). Only
 the main this window shows has rows. Reads are bounded: only assistant records
 holding a usage object are parsed, one entry per message id; a refresh reads
 appended bytes (at most 8 MiB per transcript and 16 MiB per refresh, marked

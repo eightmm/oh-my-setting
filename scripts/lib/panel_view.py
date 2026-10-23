@@ -629,7 +629,8 @@ def model_usage(report):
         key = (row.get("provider"), model, attribution)
         item = groups.setdefault(key, {"name": "Mixed models" if ambiguous else MODEL_NAMES.get(model, model) or
             PROVIDER_NAMES.get(row.get("provider"), "Unknown"), "attribution": attribution,
-            "records": 0, "tokens": 0, "token_reports": 0, "cost": 0, "cost_reports": 0})
+            "records": 0, "tokens": 0, "token_reports": 0, "input_tokens": 0, "output_tokens": 0,
+            "pair_reports": 0, "cost": 0, "cost_reports": 0})
         item["records"] += 1
         usage = mapping(row.get("provider_usage"))
         session_total = usage.get("session_cumulative") is True
@@ -640,6 +641,11 @@ def model_usage(report):
         if tokens is not None:
             item["tokens"] += tokens
             item["token_reports"] += 1
+            output_tokens = count(usage.get("output_tokens"))
+            if output_tokens is not None and tokens >= output_tokens:
+                item["input_tokens"] += tokens - output_tokens
+                item["output_tokens"] += output_tokens
+                item["pair_reports"] += 1
         if cost is not None:
             item["cost"] += cost
             item["cost_reports"] += 1
@@ -663,6 +669,19 @@ def _cache_amount(value):
     return str(value)
 
 
+def token_amount(value):
+    """Format a token count, rounding four-digit counts to one decimal thousand."""
+    rounded = value if value < 1000 else (value + 50) // 100 * 100
+    return ("%s.%sk" % (rounded // 1000, rounded % 1000 // 100) if 1000 <= rounded < 10000
+            else _cache_amount(rounded))
+
+
+def token_pair(input_tokens, output_tokens, partial=False):
+    """Format billed input and generated output with the dashboard's rounded amounts."""
+    return "%s%s in / %s out" % (token_amount(input_tokens), "+" if partial else "",
+                                  token_amount(output_tokens))
+
+
 def _cache_input_breakdown(usage):
     cache_read = count(usage.get("cache_read_tokens"))
     input_tokens = count(usage.get("input_tokens"))
@@ -684,20 +703,19 @@ def _cache_input_breakdown(usage):
 
 
 def _usage_label(usage, total, short=False, live=False):
-    label = ("~" if live else "") + amount(total) + " tok"
+    output_tokens = count(usage.get("output_tokens"))
+    label = ("~" if live else "") + (token_pair(total - output_tokens, output_tokens)
+                                     if output_tokens is not None and total >= output_tokens
+                                     else amount(total) + " tok")
     if live and not short:
         label += " so far"
     parts = _cache_input_breakdown(usage)
     if parts is not None:
         cache_read, new_input, output_tokens, share = parts
-        if short or live:
-            label += " · %s%% cached" % share
+        label += " · %s%% cached" % share
         if not short:
-            label += " (cached input %s, new input %s, output %s)" % (
-                _cache_amount(cache_read), _cache_amount(new_input), _cache_amount(output_tokens))
+            label += " (cached %s, new %s)" % (_cache_amount(cache_read), _cache_amount(new_input))
         return label
-    if not short and not live:
-        label += " (out %s)" % amount(count(usage.get("output_tokens")))
     return label
 
 
@@ -729,7 +747,8 @@ def call_tokens(report, attempt_id, state, short=False):
     tokens = provider_usage_tokens(usage)
     if tokens is not None:
         if session_total:
-            return amount(tokens) + (" tok*" if short else " tok (session total)")
+            label = _usage_label(usage, tokens, short=short)
+            return label + ("*" if short else " (session total)")
         return _usage_label(usage, tokens, short=short)
     tokens = count(operation.get("tokens"))
     if tokens is None:
@@ -737,6 +756,12 @@ def call_tokens(report, attempt_id, state, short=False):
                        if attempt_id and item.get("attempt_id") == attempt_id), None)
     if tokens is None:
         return "tok n/a" if short else "tokens unreported"
+    output_tokens = count(usage.get("output_tokens"))
+    if output_tokens is None:
+        output_tokens = count(operation.get("output_tokens"))
+    if output_tokens is not None and tokens >= output_tokens:
+        label = _usage_label({"output_tokens": output_tokens}, tokens, short=short)
+        return label + ("*" if session_total and short else " (session total)" if session_total else "")
     return amount(tokens) + (" tok (session total)" if session_total else " tok")
 
 
@@ -764,11 +789,17 @@ def _live_call_tokens(report, attempt_id, short=False):
 def usage_labels(report, costs=False):
     labels = []
     for row in model_usage(report):
-        tokens = amount(row["tokens"]) if row["token_reports"] else "?"
-        if 0 < row["token_reports"] < row["records"]:
-            tokens += "+?"
         suffix = "(sel)" if row["attribution"] == "selected" else "(?)" if row["attribution"] == "unknown" else ""
-        label = "%s%s %s tok / %sx" % (row["name"], suffix, tokens, row["records"])
+        if row["token_reports"] and row["pair_reports"] == row["token_reports"]:
+            tokens = token_pair(row["input_tokens"], row["output_tokens"])
+            if row["token_reports"] < row["records"]:
+                tokens = tokens.replace(" in / ", "+? in / ", 1)
+            label = "%s%s %s / %sx" % (row["name"], suffix, tokens, row["records"])
+        else:
+            tokens = amount(row["tokens"]) if row["token_reports"] else "?"
+            if 0 < row["token_reports"] < row["records"]:
+                tokens += "+?"
+            label = "%s%s %s tok / %sx" % (row["name"], suffix, tokens, row["records"])
         if costs:
             cost = "$%.4g" % row["cost"] if row["cost_reports"] and number(row["cost"]) is not None else "$?"
             if 0 < row["cost_reports"] < row["records"]:
