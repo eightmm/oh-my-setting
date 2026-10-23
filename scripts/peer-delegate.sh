@@ -1068,6 +1068,35 @@ quote_tail() {  # quote_tail FILE BYTES LABEL
   tail -c "$bytes" "$file"
 }
 
+write_verify_sidecar() {  # Preserve the bounded verifier tail beside its artifact.
+  local sidecar="${artifact%.md}.verify.txt" temporary
+  case "$artifact" in
+    *.md) ;;
+    *) return 1 ;;
+  esac
+  temporary="$(mktemp "${sidecar}.XXXXXX")" || return 1
+  if ! quote_tail "$verify_out" 4000 "verification output" > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! chmod 600 "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  # Replace a link itself, never write through an artifact-sidecar symlink.
+  if [ -L "$sidecar" ]; then
+    rm -f "$sidecar" || { rm -f "$temporary"; return 1; }
+  elif [ -e "$sidecar" ] && [ ! -f "$sidecar" ]; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$sidecar"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  [ -f "$sidecar" ] && [ ! -L "$sidecar" ]
+}
+
 write_compiled_context() {
   [ "$CONTEXT_MANIFEST" -eq 1 ] || return 0
   [ -f "$context_bundle_file" ] || return 0
@@ -2114,12 +2143,18 @@ run_verify() {
     route_retry_terminal=1
     KEEP_WORKTREE=1
     cat "$verify_out" >> "$artifact"
+    if ! write_verify_sidecar; then
+      echo "warning: verification output sidecar could not be preserved" >&2
+    fi
     timeout_note="$(ma_verify_timeout_note "$verify_child_status")"
     printf '\n- verify exit: %s (%ss)%s\n- post-verify protected boundary: blocked\n' \
       "$verify_child_status" "$verify_seconds" "${timeout_note:+ — $timeout_note}" >> "$artifact"
     return 0
   fi
   cat "$verify_out" >> "$artifact"
+  if ! write_verify_sidecar; then
+    echo "warning: verification output sidecar could not be preserved" >&2
+  fi
   timeout_note="$(ma_verify_timeout_note "$verify_status")"
   printf '\n- verify exit: %s (%ss)%s\n' "$verify_status" "$verify_seconds" "${timeout_note:+ — $timeout_note}" >> "$artifact"
   if [ "$worker_status" -eq 0 ]; then

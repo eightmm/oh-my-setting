@@ -363,9 +363,9 @@ with patch.dict(os.environ, environment, clear=True), patch.object(panel.shutil,
 # traps exist. A bare background function inherits the delegate's EXIT cleanup
 # and used to delete the verifier output and frozen Git snapshot here.
 delegate_source = (root / "scripts/peer-delegate.sh").read_text()
-verify_functions = "\n".join(re.search(r"^" + name + r"\(\) \{\n.*?^\}",
+verify_functions = "\n".join(re.search(r"^" + name + r"\(\) \{[^\n]*\n.*?^\}",
                                       delegate_source, re.M | re.S).group()
-                             for name in ("stop_verify_heartbeat", "run_verify"))
+                             for name in ("quote_tail", "write_verify_sidecar", "stop_verify_heartbeat", "run_verify"))
 heartbeat_probe = r'''
 set -eu
 . "$1/scripts/lib/peer-common.sh"
@@ -373,7 +373,7 @@ eval "$3"
 worktree="$2"
 REPO="$2"
 verify_out="$2/verify-output"
-artifact="$2/artifact"
+artifact="$2/artifact.md"
 worker_guard_dir="$2/guard"
 mkdir "$worker_guard_dir"
 touch "$worker_guard_dir/snapshot"
@@ -392,6 +392,7 @@ run_verify_with_timeout() {
     sleep .01; tries=$((tries + 1))
   done
   test -f "$heartbeat_entered"
+  printf 'VERIFY-SIDECAR-TAIL\n'
 }
 worker_worktree_require_identity() { return 0; }
 delegate_attempt_transition() { return 0; }
@@ -403,6 +404,14 @@ run_verify
 test "$verify_status" = 0
 test -f "$verify_out"
 test -f "$worker_guard_dir/snapshot"
+sidecar="$2/artifact.verify.txt"
+test -f "$sidecar" && test ! -L "$sidecar"
+grep -Fq 'VERIFY-SIDECAR-TAIL' "$sidecar"
+python3 - "$sidecar" <<'PY'
+import os, stat, sys
+info = os.lstat(sys.argv[1])
+assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600, oct(info.st_mode)
+PY
 '''
 heartbeat_temporary = temporary / "verify-heartbeat"
 heartbeat_temporary.mkdir()
@@ -1533,15 +1542,105 @@ salvage_error({"exit": 124, "state": "timed_out"})
 # the verifier's exit. Such a write continues with its own verified patch.
 failed_verify = dict(write_last, reason_code="verification_failed")
 panel._rework_history = lambda rows, task, parents: [failed_verify]
+verify_artifact = project / ".oms/artifacts/verify-failure.md"
+verify_sidecar = project / ".oms/artifacts/verify-failure.verify.txt"
+verify_call_id = "verify-failure-call"
+verify_digest = ""
+verification_env = dict(room_env, OMS_DELEGATE_WORKTREE_ROOT=str(temporary / "delegate-worktrees"))
+verify_command = "python3 -m compileall first-round \\\n    && python3 -m py_compile repaired.py"
+real_dispatch_verifier = panel._dispatch_verifier
+real_module_dispatch_verifier = panel_dispatch._dispatch_verifier
+panel._dispatch_verifier = lambda *args, **kwargs: verify_command
+panel_dispatch._dispatch_verifier = lambda *args, **kwargs: verify_command
 panel.results = lambda repo, task: {"rows": [{"calls": [dict(
     attempt_id=failed_verify["attempt_id"], patch=".oms/artifacts/cont.patch", patch_sha256=good,
-    exit=1, verify_exit=1, answer="SAFE-CONTINUATION-SUMMARY")]}]}
+    exit=1, verify_exit=2, event_id=verify_call_id, answer="SAFE-CONTINUATION-SUMMARY")]}]}
+real_records = saved._records
+def write_verify_artifact(content, output):
+    global verify_digest
+    verify_artifact.write_text(content)
+    verify_sidecar.write_text(output)
+    verify_digest = hashlib.sha256(verify_artifact.read_bytes()).hexdigest()
+    saved._records = lambda repo, **kwargs: ([], [dict(
+        attempt_id=failed_verify["attempt_id"], kind="delegate", event_id=verify_call_id,
+        artifact=".oms/artifacts/verify-failure.md", artifact_sha256=verify_digest)])
 try:
     carried = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"}, brief, room_env)
     assert "tampered-marker" in carried[0].read_text(), carried[0].read_text()
+    write_verify_artifact("""## Verify
+
+- command: python3 -m compileall first-round
+
+FIRST-ROUND-TAIL
+- verify exit: 1
+
+## Verify (repair 1)
+
+- command: python3 -m py_compile repaired.py
+
+ARTIFACT-REPAIR-TAIL
+- verify exit: 2
+
+## Exit
+
+1
+""", "## Results\n\nSIDECAR-RESULTS-TAIL\n")
+    repaired = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"},
+                                 brief, verification_env)[0].read_text()
+    assert verify_command in repaired, repaired
+    assert "exit: 2" in repaired and "## Results" in repaired and "SIDECAR-RESULTS-TAIL" in repaired, repaired
+    assert "ARTIFACT-REPAIR-TAIL" not in repaired and "FIRST-ROUND-TAIL" not in repaired, repaired
+
+    verify_sidecar.unlink()
+    missing_sidecar = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"},
+                                        brief, verification_env)[0].read_text()
+    assert "verification output unavailable" in missing_sidecar, missing_sidecar
+    sidecar_target = temporary / "verify-sidecar-target.txt"
+    sidecar_target.write_text("SIDECAR-SYMLINK-LEAK\n")
+    verify_sidecar.symlink_to(sidecar_target)
+    symlink_sidecar = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"},
+                                         brief, verification_env)[0].read_text()
+    assert "SIDECAR-SYMLINK-LEAK" not in symlink_sidecar, symlink_sidecar
+    assert "verification output unavailable" in symlink_sidecar, symlink_sidecar
+    verify_sidecar.unlink()
+    verify_sidecar.write_text("x" * 9000)
+    oversized_sidecar = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"},
+                                           brief, verification_env)[0].read_text()
+    assert "x" * 9000 not in oversized_sidecar, oversized_sidecar
+    assert "verification output unavailable" in oversized_sidecar, oversized_sidecar
+
+    windows_trace = (r'Traceback (most recent call last):' + "\n" +
+                     r'  File "C:\Users\worker\source\runner.py", line 9' + "\nWINDOWS-PATH-TAIL\n")
+    write_verify_artifact("## Verify\n\n- command: ignored from markdown\n", windows_trace)
+    windows_continuation = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"},
+                                             brief, verification_env)[0].read_text()
+    assert "## Failing Verification" not in windows_continuation, windows_continuation
+    assert "C:\\Users\\worker" not in windows_continuation and "WINDOWS-PATH-TAIL" not in windows_continuation
+
+    write_verify_artifact("## Verify\n\n- command: ignored from markdown\n", "SAFE-VERIFY-TAIL\n")
+    with patch.object(panel_dispatch, "_dispatch_verifier", return_value=r'python "C:\Users\worker\runner.py"'):
+        unsafe_command = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"},
+                                           brief, verification_env)[0].read_text()
+    assert "C:\\Users\\worker" not in unsafe_command, unsafe_command
+    assert "verification command unavailable" in unsafe_command and "SAFE-VERIFY-TAIL" in unsafe_command
+
+    cyclic = project / "verify-cycle"
+    cyclic.symlink_to(cyclic)
+    try:
+        write_verify_artifact("## Verify\n\n- command: true\n", ("File \"%s/verify-cycle/output.txt\", line 7\n"
+                               "CYCLIC-VERIFY-TAIL\n") % project.resolve())
+        cyclic_continuation = panel.continuation(project, "claude", None, "room-inspection", {"provider": "codex"},
+                                                  brief, verification_env)[0].read_text()
+        assert ("CYCLIC-VERIFY-TAIL" not in cyclic_continuation
+                and "## Failing Verification" not in cyclic_continuation), cyclic_continuation
+    finally:
+        cyclic.unlink()
 finally:
     panel._rework_history = real_history
     panel.results = real_results
+    panel._dispatch_verifier = real_dispatch_verifier
+    panel_dispatch._dispatch_verifier = real_module_dispatch_verifier
+    saved._records = real_records
 write_last = failed_verify
 salvage_error({"exit": 1, "verify_exit": 125, "state": "failed"})  # verifier never ran
 salvage_error({"exit": 1, "verify_exit": 124, "state": "failed"})  # verifier timed out

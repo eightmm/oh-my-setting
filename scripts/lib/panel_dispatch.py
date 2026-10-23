@@ -387,6 +387,73 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             verified_patch(repo, call)
         except (OSError, ValueError, TypeError):
             verified_failure = False
+    verification_section = ""
+    unsafe_verification_path = False
+    if verified_failure and call.get("reason_code") != "worker_authority_violation":
+        command = "verification command unavailable"
+        output = "verification output unavailable"
+        try:
+            import panel_results
+            import terminal_panel
+            parent = next((row for row in rows if row.get("attempt_id") == last.get("parent_attempt_id")), {})
+            refs = last.get("refs", {})
+            room_id = refs.get("panel_room_id")
+            member = refs.get("panel_room_participant")
+            caller = parent.get("refs", {}).get("panel_room_participant", parent.get("attempt_id"))
+            verify_command = (_dispatch_verifier(repo, room_id, member, caller, task_id=task_id)
+                              if isinstance(room_id, str) and isinstance(member, str)
+                              and isinstance(caller, str) and caller else None)
+
+            def outbound_clean(value):
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8") as candidate:
+                    candidate.write(value)
+                    candidate.flush()
+                    checked = subprocess.run(
+                        ["bash", "-c", '. "$1"; ma_validate_outbound_prompt "$2"',
+                         "oms-continuation-scan", str(terminal_panel.OUTBOUND_SCANNER), candidate.name],
+                        capture_output=True, text=True, check=False)
+                return checked.returncode == 0
+
+            _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
+            record = next((row for row in reversed(artifacts)
+                           if row.get("attempt_id") == last["attempt_id"]
+                           and row.get("kind") == "delegate"
+                           and row.get("event_id") == call.get("event_id")
+                           and row.get("artifact")), None)
+            if record:
+                artifact = record.get("artifact")
+                if isinstance(artifact, str) and artifact.endswith(".md"):
+                    sidecar = artifact[:-3] + ".verify.txt"
+                    raw = panel_results._read(repo, sidecar, 8192, missing=True).decode("utf-8", errors="replace")
+                    if raw:
+                        try:
+                            import panel_review
+                            raw = panel_review._relativize_quoted_paths(raw, [str(Path(repo).resolve())])
+                        except RuntimeError:
+                            unsafe_verification_path = True
+                    if raw and panel_results._contains_outbound_machine_path(raw):
+                        unsafe_verification_path = True
+                    elif raw and outbound_clean(raw):
+                        encoded = raw.encode("utf-8")
+                        if len(encoded) > 4000:
+                            encoded = encoded[-4000:]
+                            encoded = encoded[encoded.find(b"\n") + 1:] if b"\n" in encoded else b""
+                        output = encoded.decode("utf-8", errors="replace") or "verification output unavailable"
+
+            if (isinstance(verify_command, str) and verify_command.strip()
+                    and not panel_results._contains_outbound_machine_path(verify_command)
+                    and outbound_clean(verify_command)):
+                command = verify_command
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError, subprocess.SubprocessError):
+            pass
+        if not unsafe_verification_path:
+            backticks = max((len(match.group(0)) for match in re.finditer(r"`+", command + output)), default=0)
+            fence = "`" * max(3, backticks + 1)
+            command_block = "%ssh\n%s\n%s" % (fence, command, fence)
+            output_block = "%stext\n%s\n%s" % (fence, output, fence)
+            verification_section = ("\n\n## Failing Verification\n\nCommand:\n%s\n\n- exit: %s\n\n"
+                                    "Output tail:\n%s\n" %
+                                    (command_block, call.get("verify_exit"), output_block))
     eligible_result = (linked_call and not call.get("guard")
                        and call.get("reason_code") != "worker_authority_violation"
                        and (successful_call or verified_failure))
@@ -478,8 +545,8 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             baseline = _codex_resume_usage_baseline(usage)
             if baseline:
                 env["OMS_RESUME_USAGE_BASELINE"] = baseline
-        preamble = ("Your earlier work was on %s; the repository is now at %s.%s New instructions follow.\n\n"
-                    % (old, head, where))
+        preamble = ("Your earlier work was on %s; the repository is now at %s.%s%s\nNew instructions follow.\n\n"
+                    % (old, head, where, verification_section))
         note = "continuing %s in its native session; %s" % (task_id, "verified patch carried forward" if patch and body else
                                                           "no patch transferred")
     else:
@@ -489,10 +556,13 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                   if session and ran != route["provider"] else
                   "the earlier session is not recorded or no longer on disk")
         preamble = ("A fresh worker continues earlier work on %s (%s). The repository is now at %s.%s "
-                    "Earlier summary: %s\nNew instructions follow.\n\n" % (task_id, reason, head, where, summary))
+                    "Earlier summary: %s%s\nNew instructions follow.\n\n"
+                    % (task_id, reason, head, where, summary, verification_section))
         note = "no resumable session (%s); fresh worker transfers %s and %s" % (
             reason, "verified patch" if patch and body else "no patch",
             "recorded summary" if has_summary else "no verified summary")
+    if verification_section:
+        note += "; verification failure attached"
     if drift_note:
         note += "; " + drift_note
     text = preamble + Path(brief).read_text(encoding="utf-8")
@@ -1336,10 +1406,11 @@ def _save_dispatch_output(fd, tail):
         os.fsync(log.fileno())
 
 
-def _dispatch_verifier(repo, room_id, member, caller):
+def _dispatch_verifier(repo, room_id, member, caller, task_id=None):
     from terminal_panel import _dispatch_call_record
     call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
-    if not call or call.get("schema") != 2:
+    if (not call or call.get("schema") != 2
+            or task_id is not None and call.get("task_id") != task_id):
         return None
     anchor = dispatch_store.read(repo, member + "-launch.json")
     verify = anchor.get("verify") if isinstance(anchor, dict) else None
