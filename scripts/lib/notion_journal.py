@@ -37,6 +37,7 @@ NOTION_COLLAPSED_SECTIONS = frozenset(
         "완료하거나 검증한 작업", "Completed or verified",
         "아직 검증되지 않은 것", "Not yet verified",
         "세션", "Sessions",
+        "리뷰", "Reviews", "커밋", "Commits",
     }
 )
 NOTION_MAX_INLINE_RETRY_DELAY = 2.0

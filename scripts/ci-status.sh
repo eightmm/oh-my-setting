@@ -222,7 +222,7 @@ case "$AHEAD" in *[!0-9]*) AHEAD="" ;; esac
 # HEAD's own run in the same single call rather than only the newest one.
 gh_rc=0
 json="$("$GH" run list --branch "$branch" --limit 10 \
-  --json status,conclusion,workflowName,headSha,url 2>/dev/null)" || gh_rc=$?
+  --json status,conclusion,workflowName,headSha,url,attempt 2>/dev/null)" || gh_rc=$?
 if [ "$gh_rc" -ne 0 ]; then
   echo "ci-status: gh not authenticated or unreachable (try: gh auth login)" >&2
   exit 2
@@ -339,6 +339,10 @@ if ledger and chosen:
     sha = r.get("headSha", "")
     row = {"schema": 1, "ts": os.environ["OMS_CI_TS"], "branch": branch,
            "sha": sha, "status": status, "conclusion": concl, "url": r.get("url", "")}
+    if r.get("attempt") is not None:
+        row["attempt"] = r["attempt"]
+    if r.get("workflowName"):
+        row["workflow"] = r["workflowName"]
     try:
         pr = json.loads(os.environ.get("OMS_CI_PR_JSON", "") or "{}")
     except Exception:

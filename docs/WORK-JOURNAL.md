@@ -64,12 +64,14 @@ allowed top-level Stop, the final `HEAD` is reconciled locally. Periodic
 stable content hashes prevent repeated publication of unchanged summaries.
 
 Session capture keeps the beginning and end of long messages within the existing
-character budgets, marking omitted middle text. Handoff events retain the
-assistant summary across Markdown headings and lines, bounded to 2,000 UTF-8
-bytes with the beginning and end preserved. Historical request/contract sections
-are excluded. Verification claims remain prose, never a `passed` receipt; no
-model summarizer or extra event is added. Existing events and Notion pages are
-not automatically rewritten by this change.
+character budgets, marking omitted middle text. Handoff events retain only the
+first assistant-summary sentence, bounded to 120 characters; historical
+request/contract sections are excluded. Verification claims remain prose, never
+a `passed` receipt; no model summarizer or extra event is added.
+
+Panel owner finalization and peer-review outcomes are also observed through the
+same journal adapter. Finalization capture is non-blocking and fail-open; review
+events include the task ID from the adjacent review-scope artifact when present.
 
 An event ID is derived, in order, from an authoritative source record ID, a
 caller operation ID, or a hash of normalized stable source fields. Current time
@@ -85,6 +87,15 @@ has no timezone database, capture continues in the visibly recorded
 zone. Late events therefore rematerialize their original day and week.
 Corrections append a new event with `supersedes_event_id`; canonical events are
 never edited.
+
+CI observations use the provider run ID, or the stable run URL when the caller
+does not include an ID, as their source identity. Poll timestamps never form
+that identity, so repeated polls of one run deduplicate while separate runs
+for the same commit and conclusion remain distinct. Existing
+`SHA:conclusion` identities remain readable and are not rewritten. The first
+run observed after this identity change can add one duplicate event for a run
+already present in an older journal; subsequent captures of that run deduplicate
+under its run identity.
 
 Set `OMS_WORK_JOURNAL=0` to disable capture and materialization. Work Journal is
 otherwise on by default.
@@ -278,11 +289,14 @@ property-schema fingerprint scopes local sync state, so changing the target
 resynchronizes summaries instead of reusing page IDs from the old mirror.
 
 The mirror writes native Notion heading, paragraph, list, to-do, callout,
-toggle, and divider blocks rather than one large code block. Daily decisions
-remain prominent callouts; weekly decisions stay a compact dated list so a busy
-week does not open as a wall of callout boxes. Result and interpretation detail
-stays visually attached to its work item, while evidence IDs remain in the
-complete local summary. It uses a stable summary key and content hash:
+toggle, and divider blocks rather than one large code block. Daily pages open
+with a localized digest of completed work, failures or blockers, and next
+actions, then retain the source summary unchanged under `상세 기록` / `Details`.
+The digest excludes handoffs from its daily counts; weekly pages retain their
+dated handoff content. Task outcomes come from owner finalization records, and
+CI is joined to its commit by SHA. Weekly decisions stay a compact dated list.
+Renderer changes apply to past pages on rebuild; no event schema migration or
+extra summarization step is needed. It uses a stable summary key and content hash:
 unchanged content is a no-op, changed content updates the known page, and
 missing local sync state first queries by key before creating a page.
 HTTP 429 and retryable 5xx responses use bounded retries and respect

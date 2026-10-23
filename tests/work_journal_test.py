@@ -104,6 +104,24 @@ class JournalTestCase(unittest.TestCase):
         self.assertEqual("2026-07-31", event["local_date"])
         self.assertEqual("2026-W31", event["iso_week"])
 
+    def test_rebuild_enriches_legacy_review_from_existing_scope_reference(self):
+        review_dir = self.repo / ".oms/artifacts/review"
+        review_dir.mkdir(parents=True)
+        stamp = "20260731T020000Z-42"
+        synthesis = review_dir / ("_synthesis-review-" + stamp + ".md")
+        synthesis.write_text("review", encoding="utf-8")
+        (review_dir / ("_scope-" + stamp + ".json")).write_text(
+            json.dumps({"candidate": {"task_id": "task-past"}}), encoding="utf-8")
+        legacy = base_event("legacy-review")
+        legacy.update({"event_type": "patch_review",
+                       "source": {"type": "peer-review", "id": "review-old"},
+                       "outcome": {"summary": "Peer review outcome passed", "status": "success"},
+                       "refs": [{"type": "peer-review", "path": synthesis.relative_to(self.repo).as_posix()}]})
+        self.store.record_event(legacy)
+        self.store.materialize()
+        daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+        self.assertIn("Peer review outcome passed: task-past", daily)
+
     def test_unsupported_and_malformed_events_are_quarantined(self):
         self.store._ensure_layout()
         self.store.events_path.write_text(
@@ -328,6 +346,13 @@ class JournalTestCase(unittest.TestCase):
 
     def test_daily_weekly_and_rebuild_from_canonical_events(self):
         event, _ = self.store.record_event(base_event())
+        handoff = {
+            **base_event("handoff"), "event_type": "handoff",
+            "source": {"type": "session-handoff", "id": "handoff-1"},
+            "outcome": {"summary": "Resumed task status | noisy transcript", "status": "recorded"},
+            "verification_status": "not_verified",
+        }
+        self.store.record_event(handoff)
         self.store.materialize()
         daily = self.store.daily_dir / "2026-07-31.md"
         weekly = self.store.weekly_dir / "2026-W31.md"
@@ -337,13 +362,22 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("# Daily Work Journal — 2026-07-31", text)
         self.assertIn("## 검증된 것", text)
         self.assertIn(event["event_id"], text)
+        weekly_presentation = wj.notion_presentation(
+            self.store.summary_text("weekly", "2026-W31"), self.store.load_events()
+        )
+        self.assertIn("Resumed task status", weekly_presentation)
+        self.assertIn("noisy transcript", weekly_presentation)
+        daily_presentation = wj.notion_presentation(
+            self.store.summary_text("daily", "2026-07-31"), self.store.load_events()
+        )
+        self.assertIn("기록 1", daily_presentation)
         shutil.rmtree(self.store.daily_dir)
         shutil.rmtree(self.store.weekly_dir)
         self.store.index_path.write_text("{damaged", encoding="utf-8")
         self.store.rebuild()
         self.assertTrue(daily.is_file())
         self.assertTrue(weekly.is_file())
-        self.assertEqual(1, json.loads(self.store.index_path.read_text())["event_count"])
+        self.assertEqual(2, json.loads(self.store.index_path.read_text())["event_count"])
 
     def test_summaries_open_with_counts_and_judgment_context(self):
         decided = base_event("decided")
@@ -358,6 +392,16 @@ class JournalTestCase(unittest.TestCase):
         pending["verification_status"] = "not_verified"
         self.store.record_event(decided)
         self.store.record_event(pending)
+        blocked_first, _ = self.store.record_event({
+            **base_event("blocked-first", "2026-07-29T02:00:00Z"),
+            "blocker": "Repeated blocker",
+            "correlation": {"task_id": "task-weekly-blocked"},
+        })
+        blocked_second, _ = self.store.record_event({
+            **base_event("blocked-second", "2026-07-30T02:00:00Z"),
+            "blocker": "Repeated blocker",
+            "correlation": {"task_id": "task-weekly-blocked"},
+        })
         self.store.materialize()
 
         daily = self.store.summary_text("daily", "2026-07-31")
@@ -375,20 +419,20 @@ class JournalTestCase(unittest.TestCase):
             daily,
         )
         self.assertIn("## 한눈에 보기", weekly)
-        self.assertIn("기록 2", weekly)
+        self.assertIn("기록 4", weekly)
         self.assertIn("미검증 1", weekly)
         self.assertIn(
             "- 2026-07-31 · map-style sharding을 유지한다"
             " — 관련 작업: focused verification passed",
             weekly,
         )
+        self.assertIn("Repeated blocker (반복 2회)", weekly)
+        self.assertIn(wj._event_citation(blocked_first), weekly)
+        self.assertIn(wj._event_citation(blocked_second), weekly)
 
         daily_notion = wj.notion_presentation(daily)
         weekly_notion = wj.notion_presentation(weekly)
-        self.assertIn(
-            "> map-style sharding을 유지한다 — 관련 작업: focused verification passed",
-            daily_notion,
-        )
+        self.assertEqual(daily, daily_notion)
         self.assertIn(
             "- 2026-07-31 · map-style sharding을 유지한다"
             " — 관련 작업: focused verification passed",
@@ -832,6 +876,45 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("# Daily Work Journal — 2026-07-31", refreshed)
         self.assertIn("## 한눈에 보기", refreshed)
 
+        calls = []
+        class FakeExporter:
+            @classmethod
+            def from_config(cls, **_settings):
+                return cls()
+            def upsert(self, key, _title, content_hash, content, **_kwargs):
+                calls.append((key, content_hash, content))
+                return {"page_id": "page"}
+        fake_module = type(sys)("notion_journal")
+        fake_module.NotionJournalExporter = FakeExporter
+        settings = {
+            "data_source_id": "ds-1", "database_id": "",
+            **{key: key for key in (
+                "title_property", "key_property", "hash_property", "project_property",
+                "kind_property", "period_property", "blocker_property",
+                "sessions_property", "commits_property", "verified_property")},
+        }
+        patches = [
+            mock.patch.dict(sys.modules, {"notion_journal": fake_module}),
+            mock.patch.object(wj, "notion_repo_excluded", lambda _repo: False),
+            mock.patch.object(wj, "notion_auth_available", lambda _settings: True),
+            mock.patch.object(wj, "notion_settings", lambda: settings),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.store.sync_notion(force=True, max_per_tick=20, budget_seconds=2)
+        first = next(row for row in calls if row[0].endswith(":daily:2026-07-31"))
+        calls.clear()
+        original = wj.notion_presentation
+        with mock.patch.object(wj, "notion_presentation", lambda content, events=None: original(content, events) + "\n\nPresentation refresh"):
+            self.store.sync_notion(force=True, max_per_tick=20, budget_seconds=2)
+            second = next(row for row in calls if row[0].endswith(":daily:2026-07-31"))
+            self.assertNotEqual(first[1], second[1])
+            self.assertIn("Presentation refresh", second[2])
+            calls.clear()
+            self.store.sync_notion(force=True, max_per_tick=20, budget_seconds=2)
+            self.assertFalse(calls)
+
     def test_comparable_metric_trend_only(self):
         for source, value in (("run-1", 0.7), ("run-2", 0.8)):
             payload = base_event(source)
@@ -1244,7 +1327,7 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("\n  - 결과: success", summary)
         self.assertIn("\n  - 해석: token expiry가 해소됨", summary)
 
-    def test_notion_mirror_of_a_rendered_day_carries_no_raw_reference(self):
+    def test_notion_fallback_daily_page_is_unchanged_without_events(self):
         sha = "0e0390aa95893b50e14bdf78d60f5c5d3090cf8d"
         handoff = "b" * 64
         payload = base_event("evidence-leak")
@@ -1260,12 +1343,9 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("  - 관련 evidence: git-commit:%s" % sha, daily)
 
         rendered = wj.notion_presentation(daily)
-        self.assertNotRegex(rendered, r"[0-9a-f]{40}")
-        self.assertNotIn(handoff, rendered)
-        self.assertNotIn("관련 evidence", rendered)
-        self.assertIn("- 작업: focused verification passed", rendered)
+        self.assertEqual(daily, rendered)
 
-    def test_notion_mirror_folds_a_bullet_into_its_highest_ranked_section(self):
+    def test_notion_fallback_daily_page_keeps_all_source_sections(self):
         alpha = base_event("alpha")
         alpha["outcome"] = {"summary": "alpha check passed", "status": "success"}
         beta = base_event("beta", "2026-07-31T02:30:00Z")
@@ -1279,23 +1359,7 @@ class JournalTestCase(unittest.TestCase):
         self.assertEqual(2, daily.count("- alpha check passed"))
 
         rendered = wj.notion_presentation(daily)
-        self.assertEqual(1, rendered.count("- alpha check passed"))
-        self.assertEqual(1, rendered.count("- beta still open"))
-        # 검증된 것 and 아직 검증되지 않은 것 outrank 핵심 진전, which the
-        # source file lists first, so the fold has to follow the presented
-        # order rather than the file order.
-        self.assertLess(
-            rendered.index("## 검증된 것"), rendered.index("- alpha check passed")
-        )
-        self.assertLess(
-            rendered.index("## 아직 검증되지 않은 것"),
-            rendered.index("- beta still open"),
-        )
-        # Having given up every bullet, the duplicate progress listing goes.
-        self.assertNotIn("## 핵심 진전", rendered)
-        # The by-project section keeps its own labeled bullets and heading.
-        self.assertIn("### demo", rendered)
-        self.assertIn("- 작업: alpha check passed", rendered)
+        self.assertEqual(daily, rendered)
 
     def test_daily_sessions_section_and_decision_callout_marks(self):
         alpha = base_event("alpha")
@@ -1311,19 +1375,7 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("- sess-alpha-one (2 event(s))", daily)
         self.assertIn("oms session-handoff list", daily)
 
-        rendered = wj.notion_presentation(daily)
-        # The decision keeps its text but trades its bullet for a quote mark,
-        # which the exporter renders as a callout.
-        self.assertIn(
-            "> going with map-style sharding"
-            " — 관련 작업: focused verification passed",
-            rendered,
-        )
-        self.assertNotIn("- going with map-style sharding", rendered)
-        # Sessions are reference material: they rank below the verified work.
-        self.assertLess(
-            rendered.index("## 검증된 것"), rendered.index("## 세션")
-        )
+        self.assertEqual(daily, wj.notion_presentation(daily))
 
     def test_daily_period_aggregates_count_sessions_commits_verified(self):
         alpha = base_event("alpha")
@@ -1552,6 +1604,246 @@ class ObserveDiagnosticsTest(unittest.TestCase):
         self.assertIn("passed", result.stderr)
         self.assertFalse((self.repo / ".oms" / "work-journal" / "events.jsonl").exists())
 
+    def test_peer_review_observation_carries_task_from_scope(self):
+        artifacts = self.repo / ".oms" / "artifacts" / "review"
+        artifacts.mkdir(parents=True)
+        stamp = "20261023T014506Z-3285606"
+        self.source = artifacts / ("_synthesis-review-" + stamp + ".md")
+        self.source.write_text("review outcome", encoding="utf-8")
+        (artifacts / ("_scope-" + stamp + ".json")).write_text(
+            json.dumps({"schema": 1, "candidate": {"task_id": "task-123"}}),
+            encoding="utf-8")
+        result = self.observe("--source-type", "peer-review", "--source-id", "review-1",
+                              "--outcome", "Peer review outcome passed",
+                              "--outcome-status", "success")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads((self.repo / ".oms/work-journal/events.jsonl").read_text().splitlines()[-1])
+        self.assertEqual("task-123", row["correlation"]["task_id"])
+        self.assertIn("task-123", row["outcome"]["summary"])
+
+        task_ids = ["job-" + "y" * 121 + suffix for suffix in ("a", "b")]
+        verdicts = (("passed", "success", "passed"), ("failed", "failure", "failed"))
+        for index, (task_id, (verdict, status, verification)) in enumerate(zip(task_ids, verdicts)):
+            stamp = "20261023T014506Z-%d" % (3285607 + index)
+            review_dir = artifacts
+            source = review_dir / ("_synthesis-review-" + stamp + ".md")
+            self.source = source
+            source.write_text("review outcome", encoding="utf-8")
+            (review_dir / ("_scope-" + stamp + ".json")).write_text(
+                json.dumps({"schema": 1, "candidate": {"task_id": task_id}}),
+                encoding="utf-8")
+            result = self.observe(
+                "--source-type", "peer-review", "--source-id", "long-review-%d" % index,
+                "--outcome", "Peer review outcome " + verdict,
+                "--outcome-status", status, "--verification-status", verification,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+        rows = [json.loads(line) for line in
+                (self.repo / ".oms/work-journal/events.jsonl").read_text().splitlines()]
+        long_rows = [row for row in rows if row["source"]["type"] == "peer-review"
+                     and row.get("correlation", {}).get("task_id", "").startswith("job-" + "y" * 121)]
+        self.assertEqual(task_ids, [row["correlation"]["task_id"] for row in long_rows])
+        review_sections = wj._daily_notion_sections(long_rows)
+        reviews = next(section for section in review_sections if section and section["title"] in {"리뷰", "Reviews"})
+        self.assertEqual(2, len(reviews["lines"]) - 1)
+        self.assertTrue(any("통과" in line or "passed" in line for line in reviews["lines"]))
+        self.assertTrue(any("실패" in line or "failed" in line for line in reviews["lines"]))
+
+    def test_panel_result_source_captures_task_and_summary(self):
+        result_data = {"schema": 1, "kind": "oms-panel-result", "task_id": "task-456",
+                       "outcome": "completed", "summary": "Shipped the renderer.\nMore detail.",
+                       "revision": "abcdef123456"}
+        self.source.write_text(json.dumps(result_data), encoding="utf-8")
+        result = self.observe("--source-type", "panel-result", "--source-id", "task-456:abcdef123456",
+                              "--outcome", "Task task-456 completed: Shipped the renderer. (landed commit 1234567)",
+                              "--outcome-status", "completed", "--verification-status", "passed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads((self.repo / ".oms/work-journal/events.jsonl").read_text().splitlines()[-1])
+        self.assertEqual("task-456", row["correlation"]["task_id"])
+        self.assertIn("Shipped the renderer.", row["outcome"]["summary"])
+
+        task_ids = ["job-" + "x" * 121 + suffix for suffix in ("a", "b")]
+        for index, task_id in enumerate(task_ids):
+            self.source.write_text(json.dumps({
+                "schema": 1, "kind": "oms-panel-result", "task_id": task_id,
+                "outcome": "completed", "summary": "Long task %d" % index,
+                "revision": "long-revision-%d" % index,
+            }), encoding="utf-8")
+            result = self.observe("--source-type", "panel-result",
+                                  "--source-id", "long-task-%d" % index)
+            self.assertEqual(0, result.returncode, result.stderr)
+        rows = [json.loads(line) for line in
+                (self.repo / ".oms/work-journal/events.jsonl").read_text().splitlines()]
+        long_ids = [row["correlation"]["task_id"] for row in rows
+                    if row["correlation"]["task_id"].startswith("job-" + "x" * 121)]
+        self.assertEqual(task_ids, long_ids)
+
+    def test_ci_capture_distinguishes_recovered_runs_and_keeps_legacy_identity(self):
+        sha = "d" * 40
+        self.source.write_text(json.dumps({
+            "sha": sha, "conclusion": "success", "databaseId": 100,
+            "updatedAt": "2026-10-23T01:00:00Z",
+        }), encoding="utf-8")
+        self.assertEqual(0, self.observe(
+            "--source-type", "ci-status", "--source-id", sha + ":success",
+        ).returncode)
+        # A legacy record without a provider run identity keeps its original
+        # SHA:conclusion key even when each poll carries a fresh timestamp.
+        self.source.write_text(json.dumps({
+            "sha": sha, "conclusion": "success", "ts": "2026-10-23T01:01:00Z",
+        }), encoding="utf-8")
+        self.assertEqual(0, self.observe("--source-type", "ci-status").returncode)
+        self.assertEqual(1, len((self.repo / ".oms/work-journal/events.jsonl").read_text().splitlines()))
+
+        for run_id, conclusion, stamp in (
+            (101, "success", "2026-10-23T02:00:00Z"),
+            (102, "failure", "2026-10-23T03:00:00Z"),
+            (103, "success", "2026-10-23T04:00:00Z"),
+        ):
+            self.source.write_text(json.dumps({
+                "sha": sha, "conclusion": conclusion,
+                "url": "https://example.invalid/actions/runs/%d" % run_id,
+                "attempt": 1, "ts": stamp,
+            }), encoding="utf-8")
+            result = self.observe("--source-type", "ci-status")
+            self.assertEqual(0, result.returncode, result.stderr)
+        # A production-shaped repeated poll has the same run URL but a newer
+        # polling timestamp; its event identity must stay unchanged.
+        for stamp in ("2026-10-23T05:00:00Z", "2026-10-23T05:01:00Z"):
+            self.source.write_text(json.dumps({
+                "sha": sha, "conclusion": "success",
+                "url": "https://example.invalid/actions/runs/104",
+                "attempt": 1, "ts": stamp,
+            }), encoding="utf-8")
+            result = self.observe("--source-type", "ci-status")
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        for attempt, conclusion, stamp in (
+            (1, "failure", "2026-10-23T06:00:00Z"),
+            (2, "success", "2026-10-23T07:00:00Z"),
+        ):
+            self.source.write_text(json.dumps({
+                "sha": sha, "conclusion": conclusion,
+                "url": "https://example.invalid/actions/runs/105",
+                "attempt": attempt, "ts": stamp,
+            }), encoding="utf-8")
+            result = self.observe("--source-type", "ci-status")
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        # Older gh rows may omit attempt: the conclusion still distinguishes
+        # a rerun's failed and successful observations for the same run URL.
+        for conclusion, stamp in (
+            ("failure", "2026-10-23T08:00:00Z"),
+            ("success", "2026-10-23T09:00:00Z"),
+        ):
+            self.source.write_text(json.dumps({
+                "sha": sha, "conclusion": conclusion,
+                "url": "https://example.invalid/actions/runs/106", "ts": stamp,
+            }), encoding="utf-8")
+            result = self.observe("--source-type", "ci-status")
+            self.assertEqual(0, result.returncode, result.stderr)
+        rows = [json.loads(line) for line in
+                (self.repo / ".oms/work-journal/events.jsonl").read_text().splitlines()]
+        ci_rows = [row for row in rows if row["source"]["type"] == "ci-status"]
+        self.assertEqual(9, len(ci_rows))
+        self.assertEqual(3, len({row["event_id"] for row in ci_rows[1:4]}))
+        self.assertEqual(["success", "failure", "success"], [
+            row["outcome"]["status"] for row in ci_rows[1:4]
+        ])
+        self.assertEqual(sha + ":success", ci_rows[0]["source"]["id"])
+        self.assertEqual(sha + ":run-url:https://example.invalid/actions/runs/104:attempt:1:success",
+                         ci_rows[4]["source"]["id"])
+        self.assertEqual(sha + ":run-url:https://example.invalid/actions/runs/105:attempt:2:success",
+                         ci_rows[6]["source"]["id"])
+        self.assertEqual(sha + ":run-url:https://example.invalid/actions/runs/106:success",
+                         ci_rows[8]["source"]["id"])
+        for workflow, conclusion, stamp in (
+            ("required-tests", "failure", "2026-10-23T10:00:00Z"),
+            ("docs", "success", "2026-10-23T11:00:00Z"),
+        ):
+            self.source.write_text(json.dumps({
+                "sha": sha, "conclusion": conclusion,
+                "url": "https://example.invalid/actions/runs/107-%s" % workflow,
+                "attempt": 1, "workflow": workflow, "ts": stamp,
+            }), encoding="utf-8")
+            result = self.observe("--source-type", "ci-status")
+            self.assertEqual(0, result.returncode, result.stderr)
+        # Older records can lack workflow metadata even when they carry the
+        # provider URL. A later row for that same run supersedes the failure.
+        for row in (
+            {"sha": sha, "conclusion": "failure",
+             "url": "https://example.invalid/actions/runs/109", "attempt": 1,
+             "ts": "2026-10-23T12:00:00Z"},
+            {"sha": sha, "conclusion": "success",
+             "url": "https://example.invalid/actions/runs/109", "attempt": 1,
+             "databaseId": 109, "workflow": "required-tests",
+             "ts": "2026-10-23T13:00:00Z"},
+        ):
+            self.source.write_text(json.dumps(row), encoding="utf-8")
+            result = self.observe("--source-type", "ci-status")
+            self.assertEqual(0, result.returncode, result.stderr)
+        for row in (
+            # Explicit run ID remains stable when the URL appears later.
+            {"sha": sha, "conclusion": "failure", "databaseId": 110,
+             "attempt": 1, "ts": "2026-10-23T14:00:00Z"},
+            {"sha": sha, "conclusion": "success", "databaseId": 110,
+             "url": "https://example.invalid/actions/runs/110", "attempt": 1,
+             "ts": "2026-10-23T15:00:00Z"},
+            # The URL supplies the run ID when the subsequent row omits URL.
+            {"sha": sha, "conclusion": "failure",
+             "url": "https://example.invalid/actions/runs/111", "attempt": 1,
+             "ts": "2026-10-23T16:00:00Z"},
+            {"sha": sha, "conclusion": "success", "databaseId": 111,
+             "attempt": 1, "ts": "2026-10-23T17:00:00Z"},
+            # Different provider IDs remain distinct runs on the same SHA.
+            {"sha": sha, "conclusion": "failure", "databaseId": 112,
+             "attempt": 1, "ts": "2026-10-23T18:00:00Z"},
+            {"sha": sha, "conclusion": "success", "databaseId": 113,
+             "attempt": 1, "ts": "2026-10-23T19:00:00Z"},
+        ):
+            self.source.write_text(json.dumps(row), encoding="utf-8")
+            result = self.observe("--source-type", "ci-status")
+            self.assertEqual(0, result.returncode, result.stderr)
+        rows = [json.loads(line) for line in
+                (self.repo / ".oms/work-journal/events.jsonl").read_text().splitlines()]
+        ci_rows = [row for row in rows if row["source"]["type"] == "ci-status"]
+        self.assertEqual(19, len(ci_rows))
+        workflows = [row.get("provenance", {}).get("workflow") for row in ci_rows[11:13]]
+        self.assertEqual([None, "required-tests"], workflows)
+        same_run = [row for row in ci_rows if any(
+            ref.get("type") == "ci-run"
+            and ref.get("url") == "https://example.invalid/actions/runs/109"
+            for ref in row.get("refs", [])
+        )]
+        latest_same_run = wj._latest_ci_events(same_run)
+        self.assertEqual(1, len(latest_same_run))
+        self.assertEqual("success", latest_same_run[0]["outcome"]["status"])
+        by_run = {}
+        for run_id in ("110", "111", "112", "113"):
+            by_run[run_id] = [row for row in ci_rows
+                              if str((row.get("provenance") or {}).get("run_id") or "") == run_id
+                              or any(ref.get("type") == "ci-run" and
+                                     ref.get("url", "").endswith("/" + run_id)
+                                     for ref in row.get("refs", []))]
+        self.assertEqual(["success"], [row["outcome"]["status"]
+                                      for row in wj._latest_ci_events(by_run["110"])])
+        self.assertEqual(["success"], [row["outcome"]["status"]
+                                      for row in wj._latest_ci_events(by_run["111"])])
+        distinct_runs = wj._latest_ci_events(by_run["112"] + by_run["113"])
+        self.assertEqual(2, len(distinct_runs))
+        self.assertEqual("failure", wj._ci_status_by_sha(distinct_runs)[sha])
+        commit = {
+            "event_id": "wj_commit0000", "occurred_at": "2026-10-23T00:00:00Z",
+            "event_type": "commit", "source": {"type": "git-commit", "id": sha},
+            "verification_status": "not_verified",
+            "outcome": {"summary": "Commit %s: test CI reruns" % sha, "status": "recorded"},
+        }
+        done, failed, _next, *_rest = wj._daily_notion_sections([commit] + ci_rows)
+        self.assertFalse(any(sha[:7] in line for line in done["lines"]))
+        self.assertTrue(any(sha[:7] in line for line in failed["lines"]))
+        overview = wj._overview_summary([commit] + ci_rows, wj._headings())
+        self.assertTrue(any(value in overview for value in ("failed/parked 3", "실패/보류 3")), overview)
+
     def test_session_handoff_summary_is_the_last_assistant_line(self):
         self.source.write_text("# Session handoff\n\n## Last assistant summary\n\n"
                                "**Done: pushed x**\n\n## Open dissents\n", encoding="utf-8")
@@ -1572,10 +1864,11 @@ class ObserveDiagnosticsTest(unittest.TestCase):
         row = json.loads(events.read_text(encoding='utf-8').splitlines()[-1])
         summary = row['outcome']['summary']
         self.assertIn('Parser repaired.', summary)
-        self.assertIn('Verification: failed', summary)
-        self.assertIn('Remaining: migration unsafe', summary)
+        self.assertNotIn('Verification: failed', summary)
+        self.assertNotIn('Remaining: migration unsafe', summary)
         self.assertNotIn('OLD_REQUEST_MUST_NOT_LEAK', summary)
-        self.assertLessEqual(len(summary.encode('utf-8')), wj.MAX_TEXT_BYTES)
+        self.assertLessEqual(len(summary), 120)
+        self.assertNotIn(' | ', summary)
         self.assertNotEqual(row['verification_status'], 'passed')
 
     def test_unregistered_source_type_without_a_json_record_says_so(self):
@@ -1813,9 +2106,19 @@ class JournalLanguageTest(unittest.TestCase):
             )
             store.record_event(base_event("lang"))
             store.materialize()
+            daily = (store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+            notion = wj.notion_presentation(daily, store.load_events())
         daily = (store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
         self.assertIn("## Key progress", daily)
         self.assertNotIn("핵심 진전", daily)
+        self.assertIn("## Completed", notion)
+        self.assertIn("## Failed or blocked", notion)
+        self.assertIn("## Next", notion)
+        self.assertIn("## Details", notion)
+        self.assertIn("none recorded", notion)
+        self.assertNotIn("오늘 끝낸 것", notion)
+        self.assertNotIn("실패·막힌 것", notion)
+        self.assertEqual(daily, notion.split("## Details\n\n", 1)[1])
 
     def cli(self, *argv):
         """Run the CLI front door, keeping its output out of the test log."""
@@ -1859,12 +2162,235 @@ class JournalLanguageTest(unittest.TestCase):
 
 
 class NotionPresentationTest(unittest.TestCase):
-    def test_strips_citations_and_folds_citation_only_duplicates(self):
+    def test_notion_daily_digest_is_additive_and_keeps_raw_details(self):
+        language = mock.patch.dict(
+            os.environ, {"OMS_WORK_JOURNAL_LANG": "ko"}, clear=False
+        )
+        language.start()
+        self.addCleanup(language.stop)
+        sha = "a" * 40
+        events = []
+        def event(event_id, source_type, source_id, occurred_at, **fields):
+            value = {
+                "event_id": "wj_" + event_id.ljust(8, "0"),
+                "project_name": "demo",
+                "event_type": fields.pop("event_type", "validation"),
+                "occurred_at": occurred_at,
+                "source": {"type": source_type, "id": source_id},
+                "outcome": fields.pop("outcome", {"summary": "", "status": "recorded"}),
+                "verification_status": fields.pop("verification_status", "not_verified"),
+                **fields,
+            }
+            events.append(value)
+            return value
+        event("00000001", "panel-result", "panel-1", "2026-10-23T01:00:00Z",
+              correlation={"task_id": "task-123"},
+              outcome={"summary": "Task task-123 completed: shipped the fix (landed commit %s)" % sha, "status": "completed"},
+              verification_status="passed")
+        event("00000002", "git-commit", sha, "2026-10-23T02:00:00Z", event_type="commit",
+              outcome={"summary": "Commit %s: fix: journal rendering %s" % (sha, "x" * 130), "status": "recorded"},
+              decision="Release cut approved", blocker="Signing key unavailable")
+        event("00000003", "ci-status", "ci-old", "2026-10-23T03:00:00Z", event_type="ci",
+              refs=[{"type": "commit", "id": sha},
+                    {"type": "ci-run", "url": "https://example.invalid/actions/runs/100"}],
+              provenance={"attempt": 1}, outcome={"summary": "", "status": "failure"})
+        event("00000004", "ci-status", "ci-new", "2026-10-23T04:00:00Z", event_type="ci",
+              refs=[{"type": "commit", "id": sha},
+                    {"type": "ci-run", "url": "https://example.invalid/actions/runs/100"}],
+              provenance={"attempt": 1, "workflow": "required-tests"},
+              outcome={"summary": "", "status": "success"}, verification_status="passed")
+        event("00000005", "peer-review", "r1", "2026-10-23T05:00:00Z", event_type="patch_review",
+              correlation={"task_id": "task-123"}, outcome={"summary": "", "status": "passed"}, verification_status="passed")
+        event("00000006", "peer-review", "r2", "2026-10-23T06:00:00Z", event_type="patch_review",
+              correlation={"task_id": "task-123"}, outcome={"summary": "", "status": "failed", "interpretation": "missing edge case"}, verification_status="failed")
+        event("00000007", "session-handoff", "h1", "2026-10-23T07:00:00Z", event_type="handoff",
+              correlation={"session_id": "sess-existing"},
+              outcome={"summary": "Main agent resumed task. | progress chatter", "status": "recorded"})
+        event("00000008", "session-handoff", "h2", "2026-10-23T08:00:00Z", event_type="handoff",
+              outcome={"summary": "Second handoff remains visible. | more chatter", "status": "recorded"})
+        event("00000009", "ci-status", "ci-unmatched", "2026-10-23T09:00:00Z", event_type="ci",
+              refs=[{"type": "commit", "id": "b" * 40}], outcome={"summary": "", "status": "failure"})
+        event("00000010", "peer-review", "r-unlinked", "2026-10-23T10:00:00Z", event_type="patch_review",
+              outcome={"summary": "Peer review outcome failed", "status": "failed", "interpretation": "review could not be tied to a task"},
+              verification_status="failed")
+        event("00000011", "panel-result", "panel-2", "2026-10-23T11:00:00Z",
+              correlation={"task_id": "task-ci-failed"},
+              outcome={"summary": "Task task-ci-failed completed: shipped another fix (landed commit %s)" % ("c" * 40), "status": "completed"},
+              verification_status="passed")
+        event("00000012", "ci-status", "ci-task-only", "2026-10-23T12:00:00Z", event_type="ci",
+              refs=[{"type": "commit", "id": "c" * 40}], outcome={"summary": "", "status": "failure"})
+        event("00000013", "panel-result", "panel-unverified", "2026-10-23T13:00:00Z",
+              correlation={"task_id": "task-unverified"},
+              outcome={"summary": "Task task-unverified completed: pending verification", "status": "completed"},
+              verification_status="failed")
+        event("00000014", "run-ledger", "run-failed", "2026-10-23T14:00:00Z",
+              event_type="run", outcome={"summary": "Build command failed", "status": "failure"},
+              verification_status="failed", provenance={"exit_code": 1})
+        event("00000015", "panel-result", "panel-rejected", "2026-10-23T15:00:00Z",
+              correlation={"task_id": "task-rejected"},
+              outcome={"summary": "Task task-rejected rejected: unsafe patch", "status": "rejected"},
+              verification_status="not_verified")
+        event("00000016", "ci-status", "ci-superseded-failure", "2026-10-23T16:00:00Z",
+              event_type="ci", refs=[{"type": "commit", "id": "e" * 40},
+                                      {"type": "ci-run", "url": "https://example.invalid/actions/runs/110"}],
+              provenance={"attempt": 1}, blocker="Superseded CI blocker",
+              outcome={"summary": "CI failure for commit %s" % ("e" * 40), "status": "failure"},
+              verification_status="failed")
+        event("00000017", "ci-status", "ci-superseded-success", "2026-10-23T17:00:00Z",
+              event_type="ci", refs=[{"type": "commit", "id": "e" * 40},
+                                      {"type": "ci-run", "url": "https://example.invalid/actions/runs/110"}],
+              provenance={"attempt": 1, "workflow": "required-tests"},
+              outcome={"summary": "CI success for commit %s" % ("e" * 40), "status": "success"},
+              verification_status="passed")
+        event("00000018", "peer-review", "review-recovered-fail", "2026-10-23T18:00:00Z",
+              event_type="patch_review", correlation={"task_id": "task-review-recovered"},
+              outcome={"summary": "Peer review failed: task-review-recovered", "status": "failed",
+                       "interpretation": "stale review failure"}, verification_status="failed")
+        event("00000019", "peer-review", "review-recovered-pass", "2026-10-23T19:00:00Z",
+              event_type="patch_review", correlation={"task_id": "task-review-recovered"},
+              outcome={"summary": "Peer review passed: task-review-recovered", "status": "passed"},
+              verification_status="passed")
+        event("00000020", "agent-task", "verify-recovered-fail", "2026-10-23T20:00:00Z",
+              event_type="validation", correlation={"task_id": "task-verify-recovered"},
+              outcome={"summary": "Verification for task-verify-recovered", "status": "recorded"},
+              verification_status="failed")
+        event("00000021", "agent-task", "verify-recovered-pass", "2026-10-23T21:00:00Z",
+              event_type="validation", correlation={"task_id": "task-verify-recovered"},
+              outcome={"summary": "Verification for task-verify-recovered", "status": "recorded"},
+              verification_status="passed")
+        event("00000022", "agent-task", "cross-review-failed-verification", "2026-10-23T22:00:00Z",
+              event_type="validation", correlation={"task_id": "task-review-does-not-clear-verify"},
+              outcome={"summary": "Verifier failed for review isolation", "status": "recorded"},
+              verification_status="failed")
+        event("00000023", "peer-review", "cross-review-passed", "2026-10-23T23:00:00Z",
+              event_type="patch_review", correlation={"task_id": "task-review-does-not-clear-verify"},
+              outcome={"summary": "Review passed for verifier isolation", "status": "passed"},
+              verification_status="passed")
+        event("00000024", "agent-task", "cross-unverified-failed-verification", "2026-10-24T00:00:00Z",
+              event_type="validation", correlation={"task_id": "task-unverified-review-does-not-clear-verify"},
+              outcome={"summary": "Verifier failed before unverified review", "status": "recorded"},
+              verification_status="failed")
+        event("00000025", "peer-review", "cross-review-unverified", "2026-10-24T01:00:00Z",
+              event_type="patch_review", correlation={"task_id": "task-unverified-review-does-not-clear-verify"},
+              outcome={"summary": "Review has no verifier result", "status": "recorded"},
+              verification_status="not_verified")
+        event("00000026", "peer-review", "cross-failed-review", "2026-10-24T02:00:00Z",
+              event_type="patch_review", correlation={"task_id": "task-review-does-not-clear-failure"},
+              outcome={"summary": "Review failed before verifier", "status": "recorded",
+                       "interpretation": "review verdict still current"}, verification_status="failed")
+        event("00000027", "agent-task", "cross-passed-verifier", "2026-10-24T03:00:00Z",
+              event_type="validation", correlation={"task_id": "task-review-does-not-clear-failure"},
+              outcome={"summary": "Verifier passed after review", "status": "recorded"},
+              verification_status="passed")
+        event("00000028", "panel-result", "owner-rejected-before-update", "2026-10-24T04:00:00Z",
+              event_type="phase_outcome", correlation={"task_id": "task-owner-rejected-then-updated"},
+              outcome={"summary": "Rejected owner result before task update", "status": "rejected"},
+              verification_status="not_verified")
+        event("00000029", "agent-task", "owner-following-update", "2026-10-24T05:00:00Z",
+              event_type="agent_state", correlation={"task_id": "task-owner-rejected-then-updated"},
+              outcome={"summary": "Routine update after rejected owner result", "status": "recorded"},
+              verification_status="not_verified")
+        event("00000030", "panel-result", "owner-verification-failed", "2026-10-24T06:00:00Z",
+              event_type="phase_outcome", correlation={"task_id": "task-owner-verification-failed"},
+              outcome={"summary": "Completed owner result with failed verification", "status": "completed"},
+              verification_status="failed")
+        event("00000031", "agent-task", "owner-verification-following-update", "2026-10-24T07:00:00Z",
+              event_type="agent_state", correlation={"task_id": "task-owner-verification-failed"},
+              outcome={"summary": "Routine update after failed verification", "status": "recorded"},
+              verification_status="not_verified")
+        event("00000032", "panel-result", "owner-rejected-before-acceptance", "2026-10-24T08:00:00Z",
+              event_type="phase_outcome", correlation={"task_id": "task-owner-rejected-then-accepted"},
+              outcome={"summary": "Rejected owner result before acceptance", "status": "rejected"},
+              verification_status="not_verified")
+        event("00000033", "panel-result", "owner-accepted-after-rejection", "2026-10-24T09:00:00Z",
+              event_type="phase_outcome", correlation={"task_id": "task-owner-rejected-then-accepted"},
+              outcome={"summary": "Accepted owner result", "status": "accepted"},
+              verification_status="passed")
+        content = wj.render_daily("2026-10-23", events)
+        rendered = wj.notion_presentation(content, events)
+        self.assertIn("## 상세 기록", rendered)
+        raw_details = rendered.split("## 상세 기록\n\n", 1)[1]
+        self.assertEqual(content, raw_details)
+        digest = rendered.split("## 상세 기록", 1)[0]
+        self.assertIn("기록 31", digest)
+        self.assertIn("실패/보류 13", digest)
+        self.assertLess(rendered.index("## 오늘 끝낸 것"), rendered.index("## 실패·막힌 것"))
+        self.assertLess(rendered.index("## 실패·막힌 것"), rendered.index("## 다음"))
+        self.assertIn("fix: journal rendering", digest.split("## 커밋", 1)[1])
+        self.assertIn("커밋 aaaaaaa, CI 성공", rendered)
+        completed = rendered.split("## 오늘 끝낸 것", 1)[1].split("## 실패·막힌 것", 1)[0]
+        commit_detail = digest.split("## 커밋", 1)[1].split("## ", 1)[0]
+        self.assertIn(": 완료 —", completed)
+        self.assertNotIn(": completed —", completed)
+        self.assertIn("CI 성공", commit_detail)
+        self.assertNotIn("CI success", commit_detail)
+        failed = digest.split("## 실패·막힌 것", 1)[1].split("## 다음", 1)[0]
+        self.assertIn("task-unverified", failed)
+        self.assertIn("검증 실패", failed)
+        self.assertIn("Build command failed", failed)
+        self.assertIn("종료 코드: 1", failed)
+        self.assertEqual(1, failed.count("task-rejected"))
+        self.assertNotIn("Superseded CI blocker", failed)
+        self.assertNotIn("stale review failure", failed)
+        self.assertNotIn("task-review-recovered", failed)
+        self.assertNotIn("task-verify-recovered", failed)
+        self.assertEqual(1, failed.count("Verifier failed for review isolation"))
+        self.assertEqual(1, failed.count("Verifier failed before unverified review"))
+        self.assertIn("task-review-does-not-clear-failure", failed)
+        self.assertIn("review verdict still current", failed)
+        self.assertEqual(1, failed.count("task-owner-rejected-then-updated"))
+        self.assertEqual(1, failed.count("task-owner-verification-failed"))
+        self.assertNotIn("task-owner-rejected-then-accepted", failed)
+        self.assertNotIn("task-owner-rejected-then-updated", completed)
+        self.assertNotIn("Rejected owner result before acceptance", completed)
+        self.assertIn("task-owner-rejected-then-accepted: 수락", completed)
+        self.assertIn("stale review failure", raw_details)
+        self.assertIn("Verification for task-verify-recovered", raw_details)
+        self.assertIn("Superseded CI blocker", raw_details)
+        recovered_events = [
+            event for event in events
+            if (event.get("source") or {}).get("id") in {
+                "ci-superseded-failure", "ci-superseded-success"
+            }
+        ]
+        recovered = wj.notion_presentation(
+            wj.render_daily("2026-10-23", recovered_events), recovered_events
+        )
+        recovered_digest, recovered_details = recovered.split("## 상세 기록\n\n", 1)
+        self.assertIn("실패/보류 0", recovered_digest)
+        recovered_failed = recovered_digest.split("## 실패·막힌 것", 1)[1].split("## 다음", 1)[0]
+        self.assertIn("기록 없음", recovered_failed)
+        self.assertNotIn("Superseded CI blocker", recovered_digest)
+        self.assertIn("Superseded CI blocker", recovered_details)
+        self.assertIn("Release cut approved", rendered)
+        self.assertIn("> Release cut approved", digest)
+        self.assertIn("Signing key unavailable", rendered)
+        self.assertIn("리뷰 실패: task-123", rendered)
+        self.assertIn("task-123 — 리뷰 실패 (2회 검토)", rendered)
+        self.assertIn("task-review-recovered — 리뷰 통과 (2회 검토)", digest)
+        self.assertIn("missing edge case", rendered)
+        self.assertNotIn("리뷰 통과: task-123", rendered)
+        self.assertIn("Peer review outcome", raw_details)
+        self.assertIn("Commit ", raw_details)
+        self.assertIn("Main agent resumed task. | progress chatter", raw_details)
+        self.assertIn("### demo", raw_details)
+        self.assertIn("결과: failed", raw_details)
+        self.assertIn("sess-existing", raw_details)
+        self.assertIn("Main agent resumed task.", raw_details)
+        self.assertIn("Second handoff remains visible.", raw_details)
+        self.assertIn("  - 결과: failure", raw_details)
+        self.assertIn("r-unlinked", raw_details)
+        failures = digest.split("## 실패·막힌 것", 1)[1].split("## 다음", 1)[0]
+        self.assertIn("CI 실패 (커밋 ccccccc)", failures)
+        self.assertIn("review could not be tied to a task", digest)
+
+    def test_daily_fallback_returns_raw_content_without_a_digest(self):
         content = "\n".join(
             [
                 "# Daily Work Journal — 2026-08-01",
                 "",
                 "## 핵심 진전",
+                "- Task task-x rejected: unsafe patch",
                 "",
                 "- Commit 0e0390aa9589: test: capture status output [wj_a4b7c0f523496f5d; source git-commit:0e0390aa; evidence git-commit:0e0390aa]",
                 "",
@@ -1879,24 +2405,9 @@ class NotionPresentationTest(unittest.TestCase):
                 "- 기록 없음",
             ]
         )
-        rendered = wj.notion_presentation(content)
-        self.assertNotIn("wj_", rendered)
-        self.assertNotIn("[REDACTED]", rendered)
-        # Decision bullets trade their dash for a quote mark (the exporter
-        # renders those as callouts); the fold still collapses duplicates.
-        self.assertEqual(rendered.count("> decided the thing"), 1)
-        self.assertNotIn("- decided the thing", rendered)
-        self.assertIn("> another decision", rendered)
-        self.assertIn("# Daily Work Journal — 2026-08-01", rendered)
-        # Commit bullets lose their hash prefix but keep the message.
-        self.assertIn("- test: capture status output", rendered)
-        self.assertNotIn("Commit 0e0390aa9589", rendered)
-        # Decisions float above the progress listing.
-        self.assertLess(
-            rendered.index("## 의사결정"), rendered.index("## 핵심 진전")
-        )
-        # A section that says nothing is dropped from the human view.
-        self.assertNotIn("## 다음 우선순위", rendered)
+        with mock.patch.dict(os.environ, {"OMS_WORK_JOURNAL_LANG": "ko"}, clear=False):
+            rendered = wj.notion_presentation(content)
+        self.assertEqual(content, rendered)
 
     def test_drops_evidence_bullets_and_labeled_commit_prefixes(self):
         content = "\n".join(
@@ -2025,7 +2536,8 @@ class JudgmentCaptureTest(unittest.TestCase):
             )
             store.materialize()
             rendered = wj.notion_presentation(
-                store.summary_text("daily", store._current_periods()[0])
+                store.summary_text("daily", store._current_periods()[0]),
+                store.load_events(),
             )
             # All three judgment sections were permanently empty before these
             # verbs carried anything into them.

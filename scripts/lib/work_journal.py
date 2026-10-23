@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover - only old Python installations
 
 
 SCHEMA_VERSION = 1
-RENDERER_VERSION = 2
+RENDERER_VERSION = 3
 INDEX_SCHEMA_VERSION = 2
 INDEX_RECENT_EVENT_LIMIT = 256
 CONFIG_SCHEMA_VERSION = 1
@@ -118,6 +118,44 @@ _HEADINGS = {
         "repeated": "반복 %d회",
         "sessions": "세션",
         "sessions_restore": "복원: `oms session-handoff list`로 해당 세션의 핸드오프를 찾을 수 있음",
+        "digest_completed": "오늘 끝낸 것",
+        "digest_failed": "실패·막힌 것",
+        "digest_next": "다음",
+        "digest_details": "상세 기록",
+        "digest_decisions": "의사결정",
+        "digest_reviews": "리뷰",
+        "digest_commits": "커밋",
+        "digest_ci": "CI",
+        "digest_no_records": "- 기록 없음",
+        "digest_review_passed": "통과",
+        "digest_review_failed": "실패",
+        "digest_review_count": "%d회 검토",
+        "digest_review_unlinked": "리뷰 %s — %s",
+        "digest_review_unlinked_failure": "리뷰 실패: %s%s",
+        "digest_review_linked": "%s — 리뷰 %s%s",
+        "digest_review_linked_failure": "리뷰 실패: %s%s",
+        "digest_ci_for_commit": "- CI %s (커밋 %s)",
+        "digest_ci_line": "- CI %s (커밋 %s)",
+        "digest_ci_detail": "- 상세 CI 결과: %s (커밋 %s)",
+        "digest_ci_unlinked": "- CI %s",
+        "digest_ci_success_line": "- %s (커밋 %s, CI 성공)",
+        "digest_commit_note": " (커밋 %s%s)",
+        "digest_ci_status_suffix": " (CI %s)",
+        "digest_commit_line": "- %s (커밋 %s%s)",
+        "digest_commit_ref": "커밋 %s",
+        "digest_status_completed": "완료",
+        "digest_status_accepted": "수락",
+        "digest_status_failed": "실패",
+        "digest_status_rejected": "거부",
+        "digest_status_success": "성공",
+        "digest_status_failure": "실패",
+        "digest_status_cancelled": "취소",
+        "digest_status_timed_out": "시간 초과",
+        "digest_status_startup_failure": "시작 실패",
+        "digest_status_unknown": "알 수 없음",
+        "digest_verification_failed": "검증 실패",
+        "digest_failure_status": "상태: %s",
+        "digest_failure_exit": "종료 코드: %s",
     },
     "en": {
         "empty": "- none recorded",
@@ -152,9 +190,52 @@ _HEADINGS = {
         "repeated": "repeated %d times",
         "sessions": "Sessions",
         "sessions_restore": "restore: `oms session-handoff list` locates each session's handoff",
+        "digest_completed": "Completed",
+        "digest_failed": "Failed or blocked",
+        "digest_next": "Next",
+        "digest_details": "Details",
+        "digest_decisions": "Decisions",
+        "digest_reviews": "Reviews",
+        "digest_commits": "Commits",
+        "digest_ci": "CI",
+        "digest_no_records": "- none recorded",
+        "digest_review_passed": "passed",
+        "digest_review_failed": "failed",
+        "digest_review_count": "%d reviews",
+        "digest_review_unlinked": "Review %s — %s",
+        "digest_review_unlinked_failure": "Review failed: %s%s",
+        "digest_review_linked": "%s — review %s%s",
+        "digest_review_linked_failure": "Review failed: %s%s",
+        "digest_ci_for_commit": "- CI %s for commit %s",
+        "digest_ci_line": "- CI %s for commit %s",
+        "digest_ci_detail": "- CI result: %s for commit %s",
+        "digest_ci_unlinked": "- CI %s",
+        "digest_ci_success_line": "- %s (commit %s, CI passed)",
+        "digest_commit_note": " (commit %s%s)",
+        "digest_ci_status_suffix": " (CI %s)",
+        "digest_commit_line": "- %s (commit %s%s)",
+        "digest_commit_ref": "commit %s",
+        "digest_status_completed": "completed",
+        "digest_status_accepted": "accepted",
+        "digest_status_failed": "failed",
+        "digest_status_rejected": "rejected",
+        "digest_status_success": "success",
+        "digest_status_failure": "failure",
+        "digest_status_cancelled": "cancelled",
+        "digest_status_timed_out": "timed out",
+        "digest_status_startup_failure": "startup failure",
+        "digest_status_unknown": "unknown",
+        "digest_verification_failed": "verification failed",
+        "digest_failure_status": "status: %s",
+        "digest_failure_exit": "exit %s",
     },
 }
 _EMPTY_MARKERS = {"- 기록 없음", "- none", "- none recorded"}
+
+
+def _digest_status(value: Any, labels: Mapping[str, str]) -> str:
+    status = str(value or "unknown").strip().lower()
+    return labels.get("digest_status_" + status, status)
 
 
 def _locale_language() -> str:
@@ -304,63 +385,388 @@ def _partition_summary_sections(
     return preamble, sections
 
 
-def notion_presentation(content: str) -> str:
-    """Human-facing rendering of a summary for the Notion mirror.
+def _latest_by(events: Iterable[Mapping[str, Any]], key):
+    latest = {}
+    for event in sorted(events, key=lambda row: (row["occurred_at"], row["event_id"])):
+        value = key(event)
+        if value:
+            latest[value] = event
+    return latest
 
-    The local daily files are the evidence layer: every claim carries an
-    event-id citation, commit bullets carry their hashes, and one packet
-    update can emit near-identical bullets from its update and close events.
-    Notion is the surface the human actually reads, so the mirror drops the
-    trailing ``[wj_...]`` citations, the ``Commit <hash>:`` prefixes and the
-    raw evidence bullets, abbreviates any full commit hash those anchors did
-    not reach, floats decisions, blockers, and next priorities above the
-    progress listing, folds a bullet that several sections repeat down to its
-    single highest-ranked section — taking that bullet's indented detail lines
-    with it — and removes sections left saying nothing. Deterministic text
-    transforms only — nothing is summarized or rewritten, and the local files
-    keep full provenance.
+
+def _event_commit_sha(event: Mapping[str, Any]) -> str:
+    source = event.get("source") or {}
+    if source.get("type") == "git-commit":
+        return str(source.get("id") or "")
+    provenance = event.get("provenance") or {}
+    if provenance.get("code_commit"):
+        return str(provenance["code_commit"])
+    for ref in event.get("refs") or []:
+        if ref.get("type") == "commit" and ref.get("id"):
+            return str(ref["id"])
+    return ""
+
+
+def _ci_run_identity(event: Mapping[str, Any]) -> str:
+    provenance = event.get("provenance") or {}
+    run_id = str(provenance.get("run_id") or "").strip()
+    if re.fullmatch(r"\d+", run_id):
+        return "run:%s" % run_id
+
+    urls = [str(ref["url"]) for ref in event.get("refs") or []
+            if ref.get("type") == "ci-run" and ref.get("url")]
+    # Older event schemas may encode the run ID or URL only in source.id.
+    source_id = str((event.get("source") or {}).get("id") or "")
+    for marker, prefix in ((":run-url:", "url:"), (":run:", "run:")):
+        _head, separator, identity = source_id.partition(marker)
+        if not separator:
+            continue
+        attempt_match = re.match(r"^(.*):attempt:[^:]+:[^:]*$", identity)
+        if attempt_match:
+            identity = attempt_match.group(1)
+        else:
+            identity = identity.rsplit(":", 1)[0]
+        if identity:
+            if prefix == "run:" and re.fullmatch(r"\d+", identity):
+                return "run:%s" % identity
+            if prefix == "url:":
+                match = re.search(r"/actions/runs/(\d+)(?:/|$)", identity)
+                if match:
+                    return "run:%s" % match.group(1)
+                return "url:%s" % identity
+    for url in urls:
+        match = re.search(r"/actions/runs/(\d+)(?:/|$)", url)
+        if match:
+            return "run:%s" % match.group(1)
+    if urls:
+        return "url:%s" % urls[0]
+    return "event:%s" % str(event.get("event_id") or source_id)
+
+
+def _latest_ci_events(events: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    """Select each run's latest attempt and latest observed conclusion."""
+    latest = {}
+
+    def attempt_order(event: Mapping[str, Any]) -> int:
+        try:
+            return int((event.get("provenance") or {}).get("attempt") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    ordered = sorted(events, key=lambda row: (
+        attempt_order(row), row["occurred_at"], row["event_id"]
+    ))
+    for event in ordered:
+        if (event.get("source") or {}).get("type") != "ci-status":
+            continue
+        sha = _event_commit_sha(event) or ("@" + str(event.get("event_id") or ""))
+        latest[(sha, _ci_run_identity(event))] = event
+    return list(latest.values())
+
+
+def _ci_status_by_sha(events: Sequence[Mapping[str, Any]]) -> Dict[str, str]:
+    grouped: Dict[str, List[str]] = {}
+    for event in events:
+        sha = _event_commit_sha(event)
+        if sha:
+            grouped.setdefault(sha, []).append(
+                str((event.get("outcome") or {}).get("status") or "pending").lower()
+            )
+    result = {}
+    failed = {"failure", "failed", "cancelled", "timed_out", "startup_failure"}
+    for sha, statuses in grouped.items():
+        if any(status in failed for status in statuses):
+            result[sha] = "failure"
+        elif any(status != "success" for status in statuses):
+            result[sha] = "pending"
+        else:
+            result[sha] = "success"
+    return result
+
+
+def _short_handoff(value: Any) -> str:
+    text = str(value or "").strip().split("|", 1)[0]
+    text = re.split(r"(?<=[.!?。])\s+", text, maxsplit=1)[0]
+    return sanitize_text(text, 120)
+
+
+def _daily_notion_sections(events: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    labels = _headings()
+    ordered = sorted(events, key=lambda row: (row["occurred_at"], row["event_id"]))
+    reviews: Dict[str, List[Mapping[str, Any]]] = {}
+    unlinked_reviews: List[Mapping[str, Any]] = []
+    for event in ordered:
+        if (event.get("source") or {}).get("type") == "peer-review":
+            task_id = str((event.get("correlation") or {}).get("task_id") or "").strip()
+            if task_id:
+                reviews.setdefault(task_id, []).append(event)
+            else:
+                unlinked_reviews.append(event)
+    latest_reviews = {
+        task: rows[-1] for task, rows in reviews.items()
+    }
+    task_events = _latest_by(
+        (event for event in ordered
+         if (event.get("source") or {}).get("type") == "panel-result"),
+        lambda event: str((event.get("correlation") or {}).get("task_id") or ""),
+    )
+    commit_events = _latest_by(
+        (event for event in ordered if event.get("event_type") == "commit"),
+        _event_commit_sha,
+    )
+    ci_events = _latest_ci_events(ordered)
+    ci_by_sha = _ci_status_by_sha(ci_events)
+    for sha, status in list(ci_by_sha.items()):
+        ci_by_sha.setdefault(sha[:7], status)
+    ci_events_by_sha: Dict[str, List[Mapping[str, Any]]] = {}
+    for event in ci_events:
+        sha = _event_commit_sha(event)
+        if sha:
+            ci_events_by_sha.setdefault(sha, []).append(event)
+    completed: List[str] = []
+    failed: List[str] = []
+    represented_failures = set()
+    current_failures = _failed_digest_events(ordered)
+    current_failure_ids = {str(event.get("event_id") or "") for event in current_failures}
+    decisions: List[str] = []
+    for event in ordered:
+        if event.get("decision"):
+            decisions.append("- " + _judgment_summary(event, "decision", labels))
+        event_id = str(event.get("event_id") or "")
+        if event.get("blocker") and event_id in current_failure_ids:
+            failed.append("- " + _judgment_summary(event, "blocker", labels))
+            represented_failures.add(event_id)
+    linked_shas = set()
+    for task_id, event in task_events.items():
+        event_id = str(event.get("event_id") or "")
+        outcome = event.get("outcome") or {}
+        status_raw = str(outcome.get("status") or "").lower()
+        status = _digest_status(status_raw, labels)
+        summary = (str(outcome.get("summary") or "").splitlines() or [""])[0]
+        summary = re.sub(r"^Task [^ ]+ (?:completed|accepted|failed|rejected):\s*", "", summary)
+        landed = re.search(r"landed commit ([0-9a-f]{7,40})", summary)
+        commit_note = ""
+        if landed:
+            sha = landed.group(1)
+            linked_shas.add(sha[:7])
+            ci_status_raw = ci_by_sha.get(sha) or ci_by_sha.get(sha[:7])
+            ci_status = _digest_status(ci_status_raw, labels) if ci_status_raw else ""
+            commit_note = labels["digest_commit_note"] % (
+                sha[:7], ", CI " + ci_status if ci_status else ""
+            )
+            summary = re.sub(r"\s*\(landed commit [0-9a-f]{7,40}\)", "", summary)
+        display_task_id = _truncate_utf8(task_id, 120)
+        line = "- %s: %s — %s%s" % (display_task_id, status, summary, commit_note)
+        event_failed = event_id in current_failure_ids
+        outcome_failed = status_raw in _FAILED_OUTCOME_STATUSES
+        if event_failed and outcome_failed:
+            reason = event.get("blocker") or outcome.get("interpretation")
+            failed.append(line + (" — " + sanitize_text(str(reason), 120) if reason else ""))
+        elif not outcome_failed:
+            completed.append(line)
+        if event_failed and not outcome_failed and event.get("verification_status") in {"failed", "skipped"}:
+            failed.append(line + " — " + labels["digest_verification_failed"])
+        if event_failed:
+            represented_failures.add(str(event.get("event_id") or ""))
+
+    commits = []
+    for sha, event in commit_events.items():
+        subject = str((event.get("outcome") or {}).get("summary") or "")
+        subject = re.sub(r"^Commit [0-9a-f]{7,40}:\s*", "", subject)
+        subject = subject[:80].rstrip() + ("…" if len(subject) > 80 else "")
+        ci_status_raw = ci_by_sha.get(sha) or ""
+        ci_status = _digest_status(ci_status_raw, labels) if ci_status_raw else ""
+        detail = labels["digest_commit_line"] % (
+            subject, sha[:7], labels["digest_ci_status_suffix"] % ci_status if ci_status else ""
+        )
+        commits.append(detail)
+        if ci_status_raw == "success" and sha[:7] not in linked_shas:
+            completed.append(labels["digest_ci_success_line"] % (subject, sha[:7]))
+        elif ci_status_raw in {"failure", "failed", "cancelled", "timed_out", "startup_failure"}:
+            failed.append(labels["digest_commit_line"] % (
+                subject, sha[:7], labels["digest_ci_status_suffix"] % ci_status
+            ))
+            represented_failures.update(
+                str(ci_event.get("event_id") or "")
+                for ci_event in ci_events_by_sha.get(sha, [])
+                if str((ci_event.get("outcome") or {}).get("status") or "").lower()
+                in {"failure", "failed", "cancelled", "timed_out", "startup_failure"}
+            )
+
+    known_shas = set(commit_events) | linked_shas
+    unmatched_ci = []
+    completed_ci_shas = set()
+    for event in ci_events:
+        sha = _event_commit_sha(event)
+        short_sha = sha[:7]
+        event_status = str((event.get("outcome") or {}).get("status") or "unknown").lower()
+        aggregate_status = ci_by_sha.get(sha, event_status) if sha else event_status
+        status = _digest_status(event_status, labels)
+        matched = any(value == sha or value[:7] == short_sha for value in known_shas)
+        failed_status = event_status in {"failure", "failed", "cancelled", "timed_out", "startup_failure"}
+        commit_covers_failure = any(
+            value == sha or value[:7] == short_sha for value in commit_events
+        )
+        if failed_status and not commit_covers_failure:
+            failed.append(labels["digest_ci_for_commit"] % (status, short_sha)
+                          if short_sha else labels["digest_ci_unlinked"] % status)
+            represented_failures.add(str(event.get("event_id") or ""))
+        if not matched:
+            if (aggregate_status == "success" and sha not in completed_ci_shas):
+                completed.append(labels["digest_ci_for_commit"] % (
+                    _digest_status(aggregate_status, labels), short_sha
+                ) if short_sha else labels["digest_ci_unlinked"] % status)
+                if sha:
+                    completed_ci_shas.add(sha)
+            unmatched_ci.append(labels["digest_ci_detail"] % (status, short_sha)
+                                if short_sha else labels["digest_ci_unlinked"] % status)
+    review_details = []
+    for task_id, event in latest_reviews.items():
+        outcome = event.get("outcome") or {}
+        status = str(outcome.get("status") or "").lower()
+        passed = event.get("verification_status") == "passed" or status in {"success", "passed"}
+        verdict = labels["digest_review_passed"] if passed else labels["digest_review_failed"]
+        count = len(reviews[task_id])
+        count_text = " (" + (labels["digest_review_count"] % count) + ")" if count > 1 else ""
+        display_task_id = _truncate_utf8(task_id, 120)
+        review_details.append("- " + (labels["digest_review_linked"] % (
+            display_task_id, verdict, count_text
+        )))
+        if not passed and str(event.get("event_id") or "") in current_failure_ids:
+            reason = event.get("blocker") or outcome.get("interpretation")
+            failed.append("- " + (labels["digest_review_linked_failure"] % (
+                display_task_id, " — " + sanitize_text(str(reason), 120) if reason else ""
+            )) + count_text)
+            represented_failures.add(str(event.get("event_id") or ""))
+
+    unlinked_review_details = []
+    for event in unlinked_reviews:
+        source = event.get("source") or {}
+        identity = str(source.get("id") or event.get("event_id") or "unknown review")
+        outcome = event.get("outcome") or {}
+        status = str(outcome.get("status") or "").lower()
+        passed = event.get("verification_status") == "passed" or status in {"success", "passed"}
+        verdict = labels["digest_review_passed"] if passed else labels["digest_review_failed"]
+        reason = event.get("blocker") or outcome.get("interpretation")
+        suffix = " — " + sanitize_text(str(reason), 120) if reason else ""
+        unlinked_review_details.append("- " + (labels["digest_review_unlinked"] % (identity, verdict)))
+        if not passed and str(event.get("event_id") or "") in current_failure_ids:
+            failed.append("- " + (labels["digest_review_unlinked_failure"] % (identity, suffix)))
+            represented_failures.add(str(event.get("event_id") or ""))
+
+    # Keep the overview's failure count and the failure digest in lockstep,
+    # including generic events such as failed commands from the run ledger.
+    for event in _failed_digest_events(ordered):
+        event_id = str(event.get("event_id") or "")
+        if event_id in represented_failures:
+            continue
+        outcome = event.get("outcome") or {}
+        summary = sanitize_text(str(outcome.get("summary") or ""), 120)
+        summary = summary or str((event.get("source") or {}).get("type") or "Event failed")
+        status_raw = str(outcome.get("status") or "unknown").lower()
+        if event.get("verification_status") in {"failed", "skipped"} and status_raw not in _FAILED_OUTCOME_STATUSES:
+            status = labels["digest_verification_failed"]
+        else:
+            status = _digest_status(status_raw, labels)
+        details = [labels["digest_failure_status"] % status]
+        exit_code = (event.get("provenance") or {}).get("exit_code")
+        if exit_code is not None:
+            details.append(labels["digest_failure_exit"] % exit_code)
+        failed.append("- %s (%s)" % (summary, "; ".join(details)))
+        represented_failures.add(event_id)
+
+    next_actions = []
+    seen_actions = set()
+    for event in ordered:
+        action = str(event.get("next_action") or "").strip()
+        if action and action not in seen_actions:
+            seen_actions.add(action)
+            next_actions.append("- " + sanitize_text(action, 120))
+    handoffs = [
+        "- " + summary for event in ordered
+        if (event.get("source") or {}).get("type") == "session-handoff"
+        and (summary := _short_handoff((event.get("outcome") or {}).get("summary")))
+    ]
+    ci_section = {"title": labels["digest_ci"], "lines": ["## " + labels["digest_ci"]] + unmatched_ci}
+    return [
+        {"title": labels["digest_completed"], "lines": ["## " + labels["digest_completed"]] + (completed or [labels["digest_no_records"]])},
+        {"title": labels["digest_failed"], "lines": ["## " + labels["digest_failed"]] + (failed or [labels["digest_no_records"]])},
+        {"title": labels["digest_next"], "lines": ["## " + labels["digest_next"]] + (next_actions or [labels["digest_no_records"]])},
+        {"title": labels["digest_decisions"], "lines": ["## " + labels["digest_decisions"]] + decisions} if decisions else None,
+        {"title": labels["digest_reviews"], "lines": ["## " + labels["digest_reviews"]] + review_details + unlinked_review_details} if review_details or unlinked_review_details else None,
+        {"title": labels["digest_commits"], "lines": ["## " + labels["digest_commits"]] + commits} if commits else None,
+        ci_section if unmatched_ci else None,
+        {"title": "__handoffs__", "lines": handoffs},
+    ]
+
+
+def notion_presentation(content: str, events: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
+    """Present a canonical daily digest above its untouched source summary.
+
+    Daily source markdown remains available verbatim under a details heading;
+    without canonical events, the daily presentation is the source itself.
+    Weekly and ad hoc summaries retain their established text-only cleanup.
     """
+    labels = _headings()
+    daily_page = content.lstrip().startswith("# Daily Work Journal")
+    if daily_page:
+        if events is None:
+            return content
+        digest_sections = [
+            section for section in _daily_notion_sections(events)
+            if section and section["title"] != "__handoffs__"
+        ]
+        work_events = [
+            event for event in events
+            if (event.get("source") or {}).get("type") != "session-handoff"
+        ]
+        digest_sections.insert(0, {
+            "title": labels["overview"],
+            "lines": ["## " + labels["overview"], _overview_summary(work_events, labels)],
+        })
+        digest_lines: List[str] = []
+        for section in digest_sections:
+            if digest_lines:
+                digest_lines.append("")
+            lines = list(section["lines"])
+            if _NOTION_SECTION_RANK.get(section["title"], 3) == 0:
+                lines = [
+                    "> " + line[2:] if line.startswith("- ") else line
+                    for line in lines
+                ]
+            digest_lines.extend(lines)
+        return (
+            "\n".join(digest_lines)
+            + "\n\n## " + labels["digest_details"] + "\n\n"
+            + content
+        )
 
     citation = re.compile(r"\s*\[wj_[0-9a-f]{8,}.*\]\s*$")
     commit_prefix = re.compile(r"^- ((?:작업|work): )?Commit [0-9a-f]{7,40}: ")
-    # The prefix anchor above only reaches a leading ``Commit <hash>:``. CI and
-    # review bullets name their commit mid-sentence, so a full hash outlived it
-    # and reached the reader. Abbreviate rather than drop: a commit bullet is
-    # identified by its subject, but a CI bullet has none, so the short hash is
-    # the only identity it has left.
     long_hash = re.compile(r"\b([0-9a-f]{7})[0-9a-f]{33}\b")
-    # The renderer indents an evidence bullet under its work item, so this
-    # anchor has to tolerate leading space; a top-level-only anchor let full
-    # commit hashes and handoff digests through to the human page.
     evidence_bullet = re.compile(r"^\s*- (관련 evidence|related evidence): ")
     lines: List[str] = []
     for line in content.splitlines():
-        # Raw evidence references (full hashes, task ids) are the local
-        # provenance layer, not reading material.
         if evidence_bullet.match(line):
             continue
         if line.startswith("- "):
+            line = re.sub(
+                r"(Commit [0-9a-f]{7,40}: )(.{80})[^\s]*",
+                lambda match: match.group(1) + match.group(2).rstrip() + "…",
+                line,
+            )
             line = commit_prefix.sub(
-                lambda m: "- " + (m.group(1) or ""), citation.sub("", line)
+                lambda match: "- " + (match.group(1) or ""), citation.sub("", line)
             )
         lines.append(long_hash.sub(r"\1", line))
 
     preamble, sections = _partition_summary_sections(lines)
-
-    ordered = sorted(sections, key=lambda s: _NOTION_SECTION_RANK.get(s["title"], 3))
+    ordered = sorted(sections, key=lambda section: _NOTION_SECTION_RANK.get(section["title"], 3))
     is_weekly = any(line.startswith("# Weekly Work Journal") for line in preamble)
-
-    # The same fact reaches progress, verified, and by-project listings, so a
-    # per-section fold left the reader the same bullet three times. Folding
-    # runs over the reordered sections rather than the source order: the
-    # section the reader meets first is the one that keeps the bullet.
     seen: set = set()
 
     def fold(block: Iterable[str]) -> List[str]:
         kept: List[str] = []
-        # A folded bullet has to take its own indented detail lines with it.
-        # Leaving them behind reattached them to the previous surviving bullet,
-        # which reported that bullet's outcome as the dropped one's.
         dropping = False
         for line in block:
             if line.startswith("- ") and line not in _EMPTY_MARKERS:
@@ -380,34 +786,24 @@ def notion_presentation(content: str) -> str:
         section["lines"] = fold(section["lines"])
 
     def says_nothing(section: Dict[str, Any]) -> bool:
-        # A heading left behind by the fold — including the ``### project``
-        # heading of an emptied by-project section — is not a body.
-        body = [
-            l for l in section["lines"][1:] if l.strip() and not l.startswith("#")
-        ]
-        return not body or all(l in _EMPTY_MARKERS for l in body)
+        body = [line for line in section["lines"][1:] if line.strip() and not line.startswith("#")]
+        return not body or all(line in _EMPTY_MARKERS for line in body)
 
-    ordered = [s for s in ordered if not says_nothing(s)]
+    ordered = [section for section in ordered if not says_nothing(section)]
+    if not is_weekly:
+        for section in ordered:
+            if _NOTION_SECTION_RANK.get(section["title"], 3) == 0:
+                section["lines"] = [
+                    "> " + line[2:] if line.startswith("-") and line not in _EMPTY_MARKERS else line
+                    for line in section["lines"]
+                ]
 
-    # A daily page has few decisions, so callouts keep its judgment prominent.
-    # Weekly decisions stay a dated list: turning a busy week's entries into
-    # separate callout boxes made the summary harder to scan.
+    output = list(preamble)
     for section in ordered:
-        if _NOTION_SECTION_RANK.get(section["title"], 3) == 0 and not is_weekly:
-            section["lines"] = [
-                "> " + line[2:]
-                if line.startswith("- ") and line not in _EMPTY_MARKERS
-                else line
-                for line in section["lines"]
-            ]
-
-    out = list(preamble)
-    for section in ordered:
-        while out and not out[-1].strip():
-            out.pop()
-        out.extend(["", *section["lines"]])
-    return "\n".join(out).strip("\n")
-
+        while output and not output[-1].strip():
+            output.pop()
+        output.extend(["", *section["lines"]])
+    return "\n".join(output).strip("\n")
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -836,6 +1232,8 @@ def normalize_event(
             "command_summary",
             "exit_code",
             "duration_seconds",
+            "workflow",
+            "attempt",
             "hypothesis",
             "prediction",
             "baseline",
@@ -1374,6 +1772,7 @@ def _display_text(value: str) -> str:
 _FAILED_OUTCOME_STATUSES = {
     "failure",
     "failed",
+    "rejected",
     "deferred",
     "cancelled",
     "aborted",
@@ -1384,9 +1783,85 @@ _FAILED_OUTCOME_STATUSES = {
 def _event_failed(event: Mapping[str, Any]) -> bool:
     status = str((event.get("outcome") or {}).get("status") or "").lower()
     return (
-        event["verification_status"] in {"failed", "skipped"}
+        bool(event.get("blocker"))
+        or event["verification_status"] in {"failed", "skipped"}
         or status in _FAILED_OUTCOME_STATUSES
     )
+
+
+def _failed_digest_events(events: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    """Return current failures after reducing each event kind by its subject."""
+    latest: Dict[Tuple[str, ...], Tuple[Mapping[str, Any], str]] = {}
+
+    def order(event: Mapping[str, Any]) -> Tuple[str, str]:
+        return str(event.get("occurred_at") or ""), str(event.get("event_id") or "")
+
+    def task_id(event: Mapping[str, Any]) -> str:
+        return str((event.get("correlation") or {}).get("task_id") or "").strip()
+
+    def add(key: Tuple[str, ...], event: Mapping[str, Any], kind: str) -> None:
+        prior = latest.get(key)
+        if prior is None or order(event) > order(prior[0]):
+            latest[key] = (event, kind)
+
+    for event in events:
+        source = event.get("source") or {}
+        source_type = str(source.get("type") or "")
+        source_id = str(source.get("id") or event.get("event_id") or "")
+        task = task_id(event)
+        operation_id = str((event.get("correlation") or {}).get("operation_id") or "")
+        is_verification = source_type == "agent-task" and (
+            event.get("event_type") == "validation" or ":verify:" in operation_id
+        )
+
+        if source_type == "ci-status":
+            # CI attempts are ordered by provider attempt first, then observed
+            # time, in the shared CI selector below.
+            pass
+        elif source_type == "peer-review":
+            add(("review", task or source_id), event, "review")
+        elif source_type == "patch-land":
+            target = _event_commit_sha(event) or task or source_id
+            add(("land", target), event, "land")
+        elif is_verification:
+            add(("verify", task or source_id), event, "verify")
+        elif task:
+            add(("worker", source_type, task), event, "worker")
+        else:
+            add(("event", source_type, source_id), event, "event")
+
+    for event in _latest_ci_events(events):
+        sha = _event_commit_sha(event) or ("@" + str(event.get("event_id") or ""))
+        add(("ci", sha, _ci_run_identity(event)), event, "ci")
+
+    failed_ids = set()
+    for event, kind in latest.values():
+        outcome_status = str((event.get("outcome") or {}).get("status") or "").lower()
+        if kind == "verify":
+            is_failed = event.get("verification_status") in {"failed", "skipped"}
+        elif kind == "worker":
+            is_failed = (
+                bool(event.get("blocker"))
+                or event.get("verification_status") in {"failed", "skipped"}
+                or outcome_status in _FAILED_OUTCOME_STATUSES
+            )
+        elif kind == "review":
+            is_failed = (
+                bool(event.get("blocker"))
+                or event.get("verification_status") in {"failed", "skipped"}
+                or outcome_status in _FAILED_OUTCOME_STATUSES
+            )
+        elif kind == "land":
+            is_failed = (
+                bool(event.get("blocker"))
+                or event.get("verification_status") in {"failed", "skipped"}
+                or outcome_status in _FAILED_OUTCOME_STATUSES
+            )
+        else:
+            is_failed = _event_failed(event)
+        if is_failed:
+            failed_ids.add(str(event.get("event_id") or ""))
+    return [event for event in events if str(event.get("event_id") or "") in failed_ids]
 
 
 def _overview_summary(
@@ -1400,7 +1875,7 @@ def _overview_summary(
         len(events),
         sum(event["verification_status"] == "passed" for event in events),
         sum(event["verification_status"] == "not_verified" for event in events),
-        sum(_event_failed(event) for event in events),
+        len(_failed_digest_events(events)),
         *unique_counts,
     )
 
@@ -1474,6 +1949,8 @@ def render_daily(period: str, events: Sequence[Mapping[str, Any]]) -> str:
         for event in ordered
         if event["verification_status"] == "not_verified"
     ]
+    # This source journal is preserved under Notion Details; retain historical
+    # outcomes here while the digest above shows only current CI run failures.
     failed = [
         "- %s %s" % (_outcome_summary(event), _event_citation(event))
         for event in ordered
@@ -1485,6 +1962,8 @@ def render_daily(period: str, events: Sequence[Mapping[str, Any]]) -> str:
         for event in ordered
         if event.get("decision")
     ]
+    # Preserve every blocker in the raw evidence section; the Notion digest
+    # above filters superseded CI runs before presenting current blockers.
     blockers = [
         "- %s %s"
         % (_judgment_summary(event, "blocker", labels), _event_citation(event))
@@ -2577,6 +3056,8 @@ class JournalStore:
             ]
             for kind, period in dirty:
                 rows = self._indexed_period_events(connection, kind, period)
+                if kind == "daily":
+                    rows = _enrich_legacy_review_events(self.repo, rows)
                 directory = self.daily_dir if kind == "daily" else self.weekly_dir
                 target = directory / ("%s.md" % period)
                 if not rows:
@@ -2957,18 +3438,23 @@ class JournalStore:
         rows = []
         current_day, current_week = self._current_periods()
         self._ensure_index_database()
-        selected = (
-            "kind, period, content_hash, content, has_blocker"
-            if include_content
-            else "kind, period, content_hash, '', has_blocker"
-        )
         with sqlite3.connect(str(self.index_db_path)) as connection:
             indexed = list(
                 connection.execute(
-                    "SELECT %s FROM summaries ORDER BY kind, period" % selected
+                    "SELECT kind, period, content, has_blocker "
+                    "FROM summaries ORDER BY kind, period"
                 )
             )
-        for kind_value, period_value, content_hash, content, has_blocker in indexed:
+            event_rows = list(connection.execute(
+                "SELECT local_date, iso_week, payload FROM events WHERE active = 1 "
+                "ORDER BY occurred_at, event_id"
+            ))
+        events_by_period: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for local_date, iso_week, payload in event_rows:
+            event = self._decode_indexed_event(str(payload))
+            events_by_period.setdefault(("daily", str(local_date)), []).append(event)
+            events_by_period.setdefault(("weekly", str(iso_week)), []).append(event)
+        for kind_value, period_value, content, has_blocker in indexed:
             kind = str(kind_value)
             period = str(period_value)
             if not include_open and (
@@ -2976,14 +3462,18 @@ class JournalStore:
                 or (kind == "weekly" and period >= current_week)
             ):
                 continue
+            period_events = events_by_period.get((kind, period), [])
+            if kind == "daily":
+                period_events = _enrich_legacy_review_events(self.repo, period_events)
+            presentation = notion_presentation(str(content), period_events)
             rows.append(
                 {
                     "kind": kind,
                     "period": period,
                     "summary_key": "%s:%s:%s" % (self.project_id, kind, period),
                     "title": "%s Work Journal — %s" % (kind.title(), period),
-                    "content": str(content),
-                    "content_hash": str(content_hash),
+                    "content": presentation if include_content else "",
+                    "content_hash": _sha256_bytes(presentation.encode("utf-8")),
                     "project_name": self.project_name,
                     "has_blocker": bool(has_blocker),
                 }
@@ -3359,7 +3849,7 @@ class JournalStore:
             sync_now = sync_now.replace(tzinfo=dt.timezone.utc)
         sync_now = sync_now.astimezone(dt.timezone.utc)
         attempted = 0
-        rows = self._summary_rows(include_open=force, include_content=False)
+        rows = self._summary_rows(include_open=force, include_content=True)
         if today_only:
             current_day, _current_week = self._current_periods()
             rows = [
@@ -3422,9 +3912,7 @@ class JournalStore:
                 continue
             attempted += 1
             try:
-                content = notion_presentation(
-                    self._summary_content(row["kind"], row["period"])
-                )
+                content = row["content"]
                 aggregates = self._period_aggregates(row["kind"], row["period"])
                 result = exporter.upsert(
                     row["summary_key"],
@@ -3523,7 +4011,7 @@ def _source_ref(repo: pathlib.Path, source_path: pathlib.Path, source_id: str) -
 
 
 def _handoff_summary(path: pathlib.Path) -> str:
-    """Carry the bounded assistant claim, never upgrading it to verification."""
+    """Carry only the opening sentence as a compact handoff pointer."""
     try:
         with path.open(encoding="utf-8") as handle:
             text = handle.read(MAX_SOURCE_BYTES)
@@ -3546,13 +4034,8 @@ def _handoff_summary(path: pathlib.Path) -> str:
         clean = re.sub(r"^#{1,6}\s+", "", line.strip()).strip("* ")
         if clean:
             lines.append(clean)
-    value = sanitize_text(" | ".join(lines), MAX_SOURCE_BYTES)
-    raw = value.encode("utf-8")
-    if len(raw) > MAX_TEXT_BYTES:
-        marker = " …(truncated)… "
-        room = MAX_TEXT_BYTES - len(marker.encode("utf-8"))
-        value = (raw[:room // 2].decode("utf-8", errors="ignore") + marker
-                 + raw[-(room - room // 2):].decode("utf-8", errors="ignore"))
+    value = re.split(r"(?<=[.!?。])\s+", " ".join(lines), maxsplit=1)[0]
+    value = sanitize_text(value.replace(" | ", " "), 120)
     return value or "Session handoff captured"
 
 def _read_json_source(path: pathlib.Path) -> Dict[str, Any]:
@@ -3565,6 +4048,60 @@ def _read_json_source(path: pathlib.Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise JournalError("source record is not an object")
     return data
+
+
+def _review_task_id(source_path: pathlib.Path) -> str:
+    """Read the task identity from the adjacent immutable review scope."""
+    match = re.search(r"-(\d{8}T\d{6}Z-\d+)\.md$", source_path.name)
+    if not match:
+        return ""
+    scope = source_path.parent / ("_scope-" + match.group(1) + ".json")
+    try:
+        row = _read_json_source(scope)
+    except (OSError, JournalError):
+        return ""
+
+    def find(value: Any) -> str:
+        if isinstance(value, Mapping):
+            task = value.get("task_id")
+            if isinstance(task, str) and task:
+                return sanitize_text(task, 160)
+            for child in value.values():
+                found = find(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = find(child)
+                if found:
+                    return found
+        return ""
+
+    return find(row)
+
+
+def _enrich_legacy_review_events(
+    repo: pathlib.Path, events: Sequence[Mapping[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Attach task ids to older review events using their immutable scope file."""
+    enriched = []
+    for event in events:
+        row = dict(event)
+        source = row.get("source") or {}
+        if source.get("type") == "peer-review" and not (row.get("correlation") or {}).get("task_id"):
+            review_ref = next((ref for ref in row.get("refs", [])
+                               if ref.get("type") == "peer-review" and ref.get("path")), None)
+            if review_ref:
+                task_id = _review_task_id(repo / str(review_ref["path"]))
+                if task_id:
+                    row["correlation"] = dict(row.get("correlation") or {}, task_id=task_id)
+                    outcome = dict(row.get("outcome") or {})
+                    summary = str(outcome.get("summary") or "Peer review outcome")
+                    if not summary.endswith(": " + task_id):
+                        outcome["summary"] = summary + ": " + task_id
+                    row["outcome"] = outcome
+        enriched.append(row)
+    return enriched
 
 
 def _last_section_value(text: str, section: str) -> Optional[str]:
@@ -3686,6 +4223,24 @@ def source_payload(
         payload = _task_payload(
             repo, source_path, operation=operation, occurred_at=occurred_at or now
         )
+    elif source_type == "panel-result":
+        row = _read_json_source(source_path)
+        sid = source_id or str(row.get("revision") or row.get("task_id") or source_path.stem)
+        task_id = sanitize_text(str(row.get("task_id") or ""), 160)
+        summary = sanitize_text(str(row.get("summary") or "").splitlines()[0], 120)
+        status = str(row.get("outcome") or "completed")
+        payload = {
+            "event_type": "phase_outcome",
+            "occurred_at": occurred_at or now,
+            "source": {"type": source_type, "id": sid},
+            "correlation": {"task_id": task_id},
+            "outcome": {
+                "summary": outcome or "Task %s %s: %s" % (task_id or "unknown", status, summary),
+                "status": outcome_status or status,
+            },
+            "verification_status": verification_status or "not_verified",
+            "evidence": [{"type": source_type, "ref": sid}],
+        }
     elif source_type in {
         "autopilot",
         "goal-drive",
@@ -3730,6 +4285,13 @@ def source_payload(
             ),
             "evidence": [{"type": source_type, "ref": sid}],
         }
+        if source_type == "peer-review":
+            task_id = _review_task_id(source_path)
+            if task_id:
+                payload["correlation"] = {"task_id": task_id}
+                payload["outcome"]["summary"] = "%s: %s" % (
+                    payload["outcome"]["summary"], task_id
+                )
         relative = _safe_relpath(repo, evidence_path)
         if relative:
             payload["refs"] = [{"type": source_type, "path": relative, "id": sid}]
@@ -3954,8 +4516,25 @@ def source_payload(
             if row.get("next"):
                 payload["next_action"] = row.get("next")
         elif source_type == "ci-status":
-            sid = source_id or "%s:%s" % (row.get("sha"), row.get("conclusion"))
             conclusion = str(row.get("conclusion") or row.get("status") or "")
+            run_id = row.get("databaseId") or row.get("run_id") or row.get("id")
+            run_url = row.get("url")
+            attempt = row.get("attempt")
+            if source_id:
+                sid = source_id
+            elif run_id or run_url:
+                run_identity = (
+                    "%s:run:%s" % (row.get("sha"), run_id)
+                    if run_id else "%s:run-url:%s" % (row.get("sha"), run_url)
+                )
+                if attempt is not None:
+                    sid = "%s:attempt:%s:%s" % (run_identity, attempt, conclusion)
+                else:
+                    sid = "%s:%s" % (run_identity, conclusion)
+            else:
+                # Preserve the original identity for legacy rows without a
+                # stable provider run identifier.
+                sid = "%s:%s" % (row.get("sha"), conclusion)
             failed = conclusion in {
                 "failure",
                 "timed_out",
@@ -3999,6 +4578,11 @@ def source_payload(
                         "ref": _source_ref(repo, evidence_path, sid),
                     }
                 ],
+                "provenance": {
+                    "workflow": row.get("workflow"),
+                    "attempt": attempt,
+                    "run_id": run_id,
+                },
             }
         else:
             sid = source_id or str(row.get("id") or row.get("event_id") or "")
@@ -4026,6 +4610,10 @@ def source_payload(
         payload["verification_status"] = verification_status
     if outcome:
         payload.setdefault("outcome", {})["summary"] = outcome
+        if source_type == "peer-review" and payload.get("correlation", {}).get("task_id"):
+            payload["outcome"]["summary"] = "%s: %s" % (
+                outcome, payload["correlation"]["task_id"]
+            )
     if outcome_status:
         payload.setdefault("outcome", {})["status"] = outcome_status
     # The caller states these; the adapter never reads them out of a record. A

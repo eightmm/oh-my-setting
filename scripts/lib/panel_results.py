@@ -1592,8 +1592,31 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                 raise ValueError('finish failed; SHA %s; retry finish only after validating completion: %s'
                                  % (landed_commit, error)) from error
     try:
-        return _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify,
-                                verify_timeout, execution)
+        result = _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify,
+                                  verify_timeout, execution)
+        try:
+            first_line = summary.splitlines()[0].strip() if summary.splitlines() else ""
+            journal_summary = 'Task %s %s: %s' % (task_id, outcome, first_line[:120])
+            if landed_commit:
+                journal_summary += ' (landed commit %s)' % landed_commit[:7]
+            verification_status = result.get('verification', {}).get('status')
+            if verification_status not in ('passed', 'failed'):
+                verification_status = 'not_verified'
+            subprocess.Popen(
+                ['bash', '-c',
+                 '. "$1"; work_journal_observe "$2" panel-result "$3" '
+                 '--source-id "$4" --outcome "$5" --outcome-status "$6" '
+                 '--verification-status "$7"',
+                 'oms-panel-result-capture',
+                 str(ROOT / 'scripts' / 'lib' / 'work-journal.sh'), str(repo),
+                 str(repo / result['artifact']),
+                 str(task_id) + ':' + str(result.get('revision', '')),
+                 journal_summary, outcome, verification_status],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, close_fds=True)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            pass
+        return result
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         if landed_commit is not None:
             raise ValueError('finalization failed after plan finish; SHA %s; retry only --finalize after '
