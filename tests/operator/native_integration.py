@@ -1519,7 +1519,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     write_agent("huge", description="Huge", lines=[usage_line("m1", 1, 0, 0, 5), huge_line("no id", 2, 0, 0, 10)])
     agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["huge"]
     assert (agent["tokens"], agent["partial"]) == (6, True), agent
-    assert "1+ in / 5 out" in sub_board(panel_chats.native_subagents([claude_main]), "log")[0]
+    assert "1+ in / 5+ out" in sub_board(panel_chats.native_subagents([claude_main]), "log")[0]
     for leftover in agents_dir.glob("agent-*"):
         leftover.unlink()
     # A workflow row adds phase and approximate counts when its journal tail parses, and only its name otherwise.

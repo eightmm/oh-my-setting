@@ -1631,7 +1631,8 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertTrue(usage['session_cumulative'], usage)
         self.assertEqual(usage['session_totals'], detail['session_totals'])
 
-        from panel_view import call_tokens, model_usage
+        from panel_view import call_tokens, model_usage, token_pair
+        self.assertEqual(token_pair(1, 5, partial=True), '1+ in / 5+ out')
         call = dict(row, attempt_id='resumed-call', selected_model='gpt-6-sol',
                     tokens=1400, provider_usage=usage)
         report = {'operations': {'recent': [call]}}

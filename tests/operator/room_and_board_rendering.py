@@ -108,7 +108,7 @@ for columns, rows in ((76, 30), (110, 44)):
         native_screen = render(native_report, "claude", columns, rows, view="tree", unicode=glyphs)
         assert "SUBAGENTS (2)" in native_screen, native_screen
         assert "2.0k in / 450 out" in native_screen and "3/5 agents live" in native_screen, native_screen
-        assert "100.0k+ in / 20.0k out" in native_screen, native_screen
+        assert "100.0k+ in / 20.0k+ out" in native_screen, native_screen
         assert all(display_width(line) <= columns for line in native_screen.splitlines()), native_screen
 # A window whose main is not the Claude main shows none of that main's agents (not even as unlinked calls).
 cross_report = deepcopy(native_report)

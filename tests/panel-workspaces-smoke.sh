@@ -75,6 +75,8 @@ usage_report = {'repo': {'name': 'r', 'path': '/tmp/r'}, 'collection': {'ok': Tr
 usage_board = panel_view.render(usage_report, 'claude', 110, 40)
 for value in ('39.1k in / 9.1k out', '12.3k tok', '700 tok'):
     check(any(value in line for line in usage_board.splitlines()), 'token total missing from column: ' + value + usage_board)
+check(panel_view.token_pair(1, 5, partial=True) == '1+ in / 5+ out',
+      'partial token pair did not mark both counts')
 detail_board = panel_view.render(usage_report, 'claude', 110, 40,
                                  navigation={'selected': ('result', 'att_rev')})
 check('9.1k out · 97% cached (cached 38.0k, new 1051)' in detail_board,

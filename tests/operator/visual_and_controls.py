@@ -1754,7 +1754,7 @@ assert (served["name"], served["tokens"], served["token_reports"], served["recor
 assert selected["attribution"] == "selected" and selected["tokens"] == 0 and selected["token_reports"] == 1
 assert mixed["name"] == "Mixed models" and mixed["tokens"] == 34 and abs(mixed["cost"] - .6) < .000001
 labels = " | ".join(usage_labels(usage_view, costs=True))
-assert "12.3k+? in / 2.1k out" in labels and "$0.25+?" in labels and "Sol 6(sel) 0 in / 0 out" in labels, labels
+assert "12.3k+? in / 2.1k+? out" in labels and "$0.25+?" in labels and "Sol 6(sel) 0 in / 0 out" in labels, labels
 assert "Mixed models 18 in / 16 out" in labels, labels
 assert "Astra" not in labels and "Opus" not in labels and "$?" in labels, labels
 assert "USAGE" not in render(usage_view, "codex", 100, 28, view="tree")

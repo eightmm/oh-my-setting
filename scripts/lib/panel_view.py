@@ -678,8 +678,9 @@ def token_amount(value):
 
 def token_pair(input_tokens, output_tokens, partial=False):
     """Format billed input and generated output with the dashboard's rounded amounts."""
-    return "%s%s in / %s out" % (token_amount(input_tokens), "+" if partial else "",
-                                  token_amount(output_tokens))
+    marker = "+" if partial else ""
+    return "%s%s in / %s%s out" % (token_amount(input_tokens), marker,
+                                    token_amount(output_tokens), marker)
 
 
 def _cache_input_breakdown(usage):
@@ -793,7 +794,7 @@ def usage_labels(report, costs=False):
         if row["token_reports"] and row["pair_reports"] == row["token_reports"]:
             tokens = token_pair(row["input_tokens"], row["output_tokens"])
             if row["token_reports"] < row["records"]:
-                tokens = tokens.replace(" in / ", "+? in / ", 1)
+                tokens = tokens.replace(" in / ", "+? in / ", 1).replace(" out", "+? out", 1)
             label = "%s%s %s / %sx" % (row["name"], suffix, tokens, row["records"])
         else:
             tokens = amount(row["tokens"]) if row["token_reports"] else "?"
