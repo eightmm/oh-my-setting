@@ -727,6 +727,8 @@ def _review_preflight(repo, task_id, workers, rows, admissions=None):
     for index, worker in enumerate(workers):
         patches = [r for r in rows if r.get('kind') == 'delegate'
                    and r.get('attempt_id') == worker.get('attempt_id') and r.get('patch_sha256')]
+        if worker.get('refs', {}).get('panel_purpose') == 'investigate':
+            raise ValueError('report-only investigation findings cannot be accepted; finalize completed instead')
         owns = _worker_owns(repo, worker)
         for row in patches:
             data = verified_patch(repo, row)
@@ -1865,6 +1867,14 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             representative = stages['main_decision']['state']
             action = ('review main decision' if failed_stage == 'main_decision' else
                       'record main decision' if stages['main_decision']['state'] == 'pending' else 'none')
+        if (not result and not failed_stage and last.get('state') == 'review'
+                and metadata.get('panel_purpose') == 'investigate' and metadata.get('panel_access') == 'write'):
+            findings = next((c for c in reversed(calls) if c.get('kind') == 'delegate'), {})
+            try:
+                if findings.get('exit') == 0 and findings.get('verify_exit') == 0 and verified_patch(repo, findings) == b'':
+                    representative, action = 'findings awaiting owner judgment', 'record main decision'
+            except (OSError, ValueError, TypeError):
+                representative, action = 'patch evidence unavailable', 'inspect result evidence'
         if termination_reason and not result and not failed_stage:
             representative = termination_reason
             action = {

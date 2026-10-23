@@ -125,6 +125,8 @@ def bootstrap(provider, repo):
         "--access write --brief-file PATH --verify COMMAND for worker (--purpose explain|investigate|implement), "
         "builder, refactorer, documenter, integrator or performance-engineer; researcher, advisor, architect, "
         "critic, reviewer (needs --verify), verifier, security-auditor and release-engineer are read-only. "
+        "For measurements needing scratch writes, use worker --purpose investigate --access write with a brief and verifier: "
+        "scratch stays outside the repository, repository patches fail, and findings await owner finalization as completed, never accepted. "
         "Each role takes the first installed model of its capability tier, ordered by more weekly quota left; "
         "reviewer, verifier, security-auditor and critic then take the provider other than yours when available. Do not pass --to or "
         "--model for ordinary role calls, so tier routing applies; use them only when a specific provider is "

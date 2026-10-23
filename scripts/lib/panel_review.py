@@ -123,7 +123,7 @@ def _call_result_event(repo, room_id, member, task_id, status):
         paths = panel_results._patch_paths(data)
         if all(_safe_patch_path(path) for path in paths):
             changed = paths
-            valid_patch = True
+            valid_patch = bool(data)
         else:
             patch_path, patch_sha = None, None
     if artifact and not _safe_patch_path(artifact):

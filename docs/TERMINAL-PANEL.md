@@ -643,9 +643,13 @@ Routing is provider-neutral within the configured light, routine, deep and front
 | `critic` | frontier | read | `oms panel --dispatch critic` | `peer-delegate --role --read-only` |
 
 The plain `worker` role uses the `analysis-worker` strategy for reads and
-`implementation-worker` for writes. Other roles use their role name as the
-strategy. Write access requires `--access write`, a scoped brief and a verifier;
-read access is the default. The same role routes are available without opening
+investigations, and `implementation-worker` for implementation. Other roles use
+their role name as the strategy. Write access requires `--access write`, a scoped brief and a verifier;
+read access is the default. For measurements needing scratch writes, use
+`worker --purpose investigate --access write --brief-file B --verify CMD`:
+it keeps the analysis strategy, permits scratch outside the repository, rejects
+repository patches and returns findings for owner `--finalize --outcome completed`
+judgment (never `accepted`). The same role routes are available without opening
 the panel; see [Without the panel](#without-the-panel).
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and

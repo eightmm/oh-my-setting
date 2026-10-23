@@ -109,8 +109,9 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         raise ValueError("%s is read-only" % role)
     if role == "worker":
         purpose = purpose or ("implement" if access == "write" else "explain")
-        if purpose not in ("explain", "investigate", "implement") or (purpose == "implement") != (access == "write"):
-            raise ValueError("worker purpose must match access: explain or investigate reads, implement writes")
+        if purpose not in ("explain", "investigate", "implement") or (
+                purpose == "implement" and access != "write" or purpose == "explain" and access != "read"):
+            raise ValueError("worker purpose must match access: explain reads, investigate reads or writes, implement writes")
     elif purpose:
         raise ValueError("--purpose applies to plain workers; the role names the task")
     else:
@@ -215,9 +216,11 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
         raise ValueError("only reviewers run --verify among read roles; dispatch a reviewer to run checks")
     request = ["--brief-file", str(brief)] if brief else ["--prompt", prompt]
     profile = route["role"] if route["role"] != "worker" else (
-        "implementation-worker" if route["access"] == "write" else "analysis-worker")
+        "implementation-worker" if route["purpose"] == "implement" else "analysis-worker")
     result = prefix + ["peer-delegate", "--repo", str(repo), "--to", route["provider"], "--role", profile,
                        "--no-memory", "--no-task"] + request + model
+    if route["purpose"] == "investigate" and route["access"] == "write":
+        result += ["--allow-no-change"]
     if route["access"] == "read":
         result += ["--read-only"]
     if verify and verify.strip():

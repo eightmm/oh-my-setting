@@ -488,6 +488,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+REPORT_ONLY=0
+if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = worker ] &&
+  [ "${OMS_PANEL_PURPOSE:-}" = investigate ] && [ "$WORKER_ACCESS" = write ]; then
+  REPORT_ONLY=1
+fi
+
 if [ "$ALLOW_NO_CHANGE" = 1 ] && [ -n "$PLAN_TASK_ID" ]; then
   fail "--allow-no-change cannot complete a plan task; record a no-change result without --plan-task"
 fi
@@ -1145,6 +1151,9 @@ fi
     write_unattended_stop_rule
   fi
   write_minimal_change_doctrine
+  if [ "$REPORT_ONLY" = 1 ]; then
+    printf 'Return findings and measurement evidence. Never edit repository files; use temporary scratch outside the repository. A repository patch fails this report-only investigation.\n'
+  fi
   printf '\n'
   if [ "$APPLY" = 1 ]; then
     printf 'Automatic apply uses patch-land admission: verifier edits and test reductions require explicit caller consent; the base verification floor remains mandatory.\n'
@@ -2024,6 +2033,12 @@ EOF
     diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached --binary "$repair_replay_base" -- \
     > "$patch_file" \
     || { KEEP_WORKTREE=1; printf '\n- patch capture failed; worktree preserved: %s\n' "$worktree" >> "$artifact"; return 1; }
+  if [ "$REPORT_ONLY" = 1 ] && [ -s "$patch_file" ]; then
+    KEEP_WORKTREE=1
+    echo 'report-only investigation changed repository files' >&2
+    printf '\nreport-only investigation changed repository files\n' >> "$artifact"
+    return 1
+  fi
 }
 
 # Runs VERIFY_CMD in the worktree; output goes to the artifact and is kept in

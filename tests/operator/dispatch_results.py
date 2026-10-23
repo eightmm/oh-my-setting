@@ -367,6 +367,78 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
     else:
         assert observed["cwd"] == str(project), observed
 
+# Scratch-capable investigations return findings without entering patch review.
+try:
+    allocate("codex", access="write", purpose="explain", installed=both)
+    raise AssertionError("explain accepted write access")
+except ValueError:
+    pass
+for owner in panel.PROVIDERS:
+    scratch_task = "scratch-investigation-" + owner
+    scratch_room = room.create(project, scratch_task, "Report-only investigation")
+    room.join(project, scratch_room, main_attempts[owner], owner, "main")
+    scratch_prompt = temporary / (scratch_task + ".prompt")
+    scratch_brief = temporary / (scratch_task + ".md")
+    scratch_brief.write_text("Inspect value.txt; return findings without repository edits.\n")
+    scratch_env = dict(environment, OMS_AGENT=owner, OMS_ROOM_ID=scratch_room,
+                       OMS_ROOM_PARTICIPANT=main_attempts[owner],
+                       OMS_PANEL_MAIN_ATTEMPT=main_attempts[owner], PANEL_TEST_PROMPT=str(scratch_prompt))
+    request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", scratch_room,
+               "--dispatch", "worker", "--owner", owner, "--purpose", "investigate", "--access", "write",
+               "--brief-file", str(scratch_brief), "--verify", "test -f value.txt",
+               "--task-id", scratch_task]
+    route = json.loads(call(request + ["--dry-run"], scratch_env))
+    assert route["argv"][route["argv"].index("--role") + 1] == "analysis-worker", route
+    assert "--allow-no-change" in route["argv"] and "--read-only" not in route["argv"], route
+    previous_calls = len(worker_log.read_text().splitlines())
+    answer = call(request, scratch_env)
+    assert "patch: none (no changes)" in answer, answer
+    assert len(worker_log.read_text().splitlines()) == previous_calls + 1, "empty patch launched reviewer"
+    assert "Return findings" in scratch_prompt.read_text(), scratch_prompt.read_text()
+    observed = json.loads(worker_log.read_text().splitlines()[-1])
+    if route["route"]["provider"] == "codex":
+        assert "workspace-write" in observed["argv"], observed
+    result = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
+                              "--task-id", scratch_task, "--json"], scratch_env))["rows"][0]
+    assert result["process_state"] == "review" and not result["acceptance"], result
+    assert result["representative_state"] == "findings awaiting owner judgment", result
+    assert result["stages"]["verify"]["state"] == "passed", result
+    report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                              "--room", scratch_room, "--json"], scratch_env))["dashboard"]
+    events = [turn["room_event"] for turn in room.records(project, scratch_room) if turn.get("room_event")]
+    event = next(event for event in events if event.get("kind") == "call-result")
+    assert not event["needs_review"] and event["verify_status"] == "passed", event
+    # A missing or digest-mismatched patch must never become empty success.
+    import panel_review
+    evidence_patch = project / event["patch"]
+    for invalid_bytes in (b"tampered", None):
+        if invalid_bytes is None:
+            evidence_patch.unlink()
+        else:
+            evidence_patch.write_bytes(invalid_bytes)
+        try:
+            panel_review._call_result_event(project, scratch_room, event["call_id"], scratch_task, 0)
+            raise AssertionError("invalid patch evidence became an empty result")
+        except (OSError, ValueError):
+            pass
+        finally:
+            evidence_patch.write_bytes(b"")
+    from review_backlog import counts
+    assert counts(report).get(main_attempts[owner]) == 1, report
+    scratch_summary = temporary / (scratch_task + "-summary.md")
+    scratch_summary.write_text("Findings: value.txt exists; no repository edits.\n")
+    finalize = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize",
+                "--task-id", scratch_task, "--owner", owner, "--summary-file", str(scratch_summary)]
+    refused = subprocess.run(finalize + ["--outcome", "accepted", "--verify", "true",
+                                         "--evidence", event["artifact"]], env=scratch_env,
+                             capture_output=True, text=True,
+                             timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+    assert refused.returncode != 0, "findings satisfied accepted"
+    finalized = json.loads(call(finalize + ["--outcome", "completed"], scratch_env))
+    assert finalized["outcome"] == "completed", finalized
+    assert counts(json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                   "--room", scratch_room, "--json"], scratch_env))["dashboard"]).get(main_attempts[owner], 0) == 0
+
 # A researcher keeps the cheap family, read-only strategy and source evidence.
 from panel_routing import newest_route_model
 assert newest_route_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna", "gpt-7-astra"]) == "gpt-6.10-luna"

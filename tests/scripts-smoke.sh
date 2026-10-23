@@ -18605,6 +18605,37 @@ PY
     fail "plan-task incompatibility should have a clear usage error: $out"
   [ ! -e "$plan_worktree_root" ] || fail "incompatible arguments must fail before worktree setup"
 
+  # Report-only writes allow scratch measurements but reject captured repo edits.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'fixture'; exit 0 ;; esac
+prompt="$(cat)"
+printf '%s' "$prompt" | grep -q 'Return findings' || exit 8
+scratch="$(mktemp "${TMPDIR:-/tmp}/oms-investigation.XXXXXX")" || exit 9
+printf 'measured\n' > "$scratch"
+cat "$scratch"
+rm -f "$scratch"
+[ "${REPORT_REPO_EDIT:-0}" != 1 ] || printf 'forbidden\n' > report-edit.txt
+EOF
+  chmod +x "$bin_dir/codex"
+  for report_edit in 0 1; do
+    rc=0
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker OMS_PANEL_PURPOSE=investigate \
+      REPORT_REPO_EDIT="$report_edit" \
+      "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+      --artifact-dir "$artifact_dir" --role analysis-worker --model fixture-model \
+      --allow-no-change --verify true --prompt 'Measure using scratch only' \
+      > "$project/report-$report_edit.out" 2>&1 || rc=$?
+    if [ "$report_edit" = 0 ]; then
+      [ "$rc" = 0 ] || fail "report-only empty patch failed ($rc): $(cat "$project/report-$report_edit.out")"
+      assert_file_contains "$project/report-$report_edit.out" 'patch: none (no changes)'
+    else
+      [ "$rc" != 0 ] || fail "report-only repository patch succeeded"
+      assert_file_contains "$project/report-$report_edit.out" 'report-only investigation changed repository files'
+    fi
+  done
+
   # A patch-capture failure keeps the worker's only copy of its work.
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
