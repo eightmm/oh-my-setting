@@ -95,6 +95,19 @@ now_utc() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
 
+auto_update_timestamp_epoch() {
+  python3 -c 'import calendar,re,sys,time
+match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,6}))?Z", sys.argv[1])
+if not match:
+    raise SystemExit(1)
+try:
+    seconds = calendar.timegm(time.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S"))
+except Exception:
+    raise SystemExit(1)
+fraction = match.group(2) or ""
+print(seconds * 1000000 + int((fraction + "000000")[:6]))' "$1" 2>/dev/null
+}
+
 auto_update_receipt_field() {
   local receipt="$1"
   local key="$2"
@@ -149,7 +162,7 @@ print_attention() {
   local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
   local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
   local overdue=172800
-  local owner enabled wired=0 systemd_state status last_run message age now epoch_last
+  local owner enabled wired=0 systemd_state status last_run message age now epoch_last epoch_installed installed_at commit superseded=0
 
   owner="$(auto_update_receipt_field "$receipt" source_root 2>/dev/null || true)"
   if [ -z "$owner" ] ||
@@ -201,11 +214,25 @@ print_attention() {
     echo "attention: unknown — state file has no readable status (empty or mid-write); recheck after the next run"
     return 0
   fi
-  if [ "$status" = "failed" ]; then
+  if [ "$status" = "failed" ] || [ "$status" = "skipped" ]; then
+    installed_at="$(auto_update_receipt_field "$receipt" installed_at 2>/dev/null || true)"
+    commit="$(auto_update_receipt_field "$receipt" commit 2>/dev/null || true)"
+    if [ -n "$installed_at" ] && [ -n "$last_run" ]; then
+      epoch_installed="$(auto_update_timestamp_epoch "$installed_at" || true)"
+      epoch_last="$(auto_update_timestamp_epoch "$last_run" || true)"
+      epoch_installed="${epoch_installed//$'\r'/}"
+      epoch_last="${epoch_last//$'\r'/}"
+      if [ -n "$epoch_installed" ] && [ -n "$epoch_last" ] &&
+         [ "$((epoch_installed / 1000000))" -gt "$((epoch_last / 1000000))" ]; then
+        superseded=1
+      fi
+    fi
+  fi
+  if [ "$status" = "failed" ] && [ "$superseded" = 0 ]; then
     echo "attention: failed — ${message:-last update run failed}${last_run:+ (last run $last_run)}"
     return 0
   fi
-  if [ "$status" = "skipped" ]; then
+  if [ "$status" = "skipped" ] && [ "$superseded" = 0 ]; then
     echo "attention: blocked — ${message:-last update run was skipped}${last_run:+ (last run $last_run)}"
     return 0
   fi
@@ -216,18 +243,19 @@ print_attention() {
   fi
   if [ -n "$last_run" ]; then
     now="$(date -u +%s)"
-    epoch_last="$(python3 -c 'import calendar,sys,time
-try:
-    print(calendar.timegm(time.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")))
-except Exception:
-    raise SystemExit(1)' "$last_run" 2>/dev/null || true)"
+    epoch_last="$(auto_update_timestamp_epoch "$last_run" || true)"
+    epoch_last="${epoch_last//$'\r'/}"
     if [ -n "$epoch_last" ]; then
-      age=$((now - epoch_last))
-      if [ "$age" -ge "$overdue" ]; then
+      age=$((now * 1000000 - epoch_last))
+      if [ "$age" -ge "$((overdue * 1000000))" ]; then
         echo "attention: overdue — last run $last_run is older than ${overdue}s; the trigger may be dead"
         return 0
       fi
     fi
+  fi
+  if [ "$superseded" = 1 ]; then
+    echo "attention: ok — installed ${commit:0:12} at $installed_at after the last $status run ($last_run)"
+    return 0
   fi
   echo "attention: ok${last_run:+ — last run $last_run}"
 }

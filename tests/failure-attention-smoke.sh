@@ -204,6 +204,9 @@ assert rows[0]["actionable"] is False and rows[0]["retiring"] is False, rows
 r="$(resume_of "$repo5")"
 printf '%s' "$r" | grep >/dev/null 'failures: 1 stale on an older commit' ||
   fail "resume must count the stale row apart from actionable ones: $r"
+stale_fp="$(printf '%s' "$ledger_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][0]["fingerprint"])' | tr -d '\r')"
+printf '%s' "$r" | grep -F >/dev/null "fp: $stale_fp" ||
+  fail "resume must name a representative stale fingerprint: $r"
 out="$(inbox_of "$repo5")"
 printf '%s' "$out" | grep >/dev/null 'P3 stale-failures' ||
   fail "inbox must file a stale row under P3: $out"
@@ -224,6 +227,15 @@ printf '%s' "$r" | grep >/dev/null 'failures: 1 actionable' ||
   fail "a recurrence across commits is tree-independent and actionable: $r"
 printf '%s' "$r" | grep >/dev/null -E 'fp: [0-9a-f]{16} \(oms fail-ledger show --fingerprint [0-9a-f]{16}\)' ||
   fail "resume failure line must carry the fingerprint and the show command: $r"
+repo_long="$TMP/long-fields"
+make_repo "$repo_long"
+long_summary="$(python3 -c 'print("summary-" + "s" * 140)')"
+"$ROOT/scripts/fail-ledger.sh" record --repo "$repo_long" --kind verify \
+  --cmd "bash scripts/check.sh" --exit 1 --summary "$long_summary" >/dev/null
+r="$(resume_of "$repo_long")"
+printf '%s' "$r" | grep >/dev/null '…' || fail "a shortened summary must carry an ellipsis marker: $r"
+printf '%s' "$r" | grep >/dev/null -E 'fp: [0-9a-f]{16} \(oms fail-ledger show --fingerprint [0-9a-f]{16}\)' ||
+  fail "a shortened field must not cut the fingerprint or show command: $r"
 runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo5" envelope show)"
 printf '%s' "$runtime_json" | python3 -c '
 import json, sys
@@ -281,6 +293,62 @@ case "$out" in
   *) fail "a dirty-tree skip must require attention, not report ok: $out" ;;
 esac
 
+au_fraction_times="$(python3 - <<'PY' | tr -d '\r'
+import datetime
+base = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+print((base - datetime.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+print(base.strftime("%Y-%m-%dT%H:%M:%S") + ".552666Z")
+print(base.strftime("%Y-%m-%dT%H:%M:%SZ"))
+print((base + datetime.timedelta(seconds=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+au_prior_last="$(printf '%s\n' "$au_fraction_times" | sed -n 1p)"
+au_fraction_install="$(printf '%s\n' "$au_fraction_times" | sed -n 2p)"
+au_same_second_last="$(printf '%s\n' "$au_fraction_times" | sed -n 3p)"
+au_future_last="$(printf '%s\n' "$au_fraction_times" | sed -n 4p)"
+printf 'last_run=%s\nstatus=skipped\nmessage=dirty checkout\n' "$au_prior_last" > "$au_state"
+python3 - "$au_receipt" "$au_fraction_install" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: receipt = json.load(f)
+receipt.update(installed_at=sys.argv[2], commit="9cb3dbd123456789")
+with open(sys.argv[1], "w") as f: json.dump(receipt, f)
+PY
+out="$(attention env)"
+case "$out" in
+  "attention: ok — installed 9cb3dbd12345 at $au_fraction_install after the last skipped run ($au_prior_last)") ;;
+  *) fail "a later fractional install must supersede a skipped run: $out" ;;
+esac
+printf 'last_run=%s\nstatus=failed\nmessage=apply failed after install in same second\n' \
+  "$au_same_second_last" > "$au_state"
+out="$(attention env)"
+case "$out" in "attention: failed"*"apply failed after install in same second"*) ;;
+  *) fail "same-second install and failure ordering is ambiguous; keep the failure visible: $out" ;;
+esac
+printf 'last_run=%s\nstatus=skipped\nmessage=dirty checkout\n' "$au_future_last" > "$au_state"
+out="$(attention env)"
+case "$out" in "attention: blocked"*"dirty checkout"*) ;; *) fail "a later skipped run must remain blocked: $out" ;; esac
+
+au_old_times="$(python3 - <<'PY' | tr -d '\r'
+import datetime
+now = datetime.datetime.now(datetime.timezone.utc)
+last = now - datetime.timedelta(days=3)
+installed = last + datetime.timedelta(seconds=1)
+print(last.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+print(installed.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+PY
+)"
+au_old_last="$(printf '%s\n' "$au_old_times" | sed -n 1p)"
+au_old_install="$(printf '%s\n' "$au_old_times" | sed -n 2p)"
+printf 'last_run=%s\nstatus=failed\nmessage=old apply failure\n' "$au_old_last" > "$au_state"
+python3 - "$au_receipt" "$au_old_install" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: receipt = json.load(f)
+receipt.update(installed_at=sys.argv[2], commit="9cb3dbd123456789")
+with open(sys.argv[1], "w") as f: json.dump(receipt, f)
+PY
+out="$(attention env)"
+case "$out" in "attention: overdue"*) ;; *) fail "a superseded fractional failed run must retain the overdue warning: $out" ;; esac
+
 printf 'last_run=2026-01-01T00:00:00Z\nstatus=up_to_date\n' > "$au_state"
 out="$(attention env)"
 case "$out" in "attention: overdue"*) ;; *) fail "an ancient last_run must be overdue: $out" ;; esac
@@ -318,6 +386,15 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo Linger=no' > "$linger_bin/loginctl"
 chmod +x "$linger_bin/loginctl"
 out="$(attention PATH="$linger_bin:$PATH")"
 case "$out" in "attention: session-only"*) ;; *) fail "logout-dependent timer must be explicit: $out" ;; esac
+python3 - "$au_receipt" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: receipt = json.load(f)
+receipt.update(installed_at="2026-10-23T01:12:43.552666Z", commit="9cb3dbd123456789")
+with open(sys.argv[1], "w") as f: json.dump(receipt, f)
+PY
+printf 'last_run=2026-10-22T15:07:07Z\nstatus=failed\nmessage=old apply failure\n' > "$au_state"
+out="$(attention PATH="$linger_bin:$PATH")"
+case "$out" in "attention: session-only"*) ;; *) fail "a superseded failure must retain the disabled-linger warning: $out" ;; esac
 rm -f "$au_unit_dir/timers.target.wants/oh-my-setting-autoupdate.timer" \
   "$au_unit_dir/oh-my-setting-autoupdate.timer"
 

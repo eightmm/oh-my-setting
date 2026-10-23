@@ -211,25 +211,30 @@ if not rows:
 actionable = [row for row in rows if row.get("actionable") is True]
 retiring = sum(1 for row in rows if row.get("retiring") is True)
 stale = sum(1 for row in rows if row.get("attention") == "stale")
-side = ", ".join(t % n for t, n in (("+%d retiring on TTL", retiring),
-                                    ("+%d stale on an older commit", stale)) if n)
+retiring_row = next((row for row in rows if row.get("retiring") is True), None)
+stale_row = next((row for row in rows if row.get("attention") == "stale"), None)
+side = ", ".join(t % (n, row.get("fingerprint", "unknown")) for t, n, row in
+                  (("+%d retiring on TTL (fp: %s)", retiring, retiring_row),
+                   ("+%d stale on an older commit (fp: %s)", stale, stale_row)) if n)
 if actionable:
     newest = max(actionable, key=lambda row: row.get("ts") or "")
     bits = ["- failures: %d actionable%s" % (len(actionable), " (%s)" % side if side else "")]
     fp = newest.get("fingerprint")
     summary = (newest.get("summary") or newest.get("cmd") or "").strip()
     if summary:
-        bits.append("latest: %s" % summary[:120])
+        bits.append("latest: %s" % (summary[:119] + "…" if len(summary) > 120 else summary))
     if fp:
         bits.append("fp: %s (oms fail-ledger show --fingerprint %s)" % (fp, fp))
     nxt = (newest.get("next") or "").strip()
     if nxt:
-        bits.append("next: %s" % nxt[:120])
+        bits.append("next: %s" % (nxt[:119] + "…" if len(nxt) > 120 else nxt))
     print("; ".join(bits))
 else:
-    bits = ["%d one-shot hook failure(s), auto-retire on TTL" % retiring] if retiring else []
+    bits = ["%d one-shot hook failure(s), auto-retire on TTL (fp: %s)" %
+            (retiring, retiring_row.get("fingerprint", "unknown"))] if retiring else []
     if stale:
-        bits.append("%d stale on an older commit (oms fail-ledger list --unresolved)" % stale)
+        bits.append("%d stale on an older commit (fp: %s; oms fail-ledger list --unresolved)" %
+                    (stale, stale_row.get("fingerprint", "unknown")))
     print("- failures: " + "; ".join(bits))
 ' )" || fail_line=""
   fail_line="${fail_line//$'\r'/}"
