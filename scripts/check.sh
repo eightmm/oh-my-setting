@@ -752,6 +752,8 @@ def test_path(value):
     target = pathlib.Path(root, *pure.parts)
     if target.is_symlink() or not target.is_file():
         raise ValueError("missing test:%s" % value)
+    if value.startswith("tests/operator/"):
+        return value, "operator"
     if value.endswith(".sh"):
         return value, "shell"
     if pure.name.startswith("test_") and value.endswith(".py"):
@@ -792,7 +794,11 @@ if mode == "affected":
             language = clean(row.get("language"), "test case language")
             ident = clean(row.get("id"), "test case id")
             name = clean(row.get("name"), "test case name")
-            if path not in languages or language != languages[path]:
+            if path not in languages:
+                raise ValueError("orphan test case:%s" % ident)
+            if path.startswith("tests/operator/"):
+                continue
+            if language != languages[path]:
                 raise ValueError("orphan test case:%s" % ident)
             if path in ("tests/scripts-smoke.sh", "tests/autonomy-plan-run-smoke.sh"):
                 if language != "shell" or not re.fullmatch(r"test_[A-Za-z0-9_]+", name):

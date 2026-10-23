@@ -963,13 +963,14 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
     ;;
   error) exit 23 ;;
   *)
-    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator-tools-smoke.sh","tests/operator/section.sh","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator-tools-smoke.sh","tests/operator/section.sh","tests/operator/section.py","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"},{"id":"symbol:tests/operator/section.py::SectionTest.test_selected","language":"python","name":"test_selected","path":"tests/operator/section.py"}]}'
     ;;
 esac
 EOF
   chmod +x "$gate/scripts/graph.sh"
   mkdir -p "$gate/tests/operator"
   printf '#!/usr/bin/env bash\necho operator-fragment-standalone >> "$OMS_TEST_AFFECTED_LOG"\n' > "$gate/tests/operator/section.sh"
+  printf '# Operator section module; its suite runs as a whole.\n' > "$gate/tests/operator/section.py"
   cat > "$gate/tests/operator-tools-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'operator-args:%s\n' "$*" >> "$OMS_TEST_AFFECTED_LOG"
