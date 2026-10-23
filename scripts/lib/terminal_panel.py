@@ -837,7 +837,31 @@ def main(argv=None):
         if " is not a git repository; open it in a git repository or pass --repo PATH" in str(error):
             print("oms panel: " + clean(str(error), 200), file=sys.stderr)
             return 3
-        print("error: " + clean(str(error), 200), file=sys.stderr)
+        if isinstance(error, (subprocess.TimeoutExpired, subprocess.CalledProcessError)):
+            command = error.cmd
+            argv = command if isinstance(command, (list, tuple)) else [command]
+            verb = None
+            for index, argument in enumerate(argv[:-1]):
+                if os.path.basename(str(argument)) == "oms":
+                    verb = str(argv[index + 1])
+                    break
+            if not verb:
+                verb = os.path.basename(str(argv[0])) if argv else "command"
+            if isinstance(error, subprocess.TimeoutExpired):
+                reason = "timed out after %g s" % error.timeout
+            else:
+                reason = "exited %s" % error.returncode
+            stderr = getattr(error, "stderr", None)
+            if stderr:
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", "replace")
+                last_line = str(stderr).splitlines()[-1:]
+                if last_line:
+                    reason += ": " + clean(last_line[0], 200)
+            message = "error: %s %s" % (clean(verb, 80), reason)
+        else:
+            message = "error: " + clean(str(error), 200)
+        print(clean(message, 207), file=sys.stderr)
         return 1
 
 

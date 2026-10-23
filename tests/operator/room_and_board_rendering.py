@@ -1620,6 +1620,21 @@ with patch.object(panel.sys.stdin, "isatty", return_value=False), patch.dict(os.
     with redirect_stderr(error_text):
         assert panel.main(["--repo", str(root), "--dispatch", "advisor", "--owner", "claude", "--main", "flow-main"]) == 1
     assert "advisor dispatch needs --prompt or an interactive terminal" in error_text.getvalue(), error_text.getvalue()
+for failure, expected in (
+        (subprocess.CalledProcessError(7, ["bash", str(panel.ENTRY), "peer-delegate", "--brief-file", "x" * 300],
+                                       stderr="first line\npermission denied"),
+         "peer-delegate exited 7: permission denied"),
+        (subprocess.TimeoutExpired(["bash", str(panel.ENTRY), "peer-delegate", "--brief-file", "x" * 300],
+                                   12, stderr=b"first line\ntimed out in child"),
+         "peer-delegate timed out after 12 s: timed out in child"),
+):
+    with patch.object(panel, "dispatch", side_effect=failure), patch.object(panel.sys, "stderr", new_callable=io.StringIO) as error_text:
+        assert panel.main(["--repo", str(root), "--dispatch", "advisor", "--owner", "claude",
+                           "--main", "flow-main", "--prompt", "question"]) == 1
+        rendered_error = error_text.getvalue()
+        assert expected in rendered_error, rendered_error
+        assert "--brief-file" not in rendered_error and "x" * 40 not in rendered_error, rendered_error
+        assert len(rendered_error.splitlines()[0]) <= 207, rendered_error
 with patch.object(panel, "session_owner", return_value="/elsewhere"):
     try:
         panel.split_panel(Path("/tmp/project-a"))
