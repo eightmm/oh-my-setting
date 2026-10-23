@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import stat
 import subprocess
 import tempfile
@@ -443,8 +444,21 @@ def aggregate(repo, since=None, now=None):
         valid_tasks.append(task)
     tasks = valid_tasks
     attempts, incomplete_attempts = _attempt_history(repo)
-    artifacts = _query(repo, "artifact-index", "list", "1000").get("rows", [])
-    artifacts = [row for row in artifacts if isinstance(row, dict)]
+    selected_attempt_ids = {row.get("attempt_id") for row in attempts
+                            if isinstance(row.get("attempt_id"), str)}
+    artifact_index_read = False
+    try:
+        index_store = runpy.run_path(str(Path(__file__).with_name("artifact-index-store.py")))
+        artifact_body = index_store["read_index"](str(repo), ".oms/artifacts/index.jsonl", missing_ok=True)
+        artifact_index_read = True
+        retained_artifacts = [json.loads(line) for line in artifact_body.splitlines()]
+        artifacts = [row for row in retained_artifacts
+                     if isinstance(row.get("attempt_id"), str)
+                     and row.get("attempt_id") in selected_attempt_ids]
+    except (OSError, ValueError, SystemExit, UnicodeError):
+        retained_artifacts = []
+        artifacts = []
+        incomplete_reasons.append("artifact evidence unavailable or unsafe")
     incomplete = incomplete_attempts or bool(incomplete_reasons)
     if incomplete_attempts:
         incomplete_reasons.append("lifecycle evidence is partial")
@@ -522,8 +536,7 @@ def aggregate(repo, since=None, now=None):
             state_totals["other_by_state"][state] = count
     calls_by_attempt = {}
     for row in artifacts:
-        if isinstance(row.get("attempt_id"), str):
-            calls_by_attempt.setdefault(row["attempt_id"], []).append(row)
+        calls_by_attempt.setdefault(row["attempt_id"], []).append(row)
 
     def first_failing_stage(attempt):
         indexed = calls_by_attempt.get(attempt.get("attempt_id"), [])
@@ -572,12 +585,13 @@ def aggregate(repo, since=None, now=None):
         if state not in {"failed", "provider_error", "review"}:
             continue
         reason = attempt.get("reason_code")
+        stage = first_failing_stage(attempt)
         if state == "review" and not (isinstance(reason, str) and reason):
-            reason = "awaiting_review"
+            reason = "unknown" if stage != "unknown" else "awaiting_review"
         reason = reason if isinstance(reason, str) and reason else "unknown"
         failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
-        stage = ("none" if state == "review" and reason == "awaiting_review"
-                 else first_failing_stage(attempt))
+        if state == "review" and reason == "awaiting_review":
+            stage = "none"
         failure_stage_counts[stage] = failure_stage_counts.get(stage, 0) + 1
         if state == "review":
             stamp = _stamp(attempt.get("updated_at"))
@@ -654,7 +668,7 @@ def aggregate(repo, since=None, now=None):
                     if isinstance(task.get("cancellation"), dict)]
     cancels += sum(in_window(stamp) for stamp in plan_cancels)
     owner_failures = 0
-    for row in artifacts:
+    for row in retained_artifacts:
         if row.get("kind") != "panel-result" or not in_window(row.get("ts")):
             continue
         try:
@@ -718,10 +732,22 @@ def aggregate(repo, since=None, now=None):
     admission_tasks = [task for task in tasks if task.get("id") in admission_ids]
     admission_ages = [_stamp(task.get("updated_at") or task.get("claimed_at")) for task in admission_tasks]
     until = datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")
-    coverage = {"attempt_limit": METRIC_ATTEMPTS, "artifact_limit": 1000,
+    def has_claim_evidence(task):
+        history = task.get("history") if isinstance(task.get("history"), list) else []
+        has_history = any(isinstance(item, dict) and item.get("kind") in {"claim", "start", "started"}
+                          for item in history)
+        lease_epoch = task.get("lease_epoch", 0)
+        has_lease = ((type(lease_epoch) is int and lease_epoch > 0)
+                     or bool(task.get("lease_id") or task.get("claimed_by_participant")))
+        cancellation = task.get("cancellation") if isinstance(task.get("cancellation"), dict) else {}
+        cancelled_after_start = (task.get("state") == "cancelled"
+                                 and cancellation.get("state") not in {"ready", "blocked"})
+        return has_history or has_lease or task.get("state") in started_states or cancelled_after_start
+
+    coverage = {"attempt_limit": METRIC_ATTEMPTS, "artifact_limit": None if artifact_index_read else 0,
                 "attempts_observed": len(attempts), "artifact_events_observed": len(artifacts),
                 "lifecycle_missing_task_ids": sorted({task.get("id") for task in rate_tasks
-                    if task.get("id") and task.get("id") not in attempts_by_task}),
+                    if task.get("id") and task.get("id") not in attempts_by_task and has_claim_evidence(task)}),
                 "incomplete": bool(incomplete)}
     metric_scope = {"since": since, "until": until, "coverage": coverage}
     return {"schema": 1, "kind": "oms-panel-metrics", "since": since, "until": until,
@@ -775,7 +801,9 @@ def metrics_text(report):
             report.get("coverage", {}).get("attempts_observed", "?"),
             report.get("coverage", {}).get("artifact_events_observed", "?"),
             report.get("coverage", {}).get("attempt_limit", "?"),
-            report.get("coverage", {}).get("artifact_limit", "?"),
+            ("all retained" if report.get("coverage", {}).get("artifact_limit") is None
+             else "unavailable" if report.get("coverage", {}).get("artifact_limit") == 0
+             else report.get("coverage", {}).get("artifact_limit")),
             len(report.get("coverage", {}).get("lifecycle_missing_task_ids", [])),
             "; partial evidence" if report.get("incomplete") else ""),
         "preflight excluded from rates: %d tasks, %d attempts" % (

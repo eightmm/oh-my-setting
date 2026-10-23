@@ -648,6 +648,7 @@ else:
     'followup': {'id': 'followup', 'state': 'running', 'claimed_at': stamp_metric(-1)},
     'claim-blocked': {'id': 'claim-blocked', 'state': 'blocked', 'provider': 'codex',
                       'claimed_at': stamp_metric(-1), 'lease_epoch': 1},
+    'never-claimed-blocked': {'id': 'never-claimed-blocked', 'state': 'blocked', 'provider': 'codex'},
     'preflight-check': {'id': 'preflight-check', 'state': 'done', 'claimed_at': stamp_metric(-1),
                         'lease_epoch': 1},
     'awaiting-review': {'id': 'awaiting-review', 'state': 'review', 'claimed_at': stamp_metric(-90),
@@ -765,10 +766,55 @@ assert write_metrics['telemetry']['context_modes'] == {'graph': {'attempts': 1, 
 assert write_metrics['telemetry']['claude_fork_subagents'] == 'not_recorded', write_metrics
 assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
 assert expected_metrics['metric_scope']['completion']['coverage']['attempt_limit'] == 1000, expected_metrics
+assert 'never-claimed-blocked' not in expected_metrics['coverage']['lifecycle_missing_task_ids'], expected_metrics
 assert expected_metrics['pending']['awaiting_review']['count'] == 1, expected_metrics
 assert expected_metrics['pending']['awaiting_review']['oldest_seconds'] == 80.0, expected_metrics
 assert expected_metrics['pending']['awaiting_admission']['count'] >= 0, expected_metrics
 assert expected_metrics['preflight']['tasks'] == 1, expected_metrics
+
+# Selected attempts retain stage attribution even when their artifact rows are
+# older than the CLI's 1000-row tail. Review rows without reason codes consult
+# artifact evidence before falling back to awaiting_review / none.
+baseline_lifecycle = lifecycle.read_bytes()
+baseline_index = index_path.read_bytes()
+add_attempt('delegate-old-artifact', 'metric-old-artifact', 'worker', 'write', -4, -2,
+            'failed', tool='peer-delegate')
+add_attempt('delegate-review-failed', 'metric-review-failed', 'worker', 'write', -4, -2,
+            'review', tool='peer-delegate')
+add_attempt('delegate-review-passed', 'metric-review-passed', 'worker', 'write', -4, -2,
+            'review', tool='peer-delegate')
+lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
+artifact_rows.extend([
+    {'schema': 1, 'event_id': 'evt_delegate_old_artifact', 'operation_id': 'op_delegate_old_artifact',
+     'ts': stamp_metric(-2), 'kind': 'delegate', 'exit': 1, 'attempt_id': 'delegate-old-artifact'},
+    {'schema': 1, 'event_id': 'evt_delegate_review_failed', 'operation_id': 'op_delegate_review_failed',
+     'ts': stamp_metric(-2), 'kind': 'delegate', 'exit': 1, 'attempt_id': 'delegate-review-failed'},
+    {'schema': 1, 'event_id': 'evt_delegate_review_passed', 'operation_id': 'op_delegate_review_passed',
+     'ts': stamp_metric(-2), 'kind': 'delegate', 'exit': 0, 'attempt_id': 'delegate-review-passed'},
+])
+artifact_rows.extend({'schema': 1, 'event_id': 'evt_filler_%04d' % number,
+                      'operation_id': 'op_filler_%04d' % number,
+                      'ts': stamp_metric(-1), 'kind': 'other', 'exit': 0}
+                     for number in range(1001))
+artifact_rows.extend([
+    {'schema': 1, 'event_id': 'evt_bad_attempt_list', 'operation_id': 'op_bad_attempt_list',
+     'ts': stamp_metric(-1), 'kind': 'other', 'attempt_id': ['bad']},
+    {'schema': 1, 'event_id': 'evt_bad_attempt_object', 'operation_id': 'op_bad_attempt_object',
+     'ts': stamp_metric(-1), 'kind': 'other', 'attempt_id': {'nested': 'bad'}},
+])
+index_path.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in artifact_rows), encoding='utf-8')
+extended_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+assert extended_metrics['kind'] == 'oms-panel-metrics', extended_metrics
+assert extended_metrics['coverage']['artifact_limit'] is None, extended_metrics
+assert extended_metrics['coverage']['artifact_events_observed'] == 11, extended_metrics
+assert 'all retained' in panel_metrics.metrics_text(extended_metrics), panel_metrics.metrics_text(extended_metrics)
+extended_write = extended_metrics['write_attempts']['failed_and_undecided']
+assert extended_write['first_failing_stage']['implement'] == 5, extended_write
+assert extended_write['first_failing_stage']['none'] == 2, extended_write
+assert extended_write['reason_code']['awaiting_review'] == 2, extended_write
+assert extended_write['reason_code']['unknown'] == 4, extended_write
+lifecycle.write_bytes(baseline_lifecycle)
+index_path.write_bytes(baseline_index)
 # A finalized task leaves the metrics admission queue as it leaves the board hint, with no admission row.
 for decided, waiting in (('completed', 0), ('pending', None)):
     with patch.object(panel_results, 'pending_admissions', side_effect=lambda repo, ids, _tick=None: {i for i in ids if i}), \
