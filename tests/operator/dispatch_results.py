@@ -3066,6 +3066,48 @@ with patch.dict(os.environ, environment, clear=True):
         assert staged["representative_state"] == "review failed" and staged["next_action"] == "retry review"
         page = saved.results(project, offset=0, limit=1)
         assert page["offset"] == 0 and page["omitted"] == 0 and page["omitted_range"] is None
+    review_fixture_repo = temporary / "review-stage-verdict"
+    review_fixture_repo.mkdir()
+
+    def review_attempt(task):
+        return {"attempt_id": task, "task_id": task, "state": "done", "refs": {}}
+
+    def review_outcome(task, run, exit_code, overall):
+        return dict(task_id=task, kind="review-outcome", exit=exit_code,
+                    review={"run": run, "overall": overall, "gate_verify_exit": 0})
+
+    passing = review_outcome("review-outcome-pass", "20261023T083700Z-42", 0, 0)
+    failing = review_outcome("review-outcome-fail", "20261023T083701Z-43", 1, 1)
+    for task, rows, expected in (
+            ("review-outcome-pass", [passing], "passed"),
+            ("review-outcome-fail", [failing], "failed"),
+            ("review-exit-fail", [dict(task_id="review-exit-fail", kind="review", exit=124,
+                                        run_id="20261023T083702Z-44")], "failed"),
+            ("review-exit-zero", [dict(task_id="review-exit-zero", kind="review", exit=0,
+                                        run_id="20261023T083703Z-45")], "inconclusive")):
+        with patch.object(saved, "_records", return_value=([review_attempt(task)], rows)):
+            projected = saved.results(review_fixture_repo, task_id=task)["rows"][0]
+        assert projected["stages"]["review"]["state"] == expected, projected
+        if expected == "inconclusive":
+            assert projected["representative_state"] == "review inconclusive", projected
+        if task == "review-exit-fail":
+            assert projected["representative_state"] == "review failed" \
+                and projected["next_action"] == "retry review", projected
+
+    latest_task = "review-latest-started"
+    latest_rows = [review_outcome(latest_task, "20261023T083800Z-50", 1, 1),
+                   review_outcome(latest_task, "20261023T083700Z-49", 0, 0)]
+    with patch.object(saved, "_records", return_value=([review_attempt(latest_task)], latest_rows)):
+        latest = saved.results(review_fixture_repo, task_id=latest_task)["rows"][0]
+    assert latest["stages"]["review"]["state"] == "failed", latest
+
+    boundary_task = "review-outcome-window"
+    boundary_rows = [review_outcome(boundary_task, "20261023T083900Z-51", 1, 1)]
+    boundary_rows.extend(dict(task_id=boundary_task, kind="ask", attempt_id=boundary_task, exit=0)
+                         for _ in range(30))
+    with patch.object(saved, "_records", return_value=([review_attempt(boundary_task)], boundary_rows)):
+        boundary = saved.results(review_fixture_repo, task_id=boundary_task)["rows"][0]
+    assert boundary["stages"]["review"]["state"] == "failed", boundary
     endings = [
         ("cancelled", {"exit": 130, "state": "cancelled", "reason_code": "cancelled_by_owner"},
          "implement cancelled", "cancelled", "none"),
@@ -3267,6 +3309,29 @@ with patch.dict(os.environ, environment, clear=True):
     except (OSError, NotImplementedError):
         if os.name != "nt":
             raise
+    artifact_dir = review_fixture_repo / ".oms" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    loop_artifact = artifact_dir / "self-referencing.md"
+    sibling_artifact = artifact_dir / "sibling.md"
+    sibling_artifact.write_text("## Output\nSibling answer retained\n## Exit\n0\n", encoding="utf-8")
+    try:
+        loop_artifact.symlink_to(loop_artifact.name)
+    except (OSError, NotImplementedError):
+        if os.name != "nt":
+            raise
+    else:
+        artifact_attempt = review_attempt("artifact-symlink-loop")
+        artifact_rows = [
+            dict(task_id="artifact-symlink-loop", kind="ask", attempt_id="artifact-symlink-loop",
+                 exit=0, artifact=".oms/artifacts/self-referencing.md", artifact_sha256="0" * 64),
+            dict(task_id="artifact-symlink-loop", kind="ask", attempt_id="artifact-symlink-loop",
+                 exit=0, artifact=".oms/artifacts/sibling.md",
+                 artifact_sha256=hashlib.sha256(sibling_artifact.read_bytes()).hexdigest()),
+        ]
+        with patch.object(saved, "_records", return_value=([artifact_attempt], artifact_rows)):
+            artifact_result = saved.results(review_fixture_repo, task_id="artifact-symlink-loop")["rows"][0]
+        assert [call.get("answer") for call in artifact_result["calls"]] == [
+            "Answer evidence unavailable", "Sibling answer retained"], artifact_result["calls"]
     linked_result = project / saved.results(project, "panel-council-test")["rows"][0]["artifact"]
     linked_result.write_text("changed\n")
     assert saved.results(project, "panel-council-test")["rows"][0]["missing_result"]

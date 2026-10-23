@@ -183,10 +183,39 @@ def _indexed(repo, row, maximum=MAX_RESULT):
     path = row.get('artifact', '')
     if not isinstance(path, str) or not path.startswith('.oms/artifacts/'):
         raise ValueError('artifact is outside OMS evidence')
+    try:
+        artifacts = (Path(repo) / '.oms' / 'artifacts').resolve(strict=True)
+        target = (Path(repo) / path).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError('artifact is outside OMS evidence') from error
+    if os.path.commonpath((str(artifacts), str(target))) != str(artifacts):
+        raise ValueError('artifact is outside OMS evidence')
     data = _read(repo, path, maximum)
     if not row.get('artifact_sha256') or hashlib.sha256(data).hexdigest() != row['artifact_sha256']:
         raise ValueError('artifact digest mismatch')
     return data
+
+
+def _review_run_id(row):
+    review = row.get('review')
+    recorded_run = review.get('run') if isinstance(review, dict) else None
+    if isinstance(recorded_run, str) and recorded_run:
+        return recorded_run
+    artifact = row.get('artifact')
+    if isinstance(artifact, str):
+        match = re.search(r'-(\d{8}T\d{6}Z-\d+)(?:-r\d+)?(?:\.md)?$', Path(artifact).name)
+        if match:
+            return match.group(1)
+    for field in ('run_id', 'operation_id', 'attempt_id'):
+        value = row.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return row.get('event_id') or row.get('artifact') or ''
+
+
+def _review_run_order(run_id):
+    match = re.match(r'^(\d{8}T\d{6}Z)-(\d+)', run_id if isinstance(run_id, str) else '')
+    return (match.group(1), int(match.group(2))) if match else ('', 0)
 
 
 def verified_patch(repo, row, maximum=4 * 1024 * 1024):
@@ -1850,30 +1879,67 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                      'implement' if call.get('kind') in ('delegate', 'call', 'ask', 'consult') else None)
             if stage:
                 calls_by_stage[stage].append(call)
-        stages = {name: ({'state': ('failed' if any(c.get('stage_exit', c.get('exit')) not in (None, 0) for c in values) else 'passed'),
-                          'attempt_id': (values[-1].get('attempt_id') if values else None),
-                          'exit': (values[-1].get('stage_exit', values[-1].get('exit')) if values else None)} if values else {'state': 'not_run'})
-                  for name, values in calls_by_stage.items()}
+        review_records = [(position, row) for position, row in enumerate(indexed)
+                          if row.get('kind') in ('review', 'review-outcome')
+                          and row.get('attempt_id') not in superseded_ids]
+        review_state = 'not_run'
+        if review_records:
+            latest_run = _review_run_id(max(
+                review_records, key=lambda item: (_review_run_order(_review_run_id(item[1])), item[0]))[1])
+            selected_review = [row for _, row in review_records if _review_run_id(row) == latest_run]
+            outcomes = [row for row in selected_review if row.get('kind') == 'review-outcome'
+                        and isinstance(row.get('review'), dict)]
+            if outcomes:
+                outcome = outcomes[-1]
+                review = outcome['review']
+                overall = review.get('overall')
+                if overall == 2:
+                    review_state = 'inconclusive'
+                elif outcome.get('exit') not in (None, 0) or review.get('gate_verify_exit') not in (None, 0) or overall == 1:
+                    review_state = 'failed'
+                elif outcome.get('exit') == 0 and review.get('gate_verify_exit') in (None, 0) and overall == 0:
+                    review_state = 'passed'
+                else:
+                    review_state = 'inconclusive'
+            else:
+                review_state = ('failed' if any(row.get('exit') not in (None, 0)
+                                                for row in selected_review) else 'inconclusive')
+        stages = {}
+        for name, values in calls_by_stage.items():
+            if name == 'review':
+                stage_state = review_state
+                stage_values = values
+            else:
+                stage_state = ('failed' if any(c.get('stage_exit', c.get('exit')) not in (None, 0)
+                                               for c in values) else 'passed') if values else 'not_run'
+                stage_values = values
+            stages[name] = {'state': stage_state,
+                            'attempt_id': (stage_values[-1].get('attempt_id') if stage_values else None),
+                            'exit': (stage_values[-1].get('stage_exit', stage_values[-1].get('exit'))
+                                     if stage_values else None)}
         main_state = (result or {}).get('outcome') or 'pending'
         stages['main_decision'] = {'state': 'failed' if main_state == 'failed' else main_state}
         failed_stage = next((name for name in ('implement', 'verify', 'review', 'main_decision')
                              if stages[name]['state'] == 'failed'), None)
         failed_call = next((c for c in calls_by_stage.get(failed_stage, [])
                             if c.get('stage_exit', c.get('exit')) not in (None, 0)), {}) if failed_stage else {}
-        ending = call_ending(failed_call) if failed_call else None
+        ending = call_ending(failed_call) if failed_call and failed_stage != 'review' else None
         guard = failed_call.get('guard')
         guard_name = clean(guard, 80) if isinstance(guard, str) else ''
         if ending == 'cancelled':
             representative = failed_stage + ' cancelled'
-            stages[failed_stage]['state'] = 'cancelled'
+            if failed_stage != 'review':
+                stages[failed_stage]['state'] = 'cancelled'
             action = 'none'
         elif ending == 'guard_stop':
             representative = failed_stage + ' guard stop' + (' (' + guard_name + ')' if guard_name else '')
-            stages[failed_stage]['state'] = representative[len(failed_stage) + 1:]
+            if failed_stage != 'review':
+                stages[failed_stage]['state'] = representative[len(failed_stage) + 1:]
             action = 'inspect guard stop and salvage partial work'
         elif ending == 'timed_out':
             representative = 'timed out'
-            stages[failed_stage]['state'] = 'timed out'
+            if failed_stage != 'review':
+                stages[failed_stage]['state'] = 'timed out'
             action = 'continue with --continue TASK_ID; at the revision-round cap use the owner override'
         elif ending == 'verify_failed':
             representative, action = 'verify failed', 'retry verify'
@@ -1883,9 +1949,12 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             stages[failed_stage]['state'] = 'verify timed out'
         elif ending == 'provider_error':
             representative, action = failed_stage + ' provider error', 'retry ' + failed_stage
-            stages[failed_stage]['state'] = 'provider error'
+            if failed_stage != 'review':
+                stages[failed_stage]['state'] = 'provider error'
         elif failed_stage:
             representative, action = failed_stage + ' failed', 'retry ' + failed_stage
+        elif stages['review']['state'] == 'inconclusive' and main_state == 'pending':
+            representative, action = 'review inconclusive', 'retry review'
         else:
             representative = stages['main_decision']['state']
             action = ('review main decision' if failed_stage == 'main_decision' else
@@ -1902,7 +1971,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                     representative, action = 'findings awaiting owner judgment', 'record main decision'
             except (OSError, ValueError, TypeError):
                 representative, action = 'patch evidence unavailable', 'inspect result evidence'
-        if termination_reason and not result and not failed_stage:
+        if termination_reason and not result and not failed_stage and stages['review']['state'] != 'inconclusive':
             representative = termination_reason
             action = {
                 'cancelled': 'salvage or re-dispatch',
