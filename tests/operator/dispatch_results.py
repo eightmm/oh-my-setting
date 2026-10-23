@@ -1046,17 +1046,24 @@ old_worker = {"attempt_id": "att_before-result", "task_id": "elsewhere-task",
               "parent_attempt_id": main_attempts["codex"], "state": "review", "terminal": False,
               "created_at": "2026-10-15T00:00:00Z", "refs": {"panel_role": "worker"}}
 new_worker = dict(old_worker, attempt_id="att_after-result", created_at="2026-10-17T00:00:00Z")
+event_command = ["bash", str(panel.ENTRY), "agent-events", "--repo", str(project)]
+lifecycle = __import__("runpy").run_path(str(root / "scripts/lib/agent-events.py"))
+late_review_ident = call(event_command + ["start", "--provider", "local", "--tool", "peer-delegate",
+    "--task-id", "elsewhere-task", "--parent-attempt-id", main_attempts["codex"],
+    "--ref", "panel_role=worker", "--then", "starting", "--then", "working", "--then",
+    "verifying", "--then", "review"]).strip()
+late_review_worker = dict(old_worker, attempt_id=late_review_ident)
 with patch.object(review_settlement, "_stopped", return_value=True), \
         patch.object(review_settlement, "_apply") as settle_apply:
-    report = review_settlement._settle(project, [old_worker, new_worker], [],
+    report = review_settlement._settle(project, [old_worker, new_worker, late_review_worker], [],
         {main_attempts["codex"]}, {"elsewhere-task": (decision, result_row)}, apply=True)
 assert report["applied"] == [old_worker["attempt_id"]], report
-assert report["pending"][0]["attempt"] == new_worker["attempt_id"]
-assert report["pending"][0]["pending_reason"] == "newer_than_decision", report
+assert {(row["attempt"], row["pending_reason"]) for row in report["pending"]} == {
+    (new_worker["attempt_id"], "newer_than_decision"),
+    (late_review_worker["attempt_id"], "newer_than_decision")}, report
 assert settle_apply.call_count == 1
 # Exercise persistence and lifecycle writes: settlement must not mint another
 # result revision or notification when an identical finalize is retried.
-event_command = ["bash", str(panel.ENTRY), "agent-events", "--repo", str(project)]
 exit_artifact = project / ".oms/artifacts/settlement-exit.md"
 exit_artifact.write_text("## Output\nCompleted fixture work.\n## Exit\n0\n")
 def settlement_worker(task, parent=None, review=True, legacy=False, exit_proof=True):
@@ -1203,7 +1210,6 @@ assert standalone_worker not in json.loads(call(standalone_args + ["--apply"]))[
 # The explicit seven-day policy covers undecided legacy work and missing exits.
 # Append through the lifecycle API with a controlled event clock, never rewrite
 # the fixture ledger; a later review entry must replace the earlier review age.
-lifecycle = __import__("runpy").run_path(str(root / "scripts/lib/agent-events.py"))
 def settlement_transition(ident, state, stamp="2000-01-01T00:00:00Z"):
     with patch.dict(lifecycle["new_event"].__globals__, {"utc_now": lambda: stamp}):
         event = lifecycle["new_event"](ident, 0, "attempt.state_changed", from_state=None,

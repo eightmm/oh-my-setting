@@ -214,9 +214,13 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
             if current is not None and payload.get("plan_binding") != current:
                 report["pending"].append(dict(item, pending_reason="stale_generation"))
                 continue
-            # Both ledgers use second-resolution UTC timestamps; equality is
-            # ambiguous, so leave it pending rather than settle newer work.
-            if attempt.get("created_at", "") >= result_row.get("ts", ""):
+            # Review entry is when the owner could have seen this attempt;
+            # older records without that event retain the creation-time guard.
+            # Both ledgers use second-resolution UTC timestamps, so equality
+            # remains pending rather than settling ambiguous newer work.
+            review_since = state_since.get((ident, "review"))
+            work_since = review_since if review_since is not None else attempt.get("created_at", "")
+            if work_since >= result_row.get("ts", ""):
                 report["pending"].append(dict(item, pending_reason="newer_than_decision"))
                 continue
         stopped = False
