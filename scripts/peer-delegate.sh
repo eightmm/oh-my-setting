@@ -1361,7 +1361,7 @@ if [ "$AUTO_GRAPH_CONTEXT" = 1 ] && [ -z "$CONTEXT_PACK" ] &&
   graph_task="${graph_task:0:2000}"
   auto_pack="$worktree_parent/graph-context.json"
   if OMS_PEER_KILL_AFTER=1 \
-    ma_run_bounded 10 graph-context python3 -B "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" \
+    ma_run_bounded 25 graph-context python3 -B "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" \
     --auto "$worktree" "$delegate_worktree_repo" "$worktree/.oms/project-graph" "$graph_task" \
     > "$auto_pack" 2> "$worktree_parent/graph-context.log" &&
     CONTEXT_PACK="$auto_pack" load_context_pack && [ "$CONTEXT_PACK_FILES" -gt 0 ]; then
