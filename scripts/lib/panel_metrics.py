@@ -725,7 +725,7 @@ def aggregate(repo, since=None, now=None):
             "window": {"since": since, "until": until}, "coverage": coverage,
             "preflight": {"tasks": len(preflight_ids), "attempts": sum(
                 str(row.get("task_id", "")).startswith("preflight-") for row in attempts)},
-            "pending": {"scope": "current snapshot", "awaiting_review": age_stats(review_ages),
+            "pending": {"scope": "current snapshot of shared-plan tasks", "awaiting_review": age_stats(review_ages),
                         "awaiting_admission": age_stats(admission_ages)},
             "metric_scope": {"completion": metric_scope, "review_wait_seconds": metric_scope,
                              "rework": metric_scope, "abandoned_calls": metric_scope,
@@ -777,11 +777,11 @@ def metrics_text(report):
             "; partial evidence" if report.get("incomplete") else ""),
         "preflight excluded from rates: %d tasks, %d attempts" % (
             report.get("preflight", {}).get("tasks", 0), report.get("preflight", {}).get("attempts", 0)),
-        "awaiting review: n=%d oldest=%s median=%s" % (
+        "plan tasks awaiting review: n=%d oldest=%s median=%s" % (
             report.get("pending", {}).get("awaiting_review", {}).get("count", 0),
             seconds(report.get("pending", {}).get("awaiting_review", {}).get("oldest_seconds")),
             seconds(report.get("pending", {}).get("awaiting_review", {}).get("median_seconds"))),
-        "awaiting admission: n=%d oldest=%s median=%s" % (
+        "plan tasks awaiting admission: n=%d oldest=%s median=%s" % (
             report.get("pending", {}).get("awaiting_admission", {}).get("count", 0),
             seconds(report.get("pending", {}).get("awaiting_admission", {}).get("oldest_seconds")),
             seconds(report.get("pending", {}).get("awaiting_admission", {}).get("median_seconds"))),

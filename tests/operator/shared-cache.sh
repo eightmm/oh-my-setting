@@ -788,7 +788,7 @@ metric_text = io.StringIO()
 with redirect_stdout(metric_text):
     assert panel.main(['--repo', str(metric_repo), '--metrics']) == 0
 assert 'completion: 2/6 (33.3%)' in metric_text.getvalue(), metric_text.getvalue()
-assert 'awaiting review: n=' in metric_text.getvalue(), metric_text.getvalue()
+assert 'plan tasks awaiting review: n=' in metric_text.getvalue(), metric_text.getvalue()
 assert 'coverage:' in metric_text.getvalue() and 'until ' in metric_text.getvalue(), metric_text.getvalue()
 assert 'peer-delegate write attempts: 8' in metric_text.getvalue(), metric_text.getvalue()
 assert 'context modes (done/attempts)=graph 0/1, no artifact row 1/2, unrecorded 0/5' in metric_text.getvalue(), metric_text.getvalue()
