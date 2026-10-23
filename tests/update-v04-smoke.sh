@@ -753,6 +753,9 @@ test_detached_schema2_auto_update_check() {
   make_agy_health_stub "$home"
   cat > "$repo/scripts/update.sh" <<'EOF'
 #!/usr/bin/env bash
+if [ "${OMS_TEST_REFRESH_ORIGIN_HEAD:-0}" = 1 ] && [ "${1:-}" = --check ]; then
+  git -C "$(dirname "$0")/.." symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/release
+fi
 commit="$(git -C "$(dirname "$0")/.." rev-parse HEAD)"
 echo "current: ${commit:0:7}"
 echo "update-check: up_to_date $commit"
@@ -795,6 +798,21 @@ PY
     fail "detached schema-2 check did not use its receipt ref"
   grep -Fq 'upstream: ref:main' "$TMP/detached-auto.out" ||
     fail "detached schema-2 check lost its receipt ref"
+  if git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1; then
+    fail "edge label fixture unexpectedly has an origin default branch before check"
+  fi
+  python3 - "$receipt" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+receipt["ref"] = "edge"
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(receipt, stream)
+PY
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_TEST_REFRESH_ORIGIN_HEAD=1 "$repo/scripts/auto-update.sh" check > "$TMP/edge-auto.out"
+  grep -Fq 'upstream: release (edge: default branch)' "$TMP/edge-auto.out" ||
+    fail "edge schema-2 check did not report the refreshed origin default branch"
   if grep -Fq 'detached HEAD; auto-update skipped' "$repo/local/auto-update.status"; then
     fail "detached schema-2 check was skipped"
   fi

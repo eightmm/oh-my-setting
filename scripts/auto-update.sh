@@ -443,19 +443,37 @@ auto_update_ci_ready() {
   return 1
 }
 
+receipt_transaction_upstream() {
+  local ref="$1"
+  local remote_head
+
+  if [ "$ref" != edge ]; then
+    printf 'ref:%s\n' "$ref"
+    return 0
+  fi
+
+  remote_head="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  remote_head="${remote_head//$'\r'/}"
+  case "$remote_head" in
+    origin/*) printf '%s (edge: default branch)\n' "${remote_head#origin/}" ;;
+    *) printf 'ref:edge\n' ;;
+  esac
+}
+
 receipt_transaction_update() {
   local ref="${RECEIPT_TRANSACTION_REF:-}"
   local current output status remote message upstream base latest expected
 
   [ -n "$ref" ] || return 2
   current="$(git -C "$ROOT" rev-parse HEAD)"
-  upstream="ref:$ref"
+  upstream="$(receipt_transaction_upstream "$ref")"
 
   if [ "$MODE" = check ]; then
     set +e
     output="$("$ROOT/scripts/update.sh" --check 2>&1)"
     status=$?
     set -e
+    upstream="$(receipt_transaction_upstream "$ref")"
     if [ "$status" -ne 0 ]; then
       write_state failed "check failed: $(auto_update_error_line "$output" "$status")" \
         "$current" "" "$upstream"
@@ -489,6 +507,7 @@ receipt_transaction_update() {
   output="$("$ROOT/scripts/update.sh" --check 2>&1)"
   status=$?
   set -e
+  upstream="$(receipt_transaction_upstream "$ref")"
   if [ "$status" -ne 0 ]; then
     write_state failed "apply failed: $(auto_update_error_line "$output" "$status")" \
       "$current" "" "$upstream"
@@ -547,6 +566,7 @@ receipt_transaction_update() {
     "$ROOT/scripts/update.sh" 2>&1)"
   status=$?
   set -e
+  upstream="$(receipt_transaction_upstream "$ref")"
   [ -z "$output" ] || printf '%s\n' "$output"
   remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ "$status" -eq 75 ] &&
