@@ -1207,6 +1207,7 @@ repo_invariants_selected=" "
 
 if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
   affected_operator_staged=0
+  affected_gdr_staged=0
   affected_operator_paths=()
   affected_operator_sections=""
   affected_operator_has_suite=0
@@ -1246,6 +1247,10 @@ PY
       [ "$affected_operator_staged" = 0 ] || continue
       affected_operator_staged=1
     fi
+    if [ "$affected_test" = tests/goal-drive-recovery-smoke.sh ]; then
+      [ "$affected_gdr_staged" = 0 ] || continue
+      affected_gdr_staged=1
+    fi
     affected_test_was_run_by_quick "$affected_test" && continue
     if [ "$affected_test" = tests/scripts-smoke.sh ] || [ "$affected_test" = tests/autonomy-plan-run-smoke.sh ]; then
       affected_args=()
@@ -1276,6 +1281,9 @@ PY
       else
         stage operator-tools bash "$ROOT/tests/operator-tools-smoke.sh" --jobs "${OMS_OPERATOR_JOBS:-4}"
       fi
+    elif [ "$affected_test" = tests/goal-drive-recovery-smoke.sh ]; then
+      stage affected:tests/goal-drive-recovery-smoke.sh#2 env OMS_GDR_PART=2 bash "$affected_test"
+      stage affected:tests/goal-drive-recovery-smoke.sh#1 env OMS_GDR_PART=1 bash "$affected_test"
     elif [ "${affected_test%.py}" != "$affected_test" ]; then
       affected_args=()
       affected_index=0

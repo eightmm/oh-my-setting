@@ -16151,7 +16151,11 @@ test_check_ci_parity_panel_dispatch_runs_full_operator_suite() {
   cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
   cat > "$repo/scripts/graph.sh" <<'SH'
 #!/usr/bin/env bash
-if [ "${OMS_GRAPH_PANEL_TESTS:-0}" = section ]; then
+if [ "${OMS_GRAPH_GDR_TESTS:-0}" = 1 ]; then
+  cat <<'JSON'
+{"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/goal-drive-recovery-smoke.sh","tests/goal-drive-recovery-smoke.sh"],"test_cases":[]}
+JSON
+elif [ "${OMS_GRAPH_PANEL_TESTS:-0}" = section ]; then
   cat <<'JSON'
 {"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/operator/room_protocol.py"],"test_cases":[]}
 JSON
@@ -16267,6 +16271,23 @@ SH
   fi
   [ "$(cat "$marker")" = '--section core/room-protocol' ] ||
     fail "panel_metrics.py should run only the affected operator section, not the quick full suite; ran: $(cat "$marker" 2>/dev/null || true)"
+
+  unrelated_base="$(git -C "$repo" rev-parse HEAD)"
+  printf '# goal drive fixture\n' > "$repo/scripts/goal-drive-fixture.py"
+  cat > "$repo/tests/goal-drive-recovery-smoke.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$OMS_GDR_PART" >> "$OMS_GDR_MARKER"
+SH
+  git -C "$repo" add scripts/goal-drive-fixture.py tests/goal-drive-recovery-smoke.sh
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m goal_drive >/dev/null
+  if out="$(cd "$repo" && OMS_GRAPH_GDR_TESTS=1 OMS_GDR_MARKER="$TMP/gdr-parts.marker" \
+      bash scripts/check.sh --affected --no-lint --changed-from "$unrelated_base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "goal-drive-recovery affected selection failed: $out"
+  fi
+  [ "$(cat "$TMP/gdr-parts.marker" | sort | tr '\n' ' ')" = '1 2 ' ] ||
+    fail "affected goal-drive-recovery should run parts 2 and 1 exactly once: $(cat "$TMP/gdr-parts.marker" 2>/dev/null || true)"
   printf 'panel selector: %s\n' "$(cat "$marker")"
 }
 
