@@ -66,7 +66,7 @@ oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
 }
 
 # PID liveness alone can mistake a later process for a dead marker owner.
-# Legacy markers cannot prove an owner on hosts that can read process-start tokens.
+# Preserve legacy markers and hosts that cannot read a start token.
 oms_harness_marker_owner_alive() {  # MARKER
   local marker="$1"
   local pid=""
@@ -79,9 +79,9 @@ oms_harness_marker_owner_alive() {  # MARKER
   kill -0 "$pid" 2>/dev/null || return 1
   marker_start="$(oms_harness_read_marker_value "$marker" process-start)"
   marker_start="${marker_start//$'\r'/}"
+  [ -n "$marker_start" ] || return 0
   current_start="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
   current_start="${current_start//$'\r'/}"
-  [ -n "$marker_start" ] || [ -z "$current_start" ] || return 1
   [ -z "$current_start" ] || [ "$current_start" = "$marker_start" ]
 }
 

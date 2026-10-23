@@ -30786,18 +30786,13 @@ make_live_managed_sibling() {  # make_live_managed_sibling PROJECT SIBLING_PAREN
   local project="$1"
   local sibling_parent="$2"
   local sibling="$sibling_parent/wt"
-  local owner_start=""
 
   mkdir -p "$sibling_parent"
   git -C "$project" worktree add --quiet --detach "$sibling" HEAD >/dev/null 2>&1 ||
     fail "could not create the live managed sibling fixture"
-  owner_start="$(bash -c '. "$1/scripts/lib/file-lock.sh"; oms_file_lock_process_start_token "$2"' \
-    _ "$ROOT" "$$" 2>/dev/null || true)"
-  owner_start="${owner_start//$'\r'/}"
   {
     printf 'kind=oh-my-setting-temp\n'
     printf 'pid=%s\n' "$$"
-    [ -z "$owner_start" ] || printf 'process-start=%s\n' "$owner_start"
     printf 'repo=%s\n' "$project"
     printf 'worktree=%s\n' "$sibling"
     printf 'temporary=1\n'
@@ -31101,7 +31096,7 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
   local project="$TMP/guard-sibling-dead"
   local managed_root="$TMP/guard-sibling-dead-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
-  local sleep_pid start_id metadata head_contents
+  local sleep_pid start_id metadata
   local result
 
   make_guard_repo "$project"
@@ -31130,7 +31125,6 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
   }
   metadata="$(git -C "$sibling_parent/wt" rev-parse --git-dir)"
   case "$metadata" in /*) ;; *) metadata="$project/$metadata" ;; esac
-  head_contents="$(cat "$metadata/HEAD")"
   printf 'kind=oh-my-setting-temp\npid=%s\nprocess-start=stale:%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
     "$sleep_pid" "$start_id" "$project" "$sibling_parent/wt" \
     > "$sibling_parent/.oh-my-setting-tmp"
@@ -31145,35 +31139,12 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
   fi
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
     "rm -f '$metadata/HEAD'")"
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
   [ "${result%%\t*}" != 0 ] ||
     fail "a live reused pid must not exempt a sibling with a stale process-start: $result"
   contains "$result" 'outside its worktree: gitmeta' ||
     fail "a stale process-start sibling must remain visible as gitmeta: $result"
-
-  # Legacy markers without a start token cannot prove which process owns the
-  # PID on hosts that can read process-start tokens. A reused live PID must
-  # not exempt the sibling or hide its HEAD change from either snapshot.
-  printf '%s\n' "$head_contents" > "$metadata/HEAD"
-  printf 'kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
-    "$sleep_pid" "$project" "$sibling_parent/wt" \
-    > "$sibling_parent/.oh-my-setting-tmp"
-  if OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '
-    . "$1/scripts/lib/harness-residue.sh"
-    . "$1/scripts/lib/oms-common.sh"
-    oms_worker_gitmeta_is_live_managed_worktree "$2" "$3" "$2"
-  ' _ "$ROOT" "$project" "$metadata/HEAD"; then
-    kill "$sleep_pid" 2>/dev/null || true
-    wait "$sleep_pid" 2>/dev/null || true
-    fail "a live PID must not exempt a legacy sibling marker without process-start"
-  fi
-  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
-    "rm -f '$metadata/HEAD'")"
-  kill "$sleep_pid" 2>/dev/null || true
-  wait "$sleep_pid" 2>/dev/null || true
-  [ "${result%%\t*}" != 0 ] ||
-    fail "a live PID must not hide gitmeta through a legacy sibling marker: $result"
-  contains "$result" 'outside its worktree: gitmeta' ||
-    fail "a legacy sibling marker without process-start must remain visible as gitmeta: $result"
 }
 
 # smoke-weight: 16
