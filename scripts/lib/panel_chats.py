@@ -174,7 +174,7 @@ def native_advisors(members):
     """Claude Code's built-in advisor per main participant: the call still unanswered, else the newest
     one answered within ADVISOR_MAX_AGE; in memory only.
 
-    Reads only tool names, ids and timestamps from the tail of each main's own transcript."""
+    Reads only tool names, ids, timestamps and advisor usage numbers from the tail."""
     mains = _claude_mains(members)
     found = {}
     if not mains:
@@ -186,8 +186,10 @@ def native_advisors(members):
             path = _main_transcript(home, consumer)
             if path is None:
                 continue
-            calls, answered = [], {}
+            calls, answered, usage_by_call, calls_by_message, usage_by_message = [], {}, {}, {}, {}
+            call_ids = set()
             try:
+                partial = path.stat().st_size > TAIL_BYTES
                 data = _read_owned(path, TAIL_BYTES, tail=True)
             except OSError:
                 _transcripts.pop(consumer, None)
@@ -200,13 +202,35 @@ def native_advisors(members):
                     content = row["message"]["content"]
                 except (ValueError, KeyError, TypeError, RecursionError):
                     continue
+                message_calls, advisor_usage = [], []
                 for part in content if isinstance(content, list) else ():
                     if not isinstance(part, dict):
                         continue
                     if part.get("type") == "server_tool_use" and part.get("name") == "advisor" and isinstance(part.get("id"), str):
-                        calls.append((part["id"], row.get("timestamp")))
+                        message_calls.append((part["id"], row.get("timestamp")))
                     elif part.get("type") == "advisor_tool_result" and isinstance(part.get("tool_use_id"), str):
                         answered[part["tool_use_id"]] = row.get("timestamp")
+                message = row.get("message", {})
+                usage = message.get("usage", {}) if isinstance(message, dict) else {}
+                iterations = usage.get("iterations", []) if isinstance(usage, dict) else []
+                for iteration in iterations if isinstance(iterations, list) else ():
+                    if isinstance(iteration, dict) and iteration.get("type") == "advisor_message":
+                        advisor_usage.append(iteration)
+                message_id = message.get("id") if isinstance(message, dict) else None
+                for item in message_calls:
+                    if item[0] not in call_ids:
+                        calls.append(item)
+                        call_ids.add(item[0])
+                    if isinstance(message_id, str):
+                        message_calls_by_id = calls_by_message.setdefault(message_id, [])
+                        if item[0] not in message_calls_by_id:
+                            message_calls_by_id.append(item[0])
+                if isinstance(message_id, str) and advisor_usage:
+                    usage_by_message[message_id] = advisor_usage
+            for message_id, call_ids_for_message in calls_by_message.items():
+                advisor_usage = usage_by_message.get(message_id, [])
+                if len(advisor_usage) == len(call_ids_for_message):
+                    usage_by_call.update(zip(call_ids_for_message, advisor_usage))
             if not calls:
                 continue
             call = calls[-1]
@@ -217,7 +241,28 @@ def native_advisors(members):
             if abs(datetime.now(started.tzinfo).timestamp() - (finished or started).timestamp()) > ADVISOR_MAX_AGE:
                 continue
             label = label or _advisor_label(home)
-            found[participant] = {"model": label, "started": started.strftime("%H:%M"), "running": running}
+            now = datetime.now(started.tzinfo)
+            elapsed = max(0, int(((finished or now) - started).total_seconds()))
+            info = usage_by_call.get(call[0])
+            result = {"model": info.get("model") if info and isinstance(info.get("model"), str) else label,
+                      "started": started.strftime("%H:%M"), "running": running,
+                      "elapsed_seconds": elapsed, "calls": len(calls), "partial": partial}
+            def valid_usage(value):
+                return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+            if info:
+                inputs = [valid_usage(info.get(k, 0)) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+                output = valid_usage(info.get("output_tokens"))
+                if all(value is not None for value in inputs):
+                    result["input_tokens"] = sum(inputs)
+                if output is not None:
+                    result["output_tokens"] = output
+            token_rows = [usage_by_call[cid] for cid, _ in calls if cid in usage_by_call]
+            total = 0
+            for item in token_rows:
+                values = [valid_usage(item.get(k, 0)) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")]
+                total += sum(value for value in values if value is not None)
+            result["tokens"] = total
+            found[participant] = result
             if finished:
                 found[participant]["finished"] = finished.strftime("%H:%M")
         except (OSError, ValueError, TypeError, RecursionError):

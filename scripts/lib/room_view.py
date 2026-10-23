@@ -425,7 +425,10 @@ def call_span(call, arrow="->"):
     if call.get("_native"):
         if call.get("_kind") != "advisor":
             return "active"
-        return "answered " + call["_finished"] if call.get("_finished") else "asked %s %s running" % (call["_native"], arrow)
+        state_words = ("answered " + call["_finished"] if call.get("_finished") else
+                       "asked %s · running" % call["_native"])
+        stats = advisor_stats(call)
+        return state_words + (" · " + stats if stats else "")
     words = end_words(call, said(state))
     if state in LIVE_STATES:
         return " ".join(part for part in (words, elapsed(call.get("joined_at"))) if part)
@@ -757,7 +760,13 @@ def native_advisors(report, members):
              "state": "working" if mapping(calls.get(m["participant"])).get("running", True) else "done",
              "model": clean(mapping(calls.get(m["participant"])).get("model")) or "Advisor",
              "_native": clean(mapping(calls.get(m["participant"])).get("started")) or "earlier",
-             "_finished": clean(mapping(calls.get(m["participant"])).get("finished")) or None}
+             "_finished": clean(mapping(calls.get(m["participant"])).get("finished")) or None,
+             "_elapsed": mapping(calls.get(m["participant"])).get("elapsed_seconds"),
+             "_input_tokens": mapping(calls.get(m["participant"])).get("input_tokens"),
+             "_output_tokens": mapping(calls.get(m["participant"])).get("output_tokens"),
+             "_calls": mapping(calls.get(m["participant"])).get("calls"),
+             "_tokens": mapping(calls.get(m["participant"])).get("tokens"),
+             "_partial": mapping(calls.get(m["participant"])).get("partial", False)}
             for m in members if m.get("role") == "main" and m.get("provider") == "claude"
             and m.get("state") not in FINISHED and isinstance(calls.get(m["participant"]), dict)]
 
@@ -767,6 +776,31 @@ def native_running(calls):
     shown = [c for c in calls if c.get("_kind") in {"agent", "workflow"}]
     return ["Native agents active: %s · workflows active: %s" % (sum(c["_kind"] == "agent" for c in shown),
                                                                 sum(c["_kind"] == "workflow" for c in shown))] if shown else []
+
+
+def advisor_stats(call):
+    duration, tokens = "", []
+    def token_amount(value):
+        rounded = value if value < 1000 else (value + 50) // 100 * 100
+        return ("%s.%sk" % (rounded // 1000, rounded % 1000 // 100) if 1000 <= rounded < 10000
+                else amount(rounded))
+    if isinstance(call.get("_elapsed"), int) and call["_elapsed"] >= 0:
+        seconds = call["_elapsed"]
+        duration = "%sm%02ds" % divmod(seconds, 60) if seconds >= 60 else "%ss" % seconds
+    if isinstance(call.get("_input_tokens"), int):
+        tokens.append(token_amount(call["_input_tokens"]) + " in")
+    if isinstance(call.get("_output_tokens"), int):
+        tokens.append(token_amount(call["_output_tokens"]) + " out")
+    return " · ".join(([duration] if duration else []) + ([" / ".join(tokens)] if tokens else []))
+
+
+def advisor_total(call):
+    values = []
+    if isinstance(call.get("_calls"), int):
+        values.append("%s calls" % call["_calls"])
+    if isinstance(call.get("_tokens"), int) and call["_tokens"]:
+        values.append(amount(call["_tokens"]) + " tok" + ("+" if call.get("_partial") else ""))
+    return " · ".join(values)
 
 
 def card(title, content, width, height, unicode):
@@ -948,8 +982,12 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         native = next((c for c in calls if c.get("_kind") == "advisor"), None)
         if native:
             # A summary of the main's advisor state belongs beside the team counts, not below the call log.
-            lines.append("Built-in advisor: " + ("asked %s · running" % native["_native"] if native["state"] != "done"
-                                                 else "last answered %s" % (native.get("_finished") or native["_native"])))
+            summary = ("asked %s · running" % native["_native"] if native["state"] != "done"
+                       else "last answered %s" % (native.get("_finished") or native["_native"]))
+            stats = advisor_stats(native)
+            total = advisor_total(native)
+            lines.append("Built-in advisor: " + summary + (" · " + stats if stats else "") +
+                         (" · recent: " + total if total else ""))
         lines += native_running(calls)
 
         def team_rows(heading, group):
@@ -1006,9 +1044,13 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
             "Claude Code's own %s · read-only: not a panel worker" % member["_kind"]], targets
     if member.get("_native"):
         done = member["state"] == "done"
-        return ["%s advisor · %s" % (member.get("model"), "answered" if done else "running"),
-                ("Answered %s" % (member.get("_finished") or member["_native"]) if done else "Started %s" % member["_native"])
-                + " · Claude Code's built-in advisor",
+        model = MODEL_NAMES.get(member.get("model"), member.get("model")) or "Advisor"
+        state = ("answered %s" % (member.get("_finished") or member["_native"]) if done
+                 else "asked %s · running" % member["_native"])
+        stats = advisor_stats(member)
+        return ["%s advisor · %s%s" % (model, state, " · " + stats if stats else ""),
+                ("Recent: " + advisor_total(member) + " · Claude Code's built-in advisor" if advisor_total(member)
+                 else "Claude Code's built-in advisor"),
                 "Its answer stays inside the main's chat"], targets
     owner = names.get(member.get("parent"), "")
     lines = wrapped("%s%s · %s%s" % (who(member), " for " + owner if owner else "",
@@ -1350,9 +1392,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     band_tails = {}
     for member in gates + counsel + workers:
         tag = tagged(member)
+        advisor_figures = advisor_stats(member) if member.get("_kind") == "advisor" else ""
         band_tails[id(member)] = [(tag, judgment_tone(tag, call_ending(member) or member.get("state"))),
-                                  (member.get("tokens") or "", "metadata"),
-                                  (elapsed(member.get("joined_at")) or "unknown", "metadata")]
+                                  (advisor_figures or member.get("tokens") or "", "metadata"),
+                                  ("" if advisor_figures else elapsed(member.get("joined_at")) or "unknown", "metadata")]
     tail_plan = plan_tail_columns(list(band_tails.values()), width, prefix_width=stem + 5, optional=(1,))
     band_tails = dict(zip(band_tails, tail_plan["rows"]))
 
@@ -1580,7 +1623,10 @@ def summary_card(member, preview, width, room=None, unicode=True, *, report=None
         lines += [member["tokens"]] if member.get("tokens") else []
         lines.append("Claude Code's own %s: read-only, not a panel worker" % member["_kind"])
     elif member.get("_native"):
-        lines.append("Built-in advisor: answer stays inside the main's chat")
+        stats = advisor_stats(member)
+        total = advisor_total(member)
+        lines.append("Built-in advisor" + (": " + stats if stats else "") +
+                     (" · recent: " + total if total else "") + " · answer stays inside the main's chat")
     if member.get("role") == "main":
         held = (claims if claims is not None else claims_by_main(report)).get(member["participant"], [])
         if not held and member.get("attempt"):
@@ -1592,8 +1638,12 @@ def summary_card(member, preview, width, room=None, unicode=True, *, report=None
         calls = (everyone or {}).get(member["participant"], [])
         native = next((c for c in calls if c.get("_kind") == "advisor"), None)
         if native:
-            lines.append("Built-in advisor: " + ("last answered %s" % native["_finished"]
-                         if native.get("_finished") else "asked %s · running" % native["_native"]))
+            summary = ("last answered %s" % native["_finished"]
+                       if native.get("_finished") else "asked %s · running" % native["_native"])
+            stats = advisor_stats(native)
+            total = advisor_total(native)
+            lines.append("Built-in advisor: " + summary + (" · " + stats if stats else "") +
+                         (" · recent: " + total if total else ""))
         lines += native_running(calls)
         classify = classify or call_classifier(report)
         lines.append("Workers running: %s · Awaiting decision: %s" % (

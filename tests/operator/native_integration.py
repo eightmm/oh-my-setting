@@ -1205,14 +1205,15 @@ assert "MAIN fixture-model" in council_detail and "1 seat(s) answering" in counc
 assert ("debate", ("decide", member)) in council_detail_nav["items"], council_detail_nav
 # Claude Code's built-in advisor shows above its main only while unanswered, read from the
 # main's own transcript tail; finalized failed calls leave the board.
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 advisor_home = temporary / "advisor-claude"
 (advisor_home / "projects" / "slug").mkdir(parents=True)
 (advisor_home / "settings.json").write_text('{"advisorModel": "fable"}')
 advisor_sid = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
 advisor_consumer = hashlib.sha256(advisor_sid.encode()).hexdigest()[:32]
 advisor_log = advisor_home / "projects" / "slug" / (advisor_sid + ".jsonl")
-advisor_use = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"), "message": {"content": [
+advisor_start = datetime.now(timezone.utc).replace(microsecond=0)
+advisor_use = {"timestamp": advisor_start.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "message": {"id": "msg-advisor-1", "content": [
     {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_1"}]}}
 advisor_log.write_text("partial{\n" + json.dumps(advisor_use) + "\nnot json advisor\n")
 claude_main = {"participant": "adv-main", "provider": "claude", "role": "main", "joined": True, "label": "Claude",
@@ -1254,10 +1255,75 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     assert open_call["adv-main"]["model"] == "Fable 5.1" and len(open_call["adv-main"]["started"]) == 5, open_call
     assert open_call["adv-main"]["running"] is True and "finished" not in open_call["adv-main"], open_call
     assert panel_chats.native_advisors([dict(claude_main, provider="codex")]) == {}
-    advisor_log.write_text(advisor_log.read_text() + json.dumps({"timestamp": advisor_use["timestamp"], "message": {"content": [
-        {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1", "content": "ciphertext"}]}}) + "\n")
+    original_advisor_log = advisor_log
+    moved_dir = advisor_home / "projects" / "moved-slug"
+    moved_dir.mkdir()
+    moved_log = moved_dir / advisor_log.name
+    advisor_log.rename(moved_log)
+    assert panel_chats.native_advisors([claude_main]) == {}
+    advisor_log = moved_log
+    open_call = panel_chats.native_advisors([claude_main])
+    assert open_call["adv-main"]["running"] is True, open_call
+    moved_log.rename(original_advisor_log)
+    advisor_log = original_advisor_log
+    panel_chats._transcripts.pop(advisor_consumer, None)
+    open_call = panel_chats.native_advisors([claude_main])
+    assert open_call["adv-main"]["running"] is True, open_call
+    advisor_log.write_text(advisor_log.read_text() + json.dumps({"timestamp": (advisor_start + timedelta(seconds=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), "message": {"id": "msg-advisor-1", "content": [
+        {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1", "content": "ciphertext"}], "usage": {"iterations": [
+            {"type": "message", "model": "main-model", "input_tokens": 999999},
+            {"type": "advisor_message", "model": "claude-fable-5-1", "input_tokens": 249548,
+             "output_tokens": 4326, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}]}}}) + "\n")
     answered_call = panel_chats.native_advisors([claude_main])
     assert answered_call["adv-main"]["running"] is False and len(answered_call["adv-main"]["finished"]) == 5, answered_call
+    assert answered_call["adv-main"]["input_tokens"] == 249548 and answered_call["adv-main"]["output_tokens"] == 4326, answered_call
+    assert answered_call["adv-main"]["elapsed_seconds"] == 72 and answered_call["adv-main"]["model"] == "claude-fable-5-1", answered_call
+    two_calls = dict(advisor_use, timestamp=(advisor_start + timedelta(seconds=80)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                     message={"id": "msg-advisor-pair", "content": [
+                         {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_2"},
+                         {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_3"}]})
+    paired_result = {"timestamp": (advisor_start + timedelta(seconds=90)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                     "message": {"id": "msg-advisor-pair", "content": [
+                         {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_2"},
+                         {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_3"}], "usage": {"iterations": [
+                         {"type": "advisor_message", "model": "claude-fable-5-1", "input_tokens": 100, "output_tokens": 10},
+                         {"type": "advisor_message", "model": "claude-fable-5-1", "input_tokens": 200, "output_tokens": 20}]}}}
+    advisor_log.write_text(json.dumps(two_calls) + "\n" + json.dumps(paired_result) + "\n")
+    paired = panel_chats.native_advisors([claude_main])["adv-main"]
+    assert paired["input_tokens"] == 200 and paired["output_tokens"] == 20 and paired["calls"] == 2, paired
+    paired_result["message"]["usage"]["iterations"].pop()
+    advisor_log.write_text(json.dumps(two_calls) + "\n" + json.dumps(paired_result) + "\n")
+    mismatch = panel_chats.native_advisors([claude_main])["adv-main"]
+    assert "input_tokens" not in mismatch and "output_tokens" not in mismatch, mismatch
+    split_one = dict(two_calls, message={"id": "msg-split", "content": [
+        {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_4"}]})
+    split_two = dict(two_calls, message={"id": "msg-split", "content": [
+        {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_5"}]})
+    split_result = dict(paired_result, message={"id": "msg-split", "content": [
+        {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_4"},
+        {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_5"}], "usage": {"iterations": [
+        {"type": "advisor_message", "input_tokens": 300, "output_tokens": 30},
+        {"type": "advisor_message", "input_tokens": 400, "output_tokens": 40}]}})
+    advisor_log.write_text("\n".join(json.dumps(row) for row in (split_one, split_two, split_result)) + "\n")
+    split_pair = panel_chats.native_advisors([claude_main])["adv-main"]
+    assert split_pair["input_tokens"] == 400 and split_pair["output_tokens"] == 40, split_pair
+    older_call = dict(advisor_use, message={"id": "msg-invalid-old", "content": [
+        {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_6"}]})
+    older_result = {"timestamp": advisor_use["timestamp"], "message": {"id": "msg-invalid-old", "content": [
+        {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_6"}], "usage": {"iterations": [
+        {"type": "advisor_message", "input_tokens": None, "output_tokens": 5}]}}}
+    newer_call = dict(advisor_use, timestamp=(advisor_start + timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                      message={"id": "msg-valid-new", "content": [
+                          {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_7"}]})
+    newer_result = {"timestamp": (advisor_start + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "message": {"id": "msg-valid-new", "content": [
+                        {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_7"}], "usage": {"iterations": [
+                        {"type": "advisor_message", "input_tokens": 700, "output_tokens": 70}]}}}
+    advisor_log.write_text("\n".join(json.dumps(row) for row in (older_call, older_result, newer_call, newer_result)) + "\n")
+    after_invalid = panel_chats.native_advisors([claude_main])["adv-main"]
+    assert after_invalid["input_tokens"] == 700 and after_invalid["output_tokens"] == 70, after_invalid
+    advisor_log.write_text(("x" * (panel_chats.TAIL_BYTES + 1)) + "\n" + json.dumps(advisor_use) + "\n")
+    assert panel_chats.native_advisors([claude_main])["adv-main"]["partial"] is True
     stale_stamp = "2020-01-01T00:00:00.000Z"
     advisor_log.write_text(json.dumps(dict(advisor_use, timestamp=stale_stamp)) + "\n" + json.dumps({
         "timestamp": stale_stamp, "message": {"content": [{"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1"}]}}) + "\n")
@@ -1278,6 +1344,17 @@ assert "Fable 5.1" in finished_board and "Past work" not in finished_board, fini
 finished_nav = {"tab": "detail", "selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 finished_detail = graph_view.render_graph(dict(board, native_advisors=answered_call), 100, 40, navigation=finished_nav)
 assert "Built-in advisor: last answered " + answered_call["adv-main"]["finished"] in finished_detail, finished_detail
+finished_advisor = graph_view.native_advisors({"native_advisors": answered_call}, [claude_main])[-1]
+advisor_words = " ".join(graph_view.detail(finished_advisor, {}, 120)[0])
+assert "1m12s" in advisor_words and "249.5k in" in advisor_words and "4.3k out" in advisor_words, advisor_words
+for token_count, rendered in ((40, "40 out"), (50, "50 out"), (999, "999 out"),
+                              (1049, "1.0k out"), (249548, "249.5k out")):
+    assert rendered in graph_view.advisor_stats({"_output_tokens": token_count}), (token_count, rendered)
+advisor_selected_nav = {"tab": "detail", "selected": ("result", "native-advisor-adv-main"),
+                        "preview": {"target": ("result", "native-advisor-adv-main"), "report": {}}}
+advisor_selected_board = graph_view.render_graph(dict(board, native_advisors=answered_call), 120, 40,
+                                                 navigation=advisor_selected_nav)
+assert "1m12s" in advisor_selected_board and "249.5k in" in advisor_selected_board and "4.3k out" in advisor_selected_board, advisor_selected_board
 running_nav = {"tab": "detail", "selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 assert "Built-in advisor: asked " in graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=running_nav)
 # Claude Code's own subagents and Workflow runs: read-only rows that show only what the session files prove.
