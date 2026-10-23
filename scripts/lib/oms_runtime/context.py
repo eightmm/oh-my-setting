@@ -19,8 +19,13 @@ MAX_CONTEXT_BYTES = 512 * 1024
 MAX_DISCOVERY_FILE_BYTES = 2 * 1024 * 1024
 
 
-def _safe_repo_file(repo: Path, raw: str, *, allow_external: bool = False) -> Path:
-    path = Path(raw).expanduser()
+def _safe_repo_file(
+    repo: Path, raw: str, *, allow_external: bool = False, expanduser: bool = False
+) -> Path:
+    # Repository-relative names are literal; user-facing context paths opt in below.
+    path = Path(raw)
+    if expanduser:
+        path = path.expanduser()
     if not path.is_absolute():
         path = repo / path
     lexical = Path(os.path.abspath(str(path)))
@@ -255,7 +260,7 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
     for target in targets:
         if not target:
             continue
-        target_path = _safe_repo_file(repo, target, allow_external=allow_external)
+        target_path = _safe_repo_file(repo, target, allow_external=allow_external, expanduser=True)
         label = relative_path(target_path, repo) or (target_path.name if allow_external else "")
         if label and label not in target_labels:
             target_labels.append(label)
@@ -265,7 +270,10 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
     for path, reason, priority in _related_candidates(repo, target_paths):
         candidates.append((path, reason, priority, "middle"))
     for raw, reason in explicit:
-        candidates.append((_safe_repo_file(repo, raw, allow_external=allow_external), reason or "explicit context", 110, "middle"))
+        candidates.append((
+            _safe_repo_file(repo, raw, allow_external=allow_external, expanduser=True),
+            reason or "explicit context", 110, "middle",
+        ))
     unresolved_required: List[str] = []
     required_resolved: Dict[str, str] = {}
     # Only target ancestors apply; do not crawl siblings or follow document links.
@@ -282,7 +290,7 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
                     if os.path.lexists(directory / "AGENTS.md")]
     for raw in list(required) + scoped_rules:
         try:
-            required_path = _safe_repo_file(repo, raw, allow_external=allow_external)
+            required_path = _safe_repo_file(repo, raw, allow_external=allow_external, expanduser=True)
         except CoreError:
             unresolved_required.append(raw)
             continue

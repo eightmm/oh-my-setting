@@ -2331,6 +2331,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 command = [sys.executable, str(Path(__file__).with_name("dispatch_supervisor.py")),
                            str(repo), control_member, digest] + argv
             output_log, output_fd = _dispatch_output_log(repo, control_member)
+            if "peer-delegate" in argv and os.environ.get("OMS_GRAPH_AUTOBUILD", "1") != "0":
+                _prepare_panel_graph(repo)
             process = subprocess.Popen(command, cwd=str(execution), env=env, start_new_session=os.name == "posix",
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             output_tail, output_lock = bytearray(), threading.Lock()
@@ -2585,13 +2587,42 @@ def peer_command(action, provider, repo, prompt=None, brief=None, verify=None):
             raise ValueError("implementation needs an explicit verifier")
         return prefix + ["peer-delegate", "--repo", str(repo), "--to", peer,
                          "--brief-file", str(brief), "--verify", verify,
-                         "--role", "implementation-worker"]
+                         "--role", "implementation-worker", "--graph-context"]
     if action == "review":
         if not verify or not verify.strip():
             raise ValueError("review needs an explicit verifier")
         return prefix + ["peer-review", "--repo", str(repo), "--providers", peer,
                          "--prompt", prompt, "--gate", "--verify", verify]
     raise ValueError("unknown peer action")
+
+
+def _prepare_panel_graph(repo):
+    """Best-effort refresh so the delegate's bounded graph pack can reuse it."""
+    graph_lib = Path(__file__).resolve().parent
+    # Run the same raw Git-config guard as peer-delegate before context-pack Git queries.
+    script = ("import sys\n"
+              "sys.path.insert(0, %r)\n"
+              "import subprocess\n"
+              "guard = %r\n"
+              "safe = subprocess.run(\n"
+              "    ['bash', '-c', 'source \"$1\"; oms_git_assert_safe_execution_config \"$2\" >/dev/null 2>&1',\n"
+              "     'oms', guard, sys.argv[1]],\n"
+              "    cwd=%r, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+              "    stderr=subprocess.DEVNULL, timeout=12, check=False)\n"
+              "if safe.returncode: sys.exit(0)\n"
+              "from pathlib import Path\nfrom oms_runtime.common import file_lock\n"
+              "from oms_graph.project import build\n"
+              "from oms_runtime.context_pack import validate_automatic_graph_state\n"
+              "repo=Path(sys.argv[1]).resolve()\n"
+              "with file_lock(repo/'.oms'/'locks'/'project-graph-build', timeout_seconds=3):\n"
+              "    validate_automatic_graph_state(repo, repo/'.oms'/'project-graph')\n"
+              "    build.ensure(repo)\n" % (str(graph_lib), str(graph_lib / "oms-common.sh"), str(graph_lib)))
+    try:
+        subprocess.run([sys.executable, "-I", "-B", "-c", script, str(repo)], cwd=str(graph_lib),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=20, check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def run(command, repo, provider=None):

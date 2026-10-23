@@ -47,8 +47,8 @@ def exercise_observed_worker_leases():
             patch.object(panel.subprocess, "Popen", side_effect=lambda argv, **kwargs:
                          captured_dispatch.update(argv=argv) or Mock(pid=0, wait=lambda **kwargs: 0, poll=lambda: 0)):
         assert panel.run_dispatch(*dispatch_args) == 0
-    preview_argv = preflight.call_args.args[0]
-    assert preview_argv[-1] == "--dry-run" and "--observe-plan-binding" not in preview_argv
+    preview_argv = next(call.args[0] for call in preflight.call_args_list if call.args and call.args[0][-1:] == ["--dry-run"])
+    assert "--observe-plan-binding" not in preview_argv
     assert preview_argv[preview_argv.index("--verify") + 1] == "--task-id"
     assert preview_argv[-3] == "--task-id" and preview_argv[-2].startswith("preflight-")
     dispatch_argv = captured_dispatch["argv"]

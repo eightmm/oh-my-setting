@@ -218,7 +218,7 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
     profile = route["role"] if route["role"] != "worker" else (
         "implementation-worker" if route["purpose"] == "implement" else "analysis-worker")
     result = prefix + ["peer-delegate", "--repo", str(repo), "--to", route["provider"], "--role", profile,
-                       "--no-memory", "--no-task"] + request + model
+                       "--no-memory", "--no-task", "--graph-context"] + request + model
     if route["purpose"] == "investigate" and route["access"] == "write":
         result += ["--allow-no-change"]
     if route["access"] == "read":

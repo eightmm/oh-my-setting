@@ -1,7 +1,7 @@
 execution_repo = temporary / "verification-execution-root"
 execution_repo.mkdir()
 import panel_dispatch as dispatch
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 import io
 from concurrent.futures import ThreadPoolExecutor
@@ -266,6 +266,7 @@ for owner in panel.PROVIDERS:
     write_env = dict(env, PANEL_TEST_MODE="write")
     command = panel.peer_command("delegate", owner, project, brief=brief,
                                  verify="test \"$(tail -1 value.txt)\" = new")
+    assert "--graph-context" in command, command
     answer = call(command, write_env)
     assert re.search(r"^verify: exit 0 \([0-9]+s\)$", answer, re.M), answer
     patch_match = re.search(r"^patch: (.+)$", answer, re.M)
@@ -281,6 +282,149 @@ rows = json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", st
                         "--json", "list", "30"]))["rows"]
 assert {r["provider"] for r in rows if r["kind"] == "delegate"} == set(panel.PROVIDERS)
 assert {r["provider"] for r in rows if r["kind"] == "review"} == set(panel.PROVIDERS)
+
+# Panel preparation builds a missing canonical graph when possible and fails
+# open when the bounded best-effort subprocess cannot finish.
+graph_fixture, _ = continuation_git_repo("panel-graph-missing")
+(graph_fixture / "source.py").write_text("def fixture(): return 1\n")
+shadow_marker = temporary / "pathlib-shadow-imported"
+(graph_fixture / "pathlib.py").write_text("open(%r, 'w').write('imported')\n" % str(shadow_marker))
+subprocess.run(["git", "-C", str(graph_fixture), "add", "source.py", "pathlib.py"], check=True)
+subprocess.run(["git", "-C", str(graph_fixture), "commit", "-qm", "graph fixture source"], check=True)
+outside_source = temporary / "graph-outside" / "module.py"
+outside_source.parent.mkdir()
+outside_source.write_text("def outside_secret(): return 'outside'\n")
+(graph_fixture / "src").symlink_to(outside_source.parent, target_is_directory=True)
+outside_blob = subprocess.check_output(["git", "-C", str(graph_fixture), "hash-object", "-w", "--stdin"],
+                                       input=outside_source.read_bytes(), text=False).decode().strip()
+subprocess.run(["git", "-C", str(graph_fixture), "update-index", "--add", "--cacheinfo",
+                "100644," + outside_blob + ",src/module.py"], check=True)
+subprocess.run(["git", "-C", str(graph_fixture), "commit", "-qm", "tracked source under symlink"], check=True)
+assert "src/module.py" in subprocess.check_output(
+    ["git", "-C", str(graph_fixture), "ls-files", "--cached"], text=True).splitlines()
+with patch.dict(os.environ, {"OMS_LOCK_DIR": str(temporary / "graph-locks"), "OMS_HARNESS_CHILD": "0",
+                            "OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}):
+    dispatch._prepare_panel_graph(graph_fixture)
+assert (graph_fixture / ".oms/project-graph/graph.json").is_file()
+graph_manifest = json.loads((graph_fixture / ".oms/project-graph/manifest.json").read_text())
+assert "src/module.py" not in graph_manifest["files"], "graph read a tracked file through a symlink ancestor"
+assert not shadow_marker.exists(), "graph warm-up imported repository pathlib.py"
+timeout_fixture = temporary / "panel-graph-timeout"
+timeout_fixture.mkdir()
+with patch.object(dispatch.subprocess, "run", side_effect=subprocess.TimeoutExpired("graph", 20)):
+    dispatch._prepare_panel_graph(timeout_fixture)
+assert not (timeout_fixture / ".oms/project-graph").exists()
+
+# Dry runs return before warming any graph cache.
+preview_route = {"kind": "worker", "provider": "codex", "model": "gpt-6-luna", "effort": "low",
+                 "role": "worker", "owner": "codex", "workload": "routine", "access": "write",
+                 "purpose": "implement"}
+preview_brief = temporary / "graph-preview-brief.md"
+preview_brief.write_text("Preview only.\n")
+preview_record = {"attempt_id": "preview-main", "tool": "panel-main", "provider": "codex",
+                  "terminal": False, "refs": {"panel_room_participant": "preview-caller",
+                                               "panel_room_id": "preview-room"}}
+with patch.dict(os.environ, {"OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}), \
+        patch.object(panel, "_validate_dispatch_verifier"), \
+        patch.object(panel, "_validate_dry_run_inputs"), \
+        patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "preview-room",
+                                                               "OMS_ROOM_PARTICIPANT": "preview-caller",
+                                                               "OMS_PANEL_MAIN_ATTEMPT": "preview-main"}), \
+        patch.object(panel, "events", return_value=json.dumps(preview_record)), \
+        patch.object(panel, "active_mains", return_value={"preview-caller": preview_record}), \
+        patch.object(dispatch.room, "resolve", return_value="preview-room"), \
+        patch.object(dispatch.room, "records", return_value=[]), \
+        patch.object(dispatch.room, "project", return_value={}), \
+        patch.object(dispatch.room, "participant", return_value={"role": "main", "provider": "codex"}), \
+        patch.object(dispatch.room, "same_room", return_value=True), \
+        patch.object(dispatch.room, "declared_scopes"), \
+        patch.object(panel, "scope_overlaps", return_value=[]), \
+        patch.object(dispatch, "_prepare_panel_graph", side_effect=AssertionError("dry run warmed graph")), \
+        redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+    assert dispatch.run_dispatch(root, "codex", "worker", "write", None, str(preview_brief),
+                                 "true", "graph-preview", True, None, preview_route, "preview-caller", None,
+                                 ["source.py"],
+                                 work_repo=root) == 0
+
+# A stale graph tracked in the canonical checkout blocks refresh, preserves all
+# bytes, and does not prevent the real dispatch launch path from proceeding.
+tracked_graph_repo, _ = continuation_git_repo("panel-tracked-graph-dispatch")
+tracked_graph = tracked_graph_repo / ".oms/project-graph"
+tracked_graph.mkdir(parents=True)
+(tracked_graph / "graph.json").write_bytes(b'{"tracked":"graph"}\n')
+(tracked_graph / "manifest.json").write_bytes(b'{"tracked":"manifest"}\n')
+(tracked_graph / "cache.json").write_bytes(b'{"tracked":"cache"}\n')
+subprocess.run(["git", "-C", str(tracked_graph_repo), "add", ".oms/project-graph"], check=True)
+subprocess.run(["git", "-C", str(tracked_graph_repo), "commit", "-qm", "tracked graph fixture"], check=True)
+tracked_before = {path.name: path.read_bytes() for path in tracked_graph.iterdir()}
+tracked_route = dict(preview_route, access="read", purpose="explain")
+graph_state_home = temporary / "graph-state-home"
+graph_state_home.mkdir(mode=0o700)
+
+class FinishedDispatchProcess:
+    pid = os.getpid()
+    def __init__(self):
+        self.stdout = io.BytesIO()
+        self.stderr = io.BytesIO()
+    def poll(self): return 0
+    def wait(self, timeout=None): return 0
+
+with patch.dict(os.environ, {"OMS_LOCK_DIR": str(temporary / "graph-locks"), "XDG_STATE_HOME": str(graph_state_home),
+                            "OMS_HARNESS_CHILD": "0",
+                            "OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}):
+    tracked_log_fd = os.open(os.devnull, os.O_WRONLY)
+    import types
+    launch_subprocess = types.SimpleNamespace(**vars(subprocess))
+    launch_subprocess.Popen = lambda *args, **kwargs: FinishedDispatchProcess()
+    with patch.object(panel, "work_repository", side_effect=lambda path: Path(path)), \
+            patch.object(panel, "child_environment", return_value={}), \
+            patch.object(panel, "plan_link", return_value=None), \
+            patch.object(panel, "_prepare_dispatch_call", return_value=None), \
+            patch.object(panel, "_dispatch_output_log", return_value=("", tracked_log_fd)), \
+            patch.object(panel, "_save_dispatch_output"), \
+            patch.object(panel, "_stop_dispatch", return_value=True), \
+            patch.object(panel, "_observe_dispatch_session"), \
+            patch.object(panel, "_observe_dispatch_descendants"), \
+            patch.object(panel, "_print_dispatch_next_ready"), \
+            patch.object(dispatch, "subprocess", launch_subprocess), \
+            patch.object(panel, "_validate_dispatch_verifier"):
+        assert dispatch.run_dispatch(tracked_graph_repo, "codex", "worker", "read", "Inspect source.", None,
+                                     None, "tracked-graph-dispatch", False, None, tracked_route,
+                                     None, None, [], work_repo=tracked_graph_repo) == 0
+    os.close(tracked_log_fd)
+assert {path.name: path.read_bytes() for path in tracked_graph.iterdir()} == tracked_before
+
+# A real dispatch reaches the graph warm-up with an untrusted pathlib.py in
+# the repository; neither controller nor isolated preparation imports it.
+shadow_route = dict(tracked_route)
+fsmonitor_marker = temporary / "fsmonitor-command-executed"
+subprocess.run(["git", "-C", str(graph_fixture), "config", "core.fsmonitor",
+                "touch " + str(fsmonitor_marker)], check=True)
+with patch.dict(os.environ, {"OMS_LOCK_DIR": str(temporary / "graph-locks"), "XDG_STATE_HOME": str(graph_state_home),
+                            "OMS_HARNESS_CHILD": "0",
+                            "OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}):
+    shadow_log_fd = os.open(os.devnull, os.O_WRONLY)
+    import types
+    launch_subprocess = types.SimpleNamespace(**vars(subprocess))
+    launch_subprocess.Popen = lambda *args, **kwargs: FinishedDispatchProcess()
+    with patch.object(panel, "work_repository", side_effect=lambda path: Path(path)), \
+            patch.object(panel, "child_environment", return_value={}), \
+            patch.object(panel, "plan_link", return_value=None), \
+            patch.object(panel, "_prepare_dispatch_call", return_value=None), \
+            patch.object(panel, "_dispatch_output_log", return_value=("", shadow_log_fd)), \
+            patch.object(panel, "_save_dispatch_output"), \
+            patch.object(panel, "_stop_dispatch", return_value=True), \
+            patch.object(panel, "_observe_dispatch_session"), \
+            patch.object(panel, "_observe_dispatch_descendants"), \
+            patch.object(panel, "_print_dispatch_next_ready"), \
+            patch.object(dispatch, "subprocess", launch_subprocess), \
+            patch.object(panel, "_validate_dispatch_verifier"):
+        assert dispatch.run_dispatch(graph_fixture, "codex", "worker", "read", "Inspect source.", None,
+                                     None, "pathlib-shadow-dispatch", False, None, shadow_route,
+                                     None, None, [], work_repo=graph_fixture) == 0
+    os.close(shadow_log_fd)
+assert not shadow_marker.exists(), "panel dispatch imported repository pathlib.py"
+assert not fsmonitor_marker.exists(), "panel dispatch executed repository core.fsmonitor"
 
 # Same-repository dispatch retains its per-role execution locations, with one
 # recorded main per caller and read/write authority tested independently.
@@ -539,6 +683,7 @@ with patch.object(panel, "provider_catalog", side_effect=fixture_provider_catalo
         preset = panel.selected_route("claude", "researcher", None, "read", None, target)
         command = panel.routed_command(panel.ENTRY, project, preset, prompt="Find cited evidence.")
         assert "--read-only" in command and command[command.index("--role") + 1] == "researcher"
+        assert "--graph-context" in command, command
         assert preset["provider"] == target and preset["effort"] == "low" and preset["workload"] == "light"
         for options in ((None, "read", "implement", None, None, None),
                         (None, "write", None, None, None, None),

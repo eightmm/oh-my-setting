@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from oms_runtime.common import run_output, sha256_bytes
+from oms_runtime.common import CoreError, run_output, sha256_bytes
+from oms_runtime.context import _safe_repo_file
 
 from .model import PATH_LITERAL_RE, make_node, node_id
 from .parsers import parser_for
@@ -56,24 +57,25 @@ def discover_files(repo: Path, *, include: Sequence[str] = (), exclude: Sequence
             reason = "excluded"
         elif include and not any(fnmatch.fnmatch(relpath, pattern) for pattern in include):
             reason = "excluded"
-        elif path.is_symlink():
-            reason = "symlink"
-        elif not path.is_file():
-            reason = "excluded"
         else:
             try:
-                size = path.stat().st_size
-                with path.open("rb") as handle:
-                    head = handle.read(8192)
-            except OSError:
-                reason = "excluded"
+                source_path = _safe_repo_file(repo, str(repo / relpath))
+            except CoreError:
+                reason = "symlink" if path.is_symlink() else "excluded"
             else:
-                if size > max_bytes:
-                    reason = "too-large"
-                elif b"\0" in head:
-                    reason = "binary"
-                elif parser_for(relpath) is None:
-                    reason = "unparsed"
+                try:
+                    size = source_path.stat().st_size
+                    with source_path.open("rb") as handle:
+                        head = handle.read(8192)
+                except OSError:
+                    reason = "excluded"
+                else:
+                    if size > max_bytes:
+                        reason = "too-large"
+                    elif b"\0" in head:
+                        reason = "binary"
+                    elif parser_for(relpath) is None:
+                        reason = "unparsed"
         if reason:
             skipped.append({"path": relpath, "reason": reason})
         else:
@@ -83,7 +85,8 @@ def discover_files(repo: Path, *, include: Sequence[str] = (), exclude: Sequence
 
 def extract_file(repo: Path, relpath: str) -> Dict[str, Any]:
     """{"path","sha256","bytes","parser","parser_version","nodes","edges","refs"} for one file."""
-    path = Path(repo) / relpath
+    repo = Path(repo).resolve()
+    path = _safe_repo_file(repo, str(repo / relpath))
     data = path.read_bytes()
     digest = sha256_bytes(data)
     parser = parser_for(relpath)

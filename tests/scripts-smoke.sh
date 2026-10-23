@@ -5793,10 +5793,11 @@ EOF
   chmod +x "$bin_dir/codex"
 
   local mode
-  for mode in default first cached disabled unmatched; do
+  for mode in default first cached disabled autobuild-disabled unmatched; do
     local flags=()
     local query='recover lease'
     local expect_ready=0
+    local autobuild=1
     if [ "$mode" != default ]; then
       flags+=(--graph-context)
       expect_ready=1
@@ -5805,9 +5806,14 @@ EOF
       flags+=(--no-graph-context)
       expect_ready=0
     fi
+    if [ "$mode" = autobuild-disabled ]; then
+      expect_ready=0
+      autobuild=0
+    fi
     [ "$mode" != unmatched ] || query='zzzz_no_matching_subject'
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
       OMS_CONTEXT_CAPTURE="$capture" OMS_GRAPH_EXPECT_READY="$expect_ready" \
+      OMS_GRAPH_AUTOBUILD="$autobuild" \
       OMS_GRAPH_TEST_LIB="$ROOT/scripts/lib" PATH="$bin_dir:/usr/bin:/bin" \
       "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
       --artifact-dir "$TMP/delegate-auto-graph-artifacts" --no-verify --allow-no-change \
@@ -5815,14 +5821,16 @@ EOF
         tail -35 "$TMP/delegate-auto-graph-artifacts"/codex-*.md >&2
         fail "automatic graph worker probe failed ($mode)"
       }
-    python3 - "$capture" "$project/.oms/project-graph/graph.json" "$stamp" "$mode" <<'PY'
+    python3 - "$capture" "$project/.oms/project-graph/graph.json" "$stamp" "$mode" \
+      "$TMP/delegate-auto-graph-artifacts" <<'PY'
 import json, pathlib, sys
 prompt, graph, stamp = map(pathlib.Path, sys.argv[1:4])
 mode = sys.argv[4]
+artifact_dir = pathlib.Path(sys.argv[5])
 text = prompt.read_text(encoding="utf-8")
 assert "private_recover_lease" not in text and "untracked.py" not in text, text
 assert "def recover_lease" not in text, "automatic orientation included source bytes"
-if mode in ("default", "disabled", "unmatched"):
+if mode in ("default", "disabled", "autobuild-disabled", "unmatched"):
     assert "## Project Graph orientation" not in text, text
     if mode == "unmatched":
         assert "inspect source paths, callers and tests directly" in text, text
@@ -5834,12 +5842,15 @@ else:
     assert "detached worker snapshot" in text, text
 rows = [json.loads(line) for line in (graph.parents[1] / 'artifacts/index.jsonl').read_text(encoding='utf-8').splitlines()]
 row = next(row for row in reversed(rows) if row.get('kind') == 'delegate')
-expected = 'direct' if mode in ('default', 'disabled') else 'graph-fallback' if mode == 'unmatched' else 'graph'
+expected = 'direct' if mode in ('default', 'disabled', 'autobuild-disabled') else 'graph-fallback' if mode == 'unmatched' else 'graph'
 assert row['context_mode'] == expected, row
 assert row['context_prepare_seconds'] >= 0, row
 assert (row['context_orientation_bytes'] > 0) == (expected == 'graph'), row
 assert row['prompt_bytes'] >= row['context_orientation_bytes'], row
 assert row['context_verification'] == 'none', row
+artifact = max(artifact_dir.glob('codex-*.md'), key=lambda path: path.stat().st_mtime_ns).read_text(encoding='utf-8')
+assert '- context_mode: %s' % expected in artifact, artifact[:1000]
+assert '- context_prepare_seconds: ' in artifact, artifact[:1000]
 assert len(row['context_task_sha256']) == 64, row
 if mode in ('first', 'cached', 'disabled'):
     initial = next(row for row in rows if row.get('kind') == 'delegate')

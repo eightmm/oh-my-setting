@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from oms_graph import PARSER_VERSION, PROJECT_SCHEMA
-from oms_runtime.common import atomic_write_bytes, atomic_write_json, canonical_json, ensure_private_dir, read_bytes, read_json, sha256_bytes, sha256_file, utc_now
+from oms_runtime.common import CoreError, atomic_write_bytes, atomic_write_json, canonical_json, ensure_private_dir, read_bytes, read_json, sha256_bytes, sha256_file, utc_now
+from oms_runtime.context import _safe_repo_file
 
 from ..errors import GraphError
 
@@ -93,7 +94,7 @@ def build(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = 
     keys: List[str] = []
     cached_count = 0
     for relpath in discovery["files"]:
-        path = repo / relpath
+        path = _safe_repo_file(repo, relpath)
         digest = sha256_file(path)
         # Parser versions are currently registry-wide, but keep the individual
         # version in the cache key so an added parser can invalidate safely.
@@ -166,16 +167,25 @@ def _graph_key(path: Path) -> Any:
 
 def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
     """{"present","fresh","revision","stale":[...],"missing":[...],"new":[...]} from working-tree bytes."""
-    directory = state_dir(Path(repo).resolve(), state)
+    repo = Path(repo).resolve()
+    directory = state_dir(repo, state)
     manifest = read_json(directory / "manifest.json", None)
     if not isinstance(manifest, dict):
         return {"present": False, "fresh": False, "revision": "", "stale": [], "missing": [], "new": [],
                 "coverage": _coverage({"files": [], "skipped": []})}
     options = manifest.get("discovery") if isinstance(manifest.get("discovery"), dict) else {}
-    listed = discover_files(Path(repo).resolve(), include=tuple(options.get("include", ())), exclude=tuple(options.get("exclude", ())), max_bytes=int(options.get("max_bytes", 2 * 1024 * 1024)))
+    listed = discover_files(repo, include=tuple(options.get("include", ())), exclude=tuple(options.get("exclude", ())), max_bytes=int(options.get("max_bytes", 2 * 1024 * 1024)))
     current = set(listed["files"])
     known = set(manifest.get("files", {}))
-    stale = sorted(path for path in current & known if sha256_file(Path(repo) / path) != manifest["files"][path].get("sha256"))
+    stale = []
+    for relpath in sorted(current & known):
+        try:
+            path = _safe_repo_file(repo, relpath)
+        except CoreError:
+            stale.append(relpath)
+            continue
+        if sha256_file(path) != manifest["files"][relpath].get("sha256"):
+            stale.append(relpath)
     missing = sorted(known - current)
     new = sorted(current - known)
     # A parser or schema upgrade changes what the same bytes mean, so it makes

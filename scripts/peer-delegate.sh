@@ -1726,6 +1726,8 @@ fi
   printf '# %s delegate\n\n' "$TO"
   printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
+  printf -- '- context_mode: %s\n' "$context_mode"
+  printf -- '- context_prepare_seconds: %s\n' "$context_prepare_seconds"
   if [ -n "$CONTEXT_PACK_SHA" ]; then
     printf -- '- context_pack_sha256: %s\n' "$CONTEXT_PACK_SHA"
     printf -- '- context_file_count: %s\n' "$CONTEXT_PACK_FILES"

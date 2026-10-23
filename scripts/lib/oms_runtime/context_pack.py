@@ -192,24 +192,32 @@ def render_orientation(pack: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> Dict[str, Any]:
-    from oms_runtime.context import _fresh_graph, _safe_repo_file
-    from oms_runtime.common import atomic_write_bytes, ensure_private_dir, read_bytes, run_output
+def validate_automatic_graph_state(repo: Path, state: Path) -> None:
+    """Apply the shared-cache safety checks before an automatic graph write."""
+    from oms_runtime.common import CoreError, ensure_private_dir, run_output
     from oms_graph.project import build
-    from oms_graph.project.context import context_pack
 
     if os.environ.get("OMS_HARNESS_CHILD") == "1":
         raise CoreError("automatic context preparation is parent-only")
     default_state = state == build.state_dir(repo)
     if default_state and run_output(['git', '-C', str(repo), 'ls-files', '--', '.oms/project-graph']):
         raise CoreError("automatic graph cache must not contain tracked files")
-    # Do not refresh a shared parent graph from a detached tree: parallel
-    # viewers/delegates could otherwise mix graph and manifest generations.
     state = ensure_private_dir(state)
-    # Warm copies skip build(), which normally installs the ignore marker.
     build._ensure_state_marker(repo, state)
     if default_state and not run_output(['git', '-C', str(repo), 'check-ignore', '--', '.oms/project-graph/']):
         raise CoreError("automatic graph cache must be Git-ignored")
+
+
+def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> Dict[str, Any]:
+    from oms_runtime.context import _fresh_graph, _safe_repo_file
+    from oms_runtime.common import atomic_write_bytes, ensure_private_dir, read_bytes
+    from oms_graph.project import build
+    from oms_graph.project.context import context_pack
+
+    validate_automatic_graph_state(repo, state)
+    # Do not refresh a shared parent graph from a detached tree: parallel
+    # viewers/delegates could otherwise mix graph and manifest generations.
+    state = ensure_private_dir(state)
     try:
         source = parent / ".oms" / "project-graph"
         graph_bytes = read_bytes(_safe_repo_file(parent, str(source / "graph.json")), build.GRAPH_BYTES_LIMIT)
