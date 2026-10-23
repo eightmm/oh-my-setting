@@ -19,6 +19,7 @@ from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atom
 from oms_runtime.execution import check as check_backend
 from oms_runtime.execution import run as run_backend
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime_test_base import RuntimeFixtureBase
 
 
