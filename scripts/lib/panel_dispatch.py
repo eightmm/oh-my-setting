@@ -130,7 +130,7 @@ def provider_catalog(selection="all"):
             for row in rows]
 
 
-def routing_status(repo, room_id=None, main=None):
+def routing_status(repo, room_id=None, main=None, snapshot_sink=None):
     """Reuse the board's recorded HUD/pane readings without a provider usage query."""
     from terminal_panel import repository, snapshot
     if not (room_id or os.environ.get("OMS_ROOM_ID")):
@@ -138,6 +138,8 @@ def routing_status(repo, room_id=None, main=None):
     from panel_metrics import collect
     try:
         state, _ = snapshot(repository(repo), room_id=room_id)
+        if snapshot_sink is not None:
+            snapshot_sink.append(state)
         return collect(state, main or os.environ.get("OMS_PANEL_MAIN_ATTEMPT"), repo=repository(repo))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return {}
@@ -186,7 +188,7 @@ def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candid
 
 
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
-                   repo=None, room_id=None, main=None, task_id=None, candidate=None):
+                   repo=None, room_id=None, main=None, task_id=None, candidate=None, routing_readings=None):
     from terminal_panel import MODEL_IDS, PROVIDERS, allocate, newest_route_model, policy, provider_catalog
     from terminal_panel import route_family, routing_status
     if owner not in PROVIDERS:
@@ -201,8 +203,10 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         # Tier routing reads installed providers from the cached registry; a researcher's --to only narrows it.
         rows = provider_catalog(target or ",".join(sorted({c["provider"] for tier in policy()["tiers"].values()
                                                            for c in tier})))
-        readings, recent, writer = ({}, None, None) if target else route_inputs(
-            owner, repo, room_id, main, task_id, candidate)
+        readings, recent, writer = ((routing_readings or {}, *room_history(repo, owner, task_id, candidate, room_id))
+                                    if routing_readings is not None else
+                                    ({}, None, None) if target else route_inputs(
+                                        owner, repo, room_id, main, task_id, candidate))
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer)
         peer = next(row for row in rows if row["provider"] == route["provider"])
@@ -637,8 +641,12 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
     from terminal_panel import continuation, events, newest_route_model, provider_catalog, routing_status
     from terminal_panel import run_dispatch, safe_label, selected_route
+    dispatch_env = child_environment(owner, repo)
+    room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
+    routing_report = []
+    readings = routing_status(repo, room_id, main, snapshot_sink=routing_report) if not target else None
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
-                           task_id=task_id, candidate=candidate)
+                           room_id=room_id, task_id=task_id, candidate=candidate, routing_readings=readings)
     if access == "write":
         _require_assigned_route(repo, task_id, route)
     if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
@@ -647,8 +655,6 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     alias_pattern = r"[A-Za-z0-9-]{1,8}"
     if alias is not None and not re.fullmatch(alias_pattern, alias):
         raise ValueError("--alias must be 1-8 letters, digits or hyphens")
-    dispatch_env = child_environment(owner, repo)
-    room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
     call_rows = []
     if room_id:
         for attempt in json.loads(events(repo, "list", "--json", output=True)):
@@ -704,7 +710,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 _validate_dry_run_inputs(prompt, brief)
         fallback = None
         if not target:
-            fallback = alternate_route(route, provider_status=routing_status(repo, None, main))
+            fallback = alternate_route(route, provider_status=readings or {})
             if fallback:
                 try:
                     peer = provider_catalog(fallback["provider"])[0]
@@ -726,8 +732,12 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             options["continue_call"] = inherited_writer_alias
         if resume_usage_baseline:
             options["resume_usage_baseline"] = resume_usage_baseline
+        if routing_report:
+            options["routing_report"] = routing_report
+            options["routing_repo"] = repo
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                            dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias, **options)
+                            dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias,
+                            **options)
     finally:
         for path in temporaries:
             path.unlink()
@@ -2042,7 +2052,8 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
-                 candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None):
+                 candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None,
+                 routing_report=None, routing_repo=None):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
     from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
@@ -2166,7 +2177,12 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         if not dry_run and access == "write" and continuation_patch is None:
             from review_backlog import warning_for
             try:
-                report = snapshot(repo, room_id)[0]
+                report = routing_report[0] if routing_report else None
+                report_room = report.get("room", {}) if isinstance(report, dict) else {}
+                if not (routing_repo is not None and os.path.realpath(routing_repo) == os.path.realpath(repo)
+                        and isinstance(report_room, dict)
+                        and room.same_room(repo, report_room.get("id"), room_id)):
+                    report = snapshot(repo, room_id)[0]
                 notice = warning_for(report, caller)
                 report_room = report.get("room", {}) if isinstance(report, dict) else {}
                 finalized = report.get("finalized") if isinstance(report, dict) else None

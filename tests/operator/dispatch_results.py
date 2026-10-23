@@ -622,10 +622,12 @@ def dispatched_fallback(readings):
     with patch.object(panel, "selected_route", return_value=dict(automatic, provider="claude", model="claude-sonnet-5-5",
                                                                   binary="claude", effort="medium")), \
             patch.object(panel, "provider_catalog", side_effect=lambda name="all": [row for row in catalog if row["provider"] == name]), \
-            patch.object(panel, "routing_status", return_value=readings), \
+            patch.object(panel, "routing_status", return_value=readings) as status, \
             patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
-        return panel.dispatch(project, "claude", "worker", None, "write", "implement", brief=str(fallback_brief),
-                              verify="true")
+        result = panel.dispatch(project, "claude", "worker", None, "write", "implement", brief=str(fallback_brief),
+                                verify="true")
+        status.assert_called_once()
+        return result
 fallback_brief = temporary / "fallback-brief.md"
 fallback_brief.write_text("scoped brief\n")
 swapped = dispatched_fallback({})
