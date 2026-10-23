@@ -3243,7 +3243,10 @@ with patch.object(panel.room, "records", return_value=mail_records), \
     bounded_log = panel.room.messages(project, "flow-room") + [
         dict(old_flow["room"]["messages"][-1], text="Bounded status") for _ in range(panel.panel_messages.MAX_MESSAGES)]
     with patch.object(panel.room, "messages", return_value=bounded_log):
-        assert panel.panel_messages.read(project, "flow-room") == bounded_log[-panel.panel_messages.MAX_MESSAGES:]
+        cached_log = panel.panel_messages.read(project, "flow-room")
+        assert isinstance(cached_log, list)
+        assert cached_log == bounded_log[-panel.panel_messages.RETAIN:]
+        assert cached_log.total_count == len(bounded_log)
         panel.navigate(project, ("mail", "flow-main"), old_flow, old_nav, 120)
         assert "OLDER NOTE" not in old_nav["detail"]["text"]
 with patch.object(panel, "BackgroundRead", ImmediateRead), \
@@ -4954,7 +4957,7 @@ def exercise_exited_main_mail():
     assert len(items) == 1 and items[0]["what"] == "to Opus 5.5" and items[0]["action"] == ("chat", "mail-old1"), items
     nav = {}
     body = panel_messages.tab_body(report, 200, 20, nav, False)
-    assert body[0][0] == "Filter: needs you (1)" and nav["message_ids"] == ["mail-q"], body
+    assert body[0][0] == "Filter: needs you (at least 1)" and nav["message_ids"] == ["mail-q"], body
     assert "main exited" not in str(items) + str(body) and "(was #" not in str(items) + str(body)
     print("exited-main mail: markers, succession, unread/filter agreement, bounded safe rendering and live-main invariants passed")
 

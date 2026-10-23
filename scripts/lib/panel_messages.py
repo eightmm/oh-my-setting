@@ -11,7 +11,7 @@ import unicodedata
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_view import clipped, wrapped, plan_tail_columns, format_tail_row
 
-MAX_MESSAGES, MAX_TEXT = 200, 8000
+MAX_MESSAGES, RETAIN, MAX_TEXT = 200, 2000, 8000
 KINDS = ("question", "answer", "handoff", "status", "note", "decision")
 
 
@@ -22,9 +22,18 @@ def signature(report):
 
 
 def read(repo, room_id):
-    """Background read: the last messages of the full projected log."""
+    """Background read: one bounded list, with the full projected count attached."""
     import room
-    return room.messages(repo, room_id)[-MAX_MESSAGES:]
+    messages = room.messages(repo, room_id)
+    return MessageWindow(messages[-RETAIN:], len(messages))
+
+
+class MessageWindow(list):
+    """List of projected message dicts and the full log count before retention."""
+
+    def __init__(self, messages=(), total_count=None):
+        super().__init__(messages)
+        self.total_count = len(self) if total_count is None else total_count
 
 
 def stamp(value, now=None):
@@ -146,14 +155,16 @@ def exited_mail(message, index):
             and target.get("participant") in listing(message.get("pending_for")))
 
 
-def call_rows(rows, members, name_of, room, width, unicode=True):
+def call_rows(rows, members, name_of, room, width, unicode=True, summaries=None):
     from panel_view import status_tag
     index = {m["participant"]: m for m in members}
+    summaries = mapping(summaries)
     output = []
     for member in members:
         if member.get("role") == "main":
             continue
-        # Broadcasts cannot identify a call: their shared message id would collide across call rows.
+        summary = mapping(summaries.get(member["participant"]))
+        # A broadcast can belong to its sender's call, but never to every addressed call.
         messages = [r for r in rows if r["sender"] == member["participant"]
                     or index.get(r["sender"], {}).get("role") == "main"
                     and (r["message"].get("recipient") == member["participant"]
@@ -161,10 +172,11 @@ def call_rows(rows, members, name_of, room, width, unicode=True):
         notes = [r for r in messages if not routine(r["message"], room, index, own_notes=False)]
         row = dict(messages[-1]) if messages else {"id": None, "text": "", "unread": False,
                                                    "sender": member["participant"], "people": {member["participant"]}}
-        row["text"] = notes[-1]["text"] if notes else ""
-        row["call"] = ("result", member["participant"]) if messages else None
-        row["unread"] = any(r["unread"] for r in messages)
-        tail = (" · +%s" % (len(notes) - 1) if len(notes) > 1 else "") + (" · unread" if row["unread"] else "")
+        row["text"] = summary.get("text", notes[-1]["text"] if notes else "")
+        row["call"] = ("result", member["participant"]) if messages or summary.get("has_messages") else None
+        row["unread"] = any(r["unread"] for r in messages) or bool(summary.get("unread"))
+        note_count = summary.get("note_count", len(notes))
+        tail = (" · +%s" % (note_count - 1) if note_count > 1 else "") + (" · unread" if row["unread"] else "")
         phase = "timed_out" if member.get("exit") == 124 else member.get("state")
         if member.get("_decided"):
             code = member.get("exit")
@@ -217,6 +229,7 @@ def mail_page(state, participant, width):
     from room_view import main_names, who
     from panel_view import _result_structured
     width = max(8, width)
+    state = dict(state, messages=listing(state.get("messages"))[-MAX_MESSAGES:])
     members = listing(state.get("participants"))
     labels = main_names(members)
     names = {m["participant"]: who(m, labels) for m in members}
@@ -236,8 +249,11 @@ def tab_body(report, width, cap, navigation, unicode=True):
     name_of, mains, me, members = _people(report, navigation)
     log = state.get("log")
     loading = log is None and bool(state.get("reading")) and (room.get("message_count") or 0) > len(listing(room.get("messages")))
-    messages = (log if log is not None else listing(room.get("messages")))[-MAX_MESSAGES:]
-    from room_view import live_readers, settler
+    source = log if log is not None else listing(room.get("messages"))
+    messages = list(source)[-RETAIN:]
+    total_count = getattr(source, "total_count", room.get("message_count", len(source)))
+    total_count = max(int(total_count or 0), len(messages))
+    from room_view import live_readers, message_pending, settler
     index = {m["participant"]: m for m in members}
     settled, _ = settler(report)
     readers = live_readers(report, members, settled)
@@ -250,14 +266,65 @@ def tab_body(report, width, cap, navigation, unicode=True):
         filters.append(("to/from me", me))
     state["filter"] = state.get("filter", 0) % len(filters)
     label, person = filters[state["filter"]]
-    rows = _rows(messages, name_of, members=members, readers=readers, width=width, unicode=unicode, mains=mains,
-                 successors=mapping(report.get("message_successors")))
+    successors = mapping(report.get("message_successors"))
     if label == "needs you":
-        rows = [r for r in rows if exited_mail(r["message"], index) or not routine(r["message"], room, index)]
+        matching = [message for message in messages
+                    if exited_mail(message, index) or not routine(message, room, index)]
     elif label == "by call":
-        rows = call_rows(rows, members, name_of, room, width, unicode)
+        summaries = {}
+        groups = {}
+        for order, message in enumerate(messages):
+            targets = listing(message.get("targets"))
+            recipient = message.get("recipient") or (targets[0] if len(targets) == 1 else "all")
+            sender = message.get("sender")
+            for member in members:
+                participant = member.get("participant")
+                if member.get("role") == "main" or not participant:
+                    continue
+                addressed = (recipient != "all" and len(targets) <= 1
+                             and index.get(sender, {}).get("role") == "main"
+                             and (recipient == participant or targets == [participant]))
+                if sender == participant or addressed:
+                    groups.setdefault(participant, []).append((order, message))
+                    break
+        # Summaries cover the retained window; only one representative per call is formatted.
+        representatives = []
+        for participant, group in groups.items():
+            call_messages = [message for _, message in group]
+            notes = [message for message in call_messages
+                     if not routine(message, room, index, own_notes=False)]
+            summaries[participant] = {
+                "has_messages": True,
+                "note_count": len(notes),
+                "text": readable_text(notes[-1].get("text")) if notes else "",
+                "unread": any(message_pending(message, successors) & set(readers) for message in call_messages),
+            }
+            representatives.append(group[-1])
+        matching = [message for _, message in sorted(representatives, key=lambda entry: entry[0])]
+    elif label == "all":
+        matching = messages
     elif person:
-        rows = [r for r in rows if person in r["people"]]
+        matching = []
+        for message in messages:
+            targets = listing(message.get("targets"))
+            recipient = message.get("recipient") or (targets[0] if len(targets) == 1 else "all")
+            sender = message.get("sender")
+            if label == "this call":
+                direct = recipient != "all" and len(targets) <= 1
+                if sender == person or direct and (recipient == person or targets == [person]):
+                    matching.append(message)
+            elif (successors.get(sender, sender) == person
+                  or successors.get(recipient, recipient) == person
+                  or any(successors.get(target, target) == person for target in targets)):
+                matching.append(message)
+    else:
+        matching = []
+    match_count = len(matching)
+    display_messages = matching[-MAX_MESSAGES:]
+    rows = _rows(display_messages, name_of, members=members, readers=readers, width=width,
+                 unicode=unicode, mains=mains, successors=successors)
+    if label == "by call":
+        rows = call_rows(rows, members, name_of, room, width, unicode, summaries=summaries)
     navigation["message_calls"] = {r["id"]: r["call"] for r in rows if r["id"] is not None}
     ids = [r["id"] for r in rows if r["id"] is not None]
     navigation["message_ids"] = ids
@@ -289,7 +356,27 @@ def tab_body(report, width, cap, navigation, unicode=True):
         elif first >= state["scroll"] + budget:
             state["scroll"] = first - budget + 1
     scroll = state["scroll"] = min(max(0, state["scroll"]), max(0, len(body) - budget))
-    head = "Filter: %s (%d)%s%s" % (label, len(rows), "  · loading earlier messages..." if loading else "",
+    truncated = total_count > len(source)
+    searching = truncated and len(source) >= RETAIN
+    if loading:
+        count_text = "room-wide: %s messages" % format(total_count, ",")
+    elif label == "all":
+        count_text = ("newest %d of %s" % (len(display_messages), format(total_count, ","))
+                      if total_count > MAX_MESSAGES else str(total_count))
+    elif label == "by call":
+        count_text = str(len(rows))
+    elif searching:
+        count_text = "newest %d in search window" % len(display_messages)
+    elif truncated:
+        count_text = "at least %d" % match_count
+    elif match_count > MAX_MESSAGES:
+        count_text = "newest %d of %s" % (len(display_messages), format(match_count, ","))
+    else:
+        count_text = str(match_count)
+    search_note = ("  · searching the newest %s of %s room messages" %
+                   (format(RETAIN, ","), format(total_count, ","))) if searching and not loading else ""
+    head = "Filter: %s (%s)%s%s%s" % (label, count_text,
+                                    "  · loading earlier messages..." if loading else "", search_note,
                                     "  · %d-%d of %d" % (scroll + 1, min(len(body), scroll + budget), len(body))
                                     if len(body) > budget else "")
     out = [(head, None, False)]

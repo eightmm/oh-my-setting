@@ -792,12 +792,14 @@ aligned_message_report["room"]["messages"] = [
 ]
 aligned_message_nav = {"selected": ("chat", "m2"), "tab": "messages",
                        "messages_view": {"filter": 2, "selected": None, "open": None, "scroll": 0}}
+aligned_message_nav["messages_view"]["log"] = panel_messages.MessageWindow(
+    aligned_message_report["room"]["messages"])
 aligned_message_text = render(aligned_message_report, "codex", 80, 60, view="graph",
                               navigation=aligned_message_nav, main_attempt="a2")
 aligned_message_lines = [line for line in aligned_message_text.splitlines() if "ALIGN-" in line]
 assert len(aligned_message_lines) == 2, aligned_message_text
 aligned_message_columns = [display_width(line[:line.index("ALIGN-")]) for line in aligned_message_lines]
-assert aligned_message_columns == [aligned_message_columns[0]] * 2, (aligned_message_columns, aligned_message_lines)
+assert aligned_message_columns == [40, 40], (aligned_message_columns, aligned_message_lines)
 unread_message = [{"id": "tail-check", "sender": "peer", "recipient": "main",
                    "pending_for": ["main"], "text": "Unread body", "ts": "2026-10-12T00:00:00Z"}]
 # The row mark carries the read state (filled/hollow, ASCII */-) instead of a trailing word.
@@ -970,6 +972,7 @@ single["room"].update(messages=single_log, message_count=len(single_log), pairs=
 # A main's nonroutine brief still needs attention, so bound the default case to the first three required messages.
 default_single = deepcopy(single)
 default_single["room"]["messages"] = [single_log[0], single_log[1], single_log[-1]]
+default_single["room"]["message_count"] = len(default_single["room"]["messages"])
 for width in (50, 80, 127):
     single_nav = {"selected": ("result", "w")}
     body = panel_messages.tab_body(default_single, width, 30, single_nav)
@@ -990,6 +993,60 @@ for width in (50, 80, 127):
     assert "Filter: by call" in body[0][0] and set(single_nav["message_ids"]) == {"question", "brief"}, body
     worker_line = next(line for line, action, _ in body if action == ("message", "question"))
     assert "running" in worker_line and "+1" in worker_line, body
+    # One bounded window retains an older direct call message within RETAIN.
+    older_call_log = [dict(single_log[-1], id="older-call", sender="w", recipient="m2", targets=["m2"],
+                           text="older call message")]
+    older_call_log += [dict(single_log[4], id="unrelated-%d" % i, sender="m2", recipient="all",
+                            targets=["m2", "w", "rv"], text="unrelated broadcast")
+                       for i in range(250)]
+    older_call_nav = {"selected": ("result", "w"), "messages_view": {
+        "filter": 3, "log": panel_messages.MessageWindow(older_call_log), "scroll": 0, "tail": True}}
+    older_call_body = panel_messages.tab_body(single, 100, 40, older_call_nav)
+    assert ("message", "older-call") in [action for _, action, _ in older_call_body], older_call_body
+
+    # An older incoming unread message still marks its call after more than 200 newer messages.
+    unread_call_log = [dict(single_log[-1], id="old-unread", sender="m2", recipient="w", targets=["w"],
+                            message_kind="question", pending_for=["w"], text="old unread question")]
+    unread_call_log += [dict(single_log[0], id="new-%d" % i, sender="rv", recipient="m2", targets=["m2"],
+                             pending_for=[], text="new message")
+                        for i in range(panel_messages.MAX_MESSAGES + 50)]
+    unread_call_nav = {"selected": ("result", "w"), "messages_view": {
+        "filter": 1, "log": panel_messages.MessageWindow(unread_call_log), "scroll": 0, "tail": True}}
+    unread_call_body = panel_messages.tab_body(single, 100, 40, unread_call_nav)
+    assert "· unread" in "\n".join(line for line, _, _ in unread_call_body), unread_call_body
+    assert ("message", "old-unread") in [action for _, action, _ in unread_call_body] and \
+        unread_call_nav["message_calls"].get("old-unread") == ("result", "w"), unread_call_body
+
+    # The newest activity from the first-seen call must survive the 200-row call-view cap.
+    many_calls = deepcopy(single)
+    many_call_members = [deepcopy(msg_members[1])] + [
+        {"participant": "call-%03d" % i, "role": "worker", "joined": True, "parent": "m2",
+         "state": "working", "model": "gpt-6.1-sol", "label": "Call %d" % i}
+        for i in range(201)]
+    many_calls["room"]["participants"] = many_call_members
+    many_call_log = [dict(single_log[0], id="call-000-old", sender="call-000", recipient="m2", targets=["m2"],
+                          message_kind="note", text="older call note", pending_for=[])]
+    many_call_log += [dict(single_log[0], id="call-%03d-note" % i, sender="call-%03d" % i, recipient="m2",
+                           targets=["m2"], message_kind="note", text="call note", pending_for=[])
+                      for i in range(1, 201)]
+    many_call_log.append(dict(single_log[-1], id="newest-question", sender="call-000", recipient="m2",
+                              targets=["m2"], message_kind="question", text="newest question", pending_for=["m2"]))
+    many_calls["room"].update(messages=many_call_log, message_count=len(many_call_log))
+    many_call_nav = {"selected": ("result", "call-000"), "messages_view": {
+        "filter": 1, "log": panel_messages.MessageWindow(many_call_log), "scroll": 0, "tail": True}}
+    many_call_body = panel_messages.tab_body(many_calls, 120, 30, many_call_nav)
+    assert "newest-question" in many_call_nav["message_ids"], many_call_nav
+    assert many_call_nav["message_calls"].get("newest-question") == ("result", "call-000"), many_call_nav
+    assert panel_messages.handle(("home",), many_call_nav)
+    many_call_body = panel_messages.tab_body(many_calls, 120, 30, many_call_nav)
+    assert many_call_nav["messages_view"]["selected"] == "newest-question", many_call_nav
+    assert ("message", "newest-question") in [action for _, action, _ in many_call_body], many_call_body
+    assert panel_messages.handle(("enter",), many_call_nav)
+    panel_messages.tab_body(many_calls, 120, 30, many_call_nav)
+    assert many_call_nav["messages_view"]["open"] == "newest-question", many_call_nav
+    assert panel_messages.handle(("f",), many_call_nav) and \
+        many_call_nav.get("open_call") == ("result", "call-000"), many_call_nav
+
     single_nav["messages_view"].update(selected="question", tail=False)
     panel_messages.tab_body(single, width, 30, single_nav)
     assert panel_messages.handle(("f",), single_nav) and single_nav.pop("open_call") == ("result", "w")
@@ -1020,11 +1077,48 @@ for width in (50, 80, 127):
         assert "open_call" not in single_nav and "notice" not in single_nav
         panel_messages.tab_body(single, width, 30, single_nav)
     assert panel_messages.handle(("right",), single_nav)
-    assert "Filter: this call" in panel_messages.tab_body(single, width, 30, single_nav)[0][0]
+    this_call_body = panel_messages.tab_body(single, width, 30, single_nav)
+    assert "Filter: this call" in this_call_body[0][0] and \
+        ("message", "question") in [action for _, action, _ in this_call_body], this_call_body
     assert panel_messages.handle(("right",), single_nav)
     assert "Filter: needs you" in panel_messages.tab_body(single, width, 30, single_nav)[0][0]
     full_board = render(single, "codex", width, 60, view="graph", navigation={"tab": "messages"})
     assert ("Messages 1" if width >= 76 else "Messages: 1 unread") in full_board, full_board
+
+# Counts distinguish exact matching rows from a room-wide loading estimate and the retained search bound.
+count_log = [dict(single_log[0], id="count-%d" % i, sender="w", recipient="m2", targets=["m2"])
+             for i in range(panel_messages.MAX_MESSAGES + 60)]
+count_report = deepcopy(single)
+count_report["room"].update(messages=count_log[-12:], message_count=len(count_log))
+count_nav = {"messages_view": {"filter": 2, "log": panel_messages.MessageWindow(count_log),
+                                "tail": True, "scroll": 0}}
+count_body = panel_messages.tab_body(count_report, 100, 24, count_nav)
+assert count_body[0][0].startswith("Filter: all (newest 200 of 260)"), count_body[0]
+assert len(count_nav["message_ids"]) == panel_messages.MAX_MESSAGES
+filtered_nav = {"selected": ("result", "w"), "messages_view": {
+    "filter": 3, "log": panel_messages.MessageWindow(count_log), "tail": True, "scroll": 0}}
+formatted_counts = []
+format_rows = panel_messages._rows
+def track_message_rows(messages, *args, **kwargs):
+    messages = list(messages)
+    formatted_counts.append(len(messages))
+    return format_rows(messages, *args, **kwargs)
+with patch.object(panel_messages, "_rows", side_effect=track_message_rows):
+    filtered_body = panel_messages.tab_body(count_report, 100, 24, filtered_nav)
+assert filtered_body[0][0].startswith("Filter: this call (newest 200 of 260)"), filtered_body[0]
+assert formatted_counts == [panel_messages.MAX_MESSAGES], formatted_counts
+loading_nav = {"selected": ("result", "w"), "messages_view": {
+    "filter": 3, "reading": True, "tail": True, "scroll": 0}}
+loading_body = panel_messages.tab_body(count_report, 100, 24, loading_nav)
+assert loading_body[0][0].startswith("Filter: this call (room-wide: 260 messages)") and \
+    "of 260" not in loading_body[0][0], loading_body[0]
+long_messages = [dict(count_log[0], id="long-%d" % i) for i in range(panel_messages.RETAIN)]
+long_window = panel_messages.MessageWindow(long_messages, total_count=9876)
+long_nav = {"messages_view": {"filter": 2, "log": long_window, "tail": True, "scroll": 0}}
+long_body = panel_messages.tab_body(count_report, 100, 24, long_nav)
+assert long_body[0][0].startswith("Filter: all (newest 200 of 9,876)") and \
+    "searching the newest 2,000 of 9,876 room messages" in long_body[0][0], long_body[0]
+
 for glyphs in (True, False):
     for help_open in (True, False):
         hint_nav = {"tab": "messages", "tab_strip_visible": True, "message_has_call": True,
