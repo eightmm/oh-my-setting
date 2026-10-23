@@ -41,6 +41,9 @@ PY
     transition --attempt "$attempt" --state blocked \
     --actor operator --reason-code operator_hold >/dev/null || exit 1
 fi
+if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_GUARD_REPO:-}" ]; then
+  git -C "$OMS_TEST_GUARD_REPO" update-ref refs/heads/planted HEAD
+fi
 if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_RECONCILE_REPO:-}" ]; then
   python3 - "$OMS_TEST_RECONCILE_REPO/.oms/lifecycle/events.jsonl" <<'PY'
 import json, sys, time
@@ -62,6 +65,28 @@ printf 'tokens used\n17\n'
 [ "${1:-}" != exec ] || exit "${OMS_TEST_MAIL_EXIT:-0}"
 EOF
 chmod +x "$TMP/bin/codex"
+cat > "$TMP/bin/mkdir" <<'EOF'
+#!/usr/bin/env bash
+for target in "$@"; do
+  case "$target" in
+    "${OMS_LOCK_DIR:-}"/worktrees.*.lock)
+      if [ -n "${OMS_TEST_FAIL_WORKTREE_LOCK_AFTER:-}" ]; then
+        count=0
+        [ ! -f "$OMS_TEST_FAIL_WORKTREE_LOCK_COUNT" ] ||
+          read count < "$OMS_TEST_FAIL_WORKTREE_LOCK_COUNT"
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$OMS_TEST_FAIL_WORKTREE_LOCK_COUNT"
+        if [ "$count" -ge "$OMS_TEST_FAIL_WORKTREE_LOCK_AFTER" ]; then
+          echo "injected worktree-lock I/O failure" >&2
+          exit 1
+        fi
+      fi
+      ;;
+  esac
+done
+exec /bin/mkdir "$@"
+EOF
+chmod +x "$TMP/bin/mkdir"
 
 env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
@@ -331,6 +356,61 @@ assert "agent-lifecycle-corrupt" in {item["code"] for item in corrupt_inbox["ite
 PY
 env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" transition \
   --attempt "$review_attempt" --state "done" >/dev/null
+
+# The in-run protected-boundary callback must terminalize the attempt before
+# an I/O error in the later final scan can exit the delegator.
+mkdir -p "$TMP/in-run-guard-scan-failure-repo" "$TMP/scan-failure-locks"
+git -C "$TMP/in-run-guard-scan-failure-repo" init -q
+git -C "$TMP/in-run-guard-scan-failure-repo" -c user.name=test -c user.email=test@example.com commit --allow-empty -qm base
+guard_status=0
+env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+  OMS_LOCK_DIR="$TMP/scan-failure-locks" OMS_LOCK_TIMEOUT=1 OMS_LOCK_FORCE_MKDIR=1 \
+  OMS_TEST_GUARD_REPO="$TMP/in-run-guard-scan-failure-repo" \
+  OMS_TEST_FAIL_WORKTREE_LOCK_AFTER=5 \
+  OMS_TEST_FAIL_WORKTREE_LOCK_COUNT="$TMP/in-run-guard-scan-failure-count" \
+  PATH="$TMP/bin:/usr/bin:/bin" \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/in-run-guard-scan-failure-repo" \
+  --to codex --prompt 'in-run guard then final scan I/O failure' --no-verify \
+  > "$TMP/in-run-guard-scan-failure.out" 2>&1 || guard_status=$?
+[ "$guard_status" -eq 2 ] || fail "final guard scan I/O failure was not injected: $guard_status"
+grep -Fq 'could not acquire lock for ' "$TMP/in-run-guard-scan-failure.out" ||
+  fail "final scan did not hit the injected lock I/O failure"
+"$ROOT/scripts/agent-events.sh" --repo "$TMP/in-run-guard-scan-failure-repo" list --json \
+  > "$TMP/in-run-guard-scan-failure-attempts.json"
+python3 - "$TMP/in-run-guard-scan-failure-attempts.json" <<'PY' || fail "final scan failure left the attempt live"
+import json, sys
+attempts = json.load(open(sys.argv[1], encoding="utf-8"))
+writes = [row for row in attempts if row.get("tool") == "peer-delegate"]
+assert len(writes) == 1, writes
+assert writes[0]["state"] == "failed", writes[0]
+assert writes[0]["terminal"] is True, writes[0]
+assert writes[0]["reason_code"] == "worker_authority_violation", writes[0]
+PY
+
+# A ref mutation and worker exit 7 must retain the authority reason instead of
+# the provider failure implied by its exit status.
+mkdir -p "$TMP/in-run-guard-provider-failure-repo"
+git -C "$TMP/in-run-guard-provider-failure-repo" init -q
+git -C "$TMP/in-run-guard-provider-failure-repo" -c user.name=test -c user.email=test@example.com commit --allow-empty -qm base
+guard_status=0
+env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+  OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+  OMS_TEST_GUARD_REPO="$TMP/in-run-guard-provider-failure-repo" OMS_TEST_MAIL_EXIT=7 \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/in-run-guard-provider-failure-repo" \
+  --to codex --prompt 'in-run guard with nonzero provider exit' --no-verify \
+  >/dev/null 2>&1 || guard_status=$?
+[ "$guard_status" -ne 0 ] || fail "guarded provider exit 7 unexpectedly succeeded"
+"$ROOT/scripts/agent-events.sh" --repo "$TMP/in-run-guard-provider-failure-repo" list --json \
+  > "$TMP/in-run-guard-provider-failure-attempts.json"
+python3 - "$TMP/in-run-guard-provider-failure-attempts.json" <<'PY' || fail "provider exit masked the guard reason"
+import json, sys
+attempts = json.load(open(sys.argv[1], encoding="utf-8"))
+writes = [row for row in attempts if row.get("tool") == "peer-delegate"]
+assert len(writes) == 1, writes
+assert writes[0]["state"] == "failed", writes[0]
+assert writes[0]["terminal"] is True, writes[0]
+assert writes[0]["reason_code"] == "worker_authority_violation", writes[0]
+PY
 
 # A direct write attempt belongs to the whole delegated worker round, not just
 # the provider subprocess. Provider exit 0 must not become review before the

@@ -1787,7 +1787,9 @@ delegate_attempt_finish_without_verify() {
       delegate_attempt_fail_if_live lifecycle_transition_failed \
         delegate-review-no-verify-failed || true
     fi
-  elif [ "$worker_attempt_state" = working ]; then
+  elif [ "$worker_attempt_state" = working ] &&
+    [ "$worker_boundary_failed" != 1 ] &&
+    [ -z "$worker_hard_surface_changed" ]; then
     delegate_attempt_fail_if_live provider_blocked delegate-provider-blocked ||
       worker_status=2
   fi
@@ -2350,9 +2352,10 @@ worker_protected_surface_diff() {
 }
 if [ -n "$worker_guard_dir" ]; then
   worker_guard_identity_valid=1
-  OMS_WRITE_POST_ATTEMPT_GUARD_FN=worker_execution_boundary_check
+  OMS_WRITE_POST_ATTEMPT_GUARD_FN=worker_protected_boundary_check
 fi
 worker_hard_surface_changed=""
+worker_boundary_failed=0
 worker_protected_boundary_check() {
   local changed surface
   [ -n "$worker_guard_dir" ] || return 0
@@ -2402,13 +2405,14 @@ else
   fi
 fi
 
-worker_boundary_failed=0
-if [ -n "$worker_guard_dir" ]; then
-  # This is deliberately the first post-provider inspection. A worker can
-  # plant core.fsmonitor/diff.external and a primary-tree edit in one pass; any
-  # status/diff/ls-files before this raw comparison would execute the planted
-  # command with parent authority. Bind config bytes and the index before
-  # capturing either checkout.
+if [ -n "$worker_guard_dir" ] && {
+  [ "$worker_provider_launched" != 1 ] || [ "$WORKER_ACCESS" != write ] ||
+    [ "${OMS_WRITE_POST_ATTEMPT_GUARD_FN:-}" != worker_protected_boundary_check ];
+}; then
+  # The routed write callback already made the first post-provider inspection
+  # before it finalized lifecycle state. Other paths still need this check
+  # before patch capture, where Git status/diff must run only after the raw
+  # execution-state comparison.
   if ! worker_protected_boundary_check; then
     route_retry_terminal=1
   fi
@@ -2418,6 +2422,8 @@ if [ "$worker_boundary_failed" = 1 ] || [ -n "$worker_hard_surface_changed" ]; t
   route_retry_terminal=1
   KEEP_WORKTREE=1
   [ -z "$patch_file" ] || : > "$patch_file"
+  delegate_attempt_fail_if_live worker_authority_violation \
+    delegate-worker-authority-violation || worker_status=2
 elif ! capture_patch; then
   worker_status=125
   route_retry_terminal=1
@@ -2447,7 +2453,8 @@ verify_status=0
 verify_seconds=0
 if [ -z "$VERIFY_CMD" ]; then
   delegate_attempt_finish_without_verify
-elif [ "$worker_status" -ne 0 ] && [ "$worker_attempt_state" = working ]; then
+elif [ "$worker_status" -ne 0 ] && [ "$worker_attempt_state" = working ] &&
+  [ "$worker_boundary_failed" != 1 ] && [ -z "$worker_hard_surface_changed" ]; then
   delegate_attempt_fail_if_live provider_blocked delegate-provider-blocked ||
     worker_status=2
 fi
@@ -2862,6 +2869,17 @@ if len(details) > 8:
     plan_failure_transition
     exit 1
   fi
+fi
+
+# If an in-run boundary result deferred failure but the final guard found no
+# hard surface, retain the ordinary provider failure for any live attempt.
+if { [ "$worker_boundary_failed" = 1 ] || [ -n "$worker_hard_surface_changed" ]; } &&
+  [ -z "${worker_guard_changed:-}" ] && [ "$worker_status" -ne 0 ]; then
+  case "$worker_attempt_state" in
+    working|verifying|review)
+      delegate_attempt_fail_if_live provider_blocked delegate-provider-blocked ||
+        worker_status=2 ;;
+  esac
 fi
 
 # Remove the checkout while success is still provisional. The EXIT trap also
