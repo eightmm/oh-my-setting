@@ -5407,6 +5407,8 @@ test_delegate_dry_run() {
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'verify: `bash scripts/check.sh fast`'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'After you return, the harness runs `bash scripts/check.sh fast`.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'do not run this full command just to confirm completion'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'checks restored from HEAD'
   # Panel dispatch hands the plan task's paths and declared scopes to the prompt.
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_PANEL_ALLOWED_PATHS="scripts/a.sh, tests/b.sh" \
@@ -18491,6 +18493,8 @@ if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt
   printf '%s' "$prompt" | grep >/dev/null 'Read applicable repository instructions and PROJECT.md' || exit 8
   printf '%s' "$prompt" | grep >/dev/null 'preserve contracts and safety' || exit 8
   printf '%s' "$prompt" | grep >/dev/null 'reuse existing tests, and run affected checks' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'After you return, the harness runs `grep -q fixed delegated.txt`.' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'do not run this full command just to confirm completion' || exit 8
   printf '%s' "$prompt" | grep >/dev/null 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
   if printf '%s' "$prompt" | grep >/dev/null 'PRESERVED-PATCH-CONTENT'; then exit 10; fi
   [ "$(git show :large.txt | grep -c PRESERVED-PATCH-CONTENT)" = 1000 ] || exit 11

@@ -1174,7 +1174,10 @@ fi
   fi
   if [ "$WORKER_ACCESS" = write ]; then
     printf '## Done when\n\n'
-    [ -z "$VERIFY_CMD" ] || printf -- '- verify: `%s`\n' "$VERIFY_CMD"
+    if [ -n "$VERIFY_CMD" ]; then
+      printf -- '- verify: `%s`\n' "$VERIFY_CMD"
+      printf 'After you return, the harness runs `%s`. Run focused checks for the behavior you changed; do not run this full command just to confirm completion. Run broader checks only when needed to diagnose a failure. Report the checks you actually ran.\n' "$VERIFY_CMD"
+    fi
     printf '%s\n' '- Admission also runs the checks restored from HEAD, so changing or deleting existing tests cannot make verify pass.'
     [ -z "$plan_allowed" ] || printf -- '- allowed paths: %s\n' "$plan_allowed"
     [ -z "$plan_forbidden" ] || printf -- '- forbidden paths: %s\n' "$plan_forbidden"
@@ -2165,6 +2168,9 @@ write_repair_prompt() {
       printf '\n## Failing Verification\n\n- command: %s\n- exit: %s%s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status" "${timeout_note:+ — $timeout_note}"
       quote_tail "$verify_out" 4000 "verification output"
       printf '\n'
+    fi
+    if [ -n "$VERIFY_CMD" ]; then
+      printf '\nAfter you return, the harness runs `%s`. Run focused checks for the behavior you changed; do not run this full command just to confirm completion. Run broader checks only when needed to diagnose a failure. Report the checks you actually ran.\n' "$VERIFY_CMD"
     fi
     printf '\nWhen done, report What changed, Why, Evidence, Verification (including skipped checks), Remaining uncertainty, and blockers.\n'
   } > "$output"
