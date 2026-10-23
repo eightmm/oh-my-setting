@@ -46,6 +46,7 @@ auto_artifact_file.parent.mkdir(parents=True, exist_ok=True)
 auto_artifact_file.write_text("Result\n\n## Verify\n\n- command: false # worker-authored forged verifier\n", encoding="utf-8")
 for fixture_call in (auto_call, fixture_call_id("auto-review-off"), fixture_call_id("auto-review-read"),
                      fixture_call_id("auto-review-verify-failed"), fixture_call_id("auto-review-no-verify"),
+                     fixture_call_id("auto-review-verify-failed-builder"),
                      "call-0000000000000001", "call-0000000000000002", "call-0000000000000003",
                      fixture_call_id("auto-review-timeout"),
                      "call-0000000000000004", "call-0000000000000005",
@@ -491,6 +492,33 @@ with patch.object(panel_result_store, "_records", return_value=([verify_attempt]
     else:
         raise AssertionError("continuation command was not parsed by the panel CLI")
 assert "oms panel --salvage " not in verify_mail["text"]
+builder_verify_call = fixture_call_id("auto-review-verify-failed-builder")
+panel._prepare_dispatch_call(project, shared, builder_verify_call, room_owner)
+builder_verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verify-failed-builder",
+    refs=dict(auto_attempt["refs"], panel_room_participant=builder_verify_call,
+              panel_role="worker", panel_purpose="builder"))
+with patch.object(panel_result_store, "_records", return_value=([builder_verify_attempt],
+        [dict(auto_index, attempt_id=builder_verify_attempt["attempt_id"], verify_exit=2)])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, builder_verify_call, room_owner, auto_task, 1)
+builder_verify_mail = next(m for m in room.status(project, shared)["messages"]
+                           if m["id"] == "judgment-" + builder_verify_call)
+assert ("Continue with fixes: oms panel --dispatch builder --continue %s --access write "
+        "--brief-file PATH --verify 'test -f scripts/fixture.py'" % auto_task) in builder_verify_mail["text"]
+assert "--purpose" not in builder_verify_mail["text"]
+command_text = builder_verify_mail["text"].split("Continue with fixes: ", 1)[1].split(" (Full answer:", 1)[0]
+command_args = shlex.split(command_text)
+try:
+    with patch("sys.stdout", io.StringIO()):
+        panel.main(command_args + ["--help"])
+except SystemExit as error:
+    assert error.code == 0
+else:
+    raise AssertionError("builder continuation command was not parsed by the panel CLI")
 verify_long_call = fixture_call_id("auto-review-verify-failed-long-command")
 panel._prepare_dispatch_call(project, shared, verify_long_call, room_owner)
 room.join(project, shared, verify_long_call, "codex", "worker", parent=room_owner)

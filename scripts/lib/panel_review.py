@@ -734,9 +734,11 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
             if verify:
                 from panel_routing import KINDS
                 dispatch_role = result_record.get("panel_role")
+                purpose = result_record.get("panel_purpose")
+                if purpose in KINDS and purpose != "worker":
+                    dispatch_role = purpose
                 if dispatch_role not in KINDS:
                     dispatch_role = role if role in KINDS else "worker"
-                purpose = result_record.get("panel_purpose")
                 purpose_option = (" --purpose " + shlex.quote(purpose)
                                   if dispatch_role == "worker" and isinstance(purpose, str) and purpose in
                                   {"explain", "investigate", "implement"} else "")
