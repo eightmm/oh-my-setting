@@ -169,6 +169,14 @@ for answer, expected in (("Recommendation: PROCEED", "[verdict proceed]"),
                          ("```\nVERDICT: proceed\n```", "[✗ no verdict (exit 2)]")):
     (judgment_artifacts / "counsel-verdict.md").write_text(answer)
     assert judgment_tag(sample_judge, judgment_fixture) == expected
+(judgment_artifacts / "counsel-verdict.md").write_text("VERDICT: " + "界" * 80 + "\n")
+long_verdict_tag = judgment_tag(sample_judge, judgment_fixture)
+assert display_width(long_verdict_tag) <= 24, long_verdict_tag
+long_verdict_board = render(judgment_fixture, "codex", 120, 40, view="tree", unicode=True,
+                            navigation={"dismissed": True,
+                                        "expanded_groups": {("review", "judge-main"),
+                                                            ("counsel:review", "judge-main")}})
+assert "CRITIC Sol" in long_verdict_board and "[verdict" in long_verdict_board, long_verdict_board
 (judgment_artifacts / "counsel-verdict.md").write_text("VERDICT: revise\n")
 assert judgment_tag(dict(sample_judge, role="researcher"), judgment_fixture) == "[answered]"
 assert judgment_tag(dict(sample_judge, state="working"), judgment_fixture) == "[⟳ running]"

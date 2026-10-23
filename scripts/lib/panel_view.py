@@ -180,7 +180,7 @@ def judgment_tag(member, report, unicode=True, fallback=None):
             if (member.get("purpose") or member.get("role")) == "researcher" and answered:
                 return "[answered]"
             if counsel:
-                return "[verdict %s]" % counsel
+                return clipped("[verdict %s]" % counsel, 24)
     code = member.get("exit")
     return "[%s no verdict (exit %s)]" % (glyph("failed", unicode), code) if type(code) is int and code != 0 else fallback
 
