@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="320" viewBox="0 0 850 320" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, &quot;DejaVu Sans Mono&quot;, monospace">
+<rect width="100%" height="100%" rx="14" fill="#11151c"/>
+<path d="M14 0h822a14 14 0 0 1 14 14v34H0V14A14 14 0 0 1 14 0z" fill="#252b36"/>
+<circle cx="22" cy="23" r="5" fill="#f07178"/><circle cx="40" cy="23" r="5" fill="#ffcb6b"/><circle cx="58" cy="23" r="5" fill="#c3e88d"/>
+<text xml:space="preserve" x="325" y="28" fill="#c6d0e0" font-family="sans-serif" font-size="13" style="white-space: pre">Dashboard</text>
+<text xml:space="preserve" x="20" y="62" font-size="15px" style="white-space: pre" fill="#c6d0e0">OMS dashboard  repo=acme/webapp  feature/validation@abc1234  snapshot=2026-10-20T12:00:00Z</text>
+<text xml:space="preserve" x="20" y="80" font-size="15px" style="white-space: pre" fill="#c6d0e0">coverage: complete</text>
+<text xml:space="preserve" x="20" y="98" font-size="15px" style="white-space: pre" fill="#c6d0e0">goal: Ship reliable request validation (task)</text>
+<text xml:space="preserve" x="20" y="116" font-size="15px" style="white-space: pre" fill="#c6d0e0">scope: allowed=src/ (task)  forbidden=-</text>
+<text xml:space="preserve" x="20" y="134" font-size="15px" style="white-space: pre" fill="#c6d0e0">task: validation status=active verification=pending</text>
+<text xml:space="preserve" x="20" y="152" font-size="15px" style="white-space: pre" fill="#c6d0e0">plan: 3 task(s)  running=1 review=1 done=1</text>
+<text xml:space="preserve" x="20" y="170" font-size="15px" style="white-space: pre" fill="#c6d0e0">attempts (OMS lifecycle): 4 total, 2 active  working=1 review=1</text>
+<text xml:space="preserve" x="20" y="188" font-size="15px" style="white-space: pre" fill="#c6d0e0">operations (artifact index): none recorded</text>
+<text xml:space="preserve" x="20" y="206" font-size="15px" style="white-space: pre" fill="#c6d0e0">review gate: recorded window pass=2 fail=0 unknown=0</text>
+<text xml:space="preserve" x="20" y="224" font-size="15px" style="white-space: pre" fill="#c6d0e0">attention: 2 item(s)</text>
+<text xml:space="preserve" x="20" y="242" font-size="15px" style="white-space: pre" fill="#c6d0e0">  high worker_review: Review validation patch</text>
+<text xml:space="preserve" x="20" y="260" font-size="15px" style="white-space: pre" fill="#c6d0e0">     next: oms panel</text>
+<text xml:space="preserve" x="20" y="278" font-size="15px" style="white-space: pre" fill="#c6d0e0">  medium verification: Verify acceptance criteria</text>
+<text xml:space="preserve" x="20" y="296" font-size="15px" style="white-space: pre" fill="#c6d0e0">     next: oms panel</text>
+</svg>

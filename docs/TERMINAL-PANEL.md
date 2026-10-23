@@ -251,6 +251,14 @@ recorded role and queued state before an attempt exists. Detail parses live
 provider-stream activity for running calls and shows a What it did summary for
 finished calls; tree rows include the latest event.
 
+| Board area | What it shows |
+| --- | --- |
+| Goal | Plan goal and verified task count |
+| Needs you | Calls and messages that need an answer or decision, including failures, holds and delivery errors |
+| Activity tree or graph | Main and delegated calls, their status and latest events |
+| Session log | Scrollable recorded activity |
+| Bottom tabs | Log, Detail, Plan, Messages, Past and Attention; Debate while a debate exists |
+
 ### Keys
 
 Keys apply to the focused surface. The board and reader bindings are contextual; `?` shows live board hints for the current surface and width.

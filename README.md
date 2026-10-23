@@ -10,69 +10,15 @@
 
 <p align="center"><a href="README.ko.md">한국어</a></p>
 
-**oh-my-setting** lets Codex, Claude Code and Antigravity work on the same
-project from the same rules, state, plans, evidence and handoffs, so any of
-them can pick up where another left off.
+oh-my-setting is one harness that lets Codex, Claude Code and Antigravity share
+project rules, state, plans, evidence and handoffs. Run **`oms`** to open the
+shared control panel and see the work in progress.
 
-Run **`oms` in a terminal for the shared control panel**. See below for how to
-start it and read its board; the full [panel guide](docs/TERMINAL-PANEL.md)
-covers the details.
+<p align="center"><img src="docs/assets/panel-graph.svg" alt="OMS panel graph showing the goal, main agent, delegated worker, verifier gate, session events and provider quota" width="100%"></p>
 
-Your agent manages the remaining harness tools, `.oms/` state, updates and
-health checks. Harness commands shown below are for the agent to run.
-
-## Control panel
-
-The panel opens a tmux control window for the current project, with at most one
-live main in its room (Claude Code by default, or Pi). In the main window the
-board stays on the left when there is room and moves above the CLI when narrow or tall;
-the right reader opens the selected worker, advisor, review or result.
-
-Start it with `oms`. Choose Pi with `OMS_PANEL_MAIN=pi oms` or the Pi start key
-(`n`, then `2`); `oms panel --launch claude|pi` explicitly launches a main.
-Without tmux, OMS uses an inline menu. A room cannot run two live mains: a
-dispatch from a room with multiple live mains is refused until the extra main
-is released with `oms panel --release-main ATTEMPT` or the swap is finished.
-
-| Board area | What it shows |
-|---|---|
-| Goal | Plan goal and verified task count |
-| Attention | Items needing you: answer needed, failed, awaiting decision, held/workers ended, unread mail and delivery failed |
-| Activity tree | Main and its calls, including endings such as cancelled, guard stop, timed out and verify failed |
-| Session log | Scrollable activity log |
-| Bottom tabs | Detail, Plan, Messages, Past and Attention (kept even when empty), plus Debate while a debate exists |
-
-| Key | Action |
-|---|---|
-| Arrows / Enter | Move through items; open or expand the selection |
-| `f` | Open the selected full result in the right reader |
-| `a` | Ask the advisor |
-| F9 | Switch focus between chat and board |
-| `m` | Cycle Work, Overview and Focus modes |
-| F12 | Show panel-wide keys |
-| `[` / `]` | Scroll the session log older / newer while the Detail tab is selected |
-
-The main delegates bounded calls by role. Write roles are worker, builder,
-refactorer, documenter, integrator and performance-engineer; read roles are
-researcher, advisor, architect, critic, reviewer, verifier, security-auditor
-and release-engineer. Routing uses light, routine, deep and frontier capability
-tiers across available providers, not a fixed provider per role. Reviewer,
-verifier, security-auditor and critic prefer a provider other than the main (or
-than the reviewed task's writer, when known) when one is available; weekly
-readings within the `tie_band` of `config/panel-routing.json` count as equal, then
-fewer recent room dispatches decide. A role describes the call's mandate, not a separate main.
-
-```bash
-oms panel --dispatch worker --purpose implement --access write --brief-file B --verify CMD --task-id T --label L
-oms panel --dispatch verifier --access read --prompt 'Verify the result against the brief.'
-oms panel --council --prompt 'Compare these options.'
-oms panel --finalize --task-id T --summary-file SUMMARY --outcome completed
-```
-
-Goals and tasks live in `oms agent-plan`; the owning main records results with
-`--finalize`. Work lands through `oms land`.
-
-See the full [Control panel guide](docs/TERMINAL-PANEL.md).
+The panel puts the goal, calls, review state and recent activity in one view.
+See the [panel guide](docs/TERMINAL-PANEL.md) for startup, navigation and role
+routing.
 
 ## Install
 
@@ -92,25 +38,23 @@ are in [docs/INSTALL.md](docs/INSTALL.md).
 
 ### What the installer changes
 
-- **Global agent rules.** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and
-  `~/.gemini/AGENTS.md` become links to the OMS rules. An existing file is
-  moved to `<file>.backup.<timestamp>` and comes back on uninstall.
+- **Global rules.** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and
+  `~/.gemini/AGENTS.md` link to the OMS rules. Existing files move to
+  `<file>.backup.<timestamp>` and are restored on uninstall.
 - **Agent settings.** Claude Code gets hooks, a status-line HUD and a `high`
-  effort default for Opus 5.5 if you have none. Codex gets the OMS plugin, a
-  footer and a few usage defaults. Antigravity gets the OMS plugin. Both
-  Claude Code and Codex register the OMS MCP server.
-- **Files in your home.** `oms-*` skills for all three CLIs, the `oms`
-  command in `~/.local/bin` (added to your shell's PATH), and a private
-  Python under `~/.local/share/oh-my-setting`.
-- **A daily update.** Clean checkouts fast-forward once a day. To skip it,
-  end the install command with `| bash -s -- --no-auto-update`.
+  effort default for Opus 5.5 when unset. Codex gets the OMS plugin, a footer
+  and usage defaults; Antigravity gets the OMS plugin. Claude Code and Codex
+  register the OMS MCP server.
+- **Home files.** `oms-*` skills for all three CLIs, the `oms` command in
+  `~/.local/bin`, and private Python under `~/.local/share/oh-my-setting`.
+- **Daily update.** Clean checkouts fast-forward daily. To opt out, end the
+  install command with `| bash -s -- --no-auto-update`.
 
 ### Update and uninstall
 
-Ask your agent to update or uninstall oh-my-setting; it runs `oms update` or
-`oms uninstall`. Uninstall restores what it replaced and leaves the agent
-CLIs installed. Release-specific changes are in the
-[migration notes](docs/MIGRATION-0.7.md).
+Ask your agent to run `oms update` or `oms uninstall`. Uninstall restores
+replaced files and leaves agent CLIs in place. See the
+[migration notes](docs/MIGRATION-0.7.md) for release changes.
 
 ## How it works
 
@@ -145,21 +89,40 @@ Wait for Slurm job 12345, then digest its log and report.
 Update oh-my-setting and re-run its doctor.
 ```
 
-## What's inside
+## What you get
 
 The experimental [Codex harness launcher](docs/CODEX-HARNESSES.md) runs Codex
 subscription models in Codex CLI, Pi, or Claude Code while retaining the chosen
 harness's UI and tools: `oms harness claude --model gpt-6.1-sol`.
 
-| | |
+### Control panel
+
+Track the goal, attention items, calls and activity in one view. See the
+[panel guide](docs/TERMINAL-PANEL.md) for startup and navigation.
+
+<p align="center"><img src="docs/assets/panel-board.svg" alt="OMS panel board with a goal, attention items, main and role calls, status and log tabs" width="100%"></p>
+
+### Role-routed delegation and review gate
+
+Route bounded calls by role and inspect their verification and review results.
+See [role routing in the panel guide](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation).
+
+<p align="center"><img src="docs/assets/panel-results.svg" alt="OMS panel results with an accepted verified result and a failed verification awaiting a decision" width="100%"></p>
+
+### Shared state and dashboard
+
+Read project progress and next decisions with `oms dashboard`. See the
+[dashboard guide](docs/DASHBOARD.md).
+
+<p align="center"><img src="docs/assets/dashboard.svg" alt="OMS dashboard showing goal, plan, attempts, review window and next commands" width="100%"></p>
+
+| **Feature** | Description |
 |---|---|
-| **Shared rules** | One global rule set for all three CLIs, plus `general`, `ml` and `slurm` project templates |
-| **Councils** | Independent multi-model reviews and debates; judging seats get a read-only, bounded view |
-| **Delegation** | Isolated worktree workers, an admission gate and one landing path; no recursive delegation |
-| **State and handoff** | Work Journal, attention inbox, handoffs before compaction, failure ledger |
-| **Verified landing** | One gate, push only while the tree is unchanged, CI, then the install updates to that commit |
-| **ML and HPC** | Reproducible runs, leakage checks, Slurm and GPU queue helpers |
-| **Typed runtime** | Task contracts, evidence coverage, bounded context, portable capsules ([docs/OMS-RUNTIME.md](docs/OMS-RUNTIME.md)) |
+| **Councils** | Independent providers review changes or compare options. [Components](docs/COMPONENTS.md#asking-other-agents) |
+| **Verified landing** | Gate and publish a committed worktree with `oms land`. [Components](docs/COMPONENTS.md#verification-and-release) |
+| **Work Journal and handoffs** | Keep bounded project memory and session handoffs. [Work Journal](docs/WORK-JOURNAL.md) |
+| **ML and HPC** | Run reproducible work, data checks and Slurm tools. [Components](docs/COMPONENTS.md#ml-and-hpc-components) |
+| **Typed runtime** | Inspect task contracts and evidence coverage. [Runtime guide](docs/OMS-RUNTIME.md) |
 
 Your agent finds these on its own; the full catalog is in
 [docs/COMPONENTS.md](docs/COMPONENTS.md).
