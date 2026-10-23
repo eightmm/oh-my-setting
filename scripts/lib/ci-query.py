@@ -127,9 +127,9 @@ def run_scope(destination, run_id, sha, seconds):
     deadline = time.monotonic() + max(0.0, float(seconds))
     args = ["run", "view", run_id, "--repo", repo_slug(destination),
             "--json", "headSha,status,conclusion,jobs"]
-    for attempt in range(3):
+    while True:
         remaining = max(0.0, deadline - time.monotonic())
-        rc, output = gh(args, remaining if attempt else seconds)
+        rc, output = gh(args, remaining)
         if rc:
             return rc
         try:
@@ -149,7 +149,7 @@ def run_scope(destination, run_id, sha, seconds):
         unsettled = any(not isinstance(value, str) or not value.strip()
                         or value in ("queued", "in_progress", "pending", "waiting")
                         for value in results.values())
-        if not unsettled or attempt == 2 or deadline - time.monotonic() < 7:
+        if not unsettled or deadline - time.monotonic() < 7:
             break
         time.sleep(5)
     if all(results.get(name) == "success" for name in FULL_JOBS):

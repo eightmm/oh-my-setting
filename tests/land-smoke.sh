@@ -476,7 +476,7 @@ if [ "$2" = view ]; then
   full='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)"'
   count_file=/dev/null
   case "${OMS_TEST_CI_SCOPE:-affected}" in
-    full|wrong-sha|failed-run|duplicate|extra-failure) jobs="$full" ;;
+    full|wrong-sha|failed-run|duplicate|extra-failure|settles-full) jobs="$full" ;;
     ambiguous|ambiguous-null) jobs='"lint","affected_plan","gate","focused (1/4)"' ;;
     lagging)
       count_file="$OMS_TEST_LAND_EVENTS.lagging-count"
@@ -495,6 +495,13 @@ if "lint" not in names:
     rows.append({"name": "lint", "conclusion": "skipped"})
 if scope == "lagging" and open(sys.argv[4]).read().strip() == "1":
     rows[0]["conclusion"] = None
+if scope == "settles-full":
+    count_file = __import__("os").environ["OMS_TEST_LAND_EVENTS"] + ".settles-full-count"
+    try: count = int(open(count_file).read().strip())
+    except (FileNotFoundError, ValueError): count = 0
+    count += 1
+    open(count_file, "w").write(str(count))
+    if count <= 3: rows[0]["conclusion"] = None
 if scope == "ambiguous-null":
     rows[2]["conclusion"] = None
 if scope == "duplicate":
@@ -1308,6 +1315,15 @@ OMS_TEST_CI_SCOPE=ambiguous-null OMS_TEST_CI_RESULT=success \
 grep -Fq "('gate', None)" "$TMP/scope-diagnostics.out" || fail "null conclusion was not diagnosed distinctly"
 grep -Fq "('focused (2/4)', 'missing')" "$TMP/scope-diagnostics.out" ||
   fail "missing job was not diagnosed distinctly"
+: > "$TMP/events"
+query_rc=0
+query_out="$(OMS_TEST_CI_SCOPE=settles-full OMS_TEST_CI_RESULT=success \
+  python3 "$ROOT/scripts/lib/ci-query.py" scope fixture/repo 1 "$query_sha" 30 \
+  2> "$TMP/scope-settles-full.err")" || query_rc=$?
+[ "$query_rc" = 0 ] && [ "$query_out" = full ] ||
+  fail "settled full scope query failed: rc=$query_rc output=$query_out stderr=$(cat "$TMP/scope-settles-full.err")"
+[ "$(grep -c '^jobs$' "$TMP/events")" = 4 ] ||
+  fail "settled full scope query did not poll four times: $(cat "$TMP/events")"
 # Unreadable, ambiguous or misattributed CI scope blocks the install; the retry
 # resumes and a full-selection run for the exact SHA installs it without
 # re-running the gate.
