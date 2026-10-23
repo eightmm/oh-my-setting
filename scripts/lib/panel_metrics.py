@@ -572,9 +572,12 @@ def aggregate(repo, since=None, now=None):
         if state not in {"failed", "provider_error", "review"}:
             continue
         reason = attempt.get("reason_code")
+        if state == "review" and not (isinstance(reason, str) and reason):
+            reason = "awaiting_review"
         reason = reason if isinstance(reason, str) and reason else "unknown"
         failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
-        stage = first_failing_stage(attempt)
+        stage = ("none" if state == "review" and reason == "awaiting_review"
+                 else first_failing_stage(attempt))
         failure_stage_counts[stage] = failure_stage_counts.get(stage, 0) + 1
         if state == "review":
             stamp = _stamp(attempt.get("updated_at"))
@@ -768,7 +771,7 @@ def metrics_text(report):
         return "none" if value is None else "%ss" % value
     return "\n".join((
         "Panel metrics (since %s; until %s)" % (report.get("since") or "all retained", report.get("until", "unknown")),
-        "coverage: %s attempts, %s artifact events (limits %s/%s); lifecycle missing task IDs=%d%s" % (
+        "coverage: %s attempts, %s artifact events (limits %s/%s); plan tasks without an observed write attempt=%d%s" % (
             report.get("coverage", {}).get("attempts_observed", "?"),
             report.get("coverage", {}).get("artifact_events_observed", "?"),
             report.get("coverage", {}).get("attempt_limit", "?"),
@@ -794,7 +797,7 @@ def metrics_text(report):
             report.get("write_attempts", {}).get("total", 0),
             json.dumps(report.get("write_attempts", {}).get("state_counts", {}), sort_keys=True),
             report.get("write_attempts", {}).get("reconciles", False)),
-        "write failure reasons/stages: %s / %s; undecided ages=%s" % (
+        "failed/undecided write reasons/stages: %s / %s; undecided ages=%s" % (
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("reason_code", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("first_failing_stage", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("undecided_age_buckets", {}), sort_keys=True)),

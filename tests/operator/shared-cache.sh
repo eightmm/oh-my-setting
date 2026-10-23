@@ -756,8 +756,8 @@ write_metrics = expected_metrics['write_attempts']
 assert write_metrics['total'] == 8 and write_metrics['reconciles'], write_metrics
 assert write_metrics['state_counts'] == {'done': 1, 'failed': 5, 'review': 1, 'queued': 1}, write_metrics
 assert write_metrics['states']['other_by_state'] == {'queued': 1}, write_metrics
-assert write_metrics['failed_and_undecided']['reason_code'] == {'verification_failed': 1, 'provider_failed': 1, 'provider_timeout': 1, 'unknown': 3}, write_metrics
-assert write_metrics['failed_and_undecided']['first_failing_stage'] == {'verify': 2, 'implement': 3, 'unknown': 1}, write_metrics
+assert write_metrics['failed_and_undecided']['reason_code'] == {'verification_failed': 1, 'provider_failed': 1, 'provider_timeout': 1, 'unknown': 2, 'awaiting_review': 1}, write_metrics
+assert write_metrics['failed_and_undecided']['first_failing_stage'] == {'verify': 2, 'implement': 3, 'none': 1}, write_metrics
 assert write_metrics['provider_failed_categories']['capacity'] == 1, write_metrics
 # provider_failed without metadata and a provider failure followed by verify are both counted
 assert write_metrics['provider_failed_categories']['unknown'] == 2, write_metrics
@@ -790,6 +790,8 @@ with redirect_stdout(metric_text):
 assert 'completion: 2/6 (33.3%)' in metric_text.getvalue(), metric_text.getvalue()
 assert 'plan tasks awaiting review: n=' in metric_text.getvalue(), metric_text.getvalue()
 assert 'coverage:' in metric_text.getvalue() and 'until ' in metric_text.getvalue(), metric_text.getvalue()
+assert 'plan tasks without an observed write attempt=' in metric_text.getvalue(), metric_text.getvalue()
+assert 'failed/undecided write reasons/stages:' in metric_text.getvalue(), metric_text.getvalue()
 assert 'peer-delegate write attempts: 8' in metric_text.getvalue(), metric_text.getvalue()
 assert 'context modes (done/attempts)=graph 0/1, no artifact row 1/2, unrecorded 0/5' in metric_text.getvalue(), metric_text.getvalue()
 assert 'fork subagents' not in metric_text.getvalue(), metric_text.getvalue()
