@@ -218,6 +218,12 @@ except ValueError as error:
     assert "valid names" in str(error), error
 panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section dispatch-exit,dispatch-results,core/dashboard")
 try:
+    panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section core/room-protocol --section salvage")
+    raise AssertionError("repeated operator section was accepted")
+except ValueError as error:
+    assert "one comma-separated list" in str(error), error
+panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section core/room-protocol,salvage")
+try:
     panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only test_missing_smoke_case")
     raise AssertionError("unknown smoke test was accepted")
 except ValueError as error:

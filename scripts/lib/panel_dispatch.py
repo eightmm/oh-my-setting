@@ -738,6 +738,7 @@ def _validate_dispatch_verifier(repo, verify):
         if not target.is_file():
             raise ValueError("--verify names missing suite file: %s" % suite)
         cursor = index + 2
+        seen_sections = False
         while cursor < len(tokens):
             option = tokens[cursor]
             if option in separators:
@@ -745,6 +746,10 @@ def _validate_dispatch_verifier(repo, verify):
             if option not in {"--section", "--only"}:
                 cursor += 1
                 continue
+            if option == "--section" and suite == "tests/operator-tools-smoke.sh":
+                if seen_sections:
+                    raise ValueError("--verify repeats --section; use one comma-separated list")
+                seen_sections = True
             if cursor + 1 >= len(tokens):
                 break
             selector = tokens[cursor + 1]
