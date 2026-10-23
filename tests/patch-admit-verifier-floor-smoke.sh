@@ -10,7 +10,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/smoke-env.sh"
 ADMIT="$ROOT/scripts/patch-admit.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-admit-verifier-floor.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+cleanup() {
+  local pid
+  for pid in ${reuse_pids:-}; do wait "$pid" || true; done
+  rm -rf "$TMP"
+}
+trap cleanup EXIT HUP INT TERM
 mkdir -p "$TMP/tmp"
 export TMPDIR="$TMP/tmp"
 
@@ -86,8 +91,12 @@ contains "$TMP/benign.md" "verify-floor: PASS"
 
 # Separate parent admission retains both verification runs for landing, but
 # only while every bound input and its native producer proof is unchanged.
-for reuse_case in same plan-same plan-change command ml policy base patch report index generation environment seed floor harness; do
-  reuse_repo="$TMP/reuse-$reuse_case"
+reuse_scenario() {
+  local reuse_case="$1" reuse_source="$TMP"
+  local TMP="$TMP/reuse-$reuse_case"
+  mkdir -p "$TMP"
+  cp "$reuse_source/benign.patch" "$reuse_source/benign.md" "$TMP/"
+  reuse_repo="$TMP/repo"
   git clone -q --no-hardlinks "$repo" "$reuse_repo"
   cp "$TMP/benign.patch" "$TMP/reuse.patch"
   printf 'AGENTS.md\n' >> "$reuse_repo/.git/info/exclude"
@@ -171,7 +180,37 @@ PY_REUSE
   [ "$(grep -c capture-reserved "$reuse_repo/.oms/landings.jsonl")" = "$expected_captures" ] ||
     fail "$reuse_case landing borrowed a different capture generation"
   grep -Fq 'Keep' "$reuse_repo/tests/check-helper.sh" || fail "reused admission did not apply the patch"
+}
+
+# Reuse binds repository paths and environment bytes: isolate both scratch
+# files and shell state, and bound concurrency on smaller CI hosts.
+wait_reuse_scenarios() {
+  local pid log failed=0
+  for pid in $reuse_pids; do
+    wait "$pid" || failed=1
+  done
+  if [ "$failed" != 0 ]; then
+    for log in "$TMP"/reuse-*.out; do
+      [ -s "$log" ] || continue
+      echo "${log##*/}:" >&2
+      cat "$log" >&2
+    done
+    fail "separate admission/landing scenario failed"
+  fi
+}
+reuse_pids=""
+reuse_jobs=0
+for reuse_case in same plan-same plan-change command ml policy base patch report index generation environment seed floor harness; do
+  reuse_scenario "$reuse_case" >"$TMP/reuse-$reuse_case.out" 2>&1 &
+  reuse_pids="$reuse_pids $!"
+  reuse_jobs=$((reuse_jobs + 1))
+  if [ "$reuse_jobs" = 3 ]; then
+    wait_reuse_scenarios
+    reuse_pids=""
+    reuse_jobs=0
+  fi
 done
+wait_reuse_scenarios
 unset OMS_TEST_REUSE_INPUT
 python3 - "$ROOT/scripts/lib/landing-capture.py" "$TMP" "$repo" <<'PY_REUSE_HARNESS'
 import pathlib, runpy, sys
