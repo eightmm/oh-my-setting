@@ -33090,7 +33090,7 @@ test_peer_delegate_uses_managed_private_worktree_root() {
   worktree="$(printf '%s\n' "$out" | sed -n 's/^worktree kept: //p' | tail -n 1)"
   [ -n "$worktree" ] || fail "delegate did not report its kept worktree: $out"
   case "$worktree" in
-    "$managed_root"/*/wt) ;;
+    "$managed_root"/*/wt-*) ;;
     *) fail "delegate worktree escaped the managed root: $worktree" ;;
   esac
   [ -d "$managed_root" ] && [ ! -L "$managed_root" ] ||
