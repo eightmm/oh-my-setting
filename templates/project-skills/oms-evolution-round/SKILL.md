@@ -30,7 +30,9 @@ the regularized selection of RRSI (arXiv 2609.24972):
   that gain; inside the band, accept only a cost saving. `oms runtime
   experiment` enforces the band through `success.noise_band`.
 - Bundle edits to explore, then split a winning bundle so each landed change
-  is attributable.
+  is attributable. After splitting, re-measure the composed set on the same
+  items; do not choose among split edits by their standalone gains alone, as
+  ScholarEvolve (arXiv 2609.40169) shows.
 - Label each proposed edit invariant (global rules or roles) or domain
   (template or project skill). For guidance edits, run one fixed task with the
   old and new text under matched provider, model, and prompt settings; adopt
