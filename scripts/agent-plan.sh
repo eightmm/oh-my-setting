@@ -543,6 +543,10 @@ case "$ACTION" in
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
       fail "recover-owner is parent-only; a harness child cannot recover autopilot authority"
     ;;
+  finish|land)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
+      fail "$ACTION is parent-only; a harness child cannot complete plan tasks"
+    ;;
 esac
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

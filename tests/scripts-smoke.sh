@@ -141,8 +141,10 @@ assert_symlink_to() {
 agent_plan_land_reviewed() {
   local repo="$1"
   local id="$2"
+  local child_mode="${3:-}"
   local plan="$ROOT/scripts/agent-plan.sh"
   local patch lease verify executor soul patch_sha
+  local -a land_args
 
   patch="$(python3 - "$repo/.oms/plan/tasks.json" "$id" patch <<'PY'
 import json, sys
@@ -193,13 +195,18 @@ with open(path, "rb") as handle:
 PY
 )"
 
-  "$plan" --repo "$repo" land --id "$id" --lease-id "$lease" \
+  land_args=(--repo "$repo" land --id "$id" --lease-id "$lease" \
     --expected-review-patch "$patch" \
     --expected-review-patch-sha256 "$patch_sha" \
     --expected-review-verify "$verify" \
     --expected-review-executor-id "$executor" \
     --expected-review-executor-soul-sha256 "$soul" \
-    --expected-review-lease-id "$lease"
+    --expected-review-lease-id "$lease")
+  if [ "$child_mode" = child ]; then
+    OMS_HARNESS_CHILD=1 "$plan" "${land_args[@]}"
+  else
+    "$plan" "${land_args[@]}"
+  fi
 }
 
 agent_plan_finish_landed() {
@@ -6724,10 +6731,47 @@ test_agent_plan_lock_single_winner() {
 # smoke-weight: 300
 test_agent_plan_lifecycle() {
   local d="$TMP/agent-plan-life"
+  local child_repo="$TMP/agent-plan-child-completion"
   local SH="$ROOT/scripts/agent-plan.sh"
   mkdir -p "$d"; git -C "$d" init -q .
   "$SH" --repo "$d" init --goal life >/dev/null
   "$SH" --repo "$d" add --id P1 --title one >/dev/null
+
+  # A child may review work, but only the controller can fence its landing or
+  # mark its exact landing receipt complete.
+  make_committed_repo "$child_repo"
+  "$SH" --repo "$child_repo" init --goal child-completion >/dev/null
+  "$SH" --repo "$child_repo" add --id P2 --title two >/dev/null
+  "$SH" --repo "$child_repo" claim --id P2 --provider codex >/dev/null
+  printf 'patch bytes\n' > "$child_repo/review.patch"
+  printf 'reviewed\n' > "$child_repo/review.md"
+  "$SH" --repo "$child_repo" review --id P2 --artifact "$child_repo/review.md" \
+    --patch "$child_repo/review.patch" >/dev/null
+  local before receipt
+  before="$(cat "$child_repo/.oms/plan/tasks.json")"
+  if agent_plan_land_reviewed "$child_repo" P2 child >"$child_repo/err" 2>&1; then
+    fail "a harness child landed a reviewed plan task"
+  fi
+  assert_file_contains "$child_repo/err" 'land is parent-only; a harness child cannot complete plan tasks'
+  [ "$before" = "$(cat "$child_repo/.oms/plan/tasks.json")" ] ||
+    fail "child land refusal changed the plan"
+  agent_plan_land_reviewed "$child_repo" P2 >/dev/null || fail "parent land should still work"
+  before="$(cat "$child_repo/.oms/plan/tasks.json")"
+  receipt="$("$SH" --repo "$child_repo" show --id P2 | python3 -c '
+import json,runpy,sys
+print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
+  if OMS_HARNESS_CHILD=1 "$SH" --repo "$child_repo" finish --id P2 \
+      --expected-landing-receipt-sha256 "$receipt" >"$child_repo/err" 2>&1; then
+    fail "a harness child finished a landed plan task"
+  fi
+  assert_file_contains "$child_repo/err" 'finish is parent-only; a harness child cannot complete plan tasks'
+  [ "$before" = "$(cat "$child_repo/.oms/plan/tasks.json")" ] ||
+    fail "child finish refusal changed the plan"
+  "$SH" --repo "$child_repo" finish --id P2 --expected-landing-receipt-sha256 "$receipt" >/dev/null ||
+    fail "parent finish should still work"
+  [ "$("$SH" --repo "$child_repo" show --id P2 | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = "done" ] ||
+    fail "parent finish did not complete its landed task"
 
   # finish is not allowed straight from ready.
   if "$SH" --repo "$d" finish --id P1 >/dev/null 2>&1; then
