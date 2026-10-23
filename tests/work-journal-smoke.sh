@@ -796,6 +796,18 @@ grep -Fq "$child_expected" "$child_out" ||
   fail "child journal configure did not explain the parent boundary"
 [ ! -e "$child_config" ] || fail "child journal configure wrote global config"
 
+child_prefix_config="$TMP/child-prefix-configure.json"
+child_out="$TMP/child-prefix-configure.out"
+set +e
+OMS_HARNESS_CHILD=1 OMS_WORK_JOURNAL_CONFIG="$child_prefix_config" \
+  "$ROOT/scripts/oms" journal --repo . configure --lang ko >"$child_out" 2>&1
+rc=$?
+set -e
+[ "$rc" = 2 ] || fail "child prefix journal configure should exit 2 ($rc)"
+grep -Fq "$child_expected" "$child_out" ||
+  fail "child prefix journal configure did not explain the parent boundary"
+[ ! -e "$child_prefix_config" ] || fail "child prefix journal configure wrote global config"
+
 child_disconnect_config="$TMP/child-disconnect.json"
 child_disconnect_before="$TMP/child-disconnect.before"
 printf '%s\n' '{"schema_version":1,"managed_by":"oh-my-setting","notion":{}}' \
@@ -835,6 +847,10 @@ grep -Fq "$child_expected" "$child_out" ||
   fail "child journal sync materialized local state before refusing"
 OMS_HARNESS_CHILD=1 "$ROOT/scripts/journal.sh" show --repo "$repo" --today \
   >/dev/null || fail "a harness child should retain journal read access"
+"$ROOT/scripts/oms" journal --repo "$repo" status --json >/dev/null ||
+  fail "journal should accept --repo DIR before a read subcommand"
+"$ROOT/scripts/oms" journal --repo="$repo" status --json >/dev/null ||
+  fail "journal should accept --repo=DIR before a read subcommand"
 
 # One installer-side service connection flow owns both logins. It discovers
 # the existing Work Journal target after Notion authentication and persists no

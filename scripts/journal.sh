@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Normalize the optional leading repo selector before authorization and routing
+# inspect the command in $1. The shifted command path then keeps its normal
+# child guard, lock, and --repo parsing.
+case "${1:-}" in
+  --repo)
+    if [ "$#" -ge 3 ] && [ -n "$2" ]; then
+      repo_prefix="$2"
+      command_name="$3"
+      shift 3
+      set -- "$command_name" --repo "$repo_prefix" "$@"
+    fi
+    ;;
+  --repo=*)
+    repo_prefix="${1#--repo=}"
+    if [ "$#" -ge 2 ] && [ -n "$repo_prefix" ]; then
+      command_name="$2"
+      shift 2
+      set -- "$command_name" --repo "$repo_prefix" "$@"
+    fi
+    ;;
+esac
+
 # Read (show), inspect, rebuild, configure, or explicitly sync the local-first
 # Work Journal. `show --today|--week|--blockers|--recent N [--json]` is the
 # agent read path over the derived summaries and event index.
