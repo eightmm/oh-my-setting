@@ -1106,7 +1106,7 @@ can compile it through `oms runtime context`. Discovery honors `.gitignore`,
 skips symlinks, binaries, oversized and secret-shaped files, and treats
 every source byte as data.
 
-The **Execution Graph** (`oms graph exec validate|render|route|run|resume|decide|status|events|shadow|test|commit`)
+The **Execution Graph** (`oms graph exec validate|render|route|run|resume|decide|status|events|test|commit`)
 is an advanced option for explicit branching, concurrent graph tasks or resuming
 an existing graph run. Ordinary execution stays with plans/goal-drive/autopilot;
 the bundled goal-drive graph is an example, not another default driver.
