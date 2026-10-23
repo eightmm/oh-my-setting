@@ -144,6 +144,8 @@ def _call_result_event(repo, room_id, member, task_id, status):
     result_record = dict(record)
     result_record.update({key: attempt[key] for key in ("state", "reason_code") if key in attempt})
     result_record["dispatched_role"] = refs.get("panel_purpose") or refs.get("panel_role")
+    result_record["panel_role"] = refs.get("panel_role")
+    result_record["panel_purpose"] = refs.get("panel_purpose")
     return payload, result_record
 
 
@@ -718,8 +720,50 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         salvage = ((status != 0 and not verify_failed) or verify_needs_salvage or guard_stop) \
             and (result_event or {}).get("access") == "write"
         recovery = " Recover its edits: oms panel --salvage %s." % task_id if salvage else ""
+        if (verify_failed and not verify_needs_salvage
+                and (result_event or {}).get("access") == "write"):
+            verify = _review_verifier(repo, room_id, member, caller, task_id)
+            if verify:
+                from panel_routing import KINDS
+                dispatch_role = result_record.get("panel_role")
+                if dispatch_role not in KINDS:
+                    dispatch_role = role if role in KINDS else "worker"
+                purpose = result_record.get("panel_purpose")
+                purpose_option = (" --purpose " + shlex.quote(purpose)
+                                  if dispatch_role == "worker" and isinstance(purpose, str) and purpose in
+                                  {"explain", "investigate", "implement"} else "")
+                quoted_verify = shlex.quote(verify)
+                if len(quoted_verify.encode("utf-8")) <= 300:
+                    verify_option = "--verify " + quoted_verify
+                else:
+                    verify_option = "--verify VERIFY"
+                answer_artifact = result_record.get("artifact")
+                if (not _safe_patch_path(answer_artifact) or
+                        not answer_artifact.startswith(".oms/artifacts/") or
+                        len(answer_artifact.encode("utf-8")) > 1000):
+                    answer_artifact = None
+                evidence_pointer = ("Full answer: " + answer_artifact if answer_artifact else
+                                    "Full answer artifact unavailable")
+                results_pointer = "oms panel --results --task-id %s --participant %s" % (
+                    shlex.quote(task_id), shlex.quote(member))
+                recovery += (" Continue with fixes: oms panel --dispatch %s --continue %s --access write "
+                             "--brief-file PATH%s %s (%s; results overview: %s; include verifier diagnostics "
+                             "from the answer artifact in the continuation brief; they are not transferred automatically)."
+                             % (shlex.quote(dispatch_role), shlex.quote(task_id), purpose_option, verify_option,
+                                evidence_pointer, results_pointer))
+        judgment = "Task %s needs judgment: %s (exit %s).%s" % (task_id, reason, status, recovery)
+        if len(judgment.encode("utf-8")) > 4000:
+            marker = " [Notice truncated.]"
+            base = "Task %s needs judgment: %s (exit %s)." % (task_id, reason, status)
+            base_bytes = base.encode("utf-8")
+            if len(base_bytes) + len(marker.encode("utf-8")) >= 4000:
+                judgment = base_bytes[:4000 - len(marker.encode("utf-8"))].decode("utf-8", "ignore") + marker
+            else:
+                hint_budget = 4000 - len(base_bytes) - len(marker.encode("utf-8"))
+                hint = recovery.encode("utf-8")[:hint_budget].decode("utf-8", "ignore")
+                judgment = base + hint + marker
         _judgment_mail(repo, room_id, member, caller, task_id,
-                       "Task %s needs judgment: %s (exit %s).%s" % (task_id, reason, status, recovery))
+                       judgment)
     auto_review_done = bool(result_event and policy_available and not (result_event.get("needs_review") and status == 0
                                                   and not guard_stop
                                                   and result_event.get("verify_status") != "failed"
@@ -841,7 +885,21 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         _settlement_step(repo, member, claim, "room_quiet", bool(review_delivered))
     room_quiet = claim["steps"]["room_quiet"]
     prefix = "Call exit=%d; parent acceptance pending.\n" % status
-    message = (prefix + str(summary)).encode("utf-8")[:3800].decode("utf-8", "ignore")
+    full_message = (prefix + str(summary)).encode("utf-8")
+    message = full_message[:3800].decode("utf-8", "ignore")
+    if len(full_message) > 3800:
+        answer_artifact = result_record.get("artifact")
+        if (not _safe_patch_path(answer_artifact) or
+                not answer_artifact.startswith(".oms/artifacts/") or
+                len(answer_artifact.encode("utf-8")) > 1000):
+            answer_artifact = None
+        evidence_pointer = ("Full answer: " + answer_artifact if answer_artifact else
+                            "Full answer artifact unavailable")
+        pointer = (" [Summary truncated.] %s. Results overview: "
+                   "oms panel --results --task-id %s --participant %s" %
+                   (evidence_pointer, task_id, member))
+        budget = 4000 - len(pointer.encode("utf-8"))
+        message = full_message[:budget].decode("utf-8", "ignore") + pointer
     message_id = "result-" + member
     if review_notice is not None:
         # The result id also settles the call on the board and across room rollover.
@@ -863,12 +921,13 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             if not retry and isinstance(error, ValueError) and "sensitive" in str(error).lower():
                 message = (prefix + "Summary withheld by the sensitive-content screen; read it with "
-                           "oms panel --results --task-id " + task_id)
+                           "oms panel --results --task-id %s --participant %s" % (task_id, member))
                 continue
             if "message id conflicts" in str(error).lower():
                 print("OMS room result message-id conflict: " + message_id, file=sys.stderr)
             else:
-                print("OMS room result delivery unavailable; inspect oms panel --results --task-id " + task_id,
+                print("OMS room result delivery unavailable; inspect oms panel --results --task-id %s --participant %s" %
+                      (task_id, member),
                       file=sys.stderr)
             return False
     return False

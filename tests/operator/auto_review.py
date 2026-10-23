@@ -408,18 +408,24 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     auto_off_call = fixture_call_id("auto-review-off")
     panel._prepare_dispatch_call(project, shared, auto_off_call, room_owner)
     with patch.object(panel_result_store, "_records", return_value=([dict(auto_attempt,
-            attempt_id="attempt-auto-review-off", refs=dict(auto_attempt["refs"], panel_room_participant=auto_off_call))],
+            attempt_id="attempt-auto-review-off", refs=dict(auto_attempt["refs"], panel_room_participant=auto_off_call,
+                                                              panel_role="worker", panel_purpose="implement"))],
             [dict(auto_index, attempt_id="attempt-auto-review-off")])), \
             patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
             patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
-            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "é🙂" * 3000}]}]}), \
             patch.object(panel, "policy", return_value={"auto_review": False}), \
             patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
             patch.dict(os.environ, room_env, clear=True):
         panel.deliver_result(project, shared, auto_off_call, room_owner, auto_task, 0)
         assert len(actual_dispatch_calls) == 1
         legacy = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + auto_off_call)
-        assert legacy["text"] == "Call exit=0; parent acceptance pending.\nWorker finished."
+        assert ("[Summary truncated.] Full answer: %s. Results overview: "
+                "oms panel --results --task-id %s --participant %s" %
+                (auto_artifact, auto_task, auto_off_call)) in legacy["text"]
+        assert (project / auto_artifact).is_file()
+        assert len(legacy["text"].encode("utf-8")) <= 4000
+        assert legacy["text"].encode("utf-8").decode("utf-8") == legacy["text"]
         assert not legacy.get("quiet", False)
 read_call = fixture_call_id("auto-review-read")
 panel._prepare_dispatch_call(project, shared, read_call, room_owner)
@@ -454,7 +460,8 @@ assert "oms panel --salvage " not in read_timeout_mail["text"]
 verify_call = fixture_call_id("auto-review-verify-failed")
 panel._prepare_dispatch_call(project, shared, verify_call, room_owner)
 verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verify-failed",
-    refs=dict(auto_attempt["refs"], panel_room_participant=verify_call))
+    refs=dict(auto_attempt["refs"], panel_room_participant=verify_call,
+              panel_role="worker", panel_purpose="implement"))
 with patch.object(panel_result_store, "_records", return_value=([verify_attempt],
         [dict(auto_index, attempt_id=verify_attempt["attempt_id"], verify_exit=2)])), \
         patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
@@ -466,7 +473,64 @@ with patch.object(panel_result_store, "_records", return_value=([verify_attempt]
     assert len(actual_dispatch_calls) == 1
     verify_mail = next(m for m in room.status(project, shared)["messages"] if m["id"] == "judgment-" + verify_call)
     assert "verification failed" in verify_mail["text"] and room_owner in verify_mail["targets"]
+    assert ("Continue with fixes: oms panel --dispatch worker --continue %s --access write "
+            "--brief-file PATH --purpose implement --verify 'test -f scripts/fixture.py'" % auto_task) in verify_mail["text"]
+    assert "Full answer: %s" % auto_artifact in verify_mail["text"]
+    assert (project / auto_artifact).is_file()
+    assert "include verifier diagnostics from the answer artifact in the continuation brief" in verify_mail["text"]
+    assert "the failed verifier's tail carries over" not in verify_mail["text"]
+    import io
+    import shlex
+    command_text = verify_mail["text"].split("Continue with fixes: ", 1)[1].split(" (Full answer:", 1)[0]
+    command_args = shlex.split(command_text)
+    try:
+        with patch("sys.stdout", io.StringIO()):
+            panel.main(command_args + ["--help"])
+    except SystemExit as error:
+        assert error.code == 0
+    else:
+        raise AssertionError("continuation command was not parsed by the panel CLI")
 assert "oms panel --salvage " not in verify_mail["text"]
+verify_long_call = fixture_call_id("auto-review-verify-failed-long-command")
+panel._prepare_dispatch_call(project, shared, verify_long_call, room_owner)
+room.join(project, shared, verify_long_call, "codex", "worker", parent=room_owner)
+verify_long_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verify-failed-long-command",
+    refs=dict(auto_attempt["refs"], panel_room_participant=verify_long_call,
+              panel_role="worker", panel_purpose="implement"))
+long_verifier = "x" * 5000
+with patch.object(panel_result_store, "_records", return_value=([verify_long_attempt],
+        [dict(auto_index, attempt_id=verify_long_attempt["attempt_id"], verify_exit=2)])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value=long_verifier), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, verify_long_call, room_owner, auto_task, 1)
+verify_long_mail = next(m for m in room.status(project, shared)["messages"]
+                        if m["id"] == "judgment-" + verify_long_call)
+assert ("Continue with fixes: oms panel --dispatch worker --continue %s --access write "
+        "--brief-file PATH --purpose implement" % auto_task) in verify_long_mail["text"]
+assert "--verify VERIFY" in verify_long_mail["text"]
+assert "Full answer: %s" % auto_artifact in verify_long_mail["text"]
+assert "results overview: oms panel --results --task-id %s --participant %s" % (auto_task, verify_long_call) in verify_long_mail["text"]
+assert (project / auto_artifact).is_file()
+assert len(verify_long_mail["text"].encode("utf-8")) <= 4000
+verify_read_call = fixture_call_id("auto-review-verify-failed-read")
+panel._prepare_dispatch_call(project, shared, verify_read_call, room_owner)
+room.join(project, shared, verify_read_call, "codex", "worker", parent=room_owner)
+verify_read_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verify-failed-read",
+    refs=dict(auto_attempt["refs"], panel_room_participant=verify_read_call, panel_access="read"))
+with patch.object(panel_result_store, "_records", return_value=([verify_read_attempt],
+        [dict(auto_index, attempt_id=verify_read_attempt["attempt_id"], verify_exit=2)])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, verify_read_call, room_owner, auto_task, 1)
+verify_read_mail = next(m for m in room.status(project, shared)["messages"]
+                        if m["id"] == "judgment-" + verify_read_call)
+assert "verification failed" in verify_read_mail["text"]
+assert "Continue with fixes:" not in verify_read_mail["text"]
 verify_timeout_call = fixture_call_id("auto-review-verifier-timeout")
 panel._prepare_dispatch_call(project, shared, verify_timeout_call, room_owner)
 room.join(project, shared, verify_timeout_call, "codex", "worker", parent=room_owner)
