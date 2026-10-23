@@ -1217,6 +1217,7 @@ fi
       printf 'After you return, the harness runs `%s`. Run focused checks for the behavior you changed; do not run this full command just to confirm completion. Run broader checks only when needed to diagnose a failure. Report the checks you actually ran.\n' "$VERIFY_CMD"
     fi
     printf '%s\n' '- Admission also runs the checks restored from HEAD, so changing or deleting existing tests cannot make verify pass.'
+    printf '%s\n' '- Build credential-shaped test fixtures at runtime (for example "pass" + "word"): an added line that looks like a secret makes the outbound scan refuse review and --continue.'
     [ -z "$plan_allowed" ] || printf -- '- allowed paths: %s\n' "$plan_allowed"
     [ -z "$plan_forbidden" ] || printf -- '- forbidden paths: %s\n' "$plan_forbidden"
     printf '\n'
