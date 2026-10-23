@@ -961,9 +961,12 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
   full)
     printf '%s\n' '{"schema":1,"mode":"full","reasons":["unmatched:lib/leaf.py"],"tests":[],"test_cases":[]}'
     ;;
+  operator-unmapped)
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator/section.sh","tests/operator/section.py","tests/operator/unmapped.py"],"test_cases":[]}'
+    ;;
   error) exit 23 ;;
   *)
-    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator-tools-smoke.sh","tests/operator/section.sh","tests/operator/section.py","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"},{"id":"symbol:tests/operator/section.py::SectionTest.test_selected","language":"python","name":"test_selected","path":"tests/operator/section.py"}]}'
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator/section.sh","tests/operator/section.py","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"},{"id":"symbol:tests/operator/section.py::SectionTest.test_selected","language":"python","name":"test_selected","path":"tests/operator/section.py"}]}'
     ;;
 esac
 EOF
@@ -971,6 +974,13 @@ EOF
   mkdir -p "$gate/tests/operator"
   printf '#!/usr/bin/env bash\necho operator-fragment-standalone >> "$OMS_TEST_AFFECTED_LOG"\n' > "$gate/tests/operator/section.sh"
   printf '# Operator section module; its suite runs as a whole.\n' > "$gate/tests/operator/section.py"
+  cat > "$gate/tests/operator/runner.py" <<'EOF'
+SECTIONS = (
+    ("section-shell", 0, "section.sh"),
+    ("section-python", 0, "section.py"),
+)
+EOF
+  printf '# Unmapped operator helper.\n' > "$gate/tests/operator/unmapped.py"
   cat > "$gate/tests/operator-tools-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'operator-args:%s\n' "$*" >> "$OMS_TEST_AFFECTED_LOG"
@@ -1083,13 +1093,20 @@ EOF
   done
   grep -Fxq 'syntax:lib/leaf.py' "$log" || fail "affected syntax check did not select only the changed Python"
   grep -Fxq 'distribution:--docs-only' "$log" || fail "leaf change ran unrelated CI orchestration probes"
-  [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$log")" = 1 ] ||
-    fail "affected selection did not run operator-tools once through its existing parallel runner"
+  [ "$(grep -Fxc 'operator-args:--section section-shell,section-python' "$log")" = 1 ] ||
+    fail "affected selection did not run exactly the mapped operator sections"
   ! grep -Fq operator-fragment-standalone "$log" ||
     fail "affected selection ran an operator section fragment outside its suite"
   if grep -Fq unselected "$log"; then
     fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
   fi
+  : > "$log"
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=operator-unmapped OMS_TEST_AFFECTED_LOG="$log" \
+    GITHUB_STEP_SUMMARY="$TMP/operator-unmapped-summary.md" \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" >/dev/null) ||
+    fail "affected gate rejected an unmapped operator path"
+  [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$log")" = 1 ] ||
+    fail "an unmapped operator path did not fail open to the whole suite"
   # The same real stage runner must overlap selected suites, cap nested
   # workers, retain timings and propagate a selected lane's failure.
   : > "$TMP/affected-events"
@@ -1292,8 +1309,8 @@ EOF
       --ci-output "$TMP/panel-ci-mode" >/dev/null) ||
     fail "CI selector rejected the panel view change"
   grep -Fxq 'mode=affected' "$TMP/panel-ci-mode" || fail "panel cost alone forced unrelated full lanes"
-  [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$TMP/panel-inline.log")" = 1 ] ||
-    fail "panel selection did not use the existing operator shards"
+  [ "$(grep -Fxc 'operator-args:--section section-shell,section-python' "$TMP/panel-inline.log")" = 1 ] ||
+    fail "panel selection did not run its mapped operator sections"
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full bash scripts/check.sh --affected \
     --print-affected-mode --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||
     fail "uncertain panel plan failed"

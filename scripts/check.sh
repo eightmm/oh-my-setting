@@ -1207,6 +1207,38 @@ repo_invariants_selected=" "
 
 if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
   affected_operator_staged=0
+  affected_operator_paths=()
+  affected_operator_sections=""
+  affected_operator_has_suite=0
+  for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
+    case "$affected_test" in
+      tests/operator/*) affected_operator_paths[${#affected_operator_paths[@]}]="$affected_test" ;;
+      tests/operator-tools-smoke.sh) affected_operator_has_suite=1 ;;
+    esac
+  done
+  if [ "${#affected_operator_paths[@]}" -gt 0 ] && [ "$affected_operator_has_suite" = 0 ]; then
+    affected_operator_sections="$(python3 - "$ROOT/tests/operator/runner.py" "${affected_operator_paths[@]}" <<'PY'
+import re
+import sys
+
+manifest = open(sys.argv[1], encoding="utf-8").read()
+sections = re.findall(
+    r'^\s*\("([^\"]+)",\s*[0-9]+,\s*(?:"([^\"]+)"|None)\),?\s*$',
+    manifest, re.M)
+files = {path: [] for path in sys.argv[2:]}
+for name, filename in sections:
+    if filename is not None:
+        path = "tests/operator/" + filename
+        if path in files:
+            files[path].append(name)
+if any(not names for names in files.values()):
+    sys.exit(1)
+print(",".join(name for name, filename in sections
+                 if filename is not None and "tests/operator/" + filename in files))
+PY
+)" || affected_operator_sections=""
+    affected_operator_sections="${affected_operator_sections//$'\r'/}"
+  fi
   for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
     # Operator section fragments only run inside their suite, once.
     case "$affected_test" in tests/operator/*) affected_test=tests/operator-tools-smoke.sh ;; esac
@@ -1239,7 +1271,11 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
         stage affected-scripts-smoke env OMS_SMOKE_SUITE="$ROOT/$affected_test" bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
       fi
     elif [ "$affected_test" = tests/operator-tools-smoke.sh ]; then
-      stage operator-tools bash "$ROOT/tests/operator-tools-smoke.sh" --jobs "${OMS_OPERATOR_JOBS:-4}"
+      if [ -n "$affected_operator_sections" ]; then
+        stage operator-tools bash "$ROOT/tests/operator-tools-smoke.sh" --section "$affected_operator_sections"
+      else
+        stage operator-tools bash "$ROOT/tests/operator-tools-smoke.sh" --jobs "${OMS_OPERATOR_JOBS:-4}"
+      fi
     elif [ "${affected_test%.py}" != "$affected_test" ]; then
       affected_args=()
       affected_index=0
