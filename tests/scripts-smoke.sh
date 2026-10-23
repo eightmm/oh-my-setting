@@ -16143,7 +16143,7 @@ PY
 test_check_ci_parity_panel_dispatch_runs_full_operator_suite() {
   local repo="$TMP/panel-dispatch-selector" base marker workspace_marker unrelated_base uname_bin out
   make_committed_repo "$repo"
-  mkdir -p "$repo/scripts/lib" "$repo/tests" "$repo/bin"
+  mkdir -p "$repo/scripts/lib" "$repo/tests/operator" "$repo/bin"
   printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
   cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
   cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
@@ -16151,7 +16151,11 @@ test_check_ci_parity_panel_dispatch_runs_full_operator_suite() {
   cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
   cat > "$repo/scripts/graph.sh" <<'SH'
 #!/usr/bin/env bash
-if [ "${OMS_GRAPH_PANEL_TESTS:-0}" = 1 ]; then
+if [ "${OMS_GRAPH_PANEL_TESTS:-0}" = section ]; then
+  cat <<'JSON'
+{"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/operator/room_protocol.py"],"test_cases":[]}
+JSON
+elif [ "${OMS_GRAPH_PANEL_TESTS:-0}" = 1 ]; then
   cat <<'JSON'
 {"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/operator-tools-smoke.sh","tests/panel-workspaces-smoke.sh"],"test_cases":[]}
 JSON
@@ -16171,6 +16175,12 @@ SH
 #!/usr/bin/env bash
 printf 'ran\n' >> "$PANEL_WORKSPACES_FIXTURE_MARKER"
 SH
+  cat > "$repo/tests/operator/runner.py" <<'PY'
+SECTIONS = (
+    ("core/room-protocol", 0, "room_protocol.py"),
+)
+PY
+  printf '# operator fragment fixture\n' > "$repo/tests/operator/room_protocol.py"
   cat > "$repo/bin/uname" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$OMS_FIXTURE_UNAME"
@@ -16239,7 +16249,25 @@ SH
     fail "unrelated affected selection failed: $out"
   fi
   [ ! -e "$workspace_marker" ] || fail "unrelated change should not run panel-workspaces"
-  printf 'panel_dispatch.py selector: %s\n' "$(cat "$marker")"
+
+  # A panel implementation module outside provider/model routing must use the
+  # graph's affected operator section, not consume the quick lane's full suite.
+  unrelated_base="$(git -C "$repo" rev-parse HEAD)"
+  printf '# panel metrics fixture\n' > "$repo/scripts/lib/panel_metrics.py"
+  git -C "$repo" add scripts/lib/panel_metrics.py
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m panel_metrics >/dev/null
+  base="$unrelated_base"
+  if out="$(cd "$repo" && PATH="$uname_bin:$PATH" OMS_FIXTURE_UNAME=Linux OMS_GRAPH_PANEL_TESTS=section \
+      OMS_OPERATOR_MARKER="$marker" PANEL_WORKSPACES_FIXTURE_MARKER="$workspace_marker" OMS_OPERATOR_JOBS=4 \
+      bash scripts/check.sh --affected --ci-parity --no-lint \
+        --changed-from "$base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "non-routing panel_metrics affected selection failed: $out"
+  fi
+  [ "$(cat "$marker")" = '--section core/room-protocol' ] ||
+    fail "panel_metrics.py should run only the affected operator section, not the quick full suite; ran: $(cat "$marker" 2>/dev/null || true)"
+  printf 'panel selector: %s\n' "$(cat "$marker")"
 }
 
 test_check_gate_hard_fails_without_shellcheck() {
