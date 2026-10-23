@@ -342,7 +342,7 @@ floor_hint=""
 if [ "$apply_ok" = 1 ]; then
   oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null 2>&1 || true
   worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")" || fail "mktemp failed"
-  worktree="$worktree_parent/wt"
+  worktree="$worktree_parent/wt-${worktree_parent##*.}"
   oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
   if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
@@ -880,7 +880,7 @@ PY
       fi
     elif [ -n "$floor_verify" ] && [ -n "$verification_surface" ]; then
       if floor_worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")"; then
-        floor_worktree="$floor_worktree_parent/wt"
+        floor_worktree="$floor_worktree_parent/wt-${floor_worktree_parent##*.}"
         oms_harness_mark_tmpdir "$floor_worktree_parent" "$REPO" "$floor_worktree"
         if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
           GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \

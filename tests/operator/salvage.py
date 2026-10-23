@@ -2,6 +2,19 @@
 import contextlib
 import shutil
 import panel_salvage
+from room_repository import harness_residue_parent
+
+for residue, child in (('oh-my-setting-delegate.fixture', 'wt'),
+                       ('oh-my-setting-admit.fixture', 'wt'),
+                       ('oh-my-setting-scratch.fixture', 'wt'),
+                       ('oh-my-setting-land.fixture', 'wt'),
+                       ('oh-my-setting-agy-read.fixture', 'tree')):
+    assert harness_residue_parent(temporary / residue / child) == temporary / residue
+    assert harness_residue_parent(temporary / residue / (child + '-fixture')) == temporary / residue
+assert harness_residue_parent(temporary / 'oh-my-setting-delegate.other' / 'wt-fixture') is None
+assert harness_residue_parent(temporary / 'oh-my-setting-agy-read.fixture' / 'tree') == \
+       temporary / 'oh-my-setting-agy-read.fixture'
+assert harness_residue_parent(temporary / 'oh-my-setting-agy-read.fixture' / 'tree-other') is None
 salvage_repo = temporary / 'salvage-repo'
 salvage_execution_repo = temporary / 'salvage-execution-repo'
 salvage_registry = temporary / 'salvage-registry'
@@ -99,7 +112,7 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
         assert panel.main(['--repo', str(salvage_execution_repo), '--salvage', 'salvage-task', '--json']) == 0
     salvaged = json.loads(output.getvalue())
     scratch_execution_repo = temporary / 'salvage-scratch-execution'
-    scratch_tree = salvage_registry / 'oh-my-setting-delegate.scratch' / 'wt'
+    scratch_tree = salvage_registry / 'oh-my-setting-delegate.scratch' / 'wt-scratch'
     scratch_tree.parent.mkdir(parents=True)
     subprocess.run(['git', '-C', str(salvage_repo), 'worktree', 'add', '--detach',
                     str(scratch_execution_repo)], check=True, stdout=subprocess.DEVNULL)
@@ -111,7 +124,7 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
     scratch_attempt = {'task_id': 'scratch-task', 'attempt_id': 'att_scratch_fixture',
                        'tool': 'peer-delegate', 'provider': 'claude', 'created_at': '2026-10-14T00:01:00Z',
                        'terminal': True, 'reason_code': 'worker_authority_violation',
-                       'refs': {'panel_location': 'worktree:oh-my-setting-delegate.scratch/wt',
+                       'refs': {'panel_location': 'worktree:oh-my-setting-delegate.scratch/wt-scratch',
                                 'panel_provider': 'codex',
                                 'panel_room_participant': 'call-abcdef0123456789',
                                 'panel_room_id': 'room-fixture'}}
@@ -158,7 +171,7 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
                 raise AssertionError('missing registration fell back while the worktree still existed')
     finally:
         scratch_git_pointer.write_bytes(scratch_git_before)
-    other_tree = temporary / 'elsewhere/oh-my-setting-delegate.scratch/wt'
+    other_tree = temporary / 'elsewhere/oh-my-setting-delegate.scratch/wt-scratch'
     other_tree.parent.mkdir(parents=True)
     subprocess.run(['git', '-C', str(scratch_execution_repo), 'worktree', 'add', '--detach',
                     str(other_tree)], check=True, stdout=subprocess.DEVNULL)

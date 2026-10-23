@@ -439,7 +439,7 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
             else:
                 raise AssertionError("continuation promised an inaccessible oversized patch")
         with patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 124}]}]}), \
-                patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
+                patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt-stopped"):
             try:
                 panel.continuation(project, "claude", None, "round-task", {"provider": "codex"}, round_brief, {})
             except ValueError as error:
@@ -453,7 +453,7 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                        guard=False, event_id="e-round-2")]
         with patch.object(panel, "results", return_value={"rows": [{"calls": tail}]}), \
                 patch.object(panel_results, "_records", return_value=([main] + history, hidden)), \
-                patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt"):
+                patch.dict(history[-1]["refs"], panel_location="worktree:oh-my-setting-delegate.stopped/wt-stopped"):
             continued, _, note = panel.continuation(project, "claude", None, "round-task", {"provider": "codex"},
                                                     round_brief, {})
             continued.unlink()

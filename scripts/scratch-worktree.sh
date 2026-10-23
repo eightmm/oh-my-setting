@@ -160,7 +160,7 @@ cmd_add() {
   fi
   parent="$(mktemp -d "$ROOT_DIR/$PREFIX.XXXXXX")" || fail "mktemp failed in $ROOT_DIR"
   parent_physical="$(oms_harness_physical_dir "$parent")" || { rm -rf "$parent"; fail "cannot resolve $parent"; }
-  worktree="$parent_physical/wt"
+  worktree="$parent_physical/wt-${parent_physical##*.}"
   # The marker precedes the registration: a worker guard capturing between the
   # two sees a pending entry whose live marker already vouches for it.
   oms_harness_mark_tmpdir "$parent_physical" "$REPO_PHYSICAL" "$worktree" "$OWNER_PID"
@@ -175,23 +175,48 @@ cmd_add() {
 
 cmd_remove() {
   local target="" parent="" parent_physical="" common="" entry="" gitfile="" worktree=""
+  local marker_parent="" marker_parent_physical="" requested_physical="" expected_worktree=""
+  local target_parent_physical=""
   local -a remove_args
 
   [ -n "$TARGET" ] || fail "remove requires a scratch worktree path"
   target="${TARGET%/}"
-  case "$target" in */wt) parent="${target%/wt}" ;; *) parent="$target" ;; esac
+  parent="$(oms_harness_residue_parent "$target" 2>/dev/null || printf '%s\n' "$target")"
   parent_physical="$(oms_harness_physical_dir "$parent")" || fail "not a scratch worktree: $TARGET"
   case "$(basename "$parent_physical")" in "$PREFIX".*) ;; *) fail "not a scratch worktree: $TARGET" ;; esac
   [ "$(oms_harness_physical_dir "$ROOT_DIR" 2>/dev/null || true)" = "$(dirname "$parent_physical")" ] ||
     fail "not under the delegate worktree root: $TARGET"
   [ -O "$parent_physical" ] || fail "not owned by this user: $TARGET"
   read_marker "$parent_physical" || fail "no scratch marker beside: $TARGET"
-  worktree="$parent_physical/wt"
+  marker_parent="$(oms_harness_residue_parent "$M_WORKTREE" 2>/dev/null || true)"
+  [ -n "$marker_parent" ] || fail "marker does not describe: $TARGET"
+  marker_parent_physical="$(oms_harness_physical_dir "$marker_parent")" || fail "marker parent is gone: $marker_parent"
+  [ "$marker_parent_physical" = "$parent_physical" ] || fail "marker does not describe: $TARGET"
+  expected_worktree="$marker_parent_physical/$(basename "$M_WORKTREE")"
+  if [ -d "$target" ]; then
+    requested_physical="$(oms_harness_physical_dir "$target")" || fail "not a scratch worktree: $TARGET"
+  else
+    target_parent_physical="$(oms_harness_physical_dir "$(dirname "$target")")" || fail "not a scratch worktree: $TARGET"
+    requested_physical="$target_parent_physical/$(basename "$target")"
+  fi
+  if [ "$requested_physical" = "$parent_physical" ]; then
+    requested_physical="$expected_worktree"
+  fi
+  [ "$requested_physical" = "$expected_worktree" ] ||
+    fail "requested path disagrees with its scratch marker: $TARGET"
+  worktree="$expected_worktree"
   if [ -d "$worktree" ]; then
     oms_harness_safe_residue_worktree "$ROOT_DIR" "$parent_physical" "$M_REPO" "$M_WORKTREE" ||
       fail "marker and registration disagree; refusing: $TARGET"
+    [ "$requested_physical" = "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" ] ||
+      fail "requested path disagrees with its scratch marker: $TARGET"
     [ -z "$REPO_PHYSICAL" ] || [ "$REPO_PHYSICAL" = "$OMS_HARNESS_SAFE_RESIDUE_REPO" ] ||
       fail "scratch worktree belongs to another repository: $OMS_HARNESS_SAFE_RESIDUE_REPO"
+    OMS_HARNESS_RESIDUE_KEEP_REASON=""
+    oms_harness_keep_unverifiable_residue "$parent_physical" "$worktree"
+    if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+      [ "$FORCE" = 1 ] || fail "scratch residue has additional or unrecognized children; refusing: $TARGET"
+    fi
     remove_args=(worktree remove)
     [ "$FORCE" = 0 ] || remove_args+=(--force)
     git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" "${remove_args[@]}" "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" >&2 ||
@@ -200,9 +225,13 @@ cmd_remove() {
     # An interrupted removal left the checkout gone but its entry registered.
     # Drop that one entry, identified by its backpointer; prune would also take
     # other repositories' in-flight states.
-    case "$M_WORKTREE" in /*/wt) ;; *) fail "marker does not describe: $TARGET" ;; esac
-    [ "$(oms_harness_physical_dir "${M_WORKTREE%/wt}" 2>/dev/null || true)" = "$parent_physical" ] ||
+    [ "$(oms_harness_physical_dir "$(oms_harness_residue_parent "$M_WORKTREE" 2>/dev/null || true)" 2>/dev/null || true)" = "$parent_physical" ] ||
       fail "marker does not describe: $TARGET"
+    OMS_HARNESS_RESIDUE_KEEP_REASON=""
+    oms_harness_keep_unverifiable_residue "$parent_physical"
+    if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+      [ "$FORCE" = 1 ] || fail "scratch residue has additional or unrecognized children; refusing: $TARGET"
+    fi
     M_REPO="$(repo_root "$M_REPO")" || fail "marker repository is gone: $M_REPO"
     [ -z "$REPO_PHYSICAL" ] || [ "$REPO_PHYSICAL" = "$M_REPO" ] ||
       fail "scratch worktree belongs to another repository: $M_REPO"
@@ -216,6 +245,13 @@ cmd_remove() {
     done
   fi
   # The marker goes last so every intermediate state above stays vouched for.
+  OMS_HARNESS_RESIDUE_KEEP_REASON=""
+  oms_harness_keep_unverifiable_residue "$parent_physical"
+  if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+    printf 'removed: %s\n' "$worktree"
+    printf 'kept scratch residue parent with additional or unrecognized children: %s\n' "$parent_physical" >&2
+    return 0
+  fi
   rm -rf "$parent_physical"
   printf 'removed: %s\n' "$worktree"
 }

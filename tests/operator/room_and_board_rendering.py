@@ -1570,10 +1570,11 @@ panel.REJECTED_RELOAD.clear()
 # A finished worker's kept worktree opens only when its label names exactly one git worktree.
 kept_parent = temporary / "oh-my-setting-delegate.fixture"
 kept_parent.mkdir()
-subprocess.run(["git", "-C", str(project), "worktree", "add", "--detach", str(kept_parent / "wt")],
+kept_tree = kept_parent / "wt-fixture"
+subprocess.run(["git", "-C", str(project), "worktree", "add", "--detach", str(kept_tree)],
                check=True, capture_output=True)
-kept = {"participant": "call-kept", "role": "worker", "location": "worktree:oh-my-setting-delegate.fixture/wt"}
-assert panel.worker_worktree(project, dict(kept, state="done")) == (kept_parent / "wt").resolve()
+kept = {"participant": "call-kept", "role": "worker", "location": "worktree:oh-my-setting-delegate.fixture/wt-fixture"}
+assert panel.worker_worktree(project, dict(kept, state="done")) == kept_tree.resolve()
 for member, reason in ((dict(kept, state="working"), "still running"),
                        (dict(kept, state="done", location="worktree:gone.parent/wt"), "cleaned up"),
                        (dict(kept, state="done", location="repository"), "recorded no worktree")):
@@ -1586,8 +1587,8 @@ for member, reason in ((dict(kept, state="working"), "still running"),
 assert TerminalInput().decode(b"w") == [("w",)]
 with patch("room_view.nodes", return_value=[dict(kept, state="done")]), \
         patch.dict(os.environ, {"TMUX": ""}):
-    assert panel.open_worktree(project, {}, {"selected": ("result", "call-kept")}) == "Worktree: " + str((kept_parent / "wt").resolve())
-subprocess.run(["git", "-C", str(project), "worktree", "remove", "--force", str(kept_parent / "wt")], check=True)
+    assert panel.open_worktree(project, {}, {"selected": ("result", "call-kept")}) == "Worktree: " + str(kept_tree.resolve())
+    subprocess.run(["git", "-C", str(project), "worktree", "remove", "--force", str(kept_tree)], check=True)
 # The board's advisor action opens a question prompt on the control path; it never calls a model itself.
 assert TerminalInput().decode(b"a") == [("a",)]
 with patch.dict(os.environ, {"TMUX": ""}):

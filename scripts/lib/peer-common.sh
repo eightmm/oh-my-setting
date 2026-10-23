@@ -720,16 +720,17 @@ ma_agy_read_dir() {
   base="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-agy-read.XXXXXX")" || return 1
   # Mark before registering, so a concurrent worker guard sees a marked, live
   # entry at every instant of the add rather than an unexplained new worktree.
-  [ -z "$repo" ] || oms_harness_mark_tmpdir "$base" "$repo" "$base/tree" 2>/dev/null || true
+  local read_tree="$base/tree-${base##*.}"
+  [ -z "$repo" ] || oms_harness_mark_tmpdir "$base" "$repo" "$read_tree" 2>/dev/null || true
   if [ -n "$repo" ] &&
      oms_git_assert_safe_execution_config "$repo" diff-read >/dev/null 2>&1 &&
      git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
        GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
        -c core.fsmonitor=false -C "$repo" \
-       worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
-    oms_seed_local_agent_files "$repo" "$base/tree"
-    printf '%s/tree\n' "$base"
+       worktree add --detach "$read_tree" HEAD >/dev/null 2>&1; then
+    oms_seed_local_agent_files "$repo" "$read_tree"
+    printf '%s\n' "$read_tree"
   else
     oms_harness_mark_tmpdir "$base" "$repo" "" 2>/dev/null || true
     printf '%s\n' "$base"
@@ -743,8 +744,8 @@ ma_agy_read_cleanup() {
 
   [ -n "$dir" ] || return 0
   case "$dir" in
-    */tree)
-      base="${dir%/tree}"
+    */tree|*/tree-*)
+      base="${dir%/*}"
       if [ -n "$repo" ]; then
         git -C "$repo" worktree remove --force "$dir" >/dev/null 2>&1 || true
       fi

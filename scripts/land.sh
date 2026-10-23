@@ -423,7 +423,7 @@ run_gate() (
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  tree="$parent/wt"
+  tree="$parent/wt-${parent##*.}"
   # Local upload-pack copies objects without hardlinks or alternates. Fetch the
   # pinned SHA even if HEAD moved, and retain source remote-tracking refs used
   # by the default affected gate (clone's origin points at the local source).

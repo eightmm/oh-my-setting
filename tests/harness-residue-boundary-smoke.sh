@@ -59,12 +59,18 @@ victim_physical="$(cd "$victim" && pwd -P)"
 git -C "$repo" worktree list --porcelain | grep -Fxq "worktree $victim_physical" ||
   fail "a planted marker removed the unrelated worktree registration"
 
-# Production shape: one exact child named wt, registered to the marker
+# Production shape: a suffix-bound checkout registered to the marker
 # repository's common dir, whose owner is dead.
+residue_checkout() {
+  printf '%s/wt-%s\n' "$1" "${1##*.}"
+}
 dead_residue() {
+  local worktree
+  worktree="$(residue_checkout "$1")"
+  [ "${2:-}" != legacy ] || worktree="$1/wt"
   mkdir -p "$1"
-  git -C "$repo" worktree add --detach "$1/wt" HEAD >/dev/null 2>&1
-  oms_harness_mark_tmpdir "$1" "$repo" "$1/wt"
+  git -C "$repo" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
+  oms_harness_mark_tmpdir "$1" "$repo" "$worktree"
   sed 's/^pid=.*/pid=999999999/' "$1/.oh-my-setting-tmp" > "$1/.oh-my-setting-tmp.tmp"
   mv "$1/.oh-my-setting-tmp.tmp" "$1/.oh-my-setting-tmp"
 }
@@ -73,12 +79,12 @@ dead_residue() {
 # .oms is ignored as in real repos, so only the record check can see it.
 printf '.oms/\n' >> "$repo/.git/info/exclude"
 dead_residue "$TMPDIR/oh-my-setting-scratch.dirty"
-printf 'edit\n' >> "$TMPDIR/oh-my-setting-scratch.dirty/wt/file.txt"
+printf 'edit\n' >> "$(residue_checkout "$TMPDIR/oh-my-setting-scratch.dirty")/file.txt"
 dead_residue "$TMPDIR/oh-my-setting-scratch.untracked"
-printf 'new\n' > "$TMPDIR/oh-my-setting-scratch.untracked/wt/new.txt"
+printf 'new\n' > "$(residue_checkout "$TMPDIR/oh-my-setting-scratch.untracked")/new.txt"
 dead_residue "$TMPDIR/oh-my-setting-scratch.detached"
-git -C "$TMPDIR/oh-my-setting-scratch.detached/wt" commit -q --allow-empty -m orphan
-dead_residue "$TMPDIR/oh-my-setting-delegate.plan"
+git -C "$(residue_checkout "$TMPDIR/oh-my-setting-scratch.detached")" commit -q --allow-empty -m orphan
+dead_residue "$TMPDIR/oh-my-setting-delegate.plan" legacy
 mkdir -p "$TMPDIR/oh-my-setting-delegate.plan/wt/.oms/plan"
 printf '[]\n' > "$TMPDIR/oh-my-setting-delegate.plan/wt/.oms/plan/tasks.json"
 
@@ -100,19 +106,94 @@ for dry in 1 0; do
     fail "dry=$dry must not offer kept work for removal: $out"
   fi
 done
-for kept in scratch.dirty scratch.untracked scratch.detached delegate.plan; do
-  [ -d "$TMPDIR/oh-my-setting-$kept/wt" ] || fail "cleanup destroyed kept work in $kept"
+for kept in scratch.dirty scratch.untracked scratch.detached; do
+  [ -d "$(residue_checkout "$TMPDIR/oh-my-setting-$kept")" ] || fail "cleanup destroyed kept work in $kept"
 done
-[ "$(tail -n 1 "$TMPDIR/oh-my-setting-scratch.dirty/wt/file.txt")" = edit ] ||
+[ -d "$TMPDIR/oh-my-setting-delegate.plan/wt" ] || fail "cleanup destroyed the legacy kept checkout"
+[ "$(tail -n 1 "$(residue_checkout "$TMPDIR/oh-my-setting-scratch.dirty")/file.txt")" = edit ] ||
   fail "cleanup rewrote kept work"
 rm -rf "$TMPDIR"/oh-my-setting-scratch.* "$TMPDIR/oh-my-setting-delegate.plan"
 git -C "$repo" worktree prune
+
+# A validated checkout does not authorize removal of a sibling legacy checkout.
+mixed_parent="$TMPDIR/oh-my-setting-scratch.mixed"
+dead_residue "$mixed_parent"
+git -C "$repo" worktree add --detach "$mixed_parent/wt" HEAD >/dev/null 2>&1
+printf 'unpreserved sibling work\n' > "$mixed_parent/wt/notes.txt"
+cp "$mixed_parent/wt/notes.txt" "$TMP/mixed-sibling.expected"
+[ "$(oms_harness_tmp_residue_count)" = 0 ] ||
+  fail "doctor must not count a parent with an extra checkout as removable residue"
+for dry in 1 0; do
+  out="$(oms_harness_cleanup_temp_dirs "$dry")"
+  printf '%s\n' "$out" | grep >/dev/null -Fx \
+    "kept: $mixed_parent (dead harness temp dir; worktree residue contains an additional or unrecognized child; inspect it, then remove by hand)" ||
+    fail "dry=$dry must keep a valid checkout with a legacy sibling: $out"
+  [ -d "$mixed_parent/wt-${mixed_parent##*.}" ] &&
+    cmp -s "$TMP/mixed-sibling.expected" "$mixed_parent/wt/notes.txt" ||
+    fail "dry=$dry cleanup changed the mixed-layout checkout or sibling bytes"
+done
+rm -rf "$mixed_parent"
+git -C "$repo" worktree prune
+
+# Even a non-checkout extra file makes recursive parent removal unsafe.
+extra_parent="$TMPDIR/oh-my-setting-scratch.extra"
+dead_residue "$extra_parent"
+printf 'operator notes\n' > "$extra_parent/operator-notes.txt"
+cp "$extra_parent/operator-notes.txt" "$TMP/extra-file.expected"
+[ "$(oms_harness_tmp_residue_count)" = 0 ] ||
+  fail "doctor must not count a parent with an extra file as removable residue"
+for dry in 1 0; do
+  out="$(oms_harness_cleanup_temp_dirs "$dry")"
+  printf '%s\n' "$out" | grep >/dev/null -Fx \
+    "kept: $extra_parent (dead harness temp dir; worktree residue contains an additional or unrecognized child; inspect it, then remove by hand)" ||
+    fail "dry=$dry must keep an unknown extra parent file: $out"
+  [ -f "$extra_parent/operator-notes.txt" ] &&
+    cmp -s "$TMP/extra-file.expected" "$extra_parent/operator-notes.txt" ||
+    fail "dry=$dry cleanup changed an unknown parent file"
+done
+rm -rf "$extra_parent"
+git -C "$repo" worktree prune
+
+# Renaming a residue parent does not make a suffix-named checkout disposable.
+renamed_original="$TMPDIR/oh-my-setting-scratch.ABC123"
+renamed_parent="$TMPDIR/oh-my-setting-scratch.saved"
+dead_residue "$renamed_original"
+mv "$renamed_original" "$renamed_parent"
+renamed_tree="$renamed_parent/wt-ABC123"
+printf 'kept after parent rename\n' >> "$renamed_tree/file.txt"
+cp "$renamed_tree/file.txt" "$TMP/renamed-checkout.expected"
+for dry in 1 0; do
+  out="$(oms_harness_cleanup_temp_dirs "$dry")"
+  printf '%s\n' "$out" | grep >/dev/null -Fx \
+    "kept: $renamed_parent (dead harness temp dir; worktree unverifiable (repo moved, re-cloned or unregistered); inspect it, then remove by hand)" ||
+    fail "dry=$dry must keep a suffix-named checkout under its renamed parent: $out"
+  [ -d "$renamed_tree" ] && cmp -s "$TMP/renamed-checkout.expected" "$renamed_tree/file.txt" ||
+    fail "dry=$dry cleanup changed a renamed suffix checkout"
+done
+rm -rf "$renamed_parent"
+git -C "$repo" worktree prune
+
+# An otherwise unrecognized direct child with Git checkout metadata is also
+# potentially occupied; parent suffix validation must not authorize its removal.
+git_shape_parent="$TMPDIR/oh-my-setting-scratch.git-shape"
+git_shape_child="$git_shape_parent/renamed-checkout"
+mkdir -p "$git_shape_child"
+printf 'gitdir: /missing-registration\n' > "$git_shape_child/.git"
+oms_harness_mark_tmpdir "$git_shape_parent" "$repo" "$git_shape_child" 999999999
+for dry in 1 0; do
+  out="$(oms_harness_cleanup_temp_dirs "$dry")"
+  printf '%s\n' "$out" | grep >/dev/null -Fx \
+    "kept: $git_shape_parent (dead harness temp dir; worktree unverifiable (repo moved, re-cloned or unregistered); inspect it, then remove by hand)" ||
+    fail "dry=$dry must keep an unrecognized child with Git metadata: $out"
+  [ -f "$git_shape_child/.git" ] || fail "dry=$dry cleanup destroyed Git-shaped data"
+done
+rm -rf "$git_shape_parent"
 
 # A dead owner whose repository moved cannot be verified, and its worktree may
 # hold the only copy of the edits: keep it, never rm -rf it.
 moved_repo="$TMP/repo-moved"
 dead_residue "$TMPDIR/oh-my-setting-scratch.moved"
-printf 'edit\n' >> "$TMPDIR/oh-my-setting-scratch.moved/wt/file.txt"
+printf 'edit\n' >> "$TMPDIR/oh-my-setting-scratch.moved/wt-moved/file.txt"
 mv "$repo" "$moved_repo"
 [ "$(oms_harness_tmp_residue_count)" = 0 ] ||
   fail "doctor must not count an unverifiable worktree as removable residue"
@@ -123,7 +204,7 @@ for dry in 1 0; do
   if printf '%s\n' "$out" | grep >/dev/null -E '(would remove|removed): '; then
     fail "dry=$dry must not offer an unverifiable worktree for removal: $out"
   fi
-  [ "$(tail -n 1 "$TMPDIR/oh-my-setting-scratch.moved/wt/file.txt")" = edit ] ||
+  [ "$(tail -n 1 "$TMPDIR/oh-my-setting-scratch.moved/wt-moved/file.txt")" = edit ] ||
     fail "dry=$dry cleanup destroyed an unverifiable worktree"
 done
 rm -rf "$TMPDIR/oh-my-setting-scratch.moved"
@@ -137,7 +218,7 @@ dead_residue "$legitimate"
 oms_harness_cleanup_temp_dirs 0 >/dev/null
 [ ! -e "$legitimate" ] || fail "valid dead delegate residue was not removed"
 if git -C "$repo" worktree list --porcelain |
-    grep -Fq "worktree $legitimate/wt"; then
+    grep -Fq "worktree $legitimate/wt-${legitimate##*.}"; then
   fail "valid dead delegate worktree registration survived cleanup"
 fi
 
@@ -153,17 +234,17 @@ delegate_run() {  # NAME TASK STATE [OUTCOME]: dirty delegate worktree, its run 
   run_pid=$((run_pid + 1))
   dead_residue "$dir"
   sed "s/^pid=.*/pid=$run_pid/" "$dir/.oh-my-setting-tmp" > "$TMP/marker" && mv "$TMP/marker" "$dir/.oh-my-setting-tmp"
-  printf 'work %s\n' "$1" > "$dir/wt/new-$1.txt"
-  printf 'edit %s\n' "$1" >> "$dir/wt/file.txt"
+  printf 'work %s\n' "$1" > "$dir/wt-${dir##*.}/new-$1.txt"
+  printf 'edit %s\n' "$1" >> "$dir/wt-${dir##*.}/file.txt"
   mkdir -p "$art" "$repo/.oms/artifacts/panel-results"
   # Two-digit abbreviations: preserved patches written when the repo held fewer objects.
-  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt" read-tree HEAD
-  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt" add -A
-  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt" diff --no-ext-diff --no-textconv --abbrev=4 \
+  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt-${dir##*.}" read-tree HEAD
+  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt-${dir##*.}" add -A
+  GIT_INDEX_FILE="$tmpindex" git -C "$dir/wt-${dir##*.}" diff --no-ext-diff --no-textconv --abbrev=4 \
     --src-prefix=a/ --dst-prefix=b/ --cached --binary HEAD > "$art/claude-$1-20261018T000000Z-$run_pid.patch"
   printf '# claude delegate\n' > "$art/claude-$1-20261018T000000Z-$run_pid.md"
   attempt="$(events start --provider claude --tool peer-delegate --task-id "$2" \
-    --ref "panel_location=worktree:oh-my-setting-delegate.$1/wt" --then starting --then working)"
+    --ref "panel_location=worktree:oh-my-setting-delegate.$1/wt-$1" --then starting --then working)"
   if [ "$3" = "done" ]; then
     events transition --attempt "$attempt" --state review --then "done" >/dev/null
   elif [ "$3" != working ]; then
@@ -189,14 +270,14 @@ cleanup_out() { oms_harness_residue_reset; oms_harness_cleanup_temp_dirs "$1"; }
 drop() { rm -rf "$TMPDIR/oh-my-setting-$1"; git -C "$repo" worktree prune; }
 kept_with() {  # NAME FRAGMENT MESSAGE
   cleanup_out 0 | grep >/dev/null -F "$2" || fail "$3"
-  [ -d "$TMPDIR/oh-my-setting-delegate.$1/wt" ] || fail "$1: kept delegate was removed"
+  [ -d "$TMPDIR/oh-my-setting-delegate.$1/wt-$1" ] || fail "$1: kept delegate was removed"
   drop "delegate.$1"
 }
 
 delegate_run settled task-settled "done"
 cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegate.settled (dead harness temp dir)" ||
   fail "a finished delegate whose patch reproduces its tree must be removable"
-[ -d "$TMPDIR/oh-my-setting-delegate.settled/wt" ] || fail "dry-run removed a settled delegate"
+[ -d "$TMPDIR/oh-my-setting-delegate.settled/wt-settled" ] || fail "dry-run removed a settled delegate"
 cleanup_out 0 >/dev/null
 [ ! -e "$TMPDIR/oh-my-setting-delegate.settled" ] || fail "apply kept a settled delegate"
 
@@ -204,28 +285,28 @@ cleanup_out 0 >/dev/null
 # bytecode may go with the worktree.
 printf '__pycache__/\n*.log\n' >> "$repo/.git/info/exclude"
 delegate_run bytecode task-bytecode "done"
-mkdir -p "$TMPDIR/oh-my-setting-delegate.bytecode/wt/pkg/__pycache__"
-printf 'x' > "$TMPDIR/oh-my-setting-delegate.bytecode/wt/pkg/__pycache__/m.cpython-312.pyc"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.bytecode/wt-bytecode/pkg/__pycache__"
+printf 'x' > "$TMPDIR/oh-my-setting-delegate.bytecode/wt-bytecode/pkg/__pycache__/m.cpython-312.pyc"
 cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegate.bytecode (dead harness temp dir)" ||
   fail "ignored bytecode alone must not keep a settled delegate"
 cleanup_out 0 >/dev/null
 [ ! -e "$TMPDIR/oh-my-setting-delegate.bytecode" ] || fail "apply kept a delegate holding only bytecode"
 
 delegate_run ignored task-ignored "done"
-printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.ignored/wt/run.log"
+printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.ignored/wt-ignored/run.log"
 kept_with ignored "not settled: holds ignored file run.log" "an ignored non-bytecode file must keep the worktree"
 
 delegate_run fakecode task-fakecode "done"
-mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt/cache"
-printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt/cache/m.pyc.log"
-mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt/other/__pycache__"
-printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt/other/__pycache__/notes.log"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/cache"
+printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/cache/m.pyc.log"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/other/__pycache__"
+printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/other/__pycache__/notes.log"
 kept_with fakecode "not settled: holds ignored file " "only *.pyc/*.pyo inside __pycache__ may be discarded"
 
 # Only worker-session telemetry, cache and empty locks under .oms are disposable;
 # an unindexed artifact or a non-empty lock may be the only copy.
 delegate_run omsok task-omsok "done"
-oms_wt="$TMPDIR/oh-my-setting-delegate.omsok/wt/.oms"
+oms_wt="$TMPDIR/oh-my-setting-delegate.omsok/wt-omsok/.oms"
 mkdir -p "$oms_wt/hooks/panel-cache" "$oms_wt/artifacts"
 printf '*\n' > "$oms_wt/.gitignore"
 printf '{}\n' > "$oms_wt/hooks/events.jsonl"
@@ -237,13 +318,13 @@ cleanup_out 0 >/dev/null
 [ ! -e "$TMPDIR/oh-my-setting-delegate.omsok" ] || fail "apply kept a delegate holding only disposable .oms files"
 
 delegate_run omsart task-omsart "done"
-mkdir -p "$TMPDIR/oh-my-setting-delegate.omsart/wt/.oms/artifacts"
-printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.omsart/wt/.oms/artifacts/x.md"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.omsart/wt-omsart/.oms/artifacts"
+printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.omsart/wt-omsart/.oms/artifacts/x.md"
 kept_with omsart "holds .oms/artifacts/x.md" "an unindexed .oms artifact must keep the worktree"
 
 delegate_run omslock task-omslock "done"
-mkdir -p "$TMPDIR/oh-my-setting-delegate.omslock/wt/.oms/artifacts"
-printf 'held\n' > "$TMPDIR/oh-my-setting-delegate.omslock/wt/.oms/artifacts/x.lock"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.omslock/wt-omslock/.oms/artifacts"
+printf 'held\n' > "$TMPDIR/oh-my-setting-delegate.omslock/wt-omslock/.oms/artifacts/x.lock"
 kept_with omslock "holds .oms/artifacts/x.lock" "a non-empty lock file must keep the worktree"
 
 # A link standing where a tracked directory belongs is never followed.
@@ -251,12 +332,12 @@ mkdir -p "$repo/sub" "$TMP/outside"
 printf 'tracked\n' > "$repo/sub/a.txt"; cp "$repo/sub/a.txt" "$TMP/outside/a.txt"
 git -C "$repo" add sub && git -C "$repo" commit -qm sub
 delegate_run linked task-linked "done"
-rm -rf "$TMPDIR/oh-my-setting-delegate.linked/wt/sub"
-ln -s "$TMP/outside" "$TMPDIR/oh-my-setting-delegate.linked/wt/sub"
+rm -rf "$TMPDIR/oh-my-setting-delegate.linked/wt-linked/sub"
+ln -s "$TMP/outside" "$TMPDIR/oh-my-setting-delegate.linked/wt-linked/sub"
 kept_with linked "not settled: preserved patch" "a symlinked parent directory must keep the worktree"
 
 delegate_run mismatch task-mismatch "done"
-printf 'later\n' >> "$TMPDIR/oh-my-setting-delegate.mismatch/wt/file.txt"
+printf 'later\n' >> "$TMPDIR/oh-my-setting-delegate.mismatch/wt-mismatch/file.txt"
 kept_with mismatch "not settled: preserved patch .oms/artifacts/delegate/claude-mismatch-20261018T000000Z-$run_pid.patch does not reproduce the worktree's files" \
   "a delegate whose files moved past its patch must be kept with the mismatch named"
 
@@ -281,7 +362,7 @@ kept_with unbound "0 delegate artifacts carry pid 999998999, not one" "a run wit
 
 delegate_run twice task-twice "done"
 events start --provider claude --tool peer-delegate --task-id task-twice \
-  --ref "panel_location=worktree:oh-my-setting-delegate.twice/wt" --then starting --then working >/dev/null
+  --ref "panel_location=worktree:oh-my-setting-delegate.twice/wt-twice" --then starting --then working >/dev/null
 kept_with twice "2 attempts record this worktree, not one" "an ambiguous run binding must keep the worktree"
 
 delegate_run empty task-empty "done"
@@ -290,17 +371,18 @@ kept_with empty "is empty while the worktree has changes" "an empty preserved pa
 
 # Content staged in the real index and then deleted from the tree is work too.
 delegate_run staged task-staged "done"
-printf 'staged only\n' > "$TMPDIR/oh-my-setting-delegate.staged/wt/ghost.txt"
-git -C "$TMPDIR/oh-my-setting-delegate.staged/wt" add ghost.txt
-rm "$TMPDIR/oh-my-setting-delegate.staged/wt/ghost.txt"
+printf 'staged only\n' > "$TMPDIR/oh-my-setting-delegate.staged/wt-staged/ghost.txt"
+git -C "$TMPDIR/oh-my-setting-delegate.staged/wt-staged" add ghost.txt
+rm "$TMPDIR/oh-my-setting-delegate.staged/wt-staged/ghost.txt"
 kept_with staged "not settled: staged content in the worktree is not reproduced by preserved patch" \
   "staged-only divergence must keep the delegate"
 
 # The same preserved evidence never frees a scratch worktree.
 delegate_run scratchlike task-scratchlike "done"
 mv "$TMPDIR/oh-my-setting-delegate.scratchlike" "$TMPDIR/oh-my-setting-scratch.like"
-git -C "$repo" worktree repair "$TMPDIR/oh-my-setting-scratch.like/wt" >/dev/null 2>&1
-oms_harness_mark_tmpdir "$TMPDIR/oh-my-setting-scratch.like" "$repo" "$TMPDIR/oh-my-setting-scratch.like/wt"
+mv "$TMPDIR/oh-my-setting-scratch.like/wt-scratchlike" "$TMPDIR/oh-my-setting-scratch.like/wt-like"
+git -C "$repo" worktree repair "$TMPDIR/oh-my-setting-scratch.like/wt-like" >/dev/null 2>&1
+oms_harness_mark_tmpdir "$TMPDIR/oh-my-setting-scratch.like" "$repo" "$TMPDIR/oh-my-setting-scratch.like/wt-like"
 sed "s/^pid=.*/pid=$run_pid/" "$TMPDIR/oh-my-setting-scratch.like/.oh-my-setting-tmp" > "$TMP/marker" &&
   mv "$TMP/marker" "$TMPDIR/oh-my-setting-scratch.like/.oh-my-setting-tmp"
 cleanup_out 0 | grep >/dev/null -Fx "kept: $TMPDIR/oh-my-setting-scratch.like (dead harness temp dir; worktree has uncommitted or untracked files)" ||
@@ -309,7 +391,7 @@ drop scratch.like
 
 # The owning repo must be a distinct, surviving checkout.
 delegate_run selfowner task-selfowner "done"
-oms_harness_mark_tmpdir "$TMPDIR/oh-my-setting-delegate.selfowner" "$TMPDIR/oh-my-setting-delegate.selfowner/wt" "$TMPDIR/oh-my-setting-delegate.selfowner/wt"
+oms_harness_mark_tmpdir "$TMPDIR/oh-my-setting-delegate.selfowner" "$TMPDIR/oh-my-setting-delegate.selfowner/wt-selfowner" "$TMPDIR/oh-my-setting-delegate.selfowner/wt-selfowner"
 sed "s/^pid=.*/pid=$run_pid/" "$TMPDIR/oh-my-setting-delegate.selfowner/.oh-my-setting-tmp" > "$TMP/marker" &&
   mv "$TMP/marker" "$TMPDIR/oh-my-setting-delegate.selfowner/.oh-my-setting-tmp"
 kept_with selfowner "not settled: the owning repo is the worktree, around or inside it, or another harness temp dir" \
@@ -320,9 +402,9 @@ kept_with selfowner "not settled: the owning repo is the worktree, around or ins
 delegate_run ident task-ident "done"
 git -C "$repo" config filter.sentinel.clean "touch $TMP/filter-ran; cat"
 git -C "$repo" config filter.sentinel.smudge "touch $TMP/filter-ran; cat"
-printf 'new-ident.txt ident\nfile.txt filter=sentinel\n' > "$TMPDIR/oh-my-setting-delegate.ident/wt/.gitattributes"
+printf 'new-ident.txt ident\nfile.txt filter=sentinel\n' > "$TMPDIR/oh-my-setting-delegate.ident/wt-ident/.gitattributes"
 # shellcheck disable=SC2016
-printf "%s\n" '$Id: 0123456789abcdef $' > "$TMPDIR/oh-my-setting-delegate.ident/wt/new-ident.txt"
+printf "%s\n" '$Id: 0123456789abcdef $' > "$TMPDIR/oh-my-setting-delegate.ident/wt-ident/new-ident.txt"
 # shellcheck disable=SC2016
 sed 's/^+work ident$/+$Id$/' "$repo/.oms/artifacts/delegate/claude-ident-20261018T000000Z-$run_pid.patch" > "$TMP/ident.patch" &&
   mv "$TMP/ident.patch" "$repo/.oms/artifacts/delegate/claude-ident-20261018T000000Z-$run_pid.patch"
@@ -345,12 +427,12 @@ oms_harness_classify_dead_residue() {
   fi
   if [ -n "$relist_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
     events start --provider claude --tool peer-delegate --task-id "task-$relist_after" \
-      --ref "panel_location=worktree:oh-my-setting-delegate.$relist_after/wt" --then starting >/dev/null
+      --ref "panel_location=worktree:oh-my-setting-delegate.$relist_after/wt-$relist_after" --then starting >/dev/null
     relist_after=""
   fi
 }
 delegate_run raced task-raced "done"
-mutate_after="$TMPDIR/oh-my-setting-delegate.raced/wt/new-raced.txt"
+mutate_after="$TMPDIR/oh-my-setting-delegate.raced/wt-raced/new-raced.txt"
 kept_with raced "worktree changed during cleanup" "content changed between classification and removal must keep the worktree"
 mutate_after=""  # kept_with consumed it in a pipeline subshell
 delegate_run relisted task-relisted "done"

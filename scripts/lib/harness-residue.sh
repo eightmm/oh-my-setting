@@ -101,6 +101,31 @@ oms_harness_physical_dir() {
   printf '%s\n' "${physical//$'\r'/}"
 }
 
+# Resolve a managed checkout's residue parent without guessing from a fixed
+# child name. New names must carry the suffix of their own residue directory.
+oms_harness_residue_parent() {  # WORKTREE -> residue parent
+  local worktree="$1"
+  local parent="${worktree%/*}"
+  local leaf="${worktree##*/}"
+  local parent_name="${parent##*/}"
+  local suffix="${parent_name##*.}"
+
+  [ -n "$suffix" ] || return 1
+  case "$leaf" in
+    wt|tree) ;;
+    wt-"$suffix"|tree-"$suffix") ;;
+    *) return 1 ;;
+  esac
+  case "$parent_name" in
+    oh-my-setting-delegate.*|oh-my-setting-admit.*|oh-my-setting-scratch.*|oh-my-setting-land.*)
+      case "$leaf" in wt|wt-*) ;; *) return 1 ;; esac ;;
+    oh-my-setting-agy-read.*)
+      case "$leaf" in tree|tree-*) ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$parent"
+}
+
 oms_harness_git_path_physical() {
   local repo="$1"
   local query="$2"
@@ -126,7 +151,7 @@ OMS_HARNESS_SAFE_RESIDUE_WORKTREE=""
 # Resolve a marker only as evidence. The removal target itself is derived from
 # the managed residue shape and can therefore never be an arbitrary marker
 # path. Production creates delegate, admission, scratch and land-gate worktrees as
-# <residue>/wt and Antigravity read worktrees as <residue>/tree.
+# <residue>/wt-<suffix> and Antigravity read worktrees as <residue>/tree-<suffix>.
 oms_harness_safe_residue_worktree() {
   local base="$1"
   local dir="$2"
@@ -136,6 +161,8 @@ oms_harness_safe_residue_worktree() {
   local dir_physical=""
   local relative=""
   local child=""
+  local suffix=""
+  local leaf=""
   local expected=""
   local expected_physical=""
   local marker_worktree_physical=""
@@ -168,7 +195,13 @@ oms_harness_safe_residue_worktree() {
     *) return 1 ;;
   esac
 
-  expected="$dir_physical/$child"
+  suffix="${dir_physical##*.}"
+  leaf="$(basename "$marker_worktree")"
+  case "$leaf" in
+    "$child") expected="$dir_physical/$child" ;;
+    "$child-$suffix") expected="$dir_physical/$child-$suffix" ;;
+    *) return 1 ;;
+  esac
   [ -d "$expected" ] && [ ! -L "$expected" ] || return 1
   expected_physical="$(oms_harness_physical_dir "$expected")" || return 1
   [ "$expected_physical" = "$expected" ] || return 1
@@ -423,7 +456,7 @@ try:
             raise SystemExit(0)
 
     # The run: the one attempt whose recorded location is this worktree.
-    name = "worktree:%s/wt" % os.path.basename(os.path.dirname(os.path.realpath(wt)))
+    name = "worktree:%s/%s" % (os.path.basename(os.path.dirname(os.path.realpath(wt))), os.path.basename(os.path.realpath(wt)))
     # Each listing reads the whole lifecycle log, so a scan that sets
     # OMS_HARNESS_RESIDUE_LISTING_DIR lists each owning repo once and reuses it.
     cache = os.environ.get("OMS_HARNESS_RESIDUE_LISTING_DIR") or ""
@@ -746,17 +779,47 @@ oms_harness_cleanup_dead_locks() {
   done
 }
 
-# classify_dead_residue returns 1 for a dir it cannot verify. Without the
-# expected child that is an empty or planted shell and removable; with it, the
-# worktree may hold the only copy of its work (repo moved, re-cloned or
-# unregistered), so it is kept. The remedy cannot be `oms scratch-worktree
-# remove`: that runs git worktree remove, which fails on exactly these dirs.
-oms_harness_keep_unverifiable_residue() {  # DIR
-  local child=wt
+# A residue parent is removable only when it contains the validated checkout
+# and `.oh-my-setting-tmp`, the only metadata this file creates in that parent.
+# Unknown siblings may hold unpreserved work, even when the marker-selected
+# checkout is otherwise safe to remove.
+# The remedy cannot be `oms scratch-worktree remove`: that runs git worktree
+# remove, which fails on exactly these dirs.
+oms_harness_keep_unverifiable_residue() {  # DIR [VALIDATED_WORKTREE]
+  local child=""
+  local leaf=""
+  for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$child" ] || [ -L "$child" ] || continue
+    leaf="${child##*/}"
+    case "$leaf" in
+      .oh-my-setting-tmp) continue ;;
+      *) ;;
+    esac
+    if [ -n "${2:-}" ] && [ "$leaf" = "${2##*/}" ]; then
+      continue
+    fi
+    if [ -n "${2:-}" ]; then
+      OMS_HARNESS_RESIDUE_KEEP_REASON="residue contains an additional or unrecognized child; inspect it, then remove by hand"
+    else
+      OMS_HARNESS_RESIDUE_KEEP_REASON="unverifiable (repo moved, re-cloned or unregistered); inspect it, then remove by hand"
+    fi
+    return 0
+  done
+  return 0
+}
 
-  case "$(basename "$1")" in oh-my-setting-agy-read.*) child=tree ;; esac
-  [ -e "$1/$child" ] || [ -L "$1/$child" ] || return 0
-  OMS_HARNESS_RESIDUE_KEEP_REASON="unverifiable (repo moved, re-cloned or unregistered); inspect it, then remove by hand"
+# One predicate governs doctor counts and cleanup; its companion flag says
+# whether removal is also authorized to unregister a validated Git worktree.
+OMS_HARNESS_RESIDUE_VALIDATED=0
+oms_harness_residue_is_removable() {  # BASE DIR MARKER
+  OMS_HARNESS_RESIDUE_VALIDATED=0
+  if oms_harness_classify_dead_residue "$1" "$2" "$3"; then
+    OMS_HARNESS_RESIDUE_VALIDATED=1
+    oms_harness_keep_unverifiable_residue "$2" "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE"
+  else
+    oms_harness_keep_unverifiable_residue "$2"
+  fi
+  [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]
 }
 
 oms_harness_tmp_residue_count() {
@@ -783,9 +846,9 @@ oms_harness_tmp_residue_count() {
       oms_harness_marker_owner_alive "$marker" && continue
       # Kept work is not residue: counting it would warn with a remedy that
       # cannot act on it.
-      OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
-        oms_harness_keep_unverifiable_residue "$dir"
-      [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] || count=$((count + 1))
+      if OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_residue_is_removable "$base" "$dir" "$marker"; then
+        count=$((count + 1))
+      fi
     done
   done <<EOF
 $(oms_harness_temp_bases)
@@ -821,11 +884,8 @@ oms_harness_cleanup_temp_dirs() {
 
       safe=0
       marker_text="$(cat "$marker" 2>/dev/null)"
-      if OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_classify_dead_residue "$base" "$dir" "$marker"; then
-        safe=1
-      else
-        oms_harness_keep_unverifiable_residue "$dir"
-      fi
+      OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_residue_is_removable "$base" "$dir" "$marker" || true
+      safe="$OMS_HARNESS_RESIDUE_VALIDATED"
       if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
         printf 'kept: %s (dead harness temp dir; worktree %s)\n' \
           "$dir" "$OMS_HARNESS_RESIDUE_KEEP_REASON"
@@ -848,9 +908,14 @@ oms_harness_cleanup_temp_dirs() {
         # tree into its own scratch. What remains is the operator-applied
         # cleanup itself, between this last read and the removal below.
         proof="$OMS_HARNESS_RESIDUE_PROOF"
-        if ! oms_harness_classify_dead_residue "$base" "$dir" "$marker" ||
-            [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] ||
-            [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ] ||
+        if ! oms_harness_residue_is_removable "$base" "$dir" "$marker" ||
+            [ "$OMS_HARNESS_RESIDUE_VALIDATED" != 1 ] ||
+            [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+          printf 'kept: %s (dead harness temp dir; worktree changed during cleanup)\n' "$dir"
+          OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
+          continue
+        fi
+        if [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ] ||
             [ ! -f "$marker" ] || [ -L "$marker" ] ||
             [ "$(cat "$marker" 2>/dev/null)" != "$marker_text" ] ||
             oms_harness_marker_owner_alive "$marker"; then

@@ -1921,7 +1921,7 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
   local managed="$TMP/state-root-managed"
   local parent="env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH OMS_DELEGATE_WORKTREE_ROOT=$TMP/state-root-managed"
   local probe='. "$1/scripts/lib/agent-memory-common.sh"; oms_state_root "$2"'
-  local scratch second main plain main_head scratch_head second_head committed
+  local scratch second main plain main_head scratch_head second_head committed scratch_parent legacy
 
   make_committed_repo "$project"
   main="$(cd "$project" && pwd -P)"
@@ -1931,9 +1931,28 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
   main_head="$(git -C "$main" rev-parse HEAD)"
   git -C "$scratch" -c user.name=Test -c user.email=test@example.com commit --quiet --allow-empty -m "scratch base"
   scratch_head="$(git -C "$scratch" rev-parse HEAD)"
+  scratch_parent="$(. "$ROOT/scripts/lib/harness-residue.sh"; oms_harness_residue_parent "$scratch")" ||
+    fail "scratch path must resolve to its residue parent: $scratch"
+  legacy="$scratch_parent/wt"
+  git -C "$project" worktree add --quiet --detach "$legacy" HEAD ||
+    fail "could not create a legacy sibling scratch checkout"
   mkdir -p "$scratch/src"
   [ "$($parent bash -c "$probe" _ "$ROOT" "$scratch/src")" = "$main" ] ||
     fail "a parent's scratch state must resolve to the main checkout"
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$legacy")" = "$legacy" ] ||
+    fail "a legacy sibling must keep its own state when the suffixed checkout is marked"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed" bash -c \
+    '. "$1/scripts/lib/harness-residue.sh"; oms_harness_mark_tmpdir "$2" "$3" "$4" "$5"' \
+    _ "$ROOT" "$scratch_parent" "$main" "$legacy" "$$" ||
+    fail "could not point the scratch marker at the legacy sibling"
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$legacy")" = "$main" ] ||
+    fail "the marker-selected legacy sibling must resolve to the main checkout"
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$scratch")" = "$scratch" ] ||
+    fail "the unselected suffixed sibling must keep its own state"
+  OMS_DELEGATE_WORKTREE_ROOT="$managed" bash -c \
+    '. "$1/scripts/lib/harness-residue.sh"; oms_harness_mark_tmpdir "$2" "$3" "$4" "$5"' \
+    _ "$ROOT" "$scratch_parent" "$main" "$scratch" "$$" ||
+    fail "could not restore the scratch marker to the suffixed checkout"
   # Workers and unmarked linked worktrees keep the worktree-local root.
   [ "$($parent OMS_HARNESS_CHILD=1 bash -c "$probe" _ "$ROOT" "$scratch")" = "$scratch" ] ||
     fail "a harness child in a scratch must keep its own state root"
@@ -2115,7 +2134,7 @@ written = [row for row in rows if row.get("kind") == "commit-intent"
            and row.get("phase") == "committed" and row.get("intent_id") == "scratch-own"]
 assert written and all(row.get("worktree") == sys.argv[2] for row in written), written
 PY
-  plain="$managed/oh-my-setting-scratch.plain/wt"
+  plain="$managed/oh-my-setting-scratch.plain/wt-plain"
   git -C "$project" worktree add --quiet --detach "$plain" HEAD
   [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||
     fail "a linked worktree without a scratch marker must keep its own state root"
@@ -26148,7 +26167,7 @@ test_local_agent_files_reach_a_delegate_worktree() {
     ma_agy_read_dir "$project"
   )"
   case "$worktree" in
-    */tree) ;;
+    */tree|*/tree-*) ;;
     *) fail "ma_agy_read_dir should build a git worktree: $worktree" ;;
   esac
   assert_file_contains "$worktree/AGENTS.md" "oh-my-setting:general:begin"
@@ -30733,12 +30752,13 @@ run_delegate_beside_sibling() {  # run_delegate_beside_sibling PROJECT MANAGED_R
   local home_dir="$project-home"
   local rc=0
   local out
+  local keep_arg="${5:-}"
 
   printf '#!/usr/bin/env bash\ncat >/dev/null\n%s\necho done\n' "$body" > "$bin_dir/codex"
   chmod +x "$bin_dir/codex"
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
-    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x ${4:+--allow-no-change} \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x ${4:+--allow-no-change} $keep_arg \
     --no-verify 2>&1)" || rc=$?
   printf '%s\t%s' "$rc" "$out"
 }
@@ -30889,7 +30909,7 @@ test_worker_guard_exempts_parent_scratch_worktrees() {
   local managed_root="$TMP/guard-scratch-root"
   local parent_cmd="env -u OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH=0 OMS_DELEGATE_WORKTREE_ROOT=$managed_root $ROOT/scripts/scratch-worktree.sh"
   local bin="$TMP/guard-scratch-oms"
-  local existing marker_pid result
+  local existing marker_pid marker_parent dead_parent result
 
   make_guard_repo "$project"
   mkdir -p "$bin"
@@ -30899,7 +30919,9 @@ test_worker_guard_exempts_parent_scratch_worktrees() {
   existing="$(env -u OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH=0 \
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root" "$bin/oms" scratch-worktree add --repo "$project")" ||
     fail "parent scratch add failed: $existing"
-  marker_pid="$(sed -n 's/^pid=//p' "${existing%/wt}/.oh-my-setting-tmp")"
+  marker_parent="$(. "$ROOT/scripts/lib/harness-residue.sh"; oms_harness_residue_parent "$existing")" ||
+    fail "scratch path must resolve to its residue parent: $existing"
+  marker_pid="$(sed -n 's/^pid=//p' "$marker_parent/.oh-my-setting-tmp")"
   kill -0 "$marker_pid" 2>/dev/null ||
     fail "a scratch marker must outlive the add command (pid $marker_pid)"
   $parent_cmd list --repo "$project" | grep -Fq "$existing" ||
@@ -30907,7 +30929,7 @@ test_worker_guard_exempts_parent_scratch_worktrees() {
   # Only the worker turn acts; capability probes reach the same stub.
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
     'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
-$parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove $existing >/dev/null && if $ROOT/scripts/scratch-worktree.sh add --repo $project --owner-pid $$ 2>$project-refused; then echo refusal-missing; fi")"
+$parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove $marker_parent >/dev/null && if $ROOT/scripts/scratch-worktree.sh add --repo $project --owner-pid $$ 2>$project-refused; then echo refusal-missing; fi")"
   [ "${result%%	*}" = 0 ] ||
     fail "a parent scratch add/remove during a run must not fail the worker: $result"
   if printf '%s' "$result" | grep >/dev/null -E 'outside the worktree|refusal-missing'; then
@@ -30922,6 +30944,57 @@ $parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove 
     fail "scratch remove must refuse a path it did not create"
   fi
 
+  # An explicit legacy path must not select the marker's suffixed sibling;
+  # refusing removal must leave dirty sibling bytes and both registrations.
+  local mixed mixed_parent legacy
+  mixed="$(env -u OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH=0 \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" "$bin/oms" scratch-worktree add --repo "$project")" ||
+    fail "mixed-layout scratch add failed: $mixed"
+  mixed_parent="$(. "$ROOT/scripts/lib/harness-residue.sh"; oms_harness_residue_parent "$mixed")" ||
+    fail "mixed scratch path must resolve to its residue parent: $mixed"
+  legacy="$mixed_parent/wt"
+  git -C "$project" worktree add --detach "$legacy" HEAD >/dev/null 2>&1 ||
+    fail "could not create legacy sibling checkout"
+  printf 'legacy sibling notes\n' > "$legacy/notes.txt"
+  cp "$legacy/notes.txt" "${project}-notes.expected"
+  if $parent_cmd remove "$legacy" > "$project-mixed-remove.out" 2>&1; then
+    fail "scratch remove must refuse a requested checkout that disagrees with its marker"
+  fi
+  [ -d "$mixed" ] && [ -d "$legacy" ] &&
+    cmp -s "${project}-notes.expected" "$legacy/notes.txt" ||
+    fail "refused mixed-layout removal changed a checkout or sibling bytes"
+  git -C "$project" worktree list --porcelain | grep -Fq "worktree $mixed" &&
+    git -C "$project" worktree list --porcelain | grep -Fq "worktree $legacy" ||
+    fail "refused mixed-layout removal changed worktree registrations"
+  $parent_cmd remove --force "$mixed" >/dev/null 2>&1 ||
+    fail "--force should remove the marker-selected checkout in a mixed parent"
+  [ ! -e "$mixed" ] && [ -d "$legacy" ] && [ -d "$mixed_parent" ] &&
+    cmp -s "${project}-notes.expected" "$legacy/notes.txt" ||
+    fail "forced removal must preserve a sibling and its parent bytes"
+  git -C "$project" worktree list --porcelain | grep -Fq "worktree $legacy" &&
+    ! git -C "$project" worktree list --porcelain | grep -Fq "worktree $mixed" ||
+    fail "forced removal must unregister only the marker-selected checkout"
+  rm -rf "$mixed_parent"
+  git -C "$project" worktree prune
+
+  # Parent paths remain accepted for a legacy checkout as well as the
+  # suffixed checkout exercised above.
+  local legacy_parent legacy_parent_worktree
+  legacy_parent="$(mktemp -d "$managed_root/oh-my-setting-scratch.legacy.XXXXXX")" ||
+    fail "could not create legacy scratch parent"
+  legacy_parent_worktree="$legacy_parent/wt"
+  git -C "$project" worktree add --detach "$legacy_parent_worktree" HEAD >/dev/null 2>&1 ||
+    fail "could not create legacy scratch checkout"
+  . "$ROOT/scripts/lib/harness-residue.sh"
+  oms_harness_mark_tmpdir "$legacy_parent" "$project" "$legacy_parent_worktree" "$$" ||
+    fail "could not mark legacy scratch checkout"
+  $parent_cmd remove "$legacy_parent" >/dev/null 2>&1 ||
+    fail "scratch parent path must remove its marker-selected legacy checkout"
+  [ ! -e "$legacy_parent" ] || fail "legacy scratch parent path was not removed"
+  if git -C "$project" worktree list --porcelain | grep -Fq "worktree $legacy_parent_worktree"; then
+    fail "legacy scratch parent removal left its worktree registration"
+  fi
+
   # Once its owner exits, a scratch worktree is ordinary harness residue.
   local owner dead
   sleep 30 &
@@ -30931,7 +31004,9 @@ $parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove 
   wait "$owner" 2>/dev/null || true
   OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '. "$1"; oms_harness_cleanup_temp_dirs 0' _ \
     "$ROOT/scripts/lib/harness-residue.sh" > "$project-cleanup.out"
-  [ ! -e "${dead%/wt}" ] || fail "residue cleanup must remove a dead-owner scratch worktree"
+  dead_parent="$(. "$ROOT/scripts/lib/harness-residue.sh"; oms_harness_residue_parent "$dead")" ||
+    fail "dead scratch path must resolve to its residue parent: $dead"
+  [ ! -e "$dead_parent" ] || fail "residue cleanup must remove a dead-owner scratch worktree"
   if git -C "$project" worktree list --porcelain | grep -Fq "$dead"; then
     fail "residue cleanup must unregister a dead-owner scratch worktree"
   fi
@@ -31078,8 +31153,36 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   local dead_pid
   local body
   local result
+  local first_artifact second_artifact first_tree second_tree first_slot second_slot
+  local fake_bin="$TMP/guard-sibling-late-bin"
+  local fake_home="$TMP/guard-sibling-late-home"
 
   make_guard_repo "$project"
+  mkdir -p "$fake_bin"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\necho done\n' > "$fake_bin/codex"
+  chmod +x "$fake_bin/codex"
+  result="$(PATH="$fake_bin:/usr/bin:/bin" HOME="$fake_home" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --allow-no-change --no-verify --keep-worktree 2>&1)" ||
+    fail "first kept delegate checkout failed: $result"
+  first_artifact="$(printf '%s\n' "$result" | sed -n 's/^artifact: //p' | tail -n 1)"
+  first_tree="$(sed -n 's/^- worktree: //p' "$first_artifact" | head -n 1)"
+  result="$(PATH="$fake_bin:/usr/bin:/bin" HOME="$fake_home" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --allow-no-change --no-verify --keep-worktree 2>&1)" ||
+    fail "second kept delegate checkout failed: $result"
+  second_artifact="$(printf '%s\n' "$result" | sed -n 's/^artifact: //p' | tail -n 1)"
+  second_tree="$(sed -n 's/^- worktree: //p' "$second_artifact" | head -n 1)"
+  first_slot="$(git -C "$first_tree" rev-parse --git-dir)"; first_slot="${first_slot##*/}"
+  second_slot="$(git -C "$second_tree" rev-parse --git-dir)"; second_slot="${second_slot##*/}"
+  [ -n "$first_tree" ] && [ -n "$second_tree" ] && [ "$first_slot" != "$second_slot" ] ||
+    fail "consecutive delegate checkouts must use different Git admin slots: $first_tree ($first_slot), $second_tree ($second_slot)"
+  git -C "$project" worktree remove --force "$first_tree" >/dev/null 2>&1 || true
+  git -C "$project" worktree remove --force "$second_tree" >/dev/null 2>&1 || true
+  rm -rf "${first_tree%/*}" "${second_tree%/*}"
+  git -C "$project" worktree prune >/dev/null 2>&1 || true
   dead_pid="$(sh -c 'echo $$')"
   body="mkdir -p $sibling_parent && git -C $project worktree add --quiet --detach $sibling_parent/wt HEAD >/dev/null 2>&1 && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp"
   result="$(run_delegate_beside_sibling "$project" "$managed_root" "$body" --allow-no-change)"

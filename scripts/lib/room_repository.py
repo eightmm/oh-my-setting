@@ -9,6 +9,24 @@ EXECUTION_ENV = "OMS_PANEL_EXECUTION_ROOT"
 MARKER_LIMIT = 16 * 1024
 LIBRARY = Path(__file__).with_name("agent-memory-common.sh")
 
+
+def harness_residue_parent(value):
+    """Return the residue parent for a recognized legacy or suffix-bound checkout."""
+    worktree = Path(value)
+    parent = worktree.parent
+    name = parent.name
+    suffix = name.rpartition(".")[2]
+    if not suffix:
+        return None
+    for residue, child in (("oh-my-setting-delegate", "wt"),
+                           ("oh-my-setting-admit", "wt"),
+                           ("oh-my-setting-scratch", "wt"),
+                           ("oh-my-setting-land", "wt"),
+                           ("oh-my-setting-agy-read", "tree")):
+        if name.startswith(residue + ".") and worktree.name in (child, child + "-" + suffix):
+            return parent
+    return None
+
 # Supply the checked snapshot instead of letting the shell reopen mutable
 # marker contents. Managed paths and registration stay with the native helper:
 # Bash-minted marker paths need not use native Python's Windows spelling.
@@ -91,7 +109,8 @@ def _state_repository(value):
         return local
     parent = local.parent
     try:
-        if (local.name != "wt" or not parent.name.startswith("oh-my-setting-scratch.")
+        residue = harness_residue_parent(local)
+        if (residue is None or not residue.name.startswith("oh-my-setting-scratch.")
                 or parent.is_symlink()):
             return local
         marker = parent / ".oh-my-setting-tmp"

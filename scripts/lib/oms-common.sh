@@ -1624,12 +1624,13 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
 
   command -v oms_harness_temp_bases >/dev/null 2>&1 || return 1
   command -v oms_harness_read_marker_value >/dev/null 2>&1 || return 1
-  # Antigravity read passes register <base>/tree; every other harness tree is <base>/wt.
-  case "$wt_path" in /*/wt|/*/tree) ;; *) return 1 ;; esac
-  residue_dir="${wt_path%/*}"
-  case "$(basename "$residue_dir")/${wt_path##*/}" in
+  # Accept legacy kept worktrees and current residue-bound unique names.
+  residue_dir="$(oms_harness_residue_parent "$wt_path")" || return 1
+  base="$(basename "$residue_dir")"
+  case "$base/${wt_path##*/}" in
     oh-my-setting-delegate.*/wt|oh-my-setting-admit.*/wt|oh-my-setting-scratch.*/wt|oh-my-setting-land.*/wt) ;;
     oh-my-setting-agy-read.*/tree) ;;
+    oh-my-setting-delegate.*/wt-*|oh-my-setting-admit.*/wt-*|oh-my-setting-scratch.*/wt-*|oh-my-setting-land.*/wt-*|oh-my-setting-agy-read.*/tree-*) ;;
     *) return 1 ;;
   esac
   residue_physical="$(oms_harness_physical_dir "$residue_dir" 2>/dev/null || true)"

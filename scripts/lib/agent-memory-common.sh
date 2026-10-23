@@ -44,16 +44,17 @@ oms_state_root() {
   if [ "${OMS_HARNESS_CHILD:-0}" = 0 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] &&
     physical="$(oms_harness_physical_dir "$root" 2>/dev/null)" &&
     managed="$(oms_harness_physical_dir "$(oms_harness_delegate_worktree_root)" 2>/dev/null)"; then
-    parent="${physical%/wt}"
+    parent="$(oms_harness_residue_parent "$physical" 2>/dev/null || true)"
     marker="$parent/.oh-my-setting-tmp"
     case "$parent" in "$managed"/oh-my-setting-scratch.*) ;; *) parent="" ;; esac
-    if [ -n "$parent" ] && [ "$physical" = "$parent/wt" ] && [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    if [ -n "$parent" ] && [ -f "$marker" ] && [ ! -L "$marker" ]; then
       kind="$(oms_harness_read_marker_value "$marker" kind)"
       temporary="$(oms_harness_read_marker_value "$marker" temporary)"
       if [ "$kind" = oh-my-setting-temp ] && [ "$temporary" = 1 ] &&
         oms_harness_safe_residue_worktree "$managed" "$parent" \
           "$(oms_harness_read_marker_value "$marker" repo)" \
           "$(oms_harness_read_marker_value "$marker" worktree)" &&
+        [ "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" = "$physical" ] &&
         common="$(oms_harness_git_path_physical "$physical" --git-common-dir)" &&
         main="$(git -C "$physical" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')" &&
         main="$(oms_harness_physical_dir "${main//$'\r'/}" 2>/dev/null)" &&

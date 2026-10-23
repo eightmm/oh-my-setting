@@ -15,6 +15,7 @@ import stat
 import time
 
 from panel_results import DURABLE, _lock
+from room_repository import harness_residue_parent
 
 INTERVAL = 5
 MAX_BYTES = 8 * 1024 * 1024
@@ -479,7 +480,8 @@ def read_plan_list(repo, collect):
 
     # agent-plan redirects managed scratch worktrees to their main checkout.
     # snapshot normally already receives that canonical state repository.
-    if repo.name == 'wt' and repo.parent.name.startswith('oh-my-setting-scratch.'):
+    residue = harness_residue_parent(repo)
+    if residue is not None and residue.name.startswith('oh-my-setting-scratch.'):
         return collect()
     if any(os.environ.get(name) for name in (
             'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',

@@ -17,7 +17,7 @@ import uuid
 
 import dispatch_supervisor
 import panel_results
-from room_repository import LIBRARY, state_repository, work_repository
+from room_repository import LIBRARY, harness_residue_parent, state_repository, work_repository
 
 PREFIX = b'# oms-salvage: '
 MAX_EVIDENCE = 8 * 1024 * 1024
@@ -68,8 +68,9 @@ def _managed(repo, path):
     kept = _native_path(path).expanduser()
     physical = kept.resolve(strict=True)
     root = _worktree_root()
-    if (kept != physical or physical.name != 'wt' or physical.parent.parent != root or
-            not physical.parent.name.startswith('oh-my-setting-delegate.')):
+    residue = harness_residue_parent(physical)
+    if (kept != physical or residue is None or residue.parent != root or
+            not residue.name.startswith('oh-my-setting-delegate.')):
         raise ValueError('kept path is not an OMS-managed delegate worktree')
     marker = _read(physical.parent, '.oh-my-setting-tmp', 8192).decode()
     fields = {}
@@ -520,7 +521,7 @@ def _attempt_recovery_evidence(repo, task, attempt, indexed=None, attempt_row=No
     if execution is not None:
         location = attempt_row.get('refs', {}).get('panel_location', '')
         parts = location[len('worktree:'):].split('/') if location.startswith('worktree:') else []
-        expected_parent = parts[0] if len(parts) == 2 and parts[-1] == 'wt' else None
+        expected_parent = parts[0] if len(parts) == 2 and parts[-1] in ('wt', 'wt-' + parts[0].rpartition('.')[2]) else None
         if expected_parent:
             env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
             env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
@@ -536,7 +537,7 @@ def _attempt_recovery_evidence(repo, task, attempt, indexed=None, attempt_row=No
                 entry = next((line[9:] for line in block.splitlines() if line.startswith('worktree ')), None)
                 if entry:
                     entry_path = _native_path(entry)
-                    if (entry_path.is_dir() and entry_path.name == 'wt'
+                    if (entry_path.is_dir() and entry_path.name == parts[-1]
                             and entry_path.parent.name == expected_parent):
                         evidence.append('registered worktree: ' + str(entry_path))
 

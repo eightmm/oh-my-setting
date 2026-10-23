@@ -932,7 +932,7 @@ if [ "$delegate_root_is_default" = 1 ]; then
 fi
 worktree_parent="$(mktemp -d "$delegate_worktree_root/oh-my-setting-delegate.XXXXXX")" ||
   fail "mktemp failed in delegate worktree root: $delegate_worktree_root"
-worktree="$worktree_parent/wt"
+worktree="$worktree_parent/wt-${worktree_parent##*.}"
 worktree_created=0
 cleanup_done=0
 worker_identity_physical=""
