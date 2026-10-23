@@ -88,6 +88,24 @@ class ChildRuntimePolicyTest(unittest.TestCase):
                 self.assertFalse(child_action_is_read_only(parser.parse_args(argv)))
 
 
+class RuntimeParserTest(unittest.TestCase):
+
+    def test_repo_and_pretty_options_are_available_after_actions(self) -> None:
+        from oms_runtime.cli_parser import build_parser
+
+        parser = build_parser()
+        cases = (
+            (['--repo', 'before', 'envelope'], 'before'),
+            (['envelope', '--repo', 'after'], 'after'),
+            (['evidence', 'show', '--repo', 'nested'], 'nested'),
+            (['--repo', 'first', 'envelope', '--repo', 'last'], 'last'),
+        )
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                self.assertEqual(parser.parse_args(argv).repo, expected)
+        self.assertTrue(parser.parse_args(['envelope', '--pretty']).pretty)
+
+
 class RuntimeFixture(RuntimeFixtureBase):
 
     def test_task_status_is_read_by_the_installed_verb(self) -> None:
