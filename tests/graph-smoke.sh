@@ -311,6 +311,19 @@ impact_rc=0
 "$OMS" graph --repo "$impact" project affected --base HEAD^ --head HEAD --json \
   > "$work/affected.json" 2> "$work/affected.err" || impact_rc=$?
 [ "$impact_rc" -eq 0 ] || fail "affected exited $impact_rc: $(cat "$work/affected.err")"
+"$OMS" graph project affected --base HEAD^ --head HEAD --json --repo "$impact" \
+  > "$work/affected-after-action.json" 2> "$work/affected-after-action.err" || impact_rc=$?
+[ "$impact_rc" -eq 0 ] || fail "affected with --repo after action exited $impact_rc: $(cat "$work/affected-after-action.err")"
+cmp -s "$work/affected.json" "$work/affected-after-action.json" \
+  || fail "affected with --repo after action differed from top-level --repo"
+"$OMS" graph --repo "$tmp" project api alpha.py --pretty \
+  > "$work/api-before.pretty.json" 2> "$work/api-before.pretty.err" || graph_rc=$?
+[ "$graph_rc" -eq 0 ] || fail "api with top-level --pretty exited $graph_rc: $(cat "$work/api-before.pretty.err")"
+"$OMS" graph project --repo "$tmp" api alpha.py --pretty \
+  > "$work/api-after-group.pretty.json" 2> "$work/api-after-group.pretty.err" || graph_rc=$?
+[ "$graph_rc" -eq 0 ] || fail "api with --repo after group exited $graph_rc: $(cat "$work/api-after-group.pretty.err")"
+cmp -s "$work/api-before.pretty.json" "$work/api-after-group.pretty.json" \
+  || fail "api with --repo after group differed from top-level --repo"
 python3 - "$work/affected.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1]))

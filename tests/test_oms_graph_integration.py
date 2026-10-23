@@ -475,6 +475,21 @@ test_consumer_sibling() {
         self.assertEqual(with_option["mode"], "affected")
         self.assertEqual(set(with_option["tests"]), {"tests/operator/dispatch_results.py", "tests/test_other.py"})
 
+    def test_cli_parser_accepts_repo_and_pretty_at_each_level_and_later_repo_wins(self) -> None:
+        parser = cli.build_parser()
+        cases = (
+            (["--repo", "first", "project", "api", "x.py"], "first"),
+            (["project", "--repo", "group", "api", "x.py"], "group"),
+            (["project", "api", "x.py", "--repo", "action"], "action"),
+            (["--repo", "first", "project", "api", "x.py", "--repo", "last"], "last"),
+        )
+        for argv, expected_repo in cases:
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertEqual(args.repo, expected_repo)
+        self.assertTrue(parser.parse_args(["project", "api", "x.py", "--pretty"]).pretty)
+        self.assertTrue(parser.parse_args(["--pretty", "project", "api", "x.py"]).pretty)
+
     def test_non_utf8_test_diff_fails_open(self) -> None:
         path = "tests/test_feature.py"
         self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],

@@ -32,6 +32,7 @@ bash scripts/graph.sh exec status
 ```
 
 The full command syntax and output options are in the [CLI reference](#cli).
+For `oms graph`, `--repo` and `--pretty` work before or after a group/action; a later repeated value wins.
 
 ```text
                              OMS
