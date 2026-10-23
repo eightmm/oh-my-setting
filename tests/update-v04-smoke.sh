@@ -212,6 +212,21 @@ PY_OPTOUT
   [ ! -e "$home/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
     fail "plain update re-enabled a disabled update timer"
 
+  cp "$receipt" "$TMP/stray-target-receipt"
+  local stray_target_rc=0
+  env -u OH_MY_SETTING_UPDATE_EXPECTED_TARGET HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_UPDATE_TARGET_COMMIT="$first" \
+    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools > "$TMP/stray-target.out" 2>&1 ||
+    stray_target_rc=$?
+  [ "$stray_target_rc" = 75 ] ||
+    fail "manual update accepted a stray selected-target override (exit $stray_target_rc)"
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$good" ] ||
+    fail "stray selected-target override changed HEAD"
+  cmp -s "$receipt" "$TMP/stray-target-receipt" ||
+    fail "stray selected-target override changed the receipt"
+  grep -Fq 'selected update target requires the expected-target fence' "$TMP/stray-target.out" ||
+    fail "stray selected-target override refusal was not explained"
+
   cp "$receipt" "$TMP/expected-target-receipt"
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$first" PATH="/usr/bin:/bin" \
@@ -436,13 +451,18 @@ test_schema1_update_preserves_channel_pin_and_cron() {
   local source="$TMP/schema1-source"
   local installed="$TMP/schema1-installed"
   local detached="$TMP/schema1-detached"
+  local edge_installed="$TMP/schema1-edge-installed"
   local home="$TMP/schema1-update-home"
   local detached_home="$TMP/schema1-detached-home"
+  local edge_home="$TMP/schema1-edge-home"
   local receipt="$home/.config/oh-my-setting/install.json"
   local detached_receipt="$detached_home/.config/oh-my-setting/install.json"
+  local edge_receipt="$edge_home/.config/oh-my-setting/install.json"
   local cron_file="$home/cron.txt"
   local base
   local release_head
+  local bad_tip
+  local divergent merge_target alternate
 
   git clone -q "$ROOT" "$source"
   for file in scripts/update.sh scripts/link.sh scripts/doctor.sh \
@@ -501,6 +521,129 @@ assert d["components"]["auto_update"] is True
 PY
   grep -Fq '# oh-my-setting autoupdate:begin' "$cron_file" ||
     fail "schema-1 cron trigger was removed during migration"
+
+  # A fallback target stays within the configured branch ref and current
+  # checkout ancestry; the next update must still advance to that branch tip.
+  git -C "$source" checkout -q release-line
+  printf 'cancelled tip\n' > "$source/cancelled-tip"
+  git -C "$source" add cancelled-tip
+  git -C "$source" commit -qm 'fixture: cancelled tip'
+  bad_tip="$(git -C "$source" rev-parse HEAD)"
+  git -C "$installed" checkout -q --detach "$base"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" OH_MY_SETTING_AUTO_UPDATE_METHOD=cron \
+    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$bad_tip" \
+    OH_MY_SETTING_UPDATE_TARGET_COMMIT="$release_head" PATH="/usr/bin:/bin" \
+    "$installed/scripts/update.sh" --no-tools > "$TMP/selected-target.out" 2>&1 ||
+    { cat "$TMP/selected-target.out" >&2; fail "selected green commit should update safely"; }
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$release_head" ] ||
+    fail "selected green commit missed the fallback target"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ref"])' "$receipt")" = "release-line" ] ||
+    fail "selected green commit changed the configured receipt ref"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" OH_MY_SETTING_AUTO_UPDATE_METHOD=cron \
+    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools >/dev/null
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$bad_tip" ] ||
+    fail "the next update did not follow the configured branch ref"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ref"])' "$receipt")" = "release-line" ] ||
+    fail "the next update changed the configured receipt ref"
+
+  # When origin's default branch has no local branch yet, selected green
+  # commits must still be checked out exactly instead of starting at its tip.
+  git -C "$source" symbolic-ref HEAD refs/heads/release-line
+  git clone -q "$source" "$edge_installed"
+  git -C "$edge_installed" checkout -q --detach "$base"
+  git -C "$edge_installed" branch -D release-line >/dev/null
+  git -C "$edge_installed" checkout -qb installed-base "$base"
+  [ "$(git -C "$edge_installed" symbolic-ref --quiet --short refs/remotes/origin/HEAD)" = "origin/release-line" ] ||
+    fail "edge fixture did not use release-line as origin's default"
+  if git -C "$edge_installed" show-ref --verify --quiet refs/heads/release-line; then
+    fail "edge fixture unexpectedly has a local default branch"
+  fi
+  mkdir -p "$edge_home"
+  HOME="$edge_home" XDG_CONFIG_HOME="$edge_home/.config" OMS_INSTALL_RECEIPT="$edge_receipt" \
+    OH_MY_SETTING_REF=edge OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$edge_installed/scripts/link.sh" >/dev/null
+  HOME="$edge_home" XDG_CONFIG_HOME="$edge_home/.config" OMS_INSTALL_RECEIPT="$edge_receipt" \
+    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$bad_tip" \
+    OH_MY_SETTING_UPDATE_TARGET_COMMIT="$release_head" PATH="/usr/bin:/bin" \
+    "$edge_installed/scripts/update.sh" --no-tools > "$TMP/edge-selected-target.out" 2>&1 ||
+    { cat "$TMP/edge-selected-target.out" >&2; fail "edge fallback should apply the selected green commit"; }
+  [ "$(git -C "$edge_installed" rev-parse HEAD)" = "$release_head" ] ||
+    fail "edge fallback ended at the unverified tip instead of the green commit"
+  [ "$(git -C "$edge_installed" symbolic-ref --quiet --short HEAD)" = "release-line" ] ||
+    fail "edge fallback did not create the configured default branch"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ref"])' "$edge_receipt")" = "edge" ] ||
+    fail "edge fallback changed the configured receipt ref"
+
+  # If an existing edge branch cannot move back to the selected green commit,
+  # reject the apply and restore the branch and HEAD from before checkout.
+  git -C "$edge_installed" checkout -q installed-base
+  git -C "$edge_installed" branch -f release-line "$bad_tip"
+  cp "$edge_receipt" "$TMP/edge-receipt-before-mismatch"
+  local mismatch_rc=0
+  HOME="$edge_home" XDG_CONFIG_HOME="$edge_home/.config" OMS_INSTALL_RECEIPT="$edge_receipt" \
+    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$bad_tip" \
+    OH_MY_SETTING_UPDATE_TARGET_COMMIT="$release_head" PATH="/usr/bin:/bin" \
+    "$edge_installed/scripts/update.sh" --no-tools > "$TMP/edge-head-mismatch.out" 2>&1 ||
+    mismatch_rc=$?
+  [ "$mismatch_rc" = 75 ] || fail "edge HEAD mismatch returned $mismatch_rc, not 75"
+  [ "$(git -C "$edge_installed" rev-parse HEAD)" = "$base" ] ||
+    fail "edge HEAD mismatch did not restore the previous commit"
+  [ "$(git -C "$edge_installed" symbolic-ref --quiet --short HEAD)" = "installed-base" ] ||
+    fail "edge HEAD mismatch did not restore the previous branch"
+  cmp -s "$edge_receipt" "$TMP/edge-receipt-before-mismatch" ||
+    fail "edge HEAD mismatch changed the receipt before rejecting the target"
+  grep -Fq 'applied update target does not match selected commit' "$TMP/edge-head-mismatch.out" ||
+    fail "edge HEAD mismatch was not explained"
+
+  git -C "$source" checkout -qb divergent-from-base "$base"
+  printf 'divergent parent\n' > "$source/divergent-marker"
+  git -C "$source" add divergent-marker
+  git -C "$source" commit -qm 'fixture: divergent parent'
+  divergent="$(git -C "$source" rev-parse HEAD)"
+  git -C "$source" checkout -qb merge-ref "$bad_tip"
+  git -C "$source" merge --no-ff -s ours -m 'fixture: second-parent target' \
+    divergent-from-base >/dev/null
+  merge_target="$(git -C "$source" rev-parse HEAD)"
+  git -C "$source" checkout -q release-line
+  git -C "$source" merge --ff-only merge-ref >/dev/null
+  git -C "$installed" fetch origin >/dev/null
+
+  # The selected commit is inside the fetched ref but does not contain the
+  # installed second parent, so the updater must reject the non-fast-forward.
+  git -C "$installed" checkout -q --detach "$divergent"
+  local selected_rc=0
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$merge_target" \
+    OH_MY_SETTING_UPDATE_TARGET_COMMIT="$bad_tip" PATH="/usr/bin:/bin" \
+    "$installed/scripts/update.sh" --no-tools > "$TMP/invalid-descendant.out" 2>&1 ||
+    selected_rc=$?
+  [ "$selected_rc" = 75 ] || fail "non-descendant selected commit returned $selected_rc, not 75"
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$divergent" ] ||
+    fail "non-descendant selected commit changed HEAD"
+  grep -Fq 'selected update target is not a valid fast-forward' "$TMP/invalid-descendant.out" ||
+    fail "non-descendant selected commit was not explained"
+
+  # A commit ahead of HEAD but outside the fetched configured ref also fails.
+  git -C "$source" checkout -qb alternate-from-base "$base"
+  printf 'alternate parent\n' > "$source/alternate-marker"
+  git -C "$source" add alternate-marker
+  git -C "$source" commit -qm 'fixture: alternate parent'
+  alternate="$(git -C "$source" rev-parse HEAD)"
+  git -C "$installed" fetch origin >/dev/null
+  git -C "$installed" checkout -q --detach "$base"
+  selected_rc=0
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$merge_target" \
+    OH_MY_SETTING_UPDATE_TARGET_COMMIT="$alternate" PATH="/usr/bin:/bin" \
+    "$installed/scripts/update.sh" --no-tools > "$TMP/invalid-ref-ancestor.out" 2>&1 ||
+    selected_rc=$?
+  [ "$selected_rc" = 75 ] || fail "commit outside configured ref returned $selected_rc, not 75"
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$base" ] ||
+    fail "commit outside configured ref changed HEAD"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ref"])' "$receipt")" = "release-line" ] ||
+    fail "rejected selected commits changed the configured receipt ref"
 
   git clone -q "$source" "$detached"
   git -C "$detached" checkout -q --detach "$base"
@@ -679,11 +822,29 @@ test_schema1_auto_update_reuses_update_transaction() {
   local receipt="$home/.config/oh-my-setting/install.json"
   local marker="$home/update.argv"
   local state="$home/auto-update.status"
-  local base target
+  local base green_parent target counter
 
   mkdir -p "$repo/scripts/lib" "$repo/local" "$(dirname "$receipt")"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
-  printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
+  cat > "$repo/scripts/lib/ci-query.py" <<'PY'
+import os, sys
+sha = sys.argv[2]
+result = os.environ.get("OMS_TEST_CI_RESULT", "success")
+if result == "eventual-success" and sha == os.environ["OMS_TEST_UPDATE_TARGET"]:
+    if sys.argv[3] != "2400":
+        raise SystemExit("auto-update did not pass the bounded CI wait budget")
+    counter = os.environ["OMS_TEST_CI_COUNTER"]
+    try:
+        count = int(open(counter).read())
+    except (OSError, ValueError):
+        count = 0
+    open(counter, "w").write(str(count + 1))
+    # The stub models ci-query's bounded wait and reports the final result.
+    result = "success"
+elif sha == os.environ.get("OMS_TEST_CI_GREEN_SHA"):
+    result = "success"
+print("1 " + result)
+PY
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cat > "$repo/scripts/update.sh" <<'EOF'
@@ -697,9 +858,12 @@ if [ "${1:-}" = --check ]; then
   printf 'update-check: available %s -> %s\n' "$current" "$OMS_TEST_UPDATE_TARGET"
   exit 0
 fi
+selected="${OH_MY_SETTING_UPDATE_TARGET_COMMIT:-$OMS_TEST_UPDATE_TARGET}"
 [ "${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-}" = "$OMS_TEST_UPDATE_TARGET" ] || exit 75
-git -C "$root" checkout -q --detach "$OMS_TEST_UPDATE_TARGET"
-printf 'updated: %s -> %s\n' "${current:0:7}" "${OMS_TEST_UPDATE_TARGET:0:7}"
+[ "$selected" = "$OMS_TEST_EXPECTED_TARGET" ] || exit 75
+printf 'target-commit=%s\n' "${OH_MY_SETTING_UPDATE_TARGET_COMMIT:-}" >> "$OMS_TEST_UPDATE_MARKER"
+git -C "$root" checkout -q --detach "$selected"
+printf 'updated: %s -> %s\n' "${current:0:7}" "${selected:0:7}"
 EOF
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
   git -C "$repo" init -q
@@ -710,6 +874,9 @@ EOF
   git -C "$repo" add .
   git -C "$repo" commit -qm base
   base="$(git -C "$repo" rev-parse HEAD)"
+  printf 'green parent\n' >> "$repo/value"
+  git -C "$repo" commit -qam 'green parent'
+  green_parent="$(git -C "$repo" rev-parse HEAD)"
   printf 'target\n' > "$repo/value"
   git -C "$repo" commit -qam target
   target="$(git -C "$repo" rev-parse HEAD)"
@@ -733,32 +900,156 @@ PY
   grep -Fxq -- '--check' "$marker" ||
     fail "schema-1 auto-update check bypassed the canonical updater"
 
-  local ci_result
-  for ci_result in pending failure missing; do
+  counter="$home/ci-counter"
+  local ci_result expected_target inherited_target
+  for ci_result in eventual-success cancelled failed no-green; do
+    : > "$marker"
+    rm -f "$counter"
+    expected_target="$target"
+    case "$ci_result" in
+      cancelled|no-green) OMS_TEST_CI_RESULT=cancelled ;;
+      failed) OMS_TEST_CI_RESULT=failure ;;
+      *) OMS_TEST_CI_RESULT=eventual-success ;;
+    esac
+    if [ "$ci_result" = cancelled ]; then expected_target="$green_parent"; fi
+    if [ "$ci_result" = no-green ]; then OMS_TEST_CI_RESULT=cancelled; fi
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+      OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
+      OMS_TEST_CI_RESULT="$OMS_TEST_CI_RESULT" OMS_TEST_CI_COUNTER="$counter" \
+      OMS_TEST_CI_GREEN_SHA="$([ "$ci_result" = cancelled ] && printf '%s' "$green_parent")" \
+      OMS_TEST_UPDATE_MARKER="$marker" OMS_TEST_UPDATE_TARGET="$target" \
+      OMS_TEST_EXPECTED_TARGET="$expected_target" \
+      "$repo/scripts/auto-update.sh" apply >/dev/null
+    if [ "$ci_result" = eventual-success ] || [ "$ci_result" = cancelled ]; then
+      [ "$(git -C "$repo" rev-parse HEAD)" = "$expected_target" ] ||
+        fail "CI $ci_result did not apply the expected target"
+      grep -Fq 'status=applied' "$state" || fail "CI $ci_result apply outcome missing"
+      if [ "$ci_result" = cancelled ]; then
+        grep -Fq -- "target-commit=$expected_target" "$marker" ||
+          fail "CI $ci_result did not pass the selected commit through the internal target contract"
+        if grep -Fq -- '--ref' "$marker"; then
+          fail "CI $ci_result changed the configured install ref with a CLI override"
+        fi
+        python3 - "$receipt" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8"))["channel"] == "main"
+PY
+      fi
+      [ "$(grep -c '^--check$' "$marker")" = 1 ] ||
+        fail "schema-1 CI $ci_result did not preflight exactly once"
+      if grep -Fxq -- '--no-tools' "$marker"; then
+        fail "schema-1 auto-update must not suppress provider updates"
+      fi
+      git -C "$repo" checkout -q --detach "$base"
+    else
+      [ "$(git -C "$repo" rev-parse HEAD)" = "$base" ] || fail "unconfirmed CI moved schema-1 checkout"
+      [ "$(cat "$marker")" = --check ] || fail "unconfirmed CI invoked the mutating updater"
+      grep -Fq 'CI success not confirmed' "$state" || fail "CI deferral reason missing"
+      if [ "$ci_result" = failed ]; then
+        grep -Fq 'failed' "$state" || fail "failed CI reason missing"
+      else
+        grep -Fq 'no green descendant' "$state" || fail "no green descendant reason missing"
+      fi
+    fi
+  done
+
+  # Caller-provided internal overrides must not defeat this run's own CI
+  # selection, whether the stale value names an intermediate or current HEAD.
+  for inherited_target in "$green_parent" "$base"; do
+    git -C "$repo" checkout -q --detach "$base"
     : > "$marker"
     HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
       OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
-      OMS_TEST_CI_RESULT="$ci_result" OMS_TEST_UPDATE_MARKER="$marker" \
-      OMS_TEST_UPDATE_TARGET="$target" "$repo/scripts/auto-update.sh" apply >/dev/null
-    [ "$(git -C "$repo" rev-parse HEAD)" = "$base" ] || fail "unconfirmed CI moved schema-1 checkout"
-    [ "$(cat "$marker")" = --check ] || fail "unconfirmed CI invoked the mutating updater"
-    grep -Fq 'CI success not confirmed' "$state" || fail "CI deferral reason missing"
+      OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_MARKER="$marker" \
+      OMS_TEST_UPDATE_TARGET="$target" OMS_TEST_EXPECTED_TARGET="$target" \
+      OH_MY_SETTING_UPDATE_TARGET_COMMIT="$inherited_target" \
+      "$repo/scripts/auto-update.sh" apply > /dev/null
+    [ "$(git -C "$repo" rev-parse HEAD)" = "$target" ] ||
+      fail "inherited target override $inherited_target defeated the green tip"
+    grep -Fq -- "target-commit=$target" "$marker" ||
+      fail "auto-update did not pass its selected green tip over an inherited override"
   done
+  git -C "$repo" checkout -q --detach "$base"
 
   : > "$marker"
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
-    OMS_TEST_UPDATE_MARKER="$marker" \
-    OMS_TEST_UPDATE_TARGET="$target" "$repo/scripts/auto-update.sh" apply >/dev/null
+    OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_MARKER="$marker" \
+    OMS_TEST_UPDATE_TARGET="$target" OMS_TEST_EXPECTED_TARGET="$target" \
+    "$repo/scripts/auto-update.sh" apply >/dev/null
   [ "$(git -C "$repo" rev-parse HEAD)" = "$target" ] ||
-    fail "schema-1 auto-update did not apply through the canonical updater"
-  [ "$(grep -c '^--check$' "$marker")" = 1 ] ||
-    fail "schema-1 auto-update did not preflight exactly once"
-  if grep -Fxq -- '--no-tools' "$marker"; then
-    fail "schema-1 auto-update must not suppress provider updates"
-  fi
-  grep -Fq 'status=applied' "$state" ||
-    fail "schema-1 auto-update did not record the canonical transaction outcome"
+    fail "the next scheduled run did not follow the configured ref after fallback"
+  grep -Fxq "target-commit=$target" "$marker" ||
+    fail "the next scheduled run did not replace the fallback target with the green tip"
+  python3 - "$receipt" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8"))["channel"] == "main"
+PY
+}
+
+test_ci_query_waits_for_pending_run() {
+  local gh="$TMP/gh-ci-query" counter="$TMP/gh-ci-query-count" sha result elapsed
+  sha=0123456789abcdef0123456789abcdef01234567
+  cat > "$gh" <<'PY'
+#!/usr/bin/env python3
+import json, os, sys
+import time
+args = sys.argv[1:]
+sha = args[args.index("--commit") + 1]
+counter = os.environ["OMS_TEST_CI_COUNTER"]
+try:
+    count = int(open(counter).read())
+except (OSError, ValueError):
+    count = 0
+open(counter, "w").write(str(count + 1))
+delay = os.environ.get("OMS_TEST_CI_DELAY")
+if delay:
+    time.sleep(float(delay))
+    status, conclusion = "completed", "success"
+elif count > 0 and os.environ.get("OMS_TEST_CI_SLOW_SECOND"):
+    time.sleep(float(os.environ["OMS_TEST_CI_SLOW_SECOND"]))
+    status, conclusion = "completed", "success"
+else:
+    status = "in_progress" if count == 0 else "completed"
+    conclusion = None if count == 0 else "success"
+print(json.dumps([{"databaseId": 42, "status": status,
+                   "conclusion": conclusion, "headSha": sha}]))
+PY
+  chmod +x "$gh"
+  result="$(OMS_GH_BIN="$gh" OMS_TEST_CI_COUNTER="$counter" \
+    python3 "$ROOT/scripts/lib/ci-query.py" \
+    https://github.com/example/repo.git "$sha" 11 "" test.yml)" ||
+    fail "ci-query rejected a pending run that completed within its budget"
+  [ "$result" = '42 success' ] || fail "ci-query did not return the completed success: $result"
+  [ "$(cat "$counter")" = 2 ] || fail "ci-query did not poll the pending run"
+  rm -f "$counter"
+  elapsed="$(OMS_GH_BIN="$gh" OMS_TEST_CI_COUNTER="$counter" OMS_TEST_CI_SLOW_SECOND=1.2 \
+    python3 - "$ROOT/scripts/lib/ci-query.py" "$sha" <<'PY'
+import subprocess, sys, time
+start = time.monotonic()
+run = subprocess.run([sys.executable, sys.argv[1], "https://github.com/example/repo.git",
+                      sys.argv[2], "11", "", "test.yml"],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+elapsed = time.monotonic() - start
+if run.returncode or run.stdout.strip() != "42 pending" or elapsed > 11.8:
+    print("unexpected positive-budget result: rc=%s output=%r elapsed=%.3f" %
+          (run.returncode, run.stdout.strip(), elapsed), file=sys.stderr)
+    raise SystemExit(1)
+print("%.3f" % elapsed)
+PY
+  )" || fail "ci-query exceeded its positive wait budget after a pending response"
+  [ "$(cat "$counter")" = 2 ] || fail "ci-query did not exercise the slow second request"
+  python3 - "$elapsed" <<'PY' || fail "ci-query positive-budget wait exceeded its margin"
+import sys
+assert float(sys.argv[1]) <= 11.8
+PY
+  rm -f "$counter"
+  result="$(OMS_GH_BIN="$gh" OMS_TEST_CI_COUNTER="$counter" OMS_TEST_CI_DELAY=1.2 \
+    python3 "$ROOT/scripts/lib/ci-query.py" \
+    https://github.com/example/repo.git "$sha" 0 "" test.yml)" ||
+    fail "ci-query timed out a successful response with a zero poll budget"
+  [ "$result" = '42 success' ] || fail "zero-budget ci-query missed successful evidence: $result"
+  [ "$(cat "$counter")" = 1 ] || fail "zero-budget ci-query made more than one request"
 }
 
 test_schema2_auto_update_apply_skips_dirty_and_diverged() {
@@ -767,11 +1058,20 @@ test_schema2_auto_update_apply_skips_dirty_and_diverged() {
   local receipt="$home/.config/oh-my-setting/install.json"
   local state="$home/auto-update.status"
   local marker="$home/apply-called"
-  local base target current holder i
+  local base target current holder i long_green long_tip step
 
   mkdir -p "$repo/scripts/lib" "$home/.config/oh-my-setting"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
-  printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
+  cat > "$repo/scripts/lib/ci-query.py" <<'PY'
+import os, sys
+sha = sys.argv[2]
+result = os.environ.get("OMS_TEST_CI_RESULT", "success")
+if sha == os.environ.get("OMS_TEST_CI_TIP"):
+    result = "cancelled"
+elif sha == os.environ.get("OMS_TEST_CI_GREEN"):
+    result = "success"
+print("1 " + result)
+PY
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cat > "$repo/scripts/update.sh" <<'EOF'
@@ -787,7 +1087,11 @@ if [ -n "${OMS_TEST_UPDATE_APPLY_TARGET:-}" ] &&
   echo "error: update target changed after preflight: expected ${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-none}, actual $OMS_TEST_UPDATE_APPLY_TARGET" >&2
   exit 75
 fi
-printf 'apply\n' >> "$OMS_TEST_UPDATE_MARKER"
+if [ -n "${OH_MY_SETTING_UPDATE_TARGET_COMMIT:-}" ]; then
+  printf 'apply-target=%s\n' "$OH_MY_SETTING_UPDATE_TARGET_COMMIT" >> "$OMS_TEST_UPDATE_MARKER"
+else
+  printf 'apply\n' >> "$OMS_TEST_UPDATE_MARKER"
+fi
 EOF
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
   git -C "$repo" init -q
@@ -876,6 +1180,54 @@ PY
     fail "schema-2 auto-update did not skip a ref changed after ancestry preflight"
   grep -Fq 'status=skipped' "$state" || fail "retargeted schema-2 skip was not recorded"
   [ ! -e "$marker" ] || fail "retargeted schema-2 auto-update applied an unchecked target"
+
+  # The installed HEAD is the merge's second parent. A green first-parent
+  # commit is therefore not a fast-forward candidate and must not be selected.
+  git -C "$repo" branch installed-head "$current"
+  git -C "$repo" checkout -qb merge-target "$target"
+  git -C "$repo" merge --no-ff -s ours -m 'fixture: merge installed second parent' installed-head >/dev/null
+  local merge_target
+  merge_target="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" checkout -q installed-head
+  rm -f "$marker"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto.log" \
+    OMS_TEST_UPDATE_TARGET="$merge_target" OMS_TEST_UPDATE_MARKER="$marker" \
+    OMS_TEST_CI_TIP="$merge_target" OMS_TEST_CI_GREEN="$target" \
+    "$repo/scripts/auto-update.sh" apply > "$home/second-parent.out"
+  grep -Fq 'auto-update: skipped' "$home/second-parent.out" ||
+    fail "schema-2 auto-update selected a green but diverged first-parent commit"
+  grep -Fq 'no green descendant' "$state" ||
+    fail "second-parent merge skip did not name the missing fast-forward candidate"
+  [ ! -e "$marker" ] ||
+    fail "schema-2 auto-update tried to apply a non-descendant green candidate"
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$current" ] ||
+    fail "second-parent merge skip changed the installed HEAD"
+
+  # Keep a long first-parent history bounded and name that bound in the
+  # persisted attention reason when the only green commit is beyond it.
+  git -C "$repo" checkout -qb bounded-history "$current"
+  for step in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
+    printf 'history %s\n' "$step" >> "$repo/value"
+    git -C "$repo" add value
+    git -C "$repo" commit -qm "fixture: bounded history $step"
+    if [ "$step" = 1 ]; then long_green="$(git -C "$repo" rev-parse HEAD)"; fi
+  done
+  long_tip="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" checkout -q installed-head
+  rm -f "$marker"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto.log" \
+    OMS_TEST_UPDATE_TARGET="$long_tip" OMS_TEST_UPDATE_MARKER="$marker" \
+    OMS_TEST_CI_RESULT=cancelled OMS_TEST_CI_TIP="$long_tip" OMS_TEST_CI_GREEN="$long_green" \
+    "$repo/scripts/auto-update.sh" apply > "$home/bounded-history.out"
+  grep -Fq 'auto-update: skipped' "$home/bounded-history.out" ||
+    fail "bounded fallback history did not skip when no scanned commit was green"
+  grep -Fq 'fallback scan limit reached (20 commits)' "$state" ||
+    fail "bounded fallback history did not report its scan limit in the attention state"
+  [ ! -e "$marker" ] || fail "bounded fallback history applied an unscanned commit"
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$current" ] ||
+    fail "bounded fallback history changed the installed HEAD"
 }
 
 test_missing_codex_degrades_and_dead_ref_is_fail_closed() {
@@ -1035,6 +1387,7 @@ test_schema1_update_preserves_channel_pin_and_cron
 test_signal_during_doctor_rolls_back_transaction
 test_detached_schema2_auto_update_check
 test_schema1_auto_update_reuses_update_transaction
+test_ci_query_waits_for_pending_run
 test_schema2_auto_update_apply_skips_dirty_and_diverged
 test_missing_codex_degrades_and_dead_ref_is_fail_closed
 test_auto_update_failure_message_names_the_error

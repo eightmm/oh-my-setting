@@ -359,6 +359,31 @@ if [ -n "${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-}" ] &&
   exit 75
 fi
 
+# Auto-update may select an older green commit while preserving the configured
+# ref. Keep that commit inside both the fetched ref and the current checkout's
+# fast-forward ancestry before using it as the transaction target.
+selected_target="${OH_MY_SETTING_UPDATE_TARGET_COMMIT:-}"
+if [ -n "$selected_target" ]; then
+  if [ -z "${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-}" ]; then
+    echo "error: selected update target requires the expected-target fence" >&2
+    exit 75
+  fi
+  case "$selected_target" in
+    *[!0-9a-f]*)
+      echo "error: selected update target is not a valid fast-forward commit" >&2
+      exit 75
+      ;;
+  esac
+  selected_full="$(git -C "$ROOT" rev-parse --verify --quiet "$selected_target^{commit}" 2>/dev/null || true)"
+  if [ "$selected_full" != "$selected_target" ] ||
+     ! git -C "$ROOT" merge-base --is-ancestor "$selected_target" "$target" 2>/dev/null ||
+     ! git -C "$ROOT" merge-base --is-ancestor "$current" "$selected_target" 2>/dev/null; then
+    echo "error: selected update target is not a valid fast-forward commit" >&2
+    exit 75
+  fi
+  target="$selected_target"
+fi
+
 if [ -n "$dirty" ]; then
   echo "error: refusing update or rollback from a dirty install checkout: $ROOT" >&2
   exit 1
@@ -554,15 +579,26 @@ apply_target() {
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$edge_branch"; then
     git -C "$ROOT" checkout "$edge_branch"
   else
-    git -C "$ROOT" checkout -b "$edge_branch" --track "origin/$edge_branch"
+    git -C "$ROOT" checkout -b "$edge_branch" "$target"
+    git -C "$ROOT" branch --set-upstream-to="origin/$edge_branch" "$edge_branch"
   fi
   git -C "$ROOT" merge --ff-only "$target"
 }
 
 TRANSACTION_ACTIVE=1
-if ! apply_target; then
+if apply_target; then
+  :
+else
+  apply_status=$?
   restore_previous "$target" || true
+  if [ "$apply_status" = 75 ]; then exit 75; fi
   exit 1
+fi
+applied_head="$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)"
+if [ "$applied_head" != "$target" ]; then
+  echo "error: applied update target does not match selected commit: expected $target, actual ${applied_head:-unknown}" >&2
+  restore_previous "$target" || true
+  exit 75
 fi
 
 if ! reconcile_core; then

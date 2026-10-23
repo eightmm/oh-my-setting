@@ -393,16 +393,54 @@ auto_update_provider_health() {
 
 auto_update_ci_ready() {
   local sha="$1" remote="${2:-origin}" destination result query_rc=0
+  local conclusion reason installed candidate candidates candidate_result candidate_rc
+  local walked=0 scan_limit=20 scan_bound_hit=0
+  CI_SELECTED_TARGET="$sha"
   destination="$(git -C "$ROOT" remote get-url "$remote" 2>/dev/null)" || destination=""
-  result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$sha" 30 "" test.yml 2>/dev/null)" || query_rc=$?
+  result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$sha" 2400 "" test.yml 2>/dev/null)" || query_rc=$?
   result="${result//$'\r'/}"
-  if [ "$query_rc" -ne 0 ] ||
-      [ "${result##* }" != success ]; then
-    write_state skipped "CI success not confirmed; auto-apply deferred" \
-      "$(git -C "$ROOT" rev-parse HEAD)" "$sha" "${upstream:-origin}"
-    echo "auto-update: skipped (CI success not confirmed; retry on next scheduled run)"
-    return 1
+  conclusion="${result##* }"
+  [ "$query_rc" -eq 0 ] && [ "$conclusion" = success ] && return 0
+  case "$conclusion" in
+    pending) reason="in progress past budget" ;;
+    cancelled|canceled) reason="cancelled" ;;
+    missing) reason="no green descendant" ;;
+    *) reason="failed" ;;
+  esac
+
+  installed="$(git -C "$ROOT" rev-parse HEAD)"
+  # The target was already queried above; bound the fallback history walk so
+  # a long-lived branch cannot turn one timer firing into unbounded API calls.
+  candidates="$(git -C "$ROOT" rev-list --first-parent --max-count=$((scan_limit + 1)) "$sha" "^$installed" 2>/dev/null || true)"
+  for candidate in $candidates; do
+    walked=$((walked + 1))
+    if [ "$walked" -gt "$scan_limit" ]; then
+      scan_bound_hit=1
+      break
+    fi
+    [ "$candidate" = "$sha" ] && continue
+    git -C "$ROOT" merge-base --is-ancestor "$installed" "$candidate" 2>/dev/null || continue
+    candidate_rc=0
+    candidate_result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$candidate" 0 "" test.yml 2>/dev/null)" || candidate_rc=$?
+    candidate_result="${candidate_result//$'\r'/}"
+    if [ "$candidate_rc" -eq 0 ] && [ "${candidate_result##* }" = success ]; then
+      CI_SELECTED_TARGET="$candidate"
+      return 0
+    fi
+  done
+
+  if [ "$reason" != "in progress past budget" ] && [ "$reason" != "cancelled" ]; then
+    reason="failed; no green descendant"
+  else
+    reason="$reason; no green descendant"
   fi
+  if [ "$scan_bound_hit" = 1 ]; then
+    reason="$reason; fallback scan limit reached ($scan_limit commits)"
+  fi
+  write_state skipped "CI success not confirmed; auto-apply deferred ($reason; checked $sha)" \
+    "$installed" "$sha" "${upstream:-origin}"
+  echo "auto-update: skipped (CI success not confirmed; $reason; checked $sha)"
+  return 1
 }
 
 receipt_transaction_update() {
@@ -494,7 +532,8 @@ receipt_transaction_update() {
   # Close the fetch-to-apply race. A user edit or another updater changing HEAD
   # during preflight should make this run stand down, never feed a stale target
   # into the mutating transaction.
-  auto_update_ci_ready "$expected" || return 0
+  auto_update_ci_ready "$remote" || return 0
+  expected="$CI_SELECTED_TARGET"
   latest="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ "$latest" != "$current" ] || [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
     write_state skipped "checkout changed during preflight; auto-apply skipped" "$latest" "$remote" "$upstream"
@@ -503,14 +542,16 @@ receipt_transaction_update() {
   fi
 
   set +e
-  output="$(OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$expected" \
+  output="$(OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$remote" \
+    OH_MY_SETTING_UPDATE_TARGET_COMMIT="$expected" \
     "$ROOT/scripts/update.sh" 2>&1)"
   status=$?
   set -e
   [ -z "$output" ] || printf '%s\n' "$output"
   remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ "$status" -eq 75 ] &&
-     printf '%s\n' "$output" | grep -Fq 'error: update target changed after preflight:'; then
+     { printf '%s\n' "$output" | grep -Fq 'error: update target changed after preflight:' ||
+       printf '%s\n' "$output" | grep -Fq 'error: selected update target is not a valid fast-forward'; }; then
     write_state skipped "target changed during preflight; auto-apply skipped" \
       "$current" "$expected" "$upstream"
     echo "auto-update: skipped (target changed during preflight)"
@@ -614,6 +655,7 @@ auto_update_apply_locked() {
   # earlier check, and --ff-only still updates a non-conflicting dirty tree.
   remote_full="$(git -C "$ROOT" rev-parse "$remote_ref")"
   auto_update_ci_ready "$remote_full" "$remote" || return 0
+  remote_full="$CI_SELECTED_TARGET"
   if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
     local_full="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
     write_state skipped "tree became dirty before pull; auto-apply skipped" "$local_full" "" "$upstream"

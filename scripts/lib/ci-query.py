@@ -37,9 +37,10 @@ def gh(args, seconds):
     """Return (rc, stdout); rc is nonzero after a printed, credential-free reason."""
     cmd = [os.environ.get("OMS_GH_BIN", "gh")] + args
     try:
+        timeout = min(30.0, max(0.1, float(seconds)))
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                    text=True, start_new_session=os.name == "posix")
-        output, _ = process.communicate(timeout=min(30, max(1, int(seconds))))
+        output, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         if os.name == "posix":
             try:
@@ -68,27 +69,55 @@ def latest_run(destination, sha, seconds, branch, workflow):
         args += ["--branch", branch]
     if workflow:
         args += ["--workflow", workflow]
-    rc, output = gh(args, seconds)
-    if rc:
-        return rc
     try:
-        rows = json.loads(output)
-        if not isinstance(rows, list) or len(rows) > 1:
-            raise ValueError
-        if not rows:
-            print("0 missing")
-            return 0
-        row = rows[0]
-        if row["headSha"] != sha or type(row["databaseId"]) is not int or row["databaseId"] <= 0:
-            raise ValueError
-        conclusion = row["conclusion"] if row["status"] == "completed" else "pending"
-        if not isinstance(conclusion, str) or not re.fullmatch(r"[a-z_]+", conclusion):
-            raise ValueError
-        print(row["databaseId"], conclusion)
-    except (ValueError, KeyError, TypeError):
-        print("CI query returned invalid or mismatched evidence", file=sys.stderr)
+        budget = max(0.0, float(seconds))
+    except ValueError:
+        print("CI query wait budget is invalid", file=sys.stderr)
         return 2
-    return 0
+    deadline = time.monotonic() + budget
+    pending_id = None
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        # Only an explicit zero budget gets a full single-request timeout.
+        rc, output = gh(args, remaining if budget > 0 else 30)
+        if rc:
+            if rc == 124 and budget > 0 and pending_id is not None:
+                print(pending_id, "pending")
+                return 0
+            return rc
+        try:
+            rows = json.loads(output)
+            if not isinstance(rows, list) or len(rows) > 1:
+                raise ValueError
+            if not rows:
+                print("0 missing")
+                return 0
+            row = rows[0]
+            if (row["headSha"] != sha or type(row["databaseId"]) is not int
+                    or row["databaseId"] <= 0):
+                raise ValueError
+            status = row["status"]
+            conclusion = row["conclusion"] if status == "completed" else "pending"
+            if not isinstance(conclusion, str) or not re.fullmatch(r"[a-z_]+", conclusion):
+                raise ValueError
+            if status == "completed":
+                print(row["databaseId"], conclusion)
+                return 0
+            pending_id = row["databaseId"]
+            if budget <= 0:
+                print(row["databaseId"], "pending")
+                return 0
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                print(row["databaseId"], "pending")
+                return 0
+        except (ValueError, KeyError, TypeError):
+            print("CI query returned invalid or mismatched evidence", file=sys.stderr)
+            return 2
+        time.sleep(min(10, max(0, deadline - time.monotonic())))
+        if time.monotonic() >= deadline:
+            print(row["databaseId"], "pending")
+            return 0
 
 
 def run_scope(destination, run_id, sha, seconds):
