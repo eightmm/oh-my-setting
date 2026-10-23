@@ -1155,6 +1155,10 @@ assert "message-id conflict: result-" + screen_call in conflict.getvalue()
 panel._settle_dispatch = real_test_settle
 
 _operator_block("cross-repository-dispatch")
+# These fixtures assert dispatch boundaries and continuation, not graph orientation.
+graph_autobuild_environments = [(env, env.get("OMS_GRAPH_AUTOBUILD")) for env in (environment, room_env)]
+for env, _ in graph_autobuild_environments:
+    env["OMS_GRAPH_AUTOBUILD"] = "0"
 # A room in A keeps its parent, call and results when the worker executes in B,
 # whether the caller selects the room explicitly or inherits it.
 other_project = temporary / "dispatch work repo"
@@ -2113,6 +2117,7 @@ room.append(project, declared, {"kind": "leave", "participant": "decl-peer"}, "L
 assert room.status(project, declared)["pending_count"] == 0
 # Control-window dispatch resolves the chosen provider's active main, rather
 # than the first main ever joined, and refuses zero or ambiguous ownership.
+# Quota routing is covered above; these ownership fixtures use unavailable readings.
 control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
 control_launch = {}
 control_codex = {"provider": "codex", "binary": "codex", "installed": True, "models": ["gpt-6-sol"],
@@ -2129,6 +2134,7 @@ def observe_control_launch(argv, *args, **kwargs):
     return real_popen(argv, *args, **kwargs)
 with patch.dict(os.environ, control_env, clear=True), \
         patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
+        patch.object(panel, "routing_status", return_value={}), \
         patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
         patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
         patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch):
@@ -2403,6 +2409,12 @@ with patch.dict(os.environ, control_env, clear=True), \
     shared, room_owner = original_shared, original_room_owner
     os.environ["OMS_ROOM_ID"] = shared
     control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
+
+for env, previous in graph_autobuild_environments:
+    if previous is None:
+        env.pop("OMS_GRAPH_AUTOBUILD", None)
+    else:
+        env["OMS_GRAPH_AUTOBUILD"] = previous
 
 _operator_block("room-scopes-and-admission")
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
