@@ -1845,10 +1845,34 @@ def render_results(report, width=100, compact=False, heading=None):
             "No retained results. Finalize a task to record its owner summary.")
     for number, row in enumerate(rows, 1):
         lines.append("")
-        check = mapping(row.get("verification")).get("status")
+        verification = mapping(row.get("verification"))
+        check = verification.get("status")
+        verify_stage = mapping(mapping(row.get("stages")).get("verify"))
+        if not check or check == "not_run":
+            check = verify_stage.get("state")
         outcome = {"accepted": "Accepted by its main", "completed": "Completed; the main recorded a summary",
-                   "failed": "Marked failed by its main"}.get(row.get("outcome"), "Not reviewed by its main yet")
-        checks = "checks " + str(check).replace("_", " ") if check and check != "not_run" else "no checks run"
+                   "failed": "Marked failed by its main", "rejected": "Rejected by its main"}.get(
+                       row.get("outcome"), "Not reviewed by its main yet")
+        check_state = {"verify failed": "failed", "verify timed out": "timed out",
+                       "timed_out": "timed out", "timed out": "timed out"}.get(check, check)
+        if check_state in ("passed", "failed", "timed out"):
+            check_exit = None
+            if check_state == "failed":
+                if verification.get("status") == "failed":
+                    check_exit = verification.get("exit")
+                else:
+                    failing_verifiers = [mapping(call) for call in listing(row.get("calls"))
+                                         if not mapping(call).get("superseded") and
+                                         (mapping(call).get("verify_exit") not in (None, 0) or
+                                          mapping(call).get("verify_status") == "failed")]
+                    if failing_verifiers:
+                        check_exit = failing_verifiers[-1].get("verify_exit")
+            checks = "checks " + check_state + (" (exit %s)" % check_exit
+                       if check_exit not in (None, 0) and check_state in ("failed", "timed out") else "")
+        elif check in ("not_run", None):
+            checks = "no checks run"
+        else:
+            checks = "checks unknown"
         delivery = row.get("delivery")
         if compact:
             add("%s. %s [%s]" % (number, row.get("title") or row.get("task_id") or "Task", outcome), limit=3)

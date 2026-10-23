@@ -1867,6 +1867,10 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             representative = stages['main_decision']['state']
             action = ('review main decision' if failed_stage == 'main_decision' else
                       'record main decision' if stages['main_decision']['state'] == 'pending' else 'none')
+        if result:
+            stages['main_decision']['state'] = main_state
+            representative = 'main_decision ' + main_state
+            action = 'none'
         if (not result and not failed_stage and last.get('state') == 'review'
                 and metadata.get('panel_purpose') == 'investigate' and metadata.get('panel_access') == 'write'):
             findings = next((c for c in reversed(calls) if c.get('kind') == 'delegate'), {})

@@ -2708,7 +2708,7 @@ with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_regi
                 report_rows = [failed_row] + retry_rows + [{"kind": "panel-result", "task_id": "scope-result"}]
                 with patch.object(saved, "_records", return_value=([previous, retry_worker], report_rows)):
                     view = saved.results(project, "scope-result")["rows"][0]
-                    assert view["representative_state"] == "accepted" and view["calls"][0]["superseded"], view
+                    assert view["representative_state"] == "main_decision accepted" and view["calls"][0]["superseded"], view
             settled_retry = review_settlement._settle(project, [previous], [], {"scope-main"},
                 {"scope-result": (accepted_retry, {"ts": "2026-10-17T00:00:00Z"})})
             assert not settled_retry["pending"] and settled_retry["superseded"][0]["attempt"] == previous["attempt_id"]
@@ -2983,8 +2983,67 @@ with patch.dict(os.environ, environment, clear=True):
             patch.object(saved, "_load_result", return_value=accepted_payload), \
             patch.object(saved, "_last_delivery", return_value=None):
         accepted_projection = saved.results(project, task_id="accepted-reason")["rows"][0]
-    assert accepted_projection["representative_state"] == "accepted", accepted_projection
+    assert accepted_projection["representative_state"] == "main_decision accepted", accepted_projection
     assert accepted_projection["termination_reason"] is None, accepted_projection
+
+    # A final owner decision must be the row's stage/action even if an earlier
+    # worker stage failed. The worker verify record also supplies the check line.
+    finalized_attempt = {"attempt_id": "att-finalized-view", "task_id": "finalized-view",
+                         "state": "done", "updated_at": "2026-10-23", "refs": {}}
+    finalized_index = {"task_id": "finalized-view", "kind": "panel-result", "artifact": "finalized-result.json"}
+    failed_implement = {"task_id": "finalized-view", "kind": "delegate", "attempt_id": "att-worker-view",
+                        "exit": 1, "verify_exit": 0}
+    finalized_payload = {"outcome": "completed", "revision": "b" * 24, "summary": "Done.", "evidence": []}
+    with patch.object(saved, "_records", return_value=([finalized_attempt], [finalized_index, failed_implement])), \
+            patch.object(saved, "_load_result", return_value=finalized_payload), \
+            patch.object(saved, "_last_delivery", return_value=None):
+        finalized_projection = saved.results(project, task_id="finalized-view")["rows"][0]
+    assert finalized_projection["representative_state"] == "main_decision completed", finalized_projection
+    assert finalized_projection["next_action"] == "none", finalized_projection
+    finalized_text = render_results({"rows": [finalized_projection]}, 200)
+    assert "Stage: main_decision completed · Next: none" in finalized_text, finalized_text
+    assert "checks passed" in finalized_text and "no checks run" not in finalized_text, finalized_text
+
+    rejected_text = render_results({"rows": [{"task_id": "rejected-view", "outcome": "rejected",
+        "verification": {"status": "not_run"}, "stages": {"main_decision": {"state": "rejected"}}}]}, 200)
+    assert "Rejected by its main" in rejected_text and "Not reviewed" not in rejected_text, rejected_text
+    assert "no checks run" in rejected_text, rejected_text
+    failed_checks = render_results({"rows": [{"task_id": "failed-checks", "stages": {
+        "verify": {"state": "failed", "exit": 9}}, "calls": [{"verify_exit": 9}]}]}, 200)
+    assert "checks failed (exit 9)" in failed_checks, failed_checks
+    unattributed_checks = render_results({"rows": [{"task_id": "unattributed-checks", "stages": {
+        "verify": {"state": "failed", "exit": 9}}}]}, 200)
+    assert "checks failed" in unattributed_checks and "(exit 9)" not in unattributed_checks, unattributed_checks
+
+    def finalized_verify_view(task, verify_calls):
+        owner_attempt = {"attempt_id": "att-" + task, "task_id": task,
+                         "state": "done", "updated_at": "2026-10-23", "refs": {}}
+        result_index = {"task_id": task, "kind": "panel-result", "artifact": task + ".json"}
+        payload = {"outcome": "completed", "revision": "c" * 24, "summary": "Done.",
+                   "verification": {"status": "not_run"}, "evidence": []}
+        records = [result_index] + [dict(task_id=task, kind="delegate", attempt_id="att-%s-%s" % (task, n),
+                                         **call) for n, call in enumerate(verify_calls)]
+        with patch.object(saved, "_records", return_value=([owner_attempt], records)), \
+                patch.object(saved, "_load_result", return_value=payload), \
+                patch.object(saved, "_last_delivery", return_value=None):
+            row = saved.results(project, task_id=task)["rows"][0]
+        return render_results({"rows": [row]}, 200)
+
+    failed_verify_text = finalized_verify_view("final-verify-failed", [
+        {"exit": 0, "verify_exit": 9, "verify_status": "failed", "reason_code": "verification_failed"}])
+    assert "Completed; the main recorded a summary · checks failed (exit 9)" in failed_verify_text, failed_verify_text
+    assert "no checks run" not in failed_verify_text, failed_verify_text
+    timed_out_verify_text = finalized_verify_view("final-verify-timeout", [
+        {"exit": 0, "verify_exit": 124, "verify_status": "failed", "reason_code": "verification_failed"}])
+    assert "Completed; the main recorded a summary · checks timed out" in timed_out_verify_text, timed_out_verify_text
+    mixed_verify_text = finalized_verify_view("final-verify-mixed", [
+        {"exit": 1, "verify_exit": 9}, {"exit": 0, "verify_exit": 0}])
+    assert "checks failed (exit 9)" in mixed_verify_text, mixed_verify_text
+    assert "checks failed (exit 0)" not in mixed_verify_text, mixed_verify_text
+    unknown_checks_text = render_results({"rows": [{"task_id": "unknown-checks", "stages": {
+        "verify": {"state": "unknown"}}}]}, 200)
+    assert "checks unknown" in unknown_checks_text and "no checks run" not in unknown_checks_text, unknown_checks_text
+
     council_attempt = {"attempt_id": "att-council-reason", "task_id": "council-reason",
                        "state": "done", "reason_code": "council_complete", "updated_at": "2026-10-22", "refs": {}}
     with patch.object(saved, "_records", return_value=([council_attempt], [])):
