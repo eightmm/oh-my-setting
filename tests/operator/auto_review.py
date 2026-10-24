@@ -116,8 +116,14 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert dispatch_args[2:4] == ("reviewer", "read")
     assert dispatch_args[10]["workload"] == "deep", dispatch_args[10]
     assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
-    assert dispatch_kwargs == {"candidate": {"patch": auto_patch_path, "sha256": auto_digest,
-                                             "base": auto_index["base_sha"]}}, dispatch_kwargs
+    assert set(dispatch_kwargs) == {"candidate", "routing_report", "routing_repo"}, dispatch_kwargs
+    assert dispatch_kwargs["candidate"] == {"patch": auto_patch_path, "sha256": auto_digest,
+                                             "base": auto_index["base_sha"]}, dispatch_kwargs
+    assert isinstance(dispatch_kwargs["routing_report"], list)
+    assert len(dispatch_kwargs["routing_report"]) == 1
+    assert isinstance(dispatch_kwargs["routing_report"][0], dict)
+    assert dispatch_kwargs["routing_report"][0].get("kind") == "oms-dashboard"
+    assert Path(dispatch_kwargs["routing_repo"]).resolve() == project.resolve()
     assert dispatch_args[15] == room.review_ids(auto_call, auto_digest, 1)[2]
     assert dispatch_args[14] == worker_execution_repo and dispatch_args[14] != project, dispatch_args
     result_events = [row["room_event"] for row in room.records(project, shared)
