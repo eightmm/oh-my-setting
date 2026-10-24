@@ -10600,7 +10600,7 @@ for temp_file in "$TMPDIR"/*; do
 done
 cat > "$HOME/discovery-prompt.txt"
 cat <<'JSON'
-{"candidates":[{"id":"candidate-1","claim":"tighten greeting behavior","lens":"gap critique","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect greeting output","scope":"src/ and tests/","expected_benefit":"clearer output","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-2","claim":"duplicate existing work","lens":"pruning","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect TASK-A","scope":"src/","expected_benefit":"avoid repeated work","expected_cost":"small","duplicate_disposition":"Duplicates task TASK-A"}],"tasks":[{"candidate_id":"candidate-1","id":"t1","title":"fix: tighten greeting output","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]},{"candidate_id":"candidate-1","id":"t2","title":"test: cover greeting output","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}
+{"candidates":[{"id":"candidate-1","claim":"investigate a miscopied review reference","lens":"gap critique","evidence_refs":["unknown-ref"],"counterevidence":"none observed","smallest_check":"inspect review evidence","scope":"src/","expected_benefit":"retain useful discovery","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-2","claim":"duplicate existing work","lens":"pruning","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect TASK-A","scope":"src/","expected_benefit":"avoid repeated work","expected_cost":"small","duplicate_disposition":"Duplicates task TASK-A"},{"id":"candidate-3","claim":"tighten greeting behavior","lens":"gap critique","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect greeting output","scope":"src/ and tests/","expected_benefit":"clearer output","expected_cost":"small","duplicate_disposition":"new"}],"tasks":[{"candidate_id":"candidate-1","id":"t0","title":"investigate: copied reference","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]},{"candidate_id":"candidate-3","id":"t1","title":"fix: tighten greeting output","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]}]}
 JSON
 EOF
   chmod +x "$discovery_bin/codex" "$readers"/*
@@ -10639,9 +10639,10 @@ import json, sys
 proposal, report = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
 assert set(proposal) == {"schema", "kind", "spec_sha256", "plan_sha256", "base_sha",
                          "id_prefix", "allowed_envelope", "acceptance_files", "tasks"}
-assert [task["id"] for task in proposal["tasks"]] == ["t1", "t2"]
-assert report["candidates"][0]["disposition_status"] == "eligible"
+assert [task["id"] for task in proposal["tasks"]] == ["t1"]
+assert report["candidates"][0]["disposition_status"] == "unresolved_evidence_report_only"
 assert report["candidates"][1]["disposition_status"] == "suppressed_duplicate_task"
+assert report["candidates"][2]["disposition_status"] == "eligible"
 PY
   [ ! -e "$discovery/.oms/plan/tasks.json" ] || fail "discover must not mutate the task board"
 

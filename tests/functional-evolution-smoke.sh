@@ -1477,6 +1477,7 @@ EOF
   [ ! -s "$TMP/discovery-err" ] || fail "successful collection wrote to stderr"
   python3 - "$out" <<'PY' || fail "work discovery packet omitted evidence or normalization"
 import json, sys
+import re
 r = json.loads(sys.argv[1])
 assert r["schema"] == 1 and r["sections"].keys() == {
     "failures", "metrics", "reviews", "ci", "tasks", "rejected"}, r
@@ -1499,7 +1500,7 @@ attempts = [
 ]
 rows = [
     {"attempt_id": "a-decided", "task_id": "done-task", "artifact_id": "r-decided", "kind": "review", "artifact": ".oms/artifacts/decided"},
-    {"attempt_id": "a-pending", "task_id": "open-task", "artifact_id": "r-pending", "kind": "review", "artifact": ".oms/artifacts/pending"},
+    {"attempt_id": "a-pending", "task_id": "open-task", "artifact_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "kind": "review", "artifact": ".oms/artifacts/pending"},
 ]
 panel_results._records = lambda *args, **kwargs: (attempts, rows)
 panel_results.outcomes = lambda repo, ids: {"done-task": "accepted"}
@@ -1508,7 +1509,10 @@ artifact = (b"## Prompt\n```text\nquoted prompt\n## Findings\nnot a result\n"
 panel_results._indexed = lambda repo, row: artifact
 reviews = work_discovery._collect_reviews("unused")
 assert reviews["coverage"]["considered"] == 2 and reviews["coverage"]["selected"] == 1, reviews
-assert len(reviews["items"]) == 1 and reviews["items"][0]["ref"] == "r-pending", reviews
+assert len(reviews["items"]) == 1, reviews
+assert re.fullmatch(r"[0-9a-f]{16}", reviews["items"][0]["ref"]), reviews
+assert reviews["items"][0]["ref"] == "0123456789abcdef", reviews
+assert reviews["items"][0]["artifact_id"] == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", reviews
 assert reviews["items"][0]["findings"] == "Actual finding", reviews
 panel_results._indexed = indexed_reader
 import contextlib, hashlib, io, shutil, tempfile

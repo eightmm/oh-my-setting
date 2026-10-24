@@ -128,9 +128,12 @@ def _collect_reviews(repo):
                         "owner decisions unavailable")
     selected = [row for row in review_rows if row.get("task_id") not in decisions]
     for row in selected:
-        ref = _clean(row.get("artifact_id") or row.get("attempt_id"))
+        artifact_id = _clean(row.get("artifact_id"))
+        ref = artifact_id or _clean(row.get("attempt_id"))
         if ref:
-            item = {"ref": str(ref), "kind": row.get("kind"),
+            match = re.fullmatch(r"sha256:([0-9a-f]{64})", str(ref))
+            item = {"ref": match.group(1)[:16] if match else str(ref),
+                    "artifact_id": str(ref), "kind": row.get("kind"),
                     "attempt_id": row.get("attempt_id"), "exit": row.get("exit"),
                     "outcome": row.get("outcome"), "task_id": row.get("task_id")}
             if isinstance(row.get("artifact"), str):
