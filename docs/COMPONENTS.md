@@ -53,7 +53,7 @@ explains overlapping entrypoints.
 |---|---|---|---|
 | `autopilot` | Drive bounded coding under plan and landing contracts. | `oms autopilot` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `goal-drive` | Drive an existing approved plan to its acceptance command. | `oms goal-drive` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
-| `plan-from-spec` | Propose plan tasks from `PROJECT.md`. | `oms plan-from-spec` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `plan-from-spec` | Propose plan tasks from `PROJECT.md` or discovered work evidence. | `oms plan-from-spec` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `plan-run` | Execute one pre-authorized plan task. | `oms plan-run` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `patch-admit` | Check delegated patch scope and evidence. | `oms patch-admit` | [Delegating writes](#delegating-writes) |
 | `patch-land` | Apply an admitted delegated patch. | `oms patch-land` | [Delegating writes](#delegating-writes) |
@@ -782,7 +782,22 @@ applied. `oms plan-run` claims and executes at most one ready task. `oms
 goal-drive` repeats within a cycle cap and acceptance command; the cap counts
 task attempts across resumes of one autopilot contract, bounds attempts rather
 than provider cost, and an exhausted contract is retired with `oms autopilot
-abandon`. It is not an unbounded autonomous loop. Before landing,
+abandon`. It is not an unbounded autonomous loop.
+
+`oms plan-from-spec --discover` collects a bounded packet of failures, panel
+metrics, undecided review findings, CI history, open plan tasks, and rejected
+hypotheses. It fails closed on corrupt or over-budget evidence. The planner
+proposes evidence-cited candidates through imagination, gap-critique, and
+pruning lenses; speculative candidates remain report-only. A run with no
+eligible work creates no proposal and exits successfully. Otherwise it prints
+the proposal, evidence packet, and candidate report paths with their SHA-256
+digests. With `--collaboration auto`, the council reviews the contract without
+the packet. Applying a proposal requires `--expected-proposal-sha256` for the
+reviewed proposal bytes. `oms autopilot propose --discover` uses discovery for
+the initial tranche only; when no eligible work is found, its receipt remains
+at proposing so the attempt can be retried.
+
+Before landing,
 `goal-drive` freezes the reviewed
 patch and appends a commit intent. A restart reconciles an unapplied, applied,
 or already committed intent without calling the provider again. Publication

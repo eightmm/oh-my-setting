@@ -1,10 +1,9 @@
 # Command Routing
 
-Choose the narrowest front door; retain primitives.
+Choose the narrowest front door.
 
-`oms list` exposes entrypoints;
-`oms list --all` exposes primitives. Start with SKILL.md's six work families;
-this resolves intent variants, not extra steps.
+`oms list` exposes entrypoints; `oms list --all` exposes primitives. Start with
+SKILL.md's six work families.
 
 ## Orient and resume
 
@@ -26,9 +25,9 @@ this resolves intent variants, not extra steps.
 | Restorable tracked Git edits | `oms checkpoint` | Same-HEAD tracked snapshot; restore is dry-run unless applied. |
 | Private machine or cluster context | `oms snapshot` | Local agent facts, not a Git restore point. |
 
-Start with `inbox`; drill into one source only when its detail is needed.
-`doctor` already includes model/skill checks; run narrow diagnostics only for
-additional evidence. Installation health and project integrity remain distinct.
+Start with `inbox`; drill into sources as needed. `doctor` includes model/skill
+checks; run narrow diagnostics for more evidence. Installation health and
+project integrity remain distinct.
 
 ## Ask, review, and delegate
 
@@ -40,7 +39,7 @@ additional evidence. Installation health and project integrity remain distinct.
 | High-risk decision, repeated failure, or release go/no-go | `oms advise` | Do not spend an advisor on routine completion. |
 | One bounded implementation | `oms peer-delegate --to PROVIDER` | Write workers return a patch, with no commit/push authority. |
 | Inside an OMS panel | `oms panel --dispatch` (worker, advisor or reviewer); mail: `oms room updates/send/ack/scope` | Read: `--prompt`/`--brief-file` (reviewer-only `--verify`, required); write adds `--verify --scope`. |
-| Questions/changes for agents already working together | `oms thread append`, `updates`, `ack` on a scoped live thread | Messages neither spawn providers nor grant authority; see state-memory.md. |
+| Existing-agent questions/changes | `oms thread append`, `updates`, `ack` on a scoped live thread | Messages neither spawn providers nor grant authority; see state-memory.md. |
 | Isolated clean-HEAD audit with a worker role | `oms peer-delegate --to PROVIDER --read-only` | Report only, never a patch. |
 
 `agent-call` is read-only, not an extra council seat. Select read/write
@@ -55,10 +54,11 @@ reader; review remains typed.
 | Exactly one ready task in an existing plan | `oms plan-run --to PROVIDER --next` |
 | Reviewed task whose stored patch should continue to landing | `oms plan-run --to PROVIDER --id TASK --land` |
 | Repeated tasks in an already reviewed plan | `oms goal-drive` |
+| Find work from evidence | `oms plan-from-spec --discover`; review tasks and candidate report, then apply with `--expected-proposal-sha256`. Campaign: `oms autopilot propose --discover`. |
 | Confirmed `PROJECT.md` through reviewed proposal and bounded drive | `oms autopilot` |
 
 `autopilot -> goal-drive -> plan-run` is an execution hierarchy, not parallel
-loops. `agent-plan` owns tasks/leases. Start only the required layer; retain
+loops. `agent-plan` owns tasks/leases. Start the required layer; retain
 its stop/publication boundary and reviewed task contract.
 
 Use Execution Graph only for explicit branching or an existing graph run,
@@ -93,8 +93,8 @@ installation ownership. Never widen one deletion scope to another.
 | Same-machine provider-session continuation | `oms session-handoff` |
 | Sanitized cross-machine project continuity | `oms runtime capsule` |
 
-These stores have distinct retention, provenance, and sensitive-content
-contracts. Do not merge them or treat one as another's authority source.
+Stores have distinct retention, provenance, and sensitive-content contracts;
+do not merge them or treat one as another's authority.
 
 ## Typed runtime and compatibility surfaces
 
@@ -104,4 +104,4 @@ repeat probes.
 `runtime experiment launch` pre-registers one command through run-ledger;
 `register/run/summarize` handle comparable multi-arm studies.
 Experiment-board owns intent/claims, run-ledger records execution, and runtime
-experiment links study evidence. Keep their IDs linked, not their stores merged.
+experiment links study evidence. Link IDs; keep stores separate.

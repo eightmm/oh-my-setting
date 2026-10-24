@@ -17,6 +17,9 @@ Inspect the affected source and existing tests. Prioritize a demonstrated
 failure or redundant mechanism, not a warning count or speculative feature.
 Keep a status or review request read-only. Clear local fixes need no council,
 formal plan, autopilot run, or new test merely to satisfy this skill.
+When no demonstrated failure is at hand, use `oms plan-from-spec --discover`
+to gather bounded evidence; review the candidate report alongside the tasks,
+and treat pruning candidates as first-class investigations.
 
 ## Select a change by measurement
 
