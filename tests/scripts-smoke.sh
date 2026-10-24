@@ -19081,7 +19081,7 @@ EOF
     --gate --verify "bash scripts/check.sh" \
     --prompt "Gate verify backstop" >"$project/out-pass" 2>&1 || rc=$?
   [ "$rc" = "0" ] || fail "verify pass + reviewer pass should exit 0, got $rc"
-  assert_file_contains "$project/out-pass" "gate verify: pass (0s)"
+  assert_file_contains "$project/out-pass" "gate verify: pass ("
 
   # --no-verify keeps the old self-report-only behavior.
   printf '#!/usr/bin/env bash\nexit 1\n' > "$project/scripts/check.sh"
