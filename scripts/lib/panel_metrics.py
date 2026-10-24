@@ -379,7 +379,8 @@ def _attempt_history(repo):
                 "parent_attempt_id": row.get("parent_attempt_id", ""), "provider": row.get("provider", ""),
                 "tool": row.get("tool", ""), "refs": row.get("refs", {}), "state": row.get("to_state"),
                 "created_at": stamp, "created_order": event_order,
-                "updated_at": stamp, "terminal": False, "transitions": []}
+                "updated_at": stamp, "terminal": False, "transitions": [],
+                "usage_tokens": 0, "usage_reports": 0}
         elif attempt_id in attempts:
             current = attempts[attempt_id]
             if kind == "attempt.state_changed":
@@ -388,6 +389,13 @@ def _attempt_history(repo):
                 current["reason_code"] = row.get("reason_code", "")
                 current["transitions"].append({"state": row.get("to_state"), "reason_code": row.get("reason_code", ""),
                                                "ts": stamp, "order": event_order})
+            elif kind == "attempt.usage":
+                usage = row.get("usage")
+                if isinstance(usage, dict) and isinstance(usage.get("tokens"), int) and not isinstance(usage.get("tokens"), bool):
+                    current["usage_tokens"] += usage["tokens"]
+                    current["usage_reports"] += 1
+                if row.get("refs"):
+                    current["refs"].update(row["refs"])
             elif row.get("refs"):
                 current["refs"].update(row["refs"])
             current["updated_at"] = stamp
@@ -402,7 +410,7 @@ def aggregate(repo, since=None, now=None):
     Follow-up task IDs are not linked by any producer record; rework therefore
     counts only additional write rounds for the same task ID.
     """
-    from panel_results import _query, _read, _indexed, settled_pending_admissions
+    from panel_results import _query, _read, _indexed, outcomes, settled_pending_admissions
 
     repo = Path(repo)
     now = time.time() if now is None else now
@@ -462,6 +470,16 @@ def aggregate(repo, since=None, now=None):
     incomplete = incomplete_attempts or bool(incomplete_reasons)
     if incomplete_attempts:
         incomplete_reasons.append("lifecycle evidence is partial")
+
+    task_ids = {row.get("task_id") for row in attempts
+                if isinstance(row.get("task_id"), str) and row.get("task_id")
+                and not row["task_id"].startswith("preflight-")}
+
+    class RetainedResultRecords:
+        def records(self):
+            return attempts, retained_artifacts
+
+    decisions = outcomes(repo, task_ids, _tick=RetainedResultRecords())
 
     def in_window(stamp):
         timestamp = stamp if isinstance(stamp, (int, float)) and math.isfinite(stamp) else _stamp(stamp)
@@ -732,6 +750,35 @@ def aggregate(repo, since=None, now=None):
     admission_tasks = [task for task in tasks if task.get("id") in admission_ids]
     admission_ages = [_stamp(task.get("updated_at") or task.get("claimed_at")) for task in admission_tasks]
     until = datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")
+    token_decisions = {name: {"tokens": 0, "tasks": 0, "attempts": 0}
+                       for name in ("accepted", "completed", "rejected", "failed", "undecided", "untasked")}
+    task_sets = {name: set() for name in token_decisions}
+    unreported_tokens = 0
+    for attempt in attempts:
+        refs = attempt.get("refs", {})
+        if refs.get("panel_role") != "worker" or refs.get("panel_access") not in {"read", "write"}:
+            continue
+        if not in_window(attempt.get("updated_at")):
+            continue
+        task_id = attempt.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            bucket = "untasked"
+            task_key = None
+        else:
+            task_key = task_id
+            outcome = decisions.get(task_id)
+            bucket = outcome if outcome in {"accepted", "completed", "rejected", "failed"} else "undecided"
+        entry = token_decisions[bucket]
+        entry["attempts"] += 1
+        if task_key is not None:
+            task_sets[bucket].add(task_key)
+        if attempt.get("usage_reports", 0):
+            entry["tokens"] += attempt.get("usage_tokens", 0)
+        else:
+            unreported_tokens += 1
+    for bucket, task_set in task_sets.items():
+        token_decisions[bucket]["tasks"] = len(task_set)
+    token_decisions["unreported_attempts"] = unreported_tokens
     def has_claim_evidence(task):
         history = task.get("history") if isinstance(task.get("history"), list) else []
         has_history = any(isinstance(item, dict) and item.get("kind") in {"claim", "start", "started"}
@@ -767,6 +814,7 @@ def aggregate(repo, since=None, now=None):
                        "rate": round(len(reworked) / len(started), 4) if started else None},
             "abandoned_calls": abandoned,
             "endings": ending_counts,
+            "tokens_by_decision": token_decisions,
             "write_attempts": {"total": len(delegate_writes), "states": state_totals,
                                "state_counts": delegate_states,
                                "reconciles": (state_totals["done"] + state_totals["failed"]
@@ -786,6 +834,15 @@ def aggregate(repo, since=None, now=None):
                               "total": clears + cancels + owner_failures},
             "incomplete": bool(incomplete),
             "incomplete_reason": "; ".join(incomplete_reasons) if incomplete_reasons else None}
+
+
+def token_amount(value):
+    value = int(value)
+    if value >= 1000000:
+        return "%gM" % (value / 1000000.0)
+    if value >= 1000:
+        return "%gk" % (value / 1000.0)
+    return str(value)
 
 
 def metrics_text(report):
@@ -825,6 +882,13 @@ def metrics_text(report):
             report.get("write_attempts", {}).get("total", 0),
             json.dumps(report.get("write_attempts", {}).get("state_counts", {}), sort_keys=True),
             report.get("write_attempts", {}).get("reconciles", False)),
+        "tokens by decision: %s; unreported attempts=%d" % (
+            "; ".join("%s %s/%d tasks (%s per task)" % (
+                name, token_amount(entry["tokens"]), entry["tasks"],
+                token_amount(entry["tokens"] / entry["tasks"]) if entry["tasks"] else "--")
+                for name, entry in report.get("tokens_by_decision", {}).items()
+                if name != "unreported_attempts"),
+            report.get("tokens_by_decision", {}).get("unreported_attempts", 0)),
         "failed/undecided write reasons/stages: %s / %s; undecided ages=%s" % (
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("reason_code", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("first_failing_stage", {}), sort_keys=True),

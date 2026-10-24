@@ -641,7 +641,7 @@ else:
 
 # A ready task cancelled before claim is not started, even though claimed_at
 # can be refreshed later by touch.
-(metric_repo / '.oms/plan/tasks.json').write_text(json.dumps({'tasks': {
+(metric_repo / '.oms/plan/tasks.json').write_text(json.dumps({'plan_id': 'metric-plan', 'tasks': {
     'continued': {'id': 'continued', 'state': 'done', 'claimed_at': stamp_metric(-1), 'lease_epoch': 1},
     'recent': {'id': 'recent', 'state': 'done', 'claimed_at': stamp_metric(-1)},
     'abandoned': {'id': 'abandoned', 'state': 'running', 'claimed_at': stamp_metric(-1)},
@@ -654,7 +654,8 @@ else:
     'awaiting-review': {'id': 'awaiting-review', 'state': 'review', 'claimed_at': stamp_metric(-90),
                         'updated_at': stamp_metric(-80), 'lease_epoch': 1},
     'ready-cancel': {'id': 'ready-cancel', 'state': 'cancelled', 'claimed_at': stamp_metric(-1),
-                     'lease_epoch': 0, 'cancellation': {'state': 'ready', 'ts': stamp_metric(-90)}}}}), encoding='utf-8')
+                     'lease_epoch': 0, 'cancellation': {'state': 'ready', 'ts': stamp_metric(-90)}},
+    'token-replaced-task': {'id': 'token-replaced-task', 'state': 'blocked'}}}), encoding='utf-8')
 
 events_module = runpy.run_path(str(Path(sys.argv[1]) / 'agent-events.py'))
 new_event = events_module['new_event']
@@ -707,6 +708,20 @@ add_attempt('delegate-provider-verify', 'metric-write-provider-verify', 'worker'
             'failed', tool='peer-delegate')
 add_attempt('delegate-review', 'metric-write-review', 'worker', 'write', -8, -7, 'review', '', tool='peer-delegate')
 add_attempt('delegate-other', 'metric-write-other', 'worker', 'write', -6, -5, 'queued', '', tool='peer-delegate')
+add_attempt('token-accepted', 'token-accepted-task', 'worker', 'write', -4, -3, 'done')
+add_attempt('token-rejected', 'token-rejected-task', 'worker', 'read', -4, -3, 'done')
+add_attempt('token-undecided', 'token-undecided-task', 'worker', 'write', -4, -3, 'done')
+add_attempt('token-untasked', '', 'worker', 'read', -4, -3, 'done')
+add_attempt('token-replaced', 'token-replaced-task', 'worker', 'read', -4, -3, 'done')
+add_attempt('token-invalid-latest', 'token-invalid-task', 'worker', 'read', -4, -3, 'done')
+for token_attempt, token_count in (('token-accepted', 1200), ('token-rejected', 300),
+                                   ('token-undecided', 500), ('token-replaced', 200),
+                                   ('token-invalid-latest', 400)):
+    event_rows.append({'event_type': 'attempt.usage', 'attempt_id': token_attempt,
+                       'ts': stamp_metric(-3), 'usage': {'tokens': token_count}})
+event_rows.append({'event_type': 'attempt.usage', 'attempt_id': 'delegate-blocked',
+                   'ts': stamp_metric(-6), 'refs': {'provider_error': 'capacity',
+                                                    'provider_error_exit': 1}})
 lifecycle = metric_repo / '.oms/lifecycle/events.jsonl'
 lifecycle.parent.mkdir(parents=True)
 lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
@@ -725,6 +740,25 @@ artifact_rows.append({'schema': 1, 'event_id': 'evt_panel_failure', 'operation_i
                       'ts': stamp_metric(-10), 'kind': 'panel-result', 'provider': 'local', 'exit': 1,
                       'task_id': 'abandoned', 'artifact': '.oms/artifacts/panel-results/failure.json',
                       'artifact_sha256': hashlib.sha256(metric_result_path.read_bytes()).hexdigest()})
+for token_task, outcome in (('token-accepted-task', 'accepted'), ('token-rejected-task', 'rejected'),
+                            ('token-replaced-task', 'accepted'), ('token-invalid-task', 'accepted')):
+    result_path = metric_repo / ('.oms/artifacts/panel-results/' + token_task + '.json')
+    result = {'schema': 1, 'kind': 'oms-panel-result', 'outcome': outcome,
+              'task_id': token_task, 'owner': 'codex', 'revision': 'a' * 24,
+              'summary': 'fixture', 'evidence': []}
+    if token_task == 'token-replaced-task':
+        result['plan_binding'] = {'plan_id': 'prior-plan', 'task_sha256': 'b' * 64}
+    result_path.write_text(json.dumps(result), encoding='utf-8')
+    artifact_rows.append({'schema': 1, 'event_id': 'evt_' + token_task, 'operation_id': 'op_' + token_task,
+                          'ts': stamp_metric(-120 if token_task == 'token-accepted-task' else -2),
+                          'kind': 'panel-result', 'exit': 0,
+                          'task_id': token_task, 'artifact': '.oms/artifacts/panel-results/' + token_task + '.json',
+                          'artifact_sha256': hashlib.sha256(result_path.read_bytes()).hexdigest()})
+artifact_rows.append({'schema': 1, 'event_id': 'evt_token_invalid_latest',
+                      'operation_id': 'op_token_invalid_latest', 'ts': stamp_metric(-1),
+                      'kind': 'panel-result', 'exit': 0, 'task_id': 'token-invalid-task',
+                      'artifact': '.oms/artifacts/panel-results/token-invalid-task.json',
+                      'artifact_sha256': '0' * 64})
 artifact_rows.extend([
     {'schema': 1, 'event_id': 'evt_delegate_failed', 'operation_id': 'op_delegate_failed',
      'ts': stamp_metric(-8), 'kind': 'delegate', 'exit': 1, 'verify_exit': 1,
@@ -759,9 +793,9 @@ assert write_metrics['state_counts'] == {'done': 1, 'failed': 5, 'review': 1, 'q
 assert write_metrics['states']['other_by_state'] == {'queued': 1}, write_metrics
 assert write_metrics['failed_and_undecided']['reason_code'] == {'verification_failed': 1, 'provider_failed': 1, 'provider_timeout': 1, 'unknown': 2, 'awaiting_review': 1}, write_metrics
 assert write_metrics['failed_and_undecided']['first_failing_stage'] == {'verify': 2, 'implement': 3, 'none': 1}, write_metrics
-assert write_metrics['provider_failed_categories']['capacity'] == 1, write_metrics
+assert write_metrics['provider_failed_categories']['capacity'] == 2, write_metrics
 # provider_failed without metadata and a provider failure followed by verify are both counted
-assert write_metrics['provider_failed_categories']['unknown'] == 2, write_metrics
+assert write_metrics['provider_failed_categories']['unknown'] == 1, write_metrics
 assert write_metrics['telemetry']['context_modes'] == {'graph': {'attempts': 1, 'done': 0}, 'no artifact row': {'attempts': 2, 'done': 1}, 'unrecorded': {'attempts': 5, 'done': 0}}, write_metrics
 assert write_metrics['telemetry']['claude_fork_subagents'] == 'not_recorded', write_metrics
 assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
@@ -771,6 +805,13 @@ assert expected_metrics['pending']['awaiting_review']['count'] == 1, expected_me
 assert expected_metrics['pending']['awaiting_review']['oldest_seconds'] == 80.0, expected_metrics
 assert expected_metrics['pending']['awaiting_admission']['count'] >= 0, expected_metrics
 assert expected_metrics['preflight']['tasks'] == 1, expected_metrics
+assert expected_metrics['tokens_by_decision']['accepted'] == {'tokens': 1200, 'tasks': 1, 'attempts': 1}, expected_metrics['tokens_by_decision']
+assert expected_metrics['tokens_by_decision']['rejected'] == {'tokens': 300, 'tasks': 1, 'attempts': 1}, expected_metrics['tokens_by_decision']
+assert expected_metrics['tokens_by_decision']['failed'] == {'tokens': 0, 'tasks': 0, 'attempts': 0}, expected_metrics['tokens_by_decision']
+assert expected_metrics['tokens_by_decision']['undecided']['tasks'] > 0, expected_metrics['tokens_by_decision']
+assert expected_metrics['tokens_by_decision']['undecided']['tokens'] == 1100, expected_metrics['tokens_by_decision']
+assert expected_metrics['tokens_by_decision']['untasked'] == {'tokens': 0, 'tasks': 0, 'attempts': 1}, expected_metrics['tokens_by_decision']
+assert expected_metrics['tokens_by_decision']['unreported_attempts'] == 993, expected_metrics['tokens_by_decision']
 
 # Selected attempts retain stage attribution even when their artifact rows are
 # older than the CLI's 1000-row tail. Review rows without reason codes consult
@@ -839,6 +880,8 @@ assert 'coverage:' in metric_text.getvalue() and 'until ' in metric_text.getvalu
 assert 'plan tasks without an observed write attempt=' in metric_text.getvalue(), metric_text.getvalue()
 assert 'failed/undecided write reasons/stages:' in metric_text.getvalue(), metric_text.getvalue()
 assert 'peer-delegate write attempts: 8' in metric_text.getvalue(), metric_text.getvalue()
+assert 'tokens by decision: accepted 1.2k/1 tasks (1.2k per task); completed 0/0 tasks (-- per task); rejected 300/1 tasks (300 per task); failed 0/0 tasks (-- per task); undecided 1.1k/' in metric_text.getvalue(), metric_text.getvalue()
+assert 'unreported attempts=993' in metric_text.getvalue(), metric_text.getvalue()
 assert 'context modes (done/attempts)=graph 0/1, no artifact row 1/2, unrecorded 0/5' in metric_text.getvalue(), metric_text.getvalue()
 assert 'fork subagents' not in metric_text.getvalue(), metric_text.getvalue()
 metric_json = io.StringIO()
@@ -847,6 +890,7 @@ with redirect_stdout(metric_json):
 assert json.loads(metric_json.getvalue())['completion'] == expected_metrics['completion']
 metric_payload = json.loads(metric_json.getvalue())
 assert metric_payload['write_attempts'] == write_metrics
+assert metric_payload['tokens_by_decision'] == expected_metrics['tokens_by_decision']
 assert metric_payload['window']['since'] is None
 assert metric_payload['window']['until'] == metric_payload['until']
 metric_help = io.StringIO()
@@ -858,6 +902,7 @@ except SystemExit as error:
 assert 'follow-up task IDs have no producer linkage' in ' '.join(metric_help.getvalue().split()), metric_help.getvalue()
 recent_metrics = panel_metrics.aggregate(metric_repo, since='1m', now=now_metric)
 assert recent_metrics['write_attempts']['total'] == 8, recent_metrics
+assert recent_metrics['tokens_by_decision']['accepted']['tokens'] == 1200, recent_metrics['tokens_by_decision']
 outside_window_metrics = panel_metrics.aggregate(metric_repo, since='1s', now=now_metric)
 assert outside_window_metrics['write_attempts']['total'] == 0, outside_window_metrics
 assert recent_metrics['completion'] == {'finished': 1, 'started': 3, 'rate': 0.3333}, recent_metrics
