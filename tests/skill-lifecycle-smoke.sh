@@ -116,6 +116,7 @@ assert row["skill_evals"] == {
 test_skill_eval_candidate_compares_frozen_bundles() {
   local repo="$TMP/candidate-repo" suite="$TMP/candidate-suite.json"
   local candidate="$TMP/candidate-version" router="$TMP/candidate-router.py"
+  local staged_scripts="$TMP/evaluator-tree/scripts"
   local marker="$TMP/candidate-command-ran" current_sha candidate_sha
   local out first second
   make_repo "$repo"
@@ -228,11 +229,11 @@ path = pathlib.Path(os.environ["OMS_SKILL_EVAL_IMPLEMENTATION"])
 path.write_text(path.read_text() + "\n# mutated during eval\n")
 print(json.dumps({"selected": []}))
 PY
-  cp "$ROOT/scripts/lib/skill-lifecycle.py" "$TMP/evaluator-snapshot.py"
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+  mkdir -p "$(dirname "$staged_scripts")"
+  cp -R "$ROOT/scripts" "$staged_scripts"
+  out="$("$staged_scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
     --suite "$suite" --candidate "$candidate" --allow-host-commands --record --json 2>&1)" &&
     fail "evaluator mutation during eval was accepted: $out"
-  cp "$TMP/evaluator-snapshot.py" "$ROOT/scripts/lib/skill-lifecycle.py"
   [ ! -e "$repo/.oms/runtime/skill-evals.jsonl" ] ||
     fail "mutated evaluator eval recorded telemetry"
   cat > "$router" <<'PY'
