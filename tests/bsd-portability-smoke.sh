@@ -94,7 +94,7 @@ test_run_tools_survive_a_bsd_userland() {
     "$ROOT/scripts/run-capsule.sh" run --output ckpt.pt --no-ledger \
       -- bash -c 'echo trained' >/dev/null
     "$ROOT/scripts/run-capsule.sh" whence ckpt.pt >/dev/null
-    "$ROOT/scripts/run.sh" show "$id" | grep -Fq run-capsule ||
+    "$ROOT/scripts/run.sh" show "$id" | grep -F run-capsule > /dev/null ||
       { echo "FAIL: run spine lost the capsule step" >&2; exit 1; }
 
     printf 'a\nb\nc\n' > train.txt

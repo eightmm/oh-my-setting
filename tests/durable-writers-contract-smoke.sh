@@ -1004,7 +1004,7 @@ PY
 ) || fail "an over-ceiling ledger must compact and accept the newest row"
 [ "$(wc -c < "$byte_repo/.oms/artifacts/index.jsonl" | tr -d ' ')" -le 16777216 ] ||
   fail "artifact index exceeded the 16MiB store ceiling"
-tail -n 1 "$byte_repo/.oms/artifacts/index.jsonl" | grep -Fq '"provider": "claude"' ||
+tail -n 1 "$byte_repo/.oms/artifacts/index.jsonl" | grep -F '"provider": "claude"' > /dev/null ||
   fail "byte compaction must preserve the newly appended row"
 
 # A benign alias above the repository is accepted, but it is normalized before
@@ -1263,7 +1263,7 @@ bash "$ROOT/scripts/artifact-index.sh" --repo "$migrate_count_repo" migrate \
   >/dev/null || fail "idempotent migration of a healthy ledger failed"
 [ "$(wc -l < "$migrate_count_repo/.oms/artifacts/index.jsonl" | tr -d ' ')" -eq 1100 ] ||
   fail "migrate silently applied count retention below high-water"
-head -n 1 "$migrate_count_repo/.oms/artifacts/index.jsonl" | grep -Fq 'evt_live_0000' ||
+head -n 1 "$migrate_count_repo/.oms/artifacts/index.jsonl" | grep -F 'evt_live_0000' > /dev/null ||
   fail "migrate dropped the oldest healthy row below high-water"
 python3 - "$migrate_count_repo/.oms/artifacts/index.jsonl" <<'PY'
 import json, sys
@@ -1281,9 +1281,9 @@ bash "$ROOT/scripts/artifact-index.sh" --repo "$migrate_count_repo" migrate \
   >/dev/null || fail "migration above high-water failed"
 [ "$(wc -l < "$migrate_count_repo/.oms/artifacts/index.jsonl" | tr -d ' ')" -eq 1000 ] ||
   fail "migrate did not apply count retention above high-water"
-head -n 1 "$migrate_count_repo/.oms/artifacts/index.jsonl" | grep -Fq 'evt_live_0201' ||
+head -n 1 "$migrate_count_repo/.oms/artifacts/index.jsonl" | grep -F 'evt_live_0201' > /dev/null ||
   fail "migrate retained the wrong window above high-water"
-tail -n 1 "$migrate_count_repo/.oms/artifacts/index.jsonl" | grep -Fq 'evt_live_1200' ||
+tail -n 1 "$migrate_count_repo/.oms/artifacts/index.jsonl" | grep -F 'evt_live_1200' > /dev/null ||
   fail "migrate dropped the newest row above high-water"
 
 # `prune --stale` is not a hidden count-prune. More than the default 1000 live
@@ -1346,7 +1346,7 @@ stale_chain_dry="$(bash "$ROOT/scripts/artifact-index.sh" \
   --repo "$stale_chain_repo" prune --stale --dry-run)" ||
   fail "nested stale-lineage dry-run failed"
 printf '%s\n' "$stale_chain_dry" |
-  grep -Fq 'would drop 3 stale row(s), 3 -> 0' ||
+  grep -F 'would drop 3 stale row(s), 3 -> 0' > /dev/null||
   fail "nested lineage drops were not counted as stale: $stale_chain_dry"
 if printf '%s\n' "$stale_chain_dry" | grep >/dev/null -F 'byte retention'; then
   fail "nested lineage drops were mislabeled as byte retention: $stale_chain_dry"
@@ -1385,19 +1385,19 @@ stale_byte_dry="$(bash "$ROOT/scripts/artifact-index.sh" \
   --repo "$stale_byte_repo" prune --stale --dry-run)" ||
   fail "byte-pressure stale dry-run failed"
 printf '%s\n' "$stale_byte_dry" |
-  grep -Fq 'would drop 1 stale row(s), 18 -> 16' ||
+  grep -F 'would drop 1 stale row(s), 18 -> 16' > /dev/null||
   fail "stale dry-run did not predict byte-bounded row count: $stale_byte_dry"
 printf '%s\n' "$stale_byte_dry" |
-  grep -Fq 'byte retention would compact 1 additional row(s)' ||
+  grep -F 'byte retention would compact 1 additional row(s)' > /dev/null||
   fail "stale dry-run did not predict the additional byte drop: $stale_byte_dry"
 stale_byte_apply="$(bash "$ROOT/scripts/artifact-index.sh" \
   --repo "$stale_byte_repo" prune --stale)" ||
   fail "byte-pressure stale apply failed"
 printf '%s\n' "$stale_byte_apply" |
-  grep -Fq 'dropped 1 stale row(s), 18 -> 16' ||
+  grep -F 'dropped 1 stale row(s), 18 -> 16' > /dev/null||
   fail "stale apply disagreed with dry-run: $stale_byte_apply"
 printf '%s\n' "$stale_byte_apply" |
-  grep -Fq 'byte retention compacted 1 additional row(s)' ||
+  grep -F 'byte retention compacted 1 additional row(s)' > /dev/null||
   fail "stale apply did not report the additional byte drop: $stale_byte_apply"
 [ "$(wc -l < "$stale_byte_repo/.oms/artifacts/index.jsonl" | tr -d ' ')" -eq 16 ] ||
   fail "stale apply persisted a different row count from its dry-run"

@@ -246,7 +246,7 @@ test_fail_ledger_hook_resolves_on_success() {
     fail "the success side must never exit nonzero"
   [ -z "$out" ] || fail "the resolve receipt is bookkeeping, not context: $out"
   if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
-    grep -Fq 'check.sh focused'; then
+    grep -F 'check.sh focused' > /dev/null; then
     fail "the passing command should have resolved its own rows"
   fi
 
@@ -286,7 +286,7 @@ test_fail_ledger_hook_resolves_on_success() {
   [ "$(ledger_rows "$repo")" = "$rows" ] || fail "OMS_FAIL_LEDGER_HOOK=0 still resolved"
   (cd "$repo" && printf '%s' "$passed" | bash "$hook") >/dev/null
   if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
-    grep -Fq 'check.sh focused'; then
+    grep -F 'check.sh focused' > /dev/null; then
     fail "a later pass should still resolve after the opt-outs"
   fi
 

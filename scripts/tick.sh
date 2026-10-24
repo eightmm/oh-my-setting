@@ -282,7 +282,7 @@ sweep_repo_unlocked() {  # receipt in .oms/tick/last.json
     ' _ "$ROOT" "$root" >/dev/null 2>&1 || journal=$?
   fi
   if [ "${OMS_CI_TICK:-1}" = 1 ] &&
-    git -C "$root" remote get-url origin 2>/dev/null | grep -Eq 'github\.com[:/]'; then
+    git -C "$root" remote get-url origin 2>/dev/null | grep -E 'github\.com[:/]' > /dev/null; then
     (cd "$root" && OMS_CI_TICK_QUIET=1 bounded "$oms" ci-status tick) >/dev/null 2>&1 || true
   fi
   bounded "$oms" agent-events --repo "$root" reconcile --apply >/dev/null 2>&1 || reconcile=$?
@@ -463,7 +463,7 @@ uninstall_tick() {
       rm -f "$TIMER_FILE" "$SERVICE_FILE"
     fi
   fi
-  if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq "$CRON_MARK"; then
+  if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -F "$CRON_MARK" > /dev/null; then
     crontab -l 2>/dev/null | grep -Fv "$CRON_MARK" | crontab - || true
   fi
   record_component false
@@ -473,7 +473,7 @@ status_tick() {
   local root
   if [ -f "$TIMER_FILE" ]; then
     if systemd_owns_unit; then echo "timer: systemd (owned): $TIMER_FILE"; else echo "timer: unit file present, not wired: $TIMER_FILE"; fi
-  elif command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq "$CRON_MARK"; then echo "timer: cron"
+  elif command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -F "$CRON_MARK" > /dev/null; then echo "timer: cron"
   else echo "timer: none (run: oms tick install)"; fi
   [ -f "$REGISTRY" ] || { echo "registry: empty"; return 0; }
   while IFS= read -r root; do

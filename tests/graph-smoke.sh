@@ -436,7 +436,7 @@ run_graph "$work/context.json" project context --task "alpha entry helper for th
 [ "$graph_rc" -eq 0 ] || fail "context exited $graph_rc: $(cat "$work/context.json")"
 run_graph "$work/context.txt" project context --task "alpha entry helper for the beta runner" --max-files 3
 [ "$graph_rc" -eq 0 ] || fail "context text exited $graph_rc"
-tr -d '\r' < "$work/context.txt" | grep -Eq '^pack_bytes: [0-9]+$' \
+tr -d '\r' < "$work/context.txt" | grep -E '^pack_bytes: [0-9]+$' > /dev/null \
   || fail "context omitted pack_bytes"
 if grep -Eq 'byte_estimate|raw_candidate_files' "$work/context.txt"; then
   fail "context still reports counterfactual candidate bytes"
@@ -704,7 +704,7 @@ grep -Fq 'inspect' "$work/render.out" || fail "render omitted the entry node: $(
 grep -Fq '↻' "$work/render.out" || fail "render did not mark a repeat edge: $(cat "$work/render.out")"
 run_graph_exec "$work/render-mermaid.out" exec render coding-change --mermaid
 [ "$exec_rc" -eq 0 ] || fail "render --mermaid exited $exec_rc: $(cat "$work/render-mermaid.out")"
-head -n 1 "$work/render-mermaid.out" | grep -Fqx 'flowchart TD' \
+head -n 1 "$work/render-mermaid.out" | grep -Fx 'flowchart TD' > /dev/null \
   || fail "mermaid render is not a flowchart: $(head -n 1 "$work/render-mermaid.out")"
 run_graph_exec "$work/render-html.out" exec render coding-change \
   --html-fragment "$work/execution-graph.html"

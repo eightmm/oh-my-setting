@@ -16,7 +16,7 @@ exists_ml_entry() {
     if find "$DIR" -maxdepth 3 \( \
         -name ".git" -o -name ".venv" -o -name "node_modules" -o \
         -name "__pycache__" -o -name "tmp" -o -name "backups" \
-      \) -prune -o -name "$pattern" -print -quit | grep -q .; then
+      \) -prune -o -name "$pattern" -print -quit | grep . > /dev/null; then
       return 0
     fi
   done
@@ -33,7 +33,7 @@ has_python_ml_import() {
     -name ".git" -o -name ".venv" -o -name "node_modules" -o \
     -name "__pycache__" -o -name "tmp" -o -name "backups" \
   \) -prune -o -type f -name '*.py' \
-    -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
+    -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep . > /dev/null
 }
 
 has_ml_dependency() {
@@ -47,7 +47,7 @@ has_ml_dependency() {
     -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'setup.cfg' -o \
     -name 'setup.py' -o -name 'environment*.yaml' -o -name 'environment*.yml' -o \
     -name 'Pipfile' -o -name 'poetry.lock' -o -name 'uv.lock' \
-  \) -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
+  \) -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep . > /dev/null
 }
 
 style="general"

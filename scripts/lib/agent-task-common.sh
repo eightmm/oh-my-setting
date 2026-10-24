@@ -560,8 +560,8 @@ agent_task_loop_warnings() {
   attempts="$(agent_task_section_value "$file" "## Loop State" attempts 2>/dev/null || true)"
   max_attempts="$(agent_task_section_value "$file" "## Loop State" max_attempts 2>/dev/null || true)"
   if [ -n "$attempts" ] && [ -n "$max_attempts" ] &&
-     printf '%s\n' "$attempts" | grep -Eq '^[0-9]+$' &&
-     printf '%s\n' "$max_attempts" | grep -Eq '^[0-9]+$' &&
+     printf '%s\n' "$attempts" | grep -E '^[0-9]+$' > /dev/null &&
+     printf '%s\n' "$max_attempts" | grep -E '^[0-9]+$' > /dev/null &&
      [ "$attempts" -ge "$max_attempts" ] && [ "$max_attempts" -gt 0 ]; then
     printf 'warning: loop attempts exhausted: %s/%s\n' "$attempts" "$max_attempts"
   fi
@@ -584,7 +584,7 @@ agent_task_loop_warnings() {
   fi
 
   diff_budget="$(agent_task_section_value "$file" "## Loop State" diff_budget_lines 2>/dev/null || true)"
-  if [ -n "$diff_budget" ] && printf '%s\n' "$diff_budget" | grep -Eq '^[0-9]+$' &&
+  if [ -n "$diff_budget" ] && printf '%s\n' "$diff_budget" | grep -E '^[0-9]+$' > /dev/null &&
      [ "$diff_budget" -gt 0 ] && git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     changed_lines="$(
       { git -C "$repo" diff --numstat HEAD -- 2>/dev/null || git -C "$repo" diff --numstat -- 2>/dev/null || true; } |

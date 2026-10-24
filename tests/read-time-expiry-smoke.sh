@@ -112,9 +112,9 @@ list_out="$("$LEDGER_SH" --repo "$repo" list)"
 line="$(printf '%s\n' "$list_out" | grep -F 'oms-test-hook-old' || true)"
 [ -n "$line" ] || fail "list dropped the expired hook row: $list_out"
 case "$line" in *EXPIRED*) ;; *) fail "expired hook row is not tagged EXPIRED: $line" ;; esac
-printf '%s\n' "$list_out" | grep -F 'oms-test-hook-fresh' | grep -Fq OPEN ||
+printf '%s\n' "$list_out" | grep -F 'oms-test-hook-fresh' | grep -F OPEN > /dev/null ||
   fail "fresh hook row lost its OPEN tag"
-printf '%s\n' "$list_out" | grep -F 'oms-test-verify-old' | grep -Fq OPEN ||
+printf '%s\n' "$list_out" | grep -F 'oms-test-verify-old' | grep -F OPEN > /dev/null ||
   fail "aged non-hook row lost its OPEN tag"
 printf '%s\n' "$list_out" | grep >/dev/null -F 'retired:' || fail "list did not explain the retirement"
 
@@ -202,7 +202,7 @@ if [ "$(tail -c 1 "$ledger" | od -An -c | tr -d ' ')" != '\n' ]; then
   fail "gc compaction published the ledger without a terminal newline"
 fi
 record 'oms-test-after-compact' cmd >/dev/null
-"$LEDGER_SH" --repo "$repo" list 2>&1 | grep -Fq 'oms-test-after-compact' ||
+"$LEDGER_SH" --repo "$repo" list 2>&1 | grep -F 'oms-test-after-compact' > /dev/null ||
   fail "an append after compaction was not parseable (row fusion)"
 
 mal_repo="$TMP/mal-repo"
@@ -325,12 +325,12 @@ t1_lease="$("$PLAN" --repo "$prepo" show --id t1 |
 
 # list tags the dead claim and leaves the live one alone.
 plan_list="$("$PLAN" --repo "$prepo" list)"
-printf '%s\n' "$plan_list" | grep -E '^t1 ' | grep -Fq EXPIRED ||
+printf '%s\n' "$plan_list" | grep -E '^t1 ' | grep -F EXPIRED > /dev/null ||
   fail "expired claim is not tagged in list: $plan_list"
-if printf '%s\n' "$plan_list" | grep -E '^t2 ' | grep -Fq EXPIRED; then
+if printf '%s\n' "$plan_list" | grep -E '^t2 ' | grep -F EXPIRED > /dev/null; then
   fail "a claim with a fresh heartbeat was reported expired"
 fi
-printf '%s\n' "$plan_list" | grep -E '^t1 ' | grep -Fq claimed ||
+printf '%s\n' "$plan_list" | grep -E '^t1 ' | grep -F claimed > /dev/null ||
   fail "list stopped reporting the stored state"
 
 # show reports the verdict without inventing a state.
@@ -352,9 +352,9 @@ ready_out="$("$PLAN" --repo "$prepo" ready 2>/dev/null)"
 next_out="$("$PLAN" --repo "$prepo" next 2>&1)"
 printf '%s\n' "$next_out" | grep >/dev/null -F 'Task t1' || fail "next did not select the expired claim"
 printf '%s\n' "$next_out" | grep >/dev/null -F EXPIRED || fail "next brief hid the expiry"
-"$PLAN" --repo "$prepo" status | grep -Fq 'expired claim t1' ||
+"$PLAN" --repo "$prepo" status | grep -F 'expired claim t1' > /dev/null ||
   fail "status did not report the expired claim"
-"$PLAN" --repo "$prepo" status | grep -Fq 'ready now: t1' ||
+"$PLAN" --repo "$prepo" status | grep -F 'ready now: t1' > /dev/null ||
   fail "status did not count the expired claim as actionable"
 
 # None of those reads may touch the stored plan.

@@ -30,21 +30,21 @@ python3 "$HELPER" --lock "$LOCK" validate >/dev/null || fail "tool lock is inval
   done
   tool_lock_value() { printf '2.97.0\n'; }
   report_tool_drift() { printf 'drift: %s\n' "$*"; }
-  check_locked_direct_version gh gh gh.version | grep -q '^note:.*newer' || fail "external newer gh should not require downgrade"
+  check_locked_direct_version gh gh gh.version | grep '^note:.*newer' > /dev/null || fail "external newer gh should not require downgrade"
   for OMS_TEST_GH_VERSION in 2.9.0 2.99.0-rc1 invalid; do
-    check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "older or unverified gh escaped drift"
+    check_locked_direct_version gh gh gh.version | grep '^drift:' > /dev/null || fail "older or unverified gh escaped drift"
   done
   OMS_TEST_GH_VERSION=2.99.0
   REQUIRE_TOOLS=1
-  check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "strict gh pin was relaxed"
+  check_locked_direct_version gh gh gh.version | grep '^drift:' > /dev/null || fail "strict gh pin was relaxed"
   REQUIRE_TOOLS=0
   OH_MY_SETTING_TOOL_LOCK="$LOCK"
-  check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "explicit gh pin was relaxed"
+  check_locked_direct_version gh gh gh.version | grep '^drift:' > /dev/null || fail "explicit gh pin was relaxed"
   unset OH_MY_SETTING_TOOL_LOCK
   touch "$TMP/gh-bin/gh.oh-my-setting-managed"
-  check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "owned gh version drift was ignored"
+  check_locked_direct_version gh gh gh.version | grep '^drift:' > /dev/null || fail "owned gh version drift was ignored"
   OMS_TEST_GH_VERSION=2.97.0
-  check_locked_direct_version gh gh gh.version | grep -q 'managed binary digest changed' || fail "owned gh integrity was ignored"
+  check_locked_direct_version gh gh gh.version | grep 'managed binary digest changed' > /dev/null || fail "owned gh integrity was ignored"
 )
 
 # Native Codex owns its standalone launcher; updates must not replace it with npm.
@@ -134,9 +134,9 @@ EOF
   tool_lock_value() { tool_lock_get "$1"; }
   command_has_locked_version() { command_has_version "$@"; }
   report_tool_drift() { printf 'native-drift: %s\n' "$*"; }
-  check_locked_npm_version codex | grep -q '(standalone managed)' || fail "doctor did not recognize native Codex"
+  check_locked_npm_version codex | grep '(standalone managed)' > /dev/null || fail "doctor did not recognize native Codex"
   printf '0.0.1\n' > "$CODEX_HOME/version"
-  check_locked_npm_version codex | grep -q 'native-drift:' || fail "doctor accepted native version drift"
+  check_locked_npm_version codex | grep 'native-drift:' > /dev/null || fail "doctor accepted native version drift"
   export NATIVE_EXPECTED=0.0.2
   if refresh_standalone_codex >/dev/null 2>&1; then fail "native unexpected version passed"; fi
   export CODEX_HOME="$TMP/foreign-codex"

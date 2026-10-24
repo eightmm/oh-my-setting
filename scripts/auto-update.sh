@@ -182,7 +182,7 @@ print_attention() {
     if [ -n "$cron_file" ]; then
       grep -Fq "auto-update.sh" "$cron_file" 2>/dev/null && wired=1
     elif command -v crontab >/dev/null 2>&1; then
-      crontab -l 2>/dev/null | grep -Fq "auto-update.sh" && wired=1
+      crontab -l 2>/dev/null | grep -F "auto-update.sh" > /dev/null && wired=1
     fi
   fi
   if [ "$wired" = 0 ]; then
@@ -570,8 +570,8 @@ receipt_transaction_update() {
   [ -z "$output" ] || printf '%s\n' "$output"
   remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ "$status" -eq 75 ] &&
-     { printf '%s\n' "$output" | grep -Fq 'error: update target changed after preflight:' ||
-       printf '%s\n' "$output" | grep -Fq 'error: selected update target is not a valid fast-forward'; }; then
+     { printf '%s\n' "$output" | grep -F 'error: update target changed after preflight:' > /dev/null ||
+       printf '%s\n' "$output" | grep -F 'error: selected update target is not a valid fast-forward' > /dev/null; }; then
     write_state skipped "target changed during preflight; auto-apply skipped" \
       "$current" "$expected" "$upstream"
     echo "auto-update: skipped (target changed during preflight)"

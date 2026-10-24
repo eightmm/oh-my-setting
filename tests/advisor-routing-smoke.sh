@@ -77,7 +77,7 @@ out="$(
       bash "$ROOT/scripts/consult.sh" --prompt "preferred routing probe" \
       --new-thread --dry-run --quiet 2>&1
 )" || fail "preferred consult dry-run failed: $out"
-printf '%s\n' "$out" | sed -n '1p' | grep -Eq '^dry-run: antigravity ' ||
+printf '%s\n' "$out" | sed -n '1p' | grep -E '^dry-run: antigravity ' > /dev/null ||
   fail "OMS_CONSULT_PROVIDER was not selected before the automatic peer order: $out"
 
 out="$(
@@ -87,7 +87,7 @@ out="$(
       bash "$ROOT/scripts/consult.sh" --prompt "explicit routing probe" \
       --to codex --new-thread --dry-run --quiet 2>&1
 )" || fail "explicit consult dry-run failed: $out"
-printf '%s\n' "$out" | sed -n '1p' | grep -Eq '^dry-run: codex ' ||
+printf '%s\n' "$out" | sed -n '1p' | grep -E '^dry-run: codex ' > /dev/null ||
   fail "explicit --to did not override OMS_CONSULT_PROVIDER: $out"
 if printf '%s' "$out" | grep >/dev/null -E '^dry-run: antigravity '; then
   fail "environment preference leaked into an explicit consult: $out"

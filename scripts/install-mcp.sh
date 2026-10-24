@@ -131,7 +131,7 @@ register_claude() {
   fi
   local current
   if current="$(provider_cmd claude mcp get "$NAME" 2>/dev/null)" &&
-     printf '%s' "$current" | grep -Fq "$SERVER"; then
+     printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
     echo "mcp: claude already registered"
     return 0
   fi
@@ -180,7 +180,7 @@ register_codex() {
   fi
   local current
   if current="$(provider_cmd codex mcp get "$NAME" 2>/dev/null)" &&
-     printf '%s' "$current" | grep -Fq "$SERVER"; then
+     printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
     echo "mcp: codex already registered"
     return 0
   fi

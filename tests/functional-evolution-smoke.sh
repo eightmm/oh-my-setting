@@ -367,7 +367,7 @@ assert r["citation"]["status"] == "stale", r
 PY
   bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" rebuild >/dev/null
   bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" --include-stale \
-    recall --json "important invariant" | grep -Fq '"status": "stale"' ||
+    recall --json "important invariant" | grep -F '"status": "stale"' > /dev/null ||
     fail "rebuild lost citation provenance"
 }
 
@@ -406,9 +406,9 @@ test_checkpoint_restores_staged_and_unstaged_content_with_a_backup() {
   grep -Fq 'staged-a' "$repo/file.txt" || fail "staged checkpoint content was not restored"
   grep -Fq 'unstaged-b' "$repo/b.txt" || fail "unstaged checkpoint content was not restored"
   grep -Fq 'untracked survives' "$repo/local.txt" || fail "untracked file was touched"
-  git -C "$repo" diff --cached -- file.txt | grep -Fq 'staged-a' ||
+  git -C "$repo" diff --cached -- file.txt | grep -F 'staged-a' > /dev/null ||
     fail "checkpoint did not restore the index state"
-  git -C "$repo" diff -- b.txt | grep -Fq 'unstaged-b' ||
+  git -C "$repo" diff -- b.txt | grep -F 'unstaged-b' > /dev/null ||
     fail "checkpoint did not restore unstaged state"
   [ "$(cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" list --json | wc -l | tr -d ' ')" -ge 2 ] ||
     fail "restore did not create a recovery checkpoint"
@@ -491,7 +491,7 @@ PY
   if [ ! -f "$repo/new-empty.txt" ] || [ -s "$repo/new-empty.txt" ]; then
     fail "checkpoint lost a staged empty file"
   fi
-  git -C "$repo" diff --cached --name-only -- new-empty.txt | grep -Fxq new-empty.txt ||
+  git -C "$repo" diff --cached --name-only -- new-empty.txt | grep -Fx new-empty.txt > /dev/null ||
     fail "checkpoint converted an ordinary staged empty file to intent-to-add"
 }
 

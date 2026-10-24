@@ -421,7 +421,7 @@ chmod +x "$runtime_uv"
 )
 grep -Fq -- "venv --managed-python --no-project --no-config --python $runtime_version" "$runtime_uv_log" ||
   fail "private runtime allowed project or system-Python fallback"
-! grep '^env ' "$runtime_uv_log" | grep -Fvxq 'env downloads=manual preference= managed= certs=1' ||
+! grep '^env ' "$runtime_uv_log" | grep -Fvx 'env downloads=manual preference= managed= certs=1' > /dev/null ||
   fail "user uv settings leaked into the private runtime build: $(grep '^env ' "$runtime_uv_log" | sort -u)"
 
 # The bootstrap reads the lock before any Python exists; it must agree with

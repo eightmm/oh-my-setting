@@ -2809,7 +2809,7 @@ print(found)
     guard_expected_ref
     printf '%s\n' "$run_out" | tail -n 6
     if [ "$run_rc" -ne 0 ]; then
-      if printf '%s\n' "$run_out" | grep -q 'no actionable task'; then
+      if printf '%s\n' "$run_out" | grep 'no actionable task' > /dev/null; then
         park "tasks-exhausted" "acceptance fails and the plan has no actionable task; add tasks (agent-plan add) or decompose the remaining gap"
       fi
       park "task-failed" "plan-run failed (see its ledger row); review the task, then re-run goal-drive"

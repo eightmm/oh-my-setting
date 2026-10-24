@@ -168,10 +168,10 @@ parse_status() {
   if [ -z "$parsed" ]; then
     parsed="$(printf '%s\n' "$text" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' | sed -n '1p')"
   fi
-  if [ -z "$parsed" ] && printf '%s\n' "$text" | grep -Eiq 'finished|done|success'; then
+  if [ -z "$parsed" ] && printf '%s\n' "$text" | grep -Ei 'finished|done|success' > /dev/null; then
     parsed=0
   fi
-  if [ -z "$parsed" ] && printf '%s\n' "$text" | grep -Eiq 'fail|error'; then
+  if [ -z "$parsed" ] && printf '%s\n' "$text" | grep -Ei 'fail|error' > /dev/null; then
     parsed=1
   fi
   printf '%s\n' "${parsed:-0}"

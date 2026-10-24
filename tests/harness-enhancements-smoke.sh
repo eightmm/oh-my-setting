@@ -428,7 +428,7 @@ PY
   ) || fail "an over-ceiling ledger must compact before the append, not refuse"
   [ "$(wc -l < "$index" | tr -d ' ')" -le 6 ] ||
     fail "pre-append compaction must bound the ledger"
-  if tail -n 1 "$index" | grep -Fq 'evt_bulk'; then
+  if tail -n 1 "$index" | grep -F 'evt_bulk' > /dev/null; then
     fail "the appended row must land at the tail after compaction"
   fi
 }

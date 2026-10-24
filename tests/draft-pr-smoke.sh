@@ -613,7 +613,7 @@ test_remote_and_recovery_hardening() {
   [ "$rc" = 3 ] || fail "sensitive final tree should park, got $rc"
   grep -Fq 'reason=sensitive-publish-payload' "$repo/sensitive-final.out" ||
     fail "sensitive final tree refusal was not identified"
-  if find "$repo/.oms/publish" -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+  if find "$repo/.oms/publish" -type f -name '*.json' -print -quit 2>/dev/null | grep . > /dev/null; then
     fail "sensitive final tree produced a publication intent"
   fi
   if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture; then
@@ -975,7 +975,7 @@ EOF
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/unignored.out" 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "unignored publication intent should be refused, got $rc"
-  if find "$repo/.oms/publish" -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+  if find "$repo/.oms/publish" -type f -name '*.json' -print -quit 2>/dev/null | grep . > /dev/null; then
     fail "unignored publication intent was persisted"
   fi
 
@@ -1059,7 +1059,7 @@ PY
   run_draft_pr "$repo" prepare --remote origin --base main \
     --verify .git/hooks/tamper-on-prepare-replay > "$repo/repeat-blocked.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "blocked existing intent should park, got $rc"
-  if grep '^draft-pr: parent-agent next:' "$repo/repeat-blocked.out" | grep -Fq 'oms draft-pr'; then
+  if grep '^draft-pr: parent-agent next:' "$repo/repeat-blocked.out" | grep -F 'oms draft-pr' > /dev/null; then
     fail "blocked intent exposed a publish resume command"
   fi
   [ "$repeat_before" = "$(sha256_file "$intent")" ] ||
@@ -1073,7 +1073,7 @@ PY
   run_draft_pr "$repo" prepare --remote origin --base main \
     --verify .git/hooks/tamper-on-prepare-replay > "$repo/repeat-symlink.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "symlink existing intent should park, got $rc"
-  if grep '^draft-pr: parent-agent next:' "$repo/repeat-symlink.out" | grep -Fq 'oms draft-pr'; then
+  if grep '^draft-pr: parent-agent next:' "$repo/repeat-symlink.out" | grep -F 'oms draft-pr' > /dev/null; then
     fail "symlink intent exposed a publish resume command"
   fi
   [ "$repeat_before" = "$(sha256_file "$repeat_saved")" ] ||

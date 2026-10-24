@@ -511,7 +511,7 @@ oms_capability_effort_union() {
   file="$(oms_capability_cache_dir)/$provider.efforts"
   [ -f "$file" ] || return 0
   for candidate in low medium high xhigh max ultra; do
-    if cut -f2 "$file" | grep -qw -- "$candidate"; then
+    if cut -f2 "$file" | grep -w -- "$candidate" > /dev/null; then
       out="${out:+$out }$candidate"
     fi
   done

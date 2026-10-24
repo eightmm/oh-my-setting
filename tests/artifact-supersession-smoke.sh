@@ -208,7 +208,7 @@ EOF
   printf '%s\n' "$out" | grep >/dev/null -F '1 recovered failure(s) resolved' ||
     fail "the recovered sweep did not summarize its count: $out"
   if printf '%s\n' "$out" |
-    grep -Eq 'evt_review_open|evt_semantic_fail|evt_call_early_only|evt_delegate_open'; then
+    grep -E 'evt_review_open|evt_semantic_fail|evt_call_early_only|evt_delegate_open' > /dev/null; then
     fail "the recovered sweep claimed a row outside its bound: $out"
   fi
 

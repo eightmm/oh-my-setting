@@ -1190,7 +1190,7 @@ EOF
     fail "the refusal must name the way out: $(tail -3 "$frozen_repo/frozen-retry.out")"
   # The provenance line before the refusal prints --allowed by design; only the
   # refusal itself must stay value-free.
-  ! grep -F 'immutable contract changed' "$frozen_repo/frozen-retry.out" | grep -Fq 'src,tests' ||
+  ! grep -F 'immutable contract changed' "$frozen_repo/frozen-retry.out" | grep -F 'src,tests' > /dev/null ||
     fail "the refusal must name fields, never their values: $(tail -3 "$frozen_repo/frozen-retry.out")"
 
   # A reviewed proposal can go stale -- HEAD moves under it, or the parent

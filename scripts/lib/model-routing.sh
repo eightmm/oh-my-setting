@@ -11,7 +11,7 @@ OMS_MODEL_ROUTING_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 oms_model_validate_name() {
   local value="$1"
   [ "${#value}" -le 160 ] || { echo "error: model name exceeds 160 characters" >&2; return 2; }
-  if LC_ALL=C printf '%s' "$value" | grep -q '[[:cntrl:]]'; then
+  if LC_ALL=C printf '%s' "$value" | grep '[[:cntrl:]]' > /dev/null; then
     echo "error: model name contains control characters" >&2
     return 2
   fi
@@ -393,7 +393,7 @@ EOF
   OMS_MODEL_SAFEGUARD_CHAIN="$OMS_MODEL_DISTINCT_CHAIN"
   if [ -z "$explicit" ] && floor="$(oms_provider_safeguard_floor "$provider" 2>/dev/null)" &&
     [ "$(oms_model_catalog_key "$floor")" != "$(oms_model_catalog_key "$OMS_MODEL_PRIMARY")" ] &&
-    ! printf '%s\n' "$OMS_MODEL_DISTINCT_CHAIN" | grep -Fxq "$floor"; then
+    ! printf '%s\n' "$OMS_MODEL_DISTINCT_CHAIN" | grep -Fx "$floor" > /dev/null; then
     OMS_MODEL_SAFEGUARD_CHAIN="${OMS_MODEL_DISTINCT_CHAIN}${OMS_MODEL_DISTINCT_CHAIN:+$'\n'}$floor"
   fi
   OMS_MODEL_SELECTED="$OMS_MODEL_PRIMARY"
@@ -436,7 +436,7 @@ oms_model_is_policy_decline_output() {
   # council a false decline. Codex/agy text refusals can close a turn cleanly,
   # so only Claude's envelope is trusted here.
   if head -n 1 "$file" 2>/dev/null | tr -d '\r' |
-    grep -Eqx 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0'; then
+    grep -Ex 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0' > /dev/null; then
     return 1
   fi
   [ -f "$prompt" ] || prompt=/dev/null

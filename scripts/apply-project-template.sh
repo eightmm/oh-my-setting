@@ -83,7 +83,7 @@ has_slurm_project() {
   if find "$PROJECT_DIR" -maxdepth 3 \( \
       -name ".git" -o -name ".venv" -o -name "node_modules" -o \
       -name "__pycache__" -o -name "tmp" -o -name "backups" \
-    \) -prune -o \( -name "*.sbatch" -o -name "slurm*.sh" -o -name "submit*.sh" \) -print -quit | grep -q .; then
+    \) -prune -o \( -name "*.sbatch" -o -name "slurm*.sh" -o -name "submit*.sh" \) -print -quit | grep . > /dev/null; then
     return 0
   fi
 
@@ -96,7 +96,7 @@ has_slurm_project() {
     -name "__pycache__" -o -name "tmp" -o -name "backups" \
   \) -prune -o -type f \( -name '*.sh' -o -name '*.sbatch' \) \
     ! -path "$PROJECT_DIR/scripts/apply-project-template.sh" \
-    -exec grep -q "#SBATCH" {} \; -print -quit 2>/dev/null | grep -q .
+    -exec grep -q "#SBATCH" {} \; -print -quit 2>/dev/null | grep . > /dev/null
 }
 
 if [ "$BASE_STYLE" = "auto" ]; then

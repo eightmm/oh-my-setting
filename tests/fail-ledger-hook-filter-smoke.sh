@@ -70,7 +70,7 @@ grep -Fq nope_such_module "$ledger" ||
   fail "the recorded row should carry the failing command"
 payload "python3 -m code_two_only" 2 |
   OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh"
-grep -F code_two_only "$ledger" | grep -Eq '"exit": ?2' ||
+grep -F code_two_only "$ledger" | grep -E '"exit": ?2' > /dev/null ||
   fail "the row should carry the exit code parsed from the error text"
 
 # The deliberate record verb is not gated by the hook filter.

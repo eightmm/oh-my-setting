@@ -593,7 +593,7 @@ grep -Fq 'COLLECTION FAILED attempts: exit 2' "$TMP/dash-corrupt.txt" ||
 grep -Fq 'attempts: UNAVAILABLE (lifecycle stream invalid)' "$TMP/dash-corrupt.txt" ||
   fail "dashboard showed attempts from an invalid stream"
 corrupt_text_before_attention="$(sed '/^attention:/,$d' "$TMP/dash-corrupt.txt")"
-! printf '%s' "$corrupt_text_before_attention" | grep -Fq "$corrupt" || \
+! printf '%s' "$corrupt_text_before_attention" | grep -F "$corrupt" > /dev/null || \
   fail "dashboard leaked the repo path outside recovery commands"
 
 # Missing state and oversized listings, through the pure projection.
@@ -830,7 +830,7 @@ for bad in '--interval 5' '--count 1' '--json --watch' '--watch --interval 1' \
   dash --repo "$repo" $bad >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "dashboard $bad should be a usage error, got $rc"
 done
-"$ROOT/scripts/oms" dashboard --help | grep -Fq 'Usage: dashboard.sh' || fail "oms dashboard --help failed"
+"$ROOT/scripts/oms" dashboard --help | grep -F 'Usage: dashboard.sh' > /dev/null || fail "oms dashboard --help failed"
 # A non-terminal stream is appended to, never cleared.
 dash --repo "$repo" --watch --interval 2 --count 2 > "$TMP/dash-watch.txt" || fail "dashboard watch failed"
 [ "$(grep -c "^OMS dashboard .* refresh=2s$" "$TMP/dash-watch.txt")" = 2 ] || fail "watch did not refresh twice"

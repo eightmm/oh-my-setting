@@ -1826,7 +1826,7 @@ test_update_probe_flag_reaches_the_probe() {
     fail "an absent agy is unverified, never a guess: $out"
   out="$(bash "$ROOT/scripts/update.sh" --probe-agy-surfaces --check 2>&1)" && rc=0 || rc=$?
   [ "${rc:-0}" = 2 ] || fail "--probe-agy-surfaces with --check should be misuse"
-  bash "$ROOT/scripts/update.sh" --help | grep -Fq -- "--probe-agy-surfaces" ||
+  bash "$ROOT/scripts/update.sh" --help | grep -F -- "--probe-agy-surfaces" > /dev/null ||
     fail "the flag should be documented in usage"
 }
 
@@ -2159,7 +2159,7 @@ EOF
   grep -Fq ".claude/skills/oms-build-quirks" "$repo/.git/info/exclude" ||
     fail "claude link not hidden from git"
 
-  bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status | grep -Fq "1 project skill(s) valid" ||
+  bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status | grep -F "1 project skill(s) valid" > /dev/null ||
     fail "status should count the valid skill"
 
   cp "$repo/.oms/skills/oms-build-quirks/SKILL.md" "$original"
@@ -2358,7 +2358,7 @@ test_ml_template_installs_project_skills() {
   [ -L "$project/.agents/skills/oms-ml-experiment" ] ||
     fail "oms-ml-experiment not linked for native discovery"
   bash "$ROOT/scripts/skill-forge.sh" --repo "$project" status |
-    grep -Fq "2 project skill(s) valid" || fail "installed skills should validate"
+    grep -F "2 project skill(s) valid" > /dev/null|| fail "installed skills should validate"
 
   # Idempotent: a second apply must not fail on the existing skills.
   bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||

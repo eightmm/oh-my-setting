@@ -136,7 +136,7 @@ case "$REASONING_EFFORT" in
   *) fail "--reasoning-effort must be auto, low, medium, high, xhigh, max, or ultra" ;;
 esac
 WORKER_PROVIDER="$(oms_normalize_provider "$WORKER_PROVIDER")" || fail "unknown worker provider"
-printf '%s\n' "$PROVIDER_TIMEOUT" | grep -Eq '^[1-9][0-9]*([smh])?$' ||
+printf '%s\n' "$PROVIDER_TIMEOUT" | grep -E '^[1-9][0-9]*([smh])?$' > /dev/null ||
   fail "--provider-timeout must be a positive duration such as 15m"
 python3 - "$PROVIDER_TIMEOUT" <<'PY' ||
 import re, sys

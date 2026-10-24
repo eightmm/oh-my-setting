@@ -240,7 +240,7 @@ done
 
 ACTION="${ACTION:-show}"
 if [ -n "$DEDUPE_KEY" ]; then
-  [ "$ACTION" = append ] && printf '%s\n' "$DEDUPE_KEY" | grep -Eq '^[0-9a-f]{64}$' || {
+  [ "$ACTION" = append ] && printf '%s\n' "$DEDUPE_KEY" | grep -E '^[0-9a-f]{64}$' > /dev/null || {
     echo "error: --dedupe-key requires append and a 64-character lowercase hex hash" >&2
     exit 2
   }
@@ -274,7 +274,7 @@ require_uint() {
 require_uint "--loop-attempts" "$LOOP_ATTEMPTS"
 require_uint "--loop-max" "$LOOP_MAX"
 require_uint "--diff-budget" "$DIFF_BUDGET"
-if [ -n "$SOURCE_SESSION" ] && ! printf '%s\n' "$SOURCE_SESSION" | grep -Eq '^[0-9a-f]{16,64}$'; then
+if [ -n "$SOURCE_SESSION" ] && ! printf '%s\n' "$SOURCE_SESSION" | grep -E '^[0-9a-f]{16,64}$' > /dev/null; then
   echo "error: --source-session must be a 16-64 character lowercase hexadecimal hash" >&2
   exit 2
 fi

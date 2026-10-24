@@ -249,7 +249,7 @@ oms_python_runtime_bootstrap() {  # REPO_ROOT; needs platform.sh and file-lock.s
   [ "$archive" = tar.gz ] || oms_python_runtime_fail "unexpected uv archive: $archive" || return
   root="$(oms_python_runtime_root)"
   uv_dir="${OMS_PYTHON_RUNTIME_UV_BIN_DIR:-$(dirname "$root")/uv/bin}"
-  if ! "$uv_dir/uv" --version 2>/dev/null | grep -Fq "uv $uv_version"; then
+  if ! "$uv_dir/uv" --version 2>/dev/null | grep -F "uv $uv_version" > /dev/null; then
     command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 ||
       oms_python_runtime_fail "curl and tar are required to fetch uv" || return
     for name in uv uvx; do
@@ -278,7 +278,7 @@ oms_python_runtime_bootstrap() {  # REPO_ROOT; needs platform.sh and file-lock.s
         { rm -rf "$tmp"; return 1; }
     done
     rm -rf "$tmp"
-    "$uv_dir/uv" --version 2>/dev/null | grep -Fq "uv $uv_version" ||
+    "$uv_dir/uv" --version 2>/dev/null | grep -F "uv $uv_version" > /dev/null ||
       oms_python_runtime_fail "fetched uv does not report $uv_version" || return
   fi
   oms_python_runtime_ensure "$uv_dir/uv" "$version"

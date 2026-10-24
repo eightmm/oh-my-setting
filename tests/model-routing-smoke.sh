@@ -374,7 +374,7 @@ OMS_TEST_PROVIDER_MODE=capacity invoke --to codex --model model-a \
   fail 'explicit capacity fallback should recover'
 [ "$(wc -l < "$TMP/provider.calls" | tr -d ' ')" = 2 ] ||
   fail 'explicit capacity fallback should make exactly two attempts'
-tail -n 1 "$TMP/provider.calls" | grep -Fq 'Model B' ||
+tail -n 1 "$TMP/provider.calls" | grep -F 'Model B' > /dev/null ||
   fail 'the explicit fallback model was not selected'
 
 for mode in unknown safeguard; do
@@ -393,7 +393,7 @@ for mode in safeguard unknown; do
     fail "provider-default route should retain bounded catalog $mode recovery"
   [ "$(wc -l < "$TMP/provider.calls" | tr -d ' ')" = 2 ] ||
     fail "provider-default $mode recovery should make one retry"
-  sed -n '2p' "$TMP/provider.calls" | grep -Fq -- '--model model-a' ||
+  sed -n '2p' "$TMP/provider.calls" | grep -F -- '--model model-a' > /dev/null ||
     fail "provider-default $mode recovery did not select the first catalog model"
 done
 
@@ -403,7 +403,7 @@ OMS_TEST_PROVIDER_MODE=unknown invoke --to codex --reasoning-effort ultra \
   fail 'provider-default recovery should find a model that accepts the requested effort'
 [ "$(wc -l < "$TMP/provider.calls" | tr -d ' ')" = 2 ] ||
   fail 'effort-compatible recovery should make one retry'
-sed -n '2p' "$TMP/provider.calls" | grep -Fq -- '--model Model B' ||
+sed -n '2p' "$TMP/provider.calls" | grep -F -- '--model Model B' > /dev/null ||
   fail 'catalog recovery selected a model that does not accept the requested effort'
 
 : > "$TMP/provider.calls"
@@ -595,7 +595,7 @@ if env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
 fi
 [ "$(wc -l < "$TMP/provider.calls" | tr -d ' ')" = 3 ] ||
   fail 'repair after explicit fallback silently retried provider default'
-sed -n '3p' "$TMP/provider.calls" | grep -Fq -- '--model Model B' ||
+sed -n '3p' "$TMP/provider.calls" | grep -F -- '--model Model B' > /dev/null ||
   fail 'repair did not stay on the successfully selected fallback model'
 
 # The standalone model options are unambiguous only with one plain, explicit

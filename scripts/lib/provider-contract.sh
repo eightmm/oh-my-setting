@@ -104,9 +104,9 @@ loader_parity() {
   gemini="$(managed_blocks "$fixture/GEMINI.md")"
   if [ "$agents" != "$claude" ] || [ "$agents" != "$gemini" ]; then
     bad "loader parity (ml): managed blocks diverge across AGENTS.md/CLAUDE.md/GEMINI.md"
-  elif printf '%s\n' "$agents" | grep -q ':general:'; then
+  elif printf '%s\n' "$agents" | grep ':general:' > /dev/null; then
     bad "loader parity (ml): stale general block survived the style switch"
-  elif ! printf '%s\n' "$agents" | grep -q ':ml:'; then
+  elif ! printf '%s\n' "$agents" | grep ':ml:' > /dev/null; then
     bad "loader parity (ml): ml block missing after apply"
   else
     ok "loader parity (ml): GEMINI.md adopted and stale style retired in sync"

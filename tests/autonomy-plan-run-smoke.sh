@@ -136,7 +136,7 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$assignment_repo" \
 grep -Fq 'provider=claude' "$TMP/assigned-plan.out" || fail "plan-run lost assigned provider"
 grep -Fq 'model=assigned-claude' "$TMP/assigned-plan.out" || fail "plan-run lost assigned model"
 if grep -Fq wrong-carrier-model "$TMP/assigned-plan.out"; then fail "run default leaked into assigned route"; fi
-"$PLAN" --repo "$assignment_repo" show --id reverse | grep -Fq '"state": "ready"' ||
+"$PLAN" --repo "$assignment_repo" show --id reverse | grep -F '"state": "ready"' > /dev/null ||
   fail "assigned dry-run claimed a task"
 
 
@@ -160,7 +160,7 @@ printf '%s' "$selected" | python3 -c 'import json,sys; d=json.load(sys.stdin); a
 # Default execution leaves a reviewed patch and never mutates the main tree.
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --next >"$TMP/review.out"
 grep -Fq 'state=review' "$TMP/review.out" || fail "review result missing"
-"$PLAN" --repo "$repo" show --id t1 | grep -Fq '"state": "review"' || fail "t1 not in review"
+"$PLAN" --repo "$repo" show --id t1 | grep -F '"state": "review"' > /dev/null || fail "t1 not in review"
 [ ! -e "$repo/delegated.txt" ] || fail "review-default mutated the main tree"
 python3 - "$repo/.oms/artifacts/index.jsonl" "$initial_plan_id" <<'PY' ||
 import json, sys
@@ -193,7 +193,7 @@ git -C "$repo" add delegated.txt
 git -C "$repo" commit -qm 'test: commit first reviewed task'
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --next --land >"$TMP/land.out"
 grep -Fq 'state=done' "$TMP/land.out" || fail "land result missing"
-"$PLAN" --repo "$repo" show --id t2 | grep -Fq '"state": "done"' || fail "t2 not done"
+"$PLAN" --repo "$repo" show --id t2 | grep -F '"state": "done"' > /dev/null || fail "t2 not done"
 grep -Fxq two "$repo/delegated2.txt" || fail "plan-run --land did not apply patch"
 grep -Fq '"kind": "patch-land"' "$repo/.oms/artifacts/index.jsonl" || fail "landing lineage missing"
 python3 - "$repo/.oms/artifacts/index.jsonl" "$initial_plan_id" <<'PY' ||
@@ -386,11 +386,11 @@ if HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id 
   fail "unsafe task should be refused"
 fi
 grep -Fq 'non-empty allowed_paths' "$TMP/unsafe.err" || fail "unsafe refusal reason missing"
-"$PLAN" --repo "$repo" show --id unsafe | grep -Fq '"state": "ready"' || fail "refused claim was stranded"
+"$PLAN" --repo "$repo" show --id unsafe | grep -F '"state": "ready"' > /dev/null || fail "refused claim was stranded"
 
 # Dry-run selects but never claims or calls the provider.
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id unsafe --dry-run >"$TMP/dry.out" 2>"$TMP/dry.err" || true
-"$PLAN" --repo "$repo" show --id unsafe | grep -Fq '"state": "ready"' || fail "dry-run changed plan state"
+"$PLAN" --repo "$repo" show --id unsafe | grep -F '"state": "ready"' > /dev/null || fail "dry-run changed plan state"
 
 # A reviewed-patch repair is a one-shot transition under the exact review
 # lease. It retains the prior artifact/patch until a replacement review exists,
@@ -443,7 +443,7 @@ OMS_CAPABILITY_DIR="$TMP/routing-cap" OMS_MODEL_WORKLOAD=standard OMS_ROLE_ROUTI
 [ "$rc" = 2 ] || fail "known unchanged failure should be refused with exit 2, got $rc"
 [ ! -e "$call_log" ] || fail "known unchanged failure called provider"
 grep -Fq 'known unchanged plan-run failure' "$TMP/known.err" || fail "known failure guidance missing"
-"$PLAN" --repo "$repo" show --id known | grep -Fq '"state": "ready"' || fail "known-failure refusal stranded claim"
+"$PLAN" --repo "$repo" show --id known | grep -F '"state": "ready"' > /dev/null || fail "known-failure refusal stranded claim"
 
 # Ambient workload cannot change a plan's failure identity: peer-delegate
 # defaults to standard unless its caller explicitly supplies --workload.
@@ -455,7 +455,7 @@ OMS_CAPABILITY_DIR="$TMP/routing-cap" OMS_MODEL_WORKLOAD=routine OMS_ROLE_ROUTIN
 [ "$rc" = 2 ] || fail "ambient routine workload bypassed the standard-route known failure: exit $rc"
 grep -Fq 'known unchanged plan-run failure' "$TMP/ambient-workload.err" ||
   fail "ambient workload changed the standard-route failure fingerprint"
-"$PLAN" --repo "$repo" show --id known | grep -Fq '"state": "ready"' ||
+"$PLAN" --repo "$repo" show --id known | grep -F '"state": "ready"' > /dev/null ||
   fail "ambient workload dry-run changed plan state"
 
 # A changed resolved route is a changed failure hypothesis; with tiers gone
@@ -495,7 +495,7 @@ rc=0
 wait "$runner_pid" || rc=$?
 [ "$rc" = 143 ] || fail "signal exit should be 143, got $rc"
 [ -e "$TMP/child-cleaned" ] || fail "claim released before child cleanup completed"
-"$PLAN" --repo "$repo" show --id signal | grep -Fq '"state": "ready"' || fail "signal cleanup stranded claim"
+"$PLAN" --repo "$repo" show --id signal | grep -F '"state": "ready"' > /dev/null || fail "signal cleanup stranded claim"
 
 # --- --auto-repair: one embedded repair round at landing, then park ----------
 # Delegation succeeds (worker writes, verify passes in the worktree); landing
@@ -518,7 +518,7 @@ grep -Fq "one auto-repair round" "$TMP/t9.out" ||
 grep -Fq "parked task=t9" "$TMP/t9.out" ||
   fail "task should park after the bounded repair: $(tail -5 "$TMP/t9.out")"
 bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list |
-  grep -Fq "next: get an outside read" ||
+  grep -F "next: get an outside read" > /dev/null||
   fail "park should record a recommended next action"
 git -C "$repo" checkout -q README.md
 
@@ -561,7 +561,7 @@ git -C "$repo" log --format=%s -2 | grep -F 'feat: goal two lands' >/dev/null ||
   fail "task title should be the commit subject"
 [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ] ||
   fail "driver left tracked changes uncommitted"
-"$PLAN" --repo "$repo" show --id g2 | grep -Fq '"state": "done"' || fail "g2 not done"
+"$PLAN" --repo "$repo" show --id g2 | grep -F '"state": "done"' > /dev/null || fail "g2 not done"
 grep -Fq '"kind": "acceptance"' "$repo/.oms/plan/progress.jsonl" ||
   fail "acceptance rows missing from progress.jsonl"
 grep -Fq '"reason": "acceptance-pass"' "$repo/.oms/plan/progress.jsonl" ||
@@ -605,7 +605,7 @@ if grep -Fq 'goal-drive: next:' "$TMP/gd-park.out"; then
 fi
 grep -Fq '"reason": "tasks-exhausted"' "$repo/.oms/plan/progress.jsonl" ||
   fail "terminal park row missing"
-bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list | grep -Fq 'parked: tasks-exhausted' ||
+bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list | grep -F 'parked: tasks-exhausted' > /dev/null ||
   fail "park should leave a fail-ledger trail"
 
 # The park row is fingerprinted on the contract (reason + acceptance hash), not
@@ -627,7 +627,7 @@ esac
 case "$park_cmd" in
   *gd-*) fail "run id must not be part of the park fingerprint: $park_cmd" ;;
 esac
-park_row | grep -Fq 'parked: tasks-exhausted (gd-' ||
+park_row | grep -F 'parked: tasks-exhausted (gd-' > /dev/null ||
   fail "park summary should carry the run lineage"
 
 # The same goal parking twice is the pattern the advise threshold exists for,
@@ -651,11 +651,11 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
   fail "acceptance should now pass: $(tail -5 "$TMP/gd-resolve.out")"
 grep -Fq 'goal-drive: done' "$TMP/gd-resolve.out" || fail "done line missing after fix"
 if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
-  grep -Fq 'parked: tasks-exhausted'; then
+  grep -F 'parked: tasks-exhausted' > /dev/null; then
   fail "acceptance pass should resolve this goal's park rows"
 fi
 bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list |
-  grep -Fq 'fixed: acceptance passed in gd-' ||
+  grep -F 'fixed: acceptance passed in gd-' > /dev/null||
   fail "park resolution should record how it was fixed"
 
 # An acceptance command that already passes on the base tree cannot tell the
@@ -696,7 +696,7 @@ assert row.get("recovery") == "repair_contract", row
 ' || fail "vacuous park must record contract_invalid/repair_contract"
 [ "$(git -C "$vacuous" rev-parse HEAD)" = "$head_vacuous" ] ||
   fail "a parked vacuous run must not commit"
-"$PLAN" --repo "$vacuous" show --id v1 | grep -Fq '"state": "ready"' ||
+"$PLAN" --repo "$vacuous" show --id v1 | grep -F '"state": "ready"' > /dev/null ||
   fail "the pending task must stay ready after the park"
 
 # An empty plan is not evidence that work finished. It is an invalid work
@@ -759,7 +759,7 @@ CALL_LOG="$TMP/verify-calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
 grep -Fq 'does not exist at the base commit' "$TMP/pr-verify.out" ||
   fail "refusal must name the precondition: $(tail -3 "$TMP/pr-verify.out")"
 [ ! -s "$TMP/verify-calls" ] || fail "the provider was called despite the refusal"
-"$PLAN" --repo "$vacuous" show --id p1 | grep -Fq '"state": "ready"' ||
+"$PLAN" --repo "$vacuous" show --id p1 | grep -F '"state": "ready"' > /dev/null ||
   fail "the refused task must be left claimable, not stuck claimed"
 
 # The detector only speaks about high-confidence verifier inputs inside the
@@ -935,7 +935,7 @@ refuse_pack() {  # LABEL PACK
   grep -Fq 'error: context-pack: ' "$TMP/cp-refuse.out" ||
     fail "$1 refusal did not name context-pack: $(tail -3 "$TMP/cp-refuse.out")"
   [ ! -s "$TMP/cp-calls" ] || fail "$1 pack reached the provider"
-  "$PLAN" --repo "$pack_repo" show --id cp-refuse | grep -Fq '"state": "ready"' ||
+  "$PLAN" --repo "$pack_repo" show --id cp-refuse | grep -F '"state": "ready"' > /dev/null ||
     fail "$1 refusal did not leave the task claimable"
 }
 refuse_pack symlink "$packs/symlink.json"

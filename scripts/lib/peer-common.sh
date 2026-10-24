@@ -2438,7 +2438,7 @@ ma_sanitize_quoted_output() {
   sensitive_re="$(agent_memory_sensitive_re)"
   {
     while IFS= read -r line || [ -n "$line" ]; do
-      if printf '%s\n' "$line" | grep -Eiq "$sensitive_re"; then
+      if printf '%s\n' "$line" | grep -Ei "$sensitive_re" > /dev/null; then
         if [ "$redacted" -eq 0 ]; then
           printf '[REDACTED: sensitive-looking provider output line omitted]\n'
           redacted=1
@@ -4078,7 +4078,7 @@ EOF
     printf '\nmodel-result: declined by %s (%s); not retried on another model\n' \
       "$provider" "$OMS_MODEL_SELECTED" >> "$artifact"
     echo "note: $provider declined this request on $OMS_MODEL_SELECTED; it was not re-sent to another model" >&2
-    if head -n 1 "$attempt_file" | tr -d '\r' | grep -Eq '^stop-reason: provider=claude reason=refusal .* category=reasoning_extraction$'; then
+    if head -n 1 "$attempt_file" | tr -d '\r' | grep -E '^stop-reason: provider=claude reason=refusal .* category=reasoning_extraction$' > /dev/null; then
       echo "hint: the request asked the model to write out its internal reasoning; drop that instruction instead of retrying" >&2
     fi
     export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED

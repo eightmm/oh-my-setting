@@ -59,7 +59,7 @@ SKILL_STORE="$REPO/.oms/skill-store"
 SKILL_LIFECYCLE_HELPER="$ROOT/scripts/lib/skill-lifecycle.py"
 
 valid_name() {
-  printf '%s' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+  printf '%s' "$1" | grep -E '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' > /dev/null
 }
 
 # Spec conformance for one skill dir: frontmatter name matches the directory,
@@ -419,7 +419,7 @@ cmd_validate() {
       continue
     fi
     echo "ok: $name"
-    if sed -n '2,/^---$/p' "$skill/SKILL.md" | grep -q '^verify:'; then
+    if sed -n '2,/^---$/p' "$skill/SKILL.md" | grep '^verify:' > /dev/null; then
       echo "note: $name: top-level verify is non-portable; declare it under metadata:"
     fi
   done

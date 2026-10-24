@@ -611,7 +611,7 @@ EOF
               echo "warning: gc: plan task $task_id changed or has a live exact worker; kept it" >&2
               if [ "$plan_recovery_rc" -ne 3 ] ||
                   printf '%s\n' "$plan_recovery_out" |
-                    grep -Fxq 'plan-recovery-outcome: unproven'; then
+                    grep -Fx 'plan-recovery-outcome: unproven' > /dev/null; then
                 recovery_hard_failure=1
               fi
             fi

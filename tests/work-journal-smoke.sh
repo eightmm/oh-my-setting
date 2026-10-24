@@ -495,7 +495,7 @@ second_prompt_digest="$(
 [ -z "$second_prompt_digest" ] ||
   fail "journal digest was injected more than once in one local day"
 "$ROOT/scripts/oms" journal show --repo "$lifecycle_repo" --today |
-  grep -Fq 'Daily Work Journal' ||
+  grep -F 'Daily Work Journal' > /dev/null ||
   fail "public journal read path did not return today's summary"
 
 # Terminal job reconciliation supplies observed state without parsing raw logs.
@@ -660,11 +660,11 @@ printf '%s\n' "$auto_out" | grep >/dev/null -F '1 already in shared memory' ||
 grep -Fq 'journal-distill: decision' "$auto_memory" ||
   fail "tick distill did not promote a decision lesson"
 if ! grep -F 'journal-distill:' "$auto_memory" |
-  grep -Fq 'never closed so nothing promoted it'; then
+  grep -F 'never closed so nothing promoted it' > /dev/null; then
   fail "tick distill promoted the wrong decision"
 fi
 if grep -F 'journal-distill:' "$auto_memory" |
-  grep -Fq 'close path already promoted this one'; then
+  grep -F 'close path already promoted this one' > /dev/null; then
   fail "tick distill duplicated a decision agent-task close already promoted"
 fi
 auto_out="$(work_journal_prompt_tick "$auto_repo")"
@@ -1054,10 +1054,10 @@ row = json.load(sys.stdin)
 assert row["notion"]["excluded"] is False, row["notion"]
 ' || fail "a repo not on the list must not read as excluded"
 "$ROOT/scripts/journal.sh" configure --include-repo "$unadopted" |
-  grep -q "excludes no repos" ||
+  grep "excludes no repos" > /dev/null ||
   fail "configure --include-repo must clear the exclusion"
 "$ROOT/scripts/journal.sh" configure --exclude-repo "$unadopted" |
-  grep -q "excludes 1 repo" ||
+  grep "excludes 1 repo" > /dev/null ||
   fail "configure --exclude-repo must add and report the exclusion"
 
 # --- Project identity: drift between the pinned and detected identity is
@@ -1080,10 +1080,10 @@ assert row["drift"] is True, row
 assert row["pinned_name"] == "legacy", row
 assert row["detected_name"] == "identity-repo", row
 ' || fail "identity must report drift between a legacy pin and detection"
-"$ROOT/scripts/journal.sh" status --repo "$idrepo" | grep -q "adopt-detected" ||
+"$ROOT/scripts/journal.sh" status --repo "$idrepo" | grep "adopt-detected" > /dev/null ||
   fail "status must surface identity drift with its remedy"
 "$ROOT/scripts/journal.sh" identity --repo "$idrepo" --adopt-detected |
-  grep -q "adopted: identity-repo" ||
+  grep "adopted: identity-repo" > /dev/null ||
   fail "adopt-detected must re-pin to the detected identity"
 [ ! -e "$idrepo/.oms/work-journal/sync/notion.json" ] ||
   fail "adopt-detected must reset the disposable Notion mapping"
@@ -1094,7 +1094,7 @@ assert row["drift"] is False, row
 assert row["pinned_name"] == "identity-repo", row
 ' || fail "after adoption the pin must match detection"
 "$ROOT/scripts/journal.sh" identity --repo "$idrepo" --adopt-detected |
-  grep -q "already canonical" ||
+  grep "already canonical" > /dev/null ||
   fail "a second adoption must be an explicit no-op"
 
 # The rendered language follows the pinned configuration, not the locale of
@@ -1111,18 +1111,18 @@ git -C "$langrepo" commit -qm "seed"
   export OMS_WORK_JOURNAL_CONFIG="$TMP/lang-config.json"
   export LANG=en_US.UTF-8
   unset OMS_WORK_JOURNAL_LANG LC_ALL LC_MESSAGES
-  "$ROOT/scripts/journal.sh" configure --lang ko | grep -q "journal language: ko" ||
+  "$ROOT/scripts/journal.sh" configure --lang ko | grep "journal language: ko" > /dev/null ||
     fail "configure --lang did not confirm the pinned language"
   row="$TMP/lang-row.json"
   make_row "$row" "lang-one"
   work_journal_observe "$langrepo" run-ledger "$row"
   "$ROOT/scripts/journal.sh" show --repo "$langrepo" --period 2026-07-31 |
-    grep -q '^## 핵심 진전' ||
+    grep '^## 핵심 진전' > /dev/null ||
     fail "pinned language did not reach the rendered summary"
   export OMS_WORK_JOURNAL_LANG=en
   "$ROOT/scripts/journal.sh" rebuild --repo "$langrepo" >/dev/null
   "$ROOT/scripts/journal.sh" show --repo "$langrepo" --period 2026-07-31 |
-    grep -q '^## Key progress' ||
+    grep '^## Key progress' > /dev/null ||
     fail "environment override did not beat the pinned language"
 )
 

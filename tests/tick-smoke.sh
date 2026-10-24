@@ -170,8 +170,8 @@ done
 
 # --- registry -----------------------------------------------------------------
 a="$TMP/a"; b="$TMP/b"; make_repo "$a"; make_repo "$b"
-"$TICK" register --repo "$a" | grep -q '^registered' || fail "register must add a repo"
-"$TICK" register --repo "$a" | grep -q 'already registered' || fail "register must dedupe"
+"$TICK" register --repo "$a" | grep '^registered' > /dev/null || fail "register must add a repo"
+"$TICK" register --repo "$a" | grep 'already registered' > /dev/null || fail "register must dedupe"
 out="$("$TICK" register --repo "$TMP" 2>&1 || true)"
 printf '%s' "$out" | grep >/dev/null 'no .oms' || fail "an unadopted dir must be refused: $out"
 [ "$(wc -l < "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt")" -eq 1 ] || fail "registry must hold one line"
@@ -227,8 +227,8 @@ printf '%s' "$out" | grep >/dev/null 'threads_closed=2' || fail "idle non-curren
 grep -Fq 'work_journal_sync' "$TMP/tick.trace" || fail "tick must own journal sync"
 grep -Fq -- '--force' "$TMP/tick.trace" || fail "tick must include current summaries"
 printf '%s' "$out" | grep >/dev/null 'tasks_closed=1' || fail "the idle goal-less task must be closed: $out"
-"$THREAD" list --repo "$a" | grep -q 'new-thread' || fail "a fresh thread must stay open"
-if "$THREAD" list --repo "$a" | grep -q 'old-thread'; then fail "the idle thread must not stay open"; fi
+"$THREAD" list --repo "$a" | grep 'new-thread' > /dev/null || fail "a fresh thread must stay open"
+if "$THREAD" list --repo "$a" | grep 'old-thread' > /dev/null; then fail "the idle thread must not stay open"; fi
 [ ! -e "$a/.oms/task/current.md" ] || fail "the idle goal-less task must not stay active"
 archive="$(find "$a/.oms/task/archive" -type f -name '*.md' -print | sed -n '1p')"
 [ -n "$archive" ] && grep -Fq 'closed by oms tick' "$archive" ||
@@ -419,8 +419,8 @@ set_task_activity "$r"
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$r")"
 printf '%s' "$out" | grep >/dev/null 'tasks_closed=0' || fail "retirement opt-out must keep tasks: $out"
 [ -f "$r/.oms/task/current.md" ] || fail "retirement opt-out must keep tasks"
-"$TICK" run | grep -q "swept $a" || fail "run without --repo must use the registry"
-"$TICK" run --repo "$b" --dry-run | grep -q "would sweep $b" || fail "dry-run must not sweep"
+"$TICK" run | grep "swept $a" > /dev/null || fail "run without --repo must use the registry"
+"$TICK" run --repo "$b" --dry-run | grep "would sweep $b" > /dev/null || fail "dry-run must not sweep"
 [ ! -f "$b/.oms/tick/last.json" ] || fail "dry-run must not write a receipt"
 set +e
 bad_idle="$(OMS_TICK_TASK_IDLE_DAYS=bad "$TICK" status 2>&1)"
@@ -469,10 +469,10 @@ journal_off="$TMP/journal-off"; make_committed_repo "$journal_off"
 OMS_WORK_JOURNAL=0 "$TICK" run --repo "$journal_off" >/dev/null
 [ ! -e "$journal_off/.oms/work-journal" ] || fail "disabled journal must remain untouched by tick"
 
-(cd "$b" && "$TICK" install --method systemd --dry-run) | grep -q 'would install' || fail "install dry-run must print"
+(cd "$b" && "$TICK" install --method systemd --dry-run) | grep 'would install' > /dev/null || fail "install dry-run must print"
 [ ! -f "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" ] || fail "dry-run must not write units"
 grep -Fxq "$b" "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt" && fail "a dry-run install must not register the cwd"
-(cd "$b" && "$TICK" install --method systemd) | grep -q 'systemd timer installed' || fail "install must report"
+(cd "$b" && "$TICK" install --method systemd) | grep 'systemd timer installed' > /dev/null || fail "install must report"
 grep -Fxq "$b" "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt" || fail "install must register the adopted cwd"
 grep -q 'OnCalendar=hourly' "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" || fail "timer must be hourly"
 grep -q "tick.sh\" run" "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.service" || fail "service must run the tick"
@@ -487,13 +487,13 @@ printf '%s' "$st" | grep >/dev/null 'plans_retired=0' || fail "status must repor
 printf '%s' "$st" | grep >/dev/null 'artifacts_resolved=0' || fail "status must report artifact recoveries: $st"
 printf '%s' "$st" | grep >/dev/null 'artifacts_superseded=0' || fail "status must report artifact supersession: $st"
 printf '%s' "$st" | grep >/dev/null 'failures_retired=0' || fail "status must report stale failure retirements: $st"
-"$TICK" uninstall | grep -q 'removed' || fail "uninstall must report"
+"$TICK" uninstall | grep 'removed' > /dev/null || fail "uninstall must report"
 [ ! -f "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" ] || fail "uninstall must remove the timer"
 grep -q 'disable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "uninstall must disable the owned timer"
 st="$("$TICK" status)"
 printf '%s' "$st" | grep >/dev/null 'timer: none' || fail "status must report no timer: $st"
 "$TICK" unregister --repo "$a" >/dev/null
 "$TICK" unregister --repo "$b" >/dev/null
-"$TICK" run | grep -q 'nothing registered' || fail "an empty registry must say so"
+"$TICK" run | grep 'nothing registered' > /dev/null || fail "an empty registry must say so"
 
 echo "tick-smoke: ok"

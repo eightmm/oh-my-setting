@@ -175,7 +175,7 @@ else
 fi
 
 printf '\n## Data Manifests\n\n' >> "$tmp"
-if command -v python3 >/dev/null 2>&1 && find "$REPO/.oms/manifests" -maxdepth 1 -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+if command -v python3 >/dev/null 2>&1 && find "$REPO/.oms/manifests" -maxdepth 1 -name '*.json' -print -quit 2>/dev/null | grep . > /dev/null; then
   python3 - "$REPO/.oms/manifests" <<'PY' >> "$tmp"
 import json
 import pathlib

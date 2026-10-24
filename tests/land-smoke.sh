@@ -150,14 +150,14 @@ PY
 grep -q 'gate ok' "$(log_of "$receipt")" || fail "gate output must land in the receipt log"
 case "$(log_of "$receipt")" in "$state_land"/*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
 [ "$(dirname "$(log_of "$receipt")")" = "$receipt_dir" ] || fail "receipt and gate log must share a state directory"
-"$LAND" status --repo "$peer" | grep -q 'update: skipped (no-install-for-remote)' ||
+"$LAND" status --repo "$peer" | grep 'update: skipped (no-install-for-remote)' > /dev/null ||
   fail "text status must display the install skip reason"
 [ "$peer_oms_before" = "$(find "$peer/.oms" -mindepth 1 -print | sort)" ] ||
   fail "a landing must not add receipt state under its worktree .oms"
-"$LAND" status --repo "$peer" | grep -q '^land .*: passed' || fail "status must read a worktree receipt"
+"$LAND" status --repo "$peer" | grep '^land .*: passed' > /dev/null || fail "status must read a worktree receipt"
 git -C "$repo" worktree remove --force "$peer"
 [ ! -e "$peer" ] || fail "landing worktree removal must succeed"
-"$LAND" status --repo "$repo" | grep -q '^land .*: passed' ||
+"$LAND" status --repo "$repo" | grep '^land .*: passed' > /dev/null ||
   fail "main checkout must read the removed worktree's receipt"
 git -C "$repo" pull -q --ff-only origin main
 
@@ -226,7 +226,7 @@ git -C "$repo" worktree add -q -b oms/autopilot-aaaaaaaaaaaa "$sibling" HEAD
 sibling_physical="$(cd "$sibling" && pwd -P)"
 write_autopilot_receipt "$sibling" driving
 python3 "$AUTOPILOT_RECEIPT" metadata "$sibling/.oms/plan/autopilot-run.json" |
-  grep -q '^driving	' || fail "fixture sibling must carry a typed driving receipt"
+  grep '^driving	' > /dev/null || fail "fixture sibling must carry a typed driving receipt"
 gate 'echo sibling gate ok'
 before="$(remote_tip)"
 if "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
@@ -240,7 +240,7 @@ grep -Fq "sibling worktree $sibling_physical still driving" "$TMP/sibling-blocke
   fail "a blocked sibling must be visible in land status: $(cat "$TMP/sibling-blocked.out")"
 grep -Fq "siblings: $sibling_physical driving (waited 0s)" "$TMP/sibling-blocked.out" ||
   fail "status must show the recorded siblings: $(cat "$TMP/sibling-blocked.out")"
-"$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved 2>/dev/null | grep -q sibling &&
+"$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved 2>/dev/null | grep sibling > /dev/null &&
   fail "a blocked sibling landing must not record a fail-ledger row"
 python3 - "$receipt_dir" "$sibling_physical" <<'PY' || fail "blocked sibling receipt is wrong"
 import glob, json, os, sys
@@ -393,7 +393,7 @@ fi
 rm -f "$broken"
 # Another main's newer land must not stand in for this worktree's HEAD.
 cp "$(ls -t "$receipt_dir"/*.json | head -n 1)" "$receipt_dir/0000000000000000000000000000000000000000-other.json"
-"$LAND" status --repo "$repo" | grep -q '^land 0000000' &&
+"$LAND" status --repo "$repo" | grep '^land 0000000' > /dev/null &&
   fail "land status must prefer the receipt for this worktree's HEAD"
 rm -f "$receipt_dir/0000000000000000000000000000000000000000-other.json"
 echo other > "$other/other"; git -C "$other" add other
@@ -1091,9 +1091,9 @@ assert receipt['sha'] == sys.argv[2], receipt
 assert receipt['ci']['conclusion'] == 'success', receipt
 assert receipt['state'] == 'running', receipt
 PYCIINTERRUPTED
-grep -c '^advanced CI resume probe$' "$ci_retry_log" | grep -qx "$gate_lines_before" ||
+grep -c '^advanced CI resume probe$' "$ci_retry_log" | grep -x "$gate_lines_before" > /dev/null ||
   fail "interrupted ancestor CI resume repeated its gate"
-grep -c '^To ' "$ci_retry_log" | grep -qx "$push_lines_before" ||
+grep -c '^To ' "$ci_retry_log" | grep -x "$push_lines_before" > /dev/null ||
   fail "interrupted ancestor CI resume repeated its push"
 [ "$(git -C "$repo" rev-parse HEAD)" = "$ci_retry_sha" ] &&
   [ "$(remote_tip)" = "$advanced_tip" ] || fail "interrupted ancestor CI resume moved a branch"
@@ -1102,9 +1102,9 @@ OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
   > "$TMP/ci-ancestor-finalize.out" 2>&1 ||
   fail "running ancestor receipt with CI success did not finalize: $(cat "$TMP/ci-ancestor-finalize.out")"
 [ ! -s "$TMP/events" ] || fail "CI-success finalization queried CI or installed"
-grep -c '^advanced CI resume probe$' "$ci_retry_log" | grep -qx "$gate_lines_before" ||
+grep -c '^advanced CI resume probe$' "$ci_retry_log" | grep -x "$gate_lines_before" > /dev/null ||
   fail "CI-success finalization repeated its gate"
-grep -c '^To ' "$ci_retry_log" | grep -qx "$push_lines_before" ||
+grep -c '^To ' "$ci_retry_log" | grep -x "$push_lines_before" > /dev/null ||
   fail "CI-success finalization repeated its push"
 [ "$(git -C "$repo" rev-parse HEAD)" = "$ci_retry_sha" ] &&
   [ "$(remote_tip)" = "$advanced_tip" ] || fail "ancestor CI finalization moved a branch"
@@ -1168,7 +1168,7 @@ git -C "$repo" remote set-url --delete --push origin '.*'
 gate 'echo zero padded wait probe'
 OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 08 \
   > "$TMP/padded.out" 2>&1 || fail "--ci-wait 08 must mean eight seconds: $(cat "$TMP/padded.out")"
-"$LAND" status --repo "$repo" | grep -q 'update: skipped (no-update)' ||
+"$LAND" status --repo "$repo" | grep 'update: skipped (no-update)' > /dev/null ||
   fail "a skipped update must name its reason: $("$LAND" status --repo "$repo")"
 # A commit without workflows has no run to wait for.
 git -C "$repo" rm -q .github/workflows/test.yml
@@ -1279,7 +1279,7 @@ for lock_kind in 0 1; do
   [ -f "$OMS_TEST_LAND_COUNT" ] || fail "first landing did not start: $(cat "$TMP/first.out")"
   # The probe sees the held lock without taking, truncating or removing it.
   for _ in $(seq 1 100); do
-    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json 2>/dev/null | grep -q '"active": true' && break
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json 2>/dev/null | grep '"active": true' > /dev/null && break
     # Some Linux containers expose an empty /proc/locks even to a process
     # holding flock; in that environment the documented probe cannot observe
     # this lock, so validate the running receipt and the actual contention below.
@@ -1294,7 +1294,7 @@ for lock_kind in 0 1; do
   if python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True' "$TMP/active.json" 2>/dev/null; then
     python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["step"]=="gate" and r["minutes"]>=0, r' "$TMP/active.json" ||
       fail "status must report the active gate step: $(cat "$TMP/active.json")"
-    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q '^land .*: running (lock held)' ||
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep '^land .*: running (lock held)' > /dev/null ||
       fail "text status must say the lock is held"
     active_rc=0
     OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --active-exit >/dev/null || active_rc=$?
@@ -1305,7 +1305,7 @@ for lock_kind in 0 1; do
     unknown_rc=0
     OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --active-exit >/dev/null || unknown_rc=$?
     [ "$unknown_rc" = 4 ] || fail "--active-exit must distinguish unknown lock state: $unknown_rc"
-    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" | grep -q '^  active: unknown$' ||
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" | grep '^  active: unknown$' > /dev/null ||
       fail "text status must identify unknown lock activity"
   else
     fail "status failed to detect the held landing lock: $(cat "$TMP/active.json")"
@@ -1341,28 +1341,28 @@ for lock_kind in 0 1; do
   grep -q '^receipt:' "$TMP/second.out" || fail "admitted queued landing must report its receipt"
   [ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "duplicate landing repeated the gate"
   if [ "$lock_kind" = 0 ]; then
-    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --json | grep -q '"active": null' ||
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --json | grep '"active": null' > /dev/null ||
       fail "a released flock file without a matching row must remain unknown"
     unknown_rc=0
     OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --active-exit >/dev/null || unknown_rc=$?
     [ "$unknown_rc" = 4 ] || fail "--active-exit must distinguish unknown lock state: $unknown_rc"
   else
-    OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" --json | grep -q '"active": false' ||
+    OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" --json | grep '"active": false' > /dev/null ||
       fail "a released mkdir lock must read inactive"
     OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" --active-exit >/dev/null ||
       fail "--active-exit must exit 0 when no mkdir lock is active"
   fi
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q '^land .*: passed' ||
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep '^land .*: passed' > /dev/null ||
     fail "the queued retry must leave its passed receipt visible"
   # A receipt that says running without a lock holder is stale.
   stale_receipt="$(ls -t "$receipt_dir"/*.json | head -n 1)"
   cp "$stale_receipt" "$TMP/stale-backup.json"
   sed 's/"state": "[a-z]*"/"state": "running"/' "$TMP/stale-backup.json" > "$stale_receipt"
   if [ "$lock_kind" = 0 ]; then
-    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" | grep -q 'lock activity is unknown' ||
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" | grep 'lock activity is unknown' > /dev/null ||
       fail "a running receipt with unknown lock state must remain unknown"
   else
-    OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" | grep -q 'no land holds the lock (stale receipt)' ||
+    OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" | grep 'no land holds the lock (stale receipt)' > /dev/null ||
       fail "a running receipt without a mkdir lock must read stale"
   fi
   cp "$TMP/stale-backup.json" "$stale_receipt"

@@ -79,7 +79,7 @@ oms_harness_cleanup_temp_dirs 0 >/dev/null
 [ ! -e "$planted" ] || fail "dead planted residue directory was not removed"
 [ -d "$victim" ] || fail "a planted marker removed an unrelated linked worktree"
 victim_physical="$(cd "$victim" && pwd -P)"
-git -C "$repo" worktree list --porcelain | grep -Fxq "worktree $victim_physical" ||
+git -C "$repo" worktree list --porcelain | grep -Fx "worktree $victim_physical" > /dev/null ||
   fail "a planted marker removed the unrelated worktree registration"
 
 # Production shape: a suffix-bound checkout registered to the marker
@@ -241,7 +241,7 @@ dead_residue "$legitimate"
 oms_harness_cleanup_temp_dirs 0 >/dev/null
 [ ! -e "$legitimate" ] || fail "valid dead delegate residue was not removed"
 if git -C "$repo" worktree list --porcelain |
-    grep -Fq "worktree $legitimate/wt-${legitimate##*.}"; then
+    grep -F "worktree $legitimate/wt-${legitimate##*.}" > /dev/null; then
   fail "valid dead delegate worktree registration survived cleanup"
 fi
 

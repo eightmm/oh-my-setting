@@ -156,8 +156,8 @@ while [ "$#" -gt 0 ]; do
     --allow-floor-change)
       [ "$#" -ge 2 ] || fail "--allow-floor-change requires a reason"
       case "$2" in *$'\n'*|*$'\r'*) fail "--allow-floor-change requires a single-line reason" ;; esac
-      printf '%s' "$2" | LC_ALL=C grep -Eq '[^[:space:]]' || fail "--allow-floor-change requires a nonblank reason"
-      if printf '%s' "$2" | LC_ALL=C grep -Eq '[[:cntrl:]]'; then
+      printf '%s' "$2" | LC_ALL=C grep -E '[^[:space:]]' > /dev/null || fail "--allow-floor-change requires a nonblank reason"
+      if printf '%s' "$2" | LC_ALL=C grep -E '[[:cntrl:]]' > /dev/null; then
         fail "--allow-floor-change reason cannot contain control characters"
       fi
       ALLOW_FLOOR_CHANGE_REASON="$2"; shift 2 ;;

@@ -196,7 +196,7 @@ note() {  # stderr, and the job log when detached (stderr is /dev/null there)
 note_invalid_sibling_receipt() {  # PATH
   local path="$1"
 
-  if printf '%s\n' "$SIBLING_INVALID_NOTED" | grep -Fqx -- "$path"; then
+  if printf '%s\n' "$SIBLING_INVALID_NOTED" | grep -Fx -- "$path" > /dev/null; then
     return 0
   fi
   note "note: ignoring invalid sibling autopilot receipt: $path"
@@ -568,7 +568,7 @@ run_job() {
   if [ "$resume" -eq 1 ] && [ "$(receipt_value ci.conclusion)" = success ]; then
     conclusion=success
   elif [ "$ci_only_resume" -eq 0 ] && [ "$CI_WAIT" -gt 0 ] &&
-      ! git -C "$REPO" ls-tree -r --name-only "$SHA" -- .github/workflows | grep -Eq '\.ya?ml$'; then
+      ! git -C "$REPO" ls-tree -r --name-only "$SHA" -- .github/workflows | grep -E '\.ya?ml$' > /dev/null; then
     # No workflow can ever report on this commit; waiting only ends in timeout.
     rset ci.conclusion=skipped ci.reason=no-workflows
   elif [ "$CI_WAIT" -gt 0 ]; then

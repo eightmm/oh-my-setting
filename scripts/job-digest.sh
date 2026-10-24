@@ -112,7 +112,7 @@ LOG_FILE=""
 if [ -f "${ARGS[0]}" ]; then
   [ "${#ARGS[@]}" -eq 1 ] || fail "too many arguments"
   LOG_FILE="${ARGS[0]}"
-elif printf '%s' "${ARGS[0]}" | grep -Eq '^[0-9]+(_[0-9]+)?$'; then
+elif printf '%s' "${ARGS[0]}" | grep -E '^[0-9]+(_[0-9]+)?$' > /dev/null; then
   JOB_ID="${ARGS[0]}"
   LOG_FILE="${ARGS[1]:-}"
   [ -z "$LOG_FILE" ] || [ -f "$LOG_FILE" ] || fail "log file not found: $LOG_FILE"

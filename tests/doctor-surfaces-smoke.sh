@@ -616,7 +616,7 @@ PY
   OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
   OMS_LOCK_DIR="$home/.locks" \
     bash "$ROOT/scripts/install-claude-hooks.sh" \
-      --settings "$home/.claude/settings.json" | grep -q "already current" ||
+      --settings "$home/.claude/settings.json" | grep "already current" > /dev/null ||
     fail "the second install should be a no-op on settings.json"
 
   recorded="$(python3 -c '
