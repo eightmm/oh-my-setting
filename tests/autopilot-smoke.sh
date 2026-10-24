@@ -170,7 +170,7 @@ PY
   git -C "$repo" commit -qm 'feat: advance reviewed work'
   before="$(sha256_file "$repo/.oms/plan/tasks.json")"
   "$ROOT/scripts/plan-from-spec.sh" --repo "$repo" --apply "$proposal" \
-    --allowed 'src,tests' --max-tasks 4 >/dev/null ||
+    --expected-proposal-sha256 "$proposal_sha" --allowed 'src,tests' --max-tasks 4 >/dev/null ||
     fail "exact proposal replay after an implementation commit should converge"
   [ "$before" = "$(sha256_file "$repo/.oms/plan/tasks.json")" ] ||
     fail "HEAD-relaxed exact replay changed the approved plan"
@@ -303,7 +303,8 @@ with open(path,"w",encoding="utf-8") as handle:
 PY
     assignment_sha="$(sha256_file "$control_proposal")"
     if "$ROOT/scripts/plan-from-spec.sh" --repo "$control_repo" \
-        --apply "$control_proposal" --allowed 'src,tests' >/dev/null 2>&1; then
+        --apply "$control_proposal" --expected-proposal-sha256 "$assignment_sha" \
+        --allowed 'src,tests' >/dev/null 2>&1; then
       fail "planner accepted invalid assignment: $assignment_case"
     fi
     if "$ROOT/scripts/agent-plan.sh" --repo "$control_repo" apply-proposal \
@@ -326,7 +327,8 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(row, handle)
 PY
   if "$ROOT/scripts/plan-from-spec.sh" --repo "$control_repo" \
-      --apply "$control_proposal" --allowed 'src,tests' >/dev/null 2>&1; then
+      --apply "$control_proposal" --expected-proposal-sha256 "$(sha256_file "$control_proposal")" \
+      --allowed 'src,tests' >/dev/null 2>&1; then
     fail "proposal accepted a hidden task field absent from the review schema"
   fi
 
@@ -364,7 +366,8 @@ PY
     fail "a harness child applied plan topology directly"
   fi
   if OMS_HARNESS_CHILD=1 "$ROOT/scripts/plan-from-spec.sh" --repo "$child_repo" \
-      --apply "$child_proposal" --allowed 'src,tests' >/dev/null 2>&1; then
+      --apply "$child_proposal" --expected-proposal-sha256 "$child_sha" \
+      --allowed 'src,tests' >/dev/null 2>&1; then
     fail "a harness child applied plan topology through plan-from-spec"
   fi
   if OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-plan.sh" --repo "$child_repo" \
@@ -438,7 +441,9 @@ PY
   crlf_apply_proposal="$crlf_apply_repo/proposal.json"
   write_proposal "$crlf_apply_proposal"
   "$ROOT/scripts/plan-from-spec.sh" --repo "$crlf_apply_repo" \
-    --apply "$crlf_apply_proposal" --allowed 'src,tests' --max-tasks 4 >/dev/null ||
+    --apply "$crlf_apply_proposal" \
+    --expected-proposal-sha256 "$(sha256_file "$crlf_apply_proposal")" \
+    --allowed 'src,tests' --max-tasks 4 >/dev/null ||
     fail "full-CRLF PROJECT.md should retain its verification contract"
 
   # Proposal validation and final branch admission share the same glob
@@ -462,7 +467,9 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(row, handle)
 PY
   "$ROOT/scripts/plan-from-spec.sh" --repo "$glob_plan_repo" \
-    --apply "$glob_plan_proposal" --allowed 'src/*.py' --max-tasks 4 >/dev/null ||
+    --apply "$glob_plan_proposal" \
+    --expected-proposal-sha256 "$(sha256_file "$glob_plan_proposal")" \
+    --allowed 'src/*.py' --max-tasks 4 >/dev/null ||
     fail "a concrete task path should narrow its reviewed glob envelope"
 }
 
@@ -2833,6 +2840,7 @@ PY
 JSON
   rc=0
   "$ROOT/scripts/plan-from-spec.sh" --repo "$contract_repo" --apply "$bad_prefix" \
+    --expected-proposal-sha256 "$(sha256_file "$bad_prefix")" \
     --allowed 'src,tests' > "$contract_repo/bad-prefix.out" 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail "proposal id_prefix metadata was not enforced"
   grep -Fq 'does not start with required prefix r1-' "$contract_repo/bad-prefix.out" ||
