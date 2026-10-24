@@ -1477,12 +1477,15 @@ def git(path, *args):
 sha = git(repo, 'rev-parse', 'HEAD')
 url = git(repo, 'remote', 'get-url', '--push', 'origin')
 foreign_url = git(foreign, 'remote', 'get-url', '--push', 'origin')
-def receipt(directory, remote_url, command):
+def receipt(directory, remote_url, command, receipt_sha=sha, rc=None, state='passed'):
     request_hash = hashlib.sha256(json.dumps([remote_url, 'origin', 'main', command],
                                              ensure_ascii=True).encode()).hexdigest()[:24]
-    request = sha + '-' + request_hash
-    row = {'schema': 1, 'state': 'passed', 'sha': sha, 'request': request,
-           'remote': 'origin', 'target': 'main', 'gate': {'command': command},
+    request = receipt_sha + '-' + request_hash
+    gate = {'command': command}
+    if rc is not None:
+        gate['rc'] = rc
+    row = {'schema': 1, 'state': state, 'sha': receipt_sha, 'request': request,
+           'remote': 'origin', 'target': 'main', 'gate': gate,
            'log': '/ignored/arbitrary/path'}
     path = directory / (request + '.json')
     path.write_text(json.dumps(row, separators=(',', ':')) + '\n')
@@ -1508,6 +1511,22 @@ log.write_text(
 (state_e / passed.name).write_bytes(passed.read_bytes())
 (state_e / log.name).write_bytes(log.read_bytes())
 receipt(state_b, url, command + ' --missing-log')
+_, legacy = receipt(state_b, url, command + ' --legacy-log')
+(state_b / (legacy + '.log')).write_text(
+    'check: scripts-smoke.test_legacy_log FAILED (1s)\n')
+sha_retry, sha_never = 'a' * 40, 'b' * 40
+_, retry_failure = receipt(state_b, url, command + ' --retry-failure', sha_retry, 1, 'failed')
+(state_b / (retry_failure + '.log')).write_text(
+    'land attempt: 1 started_at=2026-01-10T10:00:00Z sha=' + sha_retry + '\n'
+    'check: affected:tests/same-stage.py FAILED (1s)\n')
+_, retry_pass = receipt(state_b, url, command + ' --retry-pass', sha_retry, 0)
+(state_b / (retry_pass + '.log')).write_text(
+    'land attempt: 1 started_at=2026-01-11T10:00:00Z sha=' + sha_retry + '\ncheck: ok\n')
+_, never_failure = receipt(state_b, url, command + ' --never-failure', sha_never, 1, 'failed')
+(state_b / (never_failure + '.log')).write_text(
+    'land attempt: 1 started_at=2026-01-10T10:00:00Z sha=' + sha_never + '\n'
+    'check: affected:tests/never-stage.py FAILED (1s)\n')
+receipt(state_c, foreign_url, command + ' --unbound-pass', sha_never, 0)
 _, oversized = receipt(state_b, url, command + ' --oversized-log')
 (state_b / (oversized + '.log')).write_bytes(b'x' * (1024 * 1024 + 1))
 receipt(state_c, foreign_url, command)
@@ -1600,8 +1619,15 @@ test = by_name["scripts-smoke.test_agent_plan_lifecycle_receipt_history"]
 assert test["kind"] == "test" and test["failed_attempts"] == 2, test
 assert test["first_attempt_date"] == "2026-01-10" and test["last_attempt_date"] == "2026-01-11", test
 assert "affected:tests/functional-evolution-smoke.sh" in by_name, by_name
+assert "scripts-smoke.test_legacy_log" not in by_name, by_name
+same_stage = by_name["affected:tests/same-stage.py"]
+assert same_stage["failed_attempts"] == 1 and same_stage["same_sha_passed"] == 1, same_stage
+never_stage = by_name["affected:tests/never-stage.py"]
+assert never_stage["failed_attempts"] == 1 and never_stage["same_sha_passed"] == 0, never_stage
 assert len([row for row in land if row["name"] == test["name"]]) == 1, land
 coverage = r["sections"]["failures"]["coverage"]
+assert coverage["land_logs_legacy"] == 1, coverage
+assert coverage["land_logs_incomplete"] == 0, coverage
 assert coverage["land_logs_missing"] == 1 and coverage["land_logs_oversized"] == 1, coverage
 assert coverage["land_scan_complete"] is False and "SSH/HTTPS aliases may be missed" in coverage["association"], coverage
 assert r["sections"]["ci"]["status"] == "available", r

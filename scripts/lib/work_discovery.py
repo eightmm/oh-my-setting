@@ -230,6 +230,9 @@ def _read_land_file(directory, name, maximum, reader):
 
 
 def _land_attempt_failures(raw, expected_sha):
+    has_attempt_line = any(line.startswith(b"land attempt:") for line in raw.splitlines())
+    if not has_attempt_line:
+        return [], False, True
     attempts = []
     current = None
     incomplete = False
@@ -274,14 +277,14 @@ def _land_attempt_failures(raw, expected_sha):
         attempts.append(current)
     if not attempts or (raw and not raw.endswith(b"\n")):
         incomplete = True
-    return attempts, incomplete
+    return attempts, incomplete, False
 
 
 def _collect_land_failures(repo):
     coverage = {"land_scan_complete": True, "land_receipts_considered": 0,
                 "land_receipts_admitted": 0, "land_logs_missing": 0,
                 "land_logs_unreadable": 0, "land_logs_oversized": 0,
-                "land_logs_incomplete": 0,
+                "land_logs_incomplete": 0, "land_logs_legacy": 0,
                 "association": "exact configured push URL, remote, target, and gate; renamed remotes or SSH/HTTPS aliases may be missed"}
     try:
         own = _land_state_directory(repo)
@@ -313,6 +316,7 @@ def _collect_land_failures(repo):
         seen_receipts = set()
         requests_with_logs = set()
         seen_failure_attempts = set()
+        passing_shas = set()
         missing_logs = set()
         total_log_bytes = 0
         receipt_count = 0
@@ -346,6 +350,9 @@ def _collect_land_failures(repo):
                                 seen_receipts.add(name)
                                 coverage["land_receipts_admitted"] += 1
                             sha = receipt.get("sha")
+                            gate = receipt.get("gate")
+                            if isinstance(gate, dict) and type(gate.get("rc")) is int and gate["rc"] == 0:
+                                passing_shas.add(sha)
                             if total_log_bytes >= _LAND_TOTAL_LOG_LIMIT:
                                 coverage["land_scan_complete"] = False
                                 continue
@@ -371,11 +378,18 @@ def _collect_land_failures(repo):
                                 continue
                             total_log_bytes += len(log)
                             requests_with_logs.add(name)
-                            attempts, incomplete = _land_attempt_failures(log, sha)
+                            attempts, incomplete, legacy = _land_attempt_failures(log, sha)
+                            if legacy:
+                                coverage["land_logs_legacy"] += 1
                             if incomplete:
                                 coverage["land_logs_incomplete"] += 1
                                 coverage["land_scan_complete"] = False
+                            failed_before = False
                             for attempt in attempts:
+                                if attempt["failures"]:
+                                    failed_before = True
+                                elif failed_before and receipt.get("state") == "passed":
+                                    passing_shas.add(sha)
                                 for kind, identifier in attempt["failures"]:
                                     observation = (name, attempt["number"], attempt["timestamp"],
                                                    kind, identifier)
@@ -384,8 +398,9 @@ def _collect_land_failures(repo):
                                     seen_failure_attempts.add(observation)
                                     row = aggregates.setdefault((kind, identifier),
                                         {"failed_attempts": 0, "first_attempt_date": attempt["date"],
-                                         "last_attempt_date": attempt["date"]})
+                                         "last_attempt_date": attempt["date"], "failed_sha_counts": {}})
                                     row["failed_attempts"] += 1
+                                    row["failed_sha_counts"][sha] = row["failed_sha_counts"].get(sha, 0) + 1
                                     row["first_attempt_date"] = min(row["first_attempt_date"], attempt["date"])
                                     row["last_attempt_date"] = max(row["last_attempt_date"], attempt["date"])
                         except SystemExit:
@@ -401,6 +416,11 @@ def _collect_land_failures(repo):
         selected = sorted(aggregates.items(), key=lambda item: item[0])
         selected.sort(key=lambda item: item[1]["failed_attempts"], reverse=True)
         selected.sort(key=lambda item: item[1]["last_attempt_date"], reverse=True)
+        for _, counts in selected:
+            counts["same_sha_passed"] = min(
+                counts["failed_attempts"],
+                sum(count for sha, count in counts.pop("failed_sha_counts").items()
+                    if sha in passing_shas))
         if len(selected) > _LAND_FAILURE_LIMIT:
             coverage["land_scan_complete"] = False
         items = []
