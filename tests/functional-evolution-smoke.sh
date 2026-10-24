@@ -1449,7 +1449,11 @@ printf '{"items":[{"fingerprint":"failure-1","summary":"resolved clue"}]}\r\n'
 EOF
   cat > "$readers/ci-status.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'run-1 success 2m\r\nFailing jobs (runs):\r\n'
+exec bash "$OMS_REAL_CI_STATUS" "$@"
+EOF
+  cat > "$readers/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '[]\n'
 EOF
   cat > "$readers/agent-plan.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -1467,15 +1471,17 @@ printf '{"since":"2026-01-01","until":"2026-01-02","coverage":{"complete":true},
 EOF
   chmod +x "$readers"/*
   export OMS_WORK_DISCOVERY_SCRIPTS_DIR="$readers" OMS_WORK_DISCOVERY_OMS="$readers/oms"
-  out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo")" ||
+  export OMS_GH_BIN="$readers/gh" OMS_REAL_CI_STATUS="$ROOT/scripts/ci-status.sh"
+  out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" 2>"$TMP/discovery-err")" ||
     fail "work discovery collection failed"
+  [ ! -s "$TMP/discovery-err" ] || fail "successful collection wrote to stderr"
   python3 - "$out" <<'PY' || fail "work discovery packet omitted evidence or normalization"
 import json, sys
 r = json.loads(sys.argv[1])
 assert r["schema"] == 1 and r["sections"].keys() == {
     "failures", "metrics", "reviews", "ci", "tasks", "rejected"}, r
 assert r["sections"]["failures"]["items"][0]["ref"] == "failure-1", r
-assert r["sections"]["ci"]["items"][0]["ref"] == "run-1", r
+assert r["sections"]["ci"]["status"] == "available", r
 assert [x["text"] for x in r["sections"]["rejected"]["items"]] == [
     "hypothesis: early clue", "hypothesis: late clue"], r
 assert r["sections"]["metrics"]["coverage"]["complete"] is True, r
@@ -1486,6 +1492,7 @@ assert all("\\r" not in json.dumps(section) for section in r["sections"].values(
 import sys
 sys.path.insert(0, "scripts/lib")
 import panel_results, work_discovery
+indexed_reader = panel_results._indexed
 attempts = [
     {"attempt_id": "a-decided", "refs": {"panel_role": "reviewer"}},
     {"attempt_id": "a-pending", "refs": {"panel_role": "critic"}},
@@ -1503,6 +1510,23 @@ reviews = work_discovery._collect_reviews("unused")
 assert reviews["coverage"]["considered"] == 2 and reviews["coverage"]["selected"] == 1, reviews
 assert len(reviews["items"]) == 1 and reviews["items"][0]["ref"] == "r-pending", reviews
 assert reviews["items"][0]["findings"] == "Actual finding", reviews
+panel_results._indexed = indexed_reader
+import contextlib, hashlib, io, shutil, tempfile
+from pathlib import Path
+oversized_repo = Path(tempfile.mkdtemp())
+artifact_path = oversized_repo / ".oms" / "artifacts" / "pending"
+artifact_path.parent.mkdir(parents=True)
+artifact_bytes = (b"## Output\n## Findings\nActual finding\n" +
+                  b"x" * (panel_results.MAX_RESULT + 1) + b"\n## Exit\n0\n")
+artifact_path.write_bytes(artifact_bytes)
+rows[1]["artifact_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+captured_stderr = io.StringIO()
+with contextlib.redirect_stderr(captured_stderr):
+    unreadable = work_discovery._collect_reviews(str(oversized_repo))
+assert captured_stderr.getvalue() == "", captured_stderr.getvalue()
+assert unreadable["coverage"]["complete"] is False, unreadable
+assert unreadable["coverage"]["unreadable_results"] == 1, unreadable
+shutil.rmtree(oversized_repo)
 import subprocess
 panel_results.outcomes = lambda repo, ids: (_ for _ in ()).throw(
     subprocess.TimeoutExpired("owner outcomes", 30))
@@ -1529,6 +1553,20 @@ EOF
   python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" >"$TMP/discovery-out" 2>"$TMP/discovery-err" || rc=$?
   [ "$rc" = 2 ] && grep -Fq 'work-discovery: failures is ' "$TMP/discovery-err" ||
     fail "multibyte section overflow did not name section and exit 2"
+
+  cat > "$readers/fail-ledger.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'helper failed\n' >&2
+exit 7
+EOF
+  chmod +x "$readers/fail-ledger.sh"
+  out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" 2>"$TMP/discovery-err")" ||
+    fail "optional helper failure should remain collectable"
+  OMS_TEST_PACKET="$out" python3 - <<'PY' || fail "optional helper failure omitted exit detail"
+import json, os
+reason = json.loads(os.environ["OMS_TEST_PACKET"])["sections"]["failures"]["reason"]
+assert "exited 7" in reason and "helper failed" in reason, reason
+PY
 
   cat > "$readers/agent-plan.sh" <<'EOF'
 #!/usr/bin/env bash

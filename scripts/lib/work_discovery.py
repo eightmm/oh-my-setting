@@ -1,5 +1,6 @@
 """Collect a bounded, untrusted evidence packet for work planning."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -18,6 +19,12 @@ SECTION_BUDGETS = {"failures": 4096, "metrics": 4096, "reviews": 65536,
 TOTAL_BUDGET = 131072
 SECTIONS = tuple(SECTION_BUDGETS)
 _TIMED_OUT = object()
+
+
+class _RunFailure:
+    def __init__(self, status, stderr):
+        self.status = status
+        self.stderr = stderr
 
 
 class DiscoveryError(Exception):
@@ -58,7 +65,11 @@ def _run(repo, name, *args, optional=False):
             return None
         raise CorruptEvidenceError(name)
     try:
-        result = subprocess.run(["bash", str(path), "--repo", str(repo), *args],
+        command = ["bash", str(path)]
+        if name != "ci-status.sh":
+            command += ["--repo", str(repo)]
+        command += list(args)
+        result = subprocess.run(command, cwd=str(repo),
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True, timeout=30, check=False)
     except subprocess.TimeoutExpired:
@@ -71,7 +82,8 @@ def _run(repo, name, *args, optional=False):
         raise CorruptEvidenceError(name)
     if result.returncode:
         if optional:
-            return None
+            first_line = result.stderr.replace("\r", "").splitlines()
+            return _RunFailure(result.returncode, first_line[0] if first_line else "")
         raise CorruptEvidenceError(name)
     return result.stdout.replace("\r", "")
 
@@ -94,6 +106,7 @@ def _collect_reviews(repo):
         return _section([], {"complete": False}, "review evidence unavailable")
     items = []
     artifact_coverage = True
+    unreadable_results = 0
     attempts_by_id = {row.get("attempt_id"): row for row in attempts if isinstance(row, dict)}
     review_roles = {"reviewer", "verifier", "critic", "security-auditor"}
     review_rows = []
@@ -122,7 +135,8 @@ def _collect_reviews(repo):
                     "outcome": row.get("outcome"), "task_id": row.get("task_id")}
             if isinstance(row.get("artifact"), str):
                 try:
-                    content = panel_results._indexed(repo, row).decode("utf-8")
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        content = panel_results._indexed(repo, row).decode("utf-8")
                     output, _ = panel_results.artifact_sections_stream(
                         io.BytesIO(content.encode("utf-8")))
                     _, sections = panel_results.debate_sections(output)
@@ -130,9 +144,10 @@ def _collect_reviews(repo):
                                              if heading == "Findings"), "")
                 except (OSError, ValueError, UnicodeError):
                     artifact_coverage = False
+                    unreadable_results += 1
             items.append(item)
     return _section(items, {"complete": artifact_coverage, "considered": len(review_rows),
-                            "selected": len(items)})
+                            "selected": len(items), "unreadable_results": unreadable_results})
 
 
 def _collect_metrics(repo):
@@ -178,6 +193,12 @@ def collect(repo):
     raw = _run(repo, "fail-ledger.sh", "list", "--unresolved", "--json", optional=True)
     if raw is _TIMED_OUT:
         sections["failures"] = _section([], {}, "timeout")
+    elif isinstance(raw, _RunFailure):
+        detail = _clean(raw.stderr)
+        reason = "fail-ledger exited %d" % raw.status
+        if detail:
+            reason += ": " + detail
+        sections["failures"] = _section([], {}, reason)
     elif raw is None:
         sections["failures"] = _section([], {}, "fail-ledger unavailable")
     else:
@@ -210,6 +231,12 @@ def collect(repo):
         sections["ci"] = _section([], {}, "timeout")
     elif raw is None:
         sections["ci"] = _section([], {"stage_timing": "unavailable"}, "CI history unavailable")
+    elif isinstance(raw, _RunFailure):
+        detail = _clean(raw.stderr)
+        reason = "CI history exited %d" % raw.status
+        if detail:
+            reason += ": " + detail
+        sections["ci"] = _section([], {"stage_timing": "unavailable"}, reason)
     else:
         items = []
         for line in raw.splitlines():
