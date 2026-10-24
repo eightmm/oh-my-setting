@@ -344,6 +344,17 @@ outer_receipt_abandon_locked() {  # REASON
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
+outer_receipt_retire_empty_discovery_locked() {  # EXPECTED DIGEST
+  local expected="$1"
+
+  if [ ! -e "$OUTER_RECEIPT" ] && [ ! -L "$OUTER_RECEIPT" ]; then
+    echo "autopilot: empty discovery receipt was not retired; the bound receipt is missing" >&2
+    return 1
+  fi
+  python3 "$RECEIPT_HELPER" discovery-retire "$OUTER_RECEIPT" --repo "$REPO" \
+    --expected "$expected" --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
 # abandon retires the receipt and owned batch before the spec/tree gates:
 # the receipt being unfinishable (a frozen contract whose own value killed
 # the run) is exactly when the operator needs this exit, and a dirty tree or
@@ -1021,6 +1032,21 @@ outer_receipt_write() {  # STAGE
   printf '%s\n' "$value"
 }
 
+outer_receipt_write_discovery_proposing() {
+  local value
+  autopilot_owner_prepare
+  value="$(oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_write_discovery_locked)" || return $?
+  value="${value//$'\r'/}"
+  OUTER_STAGE=proposing
+  OUTER_RECEIPT_READY=1
+  printf '%s\n' "$value"
+}
+
+outer_receipt_write_discovery_locked() {
+  outer_receipt_write_locked proposing >/dev/null || return $?
+  python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT"
+}
+
 outer_receipt_archive_done_locked() {
   local metadata stage receipt_sha
   metadata="$(python3 "$RECEIPT_HELPER" metadata "$OUTER_RECEIPT")" || return $?
@@ -1327,6 +1353,7 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
   local prefix="$1"
   local max_tasks="$2"
   local args out rc proposal_path proposal_digest continuation continuation_line
+  local discovery_receipt_sha
 
   REPLAN_FAILURE=""
   PROPOSAL_GENERATED=0
@@ -1339,8 +1366,13 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
   APPROVED_PROPOSAL_PATH=""
   APPROVED_PROPOSAL_SHA=""
   outer_receipt_prepare_new || fail "cannot archive the completed outer receipt"
-  outer_receipt_write proposing >/dev/null ||
-    fail "cannot bind this planning call to the durable outer receipt"
+  if [ "${3:-0}" -eq 1 ]; then
+    discovery_receipt_sha="$(outer_receipt_write_discovery_proposing)" ||
+      fail "cannot bind and identify this discovery's durable outer receipt"
+  else
+    outer_receipt_write proposing >/dev/null ||
+      fail "cannot bind this planning call to the durable outer receipt"
+  fi
   args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED"
     --worker-provider "$WORKER" --collaboration "$COLLABORATION")
   [ -z "$prefix" ] || args+=(--id-prefix "$prefix")
@@ -1372,6 +1404,13 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
     grep -Fqx 'plan-from-spec: no proposal; no eligible discovery candidates' "$out"; then
     echo "autopilot: discovery found no eligible work"
     rm -f "$out"
+    if record="$(oms_with_file_lock "$OUTER_RECEIPT" \
+      outer_receipt_retire_empty_discovery_locked "$discovery_receipt_sha")"; then
+      record="${record//$'\r'/}"
+      echo "autopilot: receipt retired after empty discovery; the next propose may bind a fresh contract ($record)"
+    else
+      echo "autopilot: receipt was not retired; it changed or no longer matches the empty-discovery retirement conditions" >&2
+    fi
     exit 0
   fi
   proposal_path="$(sed -n 's/^plan-from-spec: proposed .* -> //p' "$out" | tail -n 1)"

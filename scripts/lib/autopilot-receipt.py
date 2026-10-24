@@ -1852,6 +1852,11 @@ def main() -> int:
     abandon.add_argument("--expected", required=True)
     abandon.add_argument("--reason", required=True)
     abandon.add_argument("--updated", required=True)
+    discovery_retire = sub.add_parser("discovery-retire")
+    discovery_retire.add_argument("path")
+    discovery_retire.add_argument("--repo", required=True)
+    discovery_retire.add_argument("--expected", required=True)
+    discovery_retire.add_argument("--updated", required=True)
     reenter = sub.add_parser("reenter")
     reenter.add_argument("path")
     reenter.add_argument("--repo", required=True)
@@ -1913,7 +1918,7 @@ def main() -> int:
             row, _payload = load_receipt(path)
             print(row.get("owner_id", ""))
             return 0
-        if args.command == "abandon":
+        if args.command in ("abandon", "discovery-retire"):
             # The append-only exit for a receipt whose frozen contract turned
             # out to be the problem (a too-short wall killed the first call
             # and could not be amended — observed live, 2026-08-18). Mirrors
@@ -1926,6 +1931,12 @@ def main() -> int:
             current = digest(payload)
             if current != args.expected:
                 raise ReceiptError("outer receipt CAS changed")
+            if args.command == "discovery-retire":
+                if row["stage"] != "proposing":
+                    raise ReceiptError("empty-discovery retirement requires a proposing receipt")
+                if row["proposal"] != {"path": "", "sha256": ""}:
+                    raise ReceiptError("empty-discovery retirement requires an unbound proposal")
+                args.reason = "discovery-no-eligible-work"
             if row["stage"] == "done":
                 raise ReceiptError("a done outer receipt is archived, not abandoned")
             if not UPDATED.fullmatch(args.updated):

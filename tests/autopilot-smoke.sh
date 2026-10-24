@@ -3231,6 +3231,9 @@ PY
   then
     fail "collector refusal wrote a proposal-review receipt"
   fi
+  if find "$failed/.oms/plan" -maxdepth 1 -name 'autopilot-run.*.abandoned.json' -print | grep -q .; then
+    fail "collector refusal unexpectedly wrote an abandon record"
+  fi
 
   none="$TMP/scratch-refusal-discover-empty"
   make_repo "$none"
@@ -3241,18 +3244,29 @@ PY
   [ "$rc" = 0 ] || fail "empty discovery should succeed, got $rc: $(tail -5 "$none/propose.out")"
   grep -Fq 'autopilot: discovery found no eligible work' "$none/propose.out" ||
     fail "empty discovery did not explain that no eligible work was found"
-  [ -f "$none/.oms/plan/autopilot-run.json" ] ||
-    fail "empty discovery removed the outer receipt"
-  if python3 - "$none/.oms/plan/autopilot-run.json" <<'PY'
+  [ ! -e "$none/.oms/plan/autopilot-run.json" ] ||
+    fail "empty discovery left a live outer receipt"
+  set -- "$none"/.oms/plan/autopilot-run.*.abandoned.json
+  [ -f "$1" ] || fail "empty discovery did not write a typed abandon record"
+  abandon_record="$1"
+  python3 - "$abandon_record" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
-    raise SystemExit(0 if json.load(handle).get("stage") == "proposing" else 1)
+    row = json.load(handle)
+raise SystemExit(0 if row.get("reason") == "discovery-no-eligible-work" else 1)
 PY
-  then
-    :
-  else
-    fail "empty discovery did not leave a proposing receipt"
-  fi
+  [ "$?" = 0 ] || fail "empty discovery abandon record has the wrong reason"
+  printf '%s\n' "advance base after empty discovery" >> "$none/README.md"
+  git -C "$none" add README.md
+  git -C "$none" -c user.name=OMS -c user.email=oms@example.invalid commit -qm "advance base after empty discovery"
+  rc=0
+  run_autopilot "$none" propose --discover --planner claude \
+    --allowed 'src,tests' --base main > "$none/rebind.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "propose after base advance should bind a fresh receipt, got $rc: $(tail -5 "$none/rebind.out")"
+  grep -Fq 'plan-from-spec: proposed' "$none/rebind.out" ||
+    fail "propose after base advance did not generate a new proposal"
+  [ -f "$none/.oms/plan/autopilot-run.json" ] ||
+    fail "propose after base advance did not leave a fresh receipt"
 
   interrupted="$TMP/scratch-refusal-discover-interrupted"
   make_repo "$interrupted"
@@ -3277,18 +3291,8 @@ PY
   OMS_T_PLAN_RESULT=empty-discovery run_autopilot "$interrupted" propose --discover \
     --planner claude --allowed 'src,tests' --base main > "$interrupted/empty.out" 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "empty discovery retry should succeed, got $rc"
-  [ -f "$interrupted/.oms/plan/autopilot-run.json" ] ||
-    fail "empty discovery retry removed the interrupted outer receipt"
-  if python3 - "$interrupted/.oms/plan/autopilot-run.json" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    raise SystemExit(0 if json.load(handle).get("stage") == "proposing" else 1)
-PY
-  then
-    :
-  else
-    fail "empty discovery retry did not preserve the proposing stage"
-  fi
+  [ ! -e "$interrupted/.oms/plan/autopilot-run.json" ] ||
+    fail "empty discovery retry left a live outer receipt"
 }
 
 test_autopilot_acceptance_reuse
