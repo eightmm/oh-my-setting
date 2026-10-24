@@ -221,6 +221,47 @@ with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}
     assert dashboard.call_count == records.call_count == 2
     assert sum('agent-events' in call.args[0] for call in commands.call_args_list) == 2
 
+# Enumeration order and output growth must not weaken the shared generation.
+scan_project = project / 'scandir-inputs'
+(scan_project / '.oms/hooks').mkdir(parents=True)
+scan_outputs = scan_project / '.oms/artifacts/delegate'
+scan_outputs.mkdir(parents=True)
+for name in ('z-last', 'A-first', 'm-middle'):
+    (scan_outputs / name).write_text(name, encoding='utf-8')
+scan_before = cache.fingerprint(scan_project)
+from contextlib import contextmanager
+real_scandir = os.scandir
+@contextmanager
+def reversed_scandir(path):
+    with real_scandir(path) as children:
+        yield iter(reversed(list(children)))
+with patch.object(cache.os, 'scandir', side_effect=reversed_scandir), \
+        patch.object(Path, 'iterdir', side_effect=AssertionError('per-file Path walk')):
+    assert cache.fingerprint(scan_project) == scan_before, 'enumeration order changed generation'
+scan_file = scan_outputs / 'm-middle'
+scan_file.write_text('changed output', encoding='utf-8')
+scan_changed = cache.fingerprint(scan_project)
+assert scan_changed != scan_before, 'artifact input change was missed'
+scan_file.rename(scan_outputs / 'renamed')
+assert cache.fingerprint(scan_project) != scan_changed, 'input rename was missed'
+scan_changed = cache.fingerprint(scan_project)
+(scan_outputs / 'renamed').unlink()
+assert cache.fingerprint(scan_project) != scan_changed, 'input removal was missed'
+outside_scan = project / 'outside-scan'
+outside_scan.mkdir()
+scan_link = scan_outputs / 'outside'
+try:
+    scan_link.symlink_to(outside_scan, target_is_directory=True)
+except (OSError, NotImplementedError):
+    pass
+else:
+    scan_before = cache.fingerprint(scan_project)
+    (outside_scan / 'not-an-input').write_text('outside', encoding='utf-8')
+    assert cache.fingerprint(scan_project) == scan_before, 'followed a directory link'
+with patch.object(cache.os, 'scandir', side_effect=PermissionError('fixture denied')):
+    assert cache.read_shared(scan_project, 'unreadable', lambda: 42) == 42
+assert not (scan_project / cache.DIRECTORY / 'unreadable.json').exists()
+
 # Plan reads outlive the dashboard interval, including across board processes.
 plan.write_text('{"tasks": {}}', encoding='utf-8')
 plan_worker = worker.replace("cache.read_shared(repo, 'dashboard', compute)",

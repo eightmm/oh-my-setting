@@ -29,21 +29,31 @@ def fingerprint(repo):
     """Stat inputs without reading logs or following symlinks into other trees."""
     entries = []
 
-    def visit(path, label):
+    def visit(path, label, info=None):
         try:
-            info = path.lstat()
+            if info is None:
+                info = os.lstat(path)
         except FileNotFoundError:
             entries.append((label, None))
             return
         if stat.S_ISDIR(info.st_mode):
             # Cache writes must not invalidate their own parent directory.
             entries.append((label, info.st_mode, info.st_dev, info.st_ino))
-            for child in sorted(path.iterdir()):
+            # Sort entry names rather than Path objects, and reuse no-follow
+            # entry stats without constructing a Path for every retained file.
+            with os.scandir(path) as children:
+                ordered = sorted(children, key=lambda child: child.name)
+            for child in ordered:
                 relative = label + '/' + child.name
                 # Mains' activity heartbeats are read by each board directly, not through this cache.
                 if relative in SKIPPED or child.name.endswith(('.lock', '.tmp')):
                     continue
-                visit(child, relative)
+                try:
+                    child_info = child.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    entries.append((relative, None))
+                    continue
+                visit(child.path, relative, child_info)
         else:
             entries.append((label, info.st_mode, info.st_dev, info.st_ino,
                             info.st_size, info.st_mtime_ns, info.st_ctime_ns))
