@@ -12411,7 +12411,7 @@ test_artifact_index_prune() {
   [ "$perms" = "640" ] || fail "prune must preserve file permissions (got $perms)"
 
   python3 - "$ROOT" "$project" <<'PY' || fail "completion-pinned retention failed"
-import hashlib, json, os, runpy, subprocess, sys
+import datetime, hashlib, json, os, runpy, subprocess, sys
 from pathlib import Path
 root, repo = map(Path, sys.argv[1:])
 index = repo / '.oms/artifacts/index.jsonl'
@@ -12499,6 +12499,79 @@ bad.write_bytes(b' ' * (4 * 1024 * 1024 + 1))
 prune()
 assert index.read_bytes() == before
 bad.unlink()
+# Recent owner decisions survive ordinary pruning and stale sweeps, even when
+# their indexed artifact is missing. Older decisions follow normal retention.
+decision_repo = repo / 'decision-retention'
+decision_index = decision_repo / '.oms/artifacts/index.jsonl'
+decision_index.parent.mkdir(parents=True)
+now = datetime.datetime.now(datetime.timezone.utc)
+recent = now.isoformat().replace('+00:00', 'Z')
+old = (now - datetime.timedelta(days=40)).isoformat().replace('+00:00', 'Z')
+pin_decisions = store['RETENTION']['decision_pin_indices']
+def decision_at(event_id, stamp):
+    return json.dumps({'kind': 'panel-result', 'event_id': event_id, 'ts': stamp}).encode() + b'\n'
+pin_probe = [
+    decision_at('future-tolerance', (now + datetime.timedelta(seconds=3)).isoformat()),
+    decision_at('future-expired', (now + datetime.timedelta(days=1)).isoformat()),
+    decision_at('age-expired', old),
+    decision_at('older-recent', (now - datetime.timedelta(days=2)).isoformat()),
+    decision_at('newer-recent', (now - datetime.timedelta(days=1)).isoformat()),
+]
+assert store['RETENTION']['MAX_DECISION_PIN_ROWS'] == 3000
+assert pin_decisions(pin_probe, now=now) == {0, 3, 4}
+assert pin_decisions(pin_probe, now=now, max_rows=2) == {3, 4}
+decision_rows = [
+    {'kind': 'panel-result', 'task_id': 'task-a', 'event_id': 'a-old', 'ts': old,
+     'artifact': '.oms/artifacts/panel-results/a-old.json'},
+    {'kind': 'panel-result', 'task_id': 'task-a', 'event_id': 'a-latest', 'ts': recent,
+     'artifact': '.oms/artifacts/panel-results/missing.json'},
+    {'kind': 'panel-result', 'task_id': 'task-b', 'event_id': 'b-latest', 'ts': recent},
+    {'kind': 'panel-result', 'task_id': 'task-old', 'event_id': 'old-decision', 'ts': old},
+    {'event_id': 'ordinary-1'}, {'event_id': 'ordinary-2'},
+]
+decision_index.write_bytes(b''.join(json.dumps(row).encode() + b'\n' for row in decision_rows))
+def prune_decisions(*args):
+    result = subprocess.run(['bash', str(root / 'scripts/artifact-index.sh'), '--repo', str(decision_repo),
+                             'prune', '1', *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    assert result.returncode == 0, result.stderr.decode()
+    return result.stdout.decode()
+decision_before = decision_index.read_bytes()
+assert 'would prune 6 -> 3' in prune_decisions('--dry-run')
+assert decision_index.read_bytes() == decision_before
+prune_decisions()
+decision_ids = {json.loads(line)['event_id'] for line in decision_index.read_bytes().splitlines()}
+assert decision_ids == {'a-latest', 'b-latest', 'ordinary-2'}, decision_ids
+assert 'a-old' not in decision_ids and 'old-decision' not in decision_ids
+# The stale sweep keeps the latest decision row despite its missing artifact.
+prune_decisions('--stale', '--dry-run')
+assert 'a-latest' in {json.loads(line)['event_id'] for line in decision_index.read_bytes().splitlines()}
+prune_decisions('--stale')
+decision_ids = {json.loads(line)['event_id'] for line in decision_index.read_bytes().splitlines()}
+assert 'a-latest' in decision_ids, decision_ids
+# Automatic append overflow uses the same decision pins.
+store['append_rows'](str(decision_repo), str(decision_index), [{'event_id': 'decision-appended'}], keep=1, high=1)
+decision_ids = {json.loads(line)['event_id'] for line in decision_index.read_bytes().splitlines()}
+assert {'a-latest', 'b-latest', 'decision-appended'} <= decision_ids, decision_ids
+# Soft decision pins cannot consume the byte budget needed for a normal append.
+row_limit = store['MAX_ROW_BYTES']
+budget_decisions = []
+for number in range(16):
+    row = {'event_id': 'budget-decision-%02d' % number, 'kind': 'panel-result',
+           'ts': recent, 'padding': ''}
+    encoded = json.dumps(row, separators=(',', ':')).encode()
+    row['padding'] = 'x' * (row_limit - len(encoded) - 1)
+    line = json.dumps(row, separators=(',', ':')).encode() + b'\n'
+    assert len(line) == row_limit
+    budget_decisions.append(line)
+decision_index.write_bytes(b''.join(budget_decisions))
+store['append_rows'](str(decision_repo), str(decision_index),
+                     [{'event_id': 'budget-ordinary-append'}], keep=1, high=1)
+budget_lines = decision_index.read_bytes().splitlines()
+budget_ids = {json.loads(line)['event_id'] for line in budget_lines}
+assert len(decision_index.read_bytes()) <= store['MAX_INDEX_BYTES']
+assert 'budget-ordinary-append' in budget_ids
+assert 'budget-decision-00' not in budget_ids, budget_ids
+assert {'budget-decision-%02d' % number for number in range(1, 16)} <= budget_ids, budget_ids
 # Pins may exceed the count floor, but never the durable byte bound.
 try:
     store['_bounded'](before.splitlines(keepends=True), 1, 1, repo=str(repo))
@@ -33984,10 +34057,10 @@ PY
     OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
   [ -z "$changed" ] || fail "compaction keeping a baseline-pinned row must not be a violation, got: $changed"
 
-  # Fixtures come from the store's own retention, so the guard is judged against
-  # what compaction really produces. Only unresolved failures, pinned lineage
-  # and a resolution's target are never dropped; which ordinary rows go is
-  # retention's choice and the guard does not reconstruct it.
+  # Retention-produced fixtures cover ordinary compactions; decision
+  # replacement and rollover explicitly evict baseline decisions. The guard
+  # protects failures, pinned lineage, and resolution targets, but does not
+  # reconstruct which ordinary rows go.
   local cases="$TMP/guard-index-cases"
   local name
   local keep
@@ -33995,13 +34068,17 @@ PY
   rm -rf "$cases" "$project/.oms/plan/completions"
   mkdir -p "$cases"
   python3 - "$ROOT/scripts/lib/artifact-index-retention.py" "$cases" <<'PY'
-import json, os, runpy, sys
-retained = runpy.run_path(sys.argv[1])["retained_lines"]
+import datetime, json, os, runpy, sys
+retention = runpy.run_path(sys.argv[1])
+retained = retention["retained_lines"]
+decision_pin_indices = retention["decision_pin_indices"]
 out = sys.argv[2]
+now = datetime.datetime.now(datetime.timezone.utc)
+recent_ts = (now - datetime.timedelta(days=1)).isoformat().replace("+00:00", "Z")
 
 def row(event_id, exit_code=None, **extra):
     base = {"schema": 1, "event_id": event_id, "operation_id": "op-" + event_id,
-            "artifact_id": "art-" + event_id, "ts": "2026-10-19T00:00:00Z", "kind": "ask",
+            "artifact_id": "art-" + event_id, "ts": recent_ts, "kind": "ask",
             "provider": "codex"}
     if exit_code is not None:
         base["exit"] = exit_code
@@ -34010,7 +34087,7 @@ def row(event_id, exit_code=None, **extra):
 
 def resolution(event_id, target):
     return (json.dumps({"schema": 1, "event_id": event_id, "operation_id": "op-" + target,
-                        "artifact_id": "art-" + target, "ts": "2026-10-19T00:01:00Z",
+                        "artifact_id": "art-" + target, "ts": recent_ts,
                         "kind": "artifact-resolution", "provider": "codex", "exit": 0,
                         "resolution": "resolved", "resolves_event_id": target,
                         "parent_event_id": target}, sort_keys=True) + "\n").encode()
@@ -34060,6 +34137,30 @@ case("round1-erase-fB", 3, "violation", base,
      [line for line in retained(base, 3) if b'"fB"' not in line] + [newest])
 settled = [a[0], fa, resolution("rA", "fA"), a[1], a[2], a[3], a[4], a[5]]
 case("settled", 3, "ok", settled, retained(settled, 3) + [newest])
+owner_old = row("owner-old", kind="panel-result", task_id="owner")
+owner_latest = row("owner-latest", kind="panel-result", task_id="owner")
+owner_base = [owner_old, row("owner-a"), row("owner-b"), row("owner-c"), row("owner-d")]
+case("owner-replacement-evicts-predecessor", 3, "ok", owner_base,
+     owner_base[1:] + [owner_latest, newest])
+
+# A small pin limit exercises the same oldest-decision rollover as production's
+# 3000-row cap without making the worker-guard fixture need thousands of rows.
+rollover_base = [
+    row("decision-old", kind="panel-result", task_id="owner"),
+    row("decision-middle", kind="panel-result", task_id="other"),
+    row("decision-ordinary"),
+]
+rollover_new = row("decision-new", kind="panel-result", task_id="new-owner")
+rollover_lines = rollover_base + [rollover_new]
+rollover_pins = decision_pin_indices(rollover_lines, max_rows=2)
+assert 0 not in rollover_pins and len(rollover_pins) == 2, rollover_pins
+original_decision_pin_indices = retained.__globals__["decision_pin_indices"]
+retained.__globals__["decision_pin_indices"] = lambda lines: decision_pin_indices(lines, max_rows=2)
+rollover_compacted = retained(rollover_lines, 1)
+assert b'"decision-old"' not in b''.join(rollover_compacted)
+case("decision-rollover", 1, "ok", rollover_base,
+     rollover_compacted + [newest])
+retained.__globals__["decision_pin_indices"] = original_decision_pin_indices
 # A resolution that retention does not accept as settling (foreign exit) leaves
 # the failure protected, so erasing it behind that resolution stays a violation.
 foreign = resolution("rF", "fA").replace(b'"exit": 0', b'"exit": 7')

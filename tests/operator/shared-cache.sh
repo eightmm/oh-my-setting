@@ -1136,10 +1136,20 @@ with patch('room_view.nodes', return_value=owed_nodes), \
     assert panel.awaiting_admission(project, {}) == ['open-w']
 
 # An owner decision older than results()' twenty-task window still reaches the board through outcomes().
-many = [{'kind': 'panel-result', 'task_id': 'task-%02d' % n} for n in range(30)]
+retention = runpy.run_path(os.path.join(sys.argv[1], 'artifact-index-retention.py'))
+decision_ts = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+decision_source = [{'kind': 'panel-result', 'task_id': 'task-%02d' % n, 'ts': decision_ts,
+                    'event_id': 'decision-%02d' % n} for n in range(30)]
+decision_source.insert(0, {'kind': 'panel-result', 'task_id': 'task-00', 'ts': decision_ts,
+                          'event_id': 'decision-00-old'})
+many = [json.loads(line) for line in retention['retained_lines'](
+    [json.dumps(row).encode() + b'\n' for row in decision_source], 20)]
+assert len(many) >= 30 and any(row['task_id'] == 'task-00' and row['event_id'] == 'decision-00' for row in many)
 with patch.object(panel_results, '_records', return_value=([], many)), \
-        patch.object(panel_results, '_load_result', side_effect=lambda repo, row: {'outcome': 'completed'}):
-    assert panel_results.outcomes(project, {'task-00', 'task-29', 'missing', '../bad'}) == {'task-00': 'completed', 'task-29': 'completed'}
+        patch.object(panel_results, '_load_result', side_effect=lambda repo, row: {
+            'outcome': 'completed' if row['event_id'] == 'decision-00' else 'rejected'}):
+    assert panel_results.outcomes(project, {'task-00', 'task-29', 'missing', '../bad'}) == {
+        'task-00': 'completed', 'task-29': 'rejected'}
     assert panel_results.outcomes(project, set()) == {}
 
 # Recorded owner decisions are scoped to their plan task generation when bound.

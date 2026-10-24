@@ -747,6 +747,7 @@ import json, os, runpy, sys
 
 repo, index, store_helper = sys.argv[1:4]
 store = runpy.run_path(store_helper)
+retention = runpy.run_path(os.path.join(os.path.dirname(store_helper), "artifact-index-retention.py"))
 dry_run = os.environ.get("OMS_STALE_DRY") == "1"
 kept = []
 
@@ -767,8 +768,10 @@ pins = store["completion_pins"](repo)
 for line in snapshot.splitlines(keepends=True):
     parsed.append((line, json.loads(line.decode("utf-8"))))
 
-candidates = [item for item in parsed
-              if pins is None or item[1].get("event_id") in pins or present(item[1])]
+decision_pins = retention["decision_pin_indices"]([line for line, _row in parsed])
+candidates = [item for ordinal, item in enumerate(parsed)
+              if (pins is None or item[1].get("event_id") in pins or
+                  ordinal in decision_pins or present(item[1]))]
 while candidates:
     id_indices = {}
     for ordinal, (_line, row) in enumerate(candidates):

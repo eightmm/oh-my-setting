@@ -4,9 +4,48 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+from collections import deque
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
+
+
+DECISION_RETENTION_DAYS = 30
+DECISION_FUTURE_TOLERANCE_SECONDS = 5 * 60
+MAX_DECISION_PIN_ROWS = 3000
+
+
+def decision_pin_indices(lines, now=None, max_rows=MAX_DECISION_PIN_ROWS):
+    """Return recent panel-result positions, capped at the newest append-order rows."""
+    if max_rows < 0:
+        raise ValueError("max_rows must not be negative")
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = current - datetime.timedelta(days=DECISION_RETENTION_DAYS)
+    future_limit = current + datetime.timedelta(seconds=DECISION_FUTURE_TOLERANCE_SECONDS)
+    pinned = deque(maxlen=max_rows)
+    for index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict) or row.get("kind") != "panel-result":
+            continue
+        timestamp = row.get("ts")
+        if not isinstance(timestamp, str) or not timestamp:
+            continue
+        try:
+            # datetime.fromisoformat on Python 3.9 does not accept the common Z suffix.
+            normalized = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
+            stamp = datetime.datetime.fromisoformat(normalized)
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+            stamp = stamp.astimezone(datetime.timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if cutoff <= stamp <= future_limit:
+            pinned.append(index)
+    return set(pinned)
 
 
 def retained_lines(
@@ -15,6 +54,7 @@ def retained_lines(
     max_bytes: Optional[int] = None,
     required_event_ids: Sequence[str] = (),
     pinned_event_ids: Optional[Sequence[str]] = (),
+    include_decision_pins: bool = True,
 ) -> list[bytes]:
     """Keep the newest complete lineage groups inside both retention bounds.
 
@@ -23,9 +63,10 @@ def retained_lines(
     those rows (and a resolution's target) either survive together or the
     mutation fails before replacing the ledger.
 
-    Unresolved failures and completion pins survive the count limit. An
-    unreadable pin namespace (``None``) preserves every row; the durable byte
-    ceiling still applies.
+    Recent panel decisions are preferred within the remaining byte budget;
+    unresolved failures and completion pins survive the ordinary-history
+    floor. An unreadable pin namespace (``None``) preserves every row; the
+    durable byte ceiling still applies.
     """
     if keep <= 0:
         raise ValueError("keep must be positive")
@@ -107,6 +148,7 @@ def retained_lines(
         return sum(len(source[index]) for index in indices)
 
     selected = set()
+    required_indices = set()
     for event_id in required_event_ids:
         index = by_id.get(event_id)
         if index is None:
@@ -115,33 +157,12 @@ def retained_lines(
         if not required_group:
             raise ValueError("required artifact resolution has no earlier unique target: %s" % event_id)
         selected.update(required_group)
+        required_indices.update(required_group)
     if len(selected) > keep:
         raise ValueError("required artifact lineage exceeds row retention")
     if max_bytes is not None and selected_bytes(selected) > max_bytes:
         raise ValueError("required artifact lineage exceeds byte retention")
 
-    for index in range(len(source) - 1, -1, -1):
-        if index in selected:
-            continue
-        if index in resolved_targets:
-            continue
-        group = group_for(index)
-        if not group:
-            continue
-        group = [item for item in group if item not in selected]
-        if len(selected) + len(group) > keep:
-            continue
-        if (max_bytes is not None and
-                selected_bytes(selected) + selected_bytes(group) > max_bytes):
-            continue
-        selected.update(group)
-        if len(selected) == keep or (
-                max_bytes is not None and selected_bytes(selected) == max_bytes):
-            break
-    for index, row in enumerate(parsed):
-        if (isinstance(row, dict) and row.get("kind") != "artifact-resolution" and
-                type(row.get("exit")) is int and row["exit"] > 0 and index not in settled_failures):
-            selected.add(index)
     if pinned_event_ids is None:
         selected.update(range(len(source)))
     else:
@@ -153,6 +174,48 @@ def retained_lines(
                     selected.update(range(len(source)))
                     break
                 selected.update(group)
+    for index, row in enumerate(parsed):
+        if (isinstance(row, dict) and row.get("kind") != "artifact-resolution" and
+                type(row.get("exit")) is int and row["exit"] > 0 and index not in settled_failures):
+            selected.add(index)
+
+    # Decisions are a retention preference, not a reason to reject a mutation.
+    # Reserve the hard-protected rows first, then add newest decisions only when
+    # they fit beside required rows and hard protections.
+    if include_decision_pins:
+        decision_bytes = selected_bytes(selected)
+        for index in sorted(decision_pin_indices(source), reverse=True):
+            if index in selected:
+                continue
+            row_bytes = len(source[index])
+            if max_bytes is not None and decision_bytes + row_bytes > max_bytes:
+                continue
+            selected.add(index)
+            decision_bytes += row_bytes
+
+    # ``keep`` remains the ordinary-history floor; protected rows are reserved
+    # ahead of it and do not consume the slots the previous retention contract
+    # gave to recent ordinary rows.
+    ordinary_selected = set(required_indices)
+    for index in range(len(source) - 1, -1, -1):
+        if index in selected:
+            continue
+        if index in resolved_targets:
+            continue
+        group = group_for(index)
+        if not group:
+            continue
+        group = [item for item in group if item not in selected]
+        if len(ordinary_selected) + len(group) > keep:
+            continue
+        if (max_bytes is not None and
+                selected_bytes(selected) + selected_bytes(group) > max_bytes):
+            continue
+        selected.update(group)
+        ordinary_selected.update(group)
+        if len(ordinary_selected) == keep or (
+                max_bytes is not None and selected_bytes(selected) == max_bytes):
+            break
     if max_bytes is not None and selected_bytes(selected) > max_bytes:
         raise ValueError("protected artifact rows exceed byte retention")
     return [line for index, line in enumerate(source) if index in selected]

@@ -967,7 +967,7 @@ def index_compacted(path, size, expected):
         retention = runpy.run_path(os.path.join(os.environ["OMS_WG_LIB"], "artifact-index-retention.py"))
         kept = retention["retained_lines"](
             [line for _event_id, line, _row in old] + [b'{"event_id":"\\u0000guard"}\n'],
-            1, pinned_event_ids=sorted(pins))
+            1, pinned_event_ids=sorted(pins), include_decision_pins=False)
     except Exception:
         return False
     protected = {position[event_id] for event_id in (json.loads(line).get("event_id") for line in kept)
