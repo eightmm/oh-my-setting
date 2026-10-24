@@ -678,6 +678,11 @@ EOF
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_CALLS/plan-from-spec"
 case "${OMS_T_PLAN_RESULT:-ok}" in
+  empty-discovery)
+    echo 'plan-from-spec: no proposal; no eligible discovery candidates'
+    echo 'plan-from-spec: evidence packet: .oms/plan/work-evidence.json (sha256: fixture)'
+    echo 'plan-from-spec: candidate report: .oms/plan/candidates.json (sha256: fixture)'
+    exit 0 ;;
   empty)
     echo 'plan-from-spec: proposal carries no tasks' >&2
     exit 3 ;;
@@ -685,7 +690,10 @@ case "${OMS_T_PLAN_RESULT:-ok}" in
     echo 'error: could not extract a proposal; raw answer kept at planner artifact' >&2
     exit 3 ;;
 esac
-[ "${OMS_T_PLAN_RC:-0}" = 0 ] || exit "$OMS_T_PLAN_RC"
+if [ "${OMS_T_PLAN_RC:-0}" != 0 ]; then
+  [ "$OMS_T_PLAN_RC" != 2 ] || echo 'plan-from-spec: work evidence budget exceeded' >&2
+  exit "$OMS_T_PLAN_RC"
+fi
 proposal="$OMS_T_REPO/.oms/plan/proposal-r1.json"
 mkdir -p "$(dirname "$proposal")"
 cat > "$proposal" <<'JSON'
@@ -3140,7 +3148,7 @@ EOF
 
 test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose() {
   local main="$TMP/scratch-refusal-main" managed="$TMP/scratch-refusal-managed"
-  local scratch normal rc=0 parent_env
+  local scratch normal discovered refused failed none rc=0 parent_env
   make_repo "$main"
   mkdir -p "$main/calls" "$TMP/bin" "$managed"
   write_orchestration_stubs "$TMP/bin"
@@ -3182,6 +3190,105 @@ test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose() {
     fail "ordinary checkout did not reach the stub planner"
   [ -f "$normal/.oms/plan/autopilot-run.json" ] ||
     fail "ordinary checkout did not write the outer receipt"
+  ! grep -Fq -- '--discover' "$normal/calls/plan-from-spec" ||
+    fail "plain propose passed --discover to the planner"
+
+  discovered="$TMP/scratch-refusal-discover"
+  make_repo "$discovered"
+  mkdir -p "$discovered/calls"
+  rc=0
+  run_autopilot "$discovered" propose --discover --planner claude \
+    --allowed 'src,tests' --base main > "$discovered/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "discover propose should reach proposal review, got $rc: $(tail -5 "$discovered/propose.out")"
+  [ "$(awk '{ for (i = 1; i <= NF; i++) if ($i == "--discover") count++ } END { print count + 0 }' \
+    "$discovered/calls/plan-from-spec")" = 1 ] ||
+    fail "discover propose must pass --discover exactly once"
+
+  refused="$TMP/scratch-refusal-discover-run"
+  make_repo "$refused"
+  rc=0
+  run_autopilot "$refused" run --discover --base main > "$refused/run.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "run --discover should be refused, got $rc"
+  grep -Fq -- '--discover is only valid with propose' "$refused/run.out" ||
+    fail "run --discover refusal did not explain its action restriction"
+
+  failed="$TMP/scratch-refusal-discover-failure"
+  make_repo "$failed"
+  mkdir -p "$failed/calls"
+  rc=0
+  OMS_T_PLAN_RC=2 run_autopilot "$failed" propose --discover --planner claude \
+    --allowed 'src,tests' --base main > "$failed/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "collector refusal should fail propose with status 2, got $rc"
+  grep -Fq 'plan-from-spec: work evidence budget exceeded' "$failed/propose.out" ||
+    fail "collector stderr was not visible in the failed propose"
+  grep -Fq 'plan-from-spec: proposed' "$failed/propose.out" &&
+    fail "collector refusal unexpectedly generated a proposal"
+  if python3 - "$failed/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("stage") == "proposal-review" else 1)
+PY
+  then
+    fail "collector refusal wrote a proposal-review receipt"
+  fi
+
+  none="$TMP/scratch-refusal-discover-empty"
+  make_repo "$none"
+  mkdir -p "$none/calls"
+  rc=0
+  OMS_T_PLAN_RESULT=empty-discovery run_autopilot "$none" propose --discover \
+    --planner claude --allowed 'src,tests' --base main > "$none/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "empty discovery should succeed, got $rc: $(tail -5 "$none/propose.out")"
+  grep -Fq 'autopilot: discovery found no eligible work' "$none/propose.out" ||
+    fail "empty discovery did not explain that no eligible work was found"
+  [ -f "$none/.oms/plan/autopilot-run.json" ] ||
+    fail "empty discovery removed the outer receipt"
+  if python3 - "$none/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("stage") == "proposing" else 1)
+PY
+  then
+    :
+  else
+    fail "empty discovery did not leave a proposing receipt"
+  fi
+
+  interrupted="$TMP/scratch-refusal-discover-interrupted"
+  make_repo "$interrupted"
+  mkdir -p "$interrupted/calls"
+  rc=0
+  OMS_T_PLAN_RC=2 run_autopilot "$interrupted" propose --discover --planner claude \
+    --allowed 'src,tests' --base main > "$interrupted/interrupted.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "interrupted proposal should fail with status 2, got $rc"
+  [ -f "$interrupted/.oms/plan/autopilot-run.json" ] ||
+    fail "interrupted proposal did not leave its outer receipt"
+  if python3 - "$interrupted/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("stage") == "proposing" else 1)
+PY
+  then
+    :
+  else
+    fail "interrupted proposal did not leave a proposing receipt"
+  fi
+  rc=0
+  OMS_T_PLAN_RESULT=empty-discovery run_autopilot "$interrupted" propose --discover \
+    --planner claude --allowed 'src,tests' --base main > "$interrupted/empty.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "empty discovery retry should succeed, got $rc"
+  [ -f "$interrupted/.oms/plan/autopilot-run.json" ] ||
+    fail "empty discovery retry removed the interrupted outer receipt"
+  if python3 - "$interrupted/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("stage") == "proposing" else 1)
+PY
+  then
+    :
+  else
+    fail "empty discovery retry did not preserve the proposing stage"
+  fi
 }
 
 test_autopilot_acceptance_reuse

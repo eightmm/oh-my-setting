@@ -38,6 +38,7 @@ INITIAL_TASKS=6
 REPLAN_TASKS=2
 AUTO_REPAIR=0
 ALLOW_VERIFIER_CHANGE=0
+DISCOVER=0
 COLLABORATION=off
 REVIEW_MODE="shadow"
 REVIEW_MODE_EXPLICIT=0
@@ -149,6 +150,7 @@ Options:
                           own verifier can land (base floor still applies).
                           Mid-run discovery cannot add it — abandon the run and
                           propose a fresh contract carrying the flag.
+  --discover              Include bounded work evidence in the initial proposal.
   --provider-timeout DUR  Default per-provider wall clock (default: 5m; max 24h).
   --planner-timeout DUR   Planner override for --provider-timeout.
   --worker-timeout DUR    Worker override for --provider-timeout.
@@ -238,6 +240,7 @@ while [ "$#" -gt 0 ]; do
     --auto-repair) AUTO_REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
+    --discover) DISCOVER=1; shift ;;
     --provider-timeout)
       [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
       PROVIDER_TIMEOUT="$2"; shift 2 ;;
@@ -297,6 +300,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
+[ "$DISCOVER" -eq 0 ] || [ "$ACTION" = propose ] ||
+  fail "--discover is only valid with propose"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 REPO="${REPO//$'\r'/}"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository path"
@@ -1318,7 +1323,7 @@ print(state)
 PY
 }
 
-propose_tasks() {  # PREFIX MAX
+propose_tasks() {  # PREFIX MAX [DISCOVER]
   local prefix="$1"
   local max_tasks="$2"
   local args out rc proposal_path proposal_digest continuation continuation_line
@@ -1339,6 +1344,7 @@ propose_tasks() {  # PREFIX MAX
   args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED"
     --worker-provider "$WORKER" --collaboration "$COLLABORATION")
   [ -z "$prefix" ] || args+=(--id-prefix "$prefix")
+  [ "${3:-0}" -eq 0 ] || args+=(--discover)
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || args+=(--allow-verifier-change)
   [ -z "$PLANNER_MODEL" ] || args+=(--model "$PLANNER_MODEL")
   [ -z "$PLANNER_FALLBACK_MODEL" ] || args+=(--fallback-model "$PLANNER_FALLBACK_MODEL")
@@ -1361,6 +1367,12 @@ propose_tasks() {  # PREFIX MAX
     fi
     rm -f "$out"
     return "$rc"
+  fi
+  if [ "${3:-0}" -eq 1 ] &&
+    grep -Fqx 'plan-from-spec: no proposal; no eligible discovery candidates' "$out"; then
+    echo "autopilot: discovery found no eligible work"
+    rm -f "$out"
+    exit 0
   fi
   proposal_path="$(sed -n 's/^plan-from-spec: proposed .* -> //p' "$out" | tail -n 1)"
   proposal_digest="$(sed -n 's/^plan-from-spec: proposal sha256: //p' "$out" | tail -n 1)"
@@ -1461,7 +1473,7 @@ if [ "$ACTION" = propose ]; then
       esac
     fi
     echo "autopilot: allowed: $ALLOWED ($allowed_source)"
-    propose_tasks "" "$INITIAL_TASKS" || exit $?
+    propose_tasks "" "$INITIAL_TASKS" "$DISCOVER" || exit $?
   fi
   bind_plan_contract
   if [ "$ALLOWED_EXPLICIT" -eq 0 ]; then
