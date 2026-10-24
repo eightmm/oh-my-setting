@@ -243,6 +243,28 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(with_legacy['warnings'], row['warnings'])
         self.assertTrue(legacy.is_file())
 
+        base = projection.build_base_envelope(self.repo)
+        unbound = [dict(event_id='unbound-%d' % i, status='verified',
+                        ts='%03d' % (100 - i), _ordinal=i + 1)
+                   for i in range(65)]
+        ignored = [dict(event_id='ignored-%d' % i, kind='lifecycle',
+                        covers=['unknown-criterion']) for i in range(65)]
+        linked = dict(event_id='linked', covers=['project-safe'])
+        rows = [linked] + [item for pair in zip(unbound, ignored) for item in pair]
+        expected = [evidence._evidence_item(item, self.repo, support='explicit-artifact',
+                                           head=base['repo']['head'])
+                    for item in unbound[-50:]]
+        with patch.object(evidence, 'artifact_rows', return_value=rows), \
+                patch.object(evidence, '_evidence_item', wraps=evidence._evidence_item) as materialize:
+            projected = evidence.build_coverage(self.repo, base)
+        self.assertEqual([call.args[0]['event_id'] for call in materialize.call_args_list],
+                         ['linked'] + [item['event_id'] for item in unbound[-50:]])
+        self.assertEqual(projected['unbound_evidence'], expected)
+        self.assertEqual(projected['artifact_rows_seen'], len(rows))
+        linked_criterion = next(item for item in projected['criteria']
+                                if item['id'] == 'project-safe')
+        self.assertEqual(linked_criterion['evidence'][0]['evidence_ref'], 'linked')
+
     def test_completed_plan_without_active_task_routes_to_retirement_check(self) -> None:
         actions = projection._actions(
             {'present': True},

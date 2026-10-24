@@ -422,7 +422,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     criteria_by_id = {str(item.get("id")): item for item in criteria}
     valid_ids = set(criteria_by_id)
     by_criterion: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
-    unbound: List[Dict[str, Any]] = []
+    unbound: List[tuple] = []
     rows = artifact_rows(repo)
     resolved = resolved_event_ids(rows)
     row_by_ref = {evidence_ref(row): row for row in rows if evidence_ref(row)}
@@ -477,12 +477,12 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                         and str(item.get("plan_id", "")) == admitted_plan]
                 if refs:
                     support = "patch-admission-receipt"
-        item = _evidence_item(row, repo, support=support, head=head, resolved=resolved)
         if refs:
+            item = _evidence_item(row, repo, support=support, head=head, resolved=resolved)
             for ref in refs:
                 by_criterion[ref].append(item)
         elif outcome(row) is not None:
-            unbound.append(item)
+            unbound.append((row, support))
     active_bindings = _active_bindings(repo)
     for binding_index, binding in enumerate(active_bindings, len(rows) + 1):
         binding = dict(binding)
@@ -525,7 +525,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     total_weight = sum(float(item.get("weight", 1)) for item in projected)
     verified_weight = sum(float(item.get("weight", 1)) for item in projected if item.get("status") == "verified")
     risk_weight = sum(float(item.get("weight", 1)) * {"failed": 1.0, "missing": 0.8, "stale": 0.7, "inconclusive": 0.5, "skipped_with_reason": 0.4}.get(str(item.get("status")), 0.0) for item in projected)
-    return {"schema": RUNTIME_SCHEMA, "criteria": projected, "counts": dict(sorted(counts.items())), "coverage": verified_weight / total_weight if total_weight else 0.0, "risk_score": risk_weight / total_weight if total_weight else 1.0, "complete": bool(projected) and all(item.get("status") == "verified" for item in projected), "unbound_evidence": unbound[-50:], "artifact_rows_seen": len(rows)}
+    return {"schema": RUNTIME_SCHEMA, "criteria": projected, "counts": dict(sorted(counts.items())), "coverage": verified_weight / total_weight if total_weight else 0.0, "risk_score": risk_weight / total_weight if total_weight else 1.0, "complete": bool(projected) and all(item.get("status") == "verified" for item in projected), "unbound_evidence": [_evidence_item(row, repo, support=support, head=head, resolved=resolved) for row, support in unbound[-50:]], "artifact_rows_seen": len(rows)}
 
 
 def build_envelope(repo: Path, *, status_snapshots: Any = None) -> Dict[str, Any]:
