@@ -253,6 +253,41 @@ oldest_call = next(call for call in old_calls if call["participant"] == "old-cal
 assert oldest_call["tokens"] == "321 in / 0 out", oldest_call
 
 from panel_view import amount, call_tokens, plan_tail_columns
+# Duplicate ids retain the first row in each source, and source precedence is unchanged.
+duplicate_usage = {
+    "rows": [{"calls": [{"attempt_id": "duplicate-row", "tokens": 10},
+                        {"attempt_id": "duplicate-row", "tokens": 11}]},
+             {"calls": [{"attempt_id": "duplicate-row", "tokens": 12}]}],
+    "operations": {"recent": [
+        {"attempt_id": "duplicate-row", "tokens": 20},
+        {"attempt_id": "duplicate-operation", "task_id": "other", "kind": "call", "tokens": 30},
+        {"attempt_id": "duplicate-operation", "task_id": "target", "kind": "ignored", "verify_exit": 9},
+        {"attempt_id": "duplicate-operation", "task_id": "target", "kind": "call", "verify_exit": 0, "tokens": 31},
+        {"attempt_id": "duplicate-operation", "task_id": "target", "kind": "review", "verify_exit": 1}]},
+    "room_attempts": {"first": {"attempt_id": "duplicate-room", "tokens": 40},
+                      "second": {"attempt_id": "duplicate-room", "tokens": 41},
+                      "third": {"attempt_id": "duplicate-operation", "tokens": 42}},
+    "attempts": {"active_recent": [
+        {"attempt_id": "duplicate-live", "panel": {"room_participant": "call-first"}}],
+        "recent": [{"attempt_id": "duplicate-fallback", "tokens": 50},
+                   {"attempt_id": "duplicate-fallback", "tokens": 51},
+                   {"attempt_id": "duplicate-missing"},
+                   {"attempt_id": "duplicate-missing", "tokens": 52},
+                   {"attempt_id": "duplicate-live", "panel": {"room_participant": "call-second"}},
+                   {"attempt_id": "duplicate-operation", "state": "done", "task_id": "target",
+                    "panel": {"role": "worker", "room_id": "duplicate-room", "room_participant": "duplicate-member"}}]},
+    "room": {"id": "duplicate-room", "participants": [
+        {"participant": "duplicate-member", "role": "worker", "joined": True}]}}
+duplicate_before = json.dumps(duplicate_usage, sort_keys=True)
+for duplicate_id, expected in (("row", "10 tok"), ("operation", "30 tok"), ("room", "40 tok"),
+                               ("fallback", "50 tok"), ("missing", "tokens unreported")):
+    assert call_tokens(duplicate_usage, "duplicate-" + duplicate_id, "done") == expected
+assert projected_nodes(duplicate_usage)[0]["verify_exit"] == 0
+with mock_patch("panel_activity.live_usage", return_value={"input_tokens": 10, "output_tokens": 2,
+                                                        "cache_in_input": True}) as duplicate_live:
+    assert call_tokens(duplicate_usage, "duplicate-live", "working", True) == "~10 in / 2 out"
+    assert duplicate_live.call_args.args[1] == "call-first"
+assert json.dumps(duplicate_usage, sort_keys=True) == duplicate_before
 cache_report = {"operations": {"recent": [{"attempt_id": "cache-result", "provider_usage": {
     "input_tokens": 13851552, "output_tokens": 50304, "cache_read_tokens": 13356160,
     "cache_in_input": True}}]}}

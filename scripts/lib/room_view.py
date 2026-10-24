@@ -9,7 +9,7 @@ from panel_view import (amount, token_amount, token_pair, call_tokens, ATTENTION
                         plan_tail_columns, format_tail_row, clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
-                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tone)
+                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tone, _render_report)
 
 DECIDED = frozenset({"completed", "accepted", "rejected"})
 
@@ -34,8 +34,14 @@ def owed(report, call):
 
 
 def nodes(report):
+    report = _render_report(report)
     room = mapping(report.get("room"))
     attempts = mapping(report.get("attempts"))
+    room_attempts = mapping(report.get("room_attempts"))
+    status = mapping(mapping(report.get("provider_status")).get("codex"))
+    native = mapping(status.get("native_models"))
+    main_activity = mapping(report.get("main_activity"))
+    call_results = mapping(room.get("call_results"))
     linked = {}
     rows = listing(attempts.get("active_recent")) + listing(attempts.get("recent"))
     here = room_ids(room)
@@ -56,7 +62,7 @@ def nodes(report):
     present = {mapping(m).get("participant") for m in listing(room.get("participants"))}
     # Calls settled in a room this one continues are not carried, yet some still wait on the person; only one with
     # attempt evidence has a task to wait on, which bounds the work however long the chain grows.
-    known = (set(linked) | set(mapping(report.get("room_attempts")))) - present
+    known = (set(linked) | set(room_attempts)) - present
     earlier = [c for c in map(mapping, listing(room.get("predecessor_calls"))) if c.get("participant") in known]
     for member in listing(room.get("participants")) + earlier:
         if not member.get("joined"):
@@ -67,18 +73,14 @@ def nodes(report):
                         if mapping(row.get("panel")).get("role") == member.get("role")), {})
         if not attempt:
             # Outside the projection window: the full-projection row for this call, when the snapshot found one.
-            attempt = mapping(mapping(report.get("room_attempts")).get(member.get("participant")))
+            attempt = mapping(room_attempts.get(member.get("participant")))
         meta = mapping(attempt.get("panel"))
         refs = mapping(attempt.get("refs"))
-        extra = mapping(mapping(report.get("room_attempts")).get(member.get("participant")))
+        extra = mapping(room_attempts.get(member.get("participant")))
         if not attempt.get("attempt_id") or extra.get("attempt_id") != attempt.get("attempt_id") or extra.get("state") != attempt.get("state"):
             extra = {}
         reason = attempt.get("reason_code") or extra.get("reason_code") or member.get("reason_code")
-        operation = next((r for r in listing(mapping(report.get("operations")).get("recent"))
-                          if attempt.get("attempt_id") and r.get("attempt_id") == attempt["attempt_id"]
-                          and r.get("task_id") == attempt.get("task_id") and r.get("kind") in {"delegate", "call", "ask", "review", "consult"}), {})
-        status = mapping(mapping(report.get("provider_status")).get("codex"))
-        native = mapping(status.get("native_models"))
+        operation = report.room_operations.get((attempt.get("attempt_id"), attempt.get("task_id")), {})
         reading = mapping(native.get(member.get("participant")))
         live_native = (member.get("role") == "main" and member.get("provider") == "codex"
                        and meta.get("harness") != "pi"
@@ -92,7 +94,7 @@ def nodes(report):
             model, effort = (reading.get("model"), reading.get("effort")) if current else (None, None)
         # Attempt evidence wins; a call's result message is the fallback once its attempt left the projection.
         result = ({"exit": member.get("exit"), "ts": member.get("ended")} if member.get("_predecessor") else
-                  mapping(mapping(room.get("call_results")).get(member.get("participant"))))
+                  mapping(call_results.get(member.get("participant"))))
         code = result.get("exit", attempt.get("exit", member.get("exit")))
         provider_error = attempt.get("provider_error_exit", refs.get("provider_error_exit", extra.get("provider_error_exit",
                             mapping(extra.get("refs")).get("provider_error_exit", member.get("provider_error_exit")))))
@@ -107,7 +109,7 @@ def nodes(report):
         decided = state == "review" and finalized.get(attempt.get("task_id")) in DECIDED
         token_label = call_tokens(report, attempt["attempt_id"], state, True) if attempt.get("attempt_id") else ""
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
-                           panel_activity=mapping(mapping(report.get("main_activity")).get(member.get("participant"))),
+                           panel_activity=mapping(main_activity.get(member.get("participant"))),
                            tokens=(token_label if token_label != "tok n/a" else None)
                            if attempt.get("attempt_id") and member.get("role") != "main" else None,
                            ended=result.get("ts"), exit=code if type(code) is int else None,
@@ -1189,6 +1191,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                  attention_only=False, main_attempt=None, navigation=None, managed=False,
                  previous=None):
     """Page real parent relationships without inventing routers or progress."""
+    report = _render_report(report)
     from panel_view import tone
     from panel_view import use_unicode
     use_unicode(unicode)

@@ -6,6 +6,7 @@ import stat
 import unicodedata
 from collections import OrderedDict
 from datetime import datetime
+from itertools import chain
 
 from dashboard_projection import (clean, count, display_width, fit, listing, mapping, number,
                                   wrap_label as wrapped)
@@ -488,6 +489,7 @@ def tone(state):
 
 def worker_rows(report):
     """Only explicit panel metadata identifies advisors and main ownership."""
+    report = _render_report(report)
     from room_view import call_classifier, nodes
     classify = call_classifier(report)
     projected = {member.get("attempt"): member for member in nodes(report) if member.get("attempt")}
@@ -543,8 +545,7 @@ def worker_rows(report):
         if metadata.get("role") == "main":
             continue
         detail = TASK_NAMES.get(row.get("tool"), row.get("tool") or "Work unrecorded")
-        operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
-                          if row.get("attempt_id") and item.get("attempt_id") == row["attempt_id"]), {})
+        operation = report.operations.get(row.get("attempt_id"), {})
         model = ("served: " + operation["served_model"] if operation.get("served_model") else
                  "selected: " + operation["selected_model"] if operation.get("selected_model") else
                  "selected: " + metadata["model"] if metadata.get("model") else
@@ -730,19 +731,45 @@ def provider_usage_tokens(usage):
     return sum(parts) if None not in parts else None
 
 
+def _attempt_lookup(rows):
+    lookup = {}
+    for row in rows:
+        ident = row.get("attempt_id")
+        if ident:
+            lookup.setdefault(ident, row)
+    return lookup
+
+
+class _RenderReport(dict):
+    """A frame-local shallow view: indexes never mutate or outlive the caller's snapshot."""
+
+    def __init__(self, report):
+        super().__init__(report)
+        operations = listing(mapping(report.get("operations")).get("recent"))
+        attempts = mapping(report.get("attempts"))
+        recent = listing(attempts.get("recent"))
+        self.operations = _attempt_lookup(operations)
+        self.token_operations = _attempt_lookup(chain(
+            (call for row in listing(report.get("rows")) for call in listing(mapping(row).get("calls"))),
+            operations, mapping(report.get("room_attempts")).values()))
+        self.recent_attempts = _attempt_lookup(recent)
+        self.live_attempts = _attempt_lookup(chain(listing(attempts.get("active_recent")), recent))
+        self.room_operations = {}
+        for row in operations:
+            if row.get("attempt_id") and row.get("kind") in {"delegate", "call", "ask", "review", "consult"}:
+                self.room_operations.setdefault((row["attempt_id"], row.get("task_id")), row)
+
+
+def _render_report(report):
+    return report if isinstance(report, _RenderReport) else _RenderReport(report)
+
+
 def call_tokens(report, attempt_id, state, short=False):
     """One call's tokens: providers differ on cache, so a breakdown is summed to the same total."""
     if state in LIVE_STATES:
         return _live_call_tokens(report, attempt_id, short=short) or ""
-    call_rows = [item for row in listing(report.get("rows")) for item in listing(mapping(row).get("calls"))]
-    operation = next((item for item in call_rows
-                      if attempt_id and item.get("attempt_id") == attempt_id), {})
-    if not operation:
-        operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
-                          if attempt_id and item.get("attempt_id") == attempt_id), {})
-    if not operation:
-        operation = next((item for item in mapping(report.get("room_attempts")).values()
-                          if attempt_id and item.get("attempt_id") == attempt_id), {})
+    report = _render_report(report)
+    operation = report.token_operations.get(attempt_id, {}) if attempt_id else {}
     usage = mapping(operation.get("provider_usage"))
     session_total = usage.get("session_cumulative") is True
     tokens = provider_usage_tokens(usage)
@@ -753,8 +780,7 @@ def call_tokens(report, attempt_id, state, short=False):
         return _usage_label(usage, tokens, short=short)
     tokens = count(operation.get("tokens"))
     if tokens is None:
-        tokens = next((count(item.get("tokens")) for item in listing(mapping(report.get("attempts")).get("recent"))
-                       if attempt_id and item.get("attempt_id") == attempt_id), None)
+        tokens = count(report.recent_attempts.get(attempt_id, {}).get("tokens")) if attempt_id else None
     if tokens is None:
         return "tok n/a" if short else "tokens unreported"
     output_tokens = count(usage.get("output_tokens"))
@@ -769,9 +795,7 @@ def call_tokens(report, attempt_id, state, short=False):
 def _live_call_tokens(report, attempt_id, short=False):
     if not attempt_id:
         return ""
-    attempts = listing(mapping(report.get("attempts")).get("active_recent")) + listing(
-        mapping(report.get("attempts")).get("recent"))
-    attempt = next((item for item in attempts if item.get("attempt_id") == attempt_id), {})
+    attempt = _render_report(report).live_attempts.get(attempt_id, {})
     call = mapping(attempt.get("panel")).get("room_participant")
     if not call or not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", str(call)):
         return ""
@@ -1295,6 +1319,7 @@ def needs_strip(report, width, unicode, limit=3, ranked=None):
 def render(report, provider, width=100, height=28, color=False, unicode=True,
            previous=None, availability=None, menu=False, managed=False, main_attempt=None, frame=None,
            view="auto", attention_only=False, navigation=None):
+    report = _render_report(report)
     try:
         import panel_activity
         panel_activity._begin_usage_refresh()
