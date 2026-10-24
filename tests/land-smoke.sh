@@ -1309,7 +1309,7 @@ print(r if r != {} else "")' "$1"; }
 query_rc=0
 query_sha="$(git -C "$repo" rev-parse HEAD)"
 OMS_TEST_CI_SCOPE=ambiguous-null OMS_TEST_CI_RESULT=success \
-  python3 "$ROOT/scripts/lib/ci-query.py" scope fixture/repo 1 "$query_sha" 0 \
+  python3 "$ROOT/scripts/lib/ci-query.py" scope fixture/repo 1 "$query_sha" 5 \
   > "$TMP/scope-diagnostics.out" 2>&1 || query_rc=$?
 [ "$query_rc" = 2 ] || fail "ambiguous diagnostics unexpectedly classified CI: $query_rc"
 grep -Fq "('gate', None)" "$TMP/scope-diagnostics.out" || fail "null conclusion was not diagnosed distinctly"

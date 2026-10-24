@@ -1633,7 +1633,7 @@ PY
   # bookkeeping. Under the full serial gate that can legitimately exceed the
   # old eight-second fixture budget even though the isolated smoke is green.
   # Keep the probe bounded, but leave enough headroom for loaded CI hosts.
-  while [ ! -s "$phase_marker" ] && [ "$phase_wait" -lt 1500 ]; do
+  while [ ! -s "$phase_marker" ] && [ "$phase_wait" -lt 6000 ]; do
     sleep 0.02
     phase_wait=$((phase_wait + 1))
   done

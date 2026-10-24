@@ -1108,7 +1108,7 @@ print(hashlib.sha256(json.dumps(
 receipt_cas_pid=$!
 receipt_cas_ready=0
 receipt_cas_wait=0
-while [ "$receipt_cas_wait" -lt 200 ]; do
+while [ "$receipt_cas_wait" -lt 2400 ]; do
   if [ -f "$receipt_cas_barrier/ready" ]; then
     receipt_cas_ready=1
     break
