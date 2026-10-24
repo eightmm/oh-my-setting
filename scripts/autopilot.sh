@@ -976,17 +976,12 @@ outer_receipt_branch() {
   if [ "$current" = "$BASE" ]; then printf '%s\n' "$target"; else printf '%s\n' "$current"; fi
 }
 
-outer_receipt_write_locked() {  # STAGE
-  local stage="$1" expected="absent" receipt_branch now
-  local -a receipt_args
-  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
-    expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || return $?
-    expected="${expected//$'\r'/}"
-  fi
+outer_receipt_binding_args() {  # COMMAND STAGE EXPECTED
+  local command="$1" stage="$2" expected="$3" receipt_branch now
   receipt_branch="${work_branch:-}"
   [ -n "$receipt_branch" ] || receipt_branch="$(outer_receipt_branch)" || return $?
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  receipt_args=(write "$OUTER_RECEIPT" --expected "$expected" --stage "$stage" \
+  receipt_args=("$command" "$OUTER_RECEIPT" --expected "$expected" --stage "$stage" \
     --repo "$REPO" --spec-sha256 "$BOUND_SPEC_SHA" \
     --planner "$PLANNER" --worker "$WORKER" --reviewer "$REVIEWER" \
     --planner-model "$PLANNER_MODEL" --worker-model "$WORKER_MODEL" \
@@ -1008,6 +1003,20 @@ outer_receipt_write_locked() {  # STAGE
     --proposal-sha256 "$APPROVED_PROPOSAL_SHA" \
     --branch "$receipt_branch" --owner-id "$AUTOPILOT_OWNER_ID" \
     --updated "$now")
+  [ "$AUTO_REPAIR" -eq 0 ] || receipt_args+=(--auto-repair)
+  [ "$RETRY_KNOWN" -eq 0 ] || receipt_args+=(--retry-known)
+  [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || receipt_args+=(--allow-verifier-change)
+  [ "$DRAFT_PR" -eq 0 ] || receipt_args+=(--draft-pr)
+}
+
+outer_receipt_write_locked() {  # STAGE
+  local stage="$1" expected="absent"
+  local -a receipt_args
+  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+    expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || return $?
+    expected="${expected//$'\r'/}"
+  fi
+  outer_receipt_binding_args write "$stage" "$expected" || return $?
   if [ "$stage" = parked ]; then
     receipt_args+=(--diagnostic-phase "${PARK_PHASE:-${OUTER_STAGE:-startup}}" \
       --diagnostic-reason-code "${PARK_REASON_CODE:-unknown}" \
@@ -1015,10 +1024,18 @@ outer_receipt_write_locked() {  # STAGE
       --diagnostic-semantic-verdict "${PARK_SEMANTIC_VERDICT:-unknown}" \
       --diagnostic-evidence-path "${PARK_EVIDENCE_PATH:-}")
   fi
-  [ "$AUTO_REPAIR" -eq 0 ] || receipt_args+=(--auto-repair)
-  [ "$RETRY_KNOWN" -eq 0 ] || receipt_args+=(--retry-known)
-  [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || receipt_args+=(--allow-verifier-change)
-  [ "$DRAFT_PR" -eq 0 ] || receipt_args+=(--draft-pr)
+  python3 "$RECEIPT_HELPER" "${receipt_args[@]}"
+}
+
+outer_receipt_retire_base_moved_locked() {
+  local expected="absent"
+  local -a receipt_args
+  if [ ! -e "$OUTER_RECEIPT" ] && [ ! -L "$OUTER_RECEIPT" ]; then
+    return 0
+  fi
+  expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || return $?
+  expected="${expected//$'\r'/}"
+  outer_receipt_binding_args retire-proposing-base-moved proposing "$expected" || return $?
   python3 "$RECEIPT_HELPER" "${receipt_args[@]}"
 }
 
@@ -1352,7 +1369,7 @@ PY
 propose_tasks() {  # PREFIX MAX [DISCOVER]
   local prefix="$1"
   local max_tasks="$2"
-  local args out rc proposal_path proposal_digest continuation continuation_line
+  local args out rc proposal_path proposal_digest continuation continuation_line retired_record
   local discovery_receipt_sha
 
   REPLAN_FAILURE=""
@@ -1366,6 +1383,13 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
   APPROVED_PROPOSAL_PATH=""
   APPROVED_PROPOSAL_SHA=""
   outer_receipt_prepare_new || fail "cannot archive the completed outer receipt"
+  autopilot_owner_prepare
+  retired_record="$(oms_with_file_lock "$OUTER_RECEIPT" \
+    outer_receipt_retire_base_moved_locked)" || retired_record=""
+  retired_record="${retired_record//$'\r'/}"
+  if [ -n "$retired_record" ]; then
+    echo "autopilot: retired stale proposing receipt after base moved; abandon record: $retired_record"
+  fi
   if [ "${3:-0}" -eq 1 ]; then
     discovery_receipt_sha="$(outer_receipt_write_discovery_proposing)" ||
       fail "cannot bind and identify this discovery's durable outer receipt"

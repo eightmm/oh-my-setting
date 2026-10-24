@@ -3149,6 +3149,7 @@ EOF
 test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose() {
   local main="$TMP/scratch-refusal-main" managed="$TMP/scratch-refusal-managed"
   local scratch normal discovered refused failed none rc=0 parent_env
+  local original_receipt abandoned_archive abandon_record interrupted_branch candidate
   make_repo "$main"
   mkdir -p "$main/calls" "$TMP/bin" "$managed"
   write_orchestration_stubs "$TMP/bin"
@@ -3293,6 +3294,64 @@ PY
   [ "$rc" = 0 ] || fail "empty discovery retry should succeed, got $rc"
   [ ! -e "$interrupted/.oms/plan/autopilot-run.json" ] ||
     fail "empty discovery retry left a live outer receipt"
+
+  rc=0
+  OMS_T_PLAN_RC=2 run_autopilot "$interrupted" propose --discover --planner claude \
+    --allowed 'src,tests' --base main > "$interrupted/interrupted-again.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "second interrupted proposal should fail with status 2, got $rc"
+  [ -f "$interrupted/.oms/plan/autopilot-run.json" ] ||
+    fail "second interrupted proposal did not leave its outer receipt"
+  original_receipt="$TMP/interrupted-original-receipt"
+  cp "$interrupted/.oms/plan/autopilot-run.json" "$original_receipt"
+  interrupted_branch="$(git -C "$interrupted" branch --show-current)"
+  git -C "$interrupted" switch -q main
+  printf '%s\n' "advance base after interrupted discovery" >> "$interrupted/README.md"
+  git -C "$interrupted" add README.md
+  git -C "$interrupted" -c user.name=OMS -c user.email=oms@example.invalid commit -qm "advance base after interrupted discovery"
+  git -C "$interrupted" switch -q "$interrupted_branch"
+  rc=0
+  run_autopilot "$interrupted" propose --discover --planner claude \
+    --allowed 'src,docs' --base main > "$interrupted/changed-allowed.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "base-moved retry with a changed allowed envelope should be refused, got $rc"
+  grep -Fq 'immutable contract changed (contract)' "$interrupted/changed-allowed.out" ||
+    fail "base-moved changed-allowed retry did not preserve the immutable-contract refusal"
+  cmp -s "$original_receipt" "$interrupted/.oms/plan/autopilot-run.json" ||
+    fail "changed-allowed refusal modified the old proposing receipt"
+  rc=0
+  run_autopilot "$interrupted" propose --discover --planner claude \
+    --allowed 'src,tests' --base main > "$interrupted/rebind.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "base-moved interrupted discovery should bind a fresh proposal, got $rc: $(tail -5 "$interrupted/rebind.out")"
+  grep -Fq 'retired stale proposing receipt after base moved' "$interrupted/rebind.out" ||
+    fail "base-moved interrupted receipt retirement was not reported: $(tail -8 "$interrupted/rebind.out")"
+  [ -f "$interrupted/.oms/plan/autopilot-run.json" ] ||
+    fail "base-moved retry did not bind a fresh receipt"
+  if python3 - "$interrupted/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("stage") == "proposal-review" else 1)
+PY
+  then
+    :
+  else
+    fail "base-moved retry did not leave a fresh proposal-review receipt"
+  fi
+  abandon_record=""
+  for candidate in "$interrupted"/.oms/plan/autopilot-run.*.abandoned.json; do
+    [ -f "$candidate" ] || continue
+    if python3 - "$candidate" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("reason") == "proposing-base-moved" else 1)
+PY
+    then
+      abandon_record="$candidate"
+      break
+    fi
+  done
+  [ -n "$abandon_record" ] || fail "base-moved receipt retirement did not write an abandon record"
+  abandoned_archive="${abandon_record%.abandoned.json}.json"
+  cmp -s "$original_receipt" "$abandoned_archive" ||
+    fail "base-moved abandon did not preserve the exact old receipt bytes"
 }
 
 test_autopilot_acceptance_reuse

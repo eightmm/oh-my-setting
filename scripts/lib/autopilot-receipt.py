@@ -1857,6 +1857,10 @@ def main() -> int:
     discovery_retire.add_argument("--repo", required=True)
     discovery_retire.add_argument("--expected", required=True)
     discovery_retire.add_argument("--updated", required=True)
+    base_moved_retire = sub.add_parser("retire-proposing-base-moved")
+    base_moved_retire.add_argument("path")
+    base_moved_retire.add_argument("--expected", required=True)
+    add_binding_args(base_moved_retire)
     reenter = sub.add_parser("reenter")
     reenter.add_argument("path")
     reenter.add_argument("--repo", required=True)
@@ -1918,7 +1922,7 @@ def main() -> int:
             row, _payload = load_receipt(path)
             print(row.get("owner_id", ""))
             return 0
-        if args.command in ("abandon", "discovery-retire"):
+        if args.command in ("abandon", "discovery-retire", "retire-proposing-base-moved"):
             # The append-only exit for a receipt whose frozen contract turned
             # out to be the problem (a too-short wall killed the first call
             # and could not be amended — observed live, 2026-08-18). Mirrors
@@ -1937,6 +1941,27 @@ def main() -> int:
                 if row["proposal"] != {"path": "", "sha256": ""}:
                     raise ReceiptError("empty-discovery retirement requires an unbound proposal")
                 args.reason = "discovery-no-eligible-work"
+            elif args.command == "retire-proposing-base-moved":
+                candidate = row_from_args(args)
+                validate_receipt(candidate)
+                if (row["stage"] != "proposing" or
+                        row["proposal"] != {"path": "", "sha256": ""} or
+                        candidate["stage"] != "proposing" or
+                        candidate["proposal"] != {"path": "", "sha256": ""}):
+                    return 0
+                before = immutable_view(row)
+                after = immutable_view(candidate)
+                before_contract = row["contract"]
+                after_contract = candidate["contract"]
+                if (row["spec_sha256"] != candidate["spec_sha256"] or
+                        before.keys() != after.keys() or
+                        any(before[key] != after[key] for key in before if key != "contract") or
+                        before_contract.keys() != after_contract.keys() or
+                        before_contract["base_sha"] == after_contract["base_sha"] or
+                        any(before_contract[key] != after_contract[key]
+                            for key in before_contract if key != "base_sha")):
+                    return 0
+                args.reason = "proposing-base-moved"
             if row["stage"] == "done":
                 raise ReceiptError("a done outer receipt is archived, not abandoned")
             if not UPDATED.fullmatch(args.updated):
