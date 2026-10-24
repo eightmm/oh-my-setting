@@ -966,7 +966,7 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
     ;;
   error) exit 23 ;;
   *)
-    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator/section.sh","tests/operator/section.py","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"},{"id":"symbol:tests/operator/section.py::SectionTest.test_selected","language":"python","name":"test_selected","path":"tests/operator/section.py"}]}'
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator/section.sh","tests/operator/section.py","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py","tests/run-smoke-shard.sh"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"},{"id":"symbol:tests/operator/section.py::SectionTest.test_selected","language":"python","name":"test_selected","path":"tests/operator/section.py"}]}'
     ;;
 esac
 EOF
@@ -1069,6 +1069,12 @@ EOF
     --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||
     fail "affected gate could not expose its plan mode"
   [ "$out" = affected ] || fail "positive graph plan reported the wrong mode: $out"
+  out="$(cd "$gate" && bash scripts/check.sh --affected --changed-from "$base" \
+    --changed-to "$head" --list-stages 2>/dev/null)" ||
+    fail "affected gate could not list positive-plan stages"
+  if grep -Fxq 'affected:tests/run-smoke-shard.sh' <<< "$out"; then
+    fail "affected plan staged the smoke runner bare: $out"
+  fi
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full \
     bash scripts/check.sh --affected --print-affected-mode \
     --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||

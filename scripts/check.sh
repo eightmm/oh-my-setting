@@ -1241,6 +1241,7 @@ PY
     affected_operator_sections="${affected_operator_sections//$'\r'/}"
   fi
   for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
+    [ "$affected_test" = tests/run-smoke-shard.sh ] && continue
     # Operator section fragments only run inside their suite, once.
     case "$affected_test" in tests/operator/*) affected_test=tests/operator-tools-smoke.sh ;; esac
     if [ "$affected_test" = tests/operator-tools-smoke.sh ]; then
