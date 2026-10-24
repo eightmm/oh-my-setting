@@ -1440,7 +1440,108 @@ if os.name != 'nt':
 PY
 }
 
+test_work_discovery_packet_is_bounded_and_complete() {
+  local repo="$TMP/discovery" readers="$TMP/discovery-readers" out rc
+  mkdir -p "$repo" "$readers"
+  cat > "$readers/fail-ledger.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"items":[{"fingerprint":"failure-1","summary":"resolved clue"}]}\r\n'
+EOF
+  cat > "$readers/ci-status.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'run-1 success 2m\r\nFailing jobs (runs):\r\n'
+EOF
+  cat > "$readers/agent-plan.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '[{"id":"open-1","state":"ready"},{"id":"done-1","state":"done"}]\r\n'
+EOF
+  cat > "$readers/agent-memory.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'early line\nhypothesis: early clue\n'
+for n in $(seq 1 30); do printf 'ordinary line %s\n' "$n"; done
+printf 'hypothesis: late clue\r\n'
+EOF
+  cat > "$readers/oms" <<'EOF'
+#!/usr/bin/env bash
+printf '{"since":"2026-01-01","until":"2026-01-02","coverage":{"complete":true},"write_state":{"reconciled":true},"failures":[],"stages":[]}\r\n'
+EOF
+  chmod +x "$readers"/*
+  export OMS_WORK_DISCOVERY_SCRIPTS_DIR="$readers" OMS_WORK_DISCOVERY_OMS="$readers/oms"
+  out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo")" ||
+    fail "work discovery collection failed"
+  python3 - "$out" <<'PY' || fail "work discovery packet omitted evidence or normalization"
+import json, sys
+r = json.loads(sys.argv[1])
+assert r["schema"] == 1 and r["sections"].keys() == {
+    "failures", "metrics", "reviews", "ci", "tasks", "rejected"}, r
+assert r["sections"]["failures"]["items"][0]["ref"] == "failure-1", r
+assert r["sections"]["ci"]["items"][0]["ref"] == "run-1", r
+assert [x["text"] for x in r["sections"]["rejected"]["items"]] == [
+    "hypothesis: early clue", "hypothesis: late clue"], r
+assert r["sections"]["metrics"]["coverage"]["complete"] is True, r
+metric = r["sections"]["metrics"]["items"][0]
+assert set(metric) == {"window", "coverage", "incomplete", "write_state_reconciliation",
+                       "failure_reason_counts", "failure_stage_buckets", "cancel_totals"}, metric
+assert all("\\r" not in json.dumps(section) for section in r["sections"].values()), r
+import sys
+sys.path.insert(0, "scripts/lib")
+import panel_results, work_discovery
+attempts = [
+    {"attempt_id": "a-decided", "refs": {"panel_role": "reviewer"}},
+    {"attempt_id": "a-pending", "refs": {"panel_role": "critic"}},
+]
+rows = [
+    {"attempt_id": "a-decided", "task_id": "done-task", "artifact_id": "r-decided", "kind": "review", "artifact": ".oms/artifacts/decided"},
+    {"attempt_id": "a-pending", "task_id": "open-task", "artifact_id": "r-pending", "kind": "review", "artifact": ".oms/artifacts/pending"},
+]
+panel_results._records = lambda *args, **kwargs: (attempts, rows)
+panel_results.outcomes = lambda repo, ids: {"done-task": "accepted"}
+artifact = (b"## Prompt\n```text\nquoted prompt\n## Findings\nnot a result\n"
+            b"## Output\n## Findings\nActual finding\n## Exit\n0\n")
+panel_results._indexed = lambda repo, row: artifact
+reviews = work_discovery._collect_reviews("unused")
+assert reviews["coverage"]["considered"] == 2 and reviews["coverage"]["selected"] == 1, reviews
+assert len(reviews["items"]) == 1 and reviews["items"][0]["ref"] == "r-pending", reviews
+assert reviews["items"][0]["findings"] == "Actual finding", reviews
+import subprocess
+panel_results.outcomes = lambda repo, ids: (_ for _ in ()).throw(
+    subprocess.TimeoutExpired("owner outcomes", 30))
+timed_out = work_discovery._collect_reviews("unused")
+assert timed_out["status"] == "unavailable" and timed_out["reason"] == "timeout", timed_out
+print(json.dumps(r, ensure_ascii=False, separators=(",", ":")))
+PY
+  # The full packet example is captured by the test's JSON assertion above.
+
+  mv "$readers/fail-ledger.sh" "$readers/fail-ledger.off"
+  out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo")" ||
+    fail "missing optional fail ledger should remain collectable"
+  OMS_TEST_PACKET="$out" python3 - <<'PY' || fail "missing fail ledger was not labelled unavailable"
+import json, os
+assert json.loads(os.environ["OMS_TEST_PACKET"])["sections"]["failures"]["status"] == "unavailable"
+PY
+
+  cat > "$readers/fail-ledger.sh" <<'EOF'
+#!/usr/bin/env bash
+python3 -c 'import json; print(json.dumps({"items": [{"fingerprint": "f", "summary": "é" * 2500}]}))'
+EOF
+  chmod +x "$readers/fail-ledger.sh"
+  rc=0
+  python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" >"$TMP/discovery-out" 2>"$TMP/discovery-err" || rc=$?
+  [ "$rc" = 2 ] && grep -Fq 'work-discovery: failures is ' "$TMP/discovery-err" ||
+    fail "multibyte section overflow did not name section and exit 2"
+
+  cat > "$readers/agent-plan.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{broken json}\n'
+EOF
+  rc=0
+  python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" >"$TMP/discovery-out" 2>"$TMP/discovery-err" || rc=$?
+  [ "$rc" = 3 ] && grep -Fq 'tasks' "$TMP/discovery-err" ||
+    fail "corrupt plan JSON did not name tasks and exit 3"
+}
+
 test_managed_landing_capture_retention
+test_work_discovery_packet_is_bounded_and_complete
 
 test_native_hook_telemetry_is_content_free_and_correlated
 test_ci_tick_records_once_and_skips_a_fresh_sha
