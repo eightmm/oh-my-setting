@@ -196,6 +196,31 @@ entry['created'] = 10 ** 400
 path.write_text(json.dumps(entry), encoding='utf-8')
 assert board() == {'number': 8}, 'overflowing cache timestamp did not trigger recollection'
 
+# One collection shares its starting generation across all three persistent reads.
+assert cache.INTERVAL > 5, 'cache expires before the next watch collection'
+tick_project = project / 'fingerprint-ticks'
+(tick_project / '.oms/hooks').mkdir(parents=True)
+(tick_project / '.oms/artifacts').mkdir()
+with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}}, 0)) as dashboard, \
+        patch.object(panel.room, 'status', side_effect=lambda repo, ident: {'id': ident}), \
+        patch.object(panel.subprocess, 'run', side_effect=lambda command, **kwargs:
+                     subprocess.CompletedProcess(command, 0, '[]' if 'agent-events' in command else '{}', '')) as commands, \
+        patch.object(panel_results, '_records', return_value=([], [])) as records, \
+        patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as fingerprints:
+    anchor = time.time()
+    for offset in (*range(0, cache.INTERVAL, 5), cache.INTERVAL):
+        expected = 4 if offset in (0, cache.INTERVAL) else 1
+        fingerprints.reset_mock()
+        tick = cache.TickReads(tick_project)
+        with patch.object(cache.time, 'time', return_value=anchor + offset):
+            state, status = panel.snapshot(tick_project, 'one', _tick=tick)
+            assert status == 0 and state['room']['id'] == 'one'
+            assert tick.attempts() == []
+            assert tuple(tick.records()) == ([], [])
+        assert fingerprints.call_count == expected, (offset, fingerprints.call_count)
+    assert dashboard.call_count == records.call_count == 2
+    assert sum('agent-events' in call.args[0] for call in commands.call_args_list) == 2
+
 # Plan reads outlive the dashboard interval, including across board processes.
 plan.write_text('{"tasks": {}}', encoding='utf-8')
 plan_worker = worker.replace("cache.read_shared(repo, 'dashboard', compute)",
@@ -206,6 +231,7 @@ def plan_board(now):
         text=True, timeout=5))
 now = int(time.time())
 assert plan_board(now) == plan_board(now + 5) == plan_board(now + 10) == {'tasks': [{'number': 9}]}
+assert plan_board(now + cache.INTERVAL + 1) == {'tasks': [{'number': 9}]}
 replacement = plan.with_suffix('.tmp')
 replacement.write_text(plan.read_text(), encoding='utf-8')
 replacement.replace(plan)
@@ -1179,6 +1205,13 @@ def changing():
 # A read that overlapped a write is this board's answer, but it is not published for the others.
 assert cache.read_shared(project, 'race', changing) == {'number': 42}
 assert not (project / cache.DIRECTORY / 'race.json').exists()
+# A later key still compares against the tick's original generation before storing.
+tick = cache.TickReads(project)
+with patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as fingerprints:
+    assert cache.read_shared(project, 'tick-before-race', lambda: 1, _tick=tick) == 1
+    assert cache.read_shared(project, 'tick-race', changing, _tick=tick) == {'number': 42}
+    assert fingerprints.call_count == 3
+assert not (project / cache.DIRECTORY / 'tick-race.json').exists()
 # Mains' activity heartbeats change all the time and are read directly; they do not invalidate shared reads.
 before = cache.fingerprint(project)
 (project / '.oms/hooks/panel-activity').mkdir(parents=True, exist_ok=True)

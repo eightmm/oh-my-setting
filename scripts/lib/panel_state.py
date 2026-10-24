@@ -514,7 +514,8 @@ def snapshot(repo, room_id=None, _tick=None):
             if not isinstance(state, dict):
                 raise ValueError("invalid dashboard response")
             return state, status
-        state, status = read_shared(repo, 'dashboard', collect_dashboard, cacheable=lambda value: value[1] == 0)
+        state, status = read_shared(repo, 'dashboard', collect_dashboard,
+                                    cacheable=lambda value: value[1] == 0, _tick=_tick)
         if not isinstance(state, dict):
             raise ValueError("invalid dashboard response")
         ident = room.resolve(repo, os.environ.get("OMS_ROOM_ID") if room_id is None else room_id)

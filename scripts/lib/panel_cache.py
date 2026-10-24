@@ -17,7 +17,8 @@ import time
 from panel_results import DURABLE, _lock
 from room_repository import harness_residue_parent
 
-INTERVAL = 5
+# Clock-only refreshes need multiple watch ticks to amortize the full collectors.
+INTERVAL = 30
 MAX_BYTES = 8 * 1024 * 1024
 DIRECTORY = '.oms/hooks/panel-cache'
 SKIPPED = {DIRECTORY, '.oms/hooks/panel-activity'}
@@ -102,11 +103,13 @@ def _load(repo, relative, identity, stamp):
     return None
 
 
-def read_shared(repo, key, collect, cacheable=None):
+def read_shared(repo, key, collect, cacheable=None, _tick=None):
     """Reuse fresh reads; a busy writer may replay only the same input generation.
 
     Expiry still refreshes clock-derived ages and process liveness. An input
     change during collection is discarded rather than labelled as current.
+    A tick shares its starting generation across keys; each collection is
+    checked again before publication.
     Repositories without hook state keep the ordinary uncached read path.
     """
     repo = Path(repo).resolve()
@@ -116,13 +119,14 @@ def read_shared(repo, key, collect, cacheable=None):
     relative = DIRECTORY + '/' + key + '.json'
     cached = None
     try:
-        stamp = fingerprint(repo)
+        stamp = (fingerprint(repo) if _tick is None else
+                 _tick._once('fingerprint', lambda: fingerprint(repo)))
         cached = _load(repo, relative, identity, stamp)
-        if cached and 0 <= time.time() - cached['created'] < INTERVAL and fingerprint(repo) == stamp:
+        if cached and 0 <= time.time() - cached['created'] < INTERVAL:
             return cached['value']
         with _lock(repo, 'panel-cache-' + key, timeout=0):
             cached = _load(repo, relative, identity, stamp)
-            if cached and 0 <= time.time() - cached['created'] < INTERVAL and fingerprint(repo) == stamp:
+            if cached and 0 <= time.time() - cached['created'] < INTERVAL:
                 return cached['value']
             value = collect()
             if fingerprint(repo) != stamp:
@@ -189,13 +193,13 @@ class TickReads:
                 raise ValueError('invalid attempt evidence')
             return rows
         return self._once('attempts', lambda: read_shared(
-            self.repo, 'attempts', lambda: self._once('agent-events', collect)))
+            self.repo, 'attempts', lambda: self._once('agent-events', collect), _tick=self))
 
     def records(self):
         from panel_results import _records
         return self._once('result-records', lambda: read_shared(
             self.repo, 'result-records', lambda: self._once('records-query',
-                lambda: _records(self.repo, _attempts=self.attempts()))))
+                lambda: _records(self.repo, _attempts=self.attempts())), _tick=self))
 
 
 PLAN_INPUT_LIMIT = 16384
