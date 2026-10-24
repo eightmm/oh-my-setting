@@ -110,7 +110,7 @@ append_file_list() {
       -name "outputs" -o -name "checkpoints" -o -name "wandb" -o \
       -name "runs" \
     \) -prune -o \( "$@" \) -type f -print 2>/dev/null |
-    sed 's#^\./##' | sort | head -30)"
+    sed 's#^\./##' | sort | sed -n '1,30p')"
   if [ -n "$found" ]; then
     printf '%s\n' "$found" | sed 's/^/- /' >> "$tmp"
   else

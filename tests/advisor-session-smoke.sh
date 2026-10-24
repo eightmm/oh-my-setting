@@ -66,8 +66,8 @@ grep -q 'migrate the ledger schema' "$artifact" ||
   fail "advisor prompt is missing the caller session content"
 grep -q '## Caller session history' "$artifact" ||
   fail "advisor prompt is missing the session digest section"
-ctx="$(grep -n '## Decision context' "$artifact" | head -1 | cut -d: -f1)"
-hist="$(grep -n '## Caller session history' "$artifact" | head -1 | cut -d: -f1)"
+ctx="$(grep -n '## Decision context' "$artifact" | sed -n '1p' | cut -d: -f1)"
+hist="$(grep -n '## Caller session history' "$artifact" | sed -n '1p' | cut -d: -f1)"
 [ -n "$ctx" ] && [ -n "$hist" ] && [ "$hist" -gt "$ctx" ] ||
   fail "session digest must ride after the decision context (ctx=$ctx hist=$hist)"
 # The digest carries goal/turns/files as evidence. The caller's own concluding

@@ -1465,7 +1465,7 @@ accept_repo="$TMP/accept-body"; mk_repo "$accept_repo"
   --accept "printf 'boom %s\n' '$MPATH'; false" >/dev/null
 rc=0; "$PLAN" --repo "$accept_repo" accept >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 3 ] || fail "failing acceptance should exit 3, got $rc"
-body_file="$(ls "$accept_repo/.oms/plan/acceptance/"*.log 2>/dev/null | head -n 1)"
+body_file="$(ls "$accept_repo/.oms/plan/acceptance/"*.log 2>/dev/null | sed -n '1p')"
 [ -n "$body_file" ] || fail "a failing acceptance must persist its output body"
 grep -q "boom" "$body_file" || fail "the body must carry the acceptance output"
 grep -q "sentinel-user" "$body_file" &&
@@ -1481,7 +1481,7 @@ printf 'key %s\n' "$LEAK" > "$accept_redact/leak.txt"
 "$PLAN" --repo "$accept_redact" init --goal secret-capture \
   --accept "cat leak.txt; false" >/dev/null
 "$PLAN" --repo "$accept_redact" accept >/dev/null 2>&1 || true
-secret_body="$(ls "$accept_redact/.oms/plan/acceptance/"*.log 2>/dev/null | head -n 1)"
+secret_body="$(ls "$accept_redact/.oms/plan/acceptance/"*.log 2>/dev/null | sed -n '1p')"
 [ -n "$secret_body" ] || fail "a secret-bearing acceptance still persists a marker body"
 grep -q "$LEAK" "$secret_body" && fail "secret leaked into the acceptance body" || true
 grep -q "redacted:" "$secret_body" || fail "the secret body must be the redacted marker"
@@ -1501,7 +1501,7 @@ grep -q "was not persisted" "$TMP/dirlink.out" ||
 accept_leaflink="$TMP/accept-leaflink"; mk_repo "$accept_leaflink"
 "$PLAN" --repo "$accept_leaflink" init --goal leaflink --accept "echo leaflink-out; false" >/dev/null
 "$PLAN" --repo "$accept_leaflink" accept >/dev/null 2>&1 || true
-leaf="$(ls "$accept_leaflink/.oms/plan/acceptance/"*.log 2>/dev/null | head -n 1)"
+leaf="$(ls "$accept_leaflink/.oms/plan/acceptance/"*.log 2>/dev/null | sed -n '1p')"
 [ -n "$leaf" ] || fail "leaflink fixture needs a first body file"
 outside_leaf="$TMP/outside-leaf.log"
 printf 'untouched\n' > "$outside_leaf"

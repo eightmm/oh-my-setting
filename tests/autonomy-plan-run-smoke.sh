@@ -994,7 +994,7 @@ PROMPT_DUMP="$TMP/cp-manifest-prompt.txt" HOME="$home" PATH="$bin:/usr/bin:/bin"
   --prompt 'orientation plus bounded bytes' --context-pack "$packs/manifest.json" \
   --context-manifest >"$TMP/cp-manifest.out" 2>&1 ||
   fail "peer-delegate --context-pack --context-manifest failed: $(tail -5 "$TMP/cp-manifest.out")"
-cp_manifest="$(ls -t "$pack_repo"/.oms/runtime/context/delegate-*.json 2>/dev/null | head -n 1)"
+cp_manifest="$(ls -t "$pack_repo"/.oms/runtime/context/delegate-*.json 2>/dev/null | sed -n '1p')"
 [ -n "$cp_manifest" ] || fail "no context manifest was compiled beside the pack"
 python3 - "$cp_manifest" <<'PY' || fail "the manifest did not carry every pack file as a required direct target"
 import json, sys

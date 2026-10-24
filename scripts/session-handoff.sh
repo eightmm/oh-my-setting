@@ -134,7 +134,7 @@ resolve_codex_session() {
   if [ -n "$id" ]; then
     local hit
     hit="$(find "$CODEX_HOME/sessions" "$CODEX_HOME/archived_sessions" \
-      -type f -name "*$id*.jsonl" 2>/dev/null | head -n 1)"
+      -type f -name "*$id*.jsonl" 2>/dev/null | sed -n '1p')"
     [ -n "$hit" ] || absent "codex session not found for id: $id"
     printf '%s\n' "$hit"
     return 0

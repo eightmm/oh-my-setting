@@ -392,7 +392,7 @@ if "$LAND" status --repo "$repo" >/dev/null 2>&1; then
 fi
 rm -f "$broken"
 # Another main's newer land must not stand in for this worktree's HEAD.
-cp "$(ls -t "$receipt_dir"/*.json | head -n 1)" "$receipt_dir/0000000000000000000000000000000000000000-other.json"
+cp "$(ls -t "$receipt_dir"/*.json | sed -n 1p)" "$receipt_dir/0000000000000000000000000000000000000000-other.json"
 "$LAND" status --repo "$repo" | grep '^land 0000000' > /dev/null &&
   fail "land status must prefer the receipt for this worktree's HEAD"
 rm -f "$receipt_dir/0000000000000000000000000000000000000000-other.json"
@@ -1355,7 +1355,7 @@ for lock_kind in 0 1; do
   OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep '^land .*: passed' > /dev/null ||
     fail "the queued retry must leave its passed receipt visible"
   # A receipt that says running without a lock holder is stale.
-  stale_receipt="$(ls -t "$receipt_dir"/*.json | head -n 1)"
+  stale_receipt="$(ls -t "$receipt_dir"/*.json | sed -n 1p)"
   cp "$stale_receipt" "$TMP/stale-backup.json"
   sed 's/"state": "[a-z]*"/"state": "running"/' "$TMP/stale-backup.json" > "$stale_receipt"
   if [ "$lock_kind" = 0 ]; then

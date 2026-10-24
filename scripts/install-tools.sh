@@ -1234,7 +1234,7 @@ install_gh() {
   # Not reporting authentication here: install.sh runs doctor at the end, and
   # doctor already reads the same local credential and warns — alongside the
   # three provider CLIs, in one place instead of two saying the same thing.
-  echo "ok: $(gh --version | head -n 1)"
+  echo "ok: $(gh --version | sed -n '1p')"
 }
 
 ensure_uv() {

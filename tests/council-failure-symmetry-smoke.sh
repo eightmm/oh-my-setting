@@ -145,7 +145,7 @@ PY
   # 5. Synthesis: the dead seat is named, and its partial stdout is withheld —
   #    a truncation pasted under a provider heading reads as a short opinion.
   local synth
-  synth="$(ls "$project/artifacts/"_synthesis-*.md 2>/dev/null | head -1)"
+  synth="$(ls "$project/artifacts/"_synthesis-*.md 2>/dev/null | sed -n '1p')"
   [ -n "$synth" ] || fail "no synthesis artifact was written"
   grep -Fq 'no answer: provider exited 124' "$synth" ||
     fail "the synthesis must name the dead seat: $(cat "$synth")"

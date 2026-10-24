@@ -503,7 +503,7 @@ env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   --prompt 'write lifecycle verify environment' --model fixture-model \
   --verify 'v="${OMS_MODEL_EXPLICIT-unset}${OMS_ROOM_REPO-unset}${OMS_PANEL_LABEL-unset}${OMS_PEER_TIMEOUT-unset}${OMS_HARNESS_DELEGATE_DEPTH-0}"; [ "$v" = unsetunsetunsetunset0 ] && echo unset' \
   >/dev/null || fail "delegation verify inherited the worker model"
-verify_artifact="$(ls -t "$TMP/repo"/.oms/artifacts/delegate/*.md 2>/dev/null | head -1)"
+verify_artifact="$(ls -t "$TMP/repo"/.oms/artifacts/delegate/*.md 2>/dev/null | sed -n '1p')"
 [ -n "$verify_artifact" ] && grep -Fqx 'unset' "$verify_artifact" ||
   fail "verify output did not report an unset explicit model"
 

@@ -1102,7 +1102,7 @@ EOF
     fail "propose must preserve the spent predecessor before planning"
   [ ! -f "$successor_repo/.oms/plan/tasks.json" ] ||
     fail "the spent predecessor remained live while successor planning ran"
-  successor_proposal="$(find "$successor_repo/.oms/plan" -type f -name 'proposal-*.json' | head -n 1)"
+  successor_proposal="$(find "$successor_repo/.oms/plan" -type f -name 'proposal-*.json' | sed -n '1p')"
   [ -n "$successor_proposal" ] || fail "successor proposal was not written"
   python3 - "$successor_proposal" <<'PY' || fail "successor proposal retained predecessor task ids"
 import json, sys

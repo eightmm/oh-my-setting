@@ -100,7 +100,7 @@ probe_provider() {  # PROVIDER -> one JSON row
   if [ "$provider" = codex ]; then
     codex_config="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
     [ ! -f "$codex_config" ] ||
-      configured="$(sed -n 's/^model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$codex_config" | head -n 1)"
+      configured="$(sed -n 's/^model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$codex_config" | sed -n '1p')"
   fi
   if [ -n "$configured" ]; then
     standing=0

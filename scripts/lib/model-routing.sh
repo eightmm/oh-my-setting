@@ -235,9 +235,9 @@ oms_model_role_default() {
         done)"
         [ -z "$codex_sol" ] || { printf '%s\n' "$codex_sol"; return 0; }
       fi
-      printf '%s\n' "$ranked" | head -n 2 | tail -n 1
+      printf '%s\n' "$ranked" | sed -n '1,2p' | tail -n 1
       ;;
-    *) printf '%s\n' "$ranked" | head -n 1 ;;
+    *) printf '%s\n' "$ranked" | sed -n '1p' ;;
   esac
 }
 

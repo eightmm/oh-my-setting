@@ -580,7 +580,7 @@ agent_task_loop_warnings() {
   if [ "$(printf '%s\n' "$repeated_failures" | sed '/^$/d' | wc -l | tr -d ' ')" -ge "$repeat_threshold" ] &&
      [ "$(printf '%s\n' "$repeated_failures" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')" -eq 1 ]; then
     printf 'warning: repeated last failure detected (%sx): %s\n' \
-      "$repeat_threshold" "$(printf '%s\n' "$repeated_failures" | sed '/^$/d' | head -n 1)"
+      "$repeat_threshold" "$(printf '%s\n' "$repeated_failures" | sed '/^$/d' | sed -n '1p')"
   fi
 
   diff_budget="$(agent_task_section_value "$file" "## Loop State" diff_budget_lines 2>/dev/null || true)"

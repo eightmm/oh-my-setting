@@ -224,7 +224,7 @@ done <<EOF
 $(find "$PROJECT_DIR" -mindepth 2 -maxdepth 6 \
     \( -name .git -o -name node_modules -o -name .oms -o -name .venv \
        -o -name __pycache__ -o -name .cache \) -prune -o \
-    -type f \( -name AGENTS.md -o -name CLAUDE.md -o -name GEMINI.md \) -print 2>/dev/null | head -200)
+    -type f \( -name AGENTS.md -o -name CLAUDE.md -o -name GEMINI.md \) -print 2>/dev/null | sed -n '1,200p')
 EOF
 
 if [ -f "$PROJECT_DIR/PROJECT.md" ]; then

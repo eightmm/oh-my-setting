@@ -109,7 +109,7 @@ job_state() {
   fi
   if command -v "$SQUEUE" >/dev/null 2>&1; then
     local st
-    st="$("$SQUEUE" -j "$jid" -h -o '%T' 2>/dev/null | head -n1)"
+    st="$("$SQUEUE" -j "$jid" -h -o '%T' 2>/dev/null | sed -n '1p')"
     if [ -n "$st" ]; then
       printf '%s\t\t\tsqueue\n' "$st"
       return 0

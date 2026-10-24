@@ -82,7 +82,7 @@ if [ -n "$session" ]; then
   slug="$(printf '%s' "$session" | tr -c 'A-Za-z0-9' '-' | cut -c1-24 | sed 's/-*$//')"
   if [ -n "$slug" ] && [ -d "$repo/.oms/handoffs" ]; then
     recent="$(find "$repo/.oms/handoffs" -maxdepth 1 -type f \
-      -name "$AGENT-$slug-*.md" -mmin "-$DEDUPE_MIN" 2>/dev/null | head -n 1)"
+      -name "$AGENT-$slug-*.md" -mmin "-$DEDUPE_MIN" 2>/dev/null | sed -n '1p')"
     [ -z "$recent" ] || exit 0
   fi
 fi

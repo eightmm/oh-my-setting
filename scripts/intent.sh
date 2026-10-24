@@ -547,7 +547,7 @@ if [ "$ACTION" = draft ]; then
   if [ -f "$SPEC" ]; then
     existing_spec="$(head -c 8192 "$SPEC")"
   fi
-  tree_listing="$(cd "$REPO" && ls -1 | head -40)"
+  tree_listing="$(cd "$REPO" && ls -1 | sed -n '1,40p')"
 
   prompt="Turn ONE goal sentence into a durable intent specification for this
 repository. The spec is a delegation contract: an agent must be able to
@@ -912,7 +912,7 @@ PY
   # through gives the Work Journal daily the contract a reader needs to know
   # what the commits underneath were for. Fail-open: the contract is adopted
   # either way.
-  adopted_goal="$(sed -n 's/^- Goal sentence: //p' "$SPEC" | head -n 1)"
+  adopted_goal="$(sed -n 's/^- Goal sentence: //p' "$SPEC" | sed -n '1p')"
   work_journal_observe "$REPO" intent "$SPEC" \
     --source-id "$INTENT_ID" --outcome "Contract adopted: $INTENT_ID" \
     --outcome-status "confirmed" --verification-status not_applicable \
