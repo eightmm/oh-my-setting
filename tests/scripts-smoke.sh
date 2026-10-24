@@ -10797,16 +10797,16 @@ EOF
   [ ! -e "$discovery/.oms/plan/tasks.json" ] || fail "empty discovery changed the task board"
 
   # Collector section overflow exits before the provider stub is reached.
-  cat > "$readers/fail-ledger.sh" <<'EOF'
+  cat > "$readers/agent-plan.sh" <<'EOF'
 #!/usr/bin/env bash
-python3 -c 'import json; print(json.dumps({"items": [{"fingerprint": "f", "summary": "x" * 5000}]}))'
+python3 -c 'import json; print(json.dumps([{"id": "big", "state": "ready", "title": "x" * 5000}]))'
 EOF
   cat > "$discovery_bin/codex" <<'EOF'
 #!/usr/bin/env bash
 touch "$HOME/provider-called"
 exit 9
 EOF
-  chmod +x "$readers/fail-ledger.sh" "$discovery_bin/codex"
+  chmod +x "$readers/agent-plan.sh" "$discovery_bin/codex"
   OMS_WORK_DISCOVERY_SCRIPTS_DIR="$readers" OMS_WORK_DISCOVERY_OMS="$readers/oms" \
     HOME="$discovery_home" NVM_DIR="$discovery_home/.nvm" PATH="$discovery_bin:/usr/bin:/bin" \
     "$ROOT/scripts/plan-from-spec.sh" --repo "$discovery" --to codex --discover \

@@ -17,7 +17,7 @@ ROOT = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 import panel_results
 import land_receipts
-SECTION_BUDGETS = {"failures": 4096, "metrics": 4096, "reviews": 65536,
+SECTION_BUDGETS = {"failures": 16384, "metrics": 4096, "reviews": 65536,
                    "ci": 4096, "tasks": 4096, "rejected": 32768}
 TOTAL_BUDGET = 131072
 SECTIONS = tuple(SECTION_BUDGETS)
@@ -398,11 +398,13 @@ def _collect_land_failures(repo):
         coverage["land_logs_missing"] = len(unresolved_missing)
         if unresolved_missing:
             coverage["land_scan_complete"] = False
+        selected = sorted(aggregates.items(), key=lambda item: item[0])
+        selected.sort(key=lambda item: item[1]["failed_attempts"], reverse=True)
+        selected.sort(key=lambda item: item[1]["last_attempt_date"], reverse=True)
+        if len(selected) > _LAND_FAILURE_LIMIT:
+            coverage["land_scan_complete"] = False
         items = []
-        for (kind, identifier), counts in sorted(aggregates.items()):
-            if len(items) >= _LAND_FAILURE_LIMIT:
-                coverage["land_scan_complete"] = False
-                break
+        for (kind, identifier), counts in selected[:_LAND_FAILURE_LIMIT]:
             ref = "land:" + hashlib.sha256((kind + ":" + identifier).encode()).hexdigest()[:12]
             items.append({"ref": ref, "kind": kind, "name": identifier, **counts})
         return items, coverage
@@ -441,10 +443,22 @@ def collect(repo):
                                   ("fingerprint", "count", "last_exit", "summary")})
                 if cleaned is None:
                     continue
+                summary = cleaned.get("summary")
+                if isinstance(summary, str):
+                    lines = summary.splitlines()
+                    first_line = lines[0] if lines else ""
+                    if len(first_line) > 240 or len(lines) > 1:
+                        first_line = first_line[:237] + "..."
+                    cleaned["summary"] = first_line
                 ref = cleaned.get("fingerprint") or _fingerprint(json.dumps(cleaned, sort_keys=True))
                 cleaned["ref"] = str(ref)
                 items.append(cleaned)
-            sections["failures"] = _section(items, {"count": len(rows), "complete": True})
+            items.sort(key=lambda item: (
+                -item["count"] if type(item.get("count")) is int else 0, item["ref"]))
+            selected = items[:16]
+            sections["failures"] = _section(
+                selected, {"count": len(rows), "selected": len(selected),
+                           "complete": len(selected) == len(rows)})
         except (ValueError, TypeError):
             sections["failures"] = _section([], {}, "fail-ledger returned invalid JSON")
 

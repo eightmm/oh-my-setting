@@ -1497,11 +1497,13 @@ log = state_b / (request + '.log')
 log.write_text(
     'land attempt: 1 started_at=2026-01-10T10:00:00Z sha=' + sha + '\n'
     'check: affected:tests/functional-evolution-smoke.sh FAILED (3s)\n'
+    + ''.join('check: scripts-smoke.test_older_%02d FAILED (1s)\n' % n for n in range(17)) +
     'check: scripts-smoke.test_agent_plan_lifecycle_receipt_history FAILED (1s)\n'
     'check: scripts-smoke.test_agent_plan_lifecycle_receipt_history FAILED (1s)\n'
     'land attempt: 2 started_at=2026-01-11T10:00:00Z sha=' + sha + '\n'
     'check: scripts-smoke.test_agent_plan_lifecycle_receipt_history FAILED (2s)\n'
     'land attempt: 3 started_at=2026-01-12T10:00:00Z sha=' + sha + '\n'
+    'check: scripts-smoke.test_newest_failure FAILED (1s)\n'
     'check: ok\n')
 (state_e / passed.name).write_bytes(passed.read_bytes())
 (state_e / log.name).write_bytes(log.read_bytes())
@@ -1512,7 +1514,19 @@ receipt(state_c, foreign_url, command)
 PY
   cat > "$readers/fail-ledger.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '{"items":[{"fingerprint":"failure-1","summary":"resolved clue"}]}\r\n'
+python3 - <<'PY'
+import json
+rows = [
+    {'fingerprint': 'failure-%02d' % n, 'count': n + 1, 'summary': ('summary-%02d ' % n) + 'x' * 260 + '\nsecond line'}
+    for n in range(15)
+]
+rows.extend([
+    {'fingerprint': 'failure-%02d' % n, 'count': 0, 'summary': ('summary-%02d ' % n) + 'x' * 260 + '\nsecond line'}
+    for n in range(15, 19)
+])
+rows.append({'fingerprint': 'failure-00-null', 'count': None, 'summary': 'null count row\nsecond line'})
+print(json.dumps({'items': rows}))
+PY
 EOF
   cat > "$readers/ci-status.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -1568,14 +1582,24 @@ import re
 r = json.loads(sys.argv[1])
 assert r["schema"] == 1 and r["sections"].keys() == {
     "failures", "metrics", "reviews", "ci", "tasks", "rejected"}, r
-assert r["sections"]["failures"]["items"][0]["ref"] == "failure-1", r
+failures = r["sections"]["failures"]["items"]
+ledger = [row for row in failures if row["ref"].startswith("failure-")]
+assert len(ledger) == 16, ledger
+assert [row["count"] for row in ledger[:-1]] == list(range(15, 0, -1)), ledger
+assert ledger[-1]["fingerprint"] == "failure-00-null", ledger[-1]
+assert "count" not in ledger[-1], ledger[-1]
+assert all("\n" not in row["summary"] and len(row["summary"]) <= 240 for row in ledger), ledger
+assert r["sections"]["failures"]["coverage"]["count"] == 20, r
+assert r["sections"]["failures"]["coverage"]["selected"] == 16, r
+assert r["sections"]["failures"]["coverage"]["complete"] is False, r
 land = [row for row in r["sections"]["failures"]["items"] if row.get("ref", "").startswith("land:")]
 by_name = {row["name"]: row for row in land}
+assert "scripts-smoke.test_newest_failure" in by_name, by_name
+assert len(land) == 16, land
 test = by_name["scripts-smoke.test_agent_plan_lifecycle_receipt_history"]
 assert test["kind"] == "test" and test["failed_attempts"] == 2, test
 assert test["first_attempt_date"] == "2026-01-10" and test["last_attempt_date"] == "2026-01-11", test
-stage = by_name["affected:tests/functional-evolution-smoke.sh"]
-assert stage["kind"] == "stage" and stage["failed_attempts"] == 1, stage
+assert "affected:tests/functional-evolution-smoke.sh" in by_name, by_name
 assert len([row for row in land if row["name"] == test["name"]]) == 1, land
 coverage = r["sections"]["failures"]["coverage"]
 assert coverage["land_logs_missing"] == 1 and coverage["land_logs_oversized"] == 1, coverage
@@ -1651,10 +1675,31 @@ PY
 python3 -c 'import json; print(json.dumps({"items": [{"fingerprint": "f", "summary": "é" * 2500}]}))'
 EOF
   chmod +x "$readers/fail-ledger.sh"
+  out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" 2>"$TMP/discovery-err")" ||
+    fail "multibyte summary should be bounded before the section budget check"
+  OMS_TEST_PACKET="$out" python3 - <<'PY' || fail "multibyte summary was not truncated by characters"
+import json, os
+summary = json.loads(os.environ["OMS_TEST_PACKET"])["sections"]["failures"]["items"][0]["summary"]
+assert len(summary) == 240 and summary.endswith("..."), summary
+PY
+
+  cat > "$readers/agent-plan.sh" <<'EOF'
+#!/usr/bin/env bash
+python3 - <<'PY'
+import json
+print(json.dumps([{"id": "overflow", "state": "ready", "title": "é" * 2100}], ensure_ascii=False))
+PY
+EOF
+  chmod +x "$readers/agent-plan.sh"
   rc=0
   python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" >"$TMP/discovery-out" 2>"$TMP/discovery-err" || rc=$?
-  [ "$rc" = 2 ] && grep -Fq 'work-discovery: failures is ' "$TMP/discovery-err" ||
-    fail "multibyte section overflow did not name section and exit 2"
+  [ "$rc" = 2 ] && grep -Fq 'work-discovery: tasks is ' "$TMP/discovery-err" ||
+    fail "multibyte tasks section overflow did not name tasks and exit 2"
+  cat > "$readers/agent-plan.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '[{"id":"open-1","state":"ready"},{"id":"done-1","state":"done"}]\r\n'
+EOF
+  chmod +x "$readers/agent-plan.sh"
 
   cat > "$readers/fail-ledger.sh" <<'EOF'
 #!/usr/bin/env bash
