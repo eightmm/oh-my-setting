@@ -84,6 +84,9 @@ Without --wait the job detaches (setsid) and this prints the receipt path.
 Retrying the same commit/destination/gate reuses successful push evidence and
 resumes CI/install only. Concurrent jobs wait up to OMS_LOCK_TIMEOUT (default
 300 seconds), then exit 75 if the lock remains held; waiter order is unspecified.
+With --no-update, a receipt with successful gate/push but unsuccessful CI may
+re-query CI for its exact SHA while that SHA remains reachable from the fetched
+target; this never reruns the gate or push and never installs.
 EOF
 }
 
@@ -399,6 +402,13 @@ can_handoff_only() {
     [ "$(receipt_value state)" = passed ] && [ "$(receipt_value ci.conclusion)" = success ]
 }
 
+# CI success can be finalized from a running receipt if the prior retry stopped before finish.
+can_resume_ci_only() {
+  [ "$UPDATE" -eq 0 ] && can_resume &&
+    { [ "$(receipt_value ci.conclusion)" != success ] || [ "$(receipt_value state)" = running ]; } &&
+    git -C "$REPO" merge-base --is-ancestor "$SHA" "$REMOTE/$TARGET"
+}
+
 request_stamp() {
   local destination
   destination="$(git -C "$REPO" remote get-url --push "$REMOTE")" || return 1
@@ -448,7 +458,7 @@ run_job() {
   clean_tree || {
     note "error: tracked tree changed before job started"; return 1;
   }
-  local resume=0 remote_sha failed_stages attempt marker
+  local resume=0 ci_only_resume=0 remote_sha failed_stages attempt marker
   if can_resume; then
     if can_handoff_only; then
       # The helper fetches the target ref and proves ancestry. Receipt-only
@@ -458,15 +468,29 @@ run_job() {
     fi
     remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
     remote_sha="${remote_sha%%[[:space:]]*}"
-    if [ "$remote_sha" != "$SHA" ] || ! clean_tree; then
-      note "error: cannot resume: remote tip or tracked tree differs from verified commit"
+    if ! clean_tree; then
+      note "error: cannot resume: tracked tree changed during remote-tip lookup"
+      return 1
+    fi
+    if [ "$remote_sha" != "$SHA" ]; then
+      if [ "$UPDATE" -eq 0 ] && can_resume_ci_only &&
+          [ "$remote_sha" = "$(git rev-parse "$REMOTE/$TARGET" 2>/dev/null)" ] &&
+          git merge-base --is-ancestor "$SHA" "$remote_sha"; then
+        ci_only_resume=1
+      else
+        note "error: cannot resume: remote tip or tracked tree differs from verified commit"
+        return 1
+      fi
+    fi
+    if [ "$ci_only_resume" -eq 1 ] && [ "$CI_WAIT" -eq 0 ]; then
+      note "error: cannot resume CI-only: --ci-wait 0 skips CI queries"
       return 1
     fi
     resume=1
   fi
   [ "$resume" -eq 1 ] || rset --reset
   # Net test and code lines per push, kept to judge test growth by evidence.
-  rset growth="$(oms_test_growth "$REMOTE/$TARGET" "$SHA")"
+  [ "$ci_only_resume" -eq 1 ] || rset growth="$(oms_test_growth "$REMOTE/$TARGET" "$SHA")"
   rset pid="$$" state=running started_at="$(now)" sha="$SHA" gate.command="$GATE" \
     remote="$REMOTE" target="$TARGET" log="$LOG" request="$STAMP" resumed="$resume"
   attempt="$(($(grep -c '^land attempt: ' "$LOG" 2>/dev/null || true) + 1))"
@@ -543,7 +567,7 @@ run_job() {
   local conclusion=skipped run_id="" deadline remaining query_result
   if [ "$resume" -eq 1 ] && [ "$(receipt_value ci.conclusion)" = success ]; then
     conclusion=success
-  elif [ "$CI_WAIT" -gt 0 ] &&
+  elif [ "$ci_only_resume" -eq 0 ] && [ "$CI_WAIT" -gt 0 ] &&
       ! git -C "$REPO" ls-tree -r --name-only "$SHA" -- .github/workflows | grep -Eq '\.ya?ml$'; then
     # No workflow can ever report on this commit; waiting only ends in timeout.
     rset ci.conclusion=skipped ci.reason=no-workflows
@@ -808,9 +832,10 @@ SHA="$(git -C "$REPO" rev-parse HEAD)"
 # Retries/worktrees share a receipt; different destinations/gates never share proof.
 STAMP="$(request_stamp "$SHA")"
 RECEIPT="$LAND_DIR/$STAMP.json"
-# Only a receipt-only retry can use an ancestor of the destination tip. Its
-# helper fetches and validates the target before importing any receipt bytes.
-if ! can_handoff_only && ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" "$SHA"; then
+# Only receipt handoff and CI-only resume may use an ancestor of the
+# destination tip; both are bound to the freshly fetched target ref.
+if ! can_handoff_only && ! can_resume_ci_only &&
+    ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" "$SHA"; then
   echo "error: $REMOTE/$TARGET is not an ancestor of HEAD; rebase first" >&2; exit 2
 fi
 echo "land: this push changes $(oms_test_growth "$REMOTE/$TARGET" "$SHA" "$REPO")"

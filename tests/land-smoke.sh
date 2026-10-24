@@ -942,6 +942,53 @@ assert receipt['update']['rc'] == 0 and receipt['update']['reason'] == 'installe
 PYINSTALL
 cmp "$handoff_receipt" "$handoff_dir/$(basename "$handoff_receipt")" || fail "installed handoff changed receipt bytes"
 
+# Keep a pushed SHA with failed CI, then advance main before its CI-only retry.
+gate 'echo advanced CI resume probe'
+: > "$TMP/events"
+if OMS_TEST_CI_RESULT=cancelled "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+    > "$TMP/ci-ancestor-initial.out" 2>&1; then
+  fail "failed CI unexpectedly passed before the ancestor retry"
+fi
+ci_retry_sha="$(git -C "$repo" rev-parse HEAD)"
+ci_retry_receipt="$(find "$receipt_dir" -name "$ci_retry_sha-*.json" -print)"
+[ -n "$ci_retry_receipt" ] || fail "failed-CI retry receipt was not recorded"
+python3 - "$ci_retry_receipt" <<'PYCIFAILED' || fail "cancelled-CI receipt did not retain its conclusion"
+import json, sys
+assert json.load(open(sys.argv[1]))['ci']['conclusion'] == 'cancelled'
+PYCIFAILED
+# A tracked-tree change during the remote-tip lookup must refuse before
+# changing the receipt, even while the remote still equals the verified SHA.
+ci_retry_request="$(basename "$ci_retry_receipt" .json)"
+ci_retry_gate="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate"]["command"])' "$ci_retry_receipt")"
+ci_retry_log="$(log_of "$ci_retry_receipt")"
+cp "$ci_retry_receipt" "$TMP/ci-dirty-receipt.json"
+cp "$repo/scripts/check.sh" "$TMP/ci-dirty-check.sh"
+real_git="$(command -v git)"
+mkdir -p "$TMP/intercept"
+cat > "$TMP/intercept/git" <<'EOF'
+#!/usr/bin/env bash
+"$OMS_TEST_REAL_GIT" "$@"
+rc=$?
+if [ "$1" = ls-remote ] && [ -n "${OMS_TEST_DIRTY_LOOKUP_FILE:-}" ] &&
+    [ ! -e "$OMS_TEST_DIRTY_LOOKUP_MARKER" ]; then
+  : > "$OMS_TEST_DIRTY_LOOKUP_MARKER"
+  printf 'dirty during lookup\n' >> "$OMS_TEST_DIRTY_LOOKUP_FILE"
+fi
+exit "$rc"
+EOF
+chmod +x "$TMP/intercept/git"
+: > "$TMP/events"
+if PATH="$TMP/intercept:$PATH" OMS_TEST_REAL_GIT="$real_git" \
+    OMS_TEST_DIRTY_LOOKUP_FILE="$repo/scripts/check.sh" \
+    OMS_TEST_DIRTY_LOOKUP_MARKER="$TMP/dirty-lookup-once" OMS_TEST_CI_RC=4 \
+    "$LAND" --run-job "$ci_retry_request" --repo "$repo" --gate "$ci_retry_gate" \
+      --no-update --ci-wait 1 > "$TMP/ci-dirty-resume.out" 2>&1; then
+  fail "resume accepted a tracked-tree change during remote lookup"
+fi
+cmp "$ci_retry_receipt" "$TMP/ci-dirty-receipt.json" ||
+  fail "dirty-tree resume changed receipt bytes before refusing"
+[ "$(remote_tip)" = "$ci_retry_sha" ] || fail "dirty-tree resume changed the remote tip"
+cp "$TMP/ci-dirty-check.sh" "$repo/scripts/check.sh"
 # Another main can advance the branch before an explicit receipt-only retry.
 advanced_main="$TMP/advancing-main"
 advanced_target="$TMP/handoff-after-advance"
@@ -955,14 +1002,126 @@ advanced_tip="$(git -C "$advanced_main" rev-parse HEAD)"
 advanced_dir="$("$LAND" status --repo "$advanced_target" 2>/dev/null | sed -n 's/^no landing recorded under //p' || true)"
 [ -n "$advanced_dir" ] || fail "cannot resolve advanced handoff namespace"
 : > "$TMP/events"
+git -C "$repo" checkout -q "$handoff_sha"
 OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
   --handoff-receipt-to "$advanced_target" > "$TMP/handoff-ancestor.out" 2>&1 ||
   fail "reachable ancestor handoff refused: $(cat "$TMP/handoff-ancestor.out")"
 [ ! -s "$TMP/events" ] || fail "receipt-only ancestor retry repeated CI or install"
 cmp "$handoff_receipt" "$advanced_dir/$(basename "$handoff_receipt")" || fail "ancestor handoff changed receipt bytes"
 [ "$(git -C "$advanced_target" rev-parse origin/main)" = "$advanced_tip" ] || fail "ancestor handoff did not fetch the descendant"
-[ "$(git -C "$repo" rev-parse HEAD)" = "$handoff_sha" ] && [ "$(remote_tip)" = "$advanced_tip" ] ||
+[ "$(git -C "$repo" rev-parse HEAD)" = "$handoff_sha" ] || fail "ancestor handoff moved producer HEAD"
+git -C "$repo" checkout -q "$ci_retry_sha"
+[ "$(git -C "$repo" rev-parse HEAD)" = "$ci_retry_sha" ] && [ "$(remote_tip)" = "$advanced_tip" ] ||
   fail "receipt-only ancestor retry moved a local or remote branch"
+# Zero remains the documented no-query budget. An ancestor CI-only retry must
+# refuse before mutating the receipt or invoking the CI query.
+cp "$ci_retry_receipt" "$TMP/ci-zero-wait-receipt.json"
+: > "$TMP/events"
+if OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
+    > "$TMP/ci-zero-wait.out" 2>&1; then
+  fail "ancestor CI-only retry accepted --ci-wait 0"
+fi
+grep -q -- '--ci-wait 0 skips CI queries' "$TMP/ci-zero-wait.out" ||
+  fail "zero-wait ancestor refusal did not explain the skipped query"
+[ ! -s "$TMP/events" ] || fail "zero-wait ancestor retry queried CI"
+cmp "$ci_retry_receipt" "$TMP/ci-zero-wait-receipt.json" ||
+  fail "zero-wait ancestor refusal mutated the receipt"
+# A matching SHA and request are insufficient when gate/push evidence is not
+# successful; restore the original bytes before the actual CI resume.
+cp "$ci_retry_receipt" "$TMP/ci-ancestor-receipt.json"
+python3 - "$ci_retry_receipt" <<'PYNONRESUMABLE'
+import json, sys
+path = sys.argv[1]
+receipt = json.load(open(path))
+receipt['push']['rc'] = 1
+with open(path, 'w') as stream:
+    json.dump(receipt, stream)
+PYNONRESUMABLE
+if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+    > "$TMP/ci-ancestor-nonresumable.out" 2>&1; then
+  fail "non-resumable ancestor receipt was accepted"
+fi
+grep -q 'rebase first' "$TMP/ci-ancestor-nonresumable.out" ||
+  fail "non-resumable receipt lost its intake ancestry guard"
+mv "$TMP/ci-ancestor-receipt.json" "$ci_retry_receipt"
+# The failed-CI receipt may resume only the exact pushed SHA, without rerunning
+# its gate or push. Ordinary and installing retries retain the ancestry refusal.
+if "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/ci-ancestor-ordinary.out" 2>&1; then
+  fail "ordinary retry accepted a pushed SHA behind main"
+fi
+grep -q 'rebase first' "$TMP/ci-ancestor-ordinary.out" ||
+  fail "ordinary retry lost its intake ancestry guard"
+if "$LAND" --repo "$repo" --wait --ci-wait 1 --handoff-receipt-to "$advanced_target" \
+    > "$TMP/ci-ancestor-install.out" 2>&1; then
+  fail "installing retry accepted a pushed SHA behind main"
+fi
+grep -q 'rebase first' "$TMP/ci-ancestor-install.out" ||
+  fail "installing retry lost its intake ancestry guard"
+: > "$TMP/events"
+ci_retry_log="$(log_of "$ci_retry_receipt")"
+gate_lines_before="$(grep -c '^advanced CI resume probe$' "$ci_retry_log" || true)"
+push_lines_before="$(grep -c '^To ' "$ci_retry_log" || true)"
+real_python3="$(command -v python3)"
+mkdir -p "$TMP/interrupt-success"
+cat > "$TMP/interrupt-success/python3" <<'EOF'
+#!/usr/bin/env bash
+"$OMS_TEST_REAL_PYTHON3" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "${OMS_TEST_INTERRUPT_CI_SUCCESS:-0}" = 1 ]; then
+  for arg in "$@"; do
+    if [ "$arg" = ci.conclusion=success ]; then
+      kill -KILL "$PPID"
+    fi
+  done
+fi
+exit "$rc"
+EOF
+chmod +x "$TMP/interrupt-success/python3"
+if PATH="$TMP/interrupt-success:$PATH" OMS_TEST_REAL_PYTHON3="$real_python3" \
+    OMS_TEST_INTERRUPT_CI_SUCCESS=1 OMS_TEST_CI_RESULT=success \
+    "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+      > "$TMP/ci-ancestor-interrupted.out" 2>&1; then
+  fail "interrupted ancestor CI retry unexpectedly finished"
+fi
+[ "$(cat "$TMP/events")" = ci ] || fail "interrupted ancestor resume omitted or repeated its CI query"
+python3 - "$ci_retry_receipt" "$ci_retry_sha" <<'PYCIINTERRUPTED' || fail "CI-success interruption did not leave a running exact-SHA receipt"
+import json, sys
+receipt = json.load(open(sys.argv[1]))
+assert receipt['sha'] == sys.argv[2], receipt
+assert receipt['ci']['conclusion'] == 'success', receipt
+assert receipt['state'] == 'running', receipt
+PYCIINTERRUPTED
+grep -c '^advanced CI resume probe$' "$ci_retry_log" | grep -qx "$gate_lines_before" ||
+  fail "interrupted ancestor CI resume repeated its gate"
+grep -c '^To ' "$ci_retry_log" | grep -qx "$push_lines_before" ||
+  fail "interrupted ancestor CI resume repeated its push"
+[ "$(git -C "$repo" rev-parse HEAD)" = "$ci_retry_sha" ] &&
+  [ "$(remote_tip)" = "$advanced_tip" ] || fail "interrupted ancestor CI resume moved a branch"
+: > "$TMP/events"
+OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+  > "$TMP/ci-ancestor-finalize.out" 2>&1 ||
+  fail "running ancestor receipt with CI success did not finalize: $(cat "$TMP/ci-ancestor-finalize.out")"
+[ ! -s "$TMP/events" ] || fail "CI-success finalization queried CI or installed"
+grep -c '^advanced CI resume probe$' "$ci_retry_log" | grep -qx "$gate_lines_before" ||
+  fail "CI-success finalization repeated its gate"
+grep -c '^To ' "$ci_retry_log" | grep -qx "$push_lines_before" ||
+  fail "CI-success finalization repeated its push"
+[ "$(git -C "$repo" rev-parse HEAD)" = "$ci_retry_sha" ] &&
+  [ "$(remote_tip)" = "$advanced_tip" ] || fail "ancestor CI finalization moved a branch"
+python3 - "$ci_retry_receipt" "$ci_retry_sha" <<'PYCIRESUME' || fail "ancestor CI result was not bound to its SHA"
+import json, sys
+receipt = json.load(open(sys.argv[1]))
+assert receipt['sha'] == sys.argv[2], receipt
+assert receipt['ci']['conclusion'] == 'success', receipt
+assert receipt['state'] == 'passed', receipt
+PYCIRESUME
+: > "$TMP/events"
+OMS_TEST_CI_RC=4 "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+  --handoff-receipt-to "$advanced_target" > "$TMP/ci-ancestor-handoff.out" 2>&1 ||
+  fail "passed ancestor CI receipt did not hand off: $(cat "$TMP/ci-ancestor-handoff.out")"
+[ ! -s "$TMP/events" ] || fail "passed receipt handoff re-queried CI"
+cmp "$ci_retry_receipt" "$advanced_dir/$(basename "$ci_retry_receipt")" ||
+  fail "ancestor CI handoff changed receipt bytes"
 # The relaxed reachability rule grants no authority to push or install an old SHA.
 if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 > "$TMP/ancestor-push.out" 2>&1; then
   fail "ordinary landing accepted an old ancestor"
@@ -971,18 +1130,23 @@ grep -q 'rebase first' "$TMP/ancestor-push.out" || fail "ordinary landing lost i
 if "$LAND" --repo "$repo" --wait --ci-wait 1 --handoff-receipt-to "$advanced_target" \
     > "$TMP/ancestor-install.out" 2>&1; then fail "installing retry accepted an old ancestor"; fi
 grep -q 'rebase first' "$TMP/ancestor-install.out" || fail "installing retry lost its intake ancestry guard"
-request="$(basename "$handoff_receipt" .json)"
-recorded_gate="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate"]["command"])' "$handoff_receipt")"
+request="$(basename "$ci_retry_receipt" .json)"
+recorded_gate="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate"]["command"])' "$ci_retry_receipt")"
 if "$LAND" --run-job "$request" --repo "$repo" --gate "$recorded_gate" --no-update --ci-wait 1 \
     > "$TMP/ancestor-job.out" 2>&1; then fail "ordinary job accepted a different remote tip"; fi
 grep -q 'cannot resume: remote tip' "$TMP/ancestor-job.out" || fail "ordinary job lost tip equality"
 cmp "$handoff_receipt" "$advanced_dir/$(basename "$handoff_receipt")" || fail "refused old-SHA work changed the receipt"
-# An old passed receipt is insufficient once its SHA is no longer reachable.
+# A CI-resumed receipt is insufficient once its SHA is no longer reachable.
 git --git-dir="$TMP/remote.git" update-ref refs/heads/main "$predecessor"
 unreachable_target="$TMP/handoff-unreachable"
 git clone -q "$TMP/remote.git" "$unreachable_target" 2>/dev/null
 if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 --handoff-receipt-to "$unreachable_target" \
     > "$TMP/handoff-unreachable.out" 2>&1; then fail "handoff accepted an unreachable landed SHA"; fi
+if "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+    > "$TMP/ci-unreachable.out" 2>&1; then fail "CI-only resume accepted an unreachable SHA"; fi
+grep -q 'cannot resume: remote tip' "$TMP/ci-unreachable.out" ||
+  fail "unreachable CI-only resume lost its remote-tip refusal"
+[ ! -s "$TMP/events" ] || fail "unreachable CI-only resume queried CI"
 unreachable_dir="$("$LAND" status --repo "$unreachable_target" 2>/dev/null | sed -n 's/^no landing recorded under //p' || true)"
 [ -n "$unreachable_dir" ] && [ ! -e "$unreachable_dir/$(basename "$handoff_receipt")" ] ||
   fail "unreachable target received a receipt"
