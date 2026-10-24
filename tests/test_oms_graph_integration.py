@@ -391,6 +391,9 @@ test_shell_second() {
 
     def test_narrowed_edits_keep_shell_path_consumers(self) -> None:
         consumer = "tests/harness-consumer-smoke.sh"
+        runner = "scripts/check.sh"
+        runner_consumer = "tests/check-runner-consumer-smoke.sh"
+        shell_leaf = "tests/leaf-smoke.sh"
         self._write(self.repo / consumer, '''test_reads_feature() {
   grep -F "test_first" "$ROOT/tests/test_feature.py" >/dev/null
 }
@@ -399,7 +402,23 @@ test_consumer_sibling() {
   :
 }
 ''')
-        self.git("add", consumer)
+        self._write(self.repo / runner, '''#!/usr/bin/env bash
+ROOT=.
+bash "$ROOT/tests/leaf-smoke.sh"
+''')
+        self._write(self.repo / runner_consumer, '''test_runs_check() {
+  bash scripts/check.sh
+}
+''')
+        self._write(self.repo / shell_leaf, '''test_leaf() {
+  printf 'before\\n'
+}
+
+test_leaf_sibling() {
+  :
+}
+''')
+        self.git("add", consumer, runner, runner_consumer, shell_leaf)
         self.git("commit", "-qm", "add path-reading test")
         self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
                                             env=self._env(), text=True).strip()
@@ -423,6 +442,20 @@ test_consumer_sibling() {
         self.assertEqual(weight["mode"], "affected")
         self.assertEqual(set(weight["tests"]), expected_tests)
         self.assertEqual({(row["path"], row["name"]) for row in weight["test_cases"]}, expected_cases)
+
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        shell_path = self.repo / shell_leaf
+        self._write(shell_path, shell_path.read_text(encoding="utf-8").replace(
+            "before", "after", 1))
+        self.git("add", shell_leaf)
+        self.git("commit", "-qm", "edit runner-invoked shell test")
+        narrowed_shell, _ = self._selection()
+        self.assertEqual(narrowed_shell["mode"], "affected")
+        self.assertEqual(set(narrowed_shell["tests"]), {shell_leaf})
+        self.assertEqual({(row["path"], row["name"]) for row in narrowed_shell["test_cases"]},
+                         {(shell_leaf, "test_leaf")})
+        self.assertNotIn(runner_consumer, narrowed_shell["tests"])
 
     def test_cli_affected_passes_hunks_for_narrow_selection(self) -> None:
         feature = self.repo / "tests" / "test_feature.py"

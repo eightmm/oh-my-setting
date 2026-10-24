@@ -30,7 +30,8 @@ dog="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-dogfood.XXXXXX")"
 # Another fixture copy lets auto-build assertions start without a graph.
 auto="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-auto.XXXXXX")"
 impact="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-impact.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$impact"' EXIT INT TERM HUP
+fanout="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-fanout.XXXXXX")"
+trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$impact" "$fanout"' EXIT INT TERM HUP
 
 mkdir -p "$tmp/scripts/lib" "$tmp/docs" "$tmp/tests"
 git -C "$tmp" init -q -b main
@@ -343,6 +344,92 @@ import json, sys
 row = json.load(open(sys.argv[1]))
 assert row["mode"] == "full", row
 assert "unmatched:scripts/oms" in row["reasons"], row
+PY
+
+# Runner invocations are not test consumers. Their test edges must not turn a
+# changed leaf test into the runner's full consumer set, while source and
+# ordinary test-to-test edges keep their normal reverse traversal.
+mkdir -p "$fanout/scripts" "$fanout/tests/lib"
+cat > "$fanout/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+bash tests/literal-test-smoke.sh
+. tests/lib/shared-helper.sh
+shared_helper
+EOF
+cat > "$fanout/tests/run-smoke-shard.sh" <<'EOF'
+#!/usr/bin/env bash
+bash tests/literal-test-smoke.sh
+. tests/lib/shared-helper.sh
+shared_helper
+EOF
+cat > "$fanout/tests/literal-test-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+:
+EOF
+cat > "$fanout/tests/consumer-test-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+bash tests/literal-test-smoke.sh
+EOF
+cat > "$fanout/tests/runner-consumer-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+bash scripts/check.sh
+EOF
+cat > "$fanout/tests/shard-runner-consumer-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+bash tests/run-smoke-shard.sh
+EOF
+cat > "$fanout/tests/lib/shared-helper.sh" <<'EOF'
+#!/usr/bin/env bash
+shared_helper() { :; }
+EOF
+cat > "$fanout/tests/shared-helper-consumer-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+. tests/lib/shared-helper.sh
+shared_helper
+EOF
+cat > "$fanout/scripts/product.sh" <<'EOF'
+#!/usr/bin/env bash
+:
+EOF
+cat > "$fanout/tests/product-test-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+bash scripts/product.sh
+EOF
+git -C "$fanout" init -q -b main
+git -C "$fanout" add .
+PYTHONPATH="$ROOT/scripts/lib" python3 - "$fanout" "$work/fanout-state" <<'PY'
+import sys
+from pathlib import Path
+from oms_graph.project.affected import affected_plan
+from oms_graph.project.build import build, load_graph
+
+repo, state = Path(sys.argv[1]), Path(sys.argv[2])
+build(repo, state=state)
+graph = load_graph(repo, state=state)
+def selected(*paths):
+    return set(affected_plan(graph, paths)["tests"])
+
+literal = "tests/literal-test-smoke.sh"
+leaf = selected(literal)
+assert literal in leaf, leaf
+assert "tests/runner-consumer-smoke.sh" not in leaf, leaf
+assert "tests/shard-runner-consumer-smoke.sh" not in leaf, leaf
+
+# Another test that executes the same leaf remains a real consumer.
+assert "tests/consumer-test-smoke.sh" in leaf, leaf
+
+# A product seed retains the runner expansion when combined with a test seed.
+product_only = selected("scripts/product.sh")
+mixed = selected("scripts/product.sh", literal)
+assert "tests/product-test-smoke.sh" in product_only, product_only
+assert product_only <= mixed, (product_only, mixed)
+
+# A helper under tests/ is imported by both runners, but is not itself an
+# invoked suite test; the runner files and ordinary consumer remain traversable.
+helper = selected("tests/lib/shared-helper.sh")
+assert "tests/run-smoke-shard.sh" in helper, helper
+assert "tests/runner-consumer-smoke.sh" in helper, helper
+assert "tests/shared-helper-consumer-smoke.sh" in helper, helper
 PY
 
 run_graph "$work/context.json" project context --task "alpha entry helper for the beta runner" --max-files 3 --json

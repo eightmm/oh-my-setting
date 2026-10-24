@@ -36,6 +36,7 @@ _TEST_DEFINITION_RE = re.compile(
     r"^\s*function\s+(test_[A-Za-z0-9_]*)\b|"
     r"^\s*(test_[A-Za-z0-9_]*)\s*\(\s*\)\s*(?:\{|$)"
 )
+_TEST_RUNNER_PATHS = {"scripts/check.sh", "tests/run-smoke-shard.sh"}
 
 
 def _test_diff_hunks(repo: Path, base: str, head: str, path: str) -> Sequence[Dict[str, Any]]:
@@ -165,6 +166,17 @@ def _runnable_test(path: str, runnable_patterns: Sequence[str] = ()) -> bool:
     pure = Path(path)
     return (path.endswith(".sh") or (pure.name.startswith("test_") and path.endswith(".py"))
             or _boundary(path, runnable_patterns))
+
+
+def _runner_test_invocation(edge: Mapping[str, Any], index: Graph,
+                            runnable_patterns: Sequence[str]) -> bool:
+    """Whether an edge only records a configured runner invoking a test file."""
+    source = index.nodes.get(str(edge.get("source", "")), {})
+    target = index.nodes.get(str(edge.get("target", "")), {})
+    return (edge.get("relation") in ("calls", "tests")
+            and source.get("path") in _TEST_RUNNER_PATHS
+            and target.get("kind") == "test"
+            and _runnable_test(str(target.get("path", "")), runnable_patterns))
 
 
 def _revision_text(repo: Path, revision: str, path: str) -> Optional[str]:
@@ -384,13 +396,34 @@ def affected_plan(
                     narrow_seeds[path] = seeds
     seed_paths = [path for path in normalized if path not in narrow_cases]
     containment_seeds = set().union(*narrow_seeds.values()) if narrow_seeds else set()
+    runner_invocations = {
+        (edge["source"], edge["target"])
+        for rows in index.out.values() for edge in rows
+        if _runner_test_invocation(edge, index, runnable_patterns)
+    }
+    runner_test_paths = {str(index.nodes[target].get("path", ""))
+                         for _, target in runner_invocations}
+    # A runner's calls to its enumerated test files are suite membership, not
+    # a dependency from each test to every other test in the suite. Apply the
+    # cut only when all changed paths are tests directly invoked by a runner;
+    # product or shared-helper seeds keep the complete reverse traversal.
+    runner_test_seeds = bool(normalized) and all(
+        path in runner_test_paths for path in normalized
+    )
+    blast_index = index
+    if runner_test_seeds:
+        filtered_edges = [edge for edge in index.graph.get("edges", [])
+                          if not _runner_test_invocation(edge, index, runnable_patterns)]
+        blast_index = Graph({"schema": index.graph.get("schema"),
+                             "revision": index.graph.get("revision"),
+                             "nodes": list(index.nodes.values()), "edges": filtered_edges})
     # Variable-prefixed path references (for example "$ROOT/tests/foo.py")
     # resolve to a containing node but carry INFERRED confidence. Seed those
     # direct consumers only; traversal remains restricted to EXTRACTED edges.
     path_consumer_seeds = {
         edge["source"]
         for ident in containment_seeds
-        for edge in index.ins.get(ident, [])
+        for edge in blast_index.ins.get(ident, [])
         if edge.get("relation") in DEFAULT_RELATIONS and edge.get("confidence") == "INFERRED"
         and index.nodes.get(edge["source"], {}).get("path") not in narrow_cases
     }
@@ -399,14 +432,14 @@ def affected_plan(
     # seeding unrelated nodes from the narrowed file.
     module_consumer_seeds = {
         edge["source"]
-        for ident, node in index.nodes.items()
+        for ident, node in blast_index.nodes.items()
         if node.get("path") in narrow_cases and node.get("kind") == "module"
-        for edge in index.ins.get(ident, [])
+        for edge in blast_index.ins.get(ident, [])
         if edge.get("relation") in DEFAULT_RELATIONS
         and edge.get("confidence") in ("EXTRACTED", "INFERRED")
         and index.nodes.get(edge["source"], {}).get("path") not in narrow_cases
     }
-    result = blast_radius(index, seed_paths, depth=None if depth == 0 else depth,
+    result = blast_radius(blast_index, seed_paths, depth=None if depth == 0 else depth,
                           confidences=("EXTRACTED",),
                           seed_ids=sorted(containment_seeds | path_consumer_seeds | module_consumer_seeds))
     tests = [path for path in result["tests"] if _runnable_test(path, runnable_patterns)]
