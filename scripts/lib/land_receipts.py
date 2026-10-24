@@ -87,6 +87,33 @@ def destination(repo, remote, push=False):
     return url
 
 
+def sibling_receipt_binds_repo(repo, receipt, name):
+    """Recompute a sibling request stamp from this checkout's push URL."""
+    remote, target, gate = (receipt.get(key) for key in ("remote", "target", "gate"))
+    command = gate.get("command") if isinstance(gate, dict) else None
+    if (not isinstance(remote, str) or not remote or remote.startswith("-") or
+            not isinstance(target, str) or not target or not isinstance(command, str)):
+        return False
+    try:
+        run = subprocess.run(["git", "-C", repo, "remote", "get-url", "--push", remote],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+                             env=dict(os.environ, GIT_ALLOW_PROTOCOL=""))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    if run.returncode != 0:
+        return False
+    url = run.stdout.decode("utf-8", "surrogateescape").replace("\r", "").strip()
+    try:
+        if destination(repo, remote, push=True) != url:
+            return False
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    digest = hashlib.sha256(json.dumps([url, remote, target, command],
+                                       ensure_ascii=True).encode()).hexdigest()[:24]
+    return (receipt.get("request") == name[:-5] and
+            name[:-5].endswith("-" + digest) and name.startswith(receipt.get("sha", "") + "-"))
+
+
 def safe_directory(directory):
     # XDG roots may use OS aliases such as macOS /var -> /private/var.
     # Resolve the parent, but refuse a linked receipt namespace itself.

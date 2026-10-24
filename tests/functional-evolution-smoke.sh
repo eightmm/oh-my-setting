@@ -1441,8 +1441,75 @@ PY
 }
 
 test_work_discovery_packet_is_bounded_and_complete() {
-  local repo="$TMP/discovery" readers="$TMP/discovery-readers" out rc
+  local repo="$TMP/discovery" readers="$TMP/discovery-readers" out rc remote="$TMP/discovery-origin.git" \
+    sibling="$TMP/discovery-sibling" handoff="$TMP/discovery-handoff" \
+    duplicate="$TMP/zz-discovery-duplicate" foreign="$TMP/discovery-foreign" \
+    foreign_remote="$TMP/discovery-foreign.git" state_a state_b state_c state_d state_e state_parent
   mkdir -p "$repo" "$readers"
+  export XDG_STATE_HOME="$TMP/land-state"
+  git init -q "$repo"
+  git -C "$repo" config user.name discovery-test
+  git -C "$repo" config user.email discovery@example.invalid
+  printf 'seed\n' > "$repo/seed"
+  git -C "$repo" add seed
+  git -C "$repo" commit -qm seed
+  git clone --quiet --bare "$repo" "$remote"
+  git -C "$repo" remote add origin "$remote"
+  git clone --quiet "$remote" "$sibling"
+  git clone --quiet "$remote" "$handoff"
+  git clone --quiet "$remote" "$duplicate"
+  git clone --quiet --bare "$repo" "$foreign_remote"
+  git clone --quiet "$foreign_remote" "$foreign"
+  state_a="$(bash -c '. "$1"; oms_land_state_dir "$2"' land-state "$ROOT/scripts/lib/land-receipts.sh" "$repo")"
+  state_b="$(bash -c '. "$1"; oms_land_state_dir "$2"' land-state "$ROOT/scripts/lib/land-receipts.sh" "$sibling")"
+  state_c="$(bash -c '. "$1"; oms_land_state_dir "$2"' land-state "$ROOT/scripts/lib/land-receipts.sh" "$foreign")"
+  state_d="$(bash -c '. "$1"; oms_land_state_dir "$2"' land-state "$ROOT/scripts/lib/land-receipts.sh" "$handoff")"
+  state_e="$(bash -c '. "$1"; oms_land_state_dir "$2"' land-state "$ROOT/scripts/lib/land-receipts.sh" "$duplicate")"
+  state_parent="${state_a%/*}"
+  # Place the receipt-only handoff namespace before the producer namespace.
+  mkdir -p "$state_d" "$state_b" "$state_c" "$state_e"
+  [ ! -e "$state_a" ] || fail "discovery fixture must start without local land state"
+  python3 - "$repo" "$sibling" "$foreign" "$state_a" "$state_b" "$state_c" "$state_d" "$state_e" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+repo, _, foreign, _, state_b, state_c, state_d, state_e = map(pathlib.Path, sys.argv[1:])
+def git(path, *args):
+    return subprocess.check_output(['git', '-C', str(path), *args], text=True).replace('\r', '').strip()
+sha = git(repo, 'rev-parse', 'HEAD')
+url = git(repo, 'remote', 'get-url', '--push', 'origin')
+foreign_url = git(foreign, 'remote', 'get-url', '--push', 'origin')
+def receipt(directory, remote_url, command):
+    request_hash = hashlib.sha256(json.dumps([remote_url, 'origin', 'main', command],
+                                             ensure_ascii=True).encode()).hexdigest()[:24]
+    request = sha + '-' + request_hash
+    row = {'schema': 1, 'state': 'passed', 'sha': sha, 'request': request,
+           'remote': 'origin', 'target': 'main', 'gate': {'command': command},
+           'log': '/ignored/arbitrary/path'}
+    path = directory / (request + '.json')
+    path.write_text(json.dumps(row, separators=(',', ':')) + '\n')
+    return path, request
+command = 'bash scripts/check.sh --affected'
+passed, request = receipt(state_b, url, command)
+(state_d / passed.name).write_bytes(passed.read_bytes())
+producer = json.loads(passed.read_bytes())
+producer['finished_at'] = '2026-01-12T12:00:00Z'
+passed.write_text(json.dumps(producer, separators=(',', ':')) + '\n')
+log = state_b / (request + '.log')
+log.write_text(
+    'land attempt: 1 started_at=2026-01-10T10:00:00Z sha=' + sha + '\n'
+    'check: affected:tests/functional-evolution-smoke.sh FAILED (3s)\n'
+    'check: scripts-smoke.test_agent_plan_lifecycle_receipt_history FAILED (1s)\n'
+    'check: scripts-smoke.test_agent_plan_lifecycle_receipt_history FAILED (1s)\n'
+    'land attempt: 2 started_at=2026-01-11T10:00:00Z sha=' + sha + '\n'
+    'check: scripts-smoke.test_agent_plan_lifecycle_receipt_history FAILED (2s)\n'
+    'land attempt: 3 started_at=2026-01-12T10:00:00Z sha=' + sha + '\n'
+    'check: ok\n')
+(state_e / passed.name).write_bytes(passed.read_bytes())
+(state_e / log.name).write_bytes(log.read_bytes())
+receipt(state_b, url, command + ' --missing-log')
+_, oversized = receipt(state_b, url, command + ' --oversized-log')
+(state_b / (oversized + '.log')).write_bytes(b'x' * (1024 * 1024 + 1))
+receipt(state_c, foreign_url, command)
+PY
   cat > "$readers/fail-ledger.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '{"items":[{"fingerprint":"failure-1","summary":"resolved clue"}]}\r\n'
@@ -1469,9 +1536,29 @@ EOF
 #!/usr/bin/env bash
 printf '{"since":"2026-01-01","until":"2026-01-02","coverage":{"complete":true},"write_state":{"reconciled":true},"failures":[],"stages":[]}\r\n'
 EOF
+  cat > "$readers/sitecustomize.py" <<'PY'
+import os
+target = os.environ.get('OMS_TEST_LAND_PARENT')
+original_scandir = os.scandir
+class OrderedEntries:
+    def __init__(self, source):
+        self.source = source
+        self.entries = sorted(source, key=lambda entry: entry.name)
+    def __enter__(self):
+        return iter(self.entries)
+    def __exit__(self, *args):
+        self.source.close()
+def ordered_scandir(path):
+    entries = original_scandir(path)
+    if target and os.path.abspath(path) == os.path.abspath(target):
+        return OrderedEntries(entries)
+    return entries
+os.scandir = ordered_scandir
+PY
   chmod +x "$readers"/*
   export OMS_WORK_DISCOVERY_SCRIPTS_DIR="$readers" OMS_WORK_DISCOVERY_OMS="$readers/oms"
   export OMS_GH_BIN="$readers/gh" OMS_REAL_CI_STATUS="$ROOT/scripts/ci-status.sh"
+  export OMS_TEST_LAND_PARENT="$state_parent" PYTHONPATH="$readers${PYTHONPATH:+:$PYTHONPATH}"
   out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" 2>"$TMP/discovery-err")" ||
     fail "work discovery collection failed"
   [ ! -s "$TMP/discovery-err" ] || fail "successful collection wrote to stderr"
@@ -1482,6 +1569,17 @@ r = json.loads(sys.argv[1])
 assert r["schema"] == 1 and r["sections"].keys() == {
     "failures", "metrics", "reviews", "ci", "tasks", "rejected"}, r
 assert r["sections"]["failures"]["items"][0]["ref"] == "failure-1", r
+land = [row for row in r["sections"]["failures"]["items"] if row.get("ref", "").startswith("land:")]
+by_name = {row["name"]: row for row in land}
+test = by_name["scripts-smoke.test_agent_plan_lifecycle_receipt_history"]
+assert test["kind"] == "test" and test["failed_attempts"] == 2, test
+assert test["first_attempt_date"] == "2026-01-10" and test["last_attempt_date"] == "2026-01-11", test
+stage = by_name["affected:tests/functional-evolution-smoke.sh"]
+assert stage["kind"] == "stage" and stage["failed_attempts"] == 1, stage
+assert len([row for row in land if row["name"] == test["name"]]) == 1, land
+coverage = r["sections"]["failures"]["coverage"]
+assert coverage["land_logs_missing"] == 1 and coverage["land_logs_oversized"] == 1, coverage
+assert coverage["land_scan_complete"] is False and "SSH/HTTPS aliases may be missed" in coverage["association"], coverage
 assert r["sections"]["ci"]["status"] == "available", r
 assert [x["text"] for x in r["sections"]["rejected"]["items"]] == [
     "hypothesis: early clue", "hypothesis: late clue"], r

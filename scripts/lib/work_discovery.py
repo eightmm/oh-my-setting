@@ -1,12 +1,14 @@
 """Collect a bounded, untrusted evidence packet for work planning."""
 
 import contextlib
+import datetime
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 
@@ -14,11 +16,24 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 import panel_results
+import land_receipts
 SECTION_BUDGETS = {"failures": 4096, "metrics": 4096, "reviews": 65536,
                    "ci": 4096, "tasks": 4096, "rejected": 32768}
 TOTAL_BUDGET = 131072
 SECTIONS = tuple(SECTION_BUDGETS)
 _TIMED_OUT = object()
+_LAND_DIR_LIMIT = 128
+_LAND_PARENT_ENTRY_LIMIT = 2048
+_LAND_ENTRY_LIMIT = 512
+_LAND_RECEIPT_LIMIT = 256
+_LAND_LOG_LIMIT = 1024 * 1024
+_LAND_TOTAL_LOG_LIMIT = 8 * 1024 * 1024
+_LAND_FAILURE_LIMIT = 16
+_ATTEMPT_LINE = re.compile(
+    rb"^land attempt: ([1-9][0-9]*) started_at=([0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    rb"[0-9]{2}:[0-9]{2}:[0-9]{2}Z) sha=([0-9a-f]{40}|[0-9a-f]{64})$")
+_FAILED_CHECK = re.compile(
+    rb"^check: ([A-Za-z0-9_.:-]{1,160}|affected:tests/[A-Za-z0-9_./-]{1,128}) FAILED(?:\s|$)")
 
 
 class _RunFailure:
@@ -189,6 +204,210 @@ def _collect_metrics(repo):
     return _section([_clean(projected)], {"complete": not bool(report.get("incomplete"))})
 
 
+def _land_state_directory(repo):
+    helper = ROOT / "scripts/lib/land-receipts.sh"
+    proc = subprocess.run(
+        ["bash", "-c", '. "$1"; oms_land_state_dir "$2"', "oms-land-state",
+         str(helper), str(repo)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        universal_newlines=True, timeout=10, check=False)
+    if proc.returncode:
+        raise OSError("land state directory unavailable")
+    return Path(proc.stdout.replace("\r", "").strip())
+
+
+def _read_land_file(directory, name, maximum, reader):
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError("invalid land filename")
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(captured):
+            return reader(str(directory), name, "land evidence", max_bytes=maximum)
+    except SystemExit as error:
+        raise ValueError(captured.getvalue() or str(error)) from None
+
+
+def _land_attempt_failures(raw, expected_sha):
+    attempts = []
+    current = None
+    incomplete = False
+    next_attempt = 1
+    for line in raw.splitlines():
+        marker = _ATTEMPT_LINE.fullmatch(line)
+        if marker:
+            if current is not None:
+                attempts.append(current)
+            if int(marker.group(1)) != next_attempt:
+                incomplete = True
+            next_attempt = int(marker.group(1)) + 1
+            stamp = marker.group(2).decode("ascii")
+            try:
+                date = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").date().isoformat()
+            except ValueError:
+                current = None
+                incomplete = True
+                continue
+            if marker.group(3).decode("ascii") != expected_sha:
+                current = None
+                incomplete = True
+                continue
+            current = {"number": int(marker.group(1)), "timestamp": stamp,
+                       "date": date, "failures": set()}
+            continue
+        if line.startswith(b"land attempt:"):
+            incomplete = True
+        if current is None:
+            continue
+        match = _FAILED_CHECK.match(line)
+        if match:
+            identifier = match.group(1).decode("ascii")
+            if identifier.startswith("affected:") and any(
+                    part in {"", ".", ".."} for part in identifier[len("affected:"):].split("/")):
+                incomplete = True
+                continue
+            kind = ("stage" if identifier.startswith("affected:") else
+                    "test" if ".test_" in identifier or ".test-" in identifier else "stage")
+            current["failures"].add((kind, identifier))
+    if current is not None:
+        attempts.append(current)
+    if not attempts or (raw and not raw.endswith(b"\n")):
+        incomplete = True
+    return attempts, incomplete
+
+
+def _collect_land_failures(repo):
+    coverage = {"land_scan_complete": True, "land_receipts_considered": 0,
+                "land_receipts_admitted": 0, "land_logs_missing": 0,
+                "land_logs_unreadable": 0, "land_logs_oversized": 0,
+                "land_logs_incomplete": 0,
+                "association": "exact configured push URL, remote, target, and gate; renamed remotes or SSH/HTTPS aliases may be missed"}
+    try:
+        own = _land_state_directory(repo)
+        if own.is_symlink() or (own.exists() and not own.is_dir()):
+            raise OSError("land state directory is not a real directory")
+        durable = runpy.run_path(str(HERE / "durable-jsonl.py"))["read_no_follow"]
+        scan_dirs = [own] if own.exists() else []
+        parent = own.parent
+        seen_dirs = {os.path.abspath(own)}
+        try:
+            with os.scandir(parent) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= _LAND_PARENT_ENTRY_LIMIT:
+                        coverage["land_scan_complete"] = False
+                        break
+                    if len(scan_dirs) >= _LAND_DIR_LIMIT:
+                        coverage["land_scan_complete"] = False
+                        break
+                    try:
+                        if entry.is_dir(follow_symlinks=False) and os.path.abspath(entry.path) not in seen_dirs:
+                            scan_dirs.append(Path(entry.path))
+                            seen_dirs.add(os.path.abspath(entry.path))
+                    except OSError:
+                        coverage["land_scan_complete"] = False
+        except OSError:
+            coverage["land_scan_complete"] = False
+        scan_dirs.sort(key=lambda directory: directory.name)
+        aggregates = {}
+        seen_receipts = set()
+        requests_with_logs = set()
+        seen_failure_attempts = set()
+        missing_logs = set()
+        total_log_bytes = 0
+        receipt_count = 0
+        for directory in scan_dirs:
+            try:
+                if directory.is_symlink() or not directory.is_dir():
+                    coverage["land_scan_complete"] = False
+                    continue
+                with os.scandir(directory) as entries:
+                    for index, entry in enumerate(entries):
+                        if index >= _LAND_ENTRY_LIMIT:
+                            coverage["land_scan_complete"] = False
+                            break
+                        if receipt_count >= _LAND_RECEIPT_LIMIT:
+                            coverage["land_scan_complete"] = False
+                            break
+                        name = entry.name
+                        if not name.endswith(".json") or not re.fullmatch(
+                                r"[0-9a-f]{40,64}-[0-9a-f]{24}\.json", name):
+                            continue
+                        receipt_count += 1
+                        coverage["land_receipts_considered"] += 1
+                        try:
+                            raw_receipt = _read_land_file(directory, name, 1024 * 1024, durable)
+                            receipt = json.loads(raw_receipt)
+                            if (not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or
+                                    receipt.get("schema") != 1 or
+                                    not land_receipts.sibling_receipt_binds_repo(str(repo), receipt, name)):
+                                continue
+                            if name not in seen_receipts:
+                                seen_receipts.add(name)
+                                coverage["land_receipts_admitted"] += 1
+                            sha = receipt.get("sha")
+                            if total_log_bytes >= _LAND_TOTAL_LOG_LIMIT:
+                                coverage["land_scan_complete"] = False
+                                continue
+                            log_name = name[:-5] + ".log"
+                            try:
+                                log = _read_land_file(directory, log_name,
+                                                      min(_LAND_LOG_LIMIT,
+                                                          _LAND_TOTAL_LOG_LIMIT - total_log_bytes), durable)
+                            except ValueError as error:
+                                message = str(error)
+                                if "exceeds" in message or "size limit" in message:
+                                    coverage["land_logs_oversized"] += 1
+                                    coverage["land_scan_complete"] = False
+                                elif "does not exist" in message or "No such file" in message:
+                                    missing_logs.add(name)
+                                else:
+                                    coverage["land_logs_unreadable"] += 1
+                                    coverage["land_scan_complete"] = False
+                                continue
+                            except (OSError, ValueError):
+                                coverage["land_logs_unreadable"] += 1
+                                coverage["land_scan_complete"] = False
+                                continue
+                            total_log_bytes += len(log)
+                            requests_with_logs.add(name)
+                            attempts, incomplete = _land_attempt_failures(log, sha)
+                            if incomplete:
+                                coverage["land_logs_incomplete"] += 1
+                                coverage["land_scan_complete"] = False
+                            for attempt in attempts:
+                                for kind, identifier in attempt["failures"]:
+                                    observation = (name, attempt["number"], attempt["timestamp"],
+                                                   kind, identifier)
+                                    if observation in seen_failure_attempts:
+                                        continue
+                                    seen_failure_attempts.add(observation)
+                                    row = aggregates.setdefault((kind, identifier),
+                                        {"failed_attempts": 0, "first_attempt_date": attempt["date"],
+                                         "last_attempt_date": attempt["date"]})
+                                    row["failed_attempts"] += 1
+                                    row["first_attempt_date"] = min(row["first_attempt_date"], attempt["date"])
+                                    row["last_attempt_date"] = max(row["last_attempt_date"], attempt["date"])
+                        except SystemExit:
+                            coverage["land_scan_complete"] = False
+                        except (OSError, ValueError, TypeError, UnicodeError):
+                            coverage["land_scan_complete"] = False
+            except OSError:
+                coverage["land_scan_complete"] = False
+        unresolved_missing = missing_logs - requests_with_logs
+        coverage["land_logs_missing"] = len(unresolved_missing)
+        if unresolved_missing:
+            coverage["land_scan_complete"] = False
+        items = []
+        for (kind, identifier), counts in sorted(aggregates.items()):
+            if len(items) >= _LAND_FAILURE_LIMIT:
+                coverage["land_scan_complete"] = False
+                break
+            ref = "land:" + hashlib.sha256((kind + ":" + identifier).encode()).hexdigest()[:12]
+            items.append({"ref": ref, "kind": kind, "name": identifier, **counts})
+        return items, coverage
+    except (OSError, subprocess.SubprocessError, ValueError):
+        coverage["land_scan_complete"] = False
+        return [], coverage
+
+
 def collect(repo):
     repo = Path(repo).resolve()
     sections = {}
@@ -225,6 +444,14 @@ def collect(repo):
             sections["failures"] = _section(items, {"count": len(rows), "complete": True})
         except (ValueError, TypeError):
             sections["failures"] = _section([], {}, "fail-ledger returned invalid JSON")
+
+    land_items, land_coverage = _collect_land_failures(repo)
+    failure_section = sections["failures"]
+    failure_section["items"].extend(land_items)
+    failure_coverage = failure_section["coverage"]
+    failure_coverage.update(land_coverage)
+    failure_coverage["complete"] = bool(failure_coverage.get("complete", False) and
+                                         land_coverage["land_scan_complete"])
 
     sections["metrics"] = _collect_metrics(repo)
     sections["reviews"] = _collect_reviews(repo)
