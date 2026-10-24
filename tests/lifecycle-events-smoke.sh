@@ -33,6 +33,79 @@ new_repo "$REPO"
 [ -x "$EVENTS" ] || fail "missing executable: scripts/agent-events.sh"
 [ -x "$APPROVALS" ] || fail "missing executable: scripts/approval-inbox.sh"
 
+# Timestamp reads preserve strptime's legacy forms and exact calendar checks.
+if ! python3 - "$ROOT/scripts/lib/agent-events.py" <<'PYTEST'
+import datetime as dt
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("agent_events", sys.argv[1])
+ae = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ae)
+row = {"schema": 1, "event_id": "evt_1", "attempt_id": "att_1", "seq": 1,
+       "event_type": "attempt.created", "to_state": "queued", "ts": "2024-02-29T12:34:56Z"}
+valid = ("2024-02-29T12:34:56Z", "2000-02-29T00:00:00Z",
+         "0001-01-01T00:00:00Z", "9999-12-31T23:59:59Z",
+         "2024-2-9T1:2:3Z", "2024-02-29t12:34:56z", "2024-02- 9T01:02:03Z",
+         "２０２４-02-29T12:34:56Z")
+invalid = ("2023-02-29T12:34:56Z", "1900-02-29T00:00:00Z",
+           "2024-00-01T00:00:00Z", "2024-13-01T00:00:00Z",
+           "2024-01-00T00:00:00Z", "2024-01-32T00:00:00Z", "2024-04-31T00:00:00Z",
+           "2024-02-29T12:34:56", "2024-02-29T12:34:56Z\n",
+           "2024-02-29T24:00:00Z", "2024-02-29T12:60:00Z", "2024-02-29T12:34:60Z",
+           "0000-01-01T00:00:00Z")
+for value in valid:
+    expected = dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    assert ae.parse_ts(value) == expected, value
+    projected = ae.project_attempts([dict(row, ts=value)])
+    assert projected["att_1"]["created_at"] == value
+for value in invalid:
+    try:
+        ae.project_attempts([row, dict(row, event_id="evt_2", seq=2, ts=value),
+                             dict(row, schema=2)])
+    except ae.OpsError as exc:
+        assert str(exc) == "invalid UTC timestamp: " + value, (value, str(exc))
+    else:
+        raise AssertionError("invalid timestamp accepted: " + value)
+
+# Compare refs with the original platform path semantics, including drive-relative
+# and backslash spellings whose meaning differs on Windows and POSIX.
+for value in ("", ".", "..", "a/../b", "a//../b", "a/./b", "a/.../b", "a/..b",
+              "a/..", "a/..\\b", "a\\..\\b", "a\\..", "C:..", "C:../b",
+              "C:..\\b", "C:relative", "C:/root", "C:\\root", "/root", "\\root"):
+    invalid_ref = (value.startswith(("/", "\\"))
+                   or (len(value) >= 3 and value[0].isascii() and value[0].isalpha()
+                       and value[1] == ":" and value[2] in "/\\")
+                   or ".." in Path(value).parts)
+    candidate = dict(row, event_id="evt_2", seq=2, event_type="attempt.heartbeat", refs={"location": value})
+    try:
+        ae.project_attempts([row, candidate, dict(row, schema=2)])
+    except ae.OpsError as exc:
+        expected = ("event row 2 contains an absolute or escaping ref" if invalid_ref
+                    else "event row 3 has unsupported schema")
+        assert str(exc) == expected, (value, str(exc), expected)
+    else:
+        raise AssertionError("later malformed row was not validated")
+
+context = {"trace_id": "1" * 32, "span_id": "2" * 16, "trace_flags": "01"}
+ae.validate_event_row(dict(row, **context))
+for field in ("trace_id", "span_id", "parent_span_id", "trace_flags",
+              "traceparent", "tracestate", "baggage"):
+    for value in (None, ""):
+        try:
+            ae.validate_event_row(dict(row, **{field: value}), 7)
+        except ae.OpsError as exc:
+            expected = ("has invalid persisted trace context" if field in context or field == "parent_span_id"
+                        else "stores forbidden raw trace context")
+            assert str(exc) == "event row 7 " + expected, (field, value, str(exc))
+        else:
+            raise AssertionError("invalid trace field accepted: " + field)
+PYTEST
+then
+  fail "lifecycle timestamp, reference or trace validation changed"
+fi
+
 # Lock acquisition has a bounded wait, but a live owner is never reclaimed
 # merely because that wait elapsed. A positively dead owner remains recoverable.
 if ! python3 - "$ROOT/scripts/lib/agent-events.py" "$TMP/lock-target" <<'PY'

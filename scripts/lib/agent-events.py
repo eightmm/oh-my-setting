@@ -48,6 +48,10 @@ SCHEMA = 1
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 REASON_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+UTC_TS_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+ABSOLUTE_REF_RE = re.compile(r"^[A-Za-z]:[\\/]")
+TRACE_FIELDS = frozenset({"trace_id", "span_id", "parent_span_id", "trace_flags"})
+RAW_TRACE_FIELDS = frozenset({"traceparent", "tracestate", "baggage"})
 TERMINAL_STATES = {"done", "failed", "cancelled", "timed_out", "abandoned"}
 NONTERMINAL_STATES = {
     "queued",
@@ -102,6 +106,10 @@ def utc_now() -> str:
 
 def parse_ts(value: str) -> dt.datetime:
     try:
+        if UTC_TS_RE.fullmatch(value):
+            # Guard fromisoformat's broader grammar; it checks calendar validity.
+            return dt.datetime.fromisoformat(value[:-1] + "+00:00")
+        # strptime also accepts legacy unpadded fields and lowercase literals.
         return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     except (TypeError, ValueError) as exc:
         raise OpsError("invalid UTC timestamp: %s" % value) from exc
@@ -768,12 +776,12 @@ def validate_event_row(row: Dict[str, Any], number: int = 0) -> None:
             safe_id(str(key), "ref name")
             if not isinstance(value, str) or len(value) > 240 or "\n" in value or "\r" in value:
                 raise OpsError("%s has invalid ref %s" % (where, key))
-            if value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value) or ".." in Path(value).parts:
+            if (value.startswith(("/", "\\")) or ABSOLUTE_REF_RE.match(value)
+                    or (".." in value and ".." in Path(value).parts)):
                 raise OpsError("%s contains an absolute or escaping ref" % where)
-    trace_fields = {"trace_id", "span_id", "parent_span_id", "trace_flags"}
-    if trace_fields.intersection(row) and persisted_context(row) is None:
+    if not TRACE_FIELDS.isdisjoint(row) and persisted_context(row) is None:
         raise OpsError("%s has invalid persisted trace context" % where)
-    if any(key in row for key in ("traceparent", "tracestate", "baggage")):
+    if not RAW_TRACE_FIELDS.isdisjoint(row):
         raise OpsError("%s stores forbidden raw trace context" % where)
 
 
