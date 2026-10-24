@@ -1585,7 +1585,7 @@ assert [x["text"] for x in r["sections"]["rejected"]["items"]] == [
     "hypothesis: early clue", "hypothesis: late clue"], r
 assert r["sections"]["metrics"]["coverage"]["complete"] is True, r
 metric = r["sections"]["metrics"]["items"][0]
-assert set(metric) == {"window", "coverage", "incomplete", "write_state_reconciliation",
+assert set(metric) == {"ref", "window", "coverage", "incomplete", "write_state_reconciliation",
                        "failure_reason_counts", "failure_stage_buckets", "cancel_totals"}, metric
 assert all("\\r" not in json.dumps(section) for section in r["sections"].values()), r
 import sys
@@ -1678,6 +1678,34 @@ EOF
   python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" >"$TMP/discovery-out" 2>"$TMP/discovery-err" || rc=$?
   [ "$rc" = 3 ] && grep -Fq 'tasks' "$TMP/discovery-err" ||
     fail "corrupt plan JSON did not name tasks and exit 3"
+
+  cat > "$readers/agent-plan.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '[]\n'
+EOF
+  cat > "$readers/agent-memory.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'hypothesis: pipe shape | evidence | effect | DEFERRED | round 1\n'
+printf 'hypothesis: verdict shape | evidence: notes | verdict: ReJeCtEd | round 2\n'
+printf 'hypothesis: option | evidence: earlier verdict: rejected was overturned | effect: pending | deferred | round 3\n'
+printf 'hypothesis: other | evidence: once verdict: rejected | verdict: Adopted | round 4\n'
+EOF
+  chmod +x "$readers/agent-plan.sh" "$readers/agent-memory.sh"
+  out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo")" ||
+    fail "verdict discovery collection failed"
+  repeated="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo")" ||
+    fail "repeated verdict discovery collection failed"
+  python3 - "$out" "$repeated" <<'PY' || fail "verdicts or stable metrics reference missing"
+import json, re, sys
+packet, repeated = [json.loads(value) for value in sys.argv[1:]]
+items = packet["sections"]["rejected"]["items"]
+assert [item["verdict"] for item in items] == ["deferred", "rejected", "deferred", "adopted"], items
+assert packet["sections"]["rejected"]["coverage"]["verdict_counts"] == {
+    "deferred": 2, "rejected": 1, "adopted": 1}, packet
+metric = packet["sections"]["metrics"]["items"][0]
+assert re.fullmatch(r"metrics-[0-9a-f]{12}", metric["ref"]), metric
+assert repeated["sections"]["metrics"]["items"][0]["ref"] == metric["ref"], repeated
+PY
 }
 
 test_managed_landing_capture_retention

@@ -10559,6 +10559,12 @@ assert json.load(sys.stdin)["assignment"] == {"provider":"claude", "workload":"r
   local discovery_tmp="$TMP/plan-from-spec-discovery-tmp"
   make_committed_repo "$discovery"
   mkdir -p "$discovery_bin" "$discovery_home" "$readers" "$discovery/tests" "$discovery_tmp"
+  mkdir -p "$discovery/src"
+  printf 'print("tracked")\n' > "$discovery/src/tracked.py"
+  printf 'print("unicode")\n' > "$discovery/src/한글.py"
+  printf 'print("untracked")\n' > "$discovery/src/untracked.py"
+  git -C "$discovery" add src/tracked.py src/한글.py
+  git -C "$discovery" commit -m 'add tracked discovery source' >/dev/null
   printf '#!/usr/bin/env bash\nexit 0\n' > "$discovery/tests/run.sh"
   chmod +x "$discovery/tests/run.sh"
   cat > "$discovery/PROJECT.md" <<'EOF'
@@ -10578,7 +10584,8 @@ printf '[{"id":"TASK-A","state":"ready"}]\n'
 EOF
   cat > "$readers/agent-memory.sh" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+printf 'hypothesis: defer this approach | evidence | effect | deferred | round 1\n'
+printf 'hypothesis: reject this approach | evidence: notes | verdict: rejected | round 2\n'
 EOF
   cat > "$readers/oms" <<'EOF'
 #!/usr/bin/env bash
@@ -10600,7 +10607,7 @@ for temp_file in "$TMPDIR"/*; do
 done
 cat > "$HOME/discovery-prompt.txt"
 cat <<'JSON'
-{"candidates":[{"id":"candidate-1","claim":"investigate a miscopied review reference","lens":"gap critique","evidence_refs":["unknown-ref"],"counterevidence":"none observed","smallest_check":"inspect review evidence","scope":"src/","expected_benefit":"retain useful discovery","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-2","claim":"duplicate existing work","lens":"pruning","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect TASK-A","scope":"src/","expected_benefit":"avoid repeated work","expected_cost":"small","duplicate_disposition":"Duplicates task TASK-A"},{"id":"candidate-3","claim":"tighten greeting behavior","lens":"gap critique","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect greeting output","scope":"src/ and tests/","expected_benefit":"clearer output","expected_cost":"small","duplicate_disposition":"new"}],"tasks":[{"candidate_id":"candidate-1","id":"t0","title":"investigate: copied reference","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]},{"candidate_id":"candidate-3","id":"t1","title":"fix: tighten greeting output","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]}]}
+{"candidates":[{"id":"candidate-1","claim":"investigate a miscopied review reference","lens":"gap critique","evidence_refs":["unknown-ref"],"counterevidence":"none observed","smallest_check":"inspect review evidence","scope":"src/","expected_benefit":"retain useful discovery","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-2","claim":"duplicate existing work","lens":"pruning","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect TASK-A","scope":"src/","expected_benefit":"avoid repeated work","expected_cost":"small","duplicate_disposition":"Duplicates task TASK-A"},{"id":"candidate-3","claim":"tighten greeting behavior","lens":"gap critique","evidence_refs":["failure-ref"],"counterevidence":"none observed","smallest_check":"inspect greeting output","scope":"src/ and tests/","expected_benefit":"clearer output","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-4","claim":"revisit deferred approach","lens":"gap critique","evidence_refs":["failure-ref"],"counterevidence":"deferred","smallest_check":"inspect the current behavior","scope":"src/","expected_benefit":"clarify status","expected_cost":"small","duplicate_disposition":"matches rejected hypothesis at line 1"},{"id":"candidate-5","claim":"repeat rejected approach","lens":"gap critique","evidence_refs":["failure-ref"],"counterevidence":"rejected","smallest_check":"inspect the current behavior","scope":"src/","expected_benefit":"none","expected_cost":"small","duplicate_disposition":"matches rejected hypothesis at line 2"},{"id":"candidate-6","claim":"checked source finding","lens":"gap critique","evidence_refs":["src:src/tracked.py:1"],"counterevidence":"none observed","smallest_check":"inspect tracked source","scope":"src/","expected_benefit":"ground the finding","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-7","claim":"traversal source citation","lens":"gap critique","evidence_refs":["src:../x:1"],"counterevidence":"none observed","smallest_check":"inspect source","scope":"src/","expected_benefit":"none","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-8","claim":"untracked source citation","lens":"gap critique","evidence_refs":["src:src/untracked.py:1"],"counterevidence":"none observed","smallest_check":"inspect source","scope":"src/","expected_benefit":"none","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-9","claim":"out of range citation","lens":"gap critique","evidence_refs":["src:src/tracked.py:2"],"counterevidence":"none observed","smallest_check":"inspect source","scope":"src/","expected_benefit":"none","expected_cost":"small","duplicate_disposition":"new"},{"id":"candidate-10","claim":"Unicode source finding","lens":"gap critique","evidence_refs":["src:src/한글.py:1"],"counterevidence":"none observed","smallest_check":"inspect Unicode source","scope":"src/","expected_benefit":"ground the finding","expected_cost":"small","duplicate_disposition":"new"}],"tasks":[{"candidate_id":"candidate-3","id":"t1","title":"fix: tighten greeting output","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]},{"candidate_id":"candidate-6","id":"t6","title":"investigate: source finding","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]},{"candidate_id":"candidate-10","id":"t10","title":"investigate: Unicode source finding","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]}]}
 JSON
 EOF
   chmod +x "$discovery_bin/codex" "$readers"/*
@@ -10614,6 +10621,8 @@ EOF
   assert_file_contains "$discovery/out" "evidence packet:"
   assert_file_contains "$discovery/out" "candidate report:"
   assert_file_contains "$discovery_home/discovery-prompt.txt" "failure-ref"
+  assert_file_contains "$discovery_home/discovery-prompt.txt" "one finding per candidate"
+  assert_file_contains "$discovery_home/discovery-prompt.txt" "src:"
   assert_file_contains "$discovery_home/discovery-prompt.txt" "imagination"
   assert_file_contains "$discovery_home/discovery-prompt.txt" "gap critique"
   assert_file_contains "$discovery_home/discovery-prompt.txt" "pruning"
@@ -10639,12 +10648,77 @@ import json, sys
 proposal, report = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
 assert set(proposal) == {"schema", "kind", "spec_sha256", "plan_sha256", "base_sha",
                          "id_prefix", "allowed_envelope", "acceptance_files", "tasks"}
-assert [task["id"] for task in proposal["tasks"]] == ["t1"]
+assert [task["id"] for task in proposal["tasks"]] == ["t1", "t6", "t10"]
 assert report["candidates"][0]["disposition_status"] == "unresolved_evidence_report_only"
 assert report["candidates"][1]["disposition_status"] == "suppressed_duplicate_task"
 assert report["candidates"][2]["disposition_status"] == "eligible"
+assert report["candidates"][3]["disposition_status"] == "held_uncertain_match"
+assert report["candidates"][4]["disposition_status"] == "suppressed_rejected_hypothesis"
+assert report["candidates"][5]["disposition_status"] == "eligible"
+assert [row["disposition_status"] for row in report["candidates"][6:9]] == [
+    "unresolved_evidence_report_only"] * 3
+assert report["candidates"][9]["disposition_status"] == "eligible"
 PY
   [ ! -e "$discovery/.oms/plan/tasks.json" ] || fail "discover must not mutate the task board"
+
+  cat > "$discovery_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - <<'PY'
+import json
+
+def candidate(cid, claim, evidence_ref):
+    return {"id": cid, "claim": claim, "lens": "gap critique",
+            "evidence_refs": [evidence_ref], "counterevidence": "none observed",
+            "smallest_check": "inspect the cited source", "scope": "src/",
+            "expected_benefit": "ground the finding", "expected_cost": "small",
+            "duplicate_disposition": "new"}
+
+long_path = "src:" + "src/" + ("a" * 256) + ".py:1"
+print(json.dumps({
+    "candidates": [
+        candidate("candidate-long-path", "overlong source path", long_path),
+        candidate("candidate-valid-neighbor", "valid source neighbor",
+                  "src:src/tracked.py:1"),
+    ],
+    "tasks": [
+        {"candidate_id": "candidate-long-path", "id": "t-long-path",
+         "title": "investigate: long source path", "allowed": ["src/"],
+         "verify": "bash tests/run.sh", "depends": []},
+        {"candidate_id": "candidate-valid-neighbor", "id": "t-valid-neighbor",
+         "title": "investigate: valid source neighbor", "allowed": ["src/"],
+         "verify": "bash tests/run.sh", "depends": []},
+    ],
+}))
+PY
+EOF
+  chmod +x "$discovery_bin/codex"
+  (
+    umask 022
+    OMS_WORK_DISCOVERY_SCRIPTS_DIR="$readers" OMS_WORK_DISCOVERY_OMS="$readers/oms" \
+      OMS_LIB_TMPDIR="$discovery_tmp" TMPDIR="$discovery_tmp" \
+      HOME="$discovery_home" NVM_DIR="$discovery_home/.nvm" PATH="$discovery_bin:/usr/bin:/bin" \
+      "$ROOT/scripts/plan-from-spec.sh" --repo "$discovery" --to codex --discover
+  ) >"$discovery/long-source.out" 2>&1 ||
+    fail "overlong source citation blocked a neighboring valid proposal: $(tail -6 "$discovery/long-source.out")"
+  python3 - "$discovery/.oms/plan" <<'PY' || fail "overlong source ref damaged neighboring candidate"
+import glob, json, os, sys
+root = sys.argv[1]
+for path in glob.glob(os.path.join(root, "candidates-*.json")):
+    report = json.load(open(path, encoding="utf-8"))
+    by_id = {row["id"]: row for row in report["candidates"]}
+    if "candidate-long-path" not in by_id:
+        continue
+    assert by_id["candidate-long-path"]["disposition_status"] == \
+        "unresolved_evidence_report_only", by_id
+    assert by_id["candidate-valid-neighbor"]["disposition_status"] == "eligible", by_id
+    proposal_path = os.path.join(root, os.path.basename(path).replace("candidates-", "proposal-"))
+    proposal = json.load(open(proposal_path, encoding="utf-8"))
+    assert [row["id"] for row in proposal["tasks"]] == ["t-valid-neighbor"], proposal
+    break
+else:
+    raise AssertionError("overlong source candidate report missing")
+PY
 
   # A failed planner must remove its packet and keep all temporary artifacts private.
   cat > "$discovery_bin/codex" <<'EOF'

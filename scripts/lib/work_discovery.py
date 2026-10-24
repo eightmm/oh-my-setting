@@ -201,6 +201,9 @@ def _collect_metrics(repo):
         "cancel_totals": {"cancels": interventions.get("cancels"),
                           "total": interventions.get("total")},
     }
+    identity = json.dumps(projected, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+    projected["ref"] = "metrics-" + _fingerprint(identity)[:12]
     return _section([_clean(projected)], {"complete": not bool(report.get("incomplete"))})
 
 
@@ -508,11 +511,25 @@ def collect(repo):
         raise CorruptEvidenceError("rejected") from error
     try:
         matches = []
+        verdict_counts = {}
         for number, line in enumerate(raw.splitlines(), 1):
             if line.startswith("hypothesis:"):
                 anchor = "line-%d-%s" % (number, _fingerprint(line)[:16])
-                matches.append({"ref": anchor, "line": number, "text": line})
-        sections["rejected"] = _section(matches, {"complete": True, "hypotheses": len(matches)})
+                fields = line.split("|")
+                verdict_field = next((field.strip()[len("verdict:"):].strip()
+                                      for field in fields[1:]
+                                      if field.strip().lower().startswith("verdict:")), None)
+                verdict_value = (verdict_field.split()[0].lower()
+                                 if verdict_field and verdict_field.split() else None)
+                verdict = (verdict_value if verdict_value is not None else
+                           fields[3].strip().split()[0].lower()
+                           if len(fields) >= 4 and fields[3].strip().split() else "unknown")
+                matches.append({"ref": anchor, "line": number, "text": line,
+                                "verdict": verdict})
+                verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+        sections["rejected"] = _section(
+            matches, {"complete": True, "hypotheses": len(matches),
+                      "verdict_counts": verdict_counts})
     except (UnicodeError, ValueError):
         raise CorruptEvidenceError("rejected")
 

@@ -1016,6 +1016,11 @@ Return JSON with candidates and tasks: each candidate has id, claim, lens,
 evidence_refs (copy each ref exactly as it appears in the packet, or use the literal speculative), counterevidence,
 smallest_check, scope, expected_benefit, expected_cost, and duplicate_disposition
 (new, duplicates task X, matches rejected hypothesis at line N, or uncertain).
+Report one finding per candidate; do not bundle unrelated findings. A rejected-hypothesis
+match must name the single line whose approach the candidate repeats. Only a line
+with verdict rejected suppresses; every other matched verdict is uncertain and
+report-only. Before calling a finding fixed or uncertain, check the current source
+and cite what you checked with src:PATH:LINE evidence_refs.
 Evaluate three lenses without a quota: imagination (combine observed constraints
 or failures into another approach, including opportunities outside current
 tasks); gap critique (missing practice, missing capability, undocumented
@@ -1171,7 +1176,7 @@ if OMS_PLAN_SPEC_SHA="$spec_sha" OMS_PLAN_BEFORE_SHA="$plan_sha" \
   OMS_PLAN_DISCOVER="$DISCOVER" OMS_PLAN_DISCOVERY_PACKET="$discovery_evidence" \
   OMS_PLAN_CANDIDATE_REPORT="$candidate_report" \
   python3 - "$answer_artifact" > "$proposal_output" <<'PY'
-import json, os, re, sys
+import json, os, pathlib, re, subprocess, sys
 
 text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 # Some provider CLIs echo the whole prompt (schema example included) inside
@@ -1209,8 +1214,8 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
         existing_ids = {str(row.get("id")) for row in
                         packet.get("sections", {}).get("tasks", {}).get("items", [])
                         if isinstance(row, dict)}
-        rejected_lines = {int(row.get("line")) for row in
-                          packet.get("sections", {}).get("rejected", {}).get("items", [])
+        rejected_lines = {int(row.get("line")): str(row.get("verdict", "")).lower()
+                          for row in packet.get("sections", {}).get("rejected", {}).get("items", [])
                           if isinstance(row, dict) and str(row.get("line", "")).isdigit()}
         packet_refs = set()
         def collect_refs(value):
@@ -1223,6 +1228,56 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                 for child in value:
                     collect_refs(child)
         collect_refs(packet)
+        repository = str(pathlib.Path(packet_path).resolve().parents[2])
+        def valid_source_ref(ref):
+            match = re.fullmatch(r"src:([^:]+):([1-9][0-9]*)", ref)
+            if not match:
+                return False
+            relative, line_text = match.groups()
+            try:
+                if relative.startswith("/") or "\\" in relative or "\x00" in relative:
+                    return False
+                source = pathlib.PurePosixPath(relative)
+                if source.as_posix() != relative or any(part in ("", ".", "..")
+                                                        for part in source.parts):
+                    return False
+                cursor = pathlib.Path(repository)
+                for part in source.parts:
+                    cursor = cursor / part
+                    if cursor.is_symlink():
+                        return False
+                if not cursor.is_file():
+                    return False
+                tree = subprocess.run(
+                    ["git", "-C", repository, "ls-tree", "-r", "-z", "--full-tree",
+                     "HEAD", "--", relative],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                tree_rows = []
+                for row in tree.stdout.split(b"\0"):
+                    metadata, separator, path = row.partition(b"\t")
+                    if separator:
+                        tree_rows.append((metadata.decode("ascii"), separator,
+                                          path.decode("utf-8")))
+                if tree.returncode or not any(
+                        separator and path == relative and metadata.split()[0] in ("100644", "100755")
+                        for metadata, separator, path in tree_rows):
+                    return False
+                indexed = subprocess.run(
+                    ["git", "-C", repository, "ls-files", "--stage", "-z", "--", relative],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                index_rows = []
+                for row in indexed.stdout.split(b"\0"):
+                    metadata, separator, path = row.partition(b"\t")
+                    if separator:
+                        index_rows.append((metadata.decode("ascii"), separator,
+                                           path.decode("utf-8")))
+                if indexed.returncode or not any(
+                        separator and path == relative and metadata.split()[0] in ("100644", "100755")
+                        for metadata, separator, path in index_rows):
+                    return False
+                return int(line_text) <= len(cursor.read_bytes().splitlines())
+            except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+                return False
         statuses, normalized = {}, []
         for candidate in candidates:
             if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str):
@@ -1250,7 +1305,9 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                 match = re.search(r"line\s+(\d+)", disposition)
                 if not match or int(match.group(1)) not in rejected_lines:
                     raise ValueError("candidate cites an unknown rejected-hypothesis line")
-                status = "suppressed_rejected_hypothesis"
+                status = ("suppressed_rejected_hypothesis"
+                          if rejected_lines[int(match.group(1))] == "rejected"
+                          else "held_uncertain_match")
             elif disposition_keyword == "uncertain":
                 status = "held_uncertain_match"
             elif disposition_keyword.startswith("duplicates task "):
@@ -1265,9 +1322,12 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                 raise ValueError("candidate has invalid duplicate_disposition")
             if status == "eligible" and "speculative" in refs:
                 status = "speculative_report_only"
-            elif status == "eligible" and any(
-                    not isinstance(ref, str) or ref not in packet_refs for ref in refs):
-                status = "unresolved_evidence_report_only"
+            elif status == "eligible":
+                if any(not isinstance(ref, str) or
+                       (ref not in packet_refs and
+                        not (ref.startswith("src:") and valid_source_ref(ref)))
+                       for ref in refs):
+                    status = "unresolved_evidence_report_only"
             row = dict(candidate)
             row["disposition_status"] = status
             normalized.append(row)
