@@ -224,7 +224,7 @@ with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}
 # Enumeration order and output growth must not weaken the shared generation.
 scan_project = project / 'scandir-inputs'
 (scan_project / '.oms/hooks').mkdir(parents=True)
-scan_outputs = scan_project / '.oms/artifacts/delegate'
+scan_outputs = scan_project / '.oms/work-journal/outputs'
 scan_outputs.mkdir(parents=True)
 for name in ('z-last', 'A-first', 'm-middle'):
     (scan_outputs / name).write_text(name, encoding='utf-8')
@@ -1389,7 +1389,7 @@ for relative in ('.oms/lifecycle/events.jsonl', '.oms/hooks/events.jsonl', '.oms
     source.write_text('record', encoding='utf-8')
     assert cache.fingerprint(project) != before, relative
 # Only reads with a fully known input set are narrowed; the dashboard aggregates state.sh and everything it starts,
-# so a completion report body it validates must still invalidate it.
+# so state it reads (plan, task, the artifact index and ledger) must still invalidate it, while a report body must not.
 assert set(cache.KEY_INPUTS) == {'attempts', 'result-records'}, cache.KEY_INPUTS
 narrow_project = project / 'narrow-keys'
 (narrow_project / '.oms/hooks').mkdir(parents=True)
@@ -1411,6 +1411,11 @@ for key in narrow_calls:
 report.write_text('proof, altered', encoding='utf-8')
 for key in narrow_calls:
     narrow_read(key)
+assert narrow_calls == {'attempts': 1, 'result-records': 1, 'dashboard': 1}, narrow_calls
+(narrow_project / '.oms/plan').mkdir()
+(narrow_project / '.oms/plan/tasks.json').write_text('{}', encoding='utf-8')
+for key in narrow_calls:
+    narrow_read(key)
 assert narrow_calls == {'attempts': 1, 'result-records': 1, 'dashboard': 2}, narrow_calls
 (narrow_project / '.oms/artifacts/index.jsonl').write_text('row\n', encoding='utf-8')
 for key in narrow_calls:
@@ -1423,7 +1428,7 @@ assert narrow_calls == {'attempts': 3, 'result-records': 3, 'dashboard': 4}, nar
 # The whole-tree walk is shared by a tick's unlisted keys: one start plus one check per collection.
 tick = cache.TickReads(narrow_project)
 with patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as walks:
-    (narrow_project / '.oms/artifacts/closed-000.md').write_text('proof, again', encoding='utf-8')
+    (narrow_project / '.oms/plan/tasks.json').write_text('{"again": 1}', encoding='utf-8')
     cache.read_shared(narrow_project, 'dashboard', lambda: 1, _tick=tick)
     cache.read_shared(narrow_project, 'other-whole-key', lambda: 1, _tick=tick)
 assert [call.args[1:] for call in walks.call_args_list] == [(None,)] * 3, walks.call_args_list
@@ -1476,12 +1481,37 @@ for relative in ('.oms/panel-state/dispatch-logs/call-1.stream', '.oms/panel-sta
     with source.open('a', encoding='utf-8') as handle:
         handle.write('worker output')
     assert cache.fingerprint(walk_project) == before, relative
-for relative in ('.oms/plan/tasks.json', '.oms/task/current.md', '.oms/work-journal/index.sqlite3',
-                 '.oms/artifacts/review/r-1.md', '.oms/lifecycle/attempts/att_1/state.json'):
+# The dashboard opens only the artifact index and lifecycle ledger below these subtrees, so new or rewritten files
+# elsewhere in them keep the fingerprint, in place or not.
+for relative in ('.oms/artifacts/review/r-1.md', '.oms/artifacts/delegate/body.md', '.oms/lifecycle/attempts/att_1/state.json',
+                 '.oms/lifecycle/attempts/att_1/spec.json', '.oms/panel-state/dispatch-logs/new.json', '.oms/panel-state/board.json'):
     source = walk_project / relative
     source.parent.mkdir(parents=True, exist_ok=True)
     before = cache.fingerprint(walk_project)
     source.write_text('state', encoding='utf-8')
+    assert cache.fingerprint(walk_project) == before, relative
+    source.write_text('state, rewritten', encoding='utf-8')
+    assert cache.fingerprint(walk_project) == before, relative
+# Patch-admit reports are read directly during coverage validation.
+admit_report = walk_project / '.oms/artifacts/admit/admit-fixture.md'
+admit_report.parent.mkdir(parents=True, exist_ok=True)
+admit_report.write_text('report', encoding='utf-8')
+before = cache.fingerprint(walk_project)
+admit_report.write_text('report rewritten', encoding='utf-8')
+assert cache.fingerprint(walk_project) != before, 'patch-admit report rewrite kept the fingerprint'
+before = cache.fingerprint(walk_project)
+admit_report.unlink()
+assert cache.fingerprint(walk_project) != before, 'patch-admit report deletion kept the fingerprint'
+for relative in ('.oms/plan/tasks.json', '.oms/task/current.md', '.oms/work-journal/index.sqlite3',
+                 '.oms/artifacts/index.jsonl', '.oms/lifecycle/events.jsonl'):
+    source = walk_project / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    before = cache.fingerprint(walk_project)
+    source.write_text('state', encoding='utf-8')
+    assert cache.fingerprint(walk_project) != before, relative
+    before = cache.fingerprint(walk_project)
+    with source.open('a', encoding='utf-8') as handle:
+        handle.write('more\n')
     assert cache.fingerprint(walk_project) != before, relative
 ledger = project / '.oms/lifecycle/events.jsonl'
 def ledger_row(kind, **extra):

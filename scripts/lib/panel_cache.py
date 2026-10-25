@@ -22,25 +22,23 @@ INTERVAL = 30
 MAX_BYTES = 8 * 1024 * 1024
 DIRECTORY = '.oms/hooks/panel-cache'
 SKIPPED = {DIRECTORY, '.oms/hooks/panel-activity'}
-# Worker output the whole-.oms walk (every key without KEY_INPUTS entry, i.e. the dashboard) provably never opens.
-# Traced with strace -f over `oms dashboard --json` on a copy of a live .oms (43k entries, dispatch logs, review
-# artifacts, locks, work-journal present) plus a read of every collector it starts (state.sh, agent-events list,
-# artifact-index list, oms_runtime.evidence, dashboard_projection): none of these paths was opened or stat'ed.
-#   panel-state/dispatch-logs  live worker streams/transcripts/logs; read only by panel_activity, panel_review, peer-common
-#   locks                      advisory lock dirs and their process-start stamps; read only by lock owners
-#   artifacts/review/*.attempt-N.out, *.attempts.json  provider attempt output; read only by peer-review
-# Kept on purpose: work-journal (journal_storage reports file_count/total_bytes over every file, index.sqlite3
-# included), lifecycle/attempts (a state file there is still an input), git refs, and everything else.
-# One conditional read remains: an evidence binding may declare --depends on such a file; its change then shows
-# at INTERVAL expiry rather than on the next tick, which bounds that staleness to INTERVAL seconds.
-WALK_SKIPPED = {'.oms/panel-state/dispatch-logs', '.oms/locks'}
-_REVIEW_OUTPUT = re.compile(r'\.attempt-[0-9]+\.out$')
+# The dashboard (every key without a KEY_INPUTS entry) opens, under these .oms subtrees, only the named children
+# (state.sh, agent-events list, artifact-index list, patch-admit reports and the collectors they start; traced from source):
+#   artifacts    index.jsonl, admit      coverage hashes reports named by verified patch-admit index rows
+#   lifecycle    events.jsonl            attempts/*/spec.json is read only by the resume and start paths
+#   panel-state  (nothing)               dispatch logs and transcripts are read only by panel_activity/panel_review
+# locks (advisory lock dirs) is skipped outright. A new dashboard read under a pruned subtree must be added here.
+# The subtree itself is kept as an identity entry. Patch-admit reports supplied with --report outside artifacts/admit,
+# and evidence --depends files (many outside .oms and never fingerprinted), refresh only when INTERVAL expires.
+# Kept on purpose: work-journal (journal_storage reports file_count/total_bytes over every file), git refs, the rest.
+PRUNED = {'.oms/artifacts': ('index.jsonl', 'admit'), '.oms/lifecycle': ('events.jsonl',), '.oms/panel-state': ()}
+WALK_SKIPPED = {'.oms/locks'}
 ROOT = Path(__file__).resolve().parents[2]
 LEDGER = '.oms/lifecycle/events.jsonl'
 LEDGER_WINDOW = 256 * 1024
 # The one place a cached read declares its .oms inputs. Only a read whose complete input set is known may be
 # listed; every other key (the dashboard, which aggregates state.sh and the collectors it starts) keeps the
-# whole-.oms walk minus WALK_SKIPPED, so a key that joins that walk must never read those paths. A new read_shared key must either list every .oms file it opens here or stay unlisted.
+# whole-.oms walk minus PRUNED and WALK_SKIPPED, so a key that joins that walk must never read those paths. A new read_shared key must either list every .oms file it opens here or stay unlisted.
 #   attempts       agent-events list --json: load_projection reads only lifecycle/events.jsonl
 #                  (scripts/lib/agent-events.py event_list -> load_projection -> read_rows(event_path))
 #   result-records _records (panel_results.py): that attempts list plus read_index of artifacts/index.jsonl
@@ -121,8 +119,7 @@ def fingerprint(repo, inputs=None):
                 if relative in SKIPPED or child.name.endswith(('.lock', '.tmp')):
                     continue
                 if inputs is None and (relative in WALK_SKIPPED or (
-                        label == '.oms/artifacts/review' and (
-                            child.name.endswith('.attempts.json') or _REVIEW_OUTPUT.search(child.name)))):
+                        label in PRUNED and child.name not in PRUNED[label])):
                     continue
                 try:
                     child_info = child.stat(follow_symlinks=False)
