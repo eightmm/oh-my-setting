@@ -3073,6 +3073,20 @@ with patch.dict(os.environ, environment, clear=True):
         assert [r["task_id"] for r in selected["rows"]] == ["old-worker"]
         assert [call["attempt_id"] for call in selected["rows"][0]["calls"]] == ["att_old"]
         assert not saved.results(project, "old-worker", "chat-other")["rows"][0]["calls"]
+    # A call's scoped results never adopt tasks that aged out of the attempt window, even when
+    # their whole-main result names the call's own parent main.
+    child = {"attempt_id": "att_child", "task_id": "child-task", "parent_attempt_id": "main-aged",
+             "updated_at": "2026-05-01", "refs": {"panel_room_participant": "call-child"}}
+    aged_ids = ["aged-%s" % n for n in range(3)]
+    aged_rows = [{"kind": "panel-result", "task_id": ident, "ts": "2026-04-%02d" % (n + 1)}
+                 for n, ident in enumerate(aged_ids)]
+    child_call = {"kind": "call", "task_id": "child-task", "attempt_id": "att_child", "exit": 0}
+    with patch.object(saved, "_records", return_value=([child], aged_rows + [child_call])), \
+            patch.object(saved, "_load_result", return_value=dict(parent_task, main_attempt_id="main-aged")):
+        scoped_rows = saved.results(project, room_participant="call-child")["rows"]
+        assert [r["task_id"] for r in scoped_rows] == ["child-task"], scoped_rows
+        assert not saved.results(project, room_participant="call-other")["rows"]
+        assert saved.results(project, aged_ids[0])["rows"][0]["task_id"] == aged_ids[0]
     preflight_attempt = {"attempt_id": "att_preflight", "task_id": "preflight-check", "state": "done",
                          "updated_at": "2026-04-01", "refs": {}}
     staged_attempt = {"attempt_id": "att_staged", "task_id": "stage-check", "state": "done",

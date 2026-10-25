@@ -1775,14 +1775,12 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         ids = [ident for ident in ids if not ident.startswith('preflight-')]
     scoped = bool(room_participant and not task_id)
     if scoped:
-        # Select within this participant's retained tasks before the 20-task cap;
-        # a task with no attempt of its own may only adopt a main's children.
-        mine = [a for a in attempts if a.get('refs', {}).get('panel_room_participant') == room_participant]
-        own = {a.get('task_id') for a in mine}
-        adopting = any(a.get('parent_attempt_id') for a in mine)
-        owned = {a.get('task_id') for a in attempts}
-        has_result = {r.get('task_id') for r in rows if r.get('kind') == 'panel-result'}
-        ids = [i for i in ids if i in own or (adopting and i not in owned and i in has_result)]
+        # Select within this participant's own tasks before the 20-task cap. A task
+        # without an attempt of this participant (another call's, or a main's whole-main
+        # result) is never adopted: no recorded field ties it to this call.
+        own = {a.get('task_id') for a in attempts
+               if a.get('refs', {}).get('panel_room_participant') == room_participant}
+        ids = [i for i in ids if i in own]
     chosen = [task_id] if task_id in ids else [] if task_id else list(ids)
     chosen = list(reversed(chosen))
     # Page over the rows that survive the scope checks below, so skipped tasks never count as omitted.
