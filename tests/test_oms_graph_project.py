@@ -214,7 +214,8 @@ class ProjectGraphTest(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts/lib/oms_graph_core.py"), "--repo", str(self.repo),
              "project", "context", "--task", "잠금 복구", "--entry-path", "lease.py", "--json", "--no-refresh"],
-            env=dict(os.environ, OMS_PROJECT_GRAPH_STATE=str(self.state)), capture_output=True, text=True, check=True)
+            env={**{k: v for k, v in os.environ.items() if k != "OMS_HARNESS_CHILD"},
+                 "OMS_PROJECT_GRAPH_STATE": str(self.state)}, capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(result.stdout)["retrieval"]["status"], "matched")
         subprocess.run([sys.executable, "-c",
                         "import sys; sys.path.insert(0, sys.argv[1]); import oms_graph.cli; "
