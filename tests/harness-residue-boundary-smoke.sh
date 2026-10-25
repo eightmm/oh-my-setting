@@ -348,6 +348,32 @@ cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegat
 cleanup_out 0 >/dev/null
 [ ! -e "$TMPDIR/oh-my-setting-delegate.omsok" ] || fail "apply kept a delegate holding only disposable .oms files"
 
+# The worktree's own regenerable project graph is disposable; a user file beside it is not.
+delegate_run omsgraph task-omsgraph "done"
+oms_wt="$TMPDIR/oh-my-setting-delegate.omsgraph/wt-omsgraph/.oms"
+mkdir -p "$oms_wt/project-graph/cache" "$oms_wt/project-graph/context"
+printf '*\n' > "$oms_wt/.gitignore"
+printf '{}\n' > "$oms_wt/project-graph/graph.json"
+printf '{}\n' > "$oms_wt/project-graph/manifest.json"
+printf '{}\n' > "$oms_wt/project-graph/cache/abc123.json"
+printf '{}\n' > "$oms_wt/project-graph/context/def456.json"
+cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegate.omsgraph (dead harness temp dir)" ||
+  fail "project-graph files alone must not keep a settled delegate"
+
+delegate_run omsgraphuser task-omsgraphuser "done"
+oms_wt="$TMPDIR/oh-my-setting-delegate.omsgraphuser/wt-omsgraphuser/.oms"
+mkdir -p "$oms_wt/project-graph/cache"
+printf '{}\n' > "$oms_wt/project-graph/graph.json"
+printf 'only copy\n' > "$oms_wt/project-graph/notes.md"
+kept_with omsgraphuser "holds .oms/project-graph/notes.md" "an extra file in project-graph must keep the worktree"
+
+delegate_run omsgraphlink task-omsgraphlink "done"
+oms_wt="$TMPDIR/oh-my-setting-delegate.omsgraphlink/wt-omsgraphlink/.oms"
+mkdir -p "$oms_wt/project-graph"
+printf '{}\n' > "$oms_wt/real.json"
+ln -s ../real.json "$oms_wt/project-graph/graph.json"
+kept_with omsgraphlink "holds .oms/project-graph/graph.json" "a symlinked project-graph file must keep the worktree"
+
 delegate_run omsart task-omsart "done"
 mkdir -p "$TMPDIR/oh-my-setting-delegate.omsart/wt-omsart/.oms/artifacts"
 printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.omsart/wt-omsart/.oms/artifacts/x.md"

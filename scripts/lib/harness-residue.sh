@@ -435,6 +435,11 @@ try:
             empty_only = False
         elif parent == ".oms/hooks/panel-cache" and leaf.endswith(".json"):
             empty_only = False
+        elif rel in (".oms/project-graph/graph.json", ".oms/project-graph/manifest.json"):
+            # Derived, content-addressed copies the main checkout can rebuild.
+            empty_only = False
+        elif parent in (".oms/project-graph/cache", ".oms/project-graph/context") and leaf.endswith(".json"):
+            empty_only = False
         elif parent == ".oms/artifacts" and leaf.endswith(".lock"):
             empty_only = True
         else:
