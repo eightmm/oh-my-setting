@@ -850,6 +850,8 @@ def project_attempts(rows: Sequence[Dict[str, Any]], *, validate: bool = True) -
             current["state"] = new
             current["terminal"] = new in TERMINAL_STATES
             current["reason_code"] = row.get("reason_code", "")
+            if new == "review":
+                current["review_entered_at"] = row["ts"]
         elif event_type == "attempt.usage":
             for name, value in row.get("usage", {}).items():
                 current["usage"][name] += int(value)

@@ -108,7 +108,6 @@ rs_collect private "$ROOT/scripts/project-private.sh" --repo "$REPO" status --js
 # an agent resuming here most needs to distrust.
 rs_collect autoupdate "$ROOT/scripts/auto-update.sh" attention
 rs_collect lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json
-rs_collect lifecycle_events "$ROOT/scripts/agent-events.sh" --repo "$REPO" follow --timeout 0
 rs_collect approvals "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json
 if [ "$FAILURE_PHYSICAL" = 0 ] || [ -f "$REPO/.oms/failures.jsonl" ]; then
   rs_collect failures "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json
@@ -131,7 +130,6 @@ mv "$RS_TMP/lifecycle.out" "$RS_TMP/lifecycle.json"
   LIFECYCLE_HEALTHY=0
   printf '[]\n' > "$RS_TMP/lifecycle.json"
 }
-[ "$(rs_rc lifecycle_events)" = 0 ] || LIFECYCLE_HEALTHY=0
 APPROVAL_HEALTHY=1
 mv "$RS_TMP/approvals.out" "$RS_TMP/approvals.json"
 [ "$(rs_rc approvals)" = 0 ] || {
@@ -306,7 +304,6 @@ OMS_RS_REPO="$REPO" \
 OMS_RS_JSON="$AS_JSON" \
 OMS_RS_PRIVATE="$PRIVATE_JSON" \
 OMS_RS_LIFECYCLE_FILE="$RS_TMP/lifecycle.json" \
-OMS_RS_LIFECYCLE_EVENTS_FILE="$RS_TMP/lifecycle_events.out" \
 OMS_RS_LIFECYCLE_HEALTHY="$LIFECYCLE_HEALTHY" \
 OMS_RS_APPROVAL_FILE="$RS_TMP/approvals.json" \
 OMS_RS_APPROVAL_HEALTHY="$APPROVAL_HEALTHY" \
@@ -425,20 +422,12 @@ try:
         review_days = max(0.0, configured_review_days)
 except (TypeError, ValueError):
     pass
-review_since = {}
-if os.environ["OMS_RS_LIFECYCLE_HEALTHY"] == "1":
-    review_events, _ = read_jsonl_checked(os.environ["OMS_RS_LIFECYCLE_EVENTS_FILE"])
-    for event in review_events:
-        attempt_id = event.get("attempt_id")
-        if (event.get("event_type") == "attempt.state_changed" and event.get("to_state") == "review"
-                and isinstance(attempt_id, str)):
-            review_since[attempt_id] = event.get("ts")
 now_epoch = time.time()
 aged_reviews = 0
 for item in attempts:
     if item.get("state") != "review" or not isinstance(item.get("attempt_id"), str):
         continue
-    since = review_since.get(item.get("attempt_id"))
+    since = item.get("review_entered_at")
     try:
         entered_epoch = calendar.timegm(time.strptime(since, "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):

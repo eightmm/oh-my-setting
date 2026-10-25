@@ -354,6 +354,29 @@ assert corrupt_state["agent_operations"]["healthy"] is False, corrupt_state
 assert corrupt_state["agent_operations"]["review_aged"] == 0, corrupt_state
 assert "agent-lifecycle-corrupt" in {item["code"] for item in corrupt_inbox["items"]}, corrupt_inbox
 PY
+# An attempt that entered review, left and re-entered ages from its latest
+# entry: the first entry is rewritten far into the past, the second stays now.
+for review_state in working review; do
+  env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" transition \
+    --attempt "$review_attempt" --state "$review_state" >/dev/null
+done
+python3 - "$TMP/repo/.oms/lifecycle/events.jsonl" "$review_attempt" <<'PY'
+import json, sys
+path, attempt = sys.argv[1:3]
+rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+entries = [row for row in rows if row.get("attempt_id") == attempt and row.get("to_state") == "review"]
+assert len(entries) == 2, entries
+entries[0]["ts"] = "2000-01-01T00:00:00Z"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+PY
+"$ROOT/scripts/state.sh" --repo "$TMP/repo" --json > "$TMP/reentry-state.json"
+python3 - "$TMP/reentry-state.json" <<'PY' || fail "re-entered review did not age from its latest entry"
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+assert state["agent_operations"]["review"] == 1, state
+assert state["agent_operations"]["review_aged"] == 0, state
+PY
 env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" transition \
   --attempt "$review_attempt" --state "done" >/dev/null
 
