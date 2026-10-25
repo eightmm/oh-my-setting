@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import datetime as dt
 import hashlib
 import hmac
@@ -785,11 +786,23 @@ def validate_event_row(row: Dict[str, Any], number: int = 0) -> None:
         raise OpsError("%s stores forbidden raw trace context" % where)
 
 
-def project_attempts(rows: Sequence[Dict[str, Any]], *, validate: bool = True) -> Dict[str, Dict[str, Any]]:
-    attempts: Dict[str, Dict[str, Any]] = {}
-    event_ids = set()
-    idempotency: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for number, row in enumerate(rows, 1):
+def new_projection_state() -> Dict[str, Any]:
+    return {"attempts": {}, "event_ids": set(), "idempotency": {}, "count": 0}
+
+
+def project_attempts(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    validate: bool = True,
+    state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Project rows; a `state` from new_projection_state() is continued in place."""
+    if state is None:
+        state = new_projection_state()
+    attempts: Dict[str, Dict[str, Any]] = state["attempts"]
+    event_ids = state["event_ids"]
+    idempotency: Dict[Tuple[str, str], Any] = state["idempotency"]
+    for number, row in enumerate(rows, state["count"] + 1):
         if validate:
             validate_event_row(row, number)
         event_id = row["event_id"]
@@ -862,6 +875,7 @@ def project_attempts(rows: Sequence[Dict[str, Any]], *, validate: bool = True) -
             current["last_heartbeat_at"] = row["ts"]
         if row.get("refs"):
             current["refs"].update(row["refs"])
+    state["count"] += len(rows)
     return attempts
 
 
@@ -1227,7 +1241,176 @@ def event_usage(args: argparse.Namespace) -> int:
     return 0
 
 
+# The projection code is part of the cache identity: editing this module invalidates every cache.
+PROJECTION_CACHE_VERSION = "1:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+
+
+def projection_cache_path(repo: Path) -> Optional[Path]:
+    """Cache file outside the repository, or None when no safe location exists."""
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    home = os.environ.get("HOME", "")
+    if xdg and os.path.isabs(xdg):  # the XDG spec ignores a relative value
+        base = xdg
+    elif home and os.path.isabs(home):
+        base = os.path.join(home, ".cache")
+    else:
+        return None
+    try:
+        root = repo.resolve()
+        directory = (Path(base) / "oms" / "lifecycle").resolve()
+        if directory == root or root in directory.parents:
+            return None
+        key = hashlib.sha256(str(root).encode("utf-8", "surrogateescape")).hexdigest()[:32]
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return directory / (key + ".json")
+
+
+def projection_cache_digest(body: Dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(
+        body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def read_projection_cache(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """Return the cache body only if every field has its type and the digest matches."""
+    if path is None:
+        return None
+    try:
+        with open(str(path), encoding="utf-8") as handle:
+            cache = json.load(handle)
+        ints = ("dev", "ino", "offset", "count")
+        strs = ("prefix_sha", "event_ids", "digest")
+        if (not isinstance(cache, dict)
+                or set(cache) != set(ints + strs + ("version", "attempts", "idempotency"))
+                or cache["version"] != PROJECTION_CACHE_VERSION
+                or any(type(cache[name]) is not int or cache[name] < 0 for name in ints)
+                or any(not isinstance(cache[name], str) for name in strs)
+                or not isinstance(cache["attempts"], list)
+                or not all(isinstance(item, dict) and isinstance(item.get("attempt_id"), str)
+                           for item in cache["attempts"])
+                or len({item["attempt_id"] for item in cache["attempts"]}) != len(cache["attempts"])
+                or not isinstance(cache["idempotency"], list)
+                or not all(isinstance(item, list) and len(item) == 2
+                           and all(isinstance(part, str) for part in item)
+                           for item in cache["idempotency"])):
+            return None
+        body = {name: value for name, value in cache.items() if name != "digest"}
+        if projection_cache_digest(body) != cache["digest"]:
+            return None
+        return cache
+    except Exception:
+        return None
+
+
+def write_projection_cache(path: Optional[Path], state: Dict[str, Any], **position: Any) -> None:
+    if path is None:
+        return
+    try:
+        parent = path.parent
+        parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(str(parent), 0o700)
+        body = dict(
+            position,
+            version=PROJECTION_CACHE_VERSION,
+            count=state["count"],
+            attempts=list(state["attempts"].values()),  # keep insertion order: sort_keys reorders dicts
+            event_ids=" ".join(state["event_ids"]),
+            idempotency=[list(marker) for marker in state["idempotency"]],
+        )
+        body["digest"] = projection_cache_digest(body)
+        write_json_atomic(path, body, 0o600)
+    except Exception:
+        pass
+
+
+def prefix_digest(handle: Any, length: int) -> Any:
+    digest = hashlib.sha256()
+    handle.seek(0)
+    remaining = length
+    while remaining > 0:
+        chunk = handle.read(min(remaining, 1 << 20))
+        if not chunk:
+            return None
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest
+
+
+def cached_attempts(repo: Path) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Project the ledger, resuming from the cache; None means do a full read.
+
+    Any doubt (cache, identity, bytes, parse or projection error) returns None so
+    read_rows/project_attempts decide the result and raise the canonical error.
+    """
+    path = event_path(repo)
+    cache_path = projection_cache_path(repo)
+    try:
+        with _ledger_fd(path) as fd, os.fdopen(os.dup(fd), "rb") as handle:
+            info = os.fstat(fd)
+            cache = read_projection_cache(cache_path)
+            state = None
+            offset = 0
+            prefix = hashlib.sha256()
+            if (cache is not None and (cache["dev"], cache["ino"]) == (info.st_dev, info.st_ino)
+                    and info.st_size >= cache["offset"]):
+                resumed_prefix = prefix_digest(handle, cache["offset"])
+                # The whole consumed prefix must re-hash identically: an in-place edit
+                # anywhere in it (not only the last line) forces a full read.
+                if resumed_prefix is not None and resumed_prefix.hexdigest() == cache["prefix_sha"]:
+                    prefix = resumed_prefix
+                    state = {
+                        "attempts": {item["attempt_id"]: item for item in cache["attempts"]},
+                        "event_ids": set(cache["event_ids"].split()),
+                        "idempotency": {(item[0], item[1]): True for item in cache["idempotency"]},
+                        "count": cache["count"],
+                    }
+                    offset = cache["offset"]
+            resumed = state is not None
+            if state is None:
+                state = new_projection_state()
+            handle.seek(offset)
+            data = handle.read()
+            if data.count(b"\r") != data.count(b"\r\n"):
+                return None  # text-mode line splitting differs from the byte split below
+            lines = data.split(b"\n")
+            partial = lines.pop()
+            rows: List[Dict[str, Any]] = []
+            consumed = offset
+            for raw in lines:
+                size = len(raw) + 1
+                text = raw.decode("utf-8", "replace")
+                if text.strip():
+                    row = json.loads(text)
+                    if not isinstance(row, dict):
+                        return None
+                    rows.append(row)
+                consumed += size
+            project_attempts(rows, state=state)
+            if not resumed or consumed != offset:
+                prefix.update(data[: consumed - offset])
+                write_projection_cache(cache_path, state, dev=info.st_dev, ino=info.st_ino,
+                                       offset=consumed, prefix_sha=prefix.hexdigest())
+            text = partial.decode("utf-8", "replace")
+            if text.strip():
+                row = json.loads(text)
+                if not isinstance(row, dict):
+                    return None
+                state = copy.deepcopy(state)
+                project_attempts([row], state=state)
+            return state["attempts"]
+    except Exception:
+        return None
+
+
 def load_projection(repo: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Return (rows, attempts); rows is empty when the projection came from the cache.
+
+    Readers only: writers must keep the locked read_rows/project_attempts pair.
+    """
+    attempts = cached_attempts(repo)
+    if attempts is not None:
+        return [], attempts
     rows = read_rows(event_path(repo))
     return rows, project_attempts(rows)
 

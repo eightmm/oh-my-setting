@@ -741,4 +741,248 @@ assert row["delegated"]["lifecycle_exit"] != 0, row
 assert row["delegated"]["approval_exit"] != 0, row
 PY
 
+# Readers resume from an out-of-repo projection cache; writers never do. Every
+# cached read must equal a cold full read, and any doubt must fall back to it.
+mkdir -p "$TMP/cache-repo"
+git -C "$TMP/cache-repo" init -q
+python3 - "$ROOT" "$TMP/cache-repo" "$TMP/home" <<'PYCACHE' || fail "lifecycle projection cache diverged from a full read"
+import importlib.util, json, os, pathlib, stat, subprocess, sys, time
+
+root, repo_arg, home = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("agent_events_under_test", root + "/scripts/lib/agent-events.py")
+ae = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ae)
+repo = pathlib.Path(repo_arg).resolve()
+ledger = ae.event_path(repo)
+cache_file = ae.projection_cache_path(repo)
+assert cache_file is not None and str(cache_file).startswith(str(pathlib.Path(home).resolve()) + os.sep), cache_file
+assert not str(cache_file).startswith(str(repo)), "cache must live outside the repository"
+
+
+def cli(*argv):
+    out = subprocess.run(["bash", root + "/scripts/agent-events.sh", "--repo", str(repo)] + list(argv),
+                         check=True, stdout=subprocess.PIPE, universal_newlines=True).stdout
+    return out.replace("\r", "").strip()
+
+
+def dump(attempts):
+    return json.dumps(attempts, sort_keys=True), list(attempts)
+
+
+def full():
+    return dump(ae.project_attempts(ae.read_rows(ledger)))
+
+
+def cached():
+    rows, attempts = ae.load_projection(repo)
+    return dump(attempts)
+
+
+def cache_state():
+    return json.loads(cache_file.read_text(encoding="utf-8"))
+
+
+def failure(call):
+    try:
+        call()
+    except ae.OpsError as exc:
+        return str(exc)
+    raise AssertionError("expected the ledger to fail projection")
+
+
+def append_raw(row):
+    with open(str(ledger), "ab") as handle:
+        handle.write((json.dumps(row) + "\n").encode("utf-8"))
+
+
+def last_row():
+    return json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+
+
+a = cli("start", "--provider", "codex", "--tool", "cache-a")
+b = cli("start", "--provider", "codex", "--tool", "cache-b")
+cli("heartbeat", "--attempt", a, "--idempotency-key", "cache-key-1")
+cli("usage", "--attempt", b, "--tokens", "7")
+assert cached() == full()
+state = cache_state()
+assert state["offset"] == ledger.stat().st_size and state["count"] == 4, state
+if os.name != "nt":
+    assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(cache_file.parent.stat().st_mode) == 0o700
+
+# (a) warm cache plus new appends, including state a resume must carry over:
+# the idempotency map, the global event_ids and the row count.
+size_before = ledger.stat().st_size
+cli("heartbeat", "--attempt", a)
+cli("usage", "--attempt", b, "--tokens", "5", "--idempotency-key", "cache-key-2")
+cli("heartbeat", "--attempt", b)
+assert cache_state()["offset"] == size_before, "readers must not rewrite the cache on append"
+assert cached() == full()
+assert cache_state()["offset"] == ledger.stat().st_size
+listed = json.loads(cli("list", "--json"))
+expected = sorted(ae.project_attempts(ae.read_rows(ledger)).values(), key=lambda item: item["updated_at"])  # ties keep ledger order
+assert listed == expected, (listed, expected)
+# A cache that dropped event_ids/idempotency would accept these appends
+# silently; the resumed reader must reject them exactly like a cold read.
+for bad_name, mutate in (
+    ("duplicate event_id", lambda row, first: row.update(event_id=first["event_id"])),
+    ("duplicate idempotency key", lambda row, first: row.update(idempotency_key="cache-key-1")),
+):
+    assert cached() == full()
+    clean = ledger.read_bytes()
+    first = json.loads(clean.decode("utf-8").splitlines()[0])
+    row = {"schema": first["schema"], "event_id": "aevt_" + "f" * 32, "ts": first["ts"],
+           "attempt_id": a, "event_type": "attempt.heartbeat",
+           "seq": json.loads(full()[0])[a]["sequence"] + 1}
+    mutate(row, first)
+    append_raw(row)
+    expected_error = failure(lambda: ae.project_attempts(ae.read_rows(ledger)))
+    assert failure(lambda: ae.load_projection(repo)) == expected_error, bad_name
+    ledger.write_bytes(clean)
+
+# (c) the consumed last line edited in place at the same size is detected.
+assert cached() == full()
+raw = ledger.read_bytes()
+lines = raw.splitlines(True)
+tail = lines[-1].decode("utf-8")
+seq = json.loads(tail)["seq"]
+edited = tail.replace('"seq":%d' % seq, '"seq":%d' % (seq + 1 if seq < 9 else seq - 1)).encode("utf-8")
+assert edited != lines[-1].decode("utf-8").encode("utf-8")
+assert len(edited) == len(lines[-1])
+ledger.write_bytes(b"".join(lines[:-1]) + edited)
+assert failure(lambda: ae.project_attempts(ae.read_rows(ledger))) == failure(lambda: ae.load_projection(repo))
+ledger.write_bytes(raw)
+assert cached() == full()
+
+# (c2) an early row edited in place (same inode, size and last line) is detected too.
+assert cached() == full()
+inode_before = ledger.stat().st_ino
+early = raw.replace(b'"seq":1,', b'"seq":9,', 1)
+assert early != raw and len(early) == len(raw) and early.splitlines()[-1] == raw.splitlines()[-1]
+ledger.write_bytes(early)
+assert ledger.stat().st_ino == inode_before or os.name == "nt"
+assert failure(lambda: ae.project_attempts(ae.read_rows(ledger))) == failure(lambda: ae.load_projection(repo))
+ledger.write_bytes(raw)
+assert cached() == full()
+
+# (c3) a valid-JSON cache whose attempts were replaced, with its ledger metadata kept.
+assert cached() == full()
+tampered = cache_state()
+tampered["attempts"] = []
+cache_file.write_text(json.dumps(tampered), encoding="utf-8")
+assert cached() == full() and len(json.loads(full()[0])) == 2
+assert cache_state()["attempts"], "a rejected cache must be rewritten from a full read"
+tampered = cache_state()
+tampered["event_ids"] = ""
+cache_file.write_text(json.dumps(tampered), encoding="utf-8")
+assert cached() == full()
+tampered = cache_state()
+tampered["attempts"] = {}
+cache_file.write_text(json.dumps(tampered), encoding="utf-8")
+assert cached() == full()
+
+# (d) a truncated tail and a corrupt appended row behave exactly as without a cache.
+consumed = cache_state()["offset"]
+with open(str(ledger), "ab") as handle:
+    handle.write(b'{"schema": 1, "event_i')
+assert failure(lambda: ae.project_attempts(ae.read_rows(ledger))) == failure(lambda: ae.load_projection(repo))
+assert cache_state()["offset"] == consumed, "a partial line must not enter the cached offset"
+ledger.write_bytes(raw)
+partial = dict(last_row(), event_id="aevt_" + "e" * 32, seq=last_row()["seq"] + 1)
+with open(str(ledger), "ab") as handle:
+    handle.write(json.dumps(partial).encode("utf-8"))  # complete JSON, no newline
+assert cached() == dump(ae.project_attempts(ae.read_rows(ledger)))
+assert cache_state()["offset"] == consumed
+ledger.write_bytes(raw)
+with open(str(ledger), "ab") as handle:
+    handle.write(b"{}\n")
+assert failure(lambda: ae.project_attempts(ae.read_rows(ledger))) == failure(lambda: ae.load_projection(repo))
+assert cache_state()["offset"] == consumed
+ledger.write_bytes(raw)
+with open(str(ledger), "r+b") as handle:  # shrink below the cached offset
+    handle.truncate(consumed - len(lines[-1]))
+assert cached() == full()
+ledger.write_bytes(raw)
+assert cached() == full()
+
+# (b) compaction replaces the file: the inode changes and the cache must not resume.
+cli("transition", "--attempt", b, "--state", "cancelled", "--actor", "operator", "--reason-code", "operator_hold")
+assert cached() == full()
+inode = ledger.stat().st_ino
+before = cache_state()
+deadline = time.monotonic() + float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "10"))
+while ae.utc_now() <= json.loads(full()[0])[b]["updated_at"]:  # compact drops only strictly older attempts
+    assert time.monotonic() < deadline, "clock did not advance"
+    time.sleep(0.05)
+cli("compact", "--days", "0", "--apply")
+assert ledger.stat().st_ino != inode or os.name == "nt", "compaction should have replaced the ledger"
+after_rows = ae.read_rows(ledger)
+assert all(r["attempt_id"] != b for r in after_rows) and any(r["attempt_id"] == a for r in after_rows)
+assert cached() == full()
+assert b not in json.loads(full()[0]) and cache_state()["count"] == len(after_rows) < before["count"]
+
+# (b2) a same-size replacement whose last line is unchanged differs only by inode.
+assert cached() == full()
+original = ledger.read_bytes()
+first_ts = json.loads(original.splitlines()[0])["ts"]
+changed = original.replace(first_ts.encode("utf-8"), (first_ts[:-2] + ("1" if first_ts[-2] == "0" else "0") + "Z").encode("utf-8"), 1)
+assert changed != original and len(changed) == len(original)
+swap = ledger.with_name("events.jsonl.swap")
+swap.write_bytes(changed)
+os.replace(str(swap), str(ledger))
+assert cached() == full()
+
+# (e) an unusable cache location never changes or fails the read.
+expected = full()
+blocker = pathlib.Path(home) / "cache-blocker"
+blocker.write_text("not a directory", encoding="utf-8")
+saved = {k: os.environ.get(k) for k in ("XDG_CACHE_HOME", "HOME")}
+try:
+    os.environ["XDG_CACHE_HOME"] = str(blocker)
+    assert cached() == expected
+    assert json.loads(cli("list", "--json")) == json.loads(cli("list", "--json"))
+    # A cache root inside the repository (absolute, or via HOME) disables the cache;
+    # a relative XDG_CACHE_HOME is ignored and HOME/.cache is used instead.
+    local_cache = repo / ".cache"
+    os.environ["XDG_CACHE_HOME"] = str(local_cache)
+    assert ae.projection_cache_path(repo) is None
+    assert cached() == expected and not local_cache.exists()
+    assert json.loads(cli("list", "--json")) == json.loads(cli("list", "--json"))
+    assert not local_cache.exists()
+    os.environ["XDG_CACHE_HOME"] = str(repo)
+    assert ae.projection_cache_path(repo) is None and cached() == expected
+    before_cwd = os.getcwd()
+    os.chdir(str(repo))
+    try:
+        os.environ["XDG_CACHE_HOME"] = ".rel-cache"
+        relative = ae.projection_cache_path(repo)
+        assert relative == cache_file, (relative, cache_file)
+        assert cached() == expected and not (repo / ".rel-cache").exists()
+        os.environ["XDG_CACHE_HOME"] = ".rel-cache"
+        assert json.loads(cli("list", "--json")) == json.loads(cli("list", "--json"))
+        assert not (repo / ".rel-cache").exists()
+    finally:
+        os.chdir(before_cwd)
+    os.environ["XDG_CACHE_HOME"] = saved["XDG_CACHE_HOME"]
+    os.environ["HOME"] = str(repo)
+    os.environ.pop("XDG_CACHE_HOME")
+    assert ae.projection_cache_path(repo) is None and cached() == expected
+    assert not (repo / ".cache").exists()
+    os.environ["HOME"] = saved["HOME"]
+    os.environ.pop("XDG_CACHE_HOME", None)
+    os.environ.pop("HOME")
+    assert ae.projection_cache_path(repo) is None
+    assert cached() == expected
+finally:
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+cache_file.write_text("{not json", encoding="utf-8")
+assert cached() == expected
+cache_file.write_text(json.dumps({"version": 0}), encoding="utf-8")
+assert cached() == expected
+PYCACHE
+
 echo "lifecycle-provider-integration: ok"
