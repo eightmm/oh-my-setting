@@ -180,7 +180,7 @@ from panel_dispatch import council
 from panel_dispatch import peer_command
 from panel_dispatch import run
 from panel_dispatch import dashboard
-from panel_layout import tmux_command
+from panel_state import tmux_command
 from panel_layout import shell_command
 from panel_layout import panel_shell
 from panel_layout import watch_shell

@@ -1134,6 +1134,31 @@ plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "clai
            {"id": "t3", "state": "ready"}])
 room.send(repo, "binding-room", os.environ["OMS_ROOM_PARTICIPANT"], "all", "Wiring the banner", kind="status")
 assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
+# The status lookup decodes the room log once per change of the log file, and the prompt path never imports the panel TUI.
+status_call = dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work")
+with patch.object(room, "status", side_effect=AssertionError("unchanged log was decoded again")):
+    assert "set your status" not in hook_state.panel_status_hint(status_call, os.environ["OMS_ROOM_ID"])
+hint_cache = repo / ".oms/hooks/sessions" / (hook_state.session_hash(status_call) + ".hint.json")
+cached = json.loads(hint_cache.read_text())
+cached["status"]["stamp"][-1] += 1  # the log file changed since the answer was stored
+hint_cache.write_text(json.dumps(cached))
+with patch.object(room, "status", wraps=room.status) as decoded:
+    assert "set your status" not in hook_state.panel_status_hint(status_call, os.environ["OMS_ROOM_ID"])
+    assert decoded.call_count == 1, "a changed log must be decoded"
+probe = '''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import hook_state
+cwd = sys.argv[2]
+payload = {"session_id": "route-modules", "cwd": cwd, "hook_event_name": "UserPromptSubmit", "prompt": "Continue work"}
+hook_state.coordination_room(payload)
+hook_state.panel_status_hint(payload, os.environ["OMS_ROOM_ID"])
+print(json.dumps(sorted(m for m in ("terminal_panel", "panel_debate", "panel_results", "panel_view") if m in sys.modules)))
+'''
+route_env = dict(os.environ, TMUX="x", TMUX_PANE="%99", OMS_PANEL_SESSION="oms-fixture", OMS_ROOM_REPO=str(repo))
+loaded = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(repo)], env=route_env,
+                        capture_output=True, text=True, check=True, timeout=60).stdout.replace("\r", "").strip()
+assert loaded == "[]", "the prompt route imported the panel TUI: " + loaded
 # Repeated identical plan/status text is injected once: changed text, a context reset and every 20th prompt re-emit it.
 def wake():
     return hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))

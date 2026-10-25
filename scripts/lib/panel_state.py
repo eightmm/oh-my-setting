@@ -16,6 +16,10 @@ import time
 # Call-local facade imports preserve the public entry point and avoid import cycles.
 
 
+def tmux_command(*args):
+    return ["tmux"] + list(args)
+
+
 def ensure_room(repo, ident=None, title="Shared work"):
     ident = room.resolve(repo, ident or os.environ.get("OMS_ROOM_ID"))
     if ident:

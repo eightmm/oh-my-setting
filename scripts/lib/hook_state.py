@@ -1548,7 +1548,9 @@ def panel_dedup_hint(payload: dict[str, Any], text: str, force: bool) -> str:
     if not omit:
         since = 0
     try:
-        write_json_atomic(path, {"schema": 1, "digest": digest, "since": since})
+        # The status lookup keeps its room-log stamp in this same file.
+        write_json_atomic(path, dict({"schema": 1, "digest": digest, "since": since},
+                                     **({"status": old["status"]} if isinstance(old.get("status"), dict) else {})))
     except Exception:
         return text  # an unstored counter could never trigger the periodic repeat: fail open
     return "" if omit else text
@@ -1621,6 +1623,31 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     return " [oms plan] " + " · ".join(parts)
 
 
+def declared_status(payload: dict[str, Any], repo: Path, room_id: str, me: str) -> dict[str, Any]:
+    """The participant's latest declared status, decoding the room log only when its file changed."""
+    import room
+    import thread_live
+
+    hooks = hook_repo(payload)
+    path = hooks / ".oms" / "hooks" / "sessions" / f"{session_hash(payload)}.hint.json" if hooks else None
+    stamp = None
+    if path is not None:
+        with contextlib.suppress(Exception):
+            ident = room.resolve(repo, room_id)
+            info = thread_live.thread_path(repo, ident).stat()
+            stamp = [str(repo), ident, me, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+            cached = load_state(path).get("status")
+            if (isinstance(cached, dict) and cached.get("stamp") == stamp
+                    and isinstance(cached.get("found"), dict)):
+                return cached["found"]
+    found = (room.status(repo, room_id).get("statuses") or {}).get(me) or {}
+    if stamp is not None:
+        with contextlib.suppress(Exception):
+            kept = {key: found[key] for key in ("text", "ts") if key in found}
+            write_json_atomic(path, dict(load_state(path), status={"stamp": stamp, "found": kept}))
+    return found
+
+
 def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
     """Ask for a declared status when the main has none or it is older than twenty minutes."""
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
@@ -1630,9 +1657,7 @@ def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
     if not (me and room_id and repo):
         return ""
     try:
-        import room
-
-        found = (room.status(repo.resolve(), room_id).get("statuses") or {}).get(me) or {}
+        found = declared_status(payload, repo.resolve(), room_id, me)
         age = time.time() - datetime.strptime(str(found.get("ts")), "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc).timestamp()
         if found.get("text") and age <= 20 * 60:
@@ -1933,7 +1958,7 @@ def coordination_room(payload: dict[str, Any], repo: Path | None = None):
         return None
     try:
         import room
-        import terminal_panel
+        from panel_state import tmux_command
 
         selected_repo = repo if repo is not None else hook_repo(payload)
         if selected_repo is None:
@@ -1944,7 +1969,7 @@ def coordination_room(payload: dict[str, Any], repo: Path | None = None):
         if not re.fullmatch(r"%[0-9]+", pane):
             return None
         deadline = time.monotonic() + 0.35
-        query = subprocess.run(terminal_panel.tmux_command(
+        query = subprocess.run(tmux_command(
             "display-message", "-p", "-t", pane,
             "#{session_name}\t#{@oms_panel_repo}\t#{OMS_ROOM_ID}"),
             capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=0.2, check=False)
