@@ -39,6 +39,8 @@ subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'add', '--
 (salvage_tree / 'deleted.txt').unlink()
 (salvage_tree / 'binary.dat').write_bytes(b'\0new\xfe')
 (salvage_tree / 'new.txt').write_bytes('새 파일\r\n'.encode('utf-8'))
+(salvage_tree / '.oms-room-relay.ABC123').mkdir()
+(salvage_tree / '.oms-room-relay.ABC123' / '.ready').write_bytes(b'')
 trap_file = temporary / 'salvage-git-executed'
 trap_command = 'touch ' + shlex.quote(str(trap_file))
 for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
@@ -460,12 +462,14 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
     assert salvaged['salvaged_from'] == {'task': 'salvage-task', 'attempt': 'att_fixture',
         'kept_path': str(salvage_tree), 'stop_reason': 'worker_authority_violation'}
     assert {f['path'] for f in salvaged['files']} == {'unicode.txt', 'deleted.txt', 'binary.dat', 'new.txt'}
+    assert not any('oms-room-relay' in f['path'] for f in salvaged['files']), salvaged['files']
     flagged = {(w['file'], w['kind']) for w in salvaged['encoding_warnings']}
     assert ('unicode.txt', 'transliteration_hunk') in flagged, flagged
     assert ('unicode.txt', 'non_ascii_drop') in flagged, flagged
     saved_patch = Path(salvaged['patch_path'])
     assert saved_patch.exists() and Path(salvaged['metadata_path']).exists()
     assert saved_patch.read_bytes().startswith(panel_salvage.PREFIX)
+    assert b'oms-room-relay' not in saved_patch.read_bytes(), 'relay queue residue entered the patch'
     assert saved_patch.is_relative_to(salvage_repo), 'salvaged artifact was not written to the room repository'
     assert not trap_file.exists(), 'salvage executed repository Git config'
     assert index_path.read_bytes() == index_before, 'salvage changed kept index'

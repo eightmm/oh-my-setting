@@ -368,8 +368,12 @@ def _capture(kept, common, base):
                 raise ValueError('salvage of submodule worktrees requires owner inspection')
             entries[os.fsdecode(path)] = (mode.decode(), oid.decode())
         others = git('ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
+        # peer-common.sh creates this relay queue in the worktree and leaves it after an interrupted
+        # run; only untracked top-level directories of that form are harness residue.
+        relay = re.compile(r'\.oms-room-relay\.[A-Za-z0-9]{6}/')
         files, warnings = [], []
-        for name in sorted(set(entries) | {os.fsdecode(p) for p in others if p}):
+        for name in sorted(set(entries) | {os.fsdecode(p) for p in others
+                                           if p and not relay.match(os.fsdecode(p))}):
             path = kept / name
             # Never follow a directory symlink into unrelated data.
             if path.parent.resolve() != path.parent:
