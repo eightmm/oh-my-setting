@@ -18,6 +18,7 @@ ROOT = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 import panel_results
 import land_receipts
+from panel_review import _review_verdict
 SECTION_BUDGETS = {"failures": 16384, "metrics": 4096, "reviews": 65536,
                    "ci": 4096, "tasks": 4096, "rejected": 32768}
 TOTAL_BUDGET = 131072
@@ -152,7 +153,7 @@ def _collect_reviews(repo):
             item = {"ref": match.group(1)[:16] if match else str(ref),
                     "artifact_id": str(ref), "kind": row.get("kind"),
                     "attempt_id": row.get("attempt_id"), "exit": row.get("exit"),
-                    "outcome": row.get("outcome"), "task_id": row.get("task_id")}
+                    "task_id": row.get("task_id")}
             if isinstance(row.get("artifact"), str):
                 try:
                     with contextlib.redirect_stderr(io.StringIO()):
@@ -160,6 +161,9 @@ def _collect_reviews(repo):
                     output, _ = panel_results.artifact_sections_stream(
                         io.BytesIO(content.encode("utf-8")))
                     _, sections = panel_results.debate_sections(output)
+                    gate = _review_verdict(output)
+                    if gate:
+                        item["gate"] = gate
                     item["findings"] = next((body.strip() for heading, body in sections
                                              if heading == "Findings"), "")
                 except (OSError, ValueError, UnicodeError):
@@ -203,6 +207,8 @@ def _collect_metrics(repo):
         "cancel_totals": {"cancels": interventions.get("cancels"),
                           "total": interventions.get("total")},
     }
+    if report.get("incomplete") and report.get("incomplete_reason"):
+        projected["incomplete_reason"] = report["incomplete_reason"]
     identity = json.dumps(projected, ensure_ascii=False, sort_keys=True,
                           separators=(",", ":"))
     projected["ref"] = "metrics-" + _fingerprint(identity)[:12]
@@ -521,16 +527,19 @@ def collect(repo):
     else:
         try:
             doc = json.loads(raw)
-            rows = (doc.get("items", doc.get("failures", []))
-                    if isinstance(doc, dict) else doc)
+            rows = doc.get("failures") if isinstance(doc, dict) else doc
             if not isinstance(rows, list):
                 raise ValueError()
+            invalid_rows = doc.get("invalid_rows") if isinstance(doc, dict) else None
+            invalid_rows = invalid_rows if type(invalid_rows) is int and invalid_rows > 0 else 0
             items = []
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                cleaned = _clean({key: row.get(key) for key in
-                                  ("fingerprint", "count", "last_exit", "summary")})
+                fields = {key: row.get(key) for key in
+                          ("fingerprint", "count", "kind", "attention", "summary")}
+                fields["last_exit"] = row.get("exit")
+                cleaned = _clean(fields)
                 if cleaned is None:
                     continue
                 summary = cleaned.get("summary")
@@ -544,11 +553,14 @@ def collect(repo):
                 cleaned["ref"] = str(ref)
                 items.append(cleaned)
             items.sort(key=lambda item: (
+                item.get("attention") in ("retiring", "stale"),
                 -item["count"] if type(item.get("count")) is int else 0, item["ref"]))
             selected = items[:16]
-            sections["failures"] = _section(
-                selected, {"count": len(rows), "selected": len(selected),
-                           "complete": len(selected) == len(rows)})
+            failure_coverage = {"count": len(rows), "selected": len(selected),
+                                "complete": len(selected) == len(rows) and not invalid_rows}
+            if invalid_rows:
+                failure_coverage["invalid_rows"] = invalid_rows
+            sections["failures"] = _section(selected, failure_coverage)
         except (ValueError, TypeError):
             sections["failures"] = _section([], {}, "fail-ledger returned invalid JSON")
 
@@ -576,16 +588,50 @@ def collect(repo):
         sections["ci"] = _ci_section([], stage_items, land_coverage.get("stage_timing_observations", 0), {}, reason)
     else:
         items = []
+        failing = []
+        kind = None
         for line in raw.splitlines():
-            if not line.strip() or line.startswith(("Failing jobs", "Failing tests", "  ")):
+            if line.startswith("Failing jobs"):
+                kind = "job"
+                continue
+            if line.startswith("Failing tests"):
+                kind = "test"
+                continue
+            if line.startswith("  "):
+                match = re.match(r"\s+(.+?):\s*(\d+)", line)
+                safe_line = _clean(line.strip())
+                if kind and match and safe_line:
+                    # Tests and quarantine candidates (2+ runs) outrank plain job rows.
+                    rank = 0 if kind == "test" else 1 if int(match.group(2)) >= 2 else 2
+                    failing.append((rank, len(failing),
+                                    {"ref": "%s:%s" % (kind, _clean(match.group(1)) or ""),
+                                     "summary": safe_line}))
+                continue
+            kind = None
+            if not line.strip():
                 continue
             safe_line = _clean(line)
             if not safe_line:
                 continue
             sha = safe_line.split()[0]
             items.append({"ref": sha, "summary": safe_line})
-        sections["ci"] = _ci_section(items, stage_items, land_coverage.get("stage_timing_observations", 0),
-                                      {"complete": True})
+        observations = land_coverage.get("stage_timing_observations", 0)
+        # Stage timing rows keep half the section only when there are any.
+        capacity = SECTION_BUDGETS["ci"] // 2 if stage_items else SECTION_BUDGETS["ci"]
+        omitted = 0
+        for _, _, item in sorted(failing, key=lambda entry: entry[:2]):
+            candidate = _ci_section(items + [item], [], observations,
+                                    {"complete": False, "failing_rows_omitted": len(failing)})
+            size = len(json.dumps(candidate, ensure_ascii=False,
+                                  separators=(",", ":")).encode("utf-8"))
+            if size <= capacity:
+                items.append(item)
+            else:
+                omitted += 1
+        ci_coverage = {"complete": not omitted}
+        if omitted:
+            ci_coverage["failing_rows_omitted"] = omitted
+        sections["ci"] = _ci_section(items, stage_items, observations, ci_coverage)
 
     try:
         raw = _run(repo, "agent-plan.sh", "list", "--json")
@@ -603,7 +649,7 @@ def collect(repo):
         raise CorruptEvidenceError("tasks")
     task_items = []
     for row in tasks:
-        cleaned = _clean({key: row.get(key) for key in ("id", "state", "title", "depends")})
+        cleaned = _clean({key: row.get(key) for key in ("id", "state", "title", "depends", "claim_expired", "reason")})
         if cleaned and cleaned.get("id"):
             task_items.append(cleaned)
     sections["tasks"] = _section(task_items,

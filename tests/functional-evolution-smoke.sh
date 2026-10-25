@@ -1552,14 +1552,18 @@ python3 - <<'PY'
 import json
 rows = [
     {'fingerprint': 'failure-%02d' % n, 'count': n + 1, 'summary': ('summary-%02d ' % n) + 'x' * 260 + '\nsecond line'}
-    for n in range(15)
+    for n in range(14)
 ]
+for row in rows:
+    row.update(kind='test', attention='actionable', exit=1)
+rows.append({'fingerprint': 'failure-14', 'count': 99, 'kind': 'hook', 'attention': 'retiring', 'exit': 129,
+             'cmd': 'private-command-text'})
 rows.extend([
-    {'fingerprint': 'failure-%02d' % n, 'count': 0, 'summary': ('summary-%02d ' % n) + 'x' * 260 + '\nsecond line'}
+    {'fingerprint': 'failure-%02d' % n, 'count': 0, 'attention': 'stale', 'summary': ('summary-%02d ' % n) + 'x' * 260 + '\nsecond line'}
     for n in range(15, 19)
 ])
 rows.append({'fingerprint': 'failure-00-null', 'count': None, 'summary': 'null count row\nsecond line'})
-print(json.dumps({'items': rows}))
+print(json.dumps({'schema': 1, 'failures': rows, 'invalid_rows': 2}))
 PY
 EOF
   cat > "$readers/ci-status.sh" <<'EOF'
@@ -1568,11 +1572,23 @@ exec bash "$OMS_REAL_CI_STATUS" "$@"
 EOF
   cat > "$readers/gh" <<'EOF'
 #!/usr/bin/env bash
-printf '[]\n'
+case "$2" in
+  list)
+    printf '[{"databaseId":1,"headSha":"abcdef1234567890","conclusion":"failure","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:05:00Z"}'
+    [ -z "$OMS_TEST_CI_MANY" ] || printf ',{"databaseId":2,"headSha":"abcdef1234567891","conclusion":"failure","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:05:00Z"}'
+    printf ']\n' ;;
+  view)
+    printf 'job-a\tstep\tmessage\njob-a\tstep\tcheck: test_x FAILED\n'
+    if [ -n "$OMS_TEST_CI_MANY" ]; then
+      pad="$(printf 'x%.0s' $(seq 1 200))"
+      for n in $(seq 10 21); do printf 'job-%s-%s\tstep\tmessage\n' "$n" "$pad"; done
+    fi ;;
+  *) printf '[]\n' ;;
+esac
 EOF
   cat > "$readers/agent-plan.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '[{"id":"open-1","state":"ready"},{"id":"done-1","state":"done"}]\r\n'
+printf '[{"id":"open-1","state":"ready","claim_expired":true,"reason":"blocked on review"},{"id":"done-1","state":"done"}]\r\n'
 EOF
   cat > "$readers/agent-memory.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -1582,6 +1598,7 @@ printf 'hypothesis: late clue\r\n'
 EOF
   cat > "$readers/oms" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "$OMS_TEST_METRICS_JSON" ]; then printf '%s\r\n' "$OMS_TEST_METRICS_JSON"; exit 0; fi
 printf '{"since":"2026-01-01","until":"2026-01-02","coverage":{"complete":true},"write_state":{"reconciled":true},"failures":[],"stages":[]}\r\n'
 EOF
   cat > "$readers/sitecustomize.py" <<'PY'
@@ -1620,13 +1637,20 @@ assert r["schema"] == 1 and r["sections"].keys() == {
 failures = r["sections"]["failures"]["items"]
 ledger = [row for row in failures if row["ref"].startswith("failure-")]
 assert len(ledger) == 16, ledger
-assert [row["count"] for row in ledger[:-1]] == list(range(15, 0, -1)), ledger
-assert ledger[-1]["fingerprint"] == "failure-00-null", ledger[-1]
-assert "count" not in ledger[-1], ledger[-1]
-assert all("\n" not in row["summary"] and len(row["summary"]) <= 240 for row in ledger), ledger
+assert [row["count"] for row in ledger[:14]] == list(range(14, 0, -1)), ledger
+assert ledger[14]["fingerprint"] == "failure-00-null", ledger[14]
+assert "count" not in ledger[14], ledger[14]
+retiring = ledger[15]
+assert retiring["fingerprint"] == "failure-14" and retiring["count"] == 99, ledger
+assert (retiring["last_exit"], retiring["kind"], retiring["attention"]) == (129, "hook", "retiring"), retiring
+assert "summary" not in retiring and "cmd" not in retiring, retiring
+assert "private-command-text" not in json.dumps(r), r
+assert (ledger[0]["last_exit"], ledger[0]["kind"], ledger[0]["attention"]) == (1, "test", "actionable"), ledger[0]
+assert all("\n" not in row["summary"] and len(row["summary"]) <= 240 for row in ledger[:15]), ledger
 assert r["sections"]["failures"]["coverage"]["count"] == 20, r
 assert r["sections"]["failures"]["coverage"]["selected"] == 16, r
 assert r["sections"]["failures"]["coverage"]["complete"] is False, r
+assert r["sections"]["failures"]["coverage"]["invalid_rows"] == 2, r
 land = [row for row in r["sections"]["failures"]["items"] if row.get("ref", "").startswith("land:")]
 by_name = {row["name"]: row for row in land}
 assert "scripts-smoke.test_newest_failure" in by_name, by_name
@@ -1663,6 +1687,12 @@ assert stages["shared-stage"]["summary"] == (
     "stage shared-stage median 210s max 210s (n=12), recent 210s vs 210s; local land gates, not CI runners"), stages
 assert ci["items"].index(stages["scripts-smoke"]) == len(
     [item for item in ci["items"] if item["ref"] not in {"scripts-smoke", "short-stage", affected_name, "shared-stage"}]), ci
+ci_refs = {item["ref"]: item for item in ci["items"]}
+assert ci_refs["job:job-a"]["summary"] == "job-a: 1", ci
+assert ci_refs["test:test_x"]["summary"] == "test_x: 1", ci
+assert "abcdef123456" in ci_refs, ci
+task = next(row for row in r["sections"]["tasks"]["items"] if row["id"] == "open-1")
+assert task["claim_expired"] is True and task["reason"] == "blocked on review", task
 assert [x["text"] for x in r["sections"]["rejected"]["items"]] == [
     "hypothesis: early clue", "hypothesis: late clue"], r
 assert r["sections"]["metrics"]["coverage"]["complete"] is True, r
@@ -1699,7 +1729,7 @@ rows = [
 panel_results._records = lambda *args, **kwargs: (attempts, rows)
 panel_results.outcomes = lambda repo, ids: {"done-task": "accepted"}
 artifact = (b"## Prompt\n```text\nquoted prompt\n## Findings\nnot a result\n"
-            b"## Output\n## Findings\nActual finding\n## Exit\n0\n")
+            b"## Output\nGATE: fail\n## Findings\nActual finding\n## Exit\n0\n")
 panel_results._indexed = lambda repo, row: artifact
 reviews = work_discovery._collect_reviews("unused")
 assert reviews["coverage"]["considered"] == 2 and reviews["coverage"]["selected"] == 1, reviews
@@ -1708,6 +1738,7 @@ assert re.fullmatch(r"[0-9a-f]{16}", reviews["items"][0]["ref"]), reviews
 assert reviews["items"][0]["ref"] == "0123456789abcdef", reviews
 assert reviews["items"][0]["artifact_id"] == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", reviews
 assert reviews["items"][0]["findings"] == "Actual finding", reviews
+assert reviews["items"][0]["gate"] == "fail" and "outcome" not in reviews["items"][0], reviews
 panel_results._indexed = indexed_reader
 import contextlib, hashlib, io, shutil, tempfile
 from pathlib import Path
@@ -1744,7 +1775,7 @@ PY
 
   cat > "$readers/fail-ledger.sh" <<'EOF'
 #!/usr/bin/env bash
-python3 -c 'import json; print(json.dumps({"items": [{"fingerprint": "f", "summary": "é" * 2500}]}))'
+python3 -c 'import json; print(json.dumps({"failures": [{"fingerprint": "f", "summary": "é" * 2500}]}))'
 EOF
   chmod +x "$readers/fail-ledger.sh"
   out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" 2>"$TMP/discovery-err")" ||
@@ -1753,6 +1784,46 @@ EOF
 import json, os
 summary = json.loads(os.environ["OMS_TEST_PACKET"])["sections"]["failures"]["items"][0]["summary"]
 assert len(summary) == 240 and summary.endswith("..."), summary
+PY
+
+  cat > "$readers/fail-ledger.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$OMS_TEST_LEDGER_JSON"
+EOF
+  ROOT="$ROOT" REPO="$repo" python3 - <<'PY' || fail "work discovery bounds or producer keys regressed"
+import json, os, sys
+sys.path.insert(0, os.environ["ROOT"] + "/scripts/lib")
+import work_discovery
+work_discovery._collect_land_failures = lambda repo: ([], {"land_scan_complete": True}, [])
+repo = os.environ["REPO"]
+def packet(ledger, many=False, metrics=None):
+    os.environ["OMS_TEST_LEDGER_JSON"] = json.dumps(ledger)
+    os.environ.pop("OMS_TEST_CI_MANY", None)
+    os.environ.pop("OMS_TEST_METRICS_JSON", None)
+    if many:
+        os.environ["OMS_TEST_CI_MANY"] = "1"
+    if metrics is not None:
+        os.environ["OMS_TEST_METRICS_JSON"] = json.dumps(metrics)
+    return work_discovery.collect(repo)["sections"]
+row = {"fingerprint": "f", "count": 1}
+clean = packet({"schema": 1, "failures": [row], "invalid_rows": 0})
+assert clean["failures"]["coverage"]["complete"] is True, clean["failures"]
+assert "invalid_rows" not in clean["failures"]["coverage"], clean["failures"]
+bad = packet({"schema": 1, "failures": [row], "invalid_rows": 3})
+assert bad["failures"]["coverage"]["complete"] is False, bad["failures"]
+assert bad["failures"]["coverage"]["invalid_rows"] == 3, bad["failures"]
+alias = packet({"schema": 1, "items": [row]})
+assert alias["failures"]["items"] == [] and alias["failures"]["status"] == "unavailable", alias["failures"]
+assert "incomplete_reason" not in clean["metrics"]["items"][0], clean["metrics"]
+metrics = packet({"failures": []}, metrics={"incomplete": True, "incomplete_reason": "plan evidence malformed"})
+assert metrics["metrics"]["items"][0]["incomplete_reason"] == "plan evidence malformed", metrics["metrics"]
+many = packet({"failures": []}, many=True)["ci"]
+refs = [item["ref"] for item in many["items"]]
+assert "test:test_x" in refs, refs
+assert many["coverage"]["complete"] is False and many["coverage"]["failing_rows_omitted"] > 0, many
+assert len(json.dumps(many, separators=(",", ":")).encode()) <= work_discovery.SECTION_BUDGETS["ci"], many
+kept = sum(ref.startswith("job:job-") for ref in refs)
+assert kept + many["coverage"]["failing_rows_omitted"] == 13, many
 PY
 
   cat > "$readers/agent-plan.sh" <<'EOF'
