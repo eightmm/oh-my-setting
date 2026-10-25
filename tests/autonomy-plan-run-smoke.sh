@@ -90,6 +90,35 @@ chmod +x "$bin/codex"
 PLAN="$ROOT/scripts/agent-plan.sh"
 RUN="$ROOT/scripts/plan-run.sh"
 
+test_direct_id_and_release_accept_crlf_python_output() {
+  local crlf_repo="$TMP/crlf-repo" shim_dir="$TMP/crlf-bin" real_python
+  real_python="$(command -v python3)"
+  git clone -q "$repo" "$crlf_repo"
+  "$PLAN" --repo "$crlf_repo" init --goal crlf >/dev/null
+  "$PLAN" --repo "$crlf_repo" add --id crlf --title crlf \
+    --allowed scripts --verify 'bash scripts/not-at-base.sh' >/dev/null
+
+  mkdir -p "$shim_dir"
+  python3 - "$shim_dir/python3" "$real_python" <<'PYSHIM'
+import pathlib, shlex, sys
+script = "#!/usr/bin/env bash\n" + shlex.quote(sys.argv[2])
+script += """ "$@" | awk '{printf "%s\\r\\n", $0}'
+exit "${PIPESTATUS[0]}"
+"""
+pathlib.Path(sys.argv[1]).write_bytes(script.encode("utf-8"))
+PYSHIM
+  chmod +x "$shim_dir/python3"
+
+  if HOME="$home" PATH="$shim_dir:$bin:/usr/bin:/bin" \
+    "$RUN" --repo "$crlf_repo" --to codex --id crlf >"$TMP/crlf.out" 2>&1; then
+    fail "direct-id run unexpectedly passed a verifier-base check"
+  fi
+  grep -Fq 'scripts/not-at-base.sh, which does not exist at the base commit' "$TMP/crlf.out" ||
+    fail "CRLF direct-id state was not accepted before the post-claim check"
+  "$PLAN" --repo "$crlf_repo" show --id crlf | grep -F '"state": "ready"' >/dev/null ||
+    fail "claim release did not restore the task to ready under CRLF Python output"
+}
+
 test_plan_lifecycle() {
 # A parent transport is not a worker identity. Preserve reviewed routes in
 # atomic claims, dry-run, and direct peer hydration without calling real CLIs.
@@ -1059,6 +1088,7 @@ grep -Fq 'ORIENTATION-FILE-BODY' "$TMP/cp-manifest-prompt.txt" ||
 }
 
 # SMOKE_TEST_CALLS_BEGIN
+test_direct_id_and_release_accept_crlf_python_output
 test_plan_lifecycle
 test_context_pack
 # SMOKE_TEST_CALLS_END
