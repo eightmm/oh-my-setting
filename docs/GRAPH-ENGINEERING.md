@@ -845,9 +845,18 @@ cases, path coverage, and whether a finite depth truncated the closure.
 `project affected` uses `depth=0` for the complete reverse closure. A positive
 explicit depth is diagnostic-only for selection: if it truncates, the plan is
 `mode: full`, never a silently incomplete affected set. Selection follows only
-`EXTRACTED` edges; `INFERRED`/`AMBIGUOUS` frontier counts are diagnostic. An
-unmatched executable/data/policy path or a non-document change with no extracted
-runnable test still falls back to the complete gate. Ordinary README/CHANGELOG/
+`EXTRACTED` edges; `INFERRED`/`AMBIGUOUS` frontier counts are diagnostic. A
+consumer reached only through a variable-prefixed call, such as
+`python3 "$ROOT/scripts/lib/work_discovery.py"`, is an `INFERRED` edge and is
+not selected, and neither are tests that reach it the same way. A file reached
+both at top level and inside a test function runs only that case, though a
+shell suite's top-level statements still run under `--only`; only assertions
+that depend on another case's top-level output can be skipped. Joining
+`INFERRED` consumers would need a whole-versus-case redesign of `blast_radius`.
+So a change to a JSON key, CLI option, exit code or file format read through
+such a call needs its consumer tests named in `--verify`, or a full gate before
+landing. An unmatched executable/data/policy path or a non-document change with
+no extracted runnable test still falls back to the complete gate. Ordinary README/CHANGELOG/
 CONTRIBUTING prose and Markdown/reStructuredText/AsciiDoc under `doc/` or `docs/`
 are listed separately as `documentation_paths` (text: `documentation:`).
 Missing prose nodes do not widen otherwise covered code changes to the full
