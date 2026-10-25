@@ -746,6 +746,7 @@ def awaiting_admission(repo, state, _tick=None):
 
 def read_panel(repo, provider, view, attention_only):
     from terminal_panel import board_view, managed_session, pane_option, private_capacity, snapshot
+    from panel_navigation import pane_option_batch
     from panel_metrics import collect
     from panel_cache import TickReads
     tick = TickReads(repo)
@@ -754,15 +755,17 @@ def read_panel(repo, provider, view, attention_only):
     filtered = attention_only
     selected_room = os.environ.get("OMS_ROOM_ID", "")
     if managed_session():
-        selected = pane_option("@oms_panel_owner")
-        if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", selected):
-            provider = selected
-        main_attempt = pane_option("@oms_panel_main_attempt") or None
-        selected = pane_option("@oms_panel_view")
-        if view is None and selected in ("auto", "compact", "detail", "graph", "tree", "summary"):
-            density = board_view(selected)
-        filtered = attention_only or pane_option("@oms_panel_attention") == "1"
-        selected_room = pane_option("@oms_panel_room")
+        with pane_option_batch(("@oms_panel_owner", "@oms_panel_main_attempt", "@oms_panel_view",
+                                "@oms_panel_attention", "@oms_panel_room")):
+            selected = pane_option("@oms_panel_owner")
+            if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", selected):
+                provider = selected
+            main_attempt = pane_option("@oms_panel_main_attempt") or None
+            selected = pane_option("@oms_panel_view")
+            if view is None and selected in ("auto", "compact", "detail", "graph", "tree", "summary"):
+                density = board_view(selected)
+            filtered = attention_only or pane_option("@oms_panel_attention") == "1"
+            selected_room = pane_option("@oms_panel_room")
         if selected_room:
             try:
                 room.identifier(selected_room, "room")

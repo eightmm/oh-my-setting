@@ -12,6 +12,7 @@ import re
 import room
 import shlex
 import subprocess
+import threading
 import time
 import uuid
 
@@ -176,8 +177,56 @@ def session_option(name):
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+_PANE_BATCH = threading.local()
+_PLAIN_OPTION_VALUE = re.compile(r"[A-Za-z0-9._:/@%+=,-]*")
+
+
+class pane_option_batch:
+    """Within this thread, answer the named window options from one tmux listing instead of one exec each."""
+    def __init__(self, names):
+        self.names = tuple(names)
+
+    def __enter__(self):
+        _PANE_BATCH.names, _PANE_BATCH.values = self.names, None
+
+    def __exit__(self, *unused):
+        _PANE_BATCH.names = _PANE_BATCH.values = None
+
+
+def _batched_pane_option(name):
+    """The window-local listed value, or None when the batch is off, the name is not listed (it may be inherited from
+    a session or global default) or a value is not plainly parseable: the per-option read then answers exactly."""
+    from terminal_panel import tmux_command
+    names = getattr(_PANE_BATCH, "names", None)
+    if not names or name not in names:
+        return None
+    if _PANE_BATCH.values is None:
+        _PANE_BATCH.values = {}
+        try:
+            result = subprocess.run(tmux_command("show-options", "-w", "-q", "-t", os.environ.get("TMUX_PANE", "")),
+                                    capture_output=True, text=True, check=False, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        values = {}
+        for line in result.stdout.splitlines():
+            key, unused, value = line.rstrip("\r").partition(" ")
+            if key in names:
+                if value == '""':
+                    value = ""
+                elif not _PLAIN_OPTION_VALUE.fullmatch(value):
+                    return None  # quoted or escaped output is left to the exact per-option read
+                values[key] = value
+        _PANE_BATCH.values = values
+    return _PANE_BATCH.values.get(name)
+
+
 def pane_option(name):
     from terminal_panel import tmux_command
+    batched = _batched_pane_option(name)
+    if batched is not None:
+        return batched
     try:
         result = subprocess.run(tmux_command("show-option", "-w", "-v", "-t",
                                 os.environ.get("TMUX_PANE", ""), name),
@@ -830,6 +879,9 @@ def _window_option_local(pane, option):
     return True, _tmux_output_value(raw.stdout)
 
 
+_HEADER_SEEN = {}
+
+
 def update_context_header(state, main_attempt, repo, navigation=None):
     from terminal_panel import HEADER_ENABLED, HEADER_OPTION, _tmux_output_value, _window_option_local
     from terminal_panel import context_header_text, managed_session
@@ -840,7 +892,29 @@ def update_context_header(state, main_attempt, repo, navigation=None):
     def run(*args):
         from terminal_panel import tmux_command
         return subprocess.run(tmux_command(*args), **quiet)
+    def native_target():
+        native = run("show-option", "-w", "-v", "-t", pane, "@oms_panel_native_pane")
+        target = native.stdout.strip() if native.returncode == 0 else ""
+        return target if re.fullmatch(r"%[0-9]+", target) else ""
+    def fitted(label, target):
+        if target:
+            width = run("display-message", "-p", "-t", target, "#{pane_width}")
+            if width.returncode == 0 and width.stdout.strip().isdigit():
+                from dashboard_projection import fit
+                return fit(label, int(width.stdout.strip()))
+        return label
     try:
+        label = context_header_text(state, main_attempt, repo)
+        seen = _HEADER_SEEN.get(pane)
+        if seen:
+            # Settled on a previous collect: only a changed label, pane width, target or reader reopens the options.
+            target = native_target()
+            if seen == (fitted(label, target), target, panel_reader.find(pane)):
+                return
+        _HEADER_SEEN.pop(pane, None)
+        failed = []
+        def write(*args):
+            failed.append(run(*args).returncode != 0)
         enabled = run("show-option", "-w", "-v", "-t", pane, HEADER_ENABLED)
         if enabled.returncode:
             originals = []
@@ -851,35 +925,32 @@ def update_context_header(state, main_attempt, repo, navigation=None):
                     return
                 originals.append((option, saved, local, value))
             for option, saved, local, value in originals:
-                run("set-option", "-w", "-t", pane, saved + "_local", "1" if local else "0")
-                run("set-option", "-w", "-t", pane, saved, value)
-            run("set-option", "-w", "-t", pane, HEADER_ENABLED, "1")
-            run("set-option", "-w", "-t", pane, "pane-border-status", "top")
-            run("set-option", "-w", "-t", pane, "pane-border-format", "#{?@oms_panel_headers,#{@oms_panel_header},}")
-        label = context_header_text(state, main_attempt, repo)
-        native = run("show-option", "-w", "-v", "-t", pane, "@oms_panel_native_pane")
-        target = native.stdout.strip() if native.returncode == 0 else ""
-        if re.fullmatch(r"%[0-9]+", target):
-            width = run("display-message", "-p", "-t", target, "#{pane_width}")
-            if width.returncode == 0 and width.stdout.strip().isdigit():
-                from dashboard_projection import fit
-                label = fit(label, int(width.stdout.strip()))
+                write("set-option", "-w", "-t", pane, saved + "_local", "1" if local else "0")
+                write("set-option", "-w", "-t", pane, saved, value)
+            write("set-option", "-w", "-t", pane, HEADER_ENABLED, "1")
+            write("set-option", "-w", "-t", pane, "pane-border-status", "top")
+            write("set-option", "-w", "-t", pane, "pane-border-format", "#{?@oms_panel_headers,#{@oms_panel_header},}")
+        target = native_target()
+        label = fitted(label, target)
+        if target:
             current = run("show-option", "-p", "-v", "-t", target, HEADER_OPTION)
             if current.returncode or _tmux_output_value(current.stdout) != label:
-                run("set-option", "-p", "-t", target, HEADER_OPTION, label)
+                write("set-option", "-p", "-t", target, HEADER_OPTION, label)
         reader = panel_reader.find(pane)
         if reader:
             # The reader shell pins its identity; an additional pane title would repeat it.
-            label = ""
             current = run("show-option", "-p", "-v", "-t", reader, HEADER_OPTION)
-            if current.returncode or _tmux_output_value(current.stdout) != label:
-                run("set-option", "-p", "-t", reader, HEADER_OPTION, label)
+            if current.returncode or _tmux_output_value(current.stdout) != "":
+                write("set-option", "-p", "-t", reader, HEADER_OPTION, "")
+        if not any(failed):  # a failed write must be retried by the next update, not remembered as settled
+            _HEADER_SEEN[pane] = (label, target, reader)
     except Exception:
         return
 
 
 def toggle_context_headers():
     from terminal_panel import HEADER_ENABLED, _tmux_output_value, managed_session
+    _HEADER_SEEN.clear()
     pane = os.environ.get("TMUX_PANE", "")
     if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
         return

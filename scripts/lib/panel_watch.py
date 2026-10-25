@@ -227,6 +227,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             density, filtered = view or board_view("auto"), attention_only
             layout_mode = "work"
             next_read, next_frame, revision = 0, 0, 0
+            snapshots, animated = 0, (None, False)
             held = {}
             next_focus, splits, modes = 0, SplitSync(), PanelModeSync()
             while True:
@@ -248,6 +249,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         result = ({"repo": {"name": repo.name}, "collection": {"ok": False}}, 1,
                                   provider, main_attempt, density, filtered, os.environ.get("OMS_ROOM_ID", ""))
                     state, status, provider, main_attempt, read_density, read_filtered, selected_room = result
+                    snapshots += 1
                     os.environ["OMS_ROOM_ID"] = selected_room
                     state, status, notice = hold_state(held, state, status, selected_room)
                     if view is not None or not managed_session():
@@ -297,8 +299,12 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     owner = next((member for member in __import__("room_view").nodes(state)
                                   if member.get("role") == "main"
                                   and main_attempt in (member.get("participant"), member.get("attempt"))), None)
-                    navigation["cancel_allowed"] = bool(owner and _cancel_watch_authority(
-                        repo, main_attempt, owner["participant"]))
+                    # Five tmux reads: redo them when the state is re-read or the selection moves, not on every repaint.
+                    authority = (main_attempt, owner and owner["participant"], navigation.get("selected"))
+                    if discard_stale_clicks or navigation.get("cancel_authority_key") != authority:
+                        navigation["cancel_authority_key"] = authority
+                        navigation["cancel_allowed"] = bool(owner and _cancel_watch_authority(
+                            repo, main_attempt, owner["participant"]))
                     navigation.update(hits=[], items=[], expanded=expanded, installed=installed,
                                       spawn_busy=any(entry[0].poll() is None for entry in spawns),
                                       spawn_managed=managed_session(),
@@ -669,9 +675,23 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if expire_notice(navigation, time.monotonic()):
                         size = redraw()
                     if motion and time.monotonic() >= next_frame:
-                        frame += 1
-                        size = redraw()
                         next_frame = time.monotonic() + .25
+                        # The renderer decides what animates: two frame indices that draw alike mean an idle board,
+                        # which then repaints only on a new snapshot, input or resize. One answer serves every tick.
+                        key = (snapshots, density, filtered, size, navigation.get("selected"), navigation.get("tab"),
+                               bool(navigation.get("detail")), bool(navigation.get("health_view")))
+                        if animated[0] != key:
+                            from terminal_panel import frame_view
+                            probes = []
+                            for probe in (0, 1):
+                                probe_navigation = dict(navigation, hits=[], items=[])
+                                probes.append(frame_view(repo, provider, state, menu=False, main_attempt=main_attempt,
+                                                         frame=probe, view=density, attention_only=filtered,
+                                                         navigation=probe_navigation)[0])
+                            animated = (key, probes[0] != probes[1])
+                        if animated[1]:
+                            frame += 1
+                            size = redraw()
     finally:
         if flagged and any(flagged):
             mark_window(False)

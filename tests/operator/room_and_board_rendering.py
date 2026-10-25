@@ -2994,10 +2994,10 @@ assert "ctx 61% used" in panel.context_header_text(header_state, "header-main", 
 assert "unknown" in panel.context_header_text({"repo": {}}, "absent", Path("repo"))
 
 def header_window_fixture(local_values, reader=False, fail_capture=False,
-                          reader_target=("result", "header-call")):
+                          reader_target=("result", "header-call"), fail_first_write=False):
     options = {"@oms_panel_native_pane": "%8"}
     options.update(local_values)
-    calls = []
+    calls, write_failed = [], []
     def fake_tmux(argv, **kwargs):
         args = argv[1:]
         calls.append(args)
@@ -3020,6 +3020,9 @@ def header_window_fixture(local_values, reader=False, fail_capture=False,
         if args[0] == "display-message":
             return subprocess.CompletedProcess(argv, 0, "80\n", "")
         if args[0] == "set-option":
+            if fail_first_write and args[-2] == panel.HEADER_OPTION and args[-3] == "%8" and not write_failed:
+                write_failed.append(True)
+                return subprocess.CompletedProcess(argv, 1, "", "write failed")
             if "-u" in args:
                 options.pop(args[-1], None)
             else:
@@ -3044,6 +3047,14 @@ def header_window_fixture(local_values, reader=False, fail_capture=False,
         if not local_values:
             unset = {args[-1] for args in calls if args[0] == "set-option" and "-u" in args}
             assert {"pane-border-status", "pane-border-format"} <= unset, calls
+        if fail_first_write:
+            # A failed write is not remembered as settled: the next update retries it and installs the label.
+            writes = [a for a in calls if a[0] == "set-option" and a[-2] == panel.HEADER_OPTION and a[-3] == "%8"]
+            assert len(writes) == 2 and options.get(panel.HEADER_OPTION) == writes[-1][-1], (writes, options)
+        elif not fail_capture:
+            # The second update finds the settled label and width and leaves the header options alone.
+            enabled_reads = [args for args in calls if args[0] == "show-option" and args[-1] == panel.HEADER_ENABLED]
+            assert len(enabled_reads) == 2, enabled_reads  # first update + toggle
         if fail_capture:
             changed_borders = [args for args in calls if args[0] == "set-option" and
                                args[-2] in ("pane-border-status", "pane-border-format")]
@@ -3052,12 +3063,39 @@ def header_window_fixture(local_values, reader=False, fail_capture=False,
     return calls, options
 
 header_window_fixture({}, reader=True)
+header_window_fixture({}, fail_first_write=True)
 header_window_fixture({}, reader=True, reader_target=("debate", ("fixture-task", "header-call")))
 quoted_format = "format with spaces, #, 'single' and \"double\" quotes"
 header_window_fixture({"pane-border-status": "bottom", "pane-border-format": quoted_format})
 header_window_fixture({"pane-border-status": "bottom", "pane-border-format": quoted_format},
                       fail_capture=True)
 assert panel._tmux_output_value("value\n\n") == "value\n"
+# One window listing answers a batch of pane options; quoted values fall back to the exact per-option read.
+batch_names = ("@oms_panel_owner", "@oms_panel_room", "@oms_panel_view")
+def batch_run(listing, inherited=None):
+    inherited, seen = inherited or {}, []
+    def run(argv, **kwargs):
+        seen.append(argv[1:])
+        if argv[1] == "show-options":
+            return subprocess.CompletedProcess(argv, 0, listing, "")
+        value = inherited.get(argv[-1], "single room" if not inherited else None)
+        return subprocess.CompletedProcess(argv, 0 if value is not None else 1, (value or "") + "\n", "")
+    with patch.dict(os.environ, {"TMUX_PANE": "%7"}), \
+            patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
+            patch.object(panel.subprocess, "run", side_effect=run):
+        with __import__("panel_navigation").pane_option_batch(batch_names):
+            values = [panel.pane_option(name) for name in batch_names]
+    return values, seen
+# Names the listing lacks may be inherited from a session or global default: they get the exact per-option read.
+values, seen = batch_run('pane-border-status top\n@oms_panel_owner codex\n@oms_panel_room ""\n',
+                         {"@oms_panel_view": "graph"})
+assert values == ["codex", "", "graph"] and [a[0] for a in seen] == ["show-options", "show-option"], (values, seen)
+values, seen = batch_run('@oms_panel_owner codex\n', {"@oms_panel_room": "inherited-room", "@oms_panel_view": "graph"})
+assert values == ["codex", "inherited-room", "graph"] and len(seen) == 3, (values, seen)
+values, seen = batch_run('@oms_panel_owner codex\n@oms_panel_room ""\n@oms_panel_view graph\n')
+assert values == ["codex", "", "graph"] and len(seen) == 1, (values, seen)
+values, seen = batch_run('@oms_panel_owner codex\n@oms_panel_room "single room"\n@oms_panel_view graph\n')
+assert values == ["single room"] * 3 and seen[0][0] == "show-options" and len(seen) == 4, (values, seen)
 for code in (1, -9):
     with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
             patch.object(panel.subprocess, "run",

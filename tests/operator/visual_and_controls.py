@@ -1811,6 +1811,68 @@ for mode in ("animated", "static", "environment", "interrupt"):
     assert clock[0] == (0 if mode == "interrupt" else 5.0), clock
     assert output.getvalue().count("\033[2J") == 1 and "\033[?25h" in output.getvalue(), output.getvalue()
     assert ("\033[2K" in output.getvalue()) == (mode == "animated")
+# An idle board neither repaints on the animation tick nor re-reads cancel authority; a live call still animates,
+# and a selection change or a fresh collection recomputes the authority.
+def idle_ticks(board, keys=(), attempt="att_main", density="compact"):
+    clock, pending = [0.0], [list(keys), [], [], [], [], [], [], [("q",)]]
+    class TickInput(ResponsiveInput):
+        def __init__(self, *args, **kwargs):
+            pass
+        def wait(self, seconds):
+            clock[0] += .25
+            return pending.pop(0) if pending else [("q",)]
+    with patch.object(panel, "BackgroundRead", ImmediateRead), \
+            patch.object(panel, "read_panel", return_value=(board, 0, "codex", attempt, density, False, "")), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+            patch.object(panel.sys, "stdout", io.StringIO()), \
+            patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((100, 40))), \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel, "_cancel_watch_authority", return_value=True) as authority, \
+            patch.object(panel, "frame_view", wraps=panel.frame_view) as drawn, \
+            patch("panel_input.TerminalInput", TickInput):
+        assert panel.watch(Path("."), "codex") == 0
+    return drawn.call_count, authority.call_count
+quiet = deepcopy(live)
+quiet["room"] = {"id": "r", "participants": [{"participant": "m1", "role": "main", "joined": True, "attempt": "att_main",
+                                               "provider": "codex", "model": "gpt-6-sol"}]}
+quiet["attempts"] = {"active_recent": [], "recent": [
+    {"attempt_id": "att_main", "state": "review", "provider": "codex", "tool": "panel-main",
+     "panel": {"role": "main", "room_id": "r", "room_participant": "m1", "label": "Quiet main"}},
+    {"attempt_id": "att_old", "parent_attempt_id": "att_main", "state": "done", "provider": "claude",
+     "panel": {"role": "worker", "room_id": "r", "room_participant": "call-old", "label": "Old call"}}]}
+idle_frames, idle_authority = idle_ticks(quiet)
+# An idle board costs its one draw plus the two probe renders that show nothing animates.
+assert idle_frames == 3 and idle_authority == 1, (idle_frames, idle_authority)
+running = deepcopy(quiet)
+running["room"]["participants"].append({"participant": "call-run", "role": "worker", "joined": True, "parent": "m1",
+                                        "provider": "claude", "model": "claude-sonnet-5-5", "label": "Live call"})
+running["attempts"]["active_recent"] = [{"attempt_id": "att_run", "parent_attempt_id": "att_main", "state": "working",
+    "provider": "claude", "panel": {"role": "worker", "room_id": "r", "room_participant": "call-run", "label": "Live call"}}]
+live_frames, live_authority = idle_ticks(running)
+assert live_frames >= 5 and live_authority == 1, (live_frames, live_authority)
+# A main whose attempt stays working while its recorded activity is idle is drawn idle, so it does not animate.
+resting = deepcopy(quiet)
+resting["attempts"]["recent"][0]["state"] = "working"
+resting["main_activity"] = {"m1": {"attempt": "att_main", "state": "idle"}}
+resting_frames, unused = idle_ticks(resting)
+assert resting_frames == idle_frames, resting_frames
+# Another room's active attempt is not drawn on this board, so it does not animate it.
+elsewhere = deepcopy(quiet)
+elsewhere["attempts"]["active_recent"] = [{"attempt_id": "att_other", "state": "working", "provider": "codex",
+    "tool": "panel-main", "panel": {"role": "main", "room_id": "other-room", "room_participant": "m9"}}]
+elsewhere_frames, unused = idle_ticks(elsewhere)
+assert elsewhere_frames == idle_frames, (elsewhere_frames, idle_frames)
+# A live delegation marker has no attempt and shows on an unowned board; the renderer animates it.
+marker_idle, unused = idle_ticks(quiet, attempt=None)
+assert marker_idle == idle_frames, marker_idle
+marker = deepcopy(quiet)
+marker["delegations"] = [{"task_id": "marker-task", "live": True, "role": "worker", "provider": "codex"}]
+marker_frames, unused = idle_ticks(marker, attempt=None)
+assert marker_frames >= 5, marker_frames
+still_frames, still_authority = idle_ticks(quiet, density="tree")
+moved_frames, moved_authority = idle_ticks(quiet, keys=[("down",)], density="tree")
+assert still_authority == 1 and moved_authority == 2 and moved_frames > still_frames, (moved_frames, moved_authority)
 # A blocked state read must not block view keys or quitting the terminal.
 import threading
 import time
