@@ -6082,6 +6082,21 @@ test_agent_memory_append_show_and_rejects_sensitive() {
     fail "the reserved provenance marker must not be accepted as note text"
   fi
   assert_file_contains "$project/reserved-err" "reserved memory metadata marker"
+
+  # A failing scanner must refuse the write, not read as clean.
+  local shim="$project/scan-shim" before
+  mkdir -p "$shim"
+  printf '#!/bin/sh\nexit 1\n' > "$shim/python3"
+  chmod +x "$shim/python3"
+  before="$(cksum < "$project/.oms/memory/shared.md")"
+  if PATH="$shim:$PATH" HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "ordinary note after scanner failure" \
+    >"$project/scanfail-out" 2>"$project/scanfail-err"; then
+    fail "append must refuse when the sensitive-content scan fails"
+  fi
+  assert_file_contains "$project/scanfail-err" "scan failed"
+  [ "$(cksum < "$project/.oms/memory/shared.md")" = "$before" ] ||
+    fail "memory must stay unchanged when the scan fails"
 }
 
 test_agent_memory_indexes_existing_logs_in_sqlite() {
@@ -14447,6 +14462,97 @@ test_scrubber_tiers_split_secret_from_machine() {
   agent_memory_file_has_secret_content "$f" ||
     fail "credential assignment must match the secret tier"
 
+  # Env tier: literal values of secret-named variables are caught bare, and
+  # reported by variable name only. Fixtures are built at runtime.
+  local envval="Zq8vN3xK" dbpass="Hs7TgW2pLm9RcQ4"
+  envval="${envval}t5Yb1JdFw6UeA0Xi"
+  local envname="FIXTURE_API_""KEY"
+  printf 'note: the value %s was pasted here\n' "$envval" > "$f"
+  (
+    export "$envname=$envval"
+    agent_memory_file_has_secret_content "$f" || fail "bare env secret value must match the secret tier"
+    agent_memory_file_has_sensitive_content "$f" || fail "bare env secret value must block the combined tier"
+    local report
+    report="$(agent_memory_sensitive_report "$f")"
+    printf '%s\n' "$report" | grep -F "secret-tier match in prompt at line 1:env:$envname" >/dev/null ||
+      fail "env secret report must name the variable and line: $report"
+    case "$report" in *"$envval"*) fail "env secret value leaked into the report" ;; esac
+    printf -- '--- a/x\n+++ b/x\n@@ -0,0 +1,1 @@\n+pasted %s\n' "$envval" > "$f.diff"
+    report="$(agent_memory_sensitive_diff_scan "$f.diff")" && rc=0 || rc=$?
+    [ "$rc" = 0 ] || fail "diff scan must flag an added env secret value"
+    case "$report" in *"x:1: secret-tier match: env:$envname"*) ;; *) fail "diff scan env label unexpected: $report" ;; esac
+    case "$report" in *"$envval"*) fail "env secret value leaked into the diff report" ;; esac
+  )
+  (
+    export "$envname=short"
+    printf 'the value short appears\n' > "$f"
+    if agent_memory_file_has_secret_content "$f"; then fail "value under 8 characters must not match"; fi
+    export "$envname=/opt/some/long/path/value"
+    printf 'see /opt/some/long/path/value now\n' > "$f"
+    if agent_memory_file_has_secret_content "$f"; then fail "path value must not match"; fi
+    export "$envname=true" OTHER_VALUE="$envval"
+    printf '%s\n' "$envval" > "$f"
+    if agent_memory_file_has_secret_content "$f"; then fail "non-secret variable name must not match"; fi
+  )
+  (
+    local phrase="correct horse battery staple" aname="AUTH""ORIZATION"
+    export "FIXTURE_PASS""PHRASE=$phrase" "$aname=Basic dXNlcjpwYXNzd29yZA" \
+      GIT_AUTHOR_EMAIL="someone.fixture@example.test"
+    printf 'my phrase is %s ok\n' "$phrase" > "$f"
+    agent_memory_file_has_secret_content "$f" || fail "passphrase containing spaces must match"
+    printf 'header Basic dXNlcjpwYXNzd29yZA end\n' > "$f"
+    agent_memory_sensitive_report "$f" | grep -F ":env:$aname" >/dev/null ||
+      fail "bare authorization value must be reported by variable name"
+    printf 'contact someone.fixture@example.test\n' > "$f"
+    if agent_memory_file_has_secret_content "$f"; then fail "author variables must not match"; fi
+  )
+  (
+    local ml
+    ml="$(printf 'first line of phrase\nsecond line of phrase')"
+    export "FIXTURE_PASS""PHRASE=$ml"
+    printf 'pasted:\n%s\ndone\n' "$ml" > "$f"
+    agent_memory_file_has_secret_content "$f" || fail "multi-line passphrase pasted verbatim must match"
+    printf 'one\ntwo\vthree\n%s\n' "$ml" > "$f"
+    agent_memory_sensitive_report "$f" | grep -F 'at line 3:env:' >/dev/null ||
+      fail "vertical tab must not shift the LF-based line number"
+  )
+  (
+    # Qualification: plain words, metadata-suffixed names and drive paths are
+    # ordinary configuration, not credentials.
+    export "MON""KEY=ordinary" "AUTH_METHOD=correctpassphrase" \
+      "API_KEY""_NAME=OPENAI_API_""KEY" \
+      "FIXTURE_API_""KEY=C:\\Users\\someone\\file"
+    printf 'an ordinary note\nuse correctpassphrase and OPENAI_API_%s\n' KEY > "$f"
+    printf 'C:\\Users\\someone\\file\n' >> "$f"
+    if agent_memory_file_has_secret_content "$f"; then
+      fail "ordinary configuration values must not block: $(agent_memory_sensitive_report "$f")"
+    fi
+  )
+  (
+    local shim="$TMP/scrub-python-shim" rc=0
+    mkdir -p "$shim"
+    printf '#!/bin/sh\nexit 2\n' > "$shim/python3"
+    chmod +x "$shim/python3"
+    printf 'ordinary text\n' > "$f"
+    PATH="$shim:$PATH" agent_memory_file_has_secret_content "$f" || rc=$?
+    [ "$rc" = 2 ] || fail "interpreter failure must be a scan error, got $rc"
+    rc=0
+    PATH="$shim:$PATH" agent_memory_file_has_sensitive_content "$f" || rc=$?
+    [ "$rc" = 2 ] || fail "interpreter failure must be a sensitive scan error, got $rc"
+    printf -- '--- a/x\n+++ b/x\n@@ -0,0 +1,1 @@\n+ordinary\n' > "$f.diff"
+    rc=0
+    PATH="$shim:$PATH" agent_memory_sensitive_diff_scan "$f.diff" >/dev/null || rc=$?
+    [ "$rc" = 2 ] || fail "interpreter failure must fail the diff scan, got $rc"
+  )
+  (
+    local sep=":"
+    export FIXTURE_DATABASE_URL="postgres://dbuser${sep}${dbpass}@db.example.test/app"
+    printf 'connect with %s please\n' "$dbpass" > "$f"
+    agent_memory_file_has_secret_content "$f" || fail "bare URL userinfo password must match the secret tier"
+    agent_memory_sensitive_report "$f" | grep -F ':env:FIXTURE_DATABASE_URL' >/dev/null ||
+      fail "URL password report must name the variable"
+  )
+
   (
     sed() { printf 'partial ordinary output\n'; return 2; }
     local rc=0
@@ -14493,6 +14599,22 @@ test_scrubber_blocks_outbound_secret_shapes() {
   printf '%s%s%s\n' 'np' 'm_' 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJ' > "$f"
   bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
     fail "scrubber should block npm token"
+
+  # A matched line that merely contains ":env:" must not reach the refusal text.
+  local out
+  printf '%s%s\n' 'api_to' 'ken=zx81leakedcredential # ref:env:demo' > "$f"
+  printf -- '--- a/x\n+++ b/x\n@@ -0,0 +1,1 @@\n+%s\n' "$(cat "$f")" > "$f.diff"
+  out="$(bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_sensitive_diff_scan '$f.diff'; agent_memory_sensitive_report '$f'")"
+  case "$out" in *leakedcredential*|*ref:env:demo*) fail "refusal output echoed matched content: $out" ;; esac
+  case "$out" in *token-assignment*) ;; *) fail "refusal output lost its pattern label: $out" ;; esac
+
+  # Ordinary configuration must not block outbound text through the env tier.
+  printf 'an ordinary note\nOPENAI_API_%s is documented\nuse correctpassphrase\nC:\\Users\\x\\y\n' KEY > "$f"
+  if env "MON""KEY=ordinary" AUTH_METHOD=correctpassphrase "API_KEY""_NAME=OPENAI_API_KEY" \
+    "FIXTURE_API_""KEY=C:\\Users\\x\\y" \
+    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
+    fail "ordinary configuration values must not block outbound text"
+  fi
 
   printf '%s%s%s\n' 'AI' 'za' 'abcdefghijklmnopqrstuvwxyzABCDE1234' > "$f"
   bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||

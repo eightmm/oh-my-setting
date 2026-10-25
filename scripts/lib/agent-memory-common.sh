@@ -319,10 +319,86 @@ agent_memory_match_file() {
   }
 }
 
-agent_memory_file_has_sensitive_content() {
-  local file="$1"
+# Literal values of this process's secret-named environment variables (and the
+# password part of URL-with-userinfo values) found bare in FILE. Prints
+# "LINE:env:VARNAME" only -- values are read in-process, never put on argv,
+# disk or output. Returns 0 (hits or none), or 2 when python3 exists but the
+# scan failed. Only an absent python3 skips silently; the regex tier stays
+# authoritative then. Callers keep these records apart from raw grep output.
+agent_memory_env_secret_py() {
+  cat <<'PY'
+import os, re, sys
+
+NAMES = {
+    'KE' 'Y', 'APIKE' 'Y', 'TO' 'KEN', 'SEC' 'RET', 'PASS' 'WORD', 'PASS' 'WD',
+    'PASS' 'PHRASE', 'CRED' 'ENTIAL', 'CRED' 'ENTIALS', 'AU' 'THORIZATION',
+}
+METADATA = {
+    'NAME', 'METHOD', 'TYPE', 'KIND', 'MODE', 'FILE', 'PATH', 'DIR', 'ID',
+    'URL', 'VAR', 'ENV', 'FORMAT', 'HEADER', 'LENGTH',
+}
+PLAIN = ('true', 'false', 'yes', 'no', '0', '1')
+USERINFO = re.compile(r'^[a-z][a-z0-9+.-]*://[^\s/:@]+:([^\s/@]+)@')
+
+def secret_name(name):
+    parts = [p for p in re.split(r'[^A-Za-z0-9]+', name.upper()) if p]
+    return bool(parts) and parts[-1] not in METADATA and any(p in NAMES for p in parts)
+
+def usable(v):
+    if len(v) < 8 or v.isdigit() or v.lower() in PLAIN or v[0] in '/~':
+        return False
+    if v[1] == ':' and v[2:3] in ('\\', '/'):
+        return False
+    return len(v) >= 16 or any(not ('a' <= c.lower() <= 'z') for c in v)
+
+needles = {}
+for name, value in os.environ.items():
+    value = value.strip()
+    if value and usable(value) and secret_name(name):
+        needles.setdefault(value, name)
+    m = USERINFO.match(value)
+    if m and len(m.group(1)) >= 8 and m.group(1).lower() not in PLAIN:
+        needles.setdefault(m.group(1), name)
+if not needles:
+    sys.exit(0)
+with open(sys.argv[1], 'rb') as fh:
+    data = fh.read()
+seen = set()
+for value, name in needles.items():
+    needle = value.encode('utf-8', 'replace')
+    at = data.find(needle)
+    while at >= 0:
+        seen.add((data.count(b'\n', 0, at) + 1, name))
+        at = data.find(needle, at + 1)
+for number, name in sorted(seen):
+    print('%d:env:%s' % (number, name))
+PY
+}
+
+agent_memory_env_secret_hits() {  # FILE
+  local file="$1" out
+  [ -s "$file" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  out="$(python3 -I -c "$(agent_memory_env_secret_py)" "$file" 2>/dev/null)" || return 2
+  [ -z "$out" ] || printf '%s\n' "$out" | tr -d '\r'
+}
+
+agent_memory_file_has_secret_content() {
+  local file="$1" rc=0 hits
   [ -s "$file" ] || return 1
-  agent_memory_match_file "$file" "$(agent_memory_sensitive_re)"
+  agent_memory_match_file "$file" "$(agent_memory_secret_re)" || rc=$?
+  [ "$rc" -eq 1 ] || return "$rc"
+  hits="$(agent_memory_env_secret_hits "$file")" || return 2
+  [ -n "$hits" ]
+}
+
+agent_memory_file_has_sensitive_content() {
+  local file="$1" rc=0 hits
+  [ -s "$file" ] || return 1
+  agent_memory_match_file "$file" "$(agent_memory_sensitive_re)" || rc=$?
+  [ "$rc" -eq 1 ] || return "$rc"
+  hits="$(agent_memory_env_secret_hits "$file")" || return 2
+  [ -n "$hits" ]
 }
 
 # Scan unified-diff additions and report only target-file locations and the
@@ -334,7 +410,7 @@ agent_memory_file_has_sensitive_content() {
 # is still scanned, so a miscounted hunk header cannot hide an addition.
 agent_memory_sensitive_diff_scan() {  # DIFF
   local file="$1" content_file loc_file idx_file rc=0 tier re n pattern
-  local reported shown cap=10 scan_status=()
+  local reported shown cap=10 scan_status=() records env_hits
   content_file="$(agent_memory_mktemp)" || return 2
   loc_file="$(agent_memory_mktemp)" || { rm -f "$content_file"; return 2; }
   idx_file="$(agent_memory_mktemp)" || { rm -f "$content_file" "$loc_file"; return 2; }
@@ -381,15 +457,28 @@ agent_memory_sensitive_diff_scan() {  # DIFF
         rc=2
         break
       fi
+      # Raw grep rows reduce to bare line numbers before helper records join
+      # them, so no matched content can pose as a helper label.
+      records="$(cut -d: -f1 "$idx_file")"
+      if [ "$tier" = secret ]; then
+        env_hits="$(agent_memory_env_secret_hits "$content_file")" || { rc=2; break; }
+        [ -z "$env_hits" ] || records="${records:+$records
+}$(printf '%s\n' "$env_hits" | sed 's/^/env:/')"
+      fi
       shown=0; reported=0
       while IFS= read -r n; do
-        n="${n%%:*}"
+        [ -n "$n" ] || continue
+        pattern=""
+        case "$n" in env:*) n="${n#env:}"; pattern="${n#*:}"; n="${n%%:*}" ;; esac
         reported=$((reported + 1))
         [ "$shown" -lt "$cap" ] || continue
         shown=$((shown + 1))
-        pattern="$(agent_memory_sensitive_line_pattern "$tier" "$(LC_ALL=C sed -n "${n}p" "$content_file")")"
+        [ -n "$pattern" ] ||
+          pattern="$(agent_memory_sensitive_line_pattern "$tier" "$(LC_ALL=C sed -n "${n}p" "$content_file")")"
         printf '%s: %s-tier match: %s\n' "$(LC_ALL=C sed -n "${n}p" "$loc_file")" "$tier" "$pattern"
-      done < "$idx_file"
+      done <<EOF
+$records
+EOF
       [ "$reported" -le "$shown" ] || printf '%s-tier: +%s more added-line matches\n' "$tier" "$((reported - shown))"
     done
   fi
@@ -439,8 +528,12 @@ agent_memory_sensitive_report() {  # FILE
     while IFS= read -r line; do
       number="${line%%:*}"
       case "$number" in *[!0-9]*|"") continue ;; esac
-      line="$(sed -n "${number}p" "$file")"
-      pattern="$(agent_memory_sensitive_line_pattern "$tier" "$line")"
+      case "$line" in
+        *:env:*) pattern="${line#*:}" ;;
+        *)
+          line="$(sed -n "${number}p" "$file")"
+          pattern="$(agent_memory_sensitive_line_pattern "$tier" "$line")" ;;
+      esac
       [ -n "$pattern" ] || continue
       region=prompt
       if [ "$begin" -gt 0 ] && [ "$number" -gt "$begin" ] &&
@@ -465,7 +558,8 @@ agent_memory_sensitive_report() {  # FILE
       MA_OUTBOUND_EVIDENCE="${MA_OUTBOUND_EVIDENCE}${MA_OUTBOUND_EVIDENCE:+
 }${tier},${pattern},${source_name// /-},${number}"
     done <<EOF
-$(agent_memory_scan_input "$file" 2>/dev/null | grep -Ein "$re" | cut -d: -f1)
+$(agent_memory_scan_input "$file" 2>/dev/null | grep -Ein "$re" | cut -d: -f1
+  [ "$tier" != secret ] || agent_memory_env_secret_hits "$file")
 EOF
     if [ "$brief_first" -gt 0 ]; then
       agent_memory_sensitive_report_line "$tier" 'brief file' "$prompt_lines" "$prompt_count"
@@ -524,12 +618,6 @@ agent_memory_sensitive_report_line() {  # TIER WHERE LINES COUNT
   [ "$count" -gt 0 ] || return 0
   [ "$count" -le 3 ] || more=" (+$((count - 3)) more)"
   printf '%s-tier match in %s at line %s%s\n' "$tier" "$where" "$lines" "$more"
-}
-
-agent_memory_file_has_secret_content() {
-  local file="$1"
-  [ -s "$file" ] || return 1
-  agent_memory_match_file "$file" "$(agent_memory_secret_re)"
 }
 
 # Rewrite machine-identifying path prefixes to ~ so repo-local records can keep
@@ -915,11 +1003,19 @@ agent_memory_append_file() {
   local metadata_file
   local citation_file=""
   local repo=""
+  local scan_rc
 
-  if agent_memory_file_has_sensitive_content "$note_file"; then
-    echo "error: memory note contains sensitive-looking content; not appended" >&2
-    return 3
-  fi
+  scan_rc=0
+  agent_memory_file_has_sensitive_content "$note_file" || scan_rc=$?
+  case "$scan_rc" in
+    1) ;;
+    0)
+      echo "error: memory note contains sensitive-looking content; not appended" >&2
+      return 3 ;;
+    *)
+      echo "error: sensitive-content scan failed; memory note not appended" >&2
+      return 3 ;;
+  esac
   if grep -Fq '<!-- oms-memory' "$note_file"; then
     echo "error: memory note contains the reserved memory metadata marker; not appended" >&2
     return 3
@@ -999,11 +1095,19 @@ agent_memory_pin_file() {
   local pins_file
   local occurred_at
   local metadata_file
+  local scan_rc
 
-  if agent_memory_file_has_sensitive_content "$note_file"; then
-    echo "error: memory pin contains sensitive-looking content; not appended" >&2
-    return 3
-  fi
+  scan_rc=0
+  agent_memory_file_has_sensitive_content "$note_file" || scan_rc=$?
+  case "$scan_rc" in
+    1) ;;
+    0)
+      echo "error: memory pin contains sensitive-looking content; not appended" >&2
+      return 3 ;;
+    *)
+      echo "error: sensitive-content scan failed; memory pin not appended" >&2
+      return 3 ;;
+  esac
   if grep -Fq '<!-- oms-memory' "$note_file"; then
     echo "error: memory pin contains the reserved memory metadata marker; not appended" >&2
     return 3
