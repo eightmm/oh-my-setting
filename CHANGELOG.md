@@ -102,6 +102,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Plain heartbeat appends to the lifecycle ledger no longer invalidate the
+  panel's shared cache: its fingerprint tracks the last non-heartbeat row, so
+  board refreshes hit the cache more often. Cached heartbeat times can lag up
+  to 30 seconds.
 - The managed `python3` shim no longer resolves its interpreter from the
   caller's cwd. A uv-adopted shim (`exec "$(uv python find)" "$@"`) picked the
   `.venv` or `.python-version` of whatever project it ran in, or failed when

@@ -1358,6 +1358,36 @@ for relative in ('.oms/lifecycle/events.jsonl', '.oms/hooks/events.jsonl', '.oms
     before = cache.fingerprint(project)
     source.write_text('record', encoding='utf-8')
     assert cache.fingerprint(project) != before, relative
+ledger = project / '.oms/lifecycle/events.jsonl'
+def ledger_row(kind, **extra):
+    return json.dumps({'schema': 'oms.agent-event.v1', 'event_id': 'aevt_' + os.urandom(4).hex(), 'attempt_id': 'a1',
+                       'event_type': kind, **extra}) + '\n'
+def ledger_append(*rows):
+    with ledger.open('a', encoding='utf-8') as handle:
+        handle.write(''.join(rows))
+ledger.write_text(ledger_row('attempt.created'), encoding='utf-8')
+before = cache.fingerprint(project)
+ledger_append(ledger_row('attempt.heartbeat'))
+assert cache.fingerprint(project) == before, 'plain heartbeat invalidated the cache'
+ledger_append(ledger_row('attempt.state_changed', to_state='running'))
+assert cache.fingerprint(project) != before, 'state change kept the cache'
+before = cache.fingerprint(project)
+ledger_append(ledger_row('attempt.heartbeat', refs={'k': 'v'}))
+assert cache.fingerprint(project) != before, 'heartbeat refs kept the cache'
+before = cache.fingerprint(project)
+ledger_append(ledger_row('attempt.heartbeat', usage={'tokens': 1}))
+assert cache.fingerprint(project) != before, 'heartbeat usage kept the cache'
+ledger_append(*[ledger_row('attempt.heartbeat') for unused in range(cache.LEDGER_WINDOW // 60)])
+assert ledger.stat().st_size > cache.LEDGER_WINDOW
+before = cache.fingerprint(project)
+ledger_append(ledger_row('attempt.heartbeat'))
+assert cache.fingerprint(project) != before, 'heartbeat run beyond the window kept the cache'
+ledger.write_text(ledger_row('attempt.created'), encoding='utf-8')
+before = cache.fingerprint(project)
+replacement = ledger.with_name('events.new')
+replacement.write_text(ledger.read_text(encoding='utf-8'), encoding='utf-8')
+os.replace(replacement, ledger)
+assert cache.fingerprint(project) != before, 'ledger replacement kept the cache'
 git_dir = project / 'worktree-git'
 git_dir.mkdir()
 (project / '.git').write_text('gitdir: worktree-git\n', encoding='utf-8')

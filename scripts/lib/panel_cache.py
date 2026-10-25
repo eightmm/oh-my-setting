@@ -23,6 +23,48 @@ MAX_BYTES = 8 * 1024 * 1024
 DIRECTORY = '.oms/hooks/panel-cache'
 SKIPPED = {DIRECTORY, '.oms/hooks/panel-activity'}
 ROOT = Path(__file__).resolve().parents[2]
+LEDGER = '.oms/lifecycle/events.jsonl'
+LEDGER_WINDOW = 256 * 1024
+_ledger_source = []
+
+
+def _ledger_token(path, size):
+    """End offset of the last non-heartbeat row, so plain heartbeats keep the fingerprint.
+
+    Any doubt returns the file size, which changes on every append.
+    """
+    try:
+        if not _ledger_source:
+            _ledger_source.append(runpy.run_path(str(Path(__file__).with_name('agent-events.py'))))
+        with _ledger_source[0]['_ledger_fd'](Path(path)) as descriptor:
+            end = os.fstat(descriptor).st_size
+            start = max(0, end - LEDGER_WINDOW)
+            os.lseek(descriptor, start, os.SEEK_SET)
+            chunks, remaining = [], end - start
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    return size
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        data = b''.join(chunks)
+        if not data.endswith(b'\n'):
+            return size
+        lines = data.split(b'\n')[:-1]
+        offsets, position = [], start
+        for line in lines:
+            position += len(line) + 1
+            offsets.append(position)
+        # A window that starts mid-row never parses its first fragment.
+        first = 1 if start else 0
+        for index in range(len(lines) - 1, first - 1, -1):
+            row = json.loads(lines[index].decode('utf-8'))
+            if (not isinstance(row, dict) or row.get('event_type') != 'attempt.heartbeat'
+                    or 'refs' in row or 'usage' in row):
+                return offsets[index]
+    except Exception:
+        pass
+    return size
 
 
 def fingerprint(repo):
@@ -54,6 +96,9 @@ def fingerprint(repo):
                     entries.append((relative, None))
                     continue
                 visit(child.path, relative, child_info)
+        elif label == LEDGER and stat.S_ISREG(info.st_mode):
+            entries.append((label, info.st_mode, info.st_dev, info.st_ino,
+                            _ledger_token(path, info.st_size)))
         else:
             entries.append((label, info.st_mode, info.st_dev, info.st_ino,
                             info.st_size, info.st_mtime_ns, info.st_ctime_ns))

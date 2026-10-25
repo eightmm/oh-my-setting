@@ -1008,6 +1008,11 @@ change collects directly instead of failing. When refresh still fails, the
 board or control window keeps its last good state and shows
 `State refresh failed; showing data from Ns ago`.
 
+Plain `attempt.heartbeat` appends do not invalidate that cache, so a cached
+attempt's `last_heartbeat_at`, `updated_at` and `sequence` can lag up to 30
+seconds; any other lifecycle row, or a heartbeat carrying refs or usage,
+invalidates it.
+
 If the first read fails, or a window switches to a room it has not successfully
 read, the panel reports that room state is unavailable and its work and messages
 are unknown. It does not show empty-work counts. The control menu remains
