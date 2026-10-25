@@ -32679,9 +32679,9 @@ PY
     oms_worker_surface_capture_one "$2" omsstate "$2" > "$3" || exit 10
     rm -f "$4"
     oms_worker_state_violations "$2" "$3" > "$3-detail" || exit 11
-    grep -Fq "was deleted" "$3-detail"
+    [ ! -s "$3-detail" ]
   ' _ "$ROOT" "$graph_cache" "$graph_cache_snapshot" "$graph_cache_file" ||
-    fail "strict mode should keep a project-graph cache deletion hard"
+    fail "strict mode should also tolerate a project-graph cache deletion: the main checkout's graph rebuild prunes it"
 
   local graph_cache_rewrite="$TMP/guard-state-graph-cache-rewrite"
   local graph_cache_rewrite_file="$TMP/guard-state-graph-cache-rewrite/.oms/project-graph/cache/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"

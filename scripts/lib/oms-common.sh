@@ -982,7 +982,7 @@ with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
         rel, kind = parts[0], parts[1]
         path = os.path.join(root, rel)
         if not os.path.exists(path):
-            if (kind == "CACHE" and os.environ.get("OMS_WORKER_GUARD_STRICT", "0") != "1"
+            if (kind == "CACHE"
                     and re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel)):
                 if not os.path.lexists(path):
                     continue
