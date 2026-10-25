@@ -5436,6 +5436,7 @@ test_delegate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'After you return, the harness runs `bash scripts/check.sh fast`.'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'do not run this full command just to confirm completion'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'checks restored from HEAD'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'cluster-storage paths out of added lines'
   # Panel dispatch hands the plan task's paths and declared scopes to the prompt.
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_PANEL_ALLOWED_PATHS="scripts/a.sh, tests/b.sh" \
     OMS_PANEL_FORBIDDEN_PATHS="secrets/" "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
