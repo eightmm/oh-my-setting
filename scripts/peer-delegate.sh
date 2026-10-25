@@ -1115,8 +1115,15 @@ write_unattended_stop_rule() {
   printf 'Ending your turn ends the task: do not stop at a summary that only announces the next step, an offer to continue, or decisions that block nothing. Stop when the task is done or nothing more can advance without the owner.\n'
 }
 
+# codex loads AGENTS.md and a claude write worker loads CLAUDE.md (which imports
+# AGENTS.md; write workers keep --setting-sources), so re-reading them only
+# re-sends them every turn. Other providers have no confirmed auto-load.
 write_minimal_change_doctrine() {
-  printf 'Read applicable repository instructions and PROJECT.md. Use source evidence to bound the smallest complete change, preserve contracts and safety, reuse existing tests, and run affected checks. Report changes, evidence, verification and uncertainty; return code as patch artifacts.\n'
+  case "$TO" in
+    codex|claude) printf 'Follow the repository instructions; do not re-read a file already in your context, but read any applicable instruction file that is not. Read PROJECT.md once, only if the task touches its contract.' ;;
+    *) printf 'Read applicable repository instructions and PROJECT.md.' ;;
+  esac
+  printf ' Use source evidence to bound the smallest complete change, preserve contracts and safety, reuse existing tests, and run affected checks. Report changes, evidence, verification and uncertainty; return code as patch artifacts.\n'
 }
 
 # Print one field of a JSON object (a list joins with ", "); empty when absent.

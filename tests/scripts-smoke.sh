@@ -5464,7 +5464,24 @@ test_delegate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" 'exact-routine-model'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
-    'Read applicable repository instructions and PROJECT.md'
+    'Follow the repository instructions; do not re-read a file already in your context, but read any applicable instruction file that is not. Read PROJECT.md once, only if the task touches its contract.'
+  # A Claude target whose repository has only AGENTS.md loads nothing itself.
+  local agents_only="$TMP/delegate-agents-only"
+  mkdir -p "$agents_only"
+  git clone -q "$project" "$agents_only/repo"
+  printf 'Project rules.\n' > "$agents_only/repo/AGENTS.md"
+  rm -f "$agents_only/repo/CLAUDE.md"
+  git -C "$agents_only/repo" add -A
+  git -C "$agents_only/repo" -c user.email=test@example.com -c user.name='Test User' commit -qm 'agents only'
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$agents_only/repo" \
+    --artifact-dir "$agents_only/art" --prompt "Add a claude helper" >/dev/null
+  assert_one_artifact_contains "$agents_only/art" 'claude-add-a-claude-helper-*.md' \
+    'read any applicable instruction file that is not.'
+  # A provider whose auto-load is unconfirmed keeps the read instruction.
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to antigravity --repo "$project" \
+    --artifact-dir "$TMP/delegate-dry-agy" --prompt "Add an agy helper" >/dev/null
+  assert_one_artifact_contains "$TMP/delegate-dry-agy" 'antigravity-add-an-agy-helper-*.md' \
+    'Read applicable repository instructions and PROJECT.md.'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'preserve contracts and safety, reuse existing tests, and run affected checks'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
@@ -19479,7 +19496,7 @@ PY
 #!/usr/bin/env bash
 prompt="$(cat)"
 if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt'; then
-  printf '%s' "$prompt" | grep >/dev/null 'Read applicable repository instructions and PROJECT.md' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'read any applicable instruction file that is not' || exit 8
   printf '%s' "$prompt" | grep >/dev/null 'preserve contracts and safety' || exit 8
   printf '%s' "$prompt" | grep >/dev/null 'reuse existing tests, and run affected checks' || exit 8
   printf '%s' "$prompt" | grep >/dev/null 'After you return, the harness runs `grep -q fixed delegated.txt`.' || exit 8
