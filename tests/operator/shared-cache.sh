@@ -850,7 +850,11 @@ index_path.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for 
 expected_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
 assert expected_metrics['completion'] == {'finished': 2, 'started': 6, 'rate': 0.3333}, expected_metrics
 assert expected_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, expected_metrics
-assert expected_metrics['rework'] == {'tasks': 1, 'started': 6, 'rate': 0.1667}, expected_metrics
+# Rework counts tasks whose first write attempt is in the window, plan task or not; only 'continued' has two.
+rework_cohort_size = expected_metrics['rework']['started']
+assert expected_metrics['rework'] == {'tasks': 1, 'started': rework_cohort_size,
+                                      'rate': round(1 / rework_cohort_size, 4)}, expected_metrics
+assert rework_cohort_size > expected_metrics['completion']['started'], expected_metrics
 assert expected_metrics['abandoned_calls'] == 1, expected_metrics
 assert expected_metrics['endings'] == {'timed_out': 2, 'cancelled': 1,
                                        'verify_failed': 1, 'failed': 4}, expected_metrics
@@ -878,7 +882,9 @@ assert expected_metrics['tokens_by_decision']['failed'] == {'tokens': 0, 'tasks'
 assert expected_metrics['tokens_by_decision']['undecided']['tasks'] > 0, expected_metrics['tokens_by_decision']
 assert expected_metrics['tokens_by_decision']['undecided']['tokens'] == 1100, expected_metrics['tokens_by_decision']
 assert expected_metrics['tokens_by_decision']['untasked'] == {'tokens': 0, 'tasks': 0, 'attempts': 1}, expected_metrics['tokens_by_decision']
-assert expected_metrics['tokens_by_decision']['unreported_attempts'] == 993, expected_metrics['tokens_by_decision']
+# The old-task attempts predate the earliest retained panel-result row (-120s): decision not retained, no bucket.
+assert expected_metrics['tokens_by_decision']['unreported_attempts'] == 15, expected_metrics['tokens_by_decision']
+assert 'tasks predate retained decisions (before %s)' % stamp_metric(-120) in expected_metrics['incomplete_reason'], expected_metrics
 
 # Selected attempts retain stage attribution even when their artifact rows are
 # older than the CLI's 1000-row tail. Review rows without reason codes consult
@@ -923,6 +929,34 @@ assert extended_write['reason_code']['awaiting_review'] == 2, extended_write
 assert extended_write['reason_code']['unknown'] == 4, extended_write
 lifecycle.write_bytes(baseline_lifecycle)
 index_path.write_bytes(baseline_index)
+# Tasks without a plan entry: two write attempts of one id are one reworked task of the cohort. An undecided
+# attempt older than the retained-decision floor is excluded and counted; a newer one stays undecided.
+lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
+before_floor = panel_metrics.aggregate(metric_repo, since='10m', now=now_metric)
+assert 'predate retained decisions' not in (before_floor['incomplete_reason'] or ''), before_floor['incomplete_reason']
+floor_rows = len(event_rows)
+add_attempt('nodoc-one', 'nodoc-task', 'worker', 'write', -30, -25, 'failed')
+add_attempt('nodoc-two', 'nodoc-task', 'worker', 'write', -20, -15, 'done')
+add_attempt('predates-floor', 'predates-floor-task', 'worker', 'read', -300, -290, 'done')
+add_attempt('after-floor', 'after-floor-task', 'worker', 'read', -10, -9, 'done')
+lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
+floor_metrics = panel_metrics.aggregate(metric_repo, since='10m', now=now_metric)
+assert floor_metrics['rework']['tasks'] == before_floor['rework']['tasks'] + 1, floor_metrics['rework']
+assert floor_metrics['rework']['started'] == before_floor['rework']['started'] + 1, floor_metrics['rework']
+assert floor_metrics['rework']['rate'] == round(2 / floor_metrics['rework']['started'], 4), floor_metrics['rework']
+# nodoc (two attempts) and after-floor stay undecided; predates-floor (updated -290s, floor -120s) is in no bucket.
+before_undecided, after_undecided = before_floor['tokens_by_decision']['undecided'], floor_metrics['tokens_by_decision']['undecided']
+assert after_undecided['tasks'] == before_undecided['tasks'] + 2, (before_undecided, after_undecided)
+assert after_undecided['attempts'] == before_undecided['attempts'] + 3, (before_undecided, after_undecided)
+assert '1 tasks predate retained decisions (before %s)' % stamp_metric(-120) in floor_metrics['incomplete_reason'], floor_metrics['incomplete_reason']
+assert floor_metrics['incomplete'] is True, floor_metrics
+del event_rows[floor_rows:]
+lifecycle.write_bytes(baseline_lifecycle)
+# No plan task started in the window: the text report omits the completion line, JSON keeps it.
+idle_report = deepcopy(expected_metrics)
+idle_report['completion'] = {'finished': 0, 'started': 0, 'rate': None}
+assert 'completion:' not in panel_metrics.metrics_text(idle_report), panel_metrics.metrics_text(idle_report)
+assert 'completion: 2/6' in panel_metrics.metrics_text(expected_metrics), panel_metrics.metrics_text(expected_metrics)
 # A finalized task leaves the metrics admission queue as it leaves the board hint, with no admission row.
 for decided, waiting in (('completed', 0), ('pending', None)):
     with patch.object(panel_results, 'pending_admissions', side_effect=lambda repo, ids, _tick=None: {i for i in ids if i}), \
@@ -948,7 +982,7 @@ assert 'plan tasks without an observed write attempt=' in metric_text.getvalue()
 assert 'failed/undecided write reasons/stages:' in metric_text.getvalue(), metric_text.getvalue()
 assert 'peer-delegate write attempts: 8' in metric_text.getvalue(), metric_text.getvalue()
 assert 'tokens by decision: accepted 1.2k/1 tasks (1.2k per task); completed 0/0 tasks (-- per task); rejected 300/1 tasks (300 per task); failed 0/0 tasks (-- per task); undecided 1.1k/' in metric_text.getvalue(), metric_text.getvalue()
-assert 'unreported attempts=993' in metric_text.getvalue(), metric_text.getvalue()
+assert 'unreported attempts=15' in metric_text.getvalue(), metric_text.getvalue()
 assert 'context modes (done/attempts)=graph 0/1, no artifact row 1/2, unrecorded 0/5' in metric_text.getvalue(), metric_text.getvalue()
 assert 'fork subagents' not in metric_text.getvalue(), metric_text.getvalue()
 metric_json = io.StringIO()
@@ -974,8 +1008,9 @@ outside_window_metrics = panel_metrics.aggregate(metric_repo, since='1s', now=no
 assert outside_window_metrics['write_attempts']['total'] == 0, outside_window_metrics
 assert recent_metrics['completion'] == {'finished': 1, 'started': 3, 'rate': 0.3333}, recent_metrics
 assert recent_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, recent_metrics
-# 'continued' started before the window, so its in-window rework is outside the cohort.
-assert recent_metrics['rework'] == {'tasks': 0, 'started': 3, 'rate': 0.0}, recent_metrics
+# 'continued' first wrote before the window, so its in-window rework is outside the cohort; the cohort is the
+# 13 tasks whose first write attempt is in the window, not the 3 plan tasks that started.
+assert recent_metrics['rework'] == {'tasks': 0, 'started': 13, 'rate': 0.0}, recent_metrics
 assert recent_metrics['abandoned_calls'] == 1, recent_metrics
 assert recent_metrics['interventions'] == {'manual_clears': 1, 'cancels': 0,
                                             'owner_finalized_failures': 1, 'total': 2}, recent_metrics
@@ -1012,7 +1047,8 @@ assert panel_metrics.aggregate(metric_repo, since='1m', now=now_metric)['rework'
 plan_path.write_text('{broken json', encoding='utf-8')
 corrupt_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
 assert corrupt_metrics['incomplete'] is True, corrupt_metrics
-assert corrupt_metrics['incomplete_reason'] == 'plan evidence malformed', corrupt_metrics
+# The fixture's old tasks also predate retained decisions, so the reason list carries both entries.
+assert corrupt_metrics['incomplete_reason'].startswith('plan evidence malformed'), corrupt_metrics
 corrupt_text = io.StringIO()
 with redirect_stdout(corrupt_text):
     assert panel.main(['--repo', str(metric_repo), '--metrics']) == 0
@@ -1022,7 +1058,7 @@ with redirect_stdout(corrupt_json):
     assert panel.main(['--repo', str(metric_repo), '--metrics', '--json']) == 0
 corrupt_payload = json.loads(corrupt_json.getvalue())
 assert corrupt_payload['incomplete'] is True
-assert corrupt_payload['incomplete_reason'] == 'plan evidence malformed'
+assert corrupt_payload['incomplete_reason'].startswith('plan evidence malformed')
 
 # Invalid task state values are excluded from counts and reported as partial
 # evidence in both output formats instead of being interpreted as ready.
@@ -1059,7 +1095,7 @@ assert empty_metrics['interventions']['total'] == 0
 empty_text = io.StringIO()
 with redirect_stdout(empty_text):
     assert panel.main(['--repo', str(empty_metrics_repo), '--metrics']) == 0
-assert 'completion: 0/0 (none)' in empty_text.getvalue(), empty_text.getvalue()
+assert 'completion:' not in empty_text.getvalue() and 'rework: 0/0 (none)' in empty_text.getvalue(), empty_text.getvalue()
 empty_json = io.StringIO()
 with redirect_stdout(empty_json):
     assert panel.main(['--repo', str(empty_metrics_repo), '--metrics', '--json']) == 0

@@ -650,8 +650,15 @@ def aggregate(repo, since=None, now=None):
     for call in write_calls:
         if call.get("task_id"):
             write_groups.setdefault(call.get("task_id"), []).append(call)
-    # Same cohort as completion: tasks first started in the window.
-    reworked = {task_id for task_id in first_start if len(write_groups.get(task_id, [])) > 1}
+    # Cohort: tasks whose first write attempt was created in the window, with or without a plan task;
+    # panel write tasks mostly carry only a --task-id. Reworked means more than one write group.
+    rework_cohort = set()
+    for task_id, group in write_groups.items():
+        created = [_stamp(call.get("created_at")) for call in group]
+        first_write = min((stamp for stamp in created if stamp is not None), default=None)
+        if first_write is not None and in_window(first_write):
+            rework_cohort.add(task_id)
+    reworked = {task_id for task_id in rework_cohort if len(write_groups[task_id]) > 1}
 
     def has_write_successor(call, transition):
         if call.get("refs", {}).get("panel_role") != "worker" or call.get("refs", {}).get("panel_access") != "write":
@@ -754,6 +761,12 @@ def aggregate(repo, since=None, now=None):
                        for name in ("accepted", "completed", "rejected", "failed", "undecided", "untasked")}
     task_sets = {name: set() for name in token_decisions}
     unreported_tokens = 0
+    # outcomes() reads only retained panel-result rows, so a task last active before the earliest one
+    # may have been decided without a retained record; it is not undecided.
+    result_stamps = [_stamp(row.get("ts")) for row in retained_artifacts
+                     if isinstance(row, dict) and row.get("kind") == "panel-result"]
+    decision_floor = min((stamp for stamp in result_stamps if stamp is not None), default=None)
+    predating = set()
     for attempt in attempts:
         refs = attempt.get("refs", {})
         if refs.get("panel_role") != "worker" or refs.get("panel_access") not in {"read", "write"}:
@@ -768,6 +781,11 @@ def aggregate(repo, since=None, now=None):
             task_key = task_id
             outcome = decisions.get(task_id)
             bucket = outcome if outcome in {"accepted", "completed", "rejected", "failed"} else "undecided"
+            if outcome is None and decision_floor is not None:
+                updated = _stamp(attempt.get("updated_at"))
+                if updated is not None and updated < decision_floor:
+                    predating.add(task_id)
+                    continue
         entry = token_decisions[bucket]
         entry["attempts"] += 1
         if task_key is not None:
@@ -778,6 +796,13 @@ def aggregate(repo, since=None, now=None):
             unreported_tokens += 1
     for bucket, task_set in task_sets.items():
         token_decisions[bucket]["tasks"] = len(task_set)
+    if decision_floor is None and task_sets["undecided"]:
+        incomplete = True
+        incomplete_reasons.append("no panel-result decisions retained; undecided tokens may include decided tasks")
+    if predating:
+        incomplete = True
+        incomplete_reasons.append("%d tasks predate retained decisions (before %s); their tokens are excluded" % (
+            len(predating), datetime.fromtimestamp(decision_floor, timezone.utc).isoformat().replace("+00:00", "Z")))
     token_decisions["unreported_attempts"] = unreported_tokens
     def has_claim_evidence(task):
         history = task.get("history") if isinstance(task.get("history"), list) else []
@@ -810,8 +835,8 @@ def aggregate(repo, since=None, now=None):
                            "rate": round(finished / len(started), 4) if started else None},
             "review_wait_seconds": {"count": len(waits), "median": percentile(waits, .5),
                                     "p90": percentile(waits, .9)},
-            "rework": {"tasks": len(reworked), "started": len(started),
-                       "rate": round(len(reworked) / len(started), 4) if started else None},
+            "rework": {"tasks": len(reworked), "started": len(rework_cohort),
+                       "rate": round(len(reworked) / len(rework_cohort), 4) if rework_cohort else None},
             "abandoned_calls": abandoned,
             "endings": ending_counts,
             "tokens_by_decision": token_decisions,
@@ -852,7 +877,7 @@ def metrics_text(report):
         return "none" if value is None else "%.1f%%" % (value * 100)
     def seconds(value):
         return "none" if value is None else "%ss" % value
-    return "\n".join((
+    return "\n".join(line for line in (
         "Panel metrics (since %s; until %s)" % (report.get("since") or "all retained", report.get("until", "unknown")),
         "coverage: %s attempts, %s artifact events (limits %s/%s); plan tasks without an observed write attempt=%d%s" % (
             report.get("coverage", {}).get("attempts_observed", "?"),
@@ -874,7 +899,8 @@ def metrics_text(report):
             seconds(report.get("pending", {}).get("awaiting_admission", {}).get("oldest_seconds")),
             seconds(report.get("pending", {}).get("awaiting_admission", {}).get("median_seconds"))),
         "pending counts use the current snapshot; rates and durations use the stated window",
-        "completion: %d/%d (%s)" % (completion["finished"], completion["started"], rate(completion["rate"])),
+        "completion: %d/%d (%s)" % (completion["finished"], completion["started"], rate(completion["rate"]))
+        if completion["started"] else None,
         "review wait: n=%d median=%s p90=%s" % (waits["count"], seconds(waits["median"]), seconds(waits["p90"])),
         "rework: %d/%d (%s)" % (rework["tasks"], rework["started"], rate(rework["rate"])),
         "abandoned calls: %d" % report["abandoned_calls"],
@@ -901,7 +927,7 @@ def metrics_text(report):
             report["interventions"]["total"], report["interventions"]["manual_clears"],
             report["interventions"]["cancels"], report["interventions"]["owner_finalized_failures"]),
         "incomplete: %s" % report.get("incomplete_reason") if report.get("incomplete")
-        else "incomplete: no"))
+        else "incomplete: no") if line is not None)
 
 
 def usage_line(report, width=100, unicode=True):
