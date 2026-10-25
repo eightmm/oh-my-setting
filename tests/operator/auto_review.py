@@ -1032,8 +1032,10 @@ with patch.object(panel_result_store, "_records", return_value=([parallel_attemp
     observers = [threading.Thread(target=deliver_parallel) for _ in range(4)]
     for observer in observers:
         observer.start()
+    import time
+    join_deadline = time.monotonic() + max(15, int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")) // 6)
     for observer in observers:
-        observer.join(timeout=15)
+        observer.join(timeout=max(0.0, join_deadline - time.monotonic()))
 assert not parallel_errors and not any(observer.is_alive() for observer in observers), parallel_errors
 parallel_events = [row["room_event"] for row in room.records(project, shared)
                    if row.get("room_event", {}).get("kind") == "call-result"

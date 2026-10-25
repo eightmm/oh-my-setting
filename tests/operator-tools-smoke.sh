@@ -509,7 +509,8 @@ CONTINUATION
               "--dispatch", "builder", "--owner", "claude", "--to", "codex", "--model", "gpt-6-luna",
               "--access", "write", "--verify", "true", "--scope", "value.txt"]
     def round_call(argv, env=None):
-        run = subprocess.run(argv, cwd=str(project), env=env or room_env, capture_output=True, text=True, timeout=90)
+        run = subprocess.run(argv, cwd=str(project), env=env or room_env, capture_output=True, text=True,
+                             timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
         assert run.returncode == 0, (argv, run.stdout, run.stderr)
         return run.stdout
     original_base = round_call(["git", "rev-parse", "HEAD"]).strip()
