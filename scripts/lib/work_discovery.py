@@ -11,6 +11,7 @@ import re
 import runpy
 import subprocess
 import sys
+import unicodedata
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -34,6 +35,7 @@ _ATTEMPT_LINE = re.compile(
     rb"[0-9]{2}:[0-9]{2}:[0-9]{2}Z) sha=([0-9a-f]{40}|[0-9a-f]{64})$")
 _FAILED_CHECK = re.compile(
     rb"^check: ([A-Za-z0-9_.:-]{1,160}|affected:tests/[A-Za-z0-9_./-]{1,128}) FAILED(?:\s|$)")
+_SLOW_STAGE_LINE = re.compile(rb"^slow-stage: ([0-9]{1,9})s ([^\x00-\x20\x7f]{1,160})$")
 
 
 class _RunFailure:
@@ -280,6 +282,30 @@ def _land_attempt_failures(raw, expected_sha):
     return attempts, incomplete, False
 
 
+def _median(values):
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    total = ordered[middle - 1] + ordered[middle]
+    return total // 2 if total % 2 == 0 else total / 2
+
+
+def _ci_section(items, stage_items, observation_count, coverage=None, reason=None):
+    coverage = dict(coverage or {})
+    coverage["stage_timing"] = "land-logs" if observation_count else "unavailable"
+    coverage["stage_timing_observations"] = observation_count
+    if observation_count:
+        coverage["stage_timing_source"] = "local land gates (not CI runners)"
+    section = _section(items, coverage, reason)
+    for item in stage_items:
+        candidate = _section(section["items"] + [item], coverage, reason)
+        size = len(json.dumps(candidate, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        if size <= SECTION_BUDGETS["ci"]:
+            section = candidate
+    return section
+
+
 def _collect_land_failures(repo):
     coverage = {"land_scan_complete": True, "land_receipts_considered": 0,
                 "land_receipts_admitted": 0, "land_logs_missing": 0,
@@ -314,12 +340,14 @@ def _collect_land_failures(repo):
         scan_dirs.sort(key=lambda directory: directory.name)
         aggregates = {}
         seen_receipts = set()
+        seen_stage_logs = set()
         requests_with_logs = set()
         seen_failure_attempts = set()
         passing_shas = set()
         missing_logs = set()
         total_log_bytes = 0
         receipt_count = 0
+        stage_observations = []
         for directory in scan_dirs:
             try:
                 if directory.is_symlink() or not directory.is_dir():
@@ -378,6 +406,28 @@ def _collect_land_failures(repo):
                                 continue
                             total_log_bytes += len(log)
                             requests_with_logs.add(name)
+                            log_digest = hashlib.sha256(log).digest()
+                            if log_digest not in seen_stage_logs:
+                                seen_stage_logs.add(log_digest)
+                                attempt_timestamp = None
+                                fallback_timestamp = receipt.get("finished_at")
+                                if not isinstance(fallback_timestamp, str):
+                                    fallback_timestamp = ""
+                                for line in log.splitlines():
+                                    marker = _ATTEMPT_LINE.fullmatch(line)
+                                    if marker:
+                                        attempt_timestamp = marker.group(2).decode("ascii")
+                                        continue
+                                    match = _SLOW_STAGE_LINE.fullmatch(line)
+                                    if match:
+                                        stage_name = match.group(2).decode("utf-8", "replace")
+                                        if any(character.isspace() or unicodedata.category(character) == "Cc"
+                                               for character in stage_name):
+                                            continue
+                                        stage_observations.append((
+                                            attempt_timestamp or fallback_timestamp,
+                                            len(stage_observations),
+                                            stage_name, int(match.group(1))))
                             attempts, incomplete, legacy = _land_attempt_failures(log, sha)
                             if legacy:
                                 coverage["land_logs_legacy"] += 1
@@ -427,10 +477,30 @@ def _collect_land_failures(repo):
         for (kind, identifier), counts in selected[:_LAND_FAILURE_LIMIT]:
             ref = "land:" + hashlib.sha256((kind + ":" + identifier).encode()).hexdigest()[:12]
             items.append({"ref": ref, "kind": kind, "name": identifier, **counts})
-        return items, coverage
+        stage_observations.sort(key=lambda row: (row[0], row[1]))
+        stage_values = {}
+        for _, _, name, seconds in stage_observations:
+            stage_values.setdefault(name, []).append(seconds)
+        stage_items = []
+        for name, values in stage_values.items():
+            if len(values) < 6:
+                continue
+            earlier = values[:-5]
+            recent = values[-5:]
+            median = _median(values)
+            recent_median = _median(recent)
+            earlier_median = _median(earlier)
+            stage_items.append((median, {"ref": name,
+                                         "summary": "stage %s median %ss max %ss (n=%d), recent %ss vs %ss; local land gates, not CI runners" %
+                                                    (name, median, max(values), len(values), recent_median, earlier_median)}))
+        stage_items.sort(key=lambda row: (-row[0], row[1]["ref"]))
+        stage_items = [item for _, item in stage_items]
+        coverage["stage_timing_observations"] = len(stage_observations)
+        return items, coverage, stage_items
     except (OSError, subprocess.SubprocessError, ValueError):
         coverage["land_scan_complete"] = False
-        return [], coverage
+        coverage["stage_timing_observations"] = 0
+        return [], coverage, []
 
 
 def collect(repo):
@@ -482,7 +552,7 @@ def collect(repo):
         except (ValueError, TypeError):
             sections["failures"] = _section([], {}, "fail-ledger returned invalid JSON")
 
-    land_items, land_coverage = _collect_land_failures(repo)
+    land_items, land_coverage, stage_items = _collect_land_failures(repo)
     failure_section = sections["failures"]
     failure_section["items"].extend(land_items)
     failure_coverage = failure_section["coverage"]
@@ -495,15 +565,15 @@ def collect(repo):
 
     raw = _run(repo, "ci-status.sh", "history", optional=True)
     if raw is _TIMED_OUT:
-        sections["ci"] = _section([], {}, "timeout")
+        sections["ci"] = _ci_section([], stage_items, land_coverage.get("stage_timing_observations", 0), {}, "timeout")
     elif raw is None:
-        sections["ci"] = _section([], {"stage_timing": "unavailable"}, "CI history unavailable")
+        sections["ci"] = _ci_section([], stage_items, land_coverage.get("stage_timing_observations", 0), {}, "CI history unavailable")
     elif isinstance(raw, _RunFailure):
         detail = _clean(raw.stderr)
         reason = "CI history exited %d" % raw.status
         if detail:
             reason += ": " + detail
-        sections["ci"] = _section([], {"stage_timing": "unavailable"}, reason)
+        sections["ci"] = _ci_section([], stage_items, land_coverage.get("stage_timing_observations", 0), {}, reason)
     else:
         items = []
         for line in raw.splitlines():
@@ -514,7 +584,8 @@ def collect(repo):
                 continue
             sha = safe_line.split()[0]
             items.append({"ref": sha, "summary": safe_line})
-        sections["ci"] = _section(items, {"stage_timing": "unavailable", "complete": True})
+        sections["ci"] = _ci_section(items, stage_items, land_coverage.get("stage_timing_observations", 0),
+                                      {"complete": True})
 
     try:
         raw = _run(repo, "agent-plan.sh", "list", "--json")

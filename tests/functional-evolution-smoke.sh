@@ -1507,9 +1507,22 @@ log.write_text(
     'check: scripts-smoke.test_agent_plan_lifecycle_receipt_history FAILED (2s)\n'
     'land attempt: 3 started_at=2026-01-12T10:00:00Z sha=' + sha + '\n'
     'check: scripts-smoke.test_newest_failure FAILED (1s)\n'
-    'check: ok\n')
+    'check: ok\n'
+    + ''.join('slow-stage: %ss scripts-smoke\n' % n for n in (100, 200, 300, 600, 700, 800, 900, 1000))
+    + 'slow-stage: 12s short-stage\nslow-stage: 18s short-stage\n'
+    + ''.join('slow-stage: 210s shared-stage\n' for _ in range(6)))
 (state_e / passed.name).write_bytes(passed.read_bytes())
-(state_e / log.name).write_bytes(log.read_bytes())
+independent_log = []
+for n in range(1, 10):
+    independent_log.append('land attempt: %d started_at=2026-01-%02dT10:00:00Z sha=%s\n' %
+                           (n, n + 9, sha))
+    if n == 3:
+        independent_log.extend('slow-stage: 210s shared-stage\n' for _ in range(6))
+    if n >= 4:
+        independent_log.append(
+            'slow-stage: %ds affected:tests/goal-drive-recovery-smoke.sh#2\n' % (170 + n * 10))
+    independent_log.append('check: ok\n')
+(state_e / log.name).write_text(''.join(independent_log))
 receipt(state_b, url, command + ' --missing-log')
 _, legacy = receipt(state_b, url, command + ' --legacy-log')
 (state_b / (legacy + '.log')).write_text(
@@ -1595,10 +1608,11 @@ PY
   out="$(python3 "$ROOT/scripts/lib/work_discovery.py" collect --repo "$repo" 2>"$TMP/discovery-err")" ||
     fail "work discovery collection failed"
   [ ! -s "$TMP/discovery-err" ] || fail "successful collection wrote to stderr"
-  python3 - "$out" <<'PY' || fail "work discovery packet omitted evidence or normalization"
+  python3 - "$out" "$repo" <<'PY' || fail "work discovery packet omitted evidence or normalization"
 import json, sys
 import re
 r = json.loads(sys.argv[1])
+repo = sys.argv[2]
 assert r["schema"] == 1 and r["sections"].keys() == {
     "failures", "metrics", "reviews", "ci", "tasks", "rejected"}, r
 failures = r["sections"]["failures"]["items"]
@@ -1631,6 +1645,22 @@ assert coverage["land_logs_incomplete"] == 0, coverage
 assert coverage["land_logs_missing"] == 1 and coverage["land_logs_oversized"] == 1, coverage
 assert coverage["land_scan_complete"] is False and "SSH/HTTPS aliases may be missed" in coverage["association"], coverage
 assert r["sections"]["ci"]["status"] == "available", r
+ci = r["sections"]["ci"]
+assert ci["coverage"]["stage_timing"] == "land-logs", ci
+assert ci["coverage"]["stage_timing_observations"] == 28, ci
+assert ci["coverage"]["stage_timing_source"] == "local land gates (not CI runners)", ci
+affected_name = "affected:tests/goal-drive-recovery-smoke.sh#2"
+stages = {item["ref"]: item for item in ci["items"]
+          if item["ref"] in {"scripts-smoke", "short-stage", affected_name, "shared-stage"}}
+assert "scripts-smoke" in stages and "short-stage" not in stages, ci
+assert stages["scripts-smoke"]["summary"] == (
+    "stage scripts-smoke median 650s max 1000s (n=8), recent 800s vs 200s; local land gates, not CI runners"), stages
+assert stages[affected_name]["summary"] == (
+    "stage affected:tests/goal-drive-recovery-smoke.sh#2 median 235s max 260s (n=6), recent 240s vs 210s; local land gates, not CI runners"), stages
+assert stages["shared-stage"]["summary"] == (
+    "stage shared-stage median 210s max 210s (n=12), recent 210s vs 210s; local land gates, not CI runners"), stages
+assert ci["items"].index(stages["scripts-smoke"]) == len(
+    [item for item in ci["items"] if item["ref"] not in {"scripts-smoke", "short-stage", affected_name, "shared-stage"}]), ci
 assert [x["text"] for x in r["sections"]["rejected"]["items"]] == [
     "hypothesis: early clue", "hypothesis: late clue"], r
 assert r["sections"]["metrics"]["coverage"]["complete"] is True, r
@@ -1638,6 +1668,20 @@ metric = r["sections"]["metrics"]["items"][0]
 assert set(metric) == {"ref", "window", "coverage", "incomplete", "write_state_reconciliation",
                        "failure_reason_counts", "failure_stage_buckets", "cancel_totals"}, metric
 assert all("\\r" not in json.dumps(section) for section in r["sections"].values()), r
+# Recollect the same admitted logs after removing timing records to verify the
+# unavailable state without adding another fixture or collector path.
+import pathlib, os, subprocess
+for log_path in pathlib.Path(os.environ["OMS_TEST_LAND_PARENT"]).glob("*/*.log"):
+    try:
+        text = log_path.read_text()
+    except (UnicodeError, OSError):
+        continue
+    log_path.write_text("".join(line for line in text.splitlines(True)
+                                 if not line.startswith("slow-stage: ")))
+without_stage = json.loads(subprocess.check_output(
+    [sys.executable, "scripts/lib/work_discovery.py", "collect", "--repo", repo], text=True))
+assert without_stage["sections"]["ci"]["coverage"]["stage_timing"] == "unavailable", without_stage
+assert without_stage["sections"]["ci"]["coverage"]["stage_timing_observations"] == 0, without_stage
 import sys
 sys.path.insert(0, "scripts/lib")
 import panel_results, work_discovery
