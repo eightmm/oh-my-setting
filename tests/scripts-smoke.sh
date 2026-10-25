@@ -32893,22 +32893,29 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   mkdir -p "$panel_records/.oms/artifacts"
   printf '*\n' > "$panel_records/.oms/.gitignore"
   printf '{"pid":1}\n' > "$panel_records/.oms/artifacts/sibling.json"
-  for panel_record in panel-call-eeeeeeeeeeeeeeee.json \
-    panel-call-eeeeeeeeeeeeeeee-exit.json panel-call-eeeeeeeeeeeeeeee-pending.json; do
-    for mutation in rewrite append symlink fifo; do
+  # One run per mutation kind changes every record at once; the guard lists
+  # each changed record, so each must still be named.
+  local panel_records_list="panel-call-eeeeeeeeeeeeeeee.json panel-call-eeeeeeeeeeeeeeee-exit.json panel-call-eeeeeeeeeeeeeeee-pending.json"
+  for mutation in rewrite append symlink fifo; do
+    mutation_body=""
+    for panel_record in $panel_records_list; do
       rm -f "$panel_records/.oms/artifacts/$panel_record"
       printf '{"pid":1}\n' > "$panel_records/.oms/artifacts/$panel_record"
       case "$mutation" in
-        rewrite) mutation_body="printf '{\"pid\":2}\\n' > '$panel_records/.oms/artifacts/$panel_record'" ;;
-        append) mutation_body="printf 'extra\\n' >> '$panel_records/.oms/artifacts/$panel_record'" ;;
-        symlink) mutation_body="rm -f '$panel_records/.oms/artifacts/$panel_record'; ln -s sibling.json '$panel_records/.oms/artifacts/$panel_record'" ;;
-        fifo) mutation_body="rm -f '$panel_records/.oms/artifacts/$panel_record'; mkfifo '$panel_records/.oms/artifacts/$panel_record'" ;;
+        rewrite) mutation_body="$mutation_body printf '{\"pid\":2}\\n' > '$panel_records/.oms/artifacts/$panel_record';" ;;
+        append) mutation_body="$mutation_body printf 'extra\\n' >> '$panel_records/.oms/artifacts/$panel_record';" ;;
+        symlink) mutation_body="$mutation_body rm -f '$panel_records/.oms/artifacts/$panel_record'; ln -s sibling.json '$panel_records/.oms/artifacts/$panel_record';" ;;
+        fifo) mutation_body="$mutation_body rm -f '$panel_records/.oms/artifacts/$panel_record'; mkfifo '$panel_records/.oms/artifacts/$panel_record';" ;;
       esac
-      result="$(run_guarded_worker "$panel_records" "$mutation_body")"
-      [ "${result%%	*}" != 0 ] || fail "$mutation of panel controller state should fail: $result"
-      contains "$result" "artifacts/$panel_record controller record" ||
-        fail "panel controller mutation should name its immutable record: $result"
     done
+    result="$(run_guarded_worker "$panel_records" "$mutation_body")"
+    [ "${result%%	*}" != 0 ] || fail "$mutation of panel controller state should fail: $result"
+    for panel_record in $panel_records_list; do
+      contains "$result" "artifacts/$panel_record controller record" ||
+        fail "panel controller $mutation should name its immutable record $panel_record: $result"
+    done
+  done
+  for panel_record in $panel_records_list; do
     rm -f "$panel_records/.oms/artifacts/$panel_record"
   done
   # Concurrent mode is the guard-stop path: the ledger row and the relayed
