@@ -1030,6 +1030,17 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
                         caller=caller, attempt=attempt).get(caller)
     if not main or main["attempt_id"] != attempt:
         raise ValueError("plan observation requires the current room main")
+    if not task.get("plan_id"):
+        # A legacy plan has no lineage; mint it through the parent-only command before
+        # any claim or lease change (a harness child is refused by that command).
+        result = plan("ensure-lineage")
+        if result.returncode:
+            raise ValueError("plan has no lineage and `oms agent-plan ensure-lineage` failed: %s"
+                             % (result.stderr.strip() or "unknown error"))
+        task = snapshot()
+        if task is None or not task.get("plan_id"):
+            raise ValueError("plan has no lineage; run `oms agent-plan ensure-lineage` first")
+        state, holder = task.get("state"), task.get("claimed_by_participant")
     if state == "ready":
         result = plan("claim", "--id", task_id, "--provider", owner)
         if result.returncode:

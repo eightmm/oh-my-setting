@@ -317,6 +317,40 @@ row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert re.fullmatch(r"plan_[0-9a-f]{32}", row.get("plan_id", "")), row
 PY
 
+# Panel dispatch on a legacy plan: the parent mints lineage before it claims;
+# a harness child is refused before any claim or lease change.
+python3 - "$ROOT" "$LINEAGE_REPO" <<'PY'
+import json, os, sys
+from pathlib import Path
+from unittest.mock import patch
+root, repo = sys.argv[1], Path(sys.argv[2])
+sys.path.insert(0, os.path.join(root, "scripts", "lib"))
+import panel_dispatch, terminal_panel, room
+table = repo / ".oms/plan/tasks.json"
+def legacy():
+    row = json.loads(table.read_text(encoding="utf-8"))
+    row.pop("plan_id", None)
+    table.write_text(json.dumps(row), encoding="utf-8")
+legacy()
+caller, attempt = "participant-1", "att_" + "a" * 32
+env = dict(os.environ, OMS_ROOM_ID="room-1", OMS_PANEL_MAIN_ATTEMPT=attempt)
+def link(env):
+    with patch.object(terminal_panel, "active_mains", return_value={caller: {"attempt_id": attempt}}), \
+            patch.object(room, "records", return_value=[]), patch.object(room, "project", return_value={}):
+        return panel_dispatch.plan_link(repo, "claude", "t1", env, caller, "write")
+try:
+    link(dict(env, OMS_HARNESS_CHILD="1"))
+except ValueError as error:
+    assert "oms agent-plan ensure-lineage" in str(error), error
+else:
+    raise AssertionError("a harness child minted lineage through panel dispatch")
+row = json.loads(table.read_text(encoding="utf-8"))
+assert "plan_id" not in row and row["tasks"]["t1"]["state"] == "ready", row
+binding = link(env)
+row = json.loads(table.read_text(encoding="utf-8"))
+assert binding.plan_id == row["plan_id"] and row["tasks"]["t1"]["state"] == "running", row
+PY
+
 # Initial reviewed-proposal apply also mints a lineage without changing the
 # schema-3 plan contract.
 PROPOSAL_REPO="$TMP/proposal-repo"
