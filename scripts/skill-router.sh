@@ -11,6 +11,10 @@ set -euo pipefail
 # first; OMS_STATE_HINTS=0 disables the hints. Claude Code installs this directly;
 # Codex installs it through the repo-local oh-my-setting plugin.
 
+# A harness child is not the user's prompt: it ticks no journal, prints no hint
+# and records no row, so it exits before any Python starts.
+[ "${OMS_HARNESS_CHILD:-0}" = 1 ] && exit 0
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"

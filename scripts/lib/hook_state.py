@@ -1683,7 +1683,6 @@ def cmd_panel_hook(_: argparse.Namespace) -> int:
 def cmd_route(args: argparse.Namespace) -> int:
     payload, _ = load_payload()
     if is_harness_child():
-        append_event(hook_repo(payload), payload, action="ignored_child", status="route", **child_event_fields())
         return 0
     # Context pressure is orthogonal to prompt content: it must fire even on
     # turns the skill router skips (slash commands, system-ish notifications),

@@ -1971,6 +1971,24 @@ test_router_state_hint_skips_unadopted_repo() {
   [ ! -d "$repo/.oms" ] || fail "the hint must not create .oms in a plain directory"
 }
 
+test_router_child_session_starts_no_python() {
+  local repo="$TMP/child-shim-repo" shim="$TMP/child-shim-bin" real calls
+  make_repo "$repo"
+  mkdir -p "$shim"
+  real="$(command -v python3)"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$OMS_SHIM_LOG"\nexec "%s" "$@"\n' "$real" > "$shim/python3"
+  chmod +x "$shim/python3"
+  : > "$TMP/child-shim.log"
+  printf '{"prompt":"fix it","session_id":"cs","turn_id":"ct","cwd":"%s"}' "$repo" |
+    OMS_SHIM_LOG="$TMP/child-shim.log" PATH="$shim:$PATH" OMS_HARNESS_CHILD=1 \
+      OMS_HARNESS_ORIGIN=peer-delegate OMS_STATE_REPO="$repo" TMPDIR="$TMP" \
+      bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  calls="$(wc -l < "$TMP/child-shim.log" | tr -d ' ')"
+  [ "$calls" = 0 ] || fail "a harness child should start no Python process, got $calls"
+  [ ! -e "$repo/.oms/hooks/events.jsonl" ] || ! grep -q ignored_child "$repo/.oms/hooks/events.jsonl" ||
+    fail "a harness child must write no ignored_child row"
+}
+
 test_router_keeps_resolved_repeats_quiet() {
   local repo="$TMP/hint-forge-repo"
   local payload out
@@ -2736,6 +2754,7 @@ test_router_state_hint_on_actionable_failures
 test_router_resolves_payload_repo_before_process_cwd
 test_router_state_hint_surfaces_parked_goal
 test_router_state_hint_skips_unadopted_repo
+test_router_child_session_starts_no_python
 test_router_keeps_resolved_repeats_quiet
 test_usage_tracking_is_opt_in_without_forge_hints
 test_conditional_skills_link_only_where_required_commands_exist

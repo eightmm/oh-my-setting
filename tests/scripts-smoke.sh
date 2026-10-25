@@ -26178,8 +26178,9 @@ test_skill_router_ignores_harness_child() {
   [ -z "$out" ] || fail "a harness child hook should stay silent"
   [ "$before" = "$after" ] || fail "a harness child must not mutate the parent task"
   assert_not_exists "$child/.oms"
-  assert_file_contains "$primary/.oms/hooks/events.jsonl" '"action": "ignored_child"'
-  assert_file_contains "$primary/.oms/hooks/events.jsonl" '"origin": "peer-delegate"'
+  [ ! -e "$primary/.oms/hooks/events.jsonl" ] ||
+    ! grep -q ignored_child "$primary/.oms/hooks/events.jsonl" ||
+    fail "a harness child hook must write no ignored_child row"
 }
 
 test_agent_plan_rejects_stale_lease_after_reclaim() {
