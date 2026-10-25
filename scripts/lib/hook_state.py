@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import functools
 import hashlib
@@ -246,9 +247,20 @@ def task_route_state_path(hooks_dir: Path, payload: dict[str, Any]) -> Path:
     return hooks_dir / "sessions" / f"{session_hash(payload)}.task.json"
 
 
+STATE_FILE_LIMIT = 1024 * 1024
+
+
 def load_state(path: Path) -> dict[str, Any]:
+    """A hook state file as a dict; a FIFO, symlink, oversized or invalid file reads as empty rather than blocking."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return {}
+            raw = handle.read(STATE_FILE_LIMIT + 1)
+        if len(raw) > STATE_FILE_LIMIT:
+            return {}
+        data = json.loads(raw.decode("utf-8"))
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -1548,9 +1560,9 @@ def panel_dedup_hint(payload: dict[str, Any], text: str, force: bool) -> str:
     if not omit:
         since = 0
     try:
-        # The status lookup keeps its room-log stamp in this same file.
+        # The status and live-thread lookups keep their room-log stamps in this same file.
         write_json_atomic(path, dict({"schema": 1, "digest": digest, "since": since},
-                                     **({"status": old["status"]} if isinstance(old.get("status"), dict) else {})))
+                                     **{key: old[key] for key in ("status", "live") if isinstance(old.get(key), dict)}))
     except Exception:
         return text  # an unstored counter could never trigger the periodic repeat: fail open
     return "" if omit else text
@@ -1623,19 +1635,29 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     return " [oms plan] " + " · ".join(parts)
 
 
-def declared_status(payload: dict[str, Any], repo: Path, room_id: str, me: str) -> dict[str, Any]:
-    """The participant's latest declared status, decoding the room log only when its file changed."""
+def room_log_stamp(payload: dict[str, Any], repo: Path, room_id: str, me: str) -> tuple[Path | None, list | None]:
+    """The session's hint-cache file and the identity of the room log file, or None when either is unavailable."""
     import room
     import thread_live
 
     hooks = hook_repo(payload)
-    path = hooks / ".oms" / "hooks" / "sessions" / f"{session_hash(payload)}.hint.json" if hooks else None
-    stamp = None
-    if path is not None:
+    if not hooks:
+        return None, None
+    path = hooks / ".oms" / "hooks" / "sessions" / f"{session_hash(payload)}.hint.json"
+    with contextlib.suppress(Exception):
+        ident = room.resolve(repo, room_id)
+        info = thread_live.thread_path(repo, ident).stat()
+        return path, [str(repo), ident, me, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+    return path, None
+
+
+def declared_status(payload: dict[str, Any], repo: Path, room_id: str, me: str) -> dict[str, Any]:
+    """The participant's latest declared status, decoding the room log only when its file changed."""
+    import room
+
+    path, stamp = room_log_stamp(payload, repo, room_id, me)
+    if stamp is not None:
         with contextlib.suppress(Exception):
-            ident = room.resolve(repo, room_id)
-            info = thread_live.thread_path(repo, ident).stat()
-            stamp = [str(repo), ident, me, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
             cached = load_state(path).get("status")
             if (isinstance(cached, dict) and cached.get("stamp") == stamp
                     and isinstance(cached.get("found"), dict)):
@@ -1902,6 +1924,29 @@ def room_reminders(repo: Path, tid: str, me: str, shown: list[str], reach: int |
     return "\n".join(lines)
 
 
+def quiet_until(state: dict[str, Any], me: str, reminder_at: Any, started: float) -> float:
+    """The first reminder threshold after `started` that a question or unacknowledged message of this participant crosses.
+
+    Thresholds are absolute times from message timestamps, so one that fell between `started` and the reminder
+    evaluation is still ahead of `started`: the cached silence then expires at once instead of outliving it.
+    """
+    import room
+
+    def stamped(ts: Any) -> float | None:
+        with contextlib.suppress(ValueError, OverflowError):
+            return float(calendar.timegm(time.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S")))
+        return None
+
+    marks = (room.ACK_AFTER, room.REPEAT_AFTER, room.ASKER_AFTER, room.OVERDUE_AFTER,
+             room.SECOND_REMINDER_AFTER, room.PERSON_AFTER)
+    sent = [q["ts"] for q in room.open_questions(state, asker=me) + room.open_questions(state, recipient=me)]
+    sent += [m["ts"] for m in state["messages"] if me in m["pending_for"] and m["message_kind"] != "status"]
+    due = [at + mark for at in map(stamped, sent) if at is not None for mark in marks]
+    if isinstance(reminder_at, (int, float)) and reminder_at > 0:
+        due.append(reminder_at + room.ACK_AFTER)
+    return min((at for at in due if at > started), default=started + 3600.0)
+
+
 def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
     """Deliver opt-in thread deltas at existing safe points, never acknowledge them."""
     record_panel_activity(payload, repo)
@@ -2009,7 +2054,26 @@ def _live_thread_hint(payload: dict[str, Any], repo: Path | None = None, *, coor
         import thread_live
         import room
 
+        started = room.now()  # one reading anchors both the reminder checks and the cache expiry
         room_repo = Path(os.environ.get("OMS_ROOM_REPO", str(repo))).resolve()
+        quiet_path = quiet_stamp = None
+        if coordination is None and os.environ.get("OMS_ROOM_ID") and os.environ.get("OMS_ROOM_PARTICIPANT"):
+            # An unchanged room log and cursor file answer "nothing to deliver" again until a timed reminder falls due.
+            quiet_path, quiet_stamp = room_log_stamp(payload, room_repo, os.environ["OMS_ROOM_ID"],
+                                                     os.environ["OMS_ROOM_PARTICIPANT"])
+            if quiet_stamp is not None:
+                cursor_file = room_repo / ".oms" / "hooks" / "sessions" / (session_hash(payload) + ".thread.json")
+                try:
+                    info = cursor_file.lstat()
+                    quiet_stamp += [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+                except OSError:
+                    quiet_stamp += [None]
+                quiet_stamp += [payload.get("hook_event_name") or payload.get("hookEventName"), payload_agent(payload)]
+                with contextlib.suppress(Exception):
+                    cached = load_state(quiet_path).get("live")
+                    if (isinstance(cached, dict) and cached.get("stamp") == quiet_stamp
+                            and started < float(cached.get("until"))):
+                        return ""
         if coordination is None:
             binding, room_state = room._selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
                                                  os.environ.get("OMS_ROOM_PARTICIPANT"))
@@ -2169,6 +2233,11 @@ def _live_thread_hint(payload: dict[str, Any], repo: Path | None = None, *, coor
                     write_json_atomic(path, value)
                 else:
                     pending.append((path, state, value))
+            elif (not message and quiet_stamp is not None and room_member and pending is None
+                    and binding == (os.environ["OMS_ROOM_ID"], os.environ["OMS_ROOM_PARTICIPANT"])):
+                with contextlib.suppress(Exception):
+                    write_json_atomic(quiet_path, dict(load_state(quiet_path), live={
+                        "stamp": quiet_stamp, "until": quiet_until(room_state, room_member, reminder_at, started)}))
         return message
     except Exception:
         return ""  # Optional collaboration cannot block tools or ordinary replies.
@@ -2254,6 +2323,11 @@ def codex_notify_thread() -> str:
 def codex_notify_ready() -> Any:
     """The notifier module when a Codex app-server is reachable, else None."""
     if os.environ.get("OMS_CODEX_NOTIFY", "1") != "1":
+        return None
+    # Same location as codex_app_notify.socket_path; testing it first keeps that import off prompts with no app-server.
+    override = os.environ.get("OMS_CODEX_NOTIFY_SOCK")
+    if not (Path(override) if override else Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+            / "app-server-control" / "app-server-control.sock").exists():
         return None
     sys.path.insert(0, str(Path(__file__).parent))
     import codex_app_notify

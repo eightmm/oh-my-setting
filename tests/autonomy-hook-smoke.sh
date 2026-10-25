@@ -1153,12 +1153,91 @@ cwd = sys.argv[2]
 payload = {"session_id": "route-modules", "cwd": cwd, "hook_event_name": "UserPromptSubmit", "prompt": "Continue work"}
 hook_state.coordination_room(payload)
 hook_state.panel_status_hint(payload, os.environ["OMS_ROOM_ID"])
-print(json.dumps(sorted(m for m in ("terminal_panel", "panel_debate", "panel_results", "panel_view") if m in sys.modules)))
+hook_state.record_turn_start(payload)
+print(json.dumps(sorted(m for m in ("terminal_panel", "panel_debate", "panel_results", "panel_view", "codex_app_notify")
+                        if m in sys.modules)))
 '''
-route_env = dict(os.environ, TMUX="x", TMUX_PANE="%99", OMS_PANEL_SESSION="oms-fixture", OMS_ROOM_REPO=str(repo))
+route_env = dict(os.environ, TMUX="x", TMUX_PANE="%99", OMS_PANEL_SESSION="oms-fixture", OMS_ROOM_REPO=str(repo),
+                 OMS_CODEX_NOTIFY="1", OMS_CODEX_NOTIFY_SOCK=str(repo / "no-such-app-server.sock"))
 loaded = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(repo)], env=route_env,
                         capture_output=True, text=True, check=True, timeout=60).stdout.replace("\r", "").strip()
-assert loaded == "[]", "the prompt route imported the panel TUI: " + loaded
+assert loaded == "[]", "the prompt route imported the panel TUI or the Codex notifier with nothing due: " + loaded
+# The live-thread hint shares the status hint's room-log stamp: a quiet room is answered from the session cache while the
+# log, the cursor file and the clock are unchanged, and is decoded again after a new event or an expired reminder window.
+room.create(repo, "live-cache", "Live hint cache")
+room.join(repo, "live-cache", "cache-main", "claude", native_session="cache-native")
+room.join(repo, "live-cache", "cache-peer", "codex", "reviewer")
+live_call = dict(payload("cache-native"), hook_event_name="UserPromptSubmit")
+live_file = repo / ".oms/hooks/sessions" / (hook_state.session_hash(live_call) + ".hint.json")
+with patch.dict(os.environ, {"OMS_ROOM_ID": "live-cache", "OMS_ROOM_PARTICIPANT": "cache-main", "OMS_ROOM_REPO": str(repo)}):
+    for _ in range(2):
+        hook_state.live_thread_hint(live_call)  # settle the cursor, then store the quiet answer
+    with patch.object(room, "_selected", wraps=room._selected) as selected:
+        quiet = hook_state.live_thread_hint(live_call)
+        assert not quiet, quiet
+        assert selected.call_count == 0, "an unchanged room log was projected again"
+    room.send(repo, "live-cache", "cache-peer", "cache-main", "Live cache wake", message_id="live-cache-wake")
+    with patch.object(room, "_selected", wraps=room._selected) as selected:
+        assert "live-cache-wake" in hook_state.live_thread_hint(live_call), "a new room event was not delivered"
+        assert selected.call_count >= 1
+    room.send(repo, "live-cache", "cache-main", "cache-peer", "acknowledged", kind="status")
+    for _ in range(2):
+        hook_state.live_thread_hint(live_call)
+    live_cache = json.loads(live_file.read_text())
+    assert isinstance(live_cache.get("live"), dict), live_cache
+    live_cache["live"]["until"] = 0  # a reminder threshold has passed since the answer was stored
+    live_file.write_text(json.dumps(live_cache))
+    with patch.object(room, "_selected", wraps=room._selected) as selected:
+        hook_state.live_thread_hint(live_call)
+        assert selected.call_count >= 1, "an expired quiet answer was reused"
+# The cache file is read without blocking or unbounded: a FIFO or oversized file reads as empty and the hint is unchanged.
+import calendar, contextlib, threading
+def timed_live(call, wait=float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "60"))):
+    box = []
+    worker = threading.Thread(target=lambda: box.append(hook_state.live_thread_hint(call)), daemon=True)
+    worker.start()
+    worker.join(wait)
+    return box[0] if box else None
+with patch.dict(os.environ, {"OMS_ROOM_ID": "live-cache", "OMS_ROOM_PARTICIPANT": "cache-main", "OMS_ROOM_REPO": str(repo)}):
+    oversized = '{"live": {"stamp": [], "until": 1e18}, "pad": "' + "x" * (2 * 1024 * 1024) + '"}'
+    for kind in ["oversized"] + (["fifo"] if hasattr(os, "mkfifo") else []):
+        live_file.unlink()
+        if kind == "fifo":
+            os.mkfifo(str(live_file))
+        else:
+            live_file.write_text(oversized)
+        room.send(repo, "live-cache", "cache-peer", "cache-main", "Hostile cache " + kind, message_id="hostile-" + kind)
+        result = timed_live(live_call)
+        if kind == "fifo":  # release a reader still blocked on the pipe so the fixture can clean up
+            with contextlib.suppress(OSError):
+                os.close(os.open(str(live_file), os.O_WRONLY | os.O_NONBLOCK))
+        assert result is not None, kind + " cache file blocked the hook"
+        assert "hostile-" + kind in result, (kind, result)
+        assert hook_state.load_state(live_file) == {}, kind
+# A reminder threshold crossed while the hint is being evaluated must not be cached as silence: the next prompt emits it.
+import calendar
+room.create(repo, "live-clock", "Live hint clock")
+room.join(repo, "live-clock", "clock-main", "claude", native_session="clock-native")
+room.join(repo, "live-clock", "clock-peer", "codex", "reviewer")
+clock_call = dict(payload("clock-native"), hook_event_name="UserPromptSubmit")
+with patch.dict(os.environ, {"OMS_ROOM_ID": "live-clock", "OMS_ROOM_PARTICIPANT": "clock-main", "OMS_ROOM_REPO": str(repo)}):
+    room.send(repo, "live-clock", "clock-peer", "clock-main", "Clock mail", message_id="clock-mail")
+    assert "clock-mail" in hook_state.live_thread_hint(clock_call)
+    sent_at = calendar.timegm(time.strptime(next(m for m in room.messages(repo, "live-clock") if m["id"] == "clock-mail")["ts"][:19],
+                                            "%Y-%m-%dT%H:%M:%S"))
+    clock = [sent_at + room.ACK_AFTER - 0.1]
+    reminders = hook_state.room_reminders
+    def crossing(*args, **kwargs):
+        try:
+            return reminders(*args, **kwargs)
+        finally:
+            clock[0] = sent_at + room.ACK_AFTER + 0.1  # the threshold passes before the cache is built
+    with patch.object(room, "now", lambda: clock[0]), patch.object(hook_state, "room_reminders", crossing):
+        before = hook_state.live_thread_hint(clock_call)
+        assert "not acknowledged" not in before, before
+        clock[0] = sent_at + room.ACK_AFTER + 1
+        after = hook_state.live_thread_hint(clock_call)
+        assert "1 delivered message not acknowledged" in after, "a threshold crossed during evaluation was cached as silence: " + after
 # Repeated identical plan/status text is injected once: changed text, a context reset and every 20th prompt re-emit it.
 def wake():
     return hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
