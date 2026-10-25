@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from oms_runtime.common import atomic_write_json, ensure_private_dir, read_json, sha256_bytes
+from oms_runtime.common import MAX_STATE_BYTES, CoreError, atomic_write_bytes, canonical_json, ensure_private_dir, read_json, sha256_bytes
 
 
 def cache_key(relpath: str, sha256: str, parser_version: int, schema: int) -> str:
@@ -13,14 +13,23 @@ def cache_key(relpath: str, sha256: str, parser_version: int, schema: int) -> st
 
 
 def load_cached(state_dir: Path, key: str) -> Optional[Dict[str, Any]]:
-    value = read_json(state_dir / "cache" / (key + ".json"), None)
+    # An entry is regenerable, so one the state reader refuses (oversized,
+    # unreadable, invalid JSON) is a miss that rebuilds that file, not a failure.
+    try:
+        value = read_json(state_dir / "cache" / (key + ".json"), None)
+    except CoreError:
+        return None
     return value if isinstance(value, dict) else None
 
 
-def store(state_dir: Path, key: str, payload: Mapping[str, Any]) -> Path:
+def store(state_dir: Path, key: str, payload: Mapping[str, Any]) -> Optional[Path]:
+    """Write one entry in canonical form; skip (None) an entry load_cached could never read back."""
+    data = canonical_json(dict(payload)) + b"\n"
+    if len(data) > MAX_STATE_BYTES:
+        return None
     directory = ensure_private_dir(state_dir / "cache")
     path = directory / (key + ".json")
-    atomic_write_json(path, dict(payload))
+    atomic_write_bytes(path, data)
     return path
 
 

@@ -716,6 +716,28 @@ class ProjectGraphTest(unittest.TestCase):
         second = build(self.repo, state=self.state)
         self.assertEqual(second["stats"]["cached"], first["stats"]["files"])
 
+    def test_oversized_cache_entry_is_a_miss_and_is_not_stored(self) -> None:
+        from oms_runtime.common import MAX_STATE_BYTES
+        from oms_graph.project import cache as cache_module
+        self.write("a.py", "import b\ndef a(): pass\n")
+        self.write("b.py", "def b(): pass\n")
+        cold = build(self.repo, state=self.state)
+        cold_graph = load_graph(self.repo, state=self.state)
+        entries = sorted((self.state / "cache").glob("*.json"))
+        self.assertEqual(len(entries), 2)
+        # Plant an entry past the read limit, as a very large source file would.
+        with entries[0].open("ab") as handle:
+            handle.write(b" " * (MAX_STATE_BYTES + 1))
+        rebuilt = build(self.repo, state=self.state)
+        self.assertEqual(rebuilt["stats"]["cached"], 1)
+        self.assertEqual(rebuilt["revision"], cold["revision"])
+        self.assertEqual(load_graph(self.repo, state=self.state), cold_graph)
+        self.assertLessEqual(entries[0].stat().st_size, MAX_STATE_BYTES)
+        # A payload that could never be read back is not written at all.
+        big = {"refs": ["x" * 1024] * (MAX_STATE_BYTES // 1024 + 1)}
+        self.assertIsNone(cache_module.store(self.state, "f" * 64, big))
+        self.assertFalse((self.state / "cache" / ("f" * 64 + ".json")).exists())
+
     def test_dogfood_build_is_incremental(self) -> None:
         with tempfile.TemporaryDirectory(prefix="oms-graph-dogfood.") as raw:
             state = Path(raw) / "state"
