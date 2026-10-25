@@ -93,11 +93,29 @@ def _rows_cache_digest(body: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _owned_privately(info: os.stat_result) -> bool:
+    """Owned by this user and not writable by group or others (mode and owner are not checked on Windows)."""
+    getuid = getattr(os, "getuid", None)
+    return getuid is None or (info.st_uid == getuid() and not info.st_mode & 0o022)
+
+
+def _trusted_cache_dir(directory: Path) -> bool:
+    try:
+        info = os.lstat(str(directory))
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and _owned_privately(info)
+
+
 def _read_rows_cache(path: Optional[Path]) -> Optional[Dict[str, Any]]:
-    if path is None:
+    if path is None or not _trusted_cache_dir(path.parent):
         return None
     try:
-        with open(str(path), encoding="utf-8") as handle:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or not _owned_privately(info) or os.path.islink(str(path)):
+                return None
             cache = json.load(handle)
         ints = ("dev", "ino", "offset", "count")
         if (not isinstance(cache, dict)
@@ -123,11 +141,12 @@ def _write_rows_cache(path: Optional[Path], body: Dict[str, Any]) -> None:
         body = dict(body, version=_ROWS_CACHE_VERSION)
         body["digest"] = _rows_cache_digest(body)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(str(path.parent), 0o700)
+        if not _trusted_cache_dir(path.parent):
+            return
         fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(body, handle, sort_keys=True, separators=(",", ":"))
+                json.dump(body, handle, separators=(",", ":"))  # insertion order: rows must round-trip unchanged
             os.replace(temp_name, str(path))
         except Exception:
             try:

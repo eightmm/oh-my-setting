@@ -403,6 +403,46 @@ class RuntimeFixture(RuntimeFixtureBase):
             self.assertEqual(appended['artifact_rows_seen'], others + 4)
             self.assertNotEqual(appended['criteria'], first['criteria'])
 
+            def parsed_bytes(cache: bool = True) -> int:
+                with patch.object(evidence, '_parse_rows', wraps=evidence._parse_rows) as parse:
+                    result = evidence.build_coverage(self.repo, use_cache=cache)
+                self.assertEqual(result, evidence.build_coverage(self.repo, use_cache=False))
+                return sum(len(call.args[0]) for call in parse.call_args_list)
+
+            # A warm call parses nothing; an append parses only the appended tail.
+            self.assertEqual(parsed_bytes(), 0)
+            tail = row('e', status='verified', covers=['project-safe'])
+            with events.open('a', encoding='utf-8') as handle:
+                handle.write(tail)
+            self.assertEqual(parsed_bytes(), len(tail))
+            self.assertEqual(parsed_bytes(), 0)
+
+            # Nested values keep their key order through the cache, so refs match the full read.
+            with events.open('a', encoding='utf-8') as handle:
+                handle.write('{"event_id": {"z": 1, "a": 2}, "status": "verified", "covers": ["project-safe"]}\n')
+            both()
+            self.assertEqual(parsed_bytes(), 0)
+            both()
+
+            # A symlinked or group-writable cache is not trusted: full read, same output.
+            cache_file = cache_files()[0]
+            os.chmod(str(cache_file), 0o664)
+            self.assertGreater(parsed_bytes(), 0)
+            os.chmod(str(cache_file), 0o600)
+            self.assertEqual(parsed_bytes(), 0)
+            if hasattr(os, 'symlink'):
+                moved = cache_file.with_name('moved.json')
+                os.replace(str(cache_file), str(moved))
+                os.symlink(str(moved), str(cache_file))
+                self.assertGreater(parsed_bytes(), 0)
+                os.unlink(str(cache_file))
+                os.replace(str(moved), str(cache_file))
+            if hasattr(os, 'getuid'):
+                os.chmod(str(cache_file.parent), 0o777)
+                self.assertGreater(parsed_bytes(), 0)
+                os.chmod(str(cache_file.parent), 0o700)
+                self.assertEqual(parsed_bytes(), 0)
+
             # Same size, same inode, different bytes inside the cached prefix.
             before = events.stat()
             events.write_bytes(events.read_bytes().replace(b'"a"', b'"z"'))
