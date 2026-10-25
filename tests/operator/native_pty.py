@@ -219,6 +219,7 @@ if os.name == "posix":
                 # The option changes before the watcher paints; MAIN also
                 # appears in the preceding frame, so wait for the new filter.
                 sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "attention")
+                sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "MA")  # the identity row paints after the filter frame
                 # Two-column identities have no room for the clipping ellipsis.
                 assert any(label in sidebar for label in ("MAIN ", "MA…", "MA  [")) and "OMS · " in sidebar, sidebar
                 native_header = tmux_wait(["show-option", "-p", "-v", "-t", listing[0], "@oms_panel_header"], identity)
