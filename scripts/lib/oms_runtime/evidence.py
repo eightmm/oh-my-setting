@@ -94,9 +94,9 @@ def _rows_cache_digest(body: Mapping[str, Any]) -> str:
 
 
 def _owned_privately(info: os.stat_result) -> bool:
-    """Owned by this user and not writable by group or others (mode and owner are not checked on Windows)."""
+    """Owned by this user and not writable by group or others; without POSIX owners (Windows) the cache is never trusted."""
     getuid = getattr(os, "getuid", None)
-    return getuid is None or (info.st_uid == getuid() and not info.st_mode & 0o022)
+    return getuid is not None and info.st_uid == getuid() and not info.st_mode & 0o022
 
 
 def _trusted_cache_dir(directory: Path) -> bool:

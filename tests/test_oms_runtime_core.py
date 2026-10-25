@@ -371,6 +371,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
         self.assertEqual(statuses['project-safe'], 'stale')
 
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'the row cache is disabled without POSIX ownership')
     def test_coverage_row_cache_matches_full_read_across_append_rewrite_and_torn_tail(self) -> None:
         events = self.repo / '.oms' / 'lifecycle' / 'events.jsonl'
         events.parent.mkdir(parents=True, exist_ok=True)
