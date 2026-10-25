@@ -112,6 +112,62 @@ oms_ops_migrate_legacy_workflow_link() {
   fi
 }
 
+# True when the symlink's target lies inside this checkout or the legacy
+# ~/.oh-my-setting root. The target is resolved physically (cd -P, so a ".."
+# after a symlinked directory follows the kernel); a dangling target is foreign.
+oms_ops_link_into_install() {
+  local link="$1"
+  local dest dir base root phys hops=0
+
+  # The sentinel keeps trailing newlines that command substitution would strip;
+  # readlink's own terminating newline is the only one removed.
+  dest="$(readlink "$link" && printf x)" || return 1
+  dest="${dest%x}"
+  dest="${dest%$'\n'}"
+  case "$dest" in
+    /*) ;;
+    *) dest="${link%/*}/$dest" ;;
+  esac
+  # Resolve every existing final-component symlink before checking ownership.
+  # A dangling, looping, or otherwise unresolvable target is conservatively
+  # treated as foreign so cleanup cannot remove a user's backup link.
+  while [ -L "$dest" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    dir="${dest%/*}"
+    base="$(readlink "$dest" && printf x)" || return 1
+    base="${base%x}"
+    base="${base%$'\n'}"
+    case "$base" in
+      /*) dest="$base" ;;
+      *) dest="$dir/$base" ;;
+    esac
+  done
+  if [ -d "$dest" ]; then
+    dest="$(cd -P "$dest" 2>/dev/null && pwd -P && printf x)" || return 1
+    dest="${dest%x}"
+    dest="${dest%$'\n'}"
+  elif [ -e "$dest" ]; then
+    dir="${dest%/*}"
+    base="${dest##*/}"
+    phys="$(cd -P "$dir" 2>/dev/null && pwd -P && printf x)" || return 1
+    phys="${phys%x}"
+    phys="${phys%$'\n'}"
+    dest="$phys/$base"
+  else
+    return 1
+  fi
+  for root in "$ROOT" "$HOME/.oh-my-setting"; do
+    phys="$(cd -P "$root" 2>/dev/null && pwd -P && printf x)" || phys="${root}x"
+    phys="${phys%x}"
+    phys="${phys%$'\n'}"
+    case "$dest" in
+      "$root"|"$root"/*|"$phys"|"$phys"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 oms_ops_clean_backup_skill_links() {
   local target_root="$1"
   local dry_run="${2:-0}"
@@ -124,7 +180,11 @@ oms_ops_clean_backup_skill_links() {
         continue
         ;;
     esac
-    oms_ops_remove_symlink "$target" "backup skill symlink" "$dry_run"
+    if oms_ops_link_into_install "$target"; then
+      oms_ops_remove_symlink "$target" "backup skill symlink" "$dry_run"
+    else
+      printf 'kept: %s (backup skill symlink not owned by this install)\n' "$target"
+    fi
   done < <(find "$target_root" -maxdepth 1 -type l -name '*.backup.*' -print0 2>/dev/null)
 }
 
@@ -326,6 +386,8 @@ oms_ops_check_skill_root() {
   fi
 
   while IFS= read -r -d '' backup; do
+    # A backup link outside this install is the user's; cleanup keeps it.
+    oms_ops_link_into_install "$backup" || continue
     printf 'stale backup skill link: %s\n' "$backup"
     OMS_OPS_FAILED=1
     issues=1

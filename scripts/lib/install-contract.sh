@@ -206,7 +206,10 @@ oms_install_target_owned_source_under() {
   local source
 
   if [ -L "$target" ]; then
+    # A stale link is dangling by design, so ownership stays textual; a ".."
+    # component would let the spelled prefix hide a target outside the root.
     case "$(readlink "$target")" in
+      */..|*/../*) return 1 ;;
       "$source_root"/*) readlink "$target"; return 0 ;;
       *) return 1 ;;
     esac

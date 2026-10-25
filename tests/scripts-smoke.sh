@@ -15593,15 +15593,67 @@ test_cleanup_dry_run_and_apply() {
   ln -s "$ROOT/custom-skills/spec-interview" \
     "$home_dir/.pi/agent/skills/spec-interview"
   ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
+  # A user's own backup link must survive: it does not point into this install.
+  mkdir -p "$home_dir/mine"
+  ln -s "$home_dir/mine" "$home_dir/.codex/skills/mine.backup.legacy"
+  ln -s "$ROOT/.." "$home_dir/.codex/skills/parent.backup.legacy"
+  # The helper treats $HOME/.oh-my-setting as an install root, so the in-root
+  # intermediate links live there and the source checkout stays untouched.
+  local final_link="$home_dir/.oh-my-setting/final-link"
+  mkdir -p "$home_dir/.oh-my-setting"
+  ln -s "$home_dir/mine" "$final_link"
+  ln -s "$final_link" "$home_dir/.codex/skills/final-link.backup.legacy"
+  # "hop" is an in-install symlink to an outside directory: hop/.. is the
+  # outside parent for the kernel but would be the install for a logical cd.
+  ln -s "$home_dir/mine" "$home_dir/.oh-my-setting/hop"
+  ln -s "$home_dir/.oh-my-setting/hop/.." \
+    "$home_dir/.codex/skills/hop.backup.legacy"
+  # A dangling target ending in a newline must not collapse onto the existing
+  # AGENTS.md once command substitution strips the newline.
+  ln -s "$ROOT/AGENTS.md"$'\n' "$home_dir/.codex/skills/newline.backup.legacy"
+  # An existing outside directory named "$ROOT<LF>" must not read as $ROOT once
+  # pwd -P output loses its trailing newline, directly or through "..".
+  # The directory is a sibling of the checkout, so remove it before asserting.
+  local lf_dir="$ROOT"$'\n' lf_dry lf_apply
+  mkdir "$lf_dir" || fail "cannot create the newline-named sibling directory"
+  ln -s "$ROOT"$'\n' "$home_dir/.codex/skills/rootlf.backup.legacy"
+  ln -s "$ROOT"$'\n/..' "$home_dir/.codex/skills/rootlf-dotdot.backup.legacy"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --dry-run >"$home_dir/dry-run"
+  lf_dry=ok
+  [ -L "$home_dir/.codex/skills/rootlf.backup.legacy" ] &&
+    [ -L "$home_dir/.codex/skills/rootlf-dotdot.backup.legacy" ] || lf_dry=removed
   assert_file_contains "$home_dir/dry-run" "cleanup: 4 removable item(s) found"
   [ -e "$home_dir/.codex/skills/oms-trace.backup.legacy" ] ||
     fail "dry-run removed backup symlink"
+  [ -L "$home_dir/.codex/skills/parent.backup.legacy" ] ||
+    fail "dry-run removed parent backup symlink"
+  [ -L "$home_dir/.codex/skills/final-link.backup.legacy" ] ||
+    fail "dry-run removed final-symlink backup link"
+  [ -L "$home_dir/.codex/skills/hop.backup.legacy" ] ||
+    fail "dry-run removed symlink-then-.. backup link"
+  [ -L "$home_dir/.codex/skills/newline.backup.legacy" ] ||
+    fail "dry-run removed trailing-newline backup link"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/apply"
+  lf_apply=ok
+  [ -L "$home_dir/.codex/skills/rootlf.backup.legacy" ] &&
+    [ -L "$home_dir/.codex/skills/rootlf-dotdot.backup.legacy" ] || lf_apply=removed
+  rmdir "$lf_dir"
+  [ "$lf_dry" = ok ] || fail "dry-run removed a backup link to a newline-named outside dir"
+  [ "$lf_apply" = ok ] || fail "cleanup removed a backup link to a newline-named outside dir"
   [ ! -e "$home_dir/.codex/skills/oms-trace.backup.legacy" ] ||
     fail "cleanup did not remove backup symlink"
+  [ -L "$home_dir/.codex/skills/mine.backup.legacy" ] ||
+    fail "cleanup removed a backup link outside this install"
+  [ -L "$home_dir/.codex/skills/parent.backup.legacy" ] ||
+    fail "cleanup removed parent backup symlink"
+  [ -L "$home_dir/.codex/skills/final-link.backup.legacy" ] ||
+    fail "cleanup removed final-symlink backup link"
+  [ -L "$home_dir/.codex/skills/hop.backup.legacy" ] ||
+    fail "cleanup removed symlink-then-.. backup link"
+  [ -L "$home_dir/.codex/skills/newline.backup.legacy" ] ||
+    fail "cleanup removed trailing-newline backup link"
   [ ! -e "$home_dir/.agents/skills/oms-trust-boundary" ] ||
     fail "cleanup did not remove legacy .agents skill"
   # -L, not -e: the link dangles once its renamed source is gone, and -e would
@@ -15611,6 +15663,20 @@ test_cleanup_dry_run_and_apply() {
   [ ! -e "$home_dir/.gemini/GEMINI.md" ] ||
     fail "cleanup did not remove legacy gemini file"
   assert_file_contains "$home_dir/apply" "skill-doctor: ok"
+
+  # link.sh's stale sweep and Antigravity retirement judge ownership by the
+  # spelled prefix; a ".." component must not let them delete foreign links.
+  local sweep_home="$TMP/cleanup-sweep-home"
+  mkdir -p "$sweep_home/.codex/skills" "$sweep_home/.gemini/antigravity/skills"
+  ln -s "$ROOT/custom-skills/../../outside/missing" \
+    "$sweep_home/.codex/skills/stale.backup.20260101000000"
+  ln -s "$ROOT/custom-skills/../../outside" \
+    "$sweep_home/.gemini/antigravity/skills/retired"
+  HOME="$sweep_home" "$ROOT/scripts/link.sh" >/dev/null
+  [ -L "$sweep_home/.codex/skills/stale.backup.20260101000000" ] ||
+    fail "stale sweep removed a backup link escaping via .."
+  [ -L "$sweep_home/.gemini/antigravity/skills/retired" ] ||
+    fail "skill retirement removed a link escaping via .."
 }
 
 

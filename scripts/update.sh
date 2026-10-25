@@ -455,6 +455,8 @@ for managed_path in \
   "$HOME/.gemini/antigravity/skills" \
   "$HOME/.oh-my-setting-prompts" "$HOME/.oh-my-setting-workflows" \
   "$HOME/.local/bin/oms" "$HOME/.claude/settings.json" \
+  "$HOME/.claude/output-styles/oms-korean.md" \
+  "${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}" \
   "$HOME/.claude.json" "$HOME/.gemini/config/plugins/oh-my-setting" \
   "$CODEX_CONFIG_PATH" "$CODEX_CONFIG_PATH.oms-bak" \
   "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$ROOT/local/machine.md}" \

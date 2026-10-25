@@ -155,6 +155,9 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   # restore the missing link, so a rolled-back update must leave it missing.
   rm -f "$home/.gemini/config/skills/oms-agent-harness"
   printf 'user skill\n' > "$home/.gemini/config/skills/USER.txt"
+  # The Claude output style is relinked by the update, so it is snapshotted too.
+  rm -f "$home/.claude/output-styles/oms-korean.md"
+  printf 'user style\n' > "$home/.claude/output-styles/oms-korean.md"
 
   printf '#!/usr/bin/env bash\nexit 41\n' > "$source/scripts/doctor.sh"
   chmod +x "$source/scripts/doctor.sh"
@@ -169,6 +172,9 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   [ "$(git -C "$installed" rev-parse HEAD)" = "$first" ] ||
     fail "failed update did not restore the previous HEAD"
   cmp -s "$receipt" "$before_receipt" || fail "failed update changed the receipt"
+  [ ! -L "$home/.claude/output-styles/oms-korean.md" ] &&
+    grep -Fxq 'user style' "$home/.claude/output-styles/oms-korean.md" ||
+    fail "failed update did not restore the Claude output style"
   grep -Fq "rollback restored $first" "$TMP/fail.out" || fail "rollback was not reported"
   [ ! -L "$home/.codex/AGENTS.md" ] && grep -Fxq 'user rules' "$home/.codex/AGENTS.md" ||
     fail "failed update did not restore the user-owned rules file"
