@@ -1393,6 +1393,26 @@ if os.name != 'nt':
 h['gc'](str(repo), 0, True)
 assert unknown.exists()
 (repo / '.oms/delegations/unknown.json').unlink()
+# Only a live non-terminal attempt pins the quota: one whose heartbeat is
+# long expired (reconcile's age rule) never finishes, so it must not veto.
+# The landing-reference marker is the exception below: those writers publish
+# capture references and veto whatever their heartbeat age.
+ev = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+def stale_attempt(provider, tool, refs=None):
+    attempt = ev['create_attempt'](pathlib.Path(repo), provider=provider, tool=tool, refs=refs)
+    row = ev['new_event'](attempt, 2, 'attempt.state_changed', from_state='queued', to_state='starting',
+                          actor={'kind': 'system', 'name': 'fixture'})
+    row['ts'] = '2020-01-01T00:00:00Z'
+    ev['append_lifecycle'](pathlib.Path(repo), row)
+if os.name != 'nt':  # Windows gc preserves before reaching the lifecycle veto
+    stale_attempt('codex', 'expired-fixture')
+    capture3, patch3 = new('expired')
+    h['gc'](str(repo), 0, True)
+    assert not capture3.exists() and not patch3.exists(), 'long-expired foreign attempt pinned GC'
+    stale_attempt('local', 'agent-task', {'reference_writer': 'landing-reference-v1'})
+    capture3b, patch3b = new('marked')
+    h['gc'](str(repo), 0, True)
+    assert capture3b.exists() and patch3b.exists(), 'expired reference-writer attempt did not veto GC'
 subprocess.run(['bash', str(root / 'scripts/agent-events.sh'), '--repo', str(repo), 'start',
                 '--provider', 'codex', '--tool', 'capture-fixture', '--then', 'starting'],
                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)

@@ -26457,6 +26457,34 @@ if os.name != 'nt':
         result = subprocess.run(['bash','-c',ready_script,'fixture',str(root),str(case),str(ready_driver),mode],
                                 text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
         assert result.returncode == 0, (mode,result.stdout,result.stderr)
+# GC quiescence: a non-terminal attempt pins captures only while it can still
+# publish a reference. Marked reference writers always veto; any other attempt
+# vetoes while its heartbeat is live, and stops once long expired (the age rule
+# of agent-events reconcile), since it will never reach a terminal state.
+import contextlib, io
+gc_repo = fixture/'gc-quiescence'; gc_repo.mkdir()
+def gc_output():
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        h['C']['gc_quiescent'](str(gc_repo), 0, False)
+    return out.getvalue()
+def start(provider, tool, refs=None, ts=None):
+    attempt = e['create_attempt'](gc_repo, provider=provider, tool=tool, refs=refs)
+    row = e['new_event'](attempt, 2, 'attempt.state_changed', from_state='queued', to_state='starting',
+                         actor={'kind': 'system', 'name': 'fixture'})
+    if ts:
+        row['ts'] = ts
+    e['append_lifecycle'](gc_repo, row)
+start('codex', 'panel-review', ts='2020-01-01T00:00:00Z')
+start('local', 'agent-task', {'reference_writer': 'landing-reference-v1'}, ts='2020-01-01T00:00:00Z')
+if os.name != 'nt':  # gc_quiescent preserves unconditionally on Windows before reaching the veto
+    attempts = e['load_projection'](gc_repo)[1]
+    marked = [k for k, v in attempts.items() if v['refs'].get('reference_writer')]
+    assert 'native attempt not terminal' in gc_output(), 'expired reference writer did not veto GC'
+    for k in marked:
+        e['append_lifecycle'](gc_repo, e['new_event'](k, attempts[k]['sequence'] + 1, 'attempt.state_changed',
+                              from_state='starting', to_state='failed', actor={'kind': 'system', 'name': 'fixture'}))
+    assert 'native attempt not terminal' not in gc_output(), 'long-expired foreign attempt pinned GC'
 repo = fixture/'live'; repo.mkdir()
 packet = repo/'.oms/task/current.md'
 script = r'''

@@ -5,6 +5,7 @@ generation witness; journal rows or matching bytes alone never authorize GC.
 This is the cooperating OMS boundary, not protection from hostile same-UID code.
 """
 import calendar
+import datetime
 import hashlib
 import json
 import math
@@ -1026,7 +1027,26 @@ def gc_quiescent(repo, days, apply, private_only=""):
                 print('managed-landing-capture: preserved (delegation quiescence unproven)')
                 return
         _, attempts = engine['load_projection'](Path(repo))
-        if any(a.get('terminal') is not True for a in attempts.values()):
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        def pins_capture(attempt):
+            if attempt.get('terminal') is True:
+                return False
+            # Only the landing-reference writers publish capture references;
+            # their liveness is the owner's, so they veto regardless of age.
+            if (attempt.get('refs') or {}).get('reference_writer') == 'landing-reference-v1':
+                return True
+            # Any other attempt vetoes while its heartbeat is live (the age
+            # rule of `agent-events reconcile`, default 300s); a long-expired
+            # one never finishes and must not pin the quota. Unparseable
+            # time is uncertainty, so it vetoes.
+            try:
+                age = (now - engine['parse_ts'](attempt['last_heartbeat_at'])).total_seconds()
+            except Exception:
+                return True
+            return age < 300
+
+        if any(pins_capture(a) for a in attempts.values()):
             print('managed-landing-capture: preserved (native attempt not terminal)')
             return
         index_env = dict(os.environ,
