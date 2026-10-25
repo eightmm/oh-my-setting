@@ -1365,14 +1365,17 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   # longest local lane is operator-tools' own. Ten CI runs on 2026-10-18..19
   # measured operator-tools 914s and patch-admit-verifier-floor 281s in lane 2
   # (1333s against 608-741s); the latter and provider-registry swapped places
-  # with model-doctor and models-surface, predicting lane 2 at about 1014s. Re-derive the order when a heavy
+  # with model-doctor and models-surface, predicting lane 2 at about 1014s. The land log of
+  # 2026-10-25 (gate 993s) showed lane 3 at 943s against lane 2 at 229s: six swaps
+  # now give lanes of 548-851s (operator-tools alone is 845s) and CI pairs of 1397-1400s.
+  # Re-derive the order when a heavy
   # suite is added or one changes by minutes: assign by cost to the lightest
   # lane that still has a slot, swap to balance the k/k+4 pairs, then list
   # lane 1..8, 1..8, ... The Linux-only stages close the list, so the other
   # hosts keep the same lanes for every stage before them.
   stage graph bash tests/graph-smoke.sh
-  stage supervisor bash tests/supervisor-smoke.sh
   stage draft-pr bash tests/draft-pr-smoke.sh
+  stage work-journal bash tests/work-journal-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
   stage autopilot bash tests/autopilot-smoke.sh
   stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"
@@ -1383,11 +1386,11 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage patch-land-approval bash tests/patch-land-approval-smoke.sh
   stage runtime-core bash tests/runtime-core-smoke.sh
   stage land bash tests/land-smoke.sh
-  stage artifact-supersession bash tests/artifact-supersession-smoke.sh
+  stage prompt-budget bash tests/prompt-budget-smoke.sh
   stage autonomy-hook bash tests/autonomy-hook-smoke.sh
-  stage work-journal bash tests/work-journal-smoke.sh
-  stage tick bash tests/tick-smoke.sh
-  stage model-doctor bash tests/model-doctor-smoke.sh
+  stage supervisor bash tests/supervisor-smoke.sh
+  stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
+  stage autonomy-verification bash tests/autonomy-verification-smoke.sh
   stage state-surfaces bash tests/state-surfaces-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
   stage durable-writers bash tests/durable-writers-contract-smoke.sh
@@ -1405,7 +1408,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh
   stage functional-evolution bash tests/functional-evolution-smoke.sh
-  stage autonomy-verification bash tests/autonomy-verification-smoke.sh
+  stage model-doctor bash tests/model-doctor-smoke.sh
   stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   stage failure-attention bash tests/failure-attention-smoke.sh
   stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
@@ -1415,10 +1418,10 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage ci-status bash tests/ci-status-smoke.sh
   stage platform-portability bash tests/platform-portability-smoke.sh
   stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
-  stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
-  stage prompt-budget bash tests/prompt-budget-smoke.sh
+  stage tick bash tests/tick-smoke.sh
+  stage artifact-supersession bash tests/artifact-supersession-smoke.sh
   stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
-  stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
+  stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
   stage context-core bash tests/context-core-smoke.sh
   stage advisor-session bash tests/advisor-session-smoke.sh
   stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
@@ -1432,7 +1435,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage advisor-routing bash tests/advisor-routing-smoke.sh
   stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
   stage tool-lock bash tests/tool-lock-smoke.sh
-  stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
+  stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
   stage provider-registry bash tests/provider-registry-smoke.sh
   stage seat-reliability bash tests/seat-reliability-smoke.sh
   stage tsp-queue bash tests/tsp-queue-smoke.sh

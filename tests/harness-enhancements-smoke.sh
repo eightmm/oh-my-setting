@@ -68,14 +68,11 @@ test_smoke_shards_partition_every_definition() {
   LC_ALL=C sort "$combined" > "$TMP/actual"
   cmp -s "$expected" "$TMP/actual" || fail "smoke shards omit or invent test definitions"
   [ -z "$(LC_ALL=C sort "$combined" | uniq -d)" ] || fail "smoke shards overlap"
-  # The cost weights keep the heaviest tests apart, and the shard holding the
-  # heaviest one carries fewer tests to make up for it.
-  local heavy_a heavy_b fewest
+  # The cost weights keep the heaviest tests apart.
+  local heavy_a heavy_b
   heavy_a="$(grep -lx test_worker_guard_rejects_any_worker_authority_state_change "$TMP"/shard-[1-4])"
   heavy_b="$(grep -lx test_goal_drive_parallel_failure_recovery "$TMP"/shard-[1-4])"
   [ -n "$heavy_a" ] && [ "$heavy_a" != "$heavy_b" ] || fail "the two heaviest smoke tests share a shard"
-  fewest="$(wc -l "$TMP"/shard-[1-4] | sort -n | sed -n '1p' | awk '{print $1}')"
-  [ "$(wc -l < "$heavy_a")" -le "$fewest" ] || fail "the heaviest smoke test's shard is not the lightest by count"
   if "$ROOT/tests/run-smoke-shard.sh" --list --shard 0/4 >/dev/null 2>&1; then
     fail "zero-indexed smoke shard should be rejected"
   fi

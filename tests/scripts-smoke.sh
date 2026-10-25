@@ -6934,7 +6934,7 @@ def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payl
 PY
 }
 
-# smoke-weight: 47
+# smoke-weight: 58
 test_agent_plan_lifecycle_landing_and_main_research() {
   local d="$TMP/agent-plan-life"
   local child_repo="$TMP/agent-plan-child-completion"
@@ -7519,7 +7519,7 @@ PY
   } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
 }
 
-# smoke-weight: 50
+# smoke-weight: 61
 test_agent_plan_lifecycle_read_validation() {
   local XDG_STATE_HOME="$TMP/agent-plan-life-read-state"
   export XDG_STATE_HOME
@@ -8316,7 +8316,7 @@ PY
   } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
 }
 
-# smoke-weight: 50
+# smoke-weight: 58
 test_agent_plan_lifecycle_satisfaction() {
   local XDG_STATE_HOME="$TMP/agent-plan-life-satisfaction-state"
   export XDG_STATE_HOME
@@ -19429,7 +19429,7 @@ EOF
   fi
 }
 
-# smoke-weight: 72
+# smoke-weight: 84
 test_delegate_repair_retries_failed_verify() {
   local project="$TMP/delegate-repair"
   local kept
@@ -29249,7 +29249,7 @@ PY
   done
 }
 
-# smoke-weight: 20
+# smoke-weight: 41
 test_delegate_execution_config_guard_runs_before_git_capture() {
   local project="$TMP/worker-exec-config"
   local bin_dir="$project/bin"
@@ -31236,7 +31236,7 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
     fail "strict remote-ref violation should be named: $result"
 }
 
-# smoke-weight: 40
+# smoke-weight: 33
 test_worker_guard_still_fails_on_a_local_branch_ref_change() {
   local project="$TMP/guard-hard-local-ref"
   local head
@@ -31277,7 +31277,7 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
   contains "$result" 'outside its worktree: refs' || fail "remote target ref was not hard: $result"
 }
 
-# smoke-weight: 183
+# smoke-weight: 158
 test_worker_guard_reports_foreign_checkout_ref_moves() {
   local project="$TMP/guard-foreign-ref"
   local sibling="$TMP/guard-foreign-ref-sibling"
@@ -33424,7 +33424,7 @@ EOF
   fi
 }
 
-# smoke-weight: 88
+# smoke-weight: 127
 test_worker_guard_sees_submodule_and_worktree_metadata() {
   local project="$TMP/guard-submodule"
   local source="$TMP/guard-submodule-src"
@@ -37540,17 +37540,17 @@ PY
     fail "pytest verifier did not join disjoint tasks: $out"
 }
 
-# smoke-weight: 138
+# smoke-weight: 170
 test_goal_drive_parallel_batches_replay() {
   goal_drive_batch_cases replay-backward replay-recover recover land-recover
 }
 
-# smoke-weight: 142
+# smoke-weight: 176
 test_goal_drive_parallel_batches_verifiers() {
   goal_drive_batch_cases python pytest shared verifier
 }
 
-# smoke-weight: 103
+# smoke-weight: 121
 test_goal_drive_parallel_batches_scheduling() {
   goal_drive_batch_cases parallel overlap serial
 }
