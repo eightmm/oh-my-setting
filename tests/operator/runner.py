@@ -13,20 +13,25 @@ ROOT = HERE.parent.parent
 SOURCE = ROOT / "tests/operator-tools-smoke.sh"
 # The integration chains retain order within their own files. Everything else
 # starts with a fresh process, directory and explicitly declared fixture.
-# Measured 2026-10-22/23; buckets follow measured section cost.
+# Measured 2026-10-25 (seconds, one host): room-protocol 425, worker-leases 289,
+# dispatch-results 287, room-rollover 193, native-integration 168, dispatch-exit 143,
+# native-pty 99, auto-review 98, shared-cache 64, visual 27, scratch-state 16,
+# dashboard 12, rendering 10, salvage 2. Four-way sums: 465/459/455/454.
+# core/room-protocol stays one section: its later phases reuse the state its
+# earlier phases build (room_env, shared, main_attempts, plan_cli).
 SECTIONS = (
     ("core/dashboard", 0, "dashboard.sh"),
     ("core/visual-and-controls", 1, "visual_and_controls.py"),
     ("core/room-protocol", 0, "room_protocol.py"),
-    ("core/room-and-board-rendering", 1, "room_and_board_rendering.py"),
+    ("core/room-and-board-rendering", 0, "room_and_board_rendering.py"),
     ("core/native-integration", 2, "native_integration.py"),
-    ("shared-cache", 2, "shared-cache.sh"),
-    ("native-pty", 1, "native_pty.py"),
-    ("dispatch-exit", 3, None),
+    ("shared-cache", 3, "shared-cache.sh"),
+    ("native-pty", 3, "native_pty.py"),
+    ("dispatch-exit", 1, None),
     ("worker-leases", 1, "worker_leases.py"),
     ("dispatch-results", 2, "dispatch_results.py"),
-    ("salvage", 2, "salvage.py"),
-    ("scratch-state", 2, "scratch_state.py"),
+    ("salvage", 0, "salvage.py"),
+    ("scratch-state", 0, "scratch_state.py"),
     ("auto-review", 3, "auto_review.py"),
     ("room-rollover", 3, "room_rollover.py"),
 )
