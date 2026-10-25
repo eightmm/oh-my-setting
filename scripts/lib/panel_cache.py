@@ -25,6 +25,16 @@ SKIPPED = {DIRECTORY, '.oms/hooks/panel-activity'}
 ROOT = Path(__file__).resolve().parents[2]
 LEDGER = '.oms/lifecycle/events.jsonl'
 LEDGER_WINDOW = 256 * 1024
+# The one place a cached read declares its .oms inputs. Only a read whose complete input set is known may be
+# listed; every other key (the dashboard, which aggregates state.sh and the collectors it starts) keeps the
+# whole-.oms walk. A new read_shared key must either list every .oms file it opens here or stay unlisted.
+#   attempts       agent-events list --json: load_projection reads only lifecycle/events.jsonl
+#                  (scripts/lib/agent-events.py event_list -> load_projection -> read_rows(event_path))
+#   result-records _records (panel_results.py): that attempts list plus read_index of artifacts/index.jsonl
+# result-records is derived from the attempts read, so both keys list the same inputs: a tick then captures one
+# generation for the pair, and a ledger advance between the two reads fails the publication check.
+_LEDGER_READS = ('lifecycle/events.jsonl', 'artifacts/index.jsonl')
+KEY_INPUTS = {'attempts': _LEDGER_READS, 'result-records': _LEDGER_READS}
 _ledger_source = []
 
 
@@ -67,8 +77,15 @@ def _ledger_token(path, size):
     return size
 
 
-def fingerprint(repo):
-    """Stat inputs without reading logs or following symlinks into other trees."""
+def _link(info):
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, 'st_file_attributes', 0) & 0x400)
+
+
+def fingerprint(repo, inputs=None):
+    """Stat inputs without reading logs or following symlinks into other trees.
+
+    `inputs` names the .oms files a narrowed key depends on; None walks all of .oms.
+    """
     entries = []
 
     def visit(path, label, info=None):
@@ -103,7 +120,31 @@ def fingerprint(repo):
             entries.append((label, info.st_mode, info.st_dev, info.st_ino,
                             info.st_size, info.st_mtime_ns, info.st_ctime_ns))
 
-    visit(repo / '.oms', '.oms')
+    def declared(name):
+        # Each ancestor must be a real directory, as the whole walk never descends through a link;
+        # an unsafe or missing one is itself the input.
+        label, path = '.oms', repo / '.oms'
+        for part in [None] + name.split('/')[:-1]:
+            if part is not None:
+                label, path = label + '/' + part, path / part
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                entries.append((label, None))
+                return
+            if _link(info) or not stat.S_ISDIR(info.st_mode):
+                entries.append((label, info.st_mode, info.st_dev, info.st_ino,
+                                info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+                return
+            # Identity only: a child creation must not invalidate its ancestor.
+            entries.append((label, info.st_mode, info.st_dev, info.st_ino))
+        visit(repo / '.oms' / name, '.oms/' + name)
+
+    if inputs is None:
+        visit(repo / '.oms', '.oms')
+    else:
+        for name in inputs:
+            declared(name)
     for name in ('AGENTS.md', 'CLAUDE.md', 'PROJECT.md', '.gitignore', '.github/workflows'):
         visit(repo / name, name)
     # A worktree's gitfile is unchanged when its HEAD or index changes.
@@ -174,8 +215,10 @@ def read_shared(repo, key, collect, cacheable=None, _tick=None):
     relative = DIRECTORY + '/' + key + '.json'
     cached = None
     try:
-        stamp = (fingerprint(repo) if _tick is None else
-                 _tick._once('fingerprint', lambda: fingerprint(repo)))
+        inputs = KEY_INPUTS.get(key)
+        # One walk per scope and tick: the whole-tree key is shared by every unlisted key.
+        stamp = (fingerprint(repo, inputs) if _tick is None else
+                 _tick._once('fingerprint:' + repr(inputs), lambda: fingerprint(repo, inputs)))
         cached = _load(repo, relative, identity, stamp)
         if cached and 0 <= time.time() - cached['created'] < INTERVAL:
             return cached['value']
@@ -184,7 +227,7 @@ def read_shared(repo, key, collect, cacheable=None, _tick=None):
             if cached and 0 <= time.time() - cached['created'] < INTERVAL:
                 return cached['value']
             value = collect()
-            if fingerprint(repo) != stamp:
+            if fingerprint(repo, inputs) != stamp:
                 # Mains write state all the time; a read that overlapped a write is still a valid read for this
                 # board, it is just not stored for the others.
                 return value

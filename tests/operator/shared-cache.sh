@@ -209,7 +209,7 @@ with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}
         patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as fingerprints:
     anchor = time.time()
     for offset in (*range(0, cache.INTERVAL, 5), cache.INTERVAL):
-        expected = 4 if offset in (0, cache.INTERVAL) else 1
+        expected = 5 if offset in (0, cache.INTERVAL) else 2
         fingerprints.reset_mock()
         tick = cache.TickReads(tick_project)
         with patch.object(cache.time, 'time', return_value=anchor + offset):
@@ -665,7 +665,12 @@ with patch.object(panel_results, '_records', return_value=([], [])) as queries:
     assert panel_results.results(project, _shared=True)['rows'] == []
     assert panel_results.results(project, _shared=True)['rows'] == []
     assert queries.call_count == 1
+    # result-records reads only the lifecycle ledger and the artifact index; a plan edit is not its input.
     plan.write_text('fourth generation', encoding='utf-8')
+    panel_results.results(project, _shared=True)
+    assert queries.call_count == 1
+    (project / '.oms/artifacts').mkdir(parents=True, exist_ok=True)
+    (project / '.oms/artifacts/index.jsonl').write_text('fourth generation\n', encoding='utf-8')
     panel_results.results(project, _shared=True)
     assert queries.call_count == 2
 
@@ -1144,10 +1149,16 @@ counts = {'events': 0, 'index': 0}
 failure = [False]
 run_path = runpy.run_path
 tick_store = run_path(str(panel_results.ROOT / 'scripts/lib/artifact-index-store.py'))
+def churn():
+    # The attempts and result-records reads are keyed on the ledger and the artifact index only.
+    ledger_file = project / '.oms/lifecycle/events.jsonl'
+    ledger_file.parent.mkdir(parents=True, exist_ok=True)
+    with ledger_file.open('a', encoding='utf-8') as handle:
+        handle.write('x\n')
 def tick_index(repo, index, **kwargs):
     counts['index'] += 1
     body = tick_store['read_index'](repo, index, **kwargs)
-    plan.write_text(plan.read_text() + '\n')
+    churn()
     return body
 def tick_module(path, *args, **kwargs):
     # Observe the strict retained-index reader, including its real validation.
@@ -1162,7 +1173,7 @@ def tick_run(command, **kwargs):
         if failure[0]:
             raise subprocess.TimeoutExpired(command, 5)
         value = listed
-        plan.write_text(plan.read_text() + '\n')
+        churn()
     elif 'agent-plan' in command:
         value = {'tasks': [{'id': t} for t in task_ids]}
     elif command[:2] == ['tmux', 'list-windows']:
@@ -1289,6 +1300,25 @@ with patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as fingerprints
     assert cache.read_shared(project, 'tick-race', changing, _tick=tick) == {'number': 42}
     assert fingerprints.call_count == 3
 assert not (project / cache.DIRECTORY / 'tick-race.json').exists()
+# Records derive from the tick's attempts: a ledger advance between the two reads must not publish them.
+derived = project / 'derived-reads'
+(derived / '.oms/hooks').mkdir(parents=True)
+(derived / '.oms/lifecycle').mkdir()
+derived_ledger = derived / '.oms/lifecycle/events.jsonl'
+derived_ledger.write_text('generation A\n', encoding='utf-8')
+def derived_run(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, json.dumps([derived_ledger.read_text(encoding='utf-8').strip()]), '')
+def derived_records(repo, _attempts=None, **kwargs):
+    return list(_attempts), []
+with patch.object(cache.subprocess, 'run', side_effect=derived_run), \
+        patch.object(panel_results, '_records', side_effect=derived_records):
+    tick = cache.TickReads(derived)
+    assert tick.attempts() == ['generation A']
+    derived_ledger.write_text('generation B\n', encoding='utf-8')
+    assert tick.records()[0] == ['generation A']
+    assert not (derived / cache.DIRECTORY / 'result-records.json').exists(), 'stale records were published'
+    tick = cache.TickReads(derived)
+    assert tick.records()[0] == ['generation B'], 'stale records were reused on the next tick'
 # Mains' activity heartbeats change all the time and are read directly; they do not invalidate shared reads.
 before = cache.fingerprint(project)
 (project / '.oms/hooks/panel-activity').mkdir(parents=True, exist_ok=True)
@@ -1358,6 +1388,81 @@ for relative in ('.oms/lifecycle/events.jsonl', '.oms/hooks/events.jsonl', '.oms
     before = cache.fingerprint(project)
     source.write_text('record', encoding='utf-8')
     assert cache.fingerprint(project) != before, relative
+# Only reads with a fully known input set are narrowed; the dashboard aggregates state.sh and everything it starts,
+# so a completion report body it validates must still invalidate it.
+assert set(cache.KEY_INPUTS) == {'attempts', 'result-records'}, cache.KEY_INPUTS
+narrow_project = project / 'narrow-keys'
+(narrow_project / '.oms/hooks').mkdir(parents=True)
+(narrow_project / '.oms/lifecycle').mkdir(parents=True)
+(narrow_project / '.oms/lifecycle/events.jsonl').write_text('', encoding='utf-8')
+report = narrow_project / '.oms/artifacts/closed-000.md'
+report.parent.mkdir(parents=True)
+report.write_text('proof', encoding='utf-8')
+narrow_calls = {'attempts': 0, 'result-records': 0, 'dashboard': 0}
+def narrow_read(key):
+    def collect():
+        narrow_calls[key] += 1
+        return {'n': narrow_calls[key]}
+    return cache.read_shared(narrow_project, key, collect)
+for key in narrow_calls:
+    narrow_read(key)
+    narrow_read(key)
+    assert narrow_calls[key] == 1, key
+report.write_text('proof, altered', encoding='utf-8')
+for key in narrow_calls:
+    narrow_read(key)
+assert narrow_calls == {'attempts': 1, 'result-records': 1, 'dashboard': 2}, narrow_calls
+(narrow_project / '.oms/artifacts/index.jsonl').write_text('row\n', encoding='utf-8')
+for key in narrow_calls:
+    narrow_read(key)
+assert narrow_calls == {'attempts': 2, 'result-records': 2, 'dashboard': 3}, narrow_calls
+(narrow_project / '.oms/lifecycle/events.jsonl').write_text('{"x": 1}\n', encoding='utf-8')
+for key in narrow_calls:
+    narrow_read(key)
+assert narrow_calls == {'attempts': 3, 'result-records': 3, 'dashboard': 4}, narrow_calls
+# The whole-tree walk is shared by a tick's unlisted keys: one start plus one check per collection.
+tick = cache.TickReads(narrow_project)
+with patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as walks:
+    (narrow_project / '.oms/artifacts/closed-000.md').write_text('proof, again', encoding='utf-8')
+    cache.read_shared(narrow_project, 'dashboard', lambda: 1, _tick=tick)
+    cache.read_shared(narrow_project, 'other-whole-key', lambda: 1, _tick=tick)
+assert [call.args[1:] for call in walks.call_args_list] == [(None,)] * 3, walks.call_args_list
+# A declared path below a symlinked ancestor is not traversed, as the whole walk stops at the link.
+link_project = project / 'ancestor-link'
+(link_project / '.oms/hooks').mkdir(parents=True)
+outside_tree = project / 'ancestor-outside'
+outside_tree.mkdir()
+(outside_tree / 'index.jsonl').write_text('outside', encoding='utf-8')
+try:
+    (link_project / '.oms/artifacts').symlink_to(outside_tree, target_is_directory=True)
+except (OSError, NotImplementedError):
+    pass
+else:
+    inputs = cache.KEY_INPUTS['result-records']
+    before = cache.fingerprint(link_project, inputs)
+    (outside_tree / 'index.jsonl').write_text('outside, longer', encoding='utf-8')
+    assert cache.fingerprint(link_project, inputs) == before, 'traversed a symlinked ancestor'
+    (link_project / '.oms/artifacts').unlink()
+    assert cache.fingerprint(link_project, inputs) != before, 'ancestor link removal was missed'
+# Narrowed keys ignore churn in subtrees their reads never open and follow every input they do.
+for key, inputs in cache.KEY_INPUTS.items():
+    scoped = project / ('scope-' + key)
+    (scoped / '.oms/hooks').mkdir(parents=True)
+    for ancestor in ('lifecycle', 'artifacts'):
+        (scoped / '.oms' / ancestor).mkdir()
+    for relative in ('.oms/hooks/relay/call.json', '.oms/artifacts/delegate/body.md', '.oms/plan/tasks.json',
+                     '.oms/lifecycle/attempts/att_1/state.json', '.oms/project-graph/cache.json'):
+        before = cache.fingerprint(scoped, inputs)
+        source = scoped / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text('churn', encoding='utf-8')
+        assert cache.fingerprint(scoped, inputs) == before, (key, relative)
+        assert cache.fingerprint(scoped) != before or relative.startswith('.oms/hooks'), (key, relative)
+    for name in inputs:
+        before = cache.fingerprint(scoped, inputs)
+        (scoped / '.oms' / name).parent.mkdir(parents=True, exist_ok=True)
+        (scoped / '.oms' / name).write_text('record', encoding='utf-8')
+        assert cache.fingerprint(scoped, inputs) != before, (key, name)
 ledger = project / '.oms/lifecycle/events.jsonl'
 def ledger_row(kind, **extra):
     return json.dumps({'schema': 'oms.agent-event.v1', 'event_id': 'aevt_' + os.urandom(4).hex(), 'attempt_id': 'a1',
