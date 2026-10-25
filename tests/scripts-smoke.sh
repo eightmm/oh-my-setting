@@ -5432,6 +5432,7 @@ test_delegate_dry_run() {
     --prompt "Add a helper" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'run the tests that use them'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'verify: `bash scripts/check.sh fast`'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'After you return, the harness runs `bash scripts/check.sh fast`.'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'do not run this full command just to confirm completion'
