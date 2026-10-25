@@ -782,6 +782,39 @@ verify_control() {  # ID TITLE ALLOWED VERIFY
 verify_control p2 "test: uses the committed suite" tests/ 'bash tests/run.sh'
 verify_control p3 "test: package-wide runner" . 'go test ./...'
 verify_control p4 "test: writes a report" tests/ 'bash tests/run.sh -o tests/report.xml'
+verify_control p5 "test: compound verifier" tests/ 'bash tests/run.sh; true'
+
+python3 - "$ROOT/scripts/lib/verify-base-precondition.py" <<'PYVERIFYBOUNDARIES' || fail "verifier shell command boundaries regressed"
+import runpy, sys
+from unittest.mock import patch
+
+missing_path = runpy.run_path(sys.argv[1])["missing_path"]
+committed = {"HEAD:tests/run.sh", "HEAD:tests/a suite.sh", "HEAD:tests/semi;colon.sh"}
+
+with patch("subprocess.call", side_effect=lambda args, **kwargs: int(args[-1] not in committed)):
+    for operator in (";", "&&", "||", "|", "&"):
+        for gap in ("", " "):
+            boundary = gap + operator + gap
+            cases = (
+                ("bash tests/run.sh" + boundary + "true", ""),
+                ("bash tests/missing.sh" + boundary + "true", "tests/missing.sh"),
+                ("true" + boundary + "bash tests/missing.sh", "tests/missing.sh"),
+                ("echo -o" + boundary + "bash tests/missing.sh", "tests/missing.sh"),
+            )
+            for command, expected in cases:
+                found = missing_path(".", command, ["tests"])
+                assert found == expected, (command, expected, found)
+    for command, expected in (
+        ('bash "tests/a suite.sh"; true', ""),
+        ('bash "tests/semi;colon.sh"; true', ""),
+        ('bash "tests/missing;name.sh"; true', "tests/missing;name.sh"),
+        ('bash tests/semi\\;colon.sh; true', ""),
+        ('bash tests/run.sh -o tests/report.xml; true', ""),
+        ('bash tests/run.sh; cd elsewhere; bash tests/missing.sh', ""),
+    ):
+        found = missing_path(".", command, ["tests"])
+        assert found == expected, (command, expected, found)
+PYVERIFYBOUNDARIES
 
 # A task id can be reused by a replacement plan while a provider or verifier is
 # still running. The delegation receipt belongs to the immutable plan snapshot

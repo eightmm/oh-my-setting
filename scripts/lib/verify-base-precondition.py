@@ -55,13 +55,19 @@ def in_scope(path: str, allowed: list[str]) -> bool:
 
 def missing_path(repo: str, command: str, allowed: list[str]) -> str:
     try:
-        words = shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        words = list(lexer)
     except ValueError:
         return ""  # unparseable quoting is not evidence of anything
     if any(word in ("cd", "pushd") for word in words):
         return ""  # the paths are relative to a directory this cannot resolve
     skip_next = False
     for word in words:
+        if word and all(char in ";&|" for char in word):
+            skip_next = False
+            continue
         if skip_next:
             skip_next = False
             continue
