@@ -9,7 +9,7 @@ import time
 import unicodedata
 
 from dashboard_projection import clean, display_width, listing, mapping
-from panel_view import clipped, wrapped, plan_tail_columns, format_tail_row
+from panel_view import clipped, wrapped
 
 MAX_MESSAGES, RETAIN, MAX_TEXT = 200, 2000, 8000
 KINDS = ("question", "answer", "handoff", "status", "note", "decision")
@@ -155,47 +155,6 @@ def exited_mail(message, index):
             and target.get("participant") in listing(message.get("pending_for")))
 
 
-def call_rows(rows, members, name_of, room, width, unicode=True, summaries=None):
-    from panel_view import status_tag
-    index = {m["participant"]: m for m in members}
-    summaries = mapping(summaries)
-    output = []
-    for member in members:
-        if member.get("role") == "main":
-            continue
-        summary = mapping(summaries.get(member["participant"]))
-        # A broadcast can belong to its sender's call, but never to every addressed call.
-        messages = [r for r in rows if r["sender"] == member["participant"]
-                    or index.get(r["sender"], {}).get("role") == "main"
-                    and (r["message"].get("recipient") == member["participant"]
-                         or listing(r["message"].get("targets")) == [member["participant"]])]
-        notes = [r for r in messages if not routine(r["message"], room, index, own_notes=False)]
-        row = dict(messages[-1]) if messages else {"id": None, "text": "", "unread": False,
-                                                   "sender": member["participant"], "people": {member["participant"]}}
-        row["text"] = summary.get("text", notes[-1]["text"] if notes else "")
-        row["call"] = ("result", member["participant"]) if messages or summary.get("has_messages") else None
-        row["unread"] = any(r["unread"] for r in messages) or bool(summary.get("unread"))
-        note_count = summary.get("note_count", len(notes))
-        tail = (" · +%s" % (note_count - 1) if note_count > 1 else "") + (" · unread" if row["unread"] else "")
-        phase = "timed_out" if member.get("exit") == 124 else member.get("state")
-        if member.get("_decided"):
-            code = member.get("exit")
-            phase = "done" if code == 0 else "failed" if type(code) is int else "unknown"
-        state = " " + status_tag(phase, exit_code=member.get("exit"), unicode=unicode)
-        state += " [accepted]" if member.get("decision") == "accepted" else " [main decided]" if member.get("_decided") else ""
-        note = clipped(clean(row["text"], 300) or "(no notes)", max(0, (width - 2) // 3))
-        sep = " · " if unicode else " / "
-        row["_tail"] = [(state.strip(), "metadata"), ((sep + note) if note else "", "metadata"),
-                        (tail.replace(" · ", sep).strip(), "metadata")]
-        row["_label"] = name_of(member["participant"])
-        output.append(row)
-    plan = plan_tail_columns([row["_tail"] for row in output], max(0, width - 2), optional=(1,))
-    for row, values in zip(output, plan["rows"]):
-        row["line"], _ = format_tail_row([], (row.pop("_label"), "text"), values, plan)
-        row.pop("_tail")
-    return output
-
-
 def readable_text(text):
     from room_view import readable
     from panel_view import _result_blocks
@@ -253,13 +212,13 @@ def tab_body(report, width, cap, navigation, unicode=True):
     messages = list(source)[-RETAIN:]
     total_count = getattr(source, "total_count", room.get("message_count", len(source)))
     total_count = max(int(total_count or 0), len(messages))
-    from room_view import live_readers, message_pending, settler
+    from room_view import live_readers, settler
     index = {m["participant"]: m for m in members}
     settled, _ = settler(report)
     readers = live_readers(report, members, settled)
     selected = (navigation.get("selected") or (None, None))[1]
     call = index.get(selected)
-    filters = [("needs you", None), ("by call", None), ("all", None)]
+    filters = [("needs you", None), ("all", None)]
     if call and call.get("role") != "main":
         filters.append(("this call", selected))
     if len(mains) > 1 and me:
@@ -267,40 +226,9 @@ def tab_body(report, width, cap, navigation, unicode=True):
     state["filter"] = state.get("filter", 0) % len(filters)
     label, person = filters[state["filter"]]
     successors = mapping(report.get("message_successors"))
+    needing = [message for message in messages if exited_mail(message, index) or not routine(message, room, index)]
     if label == "needs you":
-        matching = [message for message in messages
-                    if exited_mail(message, index) or not routine(message, room, index)]
-    elif label == "by call":
-        summaries = {}
-        groups = {}
-        for order, message in enumerate(messages):
-            targets = listing(message.get("targets"))
-            recipient = message.get("recipient") or (targets[0] if len(targets) == 1 else "all")
-            sender = message.get("sender")
-            for member in members:
-                participant = member.get("participant")
-                if member.get("role") == "main" or not participant:
-                    continue
-                addressed = (recipient != "all" and len(targets) <= 1
-                             and index.get(sender, {}).get("role") == "main"
-                             and (recipient == participant or targets == [participant]))
-                if sender == participant or addressed:
-                    groups.setdefault(participant, []).append((order, message))
-                    break
-        # Summaries cover the retained window; only one representative per call is formatted.
-        representatives = []
-        for participant, group in groups.items():
-            call_messages = [message for _, message in group]
-            notes = [message for message in call_messages
-                     if not routine(message, room, index, own_notes=False)]
-            summaries[participant] = {
-                "has_messages": True,
-                "note_count": len(notes),
-                "text": readable_text(notes[-1].get("text")) if notes else "",
-                "unread": any(message_pending(message, successors) & set(readers) for message in call_messages),
-            }
-            representatives.append(group[-1])
-        matching = [message for _, message in sorted(representatives, key=lambda entry: entry[0])]
+        matching = needing
     elif label == "all":
         matching = messages
     elif person:
@@ -323,8 +251,6 @@ def tab_body(report, width, cap, navigation, unicode=True):
     display_messages = matching[-MAX_MESSAGES:]
     rows = _rows(display_messages, name_of, members=members, readers=readers, width=width,
                  unicode=unicode, mains=mains, successors=successors)
-    if label == "by call":
-        rows = call_rows(rows, members, name_of, room, width, unicode, summaries=summaries)
     navigation["message_calls"] = {r["id"]: r["call"] for r in rows if r["id"] is not None}
     ids = [r["id"] for r in rows if r["id"] is not None]
     navigation["message_ids"] = ids
@@ -358,13 +284,15 @@ def tab_body(report, width, cap, navigation, unicode=True):
     scroll = state["scroll"] = min(max(0, state["scroll"]), max(0, len(body) - budget))
     truncated = total_count > len(source)
     searching = truncated and len(source) >= RETAIN
+    # The tab's summary line reports this same count, so it never disagrees with the needs you filter.
+    navigation["messages_needs"] = (len(needing), truncated)
     if loading:
         count_text = "room-wide: %s messages" % format(total_count, ",")
     elif label == "all":
         count_text = ("newest %d of %s" % (len(display_messages), format(total_count, ","))
                       if total_count > MAX_MESSAGES else str(total_count))
-    elif label == "by call":
-        count_text = str(len(rows))
+    elif (searching or truncated) and not match_count:
+        count_text = "older messages not loaded"
     elif searching:
         count_text = "newest %d in search window" % len(display_messages)
     elif truncated:
@@ -383,7 +311,7 @@ def tab_body(report, width, cap, navigation, unicode=True):
     if error:
         out.append(("! " + error, None, False))
     if not rows:
-        out.append(("Reading messages..." if loading else "No messages need you" if label == "needs you" else "No messages in this view", None, False))
+        out.append(("Reading messages..." if loading else ("No messages need you in the loaded window" if truncated else "No messages need you") if label == "needs you" else "No messages in this view", None, False))
     out += [(text, ("message", ident) if header and ident is not None else None,
              header and ident is not None and ident == state["selected"])
             for ident, text, header in body[scroll:scroll + budget]]

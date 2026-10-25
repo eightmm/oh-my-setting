@@ -386,33 +386,23 @@ for member, attempt in zip(tail_fixture["room"]["participants"], tail_fixture["a
     attempt["panel"].update(model="gpt-6-luna", label="한글 작업 " + member["participant"])
 tail_fixture["operations"] = {"recent": [{"attempt_id": ident, "tokens": tokens}
     for ident, tokens in (("layout-review-a", 9800), ("layout-review-b", 12000))]}
-import panel_messages as tail_messages
 import panel_view as tail_view
 tail_members = [member for member in projected_nodes(tail_fixture) if member["role"] != "main"]
 tail_inbox = [{"glyph": "!", "who": name, "what": "한글 작업", "tail": age, "style": "alert",
                "action": ("result", member["participant"]), "row_id": ("call", member["participant"])}
               for member, name, age in zip(tail_members, ("A", "Long name", "한글"), ("37m", "4m", "<1m"))]
-tail_names = {m["participant"]: name for m, name in zip(tail_members, ("A", "Long name", "한글"))}
-tail_notes = [{"sender": member["participant"], "id": "%s-%s" % (member["participant"], n),
-               "text": "한글 note " + "x" * (n + 1), "unread": n == 1,
-               "message": {"sender": member["participant"], "recipient": "layout-main", "message_kind": "note"}}
-              for index, member in enumerate(tail_members) for n in range(index % 2 + 1)]
 tail_plain = {}
 for columns in (27, 42, 80, 150):
     for colored in (False, True):
-        for surface in ("compact", "tree", "graph", "inbox", "messages"):
+        for surface in ("compact", "tree", "graph", "inbox"):
             with mock_patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
-                if surface == "messages":
-                    message_rows = tail_messages.call_rows(tail_notes, tail_members, tail_names.__getitem__,
-                        tail_fixture["room"], columns)
-                    picture = "\n".join(row["line"] for row in message_rows)
-                elif surface == "inbox":
+                if surface == "inbox":
                     with mock_patch.object(tail_view, "inbox_items", return_value=tail_inbox):
                         picture = render(tail_fixture, "codex", columns, 60, menu=True, color=colored, navigation={})
                 else:
                     picture = render(tail_fixture, "codex", columns, 60, view=surface, color=colored,
                                      navigation={"dismissed": True})
-            if colored and surface != "messages":
+            if colored:
                 assert "\033[" in picture, (surface, columns, picture)
             picture = re.sub(r"\033\[[0-9;]*m", "", picture)
             if surface != "inbox":
@@ -426,7 +416,7 @@ for columns in (27, 42, 80, 150):
                         for line in call_lines]
             else:
                 call_lines = [line for line in picture.splitlines() if "running]" in line
-                              and (surface == "messages" or any(age in line for age in ("37m", "4m", "<1m")))]
+                              and any(age in line for age in ("37m", "4m", "<1m"))]
                 ends = [display_width(line[:line.index("running]") + len("running]")]) for line in call_lines]
             assert len(call_lines) == 3 and len(set(ends)) == 1, (surface, columns, call_lines, ends, picture)
             assert all(display_width(line) <= columns for line in picture.splitlines()), (surface, columns, picture)
@@ -3873,15 +3863,29 @@ ended_past = render(ended, "codex", 120, 120, view="tree", navigation={"tab": "p
 past_jobs = [line for line in ended_past.splitlines() if "Old job" in line]
 # The first page lists the newest calls in order (at least eleven at this height); the header counts every one.
 newest_first = [n for n in range(13, 0, -1) if n != 3]
-assert "12 past calls, newest first" in ended_past and len(past_jobs) >= 11 and \
+assert "12 past calls" in ended_past and "Finished calls, newest first. Enter opens one." in ended_past and \
+    "Enter shows one in Detail" not in ended_past and len(past_jobs) >= 11 and \
     [int(line.split("Old job ")[1][:2]) for line in past_jobs] == newest_first[:len(past_jobs)], past_jobs
 # An end time from an earlier local day carries its date, so the expectation holds across midnight.
 def ended_stamp(n):
     import calendar
     local = time.localtime(calendar.timegm(time.strptime(ended["room"]["call_results"]["old-%02d" % n]["ts"], "%Y-%m-%dT%H:%M:%SZ")))
     return time.strftime("%H:%M" if local[:3] == time.localtime()[:3] else "%m-%d %H:%M", local)
-assert all(re.search(r"WORKER Luna 6\s+· Old job %02d\s+\[✓ finished: exit 0\] \[acceptance pending\]  %s " % (n, ended_stamp(n)), line + " ")
+assert all(re.search(r"WORKER Luna 6\s+· Old job %02d\s+\[✓ finished: exit 0\]  %s " % (n, ended_stamp(n)), line + " ")
            for line, n in zip(past_jobs, newest_first)), past_jobs
+# Settled rows owe the main nothing, so none carries an acceptance marker.
+assert "acceptance pending" not in ended_past, ended_past
+# A recorded decision reads as accepted or decided; an undecided call already says "awaiting decision".
+marker_call = dict(review_member, participant="marker-call", title="Marker call", state="review", exit=0)
+for call, width, marker in ((marker_call, 120, ""),
+                            (dict(marker_call, decision="accepted"), 120, "[accepted]"),
+                            (dict(marker_call, decision="completed"), 120, "[main decided]"),
+                            (dict(marker_call, state="done"), 120, ""),
+                            (dict(marker_call, state="done", exit=1), 120, ""),
+                            (marker_call, 40, "")):
+    row = graph_text.past_body([call], width, 8, {}, {}, True)[-1][0]
+    assert ("Marker call" in row or width < 60) and (marker in row if marker else "[" + "acceptance" not in row and "[accepted]" not in row), (marker, row)
+assert "[✗ failed: exit 1]" in graph_text.past_body([dict(marker_call, state="done", exit=1)], 120, 8, {}, {}, True)[-1][0]
 # A worker that hit its wall clock says how to continue; later rounds of one task are numbered.
 timed = deepcopy(ended)
 timed["room"]["call_results"]["old-00"]["exit"] = 124
@@ -4519,13 +4523,14 @@ assert sum(line.startswith("Attention 11") for line in queue_screen.splitlines()
 review_group = [dict(review_member, participant="review-%s" % n, task_id="same-task") for n in range(3)]
 review_group_nav = {"tab": "past"}
 folded_reviews = graph_text.past_body(review_group, 100, 8, review_group_nav, {}, True)
-assert len(folded_reviews) == 2 and "same-task · 3 reviews" in folded_reviews[1][0], folded_reviews
+assert len(folded_reviews) == 3 and "same-task · 3 reviews" in folded_reviews[2][0], folded_reviews
+assert folded_reviews[1][0] == "Finished calls, newest first. Enter opens one.", folded_reviews
 review_group_nav["selected"] = ("past-group", "same-task")
 assert graph_text.past_event(("enter",), review_group_nav)
 expanded_reviews = graph_text.past_body(review_group, 100, 8, review_group_nav, {}, True)
-assert len(expanded_reviews) == 5 and review_group_nav["past_ids"][1:] == [("result", "review-%s" % n) for n in range(3)], expanded_reviews
+assert len(expanded_reviews) == 6 and review_group_nav["past_ids"][1:] == [("result", "review-%s" % n) for n in range(3)], expanded_reviews
 assert graph_text.past_event(("enter",), review_group_nav)
-assert len(graph_text.past_body(review_group, 100, 8, review_group_nav, {}, True)) == 2
+assert len(graph_text.past_body(review_group, 100, 8, review_group_nav, {}, True)) == 3
 # The Attention tab groups the queue under one heading per class, in rank order, rows as in the strip.
 group_nav = {}
 group_rows = graph_text.attention_body(ranked, 123, 30, group_nav, True)
@@ -4899,7 +4904,8 @@ def exercise_exited_main_mail():
                 assert len(board.splitlines()) <= height and all(display_width(line) <= columns for line in board.splitlines())
                 assert len(panel_messages.needs_main(report)) == 2
                 assert ("Messages 2" if columns >= 76 else "[Msg 2]") in board, board
-                assert "Messages: 4 unread for live participants" in board, board
+                # The summary counts the same rows as the needs you filter, so the two numbers cannot disagree.
+                assert "Messages: 4 need you" in board and "unread for live" not in board, board
                 if height >= 40:
                     assert "Filter: needs you (4)" in board, board
                 assert len(mail_nav["message_ids"]) == 4, mail_nav
@@ -4960,11 +4966,11 @@ def exercise_exited_main_mail():
     surfaces(True)
     history_window()
     successor_nav = {"main_attempt": "mail-new1", "messages_view": {
-        "filter": 3, "selected": None, "open": None, "scroll": 0}}
+        "filter": 2, "selected": None, "open": None, "scroll": 0}}
     body = panel_messages.tab_body(report, 200, 20, successor_nav, False)
     assert body[0][0] == "Filter: to/from me (4)", body
     old_nav = {"main_attempt": "mail-old1", "messages_view": {
-        "filter": 3, "selected": None, "open": None, "scroll": 0}}
+        "filter": 2, "selected": None, "open": None, "scroll": 0}}
     assert panel_messages.tab_body(report, 200, 20, old_nav, False)[0][0] == "Filter: to/from me (0)"
     with patch.object(room, "age", return_value=0):
         assert len(inbox_items(report)) == 4, "an exited main's fresh question vanished"

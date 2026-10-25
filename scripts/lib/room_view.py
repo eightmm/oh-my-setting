@@ -691,7 +691,11 @@ def goal_box(report, width, unicode, compact=False):
 
 
 def execution_tag(member, unicode=True):
-    return ending_tag(dict(member, state=main_state(member)), unicode)
+    state = main_state(member)
+    # A recorded nonzero exit is a failure whatever word the lifecycle state carries.
+    if state in {"done", "exited"} and type(member.get("exit")) is int and member["exit"] != 0:
+        state = "failed"
+    return ending_tag(dict(member, state=state), unicode)
 
 
 def member_identity(member, label=True):
@@ -1768,8 +1772,6 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         navigation["full_result"] = action(previewed)
     else:
         navigation.pop("full_result", None)
-    settled, unused = settler(report)
-    unread_total = live_unread(report, members, settled)
     scrolled = mapping(navigation.get("band_offsets"))
     scrolled_now = dict(scrolled)
     lines, hits = [], []
@@ -1885,8 +1887,13 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             elif active == "needs":
                 rows = attention_body(attention, width - 4, capacity, navigation, unicode)
             else:
-                summary = [("Messages: %s unread for live participants" % unread_total, None, False)]
-                messages = messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
+                # The note costs a row, so a short dock keeps the summary and the messages.
+                noted = capacity >= 6
+                messages = messages_body(report, width - 4, max(1, capacity - 1 - int(noted)), navigation, unicode)
+                count, lower = navigation.get("messages_needs", (0, False))
+                summary = [("Messages: %s" % messages_needs_text(count, lower), None, False)]
+                if noted:
+                    summary.append((TAB_NOTES["messages"], None, False))
                 rows = summary + aligned_message_rows(report, messages, navigation, width - 4, unicode)
             return rows, first, plain
 
@@ -1902,7 +1909,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 text = clipped(text, max(0, width - 6)) + " <"
             previous_target = target
             line = box_row(text, width, unicode)
-            if active == "messages" and n == 0:
+            if active == "messages" and (n == 0 or text == TAB_NOTES["messages"]):
                 line = line.replace(text, paint(text, "dim", color=color, colors=colors, light=light), 1)
             if active == "detail" and n == 0 and previewed and first == 0:
                 identity = clipped(member_identity(previewed), width - 4)
@@ -1948,6 +1955,15 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     return lines, hits
 
 
+def messages_needs_text(count, lower):
+    """One wording for the summary line and the filter header; an incomplete window never claims none."""
+    if lower:
+        return "at least %s need you" % count if count else "older messages not loaded"
+    return "%s need you" % count if count else "none need you"
+
+
+TAB_NOTES = {"messages": "Questions and mail for people. Finished calls are in Past.",
+             "past": "Finished calls, newest first. Enter opens one."}
 TABS = (("log", "Log"), ("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("past", "Past"),
         ("needs", "Attention"))
 
@@ -1964,9 +1980,6 @@ def past_calls(pool, classify):
 def aligned_message_rows(report, rows, navigation, width, unicode):
     """Give each Messages row fixed time, kind and route columns before its text."""
     state = mapping(navigation.get("messages_view"))
-    # By-call rows summarize calls instead of individual messages.
-    if state.get("filter") == 1:
-        return rows
     room = mapping(report.get("room"))
     source = state.get("log")
     if source is None:
@@ -2027,6 +2040,19 @@ def aligned_message_rows(report, rows, navigation, width, unicode):
     return aligned
 
 
+def acceptance_mark(call):
+    """Marks a past row's main decision; "pending" only while the main still has to act on the call.
+
+    Settled calls leave the board without a recorded decision, so an undecided past row is not owed anything."""
+    if call_ending(call) == "cancelled":
+        return ""
+    if call.get("decision") == "accepted":
+        return " [accepted]"
+    if call.get("_decided") or call.get("decision") == "completed":
+        return " [main decided]"
+    return ""  # Past holds settled calls only; one awaiting its main stays on the board
+
+
 def past_body(past, width, capacity, navigation, labels, unicode):
     """One logical row per past call; long titles wrap under the text column."""
     sep = " · " if unicode else " / "
@@ -2052,7 +2078,8 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     navigation["past_ids"] = ids
     view = navigation.setdefault("past_view", {})
     header = capacity >= 3
-    page = max(1, capacity - int(header))
+    described = capacity >= 6
+    page = max(1, capacity - int(header) - int(described))
     selected = navigation.get("selected")
 
     rendered_cache = {}
@@ -2069,9 +2096,6 @@ def past_body(past, width, capacity, navigation, labels, unicode):
             if call.get("_decided"):
                 code = call.get("exit")
                 state = "done" if code == 0 else "failed" if type(code) is int else "unknown"
-            acceptance = " [accepted]" if call.get("decision") == "accepted" else " [main decided]" if call.get("_decided") or call.get("decision") == "completed" else " [acceptance pending]"
-            if call_ending(call) == "cancelled":
-                acceptance = ""
             tag = execution_tag(dict(call, state=state), unicode)
             identity = clean(call.get("title")) or member_identity(call)
             tail = tag
@@ -2087,9 +2111,7 @@ def past_body(past, width, capacity, navigation, labels, unicode):
         if call.get("_decided"):
             code = call.get("exit")
             state = "done" if code == 0 else "failed" if type(code) is int else "unknown"
-        acceptance = " [accepted]" if call.get("decision") == "accepted" else " [main decided]" if call.get("_decided") or call.get("decision") == "completed" else " [acceptance pending]"
-        if call_ending(call) == "cancelled":
-            acceptance = ""
+        acceptance = acceptance_mark(call)
         tag = execution_tag(dict(call, state=state), unicode)
         identity_width = min(18, max(1, width // 3))
         identity = member_identity(call, False)
@@ -2130,8 +2152,9 @@ def past_body(past, width, capacity, navigation, labels, unicode):
             first = at
         else:
             first = max(first, visible_start(at))
-    rows = [("%s past call%s, newest first%sEnter shows one in Detail" % (len(ids), "" if len(ids) == 1 else "s", sep),
-             None, False)] if header else []
+    rows = [("%s past call%s" % (len(ids), "" if len(ids) == 1 else "s"), None, False)] if header else []
+    if described:
+        rows.append((TAB_NOTES["past"], None, False))
     body_rows, shown_entries = [], 0
     for index in range(first, len(entries)):
         rendered = entry_rows(index)

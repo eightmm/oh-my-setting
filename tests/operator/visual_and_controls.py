@@ -538,7 +538,7 @@ for count in (3, 5, 4):
 # Measurement cannot consume the newest message's reveal before the fitted page draws it.
 new_message_report = deepcopy(msg_report)
 new_message_report["room"]["messages"] = msg_log[:1]
-new_message_nav = {"tab": "messages", "messages_view": {"filter": 2, "selected": None, "open": None, "scroll": 0}}
+new_message_nav = {"tab": "messages", "messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
 first_message_box, _ = room_view.tab_box(new_message_report, 127, 14, new_message_nav, height=60)
 new_message_report["room"]["messages"].append(msg_log[1])
 next_message_box, _ = room_view.tab_box(new_message_report, 127, 14, new_message_nav, height=60)
@@ -799,7 +799,7 @@ aligned_message_report["room"]["messages"] = [
      "pending_for": [], "ts": "2026-10-12T19:19:00Z", "text": "ALIGN-B"},
 ]
 aligned_message_nav = {"selected": ("chat", "m2"), "tab": "messages",
-                       "messages_view": {"filter": 2, "selected": None, "open": None, "scroll": 0}}
+                       "messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
 aligned_message_nav["messages_view"]["log"] = panel_messages.MessageWindow(
     aligned_message_report["room"]["messages"])
 aligned_message_text = render(aligned_message_report, "codex", 80, 60, view="graph",
@@ -820,7 +820,12 @@ for glyphs, unread_mark, read_mark in ((True, "●", "○"), (False, "*", "-")):
     assert " %s note " % unread_mark in line and "unread" not in line, line
     assert " %s note " % read_mark in seen and unread_mark not in seen, seen
 nav, shown = board("messages", 110, 24)
-assert "Messages: 2 unread for live participants" in shown and "line 29" in shown and "MAIN Opus 5.5 → MAIN Sol 6.1" in shown and "●" in shown and "· unread" not in shown and "\x1b" not in shown, shown
+# The summary counts exactly what the needs you filter lists, so the two numbers agree.
+summary_count = re.search(r"Messages: (?:at least )?(\d+) need you", shown)
+filter_count = re.search(r"Filter: needs you \((?:at least )?(\d+)\)", shown)
+assert summary_count and filter_count and summary_count.group(1) == filter_count.group(1) and "unread for live" not in shown, shown
+assert "Questions and mail for people. Finished calls are in Past." in shown and "by call" not in shown, shown
+assert "line 29" in shown and "MAIN Opus 5.5 → MAIN Sol 6.1" in shown and "●" in shown and "· unread" not in shown and "\x1b" not in shown, shown
 assert "loading earlier" not in shown, shown
 nav["messages_view"]["reading"] = True
 assert "loading earlier messages" in board("messages", 110, 30, nav=nav)[1]
@@ -828,13 +833,13 @@ nav["messages_view"]["reading"] = False
 message_capacity = []
 for rows_high in (24, 30, 32, 33, 34, 35, 36, 40):
     sized, messages = board("messages", 110, rows_high, nav={
-        "selected": ("chat", "m2"), "messages_view": {"filter": 2, "selected": None, "open": None, "scroll": 0}})
+        "selected": ("chat", "m2"), "messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}})
     assert ("Filter: all" in messages or rows_high == 24) and "line 29" in messages, messages
     message_capacity.append(sized["box"]["y2"] - sized["box"]["y1"] + 1)
 assert message_capacity == sorted(message_capacity), message_capacity
 for rows_high in (21, 22):
     sized, messages = board("messages", 110, rows_high, nav={
-        "selected": ("chat", "m2"), "messages_view": {"filter": 2, "selected": None, "open": None, "scroll": 0}})
+        "selected": ("chat", "m2"), "messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}})
     assert sized["tab_body_visible"] and "line 29" in messages, messages
 assert "  Debate 1  " in board("detail", nav=nav)[1] and "Debate •" not in board("detail", nav=nav)[1]
 viewed = board("debate")[0]
@@ -851,9 +856,6 @@ assert tab_event(("escape",), nav)
 assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is not None
 assert tab_event(("escape",), nav) and nav["messages_view"]["open"] is None and not tab_event(("escape",), nav)
 nav["selected"] = ("chat", "m3")
-assert tab_event(("right",), nav)
-narrowed = board("messages", 110, 40, nav=nav)[1]
-assert "Filter: by call" in narrowed and not nav["message_ids"], narrowed
 assert tab_event(("right",), nav)
 assert "Filter: all" in board("messages", 110, 40, nav=nav)[1]
 assert tab_event(("right",), nav)
@@ -905,6 +907,18 @@ def pending_projection(count, consumed=0):
         log = room.messages(str(temporary), "r")
     return projection, log
 
+def need_you_numbers(report, board_text, log=None, width=123):
+    """(summary count, needs you filter count): the board's summary line must equal the filter's own head."""
+    messages_view = {"filter": 0, "selected": None, "open": None, "scroll": 0}
+    if log is not None:
+        messages_view["log"] = log
+    head = panel_messages.tab_body(report, width, 40, {"messages_view": messages_view})[0][0]
+    summary = re.search(r"Messages: (?:none need you|older messages not loaded|(?:at least )?(\d+) need you)", board_text)
+    counted = re.search(r"Filter: needs you \((?:older messages not loaded|(?:at least )?(\d+))\)", head)
+    assert summary and counted and "unread for live" not in board_text, (board_text, head)
+    return int(summary.group(1) or 0), int(counted.group(1) or 0)
+
+
 many_pending = deepcopy(msg_report)
 many_pending["room"], many_log = pending_projection(32, consumed=2)
 assert len(many_pending["room"]["messages"]) == 12 and many_pending["room"]["message_count"] == 32
@@ -919,7 +933,7 @@ expected = sum(row["unread"] for row in all_rows)
 assert expected == 30  # broadcasts count once per message, rather than once per recipient
 for loaded in (True, False):
     many_nav = {"tab": "messages", "messages_view": {
-        "filter": 2, "selected": None, "open": None, "scroll": 0}}
+        "filter": 1, "selected": None, "open": None, "scroll": 0}}
     if loaded:
         many_nav["messages_view"]["log"] = many_log
     many_body = panel_messages.tab_body(many_pending, 123, 40, many_nav)
@@ -928,14 +942,15 @@ for loaded in (True, False):
     assert live_unread(many_pending, nodes(many_pending), settler(many_pending)[0]) == expected
     many_board = render(many_pending, "codex", 127, 60, view="graph", navigation=many_nav)
     assert "Messages 0" not in many_board and not panel_messages.needs_main(many_pending), (loaded, many_board)
-    assert "%s unread for live participants" % expected in many_board, (loaded, many_board)
-    assert "%s+ unread" % expected not in many_board, many_board
+    summary_n, filter_n = need_you_numbers(many_pending, many_board, many_log if loaded else None)
+    assert summary_n == filter_n, (loaded, summary_n, filter_n, many_board)
 legacy_pending = deepcopy(many_pending)
 for key in ("pending_messages", "pending_messages_truncated"):
     legacy_pending["room"].pop(key)
 assert live_unread(legacy_pending, nodes(legacy_pending), settler(legacy_pending)[0]) == 12
 legacy_board = render(legacy_pending, "codex", 127, 60, view="graph", navigation={"tab": "messages"})
-assert "Messages 12" not in legacy_board and "12 unread for live participants" in legacy_board, legacy_board
+assert "Messages 12" not in legacy_board, legacy_board
+assert need_you_numbers(legacy_pending, legacy_board)[0] == need_you_numbers(legacy_pending, legacy_board)[1], legacy_board
 for count, expected in ((500, 500), (501, "500+")):
     capped = deepcopy(msg_report)
     capped["room"], _ = pending_projection(count)
@@ -945,7 +960,7 @@ for count, expected in ((500, 500), (501, "500+")):
     assert live_unread(capped, nodes(capped), settler(capped)[0]) == expected
     capped_board = render(capped, "codex", 127, 60, view="graph", navigation={"tab": "messages"})
     assert "Messages %s" % expected not in capped_board and not panel_messages.needs_main(capped), capped_board
-    assert "%s unread for live participants" % expected in capped_board, capped_board
+    assert need_you_numbers(capped, capped_board)[0] == need_you_numbers(capped, capped_board)[1], capped_board
 # A single main needs questions, not worker chatter or result/assignment echoes.
 from room_view import live_readers, live_unread, nodes, settler, who
 single = deepcopy(msg_report)
@@ -998,9 +1013,7 @@ for width in (50, 80, 127):
     assert panel_messages.tab_body(default_single, width, 30, single_nav) == body
     assert panel_messages.handle(("right",), single_nav)
     body = panel_messages.tab_body(single, width, 30, single_nav)
-    assert "Filter: by call" in body[0][0] and set(single_nav["message_ids"]) == {"question", "brief"}, body
-    worker_line = next(line for line, action, _ in body if action == ("message", "question"))
-    assert "running" in worker_line and "+1" in worker_line, body
+    assert "Filter: all" in body[0][0] and set(single_nav["message_ids"]) == {m["id"] for m in single_log}, body
     # One bounded window retains an older direct call message within RETAIN.
     older_call_log = [dict(single_log[-1], id="older-call", sender="w", recipient="m2", targets=["m2"],
                            text="older call message")]
@@ -1008,57 +1021,13 @@ for width in (50, 80, 127):
                             targets=["m2", "w", "rv"], text="unrelated broadcast")
                        for i in range(250)]
     older_call_nav = {"selected": ("result", "w"), "messages_view": {
-        "filter": 3, "log": panel_messages.MessageWindow(older_call_log), "scroll": 0, "tail": True}}
+        "filter": 2, "log": panel_messages.MessageWindow(older_call_log), "scroll": 0, "tail": True}}
     older_call_body = panel_messages.tab_body(single, 100, 40, older_call_nav)
     assert ("message", "older-call") in [action for _, action, _ in older_call_body], older_call_body
-
-    # An older incoming unread message still marks its call after more than 200 newer messages.
-    unread_call_log = [dict(single_log[-1], id="old-unread", sender="m2", recipient="w", targets=["w"],
-                            message_kind="question", pending_for=["w"], text="old unread question")]
-    unread_call_log += [dict(single_log[0], id="new-%d" % i, sender="rv", recipient="m2", targets=["m2"],
-                             pending_for=[], text="new message")
-                        for i in range(panel_messages.MAX_MESSAGES + 50)]
-    unread_call_nav = {"selected": ("result", "w"), "messages_view": {
-        "filter": 1, "log": panel_messages.MessageWindow(unread_call_log), "scroll": 0, "tail": True}}
-    unread_call_body = panel_messages.tab_body(single, 100, 40, unread_call_nav)
-    assert "· unread" in "\n".join(line for line, _, _ in unread_call_body), unread_call_body
-    assert ("message", "old-unread") in [action for _, action, _ in unread_call_body] and \
-        unread_call_nav["message_calls"].get("old-unread") == ("result", "w"), unread_call_body
-
-    # The newest activity from the first-seen call must survive the 200-row call-view cap.
-    many_calls = deepcopy(single)
-    many_call_members = [deepcopy(msg_members[1])] + [
-        {"participant": "call-%03d" % i, "role": "worker", "joined": True, "parent": "m2",
-         "state": "working", "model": "gpt-6.1-sol", "label": "Call %d" % i}
-        for i in range(201)]
-    many_calls["room"]["participants"] = many_call_members
-    many_call_log = [dict(single_log[0], id="call-000-old", sender="call-000", recipient="m2", targets=["m2"],
-                          message_kind="note", text="older call note", pending_for=[])]
-    many_call_log += [dict(single_log[0], id="call-%03d-note" % i, sender="call-%03d" % i, recipient="m2",
-                           targets=["m2"], message_kind="note", text="call note", pending_for=[])
-                      for i in range(1, 201)]
-    many_call_log.append(dict(single_log[-1], id="newest-question", sender="call-000", recipient="m2",
-                              targets=["m2"], message_kind="question", text="newest question", pending_for=["m2"]))
-    many_calls["room"].update(messages=many_call_log, message_count=len(many_call_log))
-    many_call_nav = {"selected": ("result", "call-000"), "messages_view": {
-        "filter": 1, "log": panel_messages.MessageWindow(many_call_log), "scroll": 0, "tail": True}}
-    many_call_body = panel_messages.tab_body(many_calls, 120, 30, many_call_nav)
-    assert "newest-question" in many_call_nav["message_ids"], many_call_nav
-    assert many_call_nav["message_calls"].get("newest-question") == ("result", "call-000"), many_call_nav
-    assert panel_messages.handle(("home",), many_call_nav)
-    many_call_body = panel_messages.tab_body(many_calls, 120, 30, many_call_nav)
-    assert many_call_nav["messages_view"]["selected"] == "newest-question", many_call_nav
-    assert ("message", "newest-question") in [action for _, action, _ in many_call_body], many_call_body
-    assert panel_messages.handle(("enter",), many_call_nav)
-    panel_messages.tab_body(many_calls, 120, 30, many_call_nav)
-    assert many_call_nav["messages_view"]["open"] == "newest-question", many_call_nav
-    assert panel_messages.handle(("f",), many_call_nav) and \
-        many_call_nav.get("open_call") == ("result", "call-000"), many_call_nav
 
     single_nav["messages_view"].update(selected="question", tail=False)
     panel_messages.tab_body(single, width, 30, single_nav)
     assert panel_messages.handle(("f",), single_nav) and single_nav.pop("open_call") == ("result", "w")
-    assert panel_messages.handle(("right",), single_nav)
     body = panel_messages.tab_body(single, width, 30, single_nav)
     assert "Filter: all" in body[0][0]
     tagged = [line for line, action, _ in body if action and (" ● " in line or " * " in line)]
@@ -1091,20 +1060,22 @@ for width in (50, 80, 127):
     assert panel_messages.handle(("right",), single_nav)
     assert "Filter: needs you" in panel_messages.tab_body(single, width, 30, single_nav)[0][0]
     full_board = render(single, "codex", width, 60, view="graph", navigation={"tab": "messages"})
-    assert ("Messages 1" if width >= 76 else "Messages: 1 unread") in full_board, full_board
+    assert width < 76 or "Messages 1" in full_board, full_board
+    summary_n, filter_n = need_you_numbers(single, full_board, width=width)
+    assert summary_n == filter_n == 2, (summary_n, filter_n, full_board)
 
 # Counts distinguish exact matching rows from a room-wide loading estimate and the retained search bound.
 count_log = [dict(single_log[0], id="count-%d" % i, sender="w", recipient="m2", targets=["m2"])
              for i in range(panel_messages.MAX_MESSAGES + 60)]
 count_report = deepcopy(single)
 count_report["room"].update(messages=count_log[-12:], message_count=len(count_log))
-count_nav = {"messages_view": {"filter": 2, "log": panel_messages.MessageWindow(count_log),
+count_nav = {"messages_view": {"filter": 1, "log": panel_messages.MessageWindow(count_log),
                                 "tail": True, "scroll": 0}}
 count_body = panel_messages.tab_body(count_report, 100, 24, count_nav)
 assert count_body[0][0].startswith("Filter: all (newest 200 of 260)"), count_body[0]
 assert len(count_nav["message_ids"]) == panel_messages.MAX_MESSAGES
 filtered_nav = {"selected": ("result", "w"), "messages_view": {
-    "filter": 3, "log": panel_messages.MessageWindow(count_log), "tail": True, "scroll": 0}}
+    "filter": 2, "log": panel_messages.MessageWindow(count_log), "tail": True, "scroll": 0}}
 formatted_counts = []
 format_rows = panel_messages._rows
 def track_message_rows(messages, *args, **kwargs):
@@ -1116,13 +1087,13 @@ with patch.object(panel_messages, "_rows", side_effect=track_message_rows):
 assert filtered_body[0][0].startswith("Filter: this call (newest 200 of 260)"), filtered_body[0]
 assert formatted_counts == [panel_messages.MAX_MESSAGES], formatted_counts
 loading_nav = {"selected": ("result", "w"), "messages_view": {
-    "filter": 3, "reading": True, "tail": True, "scroll": 0}}
+    "filter": 2, "reading": True, "tail": True, "scroll": 0}}
 loading_body = panel_messages.tab_body(count_report, 100, 24, loading_nav)
 assert loading_body[0][0].startswith("Filter: this call (room-wide: 260 messages)") and \
     "of 260" not in loading_body[0][0], loading_body[0]
 long_messages = [dict(count_log[0], id="long-%d" % i) for i in range(panel_messages.RETAIN)]
 long_window = panel_messages.MessageWindow(long_messages, total_count=9876)
-long_nav = {"messages_view": {"filter": 2, "log": long_window, "tail": True, "scroll": 0}}
+long_nav = {"messages_view": {"filter": 1, "log": long_window, "tail": True, "scroll": 0}}
 long_body = panel_messages.tab_body(count_report, 100, 24, long_nav)
 assert long_body[0][0].startswith("Filter: all (newest 200 of 9,876)") and \
     "searching the newest 2,000 of 9,876 room messages" in long_body[0][0], long_body[0]
@@ -1146,36 +1117,38 @@ peer_row = panel_messages._rows([dict(single_log[-1], sender="w", recipient="rv"
 assert "w → rv" in peer_row["line"] and "decision" in peer_row["line"]
 handoff_only = deepcopy(single)
 handoff_only["room"]["messages"] = [single_log[1]]
-handoff_nav = {"messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
+handoff_nav = {"messages_view": {"filter": 0, "selected": None, "open": None, "scroll": 0}}
 handoff_body = panel_messages.tab_body(handoff_only, 80, 10, handoff_nav)
-handoff_line = next(line for line, action, _ in handoff_body if action == ("message", "result-w"))
-assert handoff_nav["message_ids"] == ["result-w"] and "(no notes)" in handoff_line, handoff_body
-assert handoff_nav["message_has_call"] and "Finished." not in handoff_line
-# Joined non-main members without messages stay visible, but have no selectable message action.
-quiet_call = deepcopy(handoff_only)
-quiet_call["room"]["participants"].append({"participant": "quiet", "role": "worker", "joined": True,
-                                         "parent": "m2", "model": "gpt-6-luna", "label": "Quiet call"})
+# A routine result handoff is a Past row, not mail: needs you stays empty and says so.
+assert not handoff_nav["message_ids"] and "No messages need you in the loaded window" in [line for line, _, _ in handoff_body], handoff_body
+assert handoff_nav["messages_needs"][0] == 0, handoff_nav
+all_nav = {"selected": ("result", "w"), "messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
+panel_messages.tab_body(handoff_only, 80, 10, all_nav)
+assert all_nav["message_ids"] == ["result-w"] and all_nav["message_has_call"]
+assert all_nav["messages_needs"][0] == 0, all_nav
+# The by call view is gone: the filters are needs you, all, this call (a call selected) and to/from me (several mains).
+assert [panel_messages.tab_body(handoff_only, 80, 10, {"selected": ("result", "w"), "messages_view": {
+    "filter": index, "selected": None, "open": None, "scroll": 0}})[0][0].split(" (")[0] for index in range(3)] == [
+    "Filter: needs you", "Filter: all", "Filter: this call"]
+# An incomplete window never claims there is nothing: the summary and the filter header both say older mail is unloaded.
+for loaded_all, wording in ((False, "older messages not loaded"), (True, "none need you")):
+    window = deepcopy(handoff_only)
+    window["room"]["message_count"] = len(window["room"]["messages"]) if loaded_all else 5000
+    window_board = render(window, "codex", 127, 60, view="graph", navigation={"tab": "messages"})
+    assert wording in window_board and ("none need you" in window_board) == loaded_all, (loaded_all, window_board)
+    assert ("Filter: needs you (older messages not loaded)" in window_board) == (not loaded_all), window_board
+    assert "at least 0" not in window_board, window_board
+    # The empty body is qualified by the same completeness flag as the header; it never claims an exhaustive none.
+    assert ("No messages need you in the loaded window" in window_board) == (not loaded_all), window_board
+    assert (re.search(r"No messages need you(?! in the loaded window)", window_board) is not None) == loaded_all, window_board
+    if not loaded_all:
+        assert need_you_numbers(window, window_board) == (0, 0)
 for width in (24, 50, 80, 127):
     for glyphs in (True, False):
-        quiet_nav = {"messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
-        quiet_body = panel_messages.tab_body(quiet_call, width, 30, quiet_nav, glyphs)
-        quiet_rows = [(line, selected) for line, action, selected in quiet_body[1:] if action is None]
-        # Both the existing reviewer and the new worker have no messages.
-        assert len(quiet_rows) == 2 and not any(selected for _, selected in quiet_rows), (width, glyphs, quiet_body)
-        assert width < 50 or all("(no notes)" in line for line, _ in quiet_rows), (width, glyphs, quiet_body)
-        assert [action for _, action, _ in quiet_body[1:]] == [("message", "result-w"), None, None], quiet_body
-        if width >= 80:
-            assert "REVIEWER" in quiet_rows[0][0] and "Quiet call" in quiet_rows[1][0], quiet_body
-        assert quiet_nav["message_ids"] == ["result-w"] and None not in quiet_nav["message_calls"], quiet_nav
-        assert all(display_width(line) <= width for line, _, _ in quiet_body), (width, glyphs, quiet_body)
-        empty_call = deepcopy(quiet_call)
-        empty_call["room"]["messages"] = []
-        empty_nav = {"messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
-        empty_body = panel_messages.tab_body(empty_call, width, 30, empty_nav, glyphs)
-        assert len(empty_body) == 4 and all(action is None and not selected for _, action, selected in empty_body), empty_body
-        assert not empty_nav["message_ids"] and not empty_nav["message_calls"] and not empty_nav["message_has_call"], empty_nav
-        assert all(display_width(line) <= width for line, _, _ in empty_body), (width, glyphs, empty_body)
         for key in ("down", "enter", "f"):
+            empty_nav = {"messages_view": {"filter": 0, "selected": None, "open": None, "scroll": 0}}
+            empty_body = panel_messages.tab_body(handoff_only, width, 30, empty_nav, glyphs)
+            assert all(display_width(line) <= width for line, _, _ in empty_body), (width, glyphs, empty_body)
             assert panel_messages.handle((key,), empty_nav)
             assert empty_nav["messages_view"]["open"] is None and "open_call" not in empty_nav, empty_nav
 approval = deepcopy(single)
@@ -1487,10 +1460,10 @@ for worker_count in (0, 3):
         for attempt in compact_report["attempts"]["active_recent"]:
             if attempt["attempt_id"].startswith("x-worker-"):
                 attempt["state"] = phase
-        compact_nav = {"selected": ("chat", "m2"), "tab": "messages", "messages_view": {"filter": 2, "selected": None, "open": None, "scroll": 0}}
+        compact_nav = {"selected": ("chat", "m2"), "tab": "messages", "messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
         compact_text = render(compact_report, "codex", 110, 24, view="graph", navigation=compact_nav, main_attempt="a2")
         compact_docks.add((compact_nav["box"]["y1"], compact_nav["box"]["y2"]))
-        assert "Messages: 2 unread for live participants" in compact_text and "line 29" in compact_text, compact_text
+        assert "need you" in compact_text and "unread for live" not in compact_text and "line 29" in compact_text, compact_text
         assert len(compact_text.splitlines()) == 24 and all(display_width(line) <= 110 for line in compact_text.splitlines()), compact_text
 assert all(y2 == 22 and y2 - y1 + 1 >= 4 for y1, y2 in compact_docks), compact_docks
 # A main with an unanswered question shows "? N open" on its card; the person sees it in "Needs you" from 20 minutes.
@@ -1636,6 +1609,10 @@ staged_rows, _ = room_view.summary_card(dict(summary_member, provider="codex", e
 assert "Stages: implement: passed / verify: failed / review: not_run / main decision: pending" in staged_rows, staged_rows
 assert "Next: retry verify" in staged_rows and "Patch: worker.patch" in staged_rows, staged_rows
 assert "Route: codex / gpt-6.1-sol / high / routine" in staged_rows, staged_rows
+# A non-zero exit reads as a failure in every tag, never as a finished call.
+for done_state in ("done", "exited"):
+    assert room_view.execution_tag({"state": done_state, "exit": 1, "participant": "x"}) == "[✗ failed: exit 1]"
+    assert room_view.execution_tag({"state": done_state, "exit": 0, "participant": "x"}) == "[✓ finished: exit 0]"
 ended_summary, _ = room_view.summary_card(dict(summary_member, ended="2026-10-13T12:05:00Z"), {"report": staged}, 180)
 assert "Elapsed: 5m" in ended_summary, ended_summary
 missing_fields, _ = room_view.summary_card({"participant": "minimal-call", "role": "worker", "state": "working"}, {}, 180)
