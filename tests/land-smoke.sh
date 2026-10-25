@@ -1340,6 +1340,13 @@ for lock_kind in 0 1; do
   wait "$second_pid" || fail "queued same-commit retry did not resume: $(cat "$TMP/second.out")"
   grep -q '^receipt:' "$TMP/second.out" || fail "admitted queued landing must report its receipt"
   [ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "duplicate landing repeated the gate"
+  # The contender is a detached job: its launcher exits once the job is
+  # admitted, so the job can still hold the lock for a moment after wait.
+  for _ in $(seq 1 200); do
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json 2>/dev/null |
+      grep '"active": true' > /dev/null || break
+    sleep 0.1
+  done
   if [ "$lock_kind" = 0 ]; then
     OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --json | grep '"active": null' > /dev/null ||
       fail "a released flock file without a matching row must remain unknown"

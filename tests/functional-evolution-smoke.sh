@@ -1352,19 +1352,21 @@ if os.name != 'nt':
              [sys.executable, '-c',
               'import runpy,sys,time; from pathlib import Path; '
               'e=runpy.run_path(sys.argv[1]); cm=e["file_lock"](Path(sys.argv[2])); '
-              'cm.__enter__(); Path(sys.argv[3]).write_text("ready"); time.sleep(2); '
+              'cm.__enter__(); Path(sys.argv[3]).write_text("ready"); '
+              'end=time.time()+60\n'
+              'while not Path(sys.argv[4]).exists() and time.time()<end: time.sleep(0.05)\n'
               'cm.__exit__(None,None,None)', str(engine_path)]),
             ('index', repo / '.oms/artifacts/index.jsonl',
              ['bash', '-c',
-              '. "$0"; oms_with_file_lock "$1" sh -c \'printf ready > "$1"; sleep 2\' holder "$2"',
+              '. "$0"; oms_with_file_lock "$1" sh -c \'printf ready > "$1"; i=0; '
+              'while [ ! -e "$2" ] && [ "$i" -lt 600 ]; do sleep 0.1; i=$((i+1)); done\' '
+              'holder "$2" "$3"',
               str(lock_lib)])):
         lock_dir = sandbox / ('inner-gc-locks-' + lock_name)
         ready = sandbox / ('inner-gc-lock-ready-' + lock_name)
         lock_env = dict(os.environ, OMS_LOCK_DIR=str(lock_dir), OMS_LOCK_TIMEOUT='1')
-        if lock_name == 'lifecycle':
-            holder_args = holder_command + [str(lock_target), str(ready)]
-        else:
-            holder_args = holder_command + [str(lock_target), str(ready)]
+        release = sandbox / ('inner-gc-lock-release-' + lock_name)
+        holder_args = holder_command + [str(lock_target), str(ready), str(release)]
         holder = subprocess.Popen(holder_args, env=lock_env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -1380,10 +1382,10 @@ if os.name != 'nt':
             assert journal.read_bytes() == journal_before, 'busy GC changed landing journal'
             assert capture.exists() and patch.exists(), 'busy GC changed retained evidence'
         finally:
-            if holder.poll() is None:
-                holder.terminate()
+            release.write_text('release')
             holder.communicate(timeout=5)
         ready.unlink()
+        release.unlink()
 
 # Marker uncertainty vetoes the locked collector, independently of age/PID.
 (repo / '.oms/delegations').mkdir()
