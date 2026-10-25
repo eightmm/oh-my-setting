@@ -457,7 +457,7 @@ def attempt_summary(item):
         summary["refs"] = {key: refs[key] for key in (
             "panel_role", "panel_owner", "panel_harness", "panel_room_id", "panel_room_participant",
             "panel_purpose", "panel_workload",
-            "panel_provider", "panel_fallback", "panel_model", "panel_effort", "panel_location", "panel_access", "panel_label"
+            "panel_provider", "panel_fallback", "panel_model", "panel_effort", "panel_location", "panel_access", "panel_label", "panel_lease_id"
         ) if key in refs}
     return summary
 
@@ -477,6 +477,9 @@ agent_operations = {
         attempt_summary(item)
         for item in attempts[-5:]
     ],
+    # The dashboard's fields of the newest attempts, so it reads the lifecycle
+    # log once through this projection instead of listing it again.
+    "recent": [dict(attempt_summary(item), **{key: item[key] for key in ("usage", "usage_reports") if key in item}) for item in attempts[-8:]],
     # Keep current work visible even when newer completed attempts fill latest.
     "active_latest": [
         attempt_summary(item)

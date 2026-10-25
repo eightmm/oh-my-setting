@@ -106,13 +106,30 @@ set_dimensions() {  # stdout is only a terminal outside command substitution
   fi
 }
 
+# The state projection already listed the lifecycle log; listing it again for
+# the newest 8 attempts cost a full second per snapshot. An unhealthy stream
+# keeps agent-events' own failure exit.
+attempts_from_state() {  # -> tmp/snap/attempts.{json,rc,err}
+  local rc=0
+  : > "$tmp/snap/attempts.err"
+  python3 -I - "$tmp/snap/state.json" > "$tmp/snap/attempts.json" 2> /dev/null <<'PY' || rc=$?
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ops = json.load(handle)["agent_operations"]
+if ops.get("healthy") is not True:
+    sys.exit(2)
+print(json.dumps(ops["recent"][-8:]))
+PY
+  printf '%s\n' "$rc" > "$tmp/snap/attempts.rc"
+}
+
 snapshot() {  # -> tmp/view, returns the projection exit status
   local rc=0
   rm -rf "$tmp/snap"
   mkdir "$tmp/snap"
   collect state bash "$ROOT/scripts/state.sh" --repo "$REPO" --json
   collect artifacts bash "$ROOT/scripts/artifact-index.sh" --repo "$REPO" --json list 8
-  collect attempts bash "$ROOT/scripts/agent-events.sh" --repo "$REPO" list --limit 8 --json
+  attempts_from_state
   set -- "$tmp/snap" --repo-name "$(basename "$REPO")" --repo-path "$REPO" \
     --width "$WIDTH"
   [ "$AS_JSON" = 0 ] || set -- "$@" --json

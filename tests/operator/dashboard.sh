@@ -538,6 +538,15 @@ PY
 before="$(tree_sums "$TMP/panel-active/.oms")"
 dash --repo "$TMP/panel-active" --json > "$TMP/panel-active.json"
 [ "$before" = "$(tree_sums "$TMP/panel-active/.oms")" ] || fail "active panel mutated records"
+bash "$ROOT/scripts/agent-events.sh" --repo "$TMP/panel-active" list --limit 8 --json > "$TMP/panel-active-list.json"
+python3 - "$TMP/panel-active.json" "$TMP/panel-active-list.json" <<'PY' || fail "dashboard recent attempts differ from agent-events list --limit 8"
+import json, sys
+recent = json.load(open(sys.argv[1]))["attempts"]["recent"]
+listed = json.load(open(sys.argv[2]))
+assert len(listed) == 8, len(listed)
+for key in ("attempt_id", "state", "provider", "tool", "updated_at"):
+    assert [row[key] for row in recent] == [row[key] for row in reversed(listed)], key
+PY
 python3 - "$TMP/panel-active.json" <<'PY'
 import json, sys
 report = json.load(open(sys.argv[1]))
