@@ -1901,10 +1901,10 @@ abandon_invalid_intent() {  # REASON
   echo "goal-drive: ignored invalid commit intent $INTENT_ID ($1)" >&2
 }
 
-recover_landing_receipts() {
+recover_landing_receipts() {  # [TASK]: scope recovery to this run's task
   local recover_log recover_rc=0
   recover_log="$(agent_memory_mktemp)" || return 1
-  "$ROOT/scripts/patch-land.sh" --repo "$REPO" --recover >"$recover_log" 2>&1 || recover_rc=$?
+  "$ROOT/scripts/patch-land.sh" --repo "$REPO" --recover ${1:+--plan-task "$1"} >"$recover_log" 2>&1 || recover_rc=$?
   if [ "$recover_rc" -ne 0 ]; then
     tail -n 8 "$recover_log" >&2
     rm -f "$recover_log"
@@ -1961,7 +1961,7 @@ reconcile_commit_intent() {
   # the outer commit intent. An applied tree must never lose its outer recovery
   # handle merely because one lineage/plan receipt was incomplete.
   if [ "$TASK_RECEIPT_STATE" = landing ]; then
-    recover_landing_receipts ||
+    recover_landing_receipts "$INTENT_TASK" ||
       park "landing-recovery-failed" "run oms patch-land --recover; the exact outer commit intent remains open"
     load_task_receipt "$INTENT_TASK" ||
       park "landing-recovery-failed" "the recovered landing task receipt could not be read"
@@ -1976,7 +1976,7 @@ reconcile_commit_intent() {
   elif [ -z "$COMMIT_TASK" ] && [ "$TASK_RECEIPT_STATE" = "done" ] &&
     git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 &&
     intent_tree_matches "$patch_abs"; then
-    recover_landing_receipts ||
+    recover_landing_receipts "$INTENT_TASK" ||
       park "landing-recovery-failed" "run oms patch-land --recover; the exact outer commit intent remains open"
     load_task_receipt "$INTENT_TASK" ||
       park "landing-recovery-failed" "the recovered landing task receipt could not be read"
@@ -2490,7 +2490,7 @@ goal_integrate_current() {
   if [ "$land_rc" -ne 0 ] &&
     git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 &&
     intent_tree_matches "$patch_abs"; then
-    recover_landing_receipts || {
+    recover_landing_receipts "$task_id" || {
       printf '%s\n' "$(tail -n 8 "$land_log")" >&2
       rm -f "$land_log"
       park "landing-recovery-failed" "run oms patch-land --recover; the exact outer commit intent remains open"
@@ -2559,7 +2559,7 @@ goal_integrate_current() {
   if [ "$land_rc" -ne 0 ] &&
     git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 &&
     intent_tree_matches "$patch_abs"; then
-    recover_landing_receipts || {
+    recover_landing_receipts "$task_id" || {
       printf '%s\n' "$(tail -n 8 "$land_log")" >&2
       rm -f "$land_log"
       park "landing-recovery-failed" "run oms patch-land --recover; the repaired outer commit intent remains open"

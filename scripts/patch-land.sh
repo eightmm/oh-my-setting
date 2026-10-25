@@ -115,9 +115,14 @@ Options:
                    still cleanly applicable,
                    then record the missing lineage and plan completion (or mark
                    it abandoned). If neither direction is clean, leave the
-                   ambiguous intent for manual recovery. Idempotent; applies
-                   nothing new. A patch whose content changed since its intent
-                   is also left untouched and makes the command exit nonzero.
+                   ambiguous intent for manual recovery. An intent whose base
+                   commit is an ancestor of a moved HEAD is abandoned when its
+                   patch is provably absent from the tree and no lineage was
+                   recorded; if the patch is present it stays manual. Idempotent;
+                   applies nothing new. A patch whose content changed since its
+                   intent is also left untouched and makes the command exit
+                   nonzero. With --plan-task ID only that task's intents are
+                   considered; others are neither recovered nor counted.
   -h, --help       Show this help.
 
 Sequence: main tree must be clean -> patch-admit returns ADMIT -> git apply
@@ -763,12 +768,12 @@ if [ "$RECOVER" = 1 ]; then
   needs_manual=0
   while IFS= read -r intent_row; do
     [ -n "$intent_row" ] || continue
-    LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))')"
-    intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))')"
-    intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))')"
+    LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))' | tr -d '\r')"
+    intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))' | tr -d '\r')"
+    intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))' | tr -d '\r')"
     intent_panel_accept="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("panel_accept") == "true" else 0)' | tr -d '\r')"
     intent_plan_id="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_id",""))' | tr -d '\r')"
-    intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))')"
+    intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))' | tr -d '\r')"
     intent_plan_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_receipt_sha",""))' | tr -d '\r')"
     intent_plan_done_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_done_receipt_sha",""))' | tr -d '\r')"
     intent_patch_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch_sha",""))' | tr -d '\r')"
@@ -777,8 +782,9 @@ if [ "$RECOVER" = 1 ]; then
     intent_has_complete="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_complete") is True else 0)' | tr -d '\r')"
     intent_verifier_consent="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("verifier_change_consent") == "true" else 0)' | tr -d '\r')"
     intent_has_abandoned="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_abandoned") is True else 0)' | tr -d '\r')"
-    intent_approval="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval",""))')"
-    intent_approval_version="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_version",""))')"
+    intent_approval="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval",""))' | tr -d '\r')"
+    intent_approval_version="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_version",""))' | tr -d '\r')"
+    [ -z "$PLAN_TASK" ] || [ "$intent_task" = "$PLAN_TASK" ] || continue
     if [ -z "$intent_patch" ] || [ ! -f "$intent_patch" ]; then
       echo "error: patch-land: landing $LANDING_ID has no readable frozen patch" >&2
       echo "error: patch-land: outcome cannot be proven; preserve the intent for manual recovery" >&2
@@ -820,7 +826,33 @@ if [ "$RECOVER" = 1 ]; then
     # receipts; an open intent has no such authority and must remain untouched
     # for manual recovery rather than claiming the newer commit as its landing.
     current_intent_base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | tr -d '\r' || printf 'unborn')"
+    head_moved=0
     if [ -z "$intent_base_sha" ] || [ "$current_intent_base" != "$intent_base_sha" ]; then
+      head_moved=1
+    fi
+    if [ "$head_moved" = 0 ]; then
+      :
+    elif plan_superseding_done_receipt_converged || plan_superseding_landing_receipt_converged; then
+      : # A durable superseding receipt decides below, independent of HEAD.
+    elif [ -n "$intent_base_sha" ] &&
+      git -C "$REPO" merge-base --is-ancestor "$intent_base_sha" HEAD >/dev/null 2>&1 &&
+      ! git -C "$REPO" apply --binary --reverse --check "$intent_patch" >/dev/null 2>&1 &&
+      git -C "$REPO" apply --binary --check "$intent_patch" >/dev/null 2>&1 &&
+      { landing_lineage_exists "$intent_patch" "$current_patch_sha" \
+          "$intent_task" "$intent_plan_id" >/dev/null 2>&1; [ "$?" = 1 ]; }; then
+      # The base is still in HEAD's history, the exact bytes are absent from
+      # the current tree and still applicable, and no lineage says it landed:
+      # the interrupted land never applied. Present or unprovable bytes stay manual.
+      if finish_not_applied_receipts head-moved-not-applied; then
+        echo "patch-land: landing $LANDING_ID never applied (HEAD moved past its base); released and marked abandoned" >&2
+        abandoned=$((abandoned + 1))
+      else
+        echo "error: landing $LANDING_ID is unapplied but its approval/plan receipts did not converge" >&2
+        echo "error: preserve the intent and retry or perform manual recovery" >&2
+        needs_manual=$((needs_manual + 1))
+      fi
+      continue
+    else
       echo "error: landing $LANDING_ID: HEAD no longer matches its exact intent base" >&2
       echo "error: recorded ${intent_base_sha:-missing}, now $current_intent_base; preserve the open intent for manual recovery" >&2
       needs_manual=$((needs_manual + 1))

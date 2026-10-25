@@ -28272,7 +28272,7 @@ test_patch_land_recovers_an_interrupted_land() {
   local project="$TMP/landing-crash"
   local patch="$project/change.patch"
   local base_sha patch_sha
-  local out
+  local out rc
 
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
@@ -28317,6 +28317,7 @@ PY
 test_patch_land_abandons_a_landing_that_never_applied() {
   local project="$TMP/landing-abandoned"
   local patch="$project/change.patch"
+  local crlf_bin real_python3
   local base_sha patch_sha
   local out
 
@@ -28340,6 +28341,64 @@ PY
   # Recovery is bookkeeping: it must never apply the patch itself.
   [ "$(git -C "$project" status --porcelain -- file.txt)" = "" ] ||
     fail "recovery must not apply anything"
+  contains "$(cat "$project/.oms/landings.jsonl")" '"reason": "not-applied"' ||
+    fail "the closing row should carry the not-applied reason"
+
+  # HEAD moved past the base without the patch: still provably never applied.
+  rm -f "$project/.oms/landings.jsonl"
+  printf 'other\n' > "$project/other.txt"
+  git -C "$project" add other.txt
+  git -C "$project" -c user.name=t -c user.email=t@example.invalid commit -q -m other
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-moved","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":""}\n' \
+    "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)" ||
+    fail "a moved HEAD with the patch absent should close cleanly: $out"
+  contains "$out" '1 abandoned, 0 need manual' ||
+    fail "a moved HEAD with the patch absent should be abandoned: $out"
+  contains "$(cat "$project/.oms/landings.jsonl")" '"reason": "head-moved-not-applied"' ||
+    fail "the abandoned row should name head-moved-not-applied"
+
+  # A task-scoped recovery leaves another task's intent alone.
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-other","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"other-task","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":""}\n' \
+    "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover --plan-task mine 2>&1)" ||
+    fail "a scoped recovery must ignore another task's open intent: $out"
+  contains "$out" '0 abandoned, 0 need manual' ||
+    fail "a scoped recovery should not count another task's intent: $out"
+  [ "$(wc -l < "$project/.oms/landings.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "a scoped recovery must not write rows for another task"
+
+  # A matching task must still be recovered when Windows Python emits CRLF.
+  crlf_bin="$project/crlf-bin"
+  real_python3="$(command -v python3)"
+  mkdir -p "$crlf_bin"
+  cat > "$crlf_bin/python3" <<EOF
+#!/usr/bin/env bash
+set -o pipefail
+"$real_python3" "\$@" | awk '{ printf "%s%c\\n", \$0, 13 }'
+EOF
+  chmod +x "$crlf_bin/python3"
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-scoped","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"mine","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":"","panel_accept":"true"}\n' \
+    "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
+  out="$(PATH="$crlf_bin:$PATH" "$ROOT/scripts/patch-land.sh" --repo "$project" --recover --plan-task mine 2>&1)" ||
+    fail "a matching scoped recovery should succeed with CRLF Python output: $out"
+  contains "$out" '1 abandoned, 0 need manual' ||
+    fail "a matching scoped recovery must not skip the CRLF task value: $out"
+  contains "$(cat "$project/.oms/landings.jsonl")" '"reason": "head-moved-not-applied"' ||
+    fail "the matching CRLF task intent should be reconciled"
+
+  # HEAD moved and the patch is already in the tree: stays manual.
+  ( cd "$project" && git apply "$patch" && git add file.txt &&
+    git -c user.name=t -c user.email=t@example.invalid commit -q -m applied )
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-present","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":""}\n' \
+    "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
+  rc=0
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "a moved HEAD with the patch present must exit 1, got $rc: $out"
+  contains "$out" 'HEAD no longer matches its exact intent base' ||
+    fail "a moved HEAD with the patch present must stay manual: $out"
+  [ "$(wc -l < "$project/.oms/landings.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "manual recovery must leave the intent untouched"
 }
 
 test_state_validator_rejects_parseable_but_invalid_state() {
