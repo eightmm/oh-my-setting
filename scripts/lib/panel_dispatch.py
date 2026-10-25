@@ -467,6 +467,9 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
         import panel_salvage
         recovery_evidence = panel_salvage._attempt_recovery_evidence(
             repo, task_id, last.get("attempt_id"), call, last, head_repo)
+        # A registered checkout that still matches its recorded base needs no recovery.
+        recovery_evidence = panel_salvage._without_clean_worktrees(
+            repo, task_id, last.get("attempt_id"), head_repo, recovery_evidence)
         if recovery_evidence:
             if all(item.startswith(".oms/salvage-provenance/") for item in recovery_evidence):
                 message = ("recoverable delegate evidence exists for task %s and was already salvaged; "

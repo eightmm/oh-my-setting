@@ -327,7 +327,7 @@ def patch_encoding_warnings(patch):
     return warnings
 
 
-def _capture(kept, common, base):
+def _capture(kept, common, base, head=None):
     # No invocation opens the kept repository's config, index or attributes.
     # Raw blobs bypass even working-tree-encoding and text normalization.
     with tempfile.TemporaryDirectory(prefix='oms-salvage-') as scratch:
@@ -368,6 +368,16 @@ def _capture(kept, common, base):
                 raise ValueError('salvage of submodule worktrees requires owner inspection')
             entries[os.fsdecode(path)] = (mode.decode(), oid.decode())
         others = git('ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
+        # Paths the worker committed (even force-added ones matching ignore rules) are in neither set above.
+        committed = {}
+        if head and head != base:
+            for entry in filter(None, git('ls-tree', '-r', '-z', head).split(b'\0')):
+                header, path = entry.split(b'\t', 1)
+                mode = header.split()[0]
+                if mode == b'160000':
+                    raise ValueError('salvage of submodule worktrees requires owner inspection')
+                committed[path] = mode.decode()
+        others = others + list(committed)
         # peer-common.sh creates this relay queue in the worktree and leaves it after an interrupted
         # run; only untracked top-level directories of that form are harness residue.
         relay = re.compile(r'\.oms-room-relay\.[A-Za-z0-9]{6}/')
@@ -384,6 +394,8 @@ def _capture(kept, common, base):
             except FileNotFoundError:
                 info = None
             if info is None or stat.S_ISDIR(info.st_mode):
+                if name not in entries:
+                    continue
                 after, mode = b'', None
             elif stat.S_ISLNK(info.st_mode):
                 after, mode = os.fsencode(os.readlink(path)), '120000'
@@ -391,7 +403,7 @@ def _capture(kept, common, base):
                 after = _read(kept, name, 256 * 1024 * 1024)
                 mode = '100755' if info.st_mode & 0o111 else '100644'
                 if os.name == 'nt':
-                    mode = entries.get(name, ('100644', ''))[0]
+                    mode = committed.get(os.fsencode(name), entries.get(name, ('100644', ''))[0])
             else:
                 raise ValueError('salvage refuses special file: ' + name)
             if name in entries and before == after and entries[name][0] == mode:
@@ -578,6 +590,47 @@ def _attempt_recovery_evidence(repo, task, attempt, indexed=None, attempt_row=No
     return list(dict.fromkeys(evidence))
 
 
+def _launch_base(execution, indexed):
+    """Full recorded launch base, or None when no delegate record exists to name one."""
+    if not indexed:
+        return None
+    recorded = indexed.get('base_sha')
+    if not isinstance(recorded, str) or not re.fullmatch(r'[0-9a-f]{7,64}', recorded):
+        raise ValueError('delegate record has no valid recorded launch base; '
+                         'refusing to diff the kept worktree against its current HEAD')
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_NO_LAZY_FETCH='1', GIT_OPTIONAL_LOCKS='0')
+    found = subprocess.run(['git', '-C', str(execution), 'rev-parse', '--verify', recorded + '^{commit}'],
+                           capture_output=True, env=env, timeout=15, check=False)
+    full = found.stdout.decode().replace('\r', '').strip()
+    if found.returncode or not full.startswith(recorded):
+        raise ValueError('recorded launch base is unavailable or does not match')
+    return full
+
+
+def _without_clean_worktrees(repo, task, attempt, execution, evidence):
+    """Drop registered kept worktrees that still capture to an empty patch at the recorded base."""
+    remaining = []
+    prefix = 'registered worktree: '
+    for item in evidence:
+        if item.startswith(prefix):
+            try:
+                rows = panel_results._query(repo, 'artifact-index', 'list', '1000000').get('rows', [])
+                indexed = next((row for row in reversed(rows) if row.get('kind') == 'delegate' and
+                                row.get('task_id') == task and row.get('attempt_id') == attempt), {})
+                kept, common, head = _managed(execution, item[len(prefix):])
+                base = _launch_base(execution, indexed)
+                # Without a recorded base an empty diff against the kept HEAD proves nothing.
+                patch = _capture(kept, common, base, head)[0] if base else b'x'
+                if not patch and _managed(execution, kept) == (kept, common, head):
+                    continue
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                pass
+        remaining.append(item)
+    return remaining
+
+
 def _raise_recovery_evidence(evidence, message):
     unreadable = [item.partition(': ')[2] for item in evidence
                   if item.startswith('unreadable provenance: ')]
@@ -661,11 +714,28 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
         warnings = patch_encoding_warnings(patch)
         recovered = True
     else:
-        kept, common, base = _managed(execution, path)
-        patch, files, warnings = _capture(kept, common, base)
-        if _managed(execution, path) != (kept, common, base):
+        kept, common, head = _managed(execution, path)
+        # Commits a stopped worker made inside its worktree belong to the patch.
+        recorded_base = _launch_base(execution, indexed)
+        base = recorded_base or head
+        patch, files, warnings = _capture(kept, common, base, head)
+        if _managed(execution, path) != (kept, common, head):
             raise ValueError('kept worktree identity moved during capture')
         recovered = False
+        if not patch and not recorded_base:
+            raise ValueError('kept worktree matches its current HEAD but no delegate artifact-index record names '
+                             'its launch base, so commits made inside it cannot be ruled out; no empty outcome '
+                             'was recorded. Inspect %s by hand' % kept)
+        if not patch:
+            evidence = _without_clean_worktrees(
+                repo, task, attempt, execution,
+                _attempt_recovery_evidence(repo, task, attempt, indexed, execution=execution))
+            if evidence:
+                _raise_recovery_evidence(evidence, 'recoverable delegate evidence prevents empty salvage: %s' %
+                                         ', '.join(evidence))
+            record_empty_salvage(repo, task, attempt, 'kept worktree is clean at its recorded base')
+            raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
+                             % (attempt, task))
     if not patch:
         raise ValueError('kept worktree has no changes')
     metadata = {'schema': 1, 'kind': 'oms-salvaged-patch', 'base_sha': base,

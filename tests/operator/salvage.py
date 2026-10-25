@@ -595,6 +595,152 @@ assert (salvage_repo / 'new.txt').read_bytes() == '새 파일\r\n'.encode()
 assert (salvage_repo / 'binary.dat').read_bytes() == b'\0new\xfe'
 assert (salvage_repo / 'unicode.txt').read_bytes() == b'label:   cafe\n'
 assert not (salvage_repo / 'deleted.txt').exists()
+# A kept worktree is captured against its recorded launch base, so worker commits are salvaged;
+# a clean checkout records an empty outcome and stops counting as recovery evidence.
+def kept_fixture(name):
+    tree = salvage_registry / ('oh-my-setting-delegate.' + name) / ('wt-' + name)
+    tree.parent.mkdir(parents=True)
+    subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'add', '--detach', str(tree)],
+                   check=True, stdout=subprocess.DEVNULL)
+    (tree.parent / '.oh-my-setting-tmp').write_text(
+        'kind=oh-my-setting-temp\ntemporary=1\nrepo=%s\nworktree=%s\n' % (salvage_execution_repo, tree))
+    attempt = {'task_id': name + '-task', 'attempt_id': 'att_' + name, 'tool': 'peer-delegate',
+               'created_at': '2026-10-17T00:00:00Z', 'terminal': True, 'state': 'failed',
+               'reason_code': 'worker_authority_violation',
+               'refs': {'panel_location': 'worktree:oh-my-setting-delegate.%s/wt-%s' % (name, name),
+                        'panel_room_participant': 'call-' + hashlib.sha256(name.encode()).hexdigest()[:16],
+                        'panel_room_id': 'room-fixture'}}
+    return tree, attempt
+
+def kept_salvage(tree, attempt, record):
+    def query(repo, verb, *args):
+        return [attempt] if verb == 'agent-events' else {'rows': [record] if record else []}
+    anchor = {'call': {'participant': attempt['refs']['panel_room_participant'], 'room': 'room-fixture',
+                       'task_id': attempt['task_id']}, 'execution_repo': str(salvage_execution_repo)}
+    with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', side_effect=query), \
+            patch.object(panel_salvage.dispatch_supervisor, 'read', return_value=anchor):
+        return panel_salvage.salvage(salvage_repo, attempt['task_id'], salvage_execution_repo)
+
+launch_base = subprocess.run(['git', '-C', str(salvage_tree), 'rev-parse', 'HEAD'], check=True,
+                             capture_output=True, text=True).stdout.strip()
+committed_tree, committed_attempt = kept_fixture('committed')
+git_worker = ['git', '-C', str(committed_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test']
+(committed_tree / 'committed.md').write_text('committed by the worker\n')
+subprocess.run(git_worker + ['add', 'committed.md'], check=True)
+subprocess.run(git_worker + ['commit', '-qm', 'worker commit'], check=True)
+(committed_tree / 'dirty.md').write_text('left uncommitted\n')
+committed_record = {'kind': 'delegate', 'task_id': 'committed-task', 'attempt_id': 'att_committed',
+                    'exit': 124, 'base_sha': launch_base[:12]}
+committed = kept_salvage(committed_tree, committed_attempt, committed_record)
+assert committed['base_sha'] == launch_base, committed['base_sha']
+assert {row['path'] for row in committed['files']} == {'committed.md', 'dirty.md'}, committed['files']
+
+# A committed gitlink must reach the same refusal as one tracked in the launch base.
+gitlink_tree, gitlink_attempt = kept_fixture('gitlink')
+git_gitlink = ['git', '-C', str(gitlink_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test']
+subprocess.run(['git', 'init', '-q', str(temporary / 'gitlink-source')], check=True)
+(temporary / 'gitlink-source' / 'payload').write_text('gitlink target\n')
+subprocess.run(['git', '-C', str(temporary / 'gitlink-source'), 'add', 'payload'], check=True)
+subprocess.run(['git', '-C', str(temporary / 'gitlink-source'), '-c', 'user.email=test@example.com',
+                '-c', 'user.name=test', 'commit', '-qm', 'target'], check=True)
+gitlink_oid = subprocess.run(['git', '-C', str(temporary / 'gitlink-source'), 'rev-parse', 'HEAD'],
+                             check=True, capture_output=True, text=True).stdout.strip()
+subprocess.run(git_gitlink + ['update-index', '--add', '--cacheinfo', '160000', gitlink_oid, 'vendor'], check=True)
+subprocess.run(git_gitlink + ['commit', '-qm', 'add gitlink'], check=True)
+try:
+    kept_salvage(gitlink_tree, gitlink_attempt, {'kind': 'delegate', 'task_id': 'gitlink-task',
+                 'attempt_id': 'att_gitlink', 'exit': 124, 'base_sha': launch_base[:12]})
+except ValueError as error:
+    assert 'salvage of submodule worktrees requires owner inspection' in str(error), error
+else:
+    raise AssertionError('committed gitlink was silently omitted from salvage')
+
+# On Windows, a newly committed executable must retain the mode recorded by HEAD.
+executable_tree, executable_attempt = kept_fixture('executable')
+git_executable = ['git', '-C', str(executable_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test']
+(executable_tree / 'run.sh').write_text('#!/bin/sh\nprintf ok\n')
+(executable_tree / 'run.sh').chmod(0o755)
+subprocess.run(git_executable + ['add', 'run.sh'], check=True)
+subprocess.run(git_executable + ['commit', '-qm', 'add executable'], check=True)
+class WindowsOS:
+    name = 'nt'
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
+
+with patch.object(panel_salvage, 'os', WindowsOS()):
+    executable_patch, executable_files, _ = panel_salvage._capture(
+        executable_tree, Path(subprocess.run(['git', '-C', str(executable_tree), 'rev-parse', '--git-common-dir'],
+                                             check=True, capture_output=True, text=True).stdout.strip()),
+        launch_base, subprocess.run(['git', '-C', str(executable_tree), 'rev-parse', 'HEAD'],
+                                    check=True, capture_output=True, text=True).stdout.strip())
+assert executable_files and 'run.sh' in {row['path'] for row in executable_files}, executable_files
+assert b'new file mode 100755' in executable_patch, executable_patch
+for broken, expected in (({'base_sha': ''}, 'valid recorded launch base'), ({'base_sha': 'f' * 12}, 'recorded launch base')):
+    try:
+        kept_salvage(committed_tree, committed_attempt, dict(committed_record, **broken))
+    except ValueError as error:
+        assert expected in str(error), error
+    else:
+        raise AssertionError('salvage diffed against the kept HEAD without a usable recorded base')
+
+# A force-added commit of an ignored path is part of the work even when the checkout is otherwise clean.
+ignored_tree, ignored_attempt = kept_fixture('ignored')
+git_ignored = ['git', '-C', str(ignored_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test']
+(ignored_tree / '.gitignore').write_text('*.ign\n')
+(ignored_tree / 'forced.ign').write_text('ignored but committed\n')
+subprocess.run(git_ignored + ['add', '.gitignore'], check=True)
+subprocess.run(git_ignored + ['add', '-f', 'forced.ign'], check=True)
+subprocess.run(git_ignored + ['commit', '-qm', 'force-added ignored file'], check=True)
+ignored = kept_salvage(ignored_tree, ignored_attempt, {
+    'kind': 'delegate', 'task_id': 'ignored-task', 'attempt_id': 'att_ignored', 'exit': 124,
+    'base_sha': launch_base[:12]})
+assert {row['path'] for row in ignored['files']} == {'.gitignore', 'forced.ign'}, ignored['files']
+assert not (salvage_repo / panel_salvage._empty_provenance_path('ignored-task', 'att_ignored')).exists()
+
+# Without an indexed record nothing names the launch base, so a clean-looking checkout is no empty outcome.
+norecord_tree, norecord_attempt = kept_fixture('norecord')
+git_norecord = ['git', '-C', str(norecord_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test']
+(norecord_tree / 'early.md').write_text('committed before indexing\n')
+subprocess.run(git_norecord + ['add', 'early.md'], check=True)
+subprocess.run(git_norecord + ['commit', '-qm', 'early commit'], check=True)
+try:
+    kept_salvage(norecord_tree, norecord_attempt, None)
+except ValueError as error:
+    assert 'no delegate artifact-index record names its launch base' in str(error), error
+else:
+    raise AssertionError('committed worktree without an indexed record was salvaged as a patch or empty')
+assert not (salvage_repo / panel_salvage._empty_provenance_path('norecord-task', 'att_norecord')).exists()
+with patch.dict(os.environ, salvage_env), patch.object(
+        panel_results, '_query', side_effect=lambda repo, verb, *args: {'rows': []}):
+    assert panel_salvage._without_clean_worktrees(
+        salvage_repo, 'norecord-task', 'att_norecord', salvage_execution_repo,
+        ['registered worktree: ' + str(norecord_tree)]) == ['registered worktree: ' + str(norecord_tree)]
+
+clean_tree, clean_attempt = kept_fixture('clean')
+clean_record = {'kind': 'delegate', 'task_id': 'clean-task', 'attempt_id': 'att_clean', 'exit': 124,
+                'base_sha': launch_base[:12]}
+clean_receipt = salvage_repo / panel_salvage._empty_provenance_path('clean-task', 'att_clean')
+clean_evidence = ['registered worktree: ' + str(clean_tree)]
+def drop_clean():
+    with patch.dict(os.environ, salvage_env), patch.object(
+            panel_results, '_query', side_effect=lambda repo, verb, *args: {'rows': [clean_record]}):
+        return panel_salvage._without_clean_worktrees(
+            salvage_repo, 'clean-task', 'att_clean', salvage_execution_repo, clean_evidence)
+try:
+    kept_salvage(clean_tree, clean_attempt, clean_record)
+except ValueError as error:
+    assert 'nothing to recover for att_clean' in str(error), error
+else:
+    raise AssertionError('clean kept worktree produced a patch')
+assert clean_receipt.is_file(), 'clean kept worktree left no empty-salvage receipt'
+assert drop_clean() == []
+(clean_tree / 'late.md').write_text('written after inspection\n')
+assert drop_clean() == clean_evidence, 'a dirtied checkout stopped counting as recovery evidence'
+(clean_tree / 'late.md').unlink()
+subprocess.run(['git', '-C', str(clean_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test',
+                'commit', '-q', '--allow-empty', '-m', 'empty worker commit'], check=True)
+assert drop_clean() == [], 'an empty worker commit changed the clean outcome'
 import difflib
 encoding_cases = [
     ('café 한글\n', 'cafe ??\n', True),
