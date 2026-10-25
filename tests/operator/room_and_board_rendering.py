@@ -5872,6 +5872,36 @@ for width in (100, 28, 60):
     screen = render_detail(tree_room, detail, width, 200, {})
     assert "Answer line 39" in screen and "END_OF_ANSWER" in screen, screen
     assert all(display_width(line) <= width for line in screen.splitlines()), screen
+# A result's Detail opens on its summary: one title, cost and file names last.
+verdict_result = {"rows": [{"task_id": "verdict-view", "title": "Verdict view", "outcome": "completed",
+    "process_state": "finished", "verification": {"status": "not_run"},
+    "stages": {"implement": {"state": "passed"}, "verify": {"state": "not_run"},
+               "review": {"state": "passed"}, "main_decision": {"state": "pending"}},
+    "representative_state": "pending", "next_action": "record main decision",
+    "summary": "Summary line", "artifact": ".oms/artifacts/panel-results/result-verdict-view-abc.json",
+    "calls": [{"kind": "review", "exit": 0, "served_model": "claude-opus-5-5", "tokens": 1200,
+               "artifact": ".oms/artifacts/review/answer-verdict.md",
+               "answer": "Findings:\nSee [the caller](scripts/lib/panel_view.py:1881) and [spec](https://example.test/a_(b)) and [full](<docs/full result.md>)\n" +
+                         "\n".join("Body %s" % n for n in range(30)) + "\nGATE: pass"}]}]}
+for width in (60, 100, 200):
+    screen = render_detail(tree_room, {"title": "RECORDED RESULTS", "report": verdict_result}, width, 200, {})
+    rows_ = screen.split("\n")
+    assert sum(line.startswith("OMS / ") for line in rows_) == 1 and "OMS / Results" not in screen, screen
+    assert any(line.strip().startswith("Stages:") for line in rows_), screen
+    flat = " ".join(" ".join(line.split()) for line in rows_)
+    if width == 200:
+        for link in ("[the caller](scripts/lib/panel_view.py:1881)", "[spec](https://example.test/a_(b))",
+                     "[full](<docs/full result.md>)"):
+            assert link in flat, (link, flat)
+    end_of_answer = max(n for n, line in enumerate(rows_) if "GATE: pass" in line)
+    cost = next(n for n, line in enumerate(rows_) if "Opus 5.5 / review / exit 0" in line)
+    named = next(n for n, line in enumerate(rows_) if line.strip().startswith("Result:"))
+    assert end_of_answer < cost < named, (width, screen)
+    assert all(display_width(line) <= width for line in rows_), screen
+long_link = "[" + "long label " * 30 + "end](scripts/lib/panel_view.py:1881)"
+long_screen = render_detail(tree_room, {"title": "RECORDED RESULTS", "report": {"rows": [{"task_id": "link-view",
+    "calls": [{"kind": "review", "answer": "Intro " * 20 + long_link + " tail"}]}]}}, 60, 200, {})
+assert long_link in " ".join(" ".join(line.split()) for line in long_screen.split("\n")), long_screen
 # Detail paging must preserve the reader's already wrapped blocks without another clean()/clipped() pass.
 from dashboard_projection import ELLIPSIS, use_unicode
 previous_unicode = ELLIPSIS[0] == '…'
@@ -5887,7 +5917,7 @@ for glyphs in (True, False):
         retained = {'rows': [{'summary': structured_source, 'calls': [{'answer': structured_source}]}]}
         expected = render_results(retained, width).split('\n')
         screen = render_detail(tree_room, {'title': 'RECORDED RESULTS', 'report': retained}, width, 1000, {})
-        assert screen.split('\n')[2:-2] == expected, (glyphs, width, screen)
+        assert screen.split('\n')[2:-2] == expected[2:], (glyphs, width, screen)
         screen = render_detail(tree_room, {'title': 'RAW DETAIL', 'text': structured_source}, width, 1000, {})
         body = screen.split('\n')[2:-2]
         assert all(display_width(line.expandtabs(8)) <= width for line in screen.split('\n')), screen

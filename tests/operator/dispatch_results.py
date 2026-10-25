@@ -3266,6 +3266,21 @@ with patch.dict(os.environ, environment, clear=True):
         {"exit": 1, "verify_exit": 9}, {"exit": 0, "verify_exit": 0}])
     assert "checks failed (exit 9)" in mixed_verify_text, mixed_verify_text
     assert "checks failed (exit 0)" not in mixed_verify_text, mixed_verify_text
+    # A completed owner result with passed checks must still show a failed durable review.
+    review_task = "final-review-failed"
+    review_records = [{"task_id": review_task, "kind": "panel-result", "artifact": review_task + ".json"},
+                      {"task_id": review_task, "kind": "delegate", "attempt_id": "att-review-worker", "exit": 0, "verify_exit": 0},
+                      {"task_id": review_task, "kind": "review-outcome", "exit": 1,
+                       "review": {"run": "20261023T083701Z-43", "overall": 1, "gate_verify_exit": 0}}]
+    with patch.object(saved, "_records", return_value=([{"attempt_id": "att-" + review_task, "task_id": review_task,
+                                                          "state": "done", "updated_at": "2026-10-23", "refs": {}}],
+                                                        review_records)), \
+            patch.object(saved, "_load_result", return_value={"outcome": "completed", "revision": "d" * 24,
+                                                              "summary": "Done.", "evidence": []}), \
+            patch.object(saved, "_last_delivery", return_value=None):
+        review_row = saved.results(project, task_id=review_task)["rows"][0]
+    review_text = render_results({"rows": [review_row]}, 200)
+    assert "checks passed" in review_text and "review failed" in review_text, review_text
     unknown_checks_text = render_results({"rows": [{"task_id": "unknown-checks", "stages": {
         "verify": {"state": "unknown"}}}]}, 200)
     assert "checks unknown" in unknown_checks_text and "no checks run" not in unknown_checks_text, unknown_checks_text

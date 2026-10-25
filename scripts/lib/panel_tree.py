@@ -608,8 +608,10 @@ def render_detail(report, detail, width, height, navigation, managed=False, colo
     heading = [clipped("OMS / " + detail["title"], width), clipped(usage_line(report, width), width)]
     if "report" in detail:
         from panel_view import render_results
-        # The result reader already wrapped and sanitized every line at this width.
-        body = render_results(detail["report"], width).split("\n")
+        # The result reader already wrapped and sanitized every line at this width; the heading above is the one title.
+        body = render_results(detail["report"], width).split("\n")[1:]
+        while body and not body[0]:
+            body.pop(0)
     else:
         body = []
         for line, kind in _result_blocks(detail.get("text", "")):

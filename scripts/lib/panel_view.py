@@ -1964,26 +1964,36 @@ def render_results(report, width=100, compact=False, heading=None):
             prose(row["summary"], "  ")
         else:
             add("Owner summary pending. Model exit does not establish acceptance.", "  ")
+        records = []
         for call in calls:
             model = call.get("served_model") or call.get("selected_model") or call.get("requested_model")
+            if call.get("answer"):
+                label = " ".join(part for part in (MODEL_NAMES.get(model, model), call.get("kind")) if part)
+                add((label + " answer:") if label else "Answer:", "  ", 3)
+                prose(call["answer"], "    ")
+                if call.get("answer_truncated"):
+                    add("Answer exceeds the retained preview limit; full source: " +
+                        str(call.get("artifact") or "unavailable"), "    ")
+            if not (model or call.get("kind") or "exit" in call or "tokens" in call or "provider_usage" in call or
+                    call.get("artifact")):
+                continue
             line = "%s / %s / exit %s" % (MODEL_NAMES.get(model, model) or "unrecorded model",
                 call.get("kind") or "call", call.get("exit", "unknown"))
             if "tokens" in call or "provider_usage" in call:
                 token_call = dict(call, attempt_id=call.get("attempt_id") or "results-call")
                 line += " / " + call_tokens({"operations": {"recent": [token_call]}}, token_call["attempt_id"],
                                              call.get("state"))
-            add(line, "  ", 3)
-            if call.get("answer"):
-                prose(call["answer"], "    ")
-                if call.get("answer_truncated"):
-                    add("Answer exceeds the retained preview limit; full source: " +
-                        str(call.get("artifact") or "unavailable"), "    ")
+            records.append((line, 3))
             if call.get("artifact"):
-                add("Answer artifact: " + call["artifact"], "    ")
+                records.append(("Answer: " + call["artifact"], 4))
         if row.get("artifact"):
-            add("Result: " + row["artifact"], limit=4)
+            records.append(("Result: " + row["artifact"], 4))
         for ref in listing(row.get("evidence")):
-            add("Evidence: " + str(ref.get("path", "unavailable")), limit=4)
+            records.append(("Evidence: " + str(ref.get("path", "unavailable")), 4))
+        if records:
+            add("Records:")
+            for record, limit in records:
+                add(record, "  ", limit)
     lines.append("")
     add(report.get("coverage") or "Retained OMS evidence")
     if report.get("truncated"):
