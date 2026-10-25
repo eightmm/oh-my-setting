@@ -28,7 +28,7 @@ make_handoff_fixture() {
 
   mkdir -p "$repo/.oms"
   printf '*\n' > "$repo/.oms/.gitignore"
-  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$project_dir"
   cat > "$project_dir/$session.jsonl" <<EOF
 {"type":"user","cwd":"$repo","message":{"role":"user","content":"build the widget"}}
@@ -47,7 +47,7 @@ make_trivial_handoff_fixture() {
 
   mkdir -p "$repo/.oms"
   printf '*\n' > "$repo/.oms/.gitignore"
-  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$project_dir"
   cat > "$project_dir/$session.jsonl" <<EOF
 {"type":"user","cwd":"$repo","message":{"role":"user","content":"what does this repo do"}}
@@ -204,7 +204,7 @@ test_absent_session_skips_hook_capture_but_fails_manual() {
   # Real failures keep the fail-open contract: a sensitive transcript through
   # the hook still records a ledger row (policy touches absence only).
   local project_dir
-  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$project_dir"
   vector="AK""IAIOSFODNN7EXAMPLE"
   cat > "$project_dir/sess-secret.jsonl" <<EOF
@@ -262,7 +262,7 @@ test_handoff_capture_floors_trivial_sessions() {
   # Ordering: the floor must not turn a secret-bearing transcript into a silent
   # skip. Split literal keeps this test source scrubber-clean.
   local project_dir
-  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's/[^A-Za-z0-9]/-/g')"
   printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"use AK%s"}}\n' \
     "$repo" "IAIOSFODNN7EXAMPLE" > "$project_dir/sess-thin.jsonl"
   if OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/session-handoff.sh" capture \
