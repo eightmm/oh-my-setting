@@ -3534,3 +3534,10 @@ oms_worker_surface_snapshot() {
   OMS_WG_SNAPSHOT_ERROR="worker guard baseline did not stabilize after 3 attempts"
   return 1
 }
+
+# Claude Code names a project's transcript directory after its cwd with every
+# non-alphanumeric character replaced by '-'. Both the capture and the resume
+# lookup must use this one rule, or a path with '_' or '.' finds no transcript.
+oms_claude_project_dirname() {
+  printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'
+}

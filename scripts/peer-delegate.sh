@@ -1841,7 +1841,7 @@ prepare_resume_session() {
   esac
   real="$(cd "$worktree" && pwd -P)" || return 1
   # The newest regular copy wins; links and equal-age differing copies refuse.
-  python3 -I - "$config" "$RESUME_SESSION" "$(printf '%s' "$real" | sed 's/[^A-Za-z0-9]/-/g')" <<'PY'
+  python3 -I - "$config" "$RESUME_SESSION" "$(oms_claude_project_dirname "$real")" <<'PY'
 import os, stat, sys, tempfile
 
 config, session, target_name = sys.argv[1:4]

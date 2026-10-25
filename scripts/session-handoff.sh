@@ -95,9 +95,7 @@ absent() {
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 claude_project_dir() {
-  # Claude encodes the project cwd by replacing every '/' with '-'.
-  local cwd="$1"
-  printf '%s/projects/%s\n' "$CLAUDE_HOME" "$(printf '%s' "$cwd" | sed 's#/#-#g')"
+  printf '%s/projects/%s\n' "$CLAUDE_HOME" "$(oms_claude_project_dirname "$1")"
 }
 
 newest_file() {
@@ -497,7 +495,8 @@ render_digest() {
 # (agree, override with reasons, or escalate) instead of silently re-deriving
 # consensus. Mechanical and fail-open, like the rest of capture.
 append_resume_contract() {
-  local repo="$1"
+  local repo
+  repo="$(oms_repo_root "$1" 2>/dev/null || printf '%s' "$1")"
   local out="$2"
   local verify_cmd=""
   local dissent_seats=""
@@ -548,6 +547,8 @@ try:
 except OSError:
     raise SystemExit(0)
 
+# Typed history with nothing open is an answer ("every dissent resolved"),
+# not an absence; the legacy artifact parser must not second-guess it.
 best = None
 for row in rows:
     review = row["review"]
@@ -564,12 +565,17 @@ for row in rows:
             "event_id": event_id if isinstance(event_id, str) else ""}
 if best is not None:
     print(json.dumps(best, ensure_ascii=False, separators=(",", ":")))
+elif rows:
+    print("__OMS_TYPED_NO_DISSENT__")
 PY
 )"
   case "$review_json" in
     *__OMS_DISSENT_PROBE_FAILED__*) dissent_probe_failed=1; review_json="" ;;
   esac
-  if [ -z "$review_json" ] && [ "$dissent_probe_failed" -eq 0 ] &&
+  review_json="${review_json//$'\r'/}"
+  if [ "$review_json" = "__OMS_TYPED_NO_DISSENT__" ]; then
+    review_json=""
+  elif [ -z "$review_json" ] && [ "$dissent_probe_failed" -eq 0 ] &&
     [ -d "$repo/.oms/artifacts/review" ]; then
     # Artifacts that predate the typed outcome row are stored user state;
     # parse them through the one parser peer-review owns, still consuming

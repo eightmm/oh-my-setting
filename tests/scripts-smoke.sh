@@ -17621,7 +17621,7 @@ test_session_handoff_blocks_sensitive_digest() {
   # and place the session under that cwd's encoded project dir.
   local hcwd="/ho""me/researcher/proj"
   local hdir
-  hdir="$home/projects/$(printf '%s' "$hcwd" | sed 's#/#-#g')"
+  hdir="$home/projects/$(printf '%s' "$hcwd" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$hdir"
   {
     printf '{"type":"user","message":{"role":"user","content":"refactor the loader"}}\n'
@@ -17653,8 +17653,8 @@ test_session_handoff_blocks_sensitive_digest() {
 
 test_session_handoff_claude_digest() {
   local home="$TMP/sh-claude-home"
-  local cwd="/proj/demo-app"
-  local proj="$home/projects/-proj-demo-app"
+  local cwd="/proj/demo_app.v2"
+  local proj="$home/projects/-proj-demo-app-v2"
   local sess="$proj/aaaaaaaa-1111-2222-3333-444444444444.jsonl"
   local out
 
@@ -17662,7 +17662,7 @@ test_session_handoff_claude_digest() {
   {
     printf '%s\n' '{"type":"user","message":{"role":"user","content":"<local-command-caveat>noise</local-command-caveat>"}}'
     printf '%s\n' '{"type":"user","message":{"role":"user","content":"build the widget feature\nkeep the existing interface"}}'
-    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Edit","input":{"file_path":"/proj/demo-app/widget.py"}}]}}'
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Edit","input":{"file_path":"/proj/demo_app.v2/widget.py"}}]}}'
     printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}'
     printf '%s\n' '{"type":"user","message":{"role":"user","content":"now add tests"}}'
     printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done: widget plus tests\nVerification: widget check passed\nUSER_COUNT\t999\nRemaining: native check not run"}]}}'
@@ -17723,7 +17723,7 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
     > "$cwd/.oms/artifacts/review/claude-x-$run.md"
 
-  proj="$home/projects/$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9.' '-')"
+  proj="$home/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
   sess="$proj/bbbbbbbb-1111-2222-3333-444444444444.jsonl"
   mkdir -p "$proj"
   {
@@ -17793,7 +17793,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as fh:
     for row in rows:
         fh.write(json.dumps(row) + "\n")
 PY
-  proj="$home/projects/$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9.' '-')"
+  proj="$home/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
   sess="$proj/cccccccc-1111-2222-3333-444444444444.jsonl"
   mkdir -p "$proj"
   {
@@ -17819,6 +17819,39 @@ PY
   fi
   if grep -Fq "antigravity: incomplete" "$out"; then
     fail "an incomplete round was rendered as an open split"
+  fi
+
+  # Every typed split resolved: the stale rendered artifacts of that same
+  # round must not resurrect it through the legacy parser.
+  local cwd2="$TMP/sh-typed-resolved-proj"
+  mkdir -p "$cwd2/.oms/artifacts/review"
+  python3 - "$cwd2/.oms/artifacts/index.jsonl" <<'PY'
+import json, sys
+
+rows = [
+    {"schema": 1, "kind": "review-outcome", "provider": "local", "exit": 1,
+     "event_id": "evt_only_split",
+     "review": {"overall": 1, "gate_verify_exit": 0, "seats": [
+         {"provider": "codex", "verdict": "pass", "confidence": 0.9, "round": 1},
+         {"provider": "claude", "verdict": "fail", "confidence": None, "round": 1}]}},
+    {"schema": 1, "kind": "artifact-resolution", "provider": "local", "exit": 0,
+     "event_id": "evt_receipt2", "resolves_event_id": "evt_only_split"},
+]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    for row in rows:
+        fh.write(json.dumps(row) + "\n")
+PY
+  printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$cwd2/.oms/artifacts/review/codex-x-20260611T000000Z-78.md"
+  printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
+    > "$cwd2/.oms/artifacts/review/claude-x-20260611T000000Z-78.md"
+  mkdir -p "$home/projects/$(printf '%s' "$cwd2" | sed 's/[^A-Za-z0-9]/-/g')"
+  cp "$sess" "$home/projects/$(printf '%s' "$cwd2" | sed 's/[^A-Za-z0-9]/-/g')/"
+  out="$(OMS_CLAUDE_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd2" --out "$home/digest-resolved.md" 2>/dev/null)"
+  [ -f "$out" ] || fail "resolved-dissent digest not written"
+  if grep -Fq "## Open dissents" "$out"; then
+    fail "a resolved typed split was resurrected from legacy review artifacts"
   fi
 }
 
@@ -25348,7 +25381,7 @@ test_precompact_handoff_captures_adopted_repo() {
 
   mkdir -p "$repo/.oms"
   printf '*\n' > "$repo/.oms/.gitignore"
-  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$project_dir"
   cat > "$project_dir/sess-1.jsonl" <<EOF
 {"type":"user","cwd":"$repo","message":{"role":"user","content":"build the widget"}}
@@ -25379,7 +25412,15 @@ test_precompact_handoff_nested_cwd_uses_adopted_root() {
   git init -q "$repo"
   mkdir -p "$repo/.oms" "$nested"
   printf '*\n' > "$repo/.oms/.gitignore"
-  project_dir="$claude_home/projects/$(cd "$nested" && pwd | sed 's#/#-#g')"
+  # The verifier and an open split live at the adopted root, not at the cwd.
+  mkdir -p "$repo/.oms/task" "$repo/.oms/artifacts/review"
+  printf '# Task\n\n## Verify\n\nbash scripts/check.sh --nested-probe\n\n## Goal\n\nship\n' \
+    > "$repo/.oms/task/current.md"
+  printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$repo/.oms/artifacts/review/codex-x-20260611T000000Z-77.md"
+  printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
+    > "$repo/.oms/artifacts/review/claude-x-20260611T000000Z-77.md"
+  project_dir="$claude_home/projects/$(cd "$nested" && pwd | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$project_dir"
   cat > "$project_dir/nested-session.jsonl" <<EOF
 {"type":"user","cwd":"$nested","message":{"role":"user","content":"inspect the nested module"}}
@@ -25411,6 +25452,10 @@ EOF
     fail "nested cwd should capture the explicit session into the adopted root"
   grep -Fq "inspect the nested module" "$digest" ||
     fail "nested cwd must capture the payload's explicit session"
+  grep -Fq "bash scripts/check.sh --nested-probe" "$digest" ||
+    fail "nested cwd capture dropped the verifier from the adopted root"
+  grep -Fq "## Open dissents" "$digest" ||
+    fail "nested cwd capture dropped the open dissents from the adopted root"
   [ ! -e "$nested/.oms" ] ||
     fail "nested cwd must not become a separate handoff destination"
 }
@@ -25428,7 +25473,7 @@ test_precompact_handoff_ignores_nested_decoy_oms() {
   fi
   git init -q "$repo"
   mkdir -p "$nested/.oms"
-  project_dir="$claude_home/projects/$(cd "$nested" && pwd | sed 's#/#-#g')"
+  project_dir="$claude_home/projects/$(cd "$nested" && pwd | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$project_dir"
   cat > "$project_dir/decoy-session.jsonl" <<EOF
 {"type":"user","cwd":"$nested","message":{"role":"user","content":"this must not be captured under the decoy"}}
@@ -25452,7 +25497,7 @@ test_precompact_handoff_records_refusal_in_fail_ledger() {
   git init -q "$repo"
   mkdir -p "$repo/.oms"
   printf '*\n' > "$repo/.oms/.gitignore"
-  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$project_dir"
   # Secret-tier content forces a capture refusal (split literal keeps this
   # test source scrubber-clean).
