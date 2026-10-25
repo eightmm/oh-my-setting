@@ -22251,14 +22251,81 @@ test_gc_releases_plan_task_of_dead_delegation() {
   mkdir -p "$project/.oms/delegations"
   printf '{"schema":2,"id":"d1","pid":999999,"task_id":"t1","lease_id":"%s"}\n' "$lease_t1" > "$project/.oms/delegations/d1.json"
   printf '{"schema":1,"id":"d2","pid":999999,"task_id":"t2"}\n' > "$project/.oms/delegations/d2.json"
+  # A task retired from the current plan is absent, not unreadable.
+  printf '{"schema":1,"id":"d3","pid":999999,"task_id":"retired-task"}\n' > "$project/.oms/delegations/d3.json"
+  # An aged reservation whose generation directory is gone can never be
+  # collected. An inaccessible directory and a digest-only reference must keep
+  # theirs charged; the permission case needs a non-root POSIX user.
+  local capture_native=1 capture_locked=0
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) capture_native=0 ;;
+  esac
+  [ "$capture_native" = 1 ] && [ "$(id -u 2>/dev/null || echo 0)" != 0 ] && capture_locked=1
+  mkdir -p "$project/.oms/artifacts" "$project/locked"
+  printf 'quoted %s\n' "$(printf 'e%.0s' $(seq 1 64))" > "$project/.oms/artifacts/pin.txt"
+  python3 - "$project" "$capture_locked" <<'PY'
+import hashlib, json, os, sys
+repo, locked = os.path.realpath(sys.argv[1]), sys.argv[2] == '1'
+cases = [('a', 'land-vanished', 'no-such-capture-dir', 'b' * 64),
+         ('d', 'land-pinned', 'no-pinned-dir', 'e' * 64)]
+if locked:
+    cases.append(('c', 'land-locked', 'locked/capture-dir', 'f' * 64))
+with open(os.path.join(repo, '.oms/landings.jsonl'), 'ab') as handle:
+    for mark, landing, directory, sha in cases:
+        item = dict(version=1, generation=mark * 32, landing_id=landing,
+                    namespace=hashlib.sha256(repo.encode()).hexdigest(),
+                    directory=os.path.join(repo, directory), bytes=2048, sha256=sha)
+        row = dict(schema=1, event='capture-reserved', landing_id=landing,
+                   ts='2020-01-01T00:00:00Z', managed_capture=item)
+        handle.write(json.dumps(row, sort_keys=True, separators=(',', ':')).encode() + b'\n')
+PY
+  if [ "$capture_locked" = 1 ]; then
+    mkdir "$project/locked/capture-dir"
+    chmod 000 "$project/locked"
+  fi
+  capture_usage() {
+    python3 -c 'import runpy,sys; print(*runpy.run_path(sys.argv[1])["usage"](sys.argv[2]))' \
+      "$ROOT/scripts/lib/landing-capture.py" "$project" | tr -d '\r'
+  }
+  local charge_before journal_before
+  charge_before="$(capture_usage)"
 
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  assert_not_exists "$project/.oms/delegations/d3.json"
+  # Capture retention runs before marker cleanup, so it sees quiescence one sweep later.
+  journal_before="$(wc -c < "$project/.oms/landings.jsonl" | tr -d ' \r')"
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 >/dev/null 2>&1 )
+  [ "$(capture_usage)" = "$charge_before" ] &&
+    [ "$(wc -c < "$project/.oms/landings.jsonl" | tr -d ' \r')" = "$journal_before" ] ||
+    fail "gc dry-run must not release a reservation"
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  [ "$capture_locked" != 1 ] || chmod 755 "$project/locked"
+  if [ "$capture_native" = 1 ]; then
+    [ "$(grep -c '"release_missing":true' "$project/.oms/landings.jsonl")" = 1 ] &&
+      grep -F '"release_missing":true' "$project/.oms/landings.jsonl" | grep -F "$(printf 'a%.0s' $(seq 1 32))" > /dev/null ||
+      fail "gc should release only the aged reservation whose directory is confirmed gone"
+    # Count drops by exactly the released reservation; pinned and locked stay charged.
+    [ "$(capture_usage)" = "$((${charge_before% *} - 1)) $((${charge_before#* } - 33554432))" ] ||
+      fail "gc changed the quota of an inaccessible or digest-pinned reservation: $(capture_usage)"
+  fi
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -F '"state": "ready"' > /dev/null ||
     fail "gc should release the claimed task of a dead delegation"
   # review holds a finished artifact awaiting a reviewer; gc must not requeue it.
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t2 | grep -F '"state": "review"' > /dev/null ||
     fail "gc must not release a task in review"
   assert_not_exists "$project/.oms/delegations/d1.json"
+  # An unsearchable plan directory also reads as "no such task"; that is not
+  # proof of absence, so the marker and its recovery evidence stay.
+  if [ "$capture_locked" = 1 ]; then
+    local lock_out
+    printf '{"schema":1,"id":"d4","pid":999999,"task_id":"t1"}\n' > "$project/.oms/delegations/d4.json"
+    chmod 000 "$project/.oms/plan"
+    lock_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply 2>&1)" || true
+    chmod 755 "$project/.oms/plan"
+    [ -e "$project/.oms/delegations/d4.json" ] || fail "unreadable plan must keep the dead marker"
+    contains "$lock_out" "plan task t1 is unreadable" ||
+      fail "gc should warn about an unreadable plan store: $lock_out"
+  fi
 }
 
 test_gc_old_marker_cannot_release_new_lease() {

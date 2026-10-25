@@ -4,6 +4,7 @@ Writers hold landings.jsonl's lock. A private, retained hardlink is the
 generation witness; journal rows or matching bytes alone never authorize GC.
 This is the cooperating OMS boundary, not protection from hostile same-UID code.
 """
+import calendar
 import hashlib
 import json
 import math
@@ -271,6 +272,7 @@ def usage(repo):
         try:
             ready = release_ready(item, log, repo)
             released = [r for r in log if r.get('event') == 'capture-released' and
+                        r.get('release_missing') is not True and
                         r.get('managed_capture', {}).get('generation') == generation]
             for row in released:
                 if (not ready or row.get('schema') != 1 or row.get('managed_capture') != item or
@@ -281,6 +283,10 @@ def usage(repo):
             exists = os.path.lexists(item['directory'])
             if released and not exists:
                 continue
+            if not exists and any(r.get('event') == 'capture-released' and r.get('release_missing') is True and r.get('schema') == 1 and
+                                  r.get('managed_capture') == item and r.get('landing_id') == item['landing_id']
+                                  for r in log):
+                continue  # Audited: aged, directory gone, no object or publication remained.
             if exists:
                 value = certificate(item)
                 objects = value.get('objects', {})
@@ -868,6 +874,54 @@ def collect_object(item, obj):
         D['_fsync_directory_path'](root, 'collected capture generation')
 
 
+def absent(path):
+    """True only for confirmed absence; EACCES and other lookup errors are unknown."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        try:
+            os.lstat(os.path.dirname(path))
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def release_missing(repo, item, log, evidence, days, apply):
+    """Release an aged reservation whose generation directory is gone.
+
+    Nothing private can remain once the directory is absent, so the only
+    surviving state is a publication path or a reference to it; either
+    preserves the charge. The typed row keeps the decision auditable.
+    """
+    try:
+        mine = [r for r in log if r.get('managed_capture', {}).get('generation') == item['generation']]
+        if any(r.get('event') != 'capture-reserved' for r in mine):  # terminal/ready rows own another path
+            return
+        stamp = calendar.timegm(time.strptime(mine[0]['ts'], '%Y-%m-%dT%H:%M:%SZ'))
+        if stamp > time.time() - days * 86400:
+            return
+        paths = [os.path.join(item['directory'], item['landing_id'] + '.patch'),
+                 os.path.join(repo, '.oms/landing-patches', item['landing_id'] + '.patch')]
+        if not all(absent(path) for path in paths):
+            return
+        if any(spelling.encode() in evidence for path in paths for spelling in reference_spellings(repo, path)):
+            return
+        if item['sha256'].encode() in evidence:
+            return
+        if any(row.get('patch') in paths and row.get('landing_id') != item['landing_id'] for row in log):
+            return
+        print('- managed-landing-capture: ' + item['generation'] + (' release-missing' if apply else ' would release-missing'))
+        if apply:
+            log.append(append(repo, 'capture-released', item, release_missing=True))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print('warning: managed capture preserved: ' + str(error), file=sys.stderr)
+
+
 def collect(repo, days, apply, private_only=""):
     # private_only is an internal caller scope, never permission to ignore pins.
     log = rows(repo)
@@ -876,6 +930,8 @@ def collect(repo, days, apply, private_only=""):
         if private_only and item['landing_id'] != private_only:
             continue
         if not os.path.lexists(item['directory']):
+            if not private_only and absent(item['directory']):
+                release_missing(repo, item, log, evidence, days, apply)
             continue
         try:
             value = certificate(item)

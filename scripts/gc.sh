@@ -547,7 +547,7 @@ delegation_marker_gc() {  # MARKER
   local marker="$1" snapshot snapshot_rc status pid _native_pid task_id
   local marker_lease executor_id marker_digest marker_dev marker_ino marker_size
   local task_info task_state task_lease delete_rc=0
-  local plan_show_rc plan_recovery_rc
+  local plan_show_rc plan_recovery_rc plan_show_err plan_task_absent
   local plan_recovery_out
   local recovery_hard_failure=0
   local -a recovery_args
@@ -580,13 +580,26 @@ EOF
   fi
   if [ -n "$task_id" ]; then
     plan_show_rc=0
-    task_info="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>/dev/null |
+    plan_show_err="$(mktemp "${TMPDIR:-/tmp}/oms-gc-plan.XXXXXX")" || plan_show_err=""
+    task_info="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>"${plan_show_err:-/dev/null}" |
       python3 -c 'import json,sys;d=json.load(sys.stdin);print("%s\t%s"%(d.get("state",""),d.get("lease_id","")))' 2>/dev/null)" ||
       plan_show_rc=$?
+    # A readable plan that lacks the task (retired and replaced) has nothing to recover.
+    plan_task_absent=0
+    # The core reports an unsearchable plan directory the same way, so trust the
+    # message only while the plan store itself is readable.
+    if [ "$plan_show_rc" -ne 0 ] && [ -n "$plan_show_err" ] &&
+        [ -r "$STATE_ROOT/.oms/plan/tasks.json" ] &&
+        [ "$(tr -d '\r' < "$plan_show_err")" = "error: no such task: $task_id" ]; then
+      plan_task_absent=1
+    fi
+    [ -z "$plan_show_err" ] || rm -f "$plan_show_err"
     task_info="${task_info//$'\r'/}"
     task_state="$(printf '%s' "$task_info" | cut -f1)"
     task_lease="$(printf '%s' "$task_info" | cut -f2)"
-    if [ "$plan_show_rc" -ne 0 ]; then
+    if [ "$plan_task_absent" -eq 1 ]; then
+      printf -- '- orphan-delegation-plan: task %s is absent from the current plan; nothing to recover\n' "$task_id"
+    elif [ "$plan_show_rc" -ne 0 ]; then
       echo "warning: gc: plan task $task_id is unreadable; kept trigger evidence" >&2
       recovery_hard_failure=1
     else
