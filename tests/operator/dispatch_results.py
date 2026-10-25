@@ -950,6 +950,12 @@ for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
             raise AssertionError("a council without a unique main started")
 
 import panel_results as saved
+def panel_with_review_wait(arguments, seconds, **options):
+    """Run the panel CLI with the finalize review-wait bound patched (no environment knob)."""
+    code = ("import sys, panel_results, terminal_panel; panel_results.REVIEW_WAIT_SECONDS = %s; "
+            "sys.exit(terminal_panel.main(sys.argv[1:]))" % seconds)
+    return subprocess.run([sys.executable, "-c", code, *arguments], capture_output=True, text=True,
+                          env=dict(options.pop("env"), PYTHONPATH=str(root / "scripts/lib")), **options)
 from panel_view import render_results
 from types import SimpleNamespace
 
@@ -1893,14 +1899,32 @@ deferred_args = list(final_args)
 deferred_args[deferred_args.index("--task-id") + 1] = "finalize-review-read-pass"
 deferred_args[deferred_args.index("--outcome") + 1] = "completed"
 try:
-    deferred = subprocess.run(deferred_args, cwd=project, env=environment, capture_output=True, text=True)
+    deferred = panel_with_review_wait(deferred_args[3:], 2, cwd=project, env=environment)
     assert deferred.returncode == 75 and \
         "review-read-pass-fixture" in deferred.stderr and "review-malformed-fixture" in deferred.stderr, deferred.stderr
+    assert deferred.stderr.count("waiting up to") == 1, deferred.stderr
     assert not any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-review-read-pass"
                    for row in saved._records(project)[1]), "deferred finalize wrote a result"
 finally:
     review_owner.communicate("release\n", timeout=10)
     shutil.rmtree(malformed_review)
+# A review pass that ends during the bounded wait lets finalize proceed instead of exiting 75.
+gap_owner = subprocess.Popen(
+    ["bash", "-c", review_owner_script, "canonical-review-owner", str(root), str(project), review_pass.name],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+assert gap_owner.stdout.readline().strip() == "ready"
+gap_args = list(deferred_args)
+gap_args[gap_args.index("--task-id") + 1] = "finalize-review-gap"
+gap_timer = threading.Timer(2, lambda: gap_owner.communicate("release\n", timeout=10))
+gap_timer.start()
+try:
+    gap = panel_with_review_wait(gap_args[3:], 60, cwd=project, env=environment)
+finally:
+    gap_timer.join()
+assert gap.returncode == 0 and gap.stderr.count("waiting up to") == 1 and "deferred" not in gap.stderr, \
+    (gap.returncode, gap.stderr)
+assert any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-review-gap"
+           for row in saved._records(project)[1]), "finalize after the gap wrote no result"
 # BEGIN reviewed-result acceptance composition (uses only disposable Git fixtures).
 accept_repo = temporary / "accept state repo"
 subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(project), str(accept_repo)], check=True)
@@ -2614,7 +2638,8 @@ result_rows_before = [row for row in saved._records(accept_repo)[1]
 result_artifacts_dir = accept_repo / ".oms/artifacts/panel-results"
 result_artifacts_before = {path.name: path.read_bytes() for path in result_artifacts_dir.glob("result-*.json")}
 try:
-    deferred_landed = accept_call("panel", *accept_finalize, execution=accept_execution, check=False)
+    deferred_landed = panel_with_review_wait(["--repo", str(accept_execution), *accept_finalize], 2,
+                                             cwd=accept_repo, env=accept_env, timeout=90)
     assert deferred_landed.returncode == 75 and landed_review.name in deferred_landed.stderr, deferred_landed.stderr
     plan_after_deferred = json.loads(accept_call("agent-plan", "show", "--id", "accept-task",
                                                   execution=accept_execution).stdout)

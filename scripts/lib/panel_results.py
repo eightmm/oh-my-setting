@@ -49,6 +49,7 @@ def _reason_phrase(code):
 
 
 MAX_VERIFY_OUTPUT = 8192
+REVIEW_WAIT_SECONDS = 120
 
 
 def _owner():
@@ -1599,6 +1600,15 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
     if isinstance(verify_timeout, bool) or not isinstance(verify_timeout, int) or not 1 <= verify_timeout <= 86400:
         raise ValueError('verify timeout must be between 1 and 86400 seconds')
     live_reviews = _live_review_read_passes(repo)
+    if live_reviews:
+        # Overlapping automatic reviews rarely leave a gap shorter than a caller's retry
+        # interval, so wait for one here, before any side effect.
+        print('waiting up to %ds for %d review read passes (%s)'
+              % (REVIEW_WAIT_SECONDS, len(live_reviews), ', '.join(live_reviews)), file=sys.stderr)
+        deadline = time.monotonic() + REVIEW_WAIT_SECONDS
+        while live_reviews and time.monotonic() < deadline:
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            live_reviews = _live_review_read_passes(repo)
     if live_reviews:
         print('deferred: %d review read passes running (%s); finalize again after they finish'
               % (len(live_reviews), ', '.join(live_reviews)), file=sys.stderr)
