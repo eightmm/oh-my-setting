@@ -144,4 +144,72 @@ payload "python3 -m absent_cwd_fallback" 1 |
 grep -Fq absent_cwd_fallback "$other/.oms/failures.jsonl" ||
   fail "an absent payload cwd should fall back to process cwd"
 
+# The success pass imports hook_state (about 20 ms) only for a panel main:
+# record_panel_activity returns at once for every other process. A scratch
+# lib whose hook_state leaves a marker on import shows which processes load it.
+fake="$TMP/fake-root"
+mkdir -p "$fake/scripts/lib"
+cp "$ROOT/scripts/fail-ledger-hook.sh" "$fake/scripts/"
+cp "$ROOT/scripts/lib/cached-main.py" "$ROOT/scripts/lib/hook_repo.py" \
+  "$ROOT/scripts/lib/usage-families.json" "$fake/scripts/lib/"
+cp "$ROOT/scripts/lib/fail_ledger_hook.py" "$fake/scripts/lib/" 2>/dev/null || true
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "${OMS_FLH_CALLS:-/dev/null}"\nexit 0\n' > "$fake/scripts/fail-ledger.sh"
+chmod +x "$fake/scripts/fail-ledger.sh"
+cat > "$fake/scripts/lib/hook_state.py" <<'PY'
+import os
+open(os.environ["OMS_FLH_MARK"], "w").close()
+
+
+def record_panel_activity(payload):
+    pass
+PY
+printf '{"event":"fail","fingerprint":"0000000000000000"}\n' > "$ledger"
+success_payload="$(OMS_P_REPO="$repo" python3 -c '
+import json, os
+print(json.dumps({"tool_name": "Bash", "hook_event_name": "PostToolUse",
+                  "cwd": os.environ["OMS_P_REPO"],
+                  "tool_input": {"command": "true"}}))
+')"
+mark="$TMP/hook-state-imported"
+run_success() {
+  rm -f "$mark"
+  printf '%s' "$success_payload" |
+    env -u OMS_HARNESS_CHILD -u OMS_PANEL_MAIN_ATTEMPT -u OMS_PANEL_SESSION \
+      -u OMS_STATE_REPO OMS_FLH_MARK="$mark" "$@" bash "$fake/scripts/fail-ledger-hook.sh"
+}
+run_success
+[ ! -e "$mark" ] || fail "a non-panel success pass must not import hook_state"
+run_success OMS_PANEL_MAIN_ATTEMPT=a1 OMS_PANEL_SESSION=oms-x
+[ -e "$mark" ] || fail "a panel main success pass must still record panel activity"
+run_success OMS_PANEL_MAIN_ATTEMPT=a1 OMS_PANEL_SESSION=oms-x OMS_HARNESS_CHILD=1
+[ ! -e "$mark" ] || fail "a harness child must not import hook_state"
+
+# The success scan streams the ledger: memory stays bounded by the longest row,
+# so a ledger far larger than the address space still resolves a passed command.
+big="$TMP/big-failures.jsonl"
+OMS_P_FILE="$big" python3 - <<'PY'
+import hashlib, json, os
+fp = hashlib.sha256(b"true").hexdigest()[:16]
+filler = json.dumps({"event": "fail", "fingerprint": "f" * 16, "cmd": "x" * 900})
+with open(os.environ["OMS_P_FILE"], "w") as out:
+    out.write(json.dumps({"event": "fail", "fingerprint": fp}) + "\n")
+    for _ in range(45000):
+        out.write(filler + "\n")
+PY
+calls="$TMP/big-calls"
+big_limit_kb=98304
+if ! ( ulimit -v "$big_limit_kb" 2>/dev/null &&
+    ! python3 -c 'bytearray(150 * 1024 * 1024)' 2>/dev/null ); then
+  echo "fail-ledger-hook-filter-smoke: skip large-ledger case (ulimit -v is not enforced here)"
+else
+  rm -f "$calls"
+  printf '%s' "$success_payload" |
+    ( ulimit -v "$big_limit_kb"
+      env -u OMS_HARNESS_CHILD -u OMS_PANEL_MAIN_ATTEMPT -u OMS_PANEL_SESSION \
+        -u OMS_STATE_REPO OMS_FAIL_LEDGER="$big" OMS_FLH_CALLS="$calls" \
+        bash "$fake/scripts/fail-ledger-hook.sh" )
+  grep -q 'resolve' "$calls" 2>/dev/null ||
+    fail "a ledger larger than the address space must still resolve a passed command"
+fi
+
 echo "fail-ledger-hook-filter-smoke: ok"
