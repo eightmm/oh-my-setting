@@ -812,7 +812,7 @@ def main_needs_attention(state, main_attempt):
     room, finalized = mapping(state.get("room")), mapping(state.get("finalized"))
     read = handled_results(room)
     return any(m.get("role") != "main" and m.get("parent") in ids and m["state"] in WINDOW_ATTENTION
-               and not (m["state"] == "review" and classify(m) == "past")
+               and classify(m) != "past"
                and not (m["state"] in {"failed", "timed_out"} and "result-" + str(m.get("participant")) in read
                         or m["state"] in {"failed", "timed_out", "review", "blocked"}
                         and finalized.get(m.get("task_id")) in DECIDED)

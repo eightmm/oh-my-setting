@@ -188,12 +188,15 @@ def mail_page(state, participant, width):
     from room_view import main_names, who
     from panel_view import _result_structured
     width = max(8, width)
-    state = dict(state, messages=listing(state.get("messages"))[-MAX_MESSAGES:])
     members = listing(state.get("participants"))
     labels = main_names(members)
     names = {m["participant"]: who(m, labels) for m in members}
     lines = [clipped("Messages to " + clean(names.get(participant, participant)), width)]
-    for message in main_mail(state, participant):
+    mail = main_mail(state, participant)
+    if len(mail) > MAX_MESSAGES:
+        lines.append(clipped("Newest %d of %d; %d older messages not shown" %
+                             (MAX_MESSAGES, len(mail), len(mail) - MAX_MESSAGES), width))
+    for message in mail[-MAX_MESSAGES:]:
         sender = clean(names.get(message.get("sender"), message.get("sender")), 100) or "unknown"
         lines += ["", clipped("From %s / %s" % (sender, stamp(message.get("ts"))), width)]
         for line in str(message.get("text") or "(empty)").split("\n"):

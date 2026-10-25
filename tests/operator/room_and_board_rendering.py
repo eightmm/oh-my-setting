@@ -2957,6 +2957,18 @@ assert any(i["action"] == ("result", "builder") for i in inbox_items(alarm))
 alarm["room"]["call_results"] = {"builder": {"exit": 1, "read": True}}
 assert not panel.main_needs_attention(alarm, "flow-attempt")
 assert not any(i["action"] == ("result", "builder") for i in inbox_items(alarm))
+# A failed call superseded by a later call of the same role and task is Past and no longer marks the window.
+retried = deepcopy(alarm)
+retried["room"]["call_results"] = {}
+retried_builder = next(a for a in retried["attempts"]["active_recent"] if a["attempt_id"] == "builder")
+retried_builder.update(state="failed", task_id="retry-task")
+assert panel.main_needs_attention(retried, "flow-attempt")
+retry_member = dict(next(m for m in retried["room"]["participants"] if m["participant"] == "builder"),
+                    participant="builder-retry", attempt="builder-retry", seq=99)
+retried["room"]["participants"].append(retry_member)
+retried["attempts"]["active_recent"].append(dict(retried_builder, attempt_id="builder-retry", state="running",
+                                                  panel=dict(retried_builder.get("panel") or {}, room_participant="builder-retry")))
+assert not panel.main_needs_attention(retried, "flow-attempt"), "superseded failure still alarms"
 for state in ("failed", "timed_out", "abandoned", "orphaned", "review", "blocked", "waiting_approval"):
     failure = deepcopy(alarm)
     next(a for a in failure["attempts"]["active_recent"] if a["attempt_id"] == "builder")["state"] = state
@@ -3293,7 +3305,18 @@ with patch.object(panel.room, "records", return_value=mail_records), \
         assert cached_log == bounded_log[-panel.panel_messages.RETAIN:]
         assert cached_log.total_count == len(bounded_log)
         panel.navigate(project, ("mail", "flow-main"), old_flow, old_nav, 120)
-        assert "OLDER NOTE" not in old_nav["detail"]["text"]
+        # Recipient filtering precedes the cap, so mail to others cannot push the main's note out of the reader.
+        assert "OLDER NOTE" in old_nav["detail"]["text"] and "older messages not shown" not in old_nav["detail"]["text"]
+    crowded = dict(mail_flow["room"], messages=[
+        {"sender": "advisor", "targets": ["flow-main"], "text": "OPEN QUESTION"}] + [
+        {"sender": "advisor", "targets": ["flow-other"], "text": "n%d" % i}
+        for i in range(panel.panel_messages.MAX_MESSAGES + 5)])
+    crowded_page = panel.panel_messages.mail_page(crowded, "flow-main", 120)
+    assert "OPEN QUESTION" in crowded_page and "older messages not shown" not in crowded_page
+    crowded["messages"] += [{"sender": "advisor", "targets": ["flow-main"], "text": "m%d" % i}
+                            for i in range(panel.panel_messages.MAX_MESSAGES)]
+    crowded_page = panel.panel_messages.mail_page(crowded, "flow-main", 120)
+    assert "OPEN QUESTION" not in crowded_page and "1 older messages not shown" in crowded_page, crowded_page
 with patch.object(panel, "BackgroundRead", ImmediateRead), \
         patch.object(panel, "read_panel", return_value=(mail_flow, 0, "codex", "flow-attempt", "graph", False, "flow-room")), \
         patch.object(panel, "managed_session", return_value=True), \
