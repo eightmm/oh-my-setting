@@ -6,6 +6,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+
+- The panel main's launch instructions now count the two-line direct-edit allowance per task instead of per edit, send release bookkeeping (changelog, version, manifest, inventory) to the worker whose change needs it or one documenter per landing batch, and assign experiments: the main authorizes launches, builders edit run scripts and configs, an investigate worker reads outputs, and jobs get one background wait instead of polling. An audit of three panel mains found these gaps behind most direct work.
+
 ### Removed
 
 - Removed the unused `otel-export`, `open-in`, `support-bundle`, and `semantic-eval` commands.

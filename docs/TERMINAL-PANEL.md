@@ -690,8 +690,16 @@ Start the next ready plan task or follow-up round in the same turn; a new write
 dispatch is refused while your results awaiting review exceed the backlog
 threshold. Send remaining review findings to a worker with `--continue`.
 It edits directly only for admitted-patch integration, conflict resolution, or
-a fix of at most two lines; everything else goes to a worker even when the brief
-feels longer. Outside the panel, the global rule still requires an
+fixes totaling at most two lines per task, counting every direct edit made for
+it; everything else goes to a worker even when the brief feels longer.
+Release bookkeeping (changelog, version, manifest, inventory files) goes in the
+scope of the worker whose change needs it, or in one documenter worker per
+landing batch, never hand-edited by the main. For experiments the main
+authorizes launches, since paid compute needs the user's authority; builders
+write run scripts and configs, a worker with `--purpose investigate`
+reports finished outputs (`oms job-digest` condenses a
+training or Slurm log), and the main waits on jobs with one background wait or
+notification, not repeated polls. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
 
 The sole panel main also lands its own work. `oms scratch-worktree add` starts a detached

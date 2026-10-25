@@ -242,6 +242,10 @@ for owner in panel.PROVIDERS:
         "security-auditor for risky changes", "verifier before declaring completion", "integrator when merging",
         "performance-engineer when performance needs measurement", "documenter at completion",
         "release-engineer when deploying", "not all by default", "a context apart"))
+    assert all(phrase in panel.bootstrap(owner, project) for phrase in (
+        "at most two lines per task", "counting every direct edit", "Release bookkeeping (changelog, version, manifest, inventory files)",
+        "one documenter worker per landing batch", "paid compute needs the user's authority", "--purpose investigate",
+        "oms job-digest", "one background wait or notification, not repeated polls"))
     assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
     assert "preferred installed provider" not in panel.bootstrap(owner, project) and \
         "ordered by more weekly quota left" in panel.bootstrap(owner, project)
@@ -2640,6 +2644,13 @@ import hook_state
 with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": room_owner, "OMS_PANEL_SESSION": "oms-fixture"}):
     tower = hook_state.panel_main_hint({"hook_event_name": "UserPromptSubmit"})
     assert "oms room scope" in tower
+    # The recovery text and the launch bootstrap carry one ownership rule; they must not drift.
+    def ownership_rule(text):
+        start = text.index("Edit directly only")
+        return text[start:text.index("repeated polls.", start)]
+    assert ownership_rule(tower) == ownership_rule(panel_native.bootstrap("codex", project)), tower
+    assert "at most two lines per task" in tower and "one documenter worker per landing batch" in tower
+    assert "--purpose investigate" in tower and "a fix of at most two lines" not in tower
 # Same task reuse cannot return another participant's artifact as the result.
 assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
 participant_results = panel.results(project, room_participant=child["participant"])
