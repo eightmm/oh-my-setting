@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from oms_runtime.common import CoreError, run_output, sha256_bytes
+from oms_runtime.common import CoreError, sha256_bytes
 from oms_runtime.context import _safe_repo_file
 
 from .model import PATH_LITERAL_RE, make_node, node_id
@@ -34,8 +35,14 @@ def discover_files(repo: Path, *, include: Sequence[str] = (), exclude: Sequence
     """{"files": [relpath...], "skipped": [{"path","reason"}]} — no symlinks, no binaries, no secrets."""
     repo = Path(repo).resolve()
     candidates: List[str] = []
-    listed = run_output(["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z"])
-    if listed:
+    try:
+        # run_output cannot tell an empty listing from a failure; only a failure falls back to the walk.
+        git_run = subprocess.run(["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=False)
+        listed: Optional[str] = git_run.stdout.decode("utf-8", "surrogateescape") if git_run.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        listed = None
+    if listed is not None:
         candidates = [item.replace("\\", "/") for item in listed.split("\0") if item]
     else:
         for root, dirs, names in os.walk(str(repo), followlinks=False):
