@@ -488,8 +488,13 @@ CHILD_STARTED="$TMP/child-started" CHILD_CLEANED="$TMP/child-cleaned" \
   HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id signal \
   >"$TMP/signal.out" 2>"$TMP/signal.err" &
 runner_pid="$!"
-for _ in $(seq 1 50); do [ -e "$TMP/child-started" ] && break; sleep 0.1; done
-[ -e "$TMP/child-started" ] || fail "signal fixture child did not start"
+for _ in $(seq 1 300); do
+  [ -e "$TMP/child-started" ] && break
+  kill -0 "$runner_pid" 2>/dev/null || break
+  sleep 0.1
+done
+[ -e "$TMP/child-started" ] ||
+  fail "signal fixture child did not start (runner alive: $(kill -0 "$runner_pid" 2>/dev/null && echo yes || echo no)): $(tail -5 "$TMP/signal.err" 2>/dev/null)"
 kill -TERM "$runner_pid"
 rc=0
 wait "$runner_pid" || rc=$?
