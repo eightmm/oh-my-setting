@@ -1143,6 +1143,27 @@ def _swap_submit(pane, text):
     subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3, stdin=subprocess.DEVNULL)
 
 
+def live_main_pane(repo):
+    """(pane, harness) of the one verified working tmux panel main, with swap_main's ownership proofs."""
+    from terminal_panel import live_mains, main_history, resolve_session
+    session, session_repo = resolve_session(repo, wait=False)
+    if session_repo != str(repo):
+        raise ValueError("no panel main to type into")
+    window, attempt, pane, member, ident = _swap_main_window(repo, session)
+    if live_mains(repo, session, ident) != 1:
+        raise ValueError("main liveness is unverified")
+    old = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)
+    refs = (old or {}).get("refs", {})
+    if (not old or old.get("tool") != "panel-main" or old.get("terminal") is not False
+            or old.get("state") != "working" or refs.get("panel_room_participant", attempt) != member
+            or refs.get("panel_host") != "tmux"):
+        raise ValueError("current main ownership is unverified")
+    current = room.participant(room.status(repo, ident), member)
+    if current["role"] != "main" or current["provider"] != old["provider"]:
+        raise ValueError("current room main binding is unverified")
+    return pane, refs.get("panel_harness")
+
+
 def swap_main(repo, harness, model=None):
     """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
     from terminal_panel import ENTRY, MAIN_HARNESSES, _lock, _main_window, _swap_digest, _swap_handoff_file

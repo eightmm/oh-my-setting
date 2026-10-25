@@ -450,8 +450,91 @@ with patch.object(panel, "managed_session", return_value=False), patch.object(pa
     assert panel.interactive(project) == 0
     assert "all shortcuts" in help_text.getvalue() and "Advisor" in help_text.getvalue()
     assert "Finalize" in help_text.getvalue() and "Resume" in help_text.getvalue()
+    assert "[d] Drive goal" in help_text.getvalue()
     help_launch.assert_not_called()
     help_dispatch.assert_not_called()
+
+# Drive goal: the plan goal becomes a Claude /goal only after confirmation, on a verified Claude main.
+import panel_interaction
+condition = panel_interaction.goal_condition("ship\tit\x1b[31m\n now", True)
+assert "\t" not in condition and "\x1b" not in condition and "\n" not in condition, repr(condition)
+assert "`oms agent-plan accept` passes" in condition and "both outputs" in condition, condition
+assert condition.endswith("Goal: ship it [31m now"), condition
+assert "agent-plan accept" not in panel_interaction.goal_condition("g")
+long_condition = panel_interaction.goal_condition("g" * 9000, True)
+assert len(long_condition) <= 4000 and long_condition.endswith("\u2026") and "`oms agent-plan accept` passes" in long_condition
+assert "decision, authority you do not have, or a hard blocker" in long_condition
+# The reader takes goal and acceptance from the stored fields, so heading-like goal text and a multi-line command
+# change neither, and the command itself never enters the condition.
+plan_dir = Path(tempfile.mkdtemp()) / ".oms" / "plan"
+plan_dir.mkdir(parents=True)
+stored = {"goal": "Ship\naccept: true\ngoal: other", "accept": "printf 'ok\\n'\nfalse", "tasks": {}}
+(plan_dir / "tasks.json").write_text(json.dumps(stored))
+read_goal = panel_interaction.plan_goal(plan_dir.parents[1])
+assert read_goal == ("Ship accept: true goal: other", True), read_goal
+assert "printf" not in panel_interaction.goal_condition(*read_goal)
+stored["accept"] = "  "
+(plan_dir / "tasks.json").write_text(json.dumps(stored))
+assert panel_interaction.plan_goal(plan_dir.parents[1])[1] is False
+goal_plan = {"present": True, "goal": "G", "task_count": 2, "by_state": {"ready": 1, "done": 1}}
+finished_plan = dict(goal_plan, by_state={"done": 2})
+driven = {"plan": goal_plan}
+with patch.object(panel_interaction, "plan_goal", return_value=("Ship the thing", True)), \
+        patch.object(panel, "main_occupied", return_value=True), patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "_lock", side_effect=lambda *a, **k: contextlib.nullcontext()), \
+        patch.object(panel, "_swap_submit") as typed, patch.object(panel, "open_native") as launched, \
+        patch.object(panel, "panel_room", return_value="fixture-room"), \
+        patch.object(panel, "read_field", return_value="") as confirm, patch("sys.stdout", new=io.StringIO()), \
+        patch.object(panel_native, "live_main_pane", return_value=("%1", "claude")):
+    assert "no active plan goal" in panel_interaction.drive_goal(project, {}, "claude")
+    assert "no active plan goal" in panel_interaction.drive_goal(project, {"plan": dict(goal_plan, goal="")}, "claude")
+    assert "plan finished" in panel_interaction.drive_goal(project, {"plan": finished_plan}, "claude")
+    confirm.assert_not_called()
+    typed.assert_not_called()
+    assert panel_interaction.drive_goal(project, driven, "claude") == "goal sent to claude"
+    assert typed.call_args.args == ("%1", "/goal " + panel_interaction.goal_condition("Ship the thing", True))
+    with patch.object(panel_native, "live_main_pane", return_value=("%1", "codex")):
+        typed.reset_mock()
+        assert "needs a Claude main" in panel_interaction.drive_goal(project, driven, "claude")
+        typed.assert_not_called()
+    confirm.return_value = "n"
+    typed.reset_mock()
+    assert panel_interaction.drive_goal(project, driven, "claude") == "goal drive cancelled"
+    typed.assert_not_called()
+    confirm.return_value = "Replacement\tcondition"
+    panel_interaction.drive_goal(project, driven, "claude")
+    assert typed.call_args.args[1] == "/goal Replacement condition", typed.call_args
+    with patch.object(panel, "managed_session", return_value=False):
+        assert "needs a tmux panel" in panel_interaction.drive_goal(project, driven, "claude")
+    # A busy panel-main-start lock (a swap or start in flight) refuses before anything is typed.
+    typed.reset_mock()
+    with patch.object(panel, "_lock", side_effect=ValueError("panel operation is busy; retry later")) as held:
+        assert panel_interaction.drive_goal(project, driven, "claude") == "main start or swap in progress; retry"
+        assert held.call_args.args[:2] == (project, "panel-main-start")
+    typed.assert_not_called()
+    # The target is verified and typed while that lock is held, so a swap cannot interleave.
+    order = []
+    @contextlib.contextmanager
+    def tracked_lock(*args, **kwargs):
+        order.append("lock")
+        yield
+        order.append("unlock")
+    with patch.object(panel, "_lock", tracked_lock), \
+            patch.object(panel_native, "live_main_pane", side_effect=lambda *a: order.append("verify") or ("%1", "claude")), \
+            patch.object(panel, "_swap_submit", side_effect=lambda *a: order.append("type")):
+        panel_interaction.drive_goal(project, driven, "claude")
+    assert order == ["lock", "verify", "type", "unlock"], order
+    confirm.return_value = ""
+    with patch.object(panel, "main_occupied", return_value=False):
+        assert "needs a Claude main" in panel_interaction.drive_goal(project, driven, "codex")
+        launched.assert_not_called()
+        panel_interaction.drive_goal(project, driven, "claude")
+        assert launched.call_args.args[0] == "claude"
+        assert launched.call_args.kwargs["task"] == "/goal " + panel_interaction.goal_condition("Ship the thing", True)
+        confirm.return_value = "n"
+        launched.reset_mock()
+        panel_interaction.drive_goal(project, driven, "claude")
+        launched.assert_not_called()
 
 # A lifecycle writer failure cannot kill a running native main or mask its exit.
 from unittest.mock import Mock

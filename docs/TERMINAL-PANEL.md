@@ -292,6 +292,8 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | Shift-drag | Copy terminal selection in a managed panel | — |
 | Mouse click | Select a row/tab; graph calls and the main preview their cards | — |
 
+In the control menu, `d` (Drive goal) sends the shared plan goal to a Claude main as a Claude Code `/goal`, so the main keeps working across turns until a small model judges the condition met from the transcript. The panel shows the condition (the goal, `oms agent-plan accept` (which runs the stored acceptance command; omitted when the plan has none), and a stop clause for decisions, missing authority or hard blockers; at most 4000 characters), and nothing is sent until you press Enter, type replacement text, or cancel with `n`. A live Claude main receives `/goal ...` in its tmux pane after the same ownership checks as a swap, verified and typed under the swap's `panel-main-start` lock (a busy lock refuses with a retry line); with no main, a Claude main starts with it as its task. It refuses when the plan has no active goal or is finished, when the main is not Claude, or when the live main is not in a tmux panel; Codex `/goal` is not verified, so there is no fallback.
+
 At the native main's exit prompt, `r` resumes/restarts there and Enter closes the window. The terminal/job workspace has its own controls; this table covers only the board and result reader.
 
 A dispatched call settles only after its supervisor proves the whole process tree exited. On macOS and Windows, where that supervisor is unsupported, the call stays pending and the panel prints a manual-clear hint; independently stop every provider descendant before clearing its retained scope.

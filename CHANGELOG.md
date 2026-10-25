@@ -12,6 +12,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- Panel control `d` (Drive goal) sends the shared plan goal, with `oms agent-plan accept` as the acceptance check, to the Claude main as a Claude Code `/goal` after a confirmation, or starts a Claude main with it; it refuses without an active plan goal, on a finished plan, and for non-Claude mains.
 - `oms` in a terminal opens a control panel: the native Claude Code or Codex
   conversation keeps its pane beside a read-only OMS sidebar (connected tree,
   card graph or compact list) of joined mains and their advisor, reviewer and

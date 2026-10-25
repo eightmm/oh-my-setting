@@ -1,6 +1,7 @@
 """Interactive terminal input, browsing and control-menu presentation."""
 
 from pathlib import Path
+import json
 import os
 import panel_debate
 import panel_host
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 
 # Call-local facade imports preserve the public entry point and avoid import cycles.
 
@@ -88,6 +90,85 @@ def browse_chats(repo):
 def raw_keys():
     from terminal_panel import terminal_style
     return terminal_style()[0] and os.name == "posix" and sys.stdin.isatty()
+
+
+GOAL_LIMIT = 4000  # Claude Code's /goal condition limit
+_GOAL_HEAD = ("Work the OMS shared plan for this repository. Met when `oms agent-plan list` shows every task done%s, "
+              "with %s shown in this conversation. Also met when the next step needs the user's "
+              "decision, authority you do not have, or a hard blocker; state which and stop. Goal: ")
+
+
+def _one_line(text):
+    return " ".join("".join(" " if unicodedata.category(c).startswith("C") else c for c in str(text)).split())
+
+
+def goal_condition(goal, has_accept=False):
+    """The /goal condition for the shared plan; only the goal text is shortened to fit the limit.
+
+    The stored acceptance command is run by `oms agent-plan accept` (which refuses a plan without one), never copied."""
+    head = _GOAL_HEAD % ((" and `oms agent-plan accept` passes", "both outputs") if has_accept else ("", "its output"))
+    room_left = GOAL_LIMIT - len(head)
+    goal = _one_line(goal)
+    return head + (goal if len(goal) <= room_left else goal[:room_left - 1].rstrip() + "\u2026")
+
+
+def plan_goal(repo):
+    """(goal, has_accept) from the stored plan's own fields; the board's report keeps neither in full."""
+    from terminal_panel import _read
+    plan = json.loads(_read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024))
+    if not isinstance(plan, dict):
+        raise ValueError("plan is unreadable")
+    goal, accept = plan.get("goal"), plan.get("accept")
+    return (_one_line(goal) if isinstance(goal, str) else "",
+            isinstance(accept, str) and bool(accept.strip()))
+
+
+def help_rows(rows, width, unicode=True):
+    """menu_rows plus the goal-drive key, placed before the closing edge of the expanded box."""
+    from panel_view import box_row
+    return rows[:-1] + [box_row("GOAL".ljust(9) + "[d] Drive goal", width, unicode)] + rows[-1:]
+
+
+def drive_goal(repo, state, harness, view="auto", attention_only=False):
+    """Send the plan goal to the panel's Claude main as /goal after the person confirms; returns a status line."""
+    from room_view import _plan_finished, plan_summary
+    from terminal_panel import _lock, _swap_submit, main_occupied, managed_session, open_native, panel_room, read_field
+    if not plan_summary(state):
+        return "no active plan goal to drive"
+    if _plan_finished(state):
+        return "plan finished; retire or init the next goal first"
+    goal, has_accept = plan_goal(repo)
+    if not goal:
+        return "no active plan goal to drive"
+    live = main_occupied(state)
+    if live and not managed_session():
+        return "goal drive needs a tmux panel to type into the live main"
+    if not live and harness != "claude":
+        return "goal drive needs a Claude main; %s has no verified /goal" % harness
+    condition = goal_condition(goal, has_accept)
+    print("/goal " + condition)
+    answer = read_field("Enter to send / type replacement text / n to cancel: ", required=False)
+    if answer == "n":
+        return "goal drive cancelled"
+    if answer:
+        condition = _one_line(answer)[:GOAL_LIMIT]
+    if live:
+        from panel_native import live_main_pane
+        try:
+            # swap_main verifies and types under this lock; so must a goal, or the two could interleave their keys.
+            with _lock(repo, "panel-main-start", timeout=.1):
+                pane, live_harness = live_main_pane(repo)
+                if live_harness != "claude":
+                    return "goal drive needs a Claude main; the live main is %s" % live_harness
+                _swap_submit(pane, "/goal " + condition)
+        except ValueError as error:
+            if "busy" in str(error):
+                return "main start or swap in progress; retry"
+            raise
+        return "goal sent to claude"
+    os.environ["OMS_ROOM_ID"] = panel_room(repo, title="Plan goal")
+    status = open_native("claude", repo, task="/goal " + condition, view=view, attention_only=attention_only)
+    return "goal sent to claude (new main) / exit=%s" % status
 
 
 def menu_input():
@@ -321,7 +402,8 @@ def interactive(repo, view="auto", attention_only=False):
             if choice == "?":
                 width = max(1, shutil.get_terminal_size().columns)
                 clear_control_view()
-                print("\n".join(menu_rows(width, 40, terminal_style()[2], expanded=True, managed=managed_session(), occupied=navigation.get("main_occupied", True), installed=navigation.get("installed"))))
+                style = terminal_style()[2]
+                print("\n".join(help_rows(menu_rows(width, 40, style, expanded=True, managed=managed_session(), occupied=navigation.get("main_occupied", True), installed=navigation.get("installed")), width, style)))
                 read_field("Press Enter to return to the panel: ", required=False)
                 continue
             if choice == "k":
@@ -511,6 +593,8 @@ def interactive(repo, view="auto", attention_only=False):
                 status = council(repo, provider, task_id, label, prompt)
                 previous = "council exit=%s / owner decision pending" % status
                 read_field("Press Enter to return: ", required=False)
+            elif choice == "d":
+                previous = drive_goal(repo, cache.get("state", {}), harness, view, attention_only)
             elif choice == "f":
                 previous = finalize_selection(repo, provider, navigation, cache.get("state", {}))
             elif choice == "n":
@@ -518,8 +602,8 @@ def interactive(repo, view="auto", attention_only=False):
                 delivered = retry_delivery(repo, task_id)
                 previous = "app delivery: " + delivered["receipt"]["status"]
             elif choice != "9":
-                available = menu_rows(200, 100, expanded=True, managed=managed_session(),
-                                      occupied=navigation.get("main_occupied", True), installed=navigation.get("installed"))
+                available = help_rows(menu_rows(200, 100, expanded=True, managed=managed_session(),
+                                                occupied=navigation.get("main_occupied", True), installed=navigation.get("installed")), 200)
                 raise ValueError("choose " + ", ".join(re.findall(r"\[([^]]+)\]", " ".join(available))))
         except EOFError:
             return 0
