@@ -344,6 +344,25 @@ grep -Fq "note: moved your existing" "$TMP/install-out.txt" ||
   fail "displacing existing rules must be announced at install time"
 dest="$HOME/.oh-my-setting"
 [ -d "$dest/.git" ] || fail "install did not clone the fixture"
+
+# Wrappers set PYTHONDONTWRITEBYTECODE, so the installer must leave a .pyc
+# that is hash-validated against the current source.
+assert_lib_pyc_current() {
+  local out
+  out="$("$PYTHON" - "$dest/scripts/lib/hook_state.py" <<'PY_PYC'
+import importlib.util, sys
+src = sys.argv[1]
+pyc = importlib.util.cache_from_source(src)
+with open(pyc, "rb") as handle:
+    header = handle.read(16)
+with open(src, "rb") as handle:
+    digest = importlib.util.source_hash(handle.read())
+print("ok" if header[4:8] == b"\x03\x00\x00\x00" and header[8:16] == digest else "stale")
+PY_PYC
+  )" || fail "$1: no compiled scripts/lib/hook_state module"
+  [ "${out%$(printf '\r')}" = ok ] || fail "$1: scripts/lib/hook_state .pyc is not current"
+}
+assert_lib_pyc_current "install"
 for f in "$dest/install.sh" "$dest/scripts/oms" "$dest"/scripts/*.sh; do
   ! LC_ALL=C grep -q "$(printf '\r')" "$f" ||
     fail "checkout under core.autocrlf=true carries CR bytes: $f"
@@ -549,8 +568,9 @@ mkdir -p "$dest/prompts" "$HOME/.oh-my-setting-prompts.backup.20260914000000"
 printf 'retired prompt\n' > "$dest/prompts/SOUL.md"
 printf 'user prompt\n' > "$HOME/.oh-my-setting-prompts.backup.20260914000000/user.md"
 oms_install_materialize "$dest/prompts" "$HOME/.oh-my-setting-prompts"
-rm -rf "$dest/prompts"
+rm -rf "$dest/prompts" "$dest/scripts/lib/__pycache__"
 (cd "$HOME" && "$dest/scripts/update.sh" --no-tools)
+assert_lib_pyc_current "update"
 grep -Fxq 'user prompt' "$HOME/.oh-my-setting-prompts/user.md" ||
   fail "update did not restore displaced user prompts"
 [ ! -e "$HOME/.oh-my-setting-prompts/SOUL.md" ] || fail "update kept retired managed prompts"

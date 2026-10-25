@@ -309,6 +309,24 @@ oms_python_runtime_activate() {
   hash -r 2>/dev/null || true
 }
 
+# Wrappers export PYTHONDONTWRITEBYTECODE, so a module without a current .pyc
+# is recompiled on every Python start. Compile the installed tree once after
+# the source is placed. Best effort and quiet. Checked-hash .pyc files are
+# validated against the source hash on every import and -f rebuilds them, so an
+# equal-length module restored within the same mtime second (a fast rollback)
+# can never run the rejected target's bytecode. PYTHONPYCACHEPREFIX is deliberately unset:
+# it would also hide the standard library's own bytecode.
+oms_python_precompile() {
+  local root="${1:-${ROOT:-}}"
+  [ -d "$root/scripts/lib" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  (
+    unset PYTHONPYCACHEPREFIX PYTHONDONTWRITEBYTECODE
+    python3 -m compileall -q -f --invalidation-mode checked-hash "$root/scripts/lib" >/dev/null 2>&1
+  ) || true
+  return 0
+}
+
 oms_python_runtime_activate_if_present() {
   oms_python_runtime_matches_lock "$ROOT" || return 0
   oms_python_runtime_activate "$ROOT"

@@ -130,12 +130,14 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
+  cp "$ROOT/scripts/lib/python-runtime.sh" "$source/scripts/lib/python-runtime.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   cp "$ROOT/scripts/lib/agent-install-state.sh" "$source/scripts/lib/agent-install-state.sh"
   rm -rf "$source/workflows"
   rm -f "$source/scripts/multi-agent-ask.sh" "$source/scripts/multi-agent-review.sh" \
     "$source/scripts/multi-agent-delegate.sh"
+  printf 'VALUE = "aaaa"\n' > "$source/scripts/lib/precompile_probe.py"
   git -C "$source" add -A
   git -C "$source" commit -qm "fixture: v0.4 base" || true
   first="$(git -C "$source" rev-parse HEAD)"
@@ -161,7 +163,8 @@ test_update_rolls_back_and_supports_explicit_rollback() {
 
   printf '#!/usr/bin/env bash\nexit 41\n' > "$source/scripts/doctor.sh"
   chmod +x "$source/scripts/doctor.sh"
-  git -C "$source" add scripts/doctor.sh
+  printf 'VALUE = "bbbb"\n' > "$source/scripts/lib/precompile_probe.py"
+  git -C "$source" add scripts/doctor.sh scripts/lib/precompile_probe.py
   git -C "$source" commit -qm "fixture: failing doctor"
   failed="$(git -C "$source" rev-parse HEAD)"
 
@@ -176,6 +179,24 @@ test_update_rolls_back_and_supports_explicit_rollback() {
     grep -Fxq 'user style' "$home/.claude/output-styles/oms-korean.md" ||
     fail "failed update did not restore the Claude output style"
   grep -Fq "rollback restored $first" "$TMP/fail.out" || fail "rollback was not reported"
+  # The rejected target was compiled before the doctor failed. Bytecode must
+  # follow the restored source even when both share one mtime second.
+  [ "$(PYTHONDONTWRITEBYTECODE=1 python3 -c \
+    'import sys; sys.path.insert(0, sys.argv[1]); import precompile_probe as m; print(m.VALUE)' \
+    "$installed/scripts/lib" | tr -d '\r')" = aaaa ] ||
+    fail "rollback left bytecode from the rejected target"
+  # Deterministic collision: equal-length source, identical integer mtime.
+  mkdir -p "$TMP/collide/scripts/lib"
+  printf 'VALUE = "bbbb"\n' > "$TMP/collide/scripts/lib/precompile_probe.py"
+  touch -t 202001010000.00 "$TMP/collide/scripts/lib/precompile_probe.py"
+  (. "$installed/scripts/lib/python-runtime.sh" && oms_python_precompile "$TMP/collide")
+  printf 'VALUE = "aaaa"\n' > "$TMP/collide/scripts/lib/precompile_probe.py"
+  touch -t 202001010000.00 "$TMP/collide/scripts/lib/precompile_probe.py"
+  (. "$installed/scripts/lib/python-runtime.sh" && oms_python_precompile "$TMP/collide")
+  [ "$(PYTHONDONTWRITEBYTECODE=1 python3 -c \
+    'import sys; sys.path.insert(0, sys.argv[1]); import precompile_probe as m; print(m.VALUE)' \
+    "$TMP/collide/scripts/lib" | tr -d '\r')" = aaaa ] ||
+    fail "same-mtime equal-length source ran stale bytecode"
   [ ! -L "$home/.codex/AGENTS.md" ] && grep -Fxq 'user rules' "$home/.codex/AGENTS.md" ||
     fail "failed update did not restore the user-owned rules file"
   [ "$(find "$home/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' | wc -l | tr -d ' ')" = 1 ] ||

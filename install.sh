@@ -992,6 +992,8 @@ if oms_install_python_shim_repoint "$HOME/.local/bin/python3" "$(oms_python_runt
   echo "python3 shim: $HOME/.local/bin/python3 -> runtime"
 fi
 
+oms_python_precompile "$DEST"
+
 if [ "$TOOLS_FULL" -eq 1 ]; then
   # Explicit compatibility: the historical all-tools council footprint.
   "$DEST/scripts/install-tools.sh"

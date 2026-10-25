@@ -475,6 +475,16 @@ cleanup_update_tmp() {
 TRANSACTION_ACTIVE=0
 trap cleanup_update_tmp EXIT
 
+# The running shell sourced the pre-checkout helper library, which an older
+# source tree may lack; reload it from the tree that is now checked out.
+precompile_installed_tree() {
+  [ -f "$ROOT/scripts/lib/python-runtime.sh" ] || return 0
+  # shellcheck source=scripts/lib/python-runtime.sh
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  if command -v oms_python_precompile >/dev/null 2>&1; then oms_python_precompile "$ROOT"; fi
+  return 0
+}
+
 restore_previous() {
   local failed_target="$1"
   local rollback_failed=0
@@ -497,6 +507,7 @@ restore_previous() {
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null 2>&1 || rollback_failed=1
   fi
   restore_managed_targets || rollback_failed=1
+  precompile_installed_tree
   if [ -s "$receipt_backup" ]; then cp "$receipt_backup" "$RECEIPT"; else rm -f "$RECEIPT"; fi
   echo "update: rollback restored $current" >&2
   if [ "$rollback_failed" = "1" ]; then
@@ -539,6 +550,7 @@ reconcile_core() {
   else
     export OMS_INSTALL_PREVIOUS_COMMIT="$current"
   fi
+  precompile_installed_tree
   "$ROOT/scripts/link.sh" || return 1
   if [ "$CLAUDE_HOOKS" = "1" ]; then "$ROOT/scripts/install-claude-hooks.sh" || return 1; else "$ROOT/scripts/install-claude-hooks.sh" --remove || return 1; fi
   if [ "$CODEX_PLUGIN" = "1" ]; then
