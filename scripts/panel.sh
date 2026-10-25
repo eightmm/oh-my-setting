@@ -7,9 +7,7 @@ command -v python3 >/dev/null 2>&1 || {
   echo "error: python3 is required" >&2
   exit 2
 }
-# shellcheck source=scripts/lib/pycache-env.sh
-. "$ROOT/scripts/lib/pycache-env.sh"
-oms_pycache_env "$ROOT"
+export PYTHONDONTWRITEBYTECODE=1
 board=0
 for arg in "$@"; do
   [ "$arg" != "--watch" ] || board=1
