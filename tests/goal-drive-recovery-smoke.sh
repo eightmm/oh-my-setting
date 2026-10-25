@@ -749,6 +749,151 @@ HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
 [ "$(wc -l < "$repair_calls" | tr -d ' ')" = "$repair_calls_before" ] ||
   fail "a later goal-drive re-delegated the failed bounded repair task"
 
+# Exercise the driver's fallback without another provider: the receipt may
+# change after the failed repair returns, or while its block is in flight.
+# shellcheck disable=SC2034,SC2317 # Extracted functions consume the fixture state and callbacks.
+(
+  export FENCE_PLAN="$ROOT/scripts/agent-plan.sh"
+  eval "$(sed -n '/^goal_integrate_current()/,/^}/p' "$ROOT/scripts/goal-drive.sh")"
+  eval "$(sed -n '/^reconcile_commit_intent()/,/^}/p' "$ROOT/scripts/goal-drive.sh")"
+  eval "$(sed -n '/^load_task_receipt()/,/^patch_leaf_replace()/p' "$ROOT/scripts/goal-drive.sh" | sed '$d')"
+  mkdir -p "$TMP/repair-fence/scripts/lib"
+  cp "$ROOT/scripts/lib/task-assignment.py" "$TMP/repair-fence/scripts/lib/"
+  ROOT="$TMP/repair-fence"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$ROOT/scripts/patch-land.sh"
+  cat > "$ROOT/scripts/agent-plan.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+case "${3:-}" in
+  repair) exit 0 ;;
+  block)
+    printf '%s\n' "$*" >> "$FENCE_BLOCKS"
+    if [ "$FENCE_CASE" = raced-successor ]; then
+      "$FENCE_PLAN" --repo "$FENCE_REPO" release --id tracked --lease-id "$FENCE_LEASE"
+      "$FENCE_PLAN" --repo "$FENCE_REPO" claim --id tracked --provider codex
+    fi
+    "$FENCE_PLAN" "$@"
+    if [ "$FENCE_CASE" = late-successor ]; then
+      "$FENCE_PLAN" --repo "$FENCE_REPO" reopen --id tracked
+      "$FENCE_PLAN" --repo "$FENCE_REPO" claim --id tracked --provider codex
+    fi
+    exit 0 ;;
+esac
+exec "$FENCE_PLAN" "$@"
+EOF
+  chmod +x "$ROOT/scripts/patch-land.sh" "$ROOT/scripts/agent-plan.sh"
+  printf 'patch\n' > "$ROOT/frozen.patch"
+  intent_prepare() { :; }
+  intent_patch_file() { printf '%s\n' "$ROOT/frozen.patch"; }
+  intent_write() { printf '%s\n' "$1" >> "$ROOT/phases"; }
+  guard_git_authority() { :; }
+  guard_expected_ref() { :; }
+  git() { return 1; }
+  git_status_porcelain() { :; }
+  agent_memory_mktemp() { mktemp "$ROOT/land.XXXXXX"; }
+  goal_phase_run() { GOAL_PHASE_OUT=""; return 9; }
+  park() { printf 'park: %s (%s)\n' "$1" "$2"; exit 3; }
+  task_id=tracked
+  patch_file="$ROOT/frozen.patch"
+  head_before=base
+  head_ref_before="refs/heads/main"
+  AUTO_REPAIR=1
+  PROVIDER=codex MODEL="" FALLBACK_MODEL="" REASONING_EFFORT=auto
+  TASK_ROUTE_PROVIDER=codex
+  TASK_ROUTE_MODEL=""
+  TASK_ROUTE_FALLBACK_MODEL=""
+  TASK_ROUTE_REASONING_EFFORT=auto
+  TASK_ROUTE_WORKLOAD=standard
+  TASK_RECEIPT_VERIFY=true
+  PROVIDER_TIMEOUT=1m
+  for fence_case in claimed running review blocked ready \
+    successor-claimed successor-running successor-review successor-blocked \
+    raced-successor late-successor; do
+    REPO="$ROOT/$fence_case"
+    mkdir -p "$REPO"
+    REPO="$(cd "$REPO" && pwd -P)"
+    STATE_REPO="$REPO"
+    command git -C "$REPO" init -q
+    "$FENCE_PLAN" --repo "$REPO" init --goal repair-fence --accept true >/dev/null
+    "$FENCE_PLAN" --repo "$REPO" add --id tracked --title 'fix: fence repair' \
+      --allowed tracked.txt --verify true >/dev/null
+    "$FENCE_PLAN" --repo "$REPO" claim --id tracked --provider codex >/dev/null
+    load_task_receipt tracked
+    INTENT_LEASE="$TASK_RECEIPT_LEASE"
+    "$FENCE_PLAN" --repo "$REPO" review --id tracked --lease-id "$INTENT_LEASE" \
+      --artifact "$ROOT/frozen.patch" --patch "$ROOT/frozen.patch" >/dev/null
+    "$FENCE_PLAN" --repo "$REPO" repair --id tracked --lease-id "$INTENT_LEASE" >/dev/null
+    case "$fence_case" in
+      ready|successor-*)
+        "$FENCE_PLAN" --repo "$REPO" release --id tracked --lease-id "$INTENT_LEASE" >/dev/null ;;
+    esac
+    case "$fence_case" in
+      successor-*) "$FENCE_PLAN" --repo "$REPO" claim --id tracked --provider codex >/dev/null ;;
+    esac
+    load_task_receipt tracked
+    case "$fence_case" in
+      running|successor-running) action=start ;;
+      review|successor-review) action=review ;;
+      blocked|successor-blocked) action=block ;;
+      *) action="" ;;
+    esac
+    [ -z "$action" ] || "$FENCE_PLAN" --repo "$REPO" "$action" --id tracked \
+      --lease-id "$TASK_RECEIPT_LEASE" --reason fixture >/dev/null
+    cp "$REPO/.oms/plan/tasks.json" "$ROOT/$fence_case.before"
+    export FENCE_BLOCKS="$ROOT/$fence_case.blocks"
+    export FENCE_CASE="$fence_case" FENCE_REPO="$REPO" FENCE_LEASE="$INTENT_LEASE"
+    rc=0
+    (goal_integrate_current) > "$ROOT/$fence_case.out" 2>&1 || rc=$?
+    [ "$rc" = 3 ] || fail "repair fence $fence_case did not park"
+    case "$fence_case" in
+      claimed|running|review|raced-successor|late-successor)
+        grep -Fq -- "--lease-id $INTENT_LEASE" "$FENCE_BLOCKS" ||
+          fail "repair fence $fence_case did not use the original lease" ;;
+      *) [ ! -s "$FENCE_BLOCKS" ] ||
+          fail "repair fence $fence_case blocked a row it no longer owns"
+        cmp -s "$ROOT/$fence_case.before" "$REPO/.oms/plan/tasks.json" ||
+          fail "repair fence $fence_case changed another task receipt" ;;
+    esac
+    case "$fence_case" in
+      claimed|running|review|blocked) expected_reason="task-failed" ;;
+      *) expected_reason="repair-terminalize-failed" ;;
+    esac
+    grep -Fq "park: $expected_reason" "$ROOT/$fence_case.out" ||
+      fail "repair fence $fence_case did not verify terminal convergence"
+    case "$fence_case" in
+      raced-successor|late-successor)
+        load_task_receipt tracked
+        [ "$TASK_RECEIPT_STATE" = claimed ] && [ "$TASK_RECEIPT_LEASE" != "$INTENT_LEASE" ] ||
+          fail "repair fence $fence_case did not preserve the concurrent successor claim" ;;
+    esac
+  done
+
+  # A restart must preserve the same ready-row fence, with no post-release block.
+  latest_open_intent() { printf 'intent\n'; }
+  load_intent() {
+    INTENT_TASK=tracked INTENT_PROVIDER=codex INTENT_PHASE=repairing
+    INTENT_PATCH_SHA=hash INTENT_VERIFY_SHA=hash
+    INTENT_PATHS='[]'
+  }
+  intent_patch_paths_json() { printf '[]\n'; }
+  oms_sha256_file() { printf 'hash\n'; }
+  oms_sha256_stream() { cat >/dev/null; printf 'hash\n'; }
+  COMMIT_TASK=""
+  REPO="$(cd "$ROOT/ready" && pwd -P)"
+  STATE_REPO="$REPO"
+  load_task_receipt tracked
+  INTENT_LEASE="$TASK_RECEIPT_REVIEW_LEASE"
+  export FENCE_BLOCKS="$ROOT/resumed-ready.blocks"
+  for attempt in 1 2; do
+    rc=0
+    (reconcile_commit_intent) > "$ROOT/resumed-ready.out" 2>&1 || rc=$?
+    [ "$rc" = 3 ] || fail "resumed ready repair did not park"
+    [ ! -s "$FENCE_BLOCKS" ] || fail "resumed repair blocked an unfenced ready row"
+    cmp -s "$ROOT/ready.before" "$REPO/.oms/plan/tasks.json" ||
+      fail "resumed repair changed the ready task receipt"
+  done
+)
+
 # A successful repair process can still publish no patch when its verifier is
 # intentionally broad. Publishing that empty review replaces the old review
 # evidence, so the old frozen intent must be abandoned just like a failed

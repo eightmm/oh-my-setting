@@ -1994,11 +1994,7 @@ reconcile_commit_intent() {
           abandon_invalid_intent "released-repair-receipt-mismatch"
           return 0
         fi
-        "$ROOT/scripts/agent-plan.sh" --repo "$REPO" block --id "$INTENT_TASK" \
-          --reason "interrupted bounded landing repair" >/dev/null 2>&1 ||
-          park "repair-terminalize-failed" "the interrupted repair could not be blocked"
-        intent_write abandoned "repair-released-before-review"
-        return 0
+        park "repair-terminalize-failed" "the interrupted repair returned a ready task; refusing an unfenced post-release block"
         ;;
       blocked:1)
         intent_write abandoned "repair-blocked-before-review"
@@ -2041,7 +2037,7 @@ reconcile_commit_intent() {
   # A repair journal row is written before the state transition. It prevents a
   # restart from blindly making a second provider call. A completed same-lease
   # repaired review supersedes the old frozen patch under the same intent id;
-  # an in-flight repair stays parked, and a released/blocked repair closes.
+  # an in-flight or released repair stays parked, and a blocked repair closes.
   if [ "$INTENT_PHASE" = repairing ]; then
     case "$TASK_RECEIPT_STATE:$TASK_RECEIPT_REPAIR_COUNT" in
       review:1)
@@ -2589,19 +2585,32 @@ goal_integrate_current() {
       park "invalid-review-receipt" "the failed landing task receipt could not be read"
     current_task_state="$TASK_RECEIPT_STATE"
     current_task_lease="$TASK_RECEIPT_LEASE"
-    if [ "$repair_worker_failed" = 1 ] && [ "$current_task_state" != blocked ]; then
-      block_args=(--repo "$REPO" block --id "$task_id" --reason "bounded landing repair failed")
+    if [ "$repair_worker_failed" = 1 ]; then
+      [ -n "$INTENT_LEASE" ] && [ "$TASK_RECEIPT_REPAIR_COUNT" = 1 ] &&
+        [ "$TASK_RECEIPT_REVIEW_LEASE" = "$INTENT_LEASE" ] ||
+        park "repair-terminalize-failed" "the failed bounded repair no longer has its exact one-shot receipt"
+      # Only the original repair lease authorizes this fallback. A ready row
+      # has no lease fence in agent-plan block, so park without mutating it.
       case "$current_task_state" in
+        blocked) ;;
         claimed|running|review|landing)
-          [ -z "$current_task_lease" ] || block_args+=(--lease-id "$current_task_lease")
+          [ "$current_task_lease" = "$INTENT_LEASE" ] ||
+            park "repair-terminalize-failed" "the failed bounded repair is now owned by a different lease"
+          "$ROOT/scripts/agent-plan.sh" --repo "$REPO" block --id "$task_id" \
+            --lease-id "$INTENT_LEASE" --reason "bounded landing repair failed" >/dev/null 2>&1 ||
+            park "repair-terminalize-failed" "the failed bounded repair could not be blocked under its original lease; inspect task $task_id"
+          load_task_receipt "$task_id" ||
+            park "repair-terminalize-failed" "the blocked repair task receipt could not be read"
+          current_task_state="$TASK_RECEIPT_STATE"
+          current_task_lease="$TASK_RECEIPT_LEASE"
+          ;;
+        *)
+          park "repair-terminalize-failed" "the failed bounded repair is $current_task_state; refusing a block without an active lease"
           ;;
       esac
-      "$ROOT/scripts/agent-plan.sh" "${block_args[@]}" >/dev/null 2>&1 ||
-        park "repair-terminalize-failed" "the failed bounded repair could not be blocked; inspect task $task_id"
-      load_task_receipt "$task_id" ||
-        park "repair-terminalize-failed" "the blocked repair task receipt could not be read"
-      current_task_state="$TASK_RECEIPT_STATE"
-      current_task_lease="$TASK_RECEIPT_LEASE"
+      [ "$current_task_state" = blocked ] && [ "$current_task_lease" = "$INTENT_LEASE" ] &&
+        [ "$TASK_RECEIPT_REPAIR_COUNT" = 1 ] && [ "$TASK_RECEIPT_REVIEW_LEASE" = "$INTENT_LEASE" ] ||
+        park "repair-terminalize-failed" "the failed bounded repair did not converge to its exact blocked receipt"
     fi
     landing_next="the frozen intent is resumable after fixing the gate or approval"
     if [ "$current_task_state" != review ] || [ "$current_task_lease" != "$INTENT_LEASE" ]; then
