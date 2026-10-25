@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import collections
+import hashlib
+import json
+import os
 import re
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence
 
 from . import RUNTIME_SCHEMA
-from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, git_head, install_root, parse_path_list, read_jsonl, relative_path, safe_id, sha256_file, utc_now
+from .common import MAX_JSONL_BYTES, MAX_JSONL_LINE_BYTES, MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, git_head, install_root, parse_path_list, read_jsonl, relative_path, safe_id, sha256_file, utc_now
 from .projection import build_base_envelope, finalize_envelope
 
 VALID_STATUSES = {"verified", "failed", "inconclusive", "skipped_with_reason", "stale"}
@@ -27,7 +32,19 @@ def _artifact_paths(repo: Path) -> List[Path]:
     return [path for path in candidates if path.is_file() and not path.is_symlink()]
 
 
-def artifact_rows(repo: Path) -> List[Dict[str, Any]]:
+class _ReducedRows(list):
+    """Rows build_coverage can act on, plus what the dropped rows contributed."""
+
+    total: int
+    inert_refs: List[str]
+
+
+def artifact_rows(repo: Path, *, reduced: bool = False) -> List[Dict[str, Any]]:
+    """All rows; `reduced` may instead return a _ReducedRows from the append cache."""
+    if reduced:
+        cached = _cached_artifact_rows(repo)
+        if cached is not None:
+            return cached
     result: List[Dict[str, Any]] = []
     ordinal = 0
     for path in _artifact_paths(repo):
@@ -39,6 +56,205 @@ def artifact_rows(repo: Path) -> List[Dict[str, Any]]:
             copy["_ordinal"] = ordinal
             result.append(copy)
     return result
+
+
+# The classification below depends on this module's own code, so editing it
+# invalidates every cache.
+_ROWS_CACHE_VERSION = "1:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+
+
+def _rows_cache_path(repo: Path, source: str) -> Optional[Path]:
+    """Cache file outside the repository (worker runs must not write under .oms)."""
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    home = os.environ.get("HOME", "")
+    if xdg and os.path.isabs(xdg):
+        base = xdg
+    elif home and os.path.isabs(home):
+        base = os.path.join(home, ".cache")
+    else:
+        return None
+    try:
+        root = repo.resolve()
+        directory = (Path(base) / "oms" / "evidence-rows").resolve()
+        if directory == root or root in directory.parents:
+            return None
+        key = hashlib.sha256((str(root) + "\0" + source).encode("utf-8", "surrogateescape")).hexdigest()[:32]
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return directory / (key + ".json")
+
+
+def _inert_row(row: Mapping[str, Any], source: str) -> bool:
+    """True when build_coverage's row loop cannot act on the row for any criteria set."""
+    return source != INDEX_SOURCE and not criterion_refs(row) and outcome(row) is None
+
+
+def _rows_cache_digest(body: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _read_rows_cache(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    if path is None:
+        return None
+    try:
+        with open(str(path), encoding="utf-8") as handle:
+            cache = json.load(handle)
+        ints = ("dev", "ino", "offset", "count")
+        if (not isinstance(cache, dict)
+                or set(cache) != set(ints + ("version", "prefix_sha", "rows", "inert_refs", "digest"))
+                or cache["version"] != _ROWS_CACHE_VERSION
+                or any(type(cache[name]) is not int or cache[name] < 0 for name in ints)
+                or not isinstance(cache["prefix_sha"], str) or not isinstance(cache["inert_refs"], str)
+                or not isinstance(cache["rows"], list)
+                or not all(isinstance(item, list) and len(item) == 2 and type(item[0]) is int
+                           and isinstance(item[1], dict) for item in cache["rows"])):
+            return None
+        if _rows_cache_digest({name: value for name, value in cache.items() if name != "digest"}) != cache["digest"]:
+            return None
+        return cache
+    except Exception:
+        return None
+
+
+def _write_rows_cache(path: Optional[Path], body: Dict[str, Any]) -> None:
+    if path is None:
+        return
+    try:
+        body = dict(body, version=_ROWS_CACHE_VERSION)
+        body["digest"] = _rows_cache_digest(body)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(str(path.parent), 0o700)
+        fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(body, handle, sort_keys=True, separators=(",", ":"))
+            os.replace(temp_name, str(path))
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _parse_rows(data: bytes, first: int) -> Optional[List[tuple]]:
+    """[(row number, row)] for each non-blank line, numbered after `first`; None on any doubt."""
+    if data.count(b"\r") != data.count(b"\r\n"):
+        return None  # bytes.splitlines would split where the newline split does not
+    parsed: List[tuple] = []
+    number = first
+    for line in data.split(b"\n"):
+        if not line.strip():
+            continue
+        if len(line.rstrip(b"\r")) > MAX_JSONL_LINE_BYTES or number >= MAX_JSONL_ROWS:
+            return None
+        row = json.loads(line.decode("utf-8"))
+        if not isinstance(row, dict):
+            return None
+        number += 1
+        parsed.append((number, row))
+    return parsed
+
+
+def _cached_file_rows(repo: Path, path: Path, source: str) -> Optional[tuple]:
+    """Reduced rows of one append-only JSONL file, resuming from the cache.
+
+    Returns (row count, retained [(row number, row)], inert refs) or None to
+    request the canonical read_jsonl, which also raises the canonical errors.
+    Only newline-terminated rows become cache state: a torn or unterminated
+    tail is re-parsed on every call and never cached.
+    """
+    cache_path = _rows_cache_path(repo, source)
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_JSONL_BYTES:
+            return None
+        with open(str(path), "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino) or not stat.S_ISREG(info.st_mode):
+                return None
+            cache = _read_rows_cache(cache_path)
+            retained: List[Any] = []
+            inert: List[str] = []
+            count = offset = 0
+            prefix = hashlib.sha256()
+            resumed = False
+            if (cache is not None and (cache["dev"], cache["ino"]) == (info.st_dev, info.st_ino)
+                    and info.st_size >= cache["offset"]):
+                remaining = cache["offset"]
+                while remaining > 0:
+                    chunk = handle.read(min(remaining, 1 << 20))
+                    if not chunk:
+                        break
+                    prefix.update(chunk)
+                    remaining -= len(chunk)
+                # The whole consumed prefix must re-hash identically: an in-place
+                # edit anywhere in it forces a full read.
+                if remaining == 0 and prefix.hexdigest() == cache["prefix_sha"]:
+                    retained = cache["rows"]
+                    inert = cache["inert_refs"].split("\n") if cache["inert_refs"] else []
+                    count, offset, resumed = cache["count"], cache["offset"], True
+            if not resumed:
+                prefix = hashlib.sha256()
+                handle.seek(0)
+            data = handle.read(MAX_JSONL_BYTES + 1)
+            if offset + len(data) > MAX_JSONL_BYTES:
+                return None
+            cut = data.rfind(b"\n") + 1
+            complete = _parse_rows(data[:cut], count)
+            if complete is None:
+                return None
+            for number, row in complete:
+                if _inert_row(row, source):
+                    ref = evidence_ref(row)
+                    if ref:
+                        inert.append(ref)
+                else:
+                    retained.append([number, row])
+            if complete:
+                count = complete[-1][0]
+            if complete or not resumed:
+                prefix.update(data[:cut])
+                _write_rows_cache(cache_path, {
+                    "dev": info.st_dev, "ino": info.st_ino, "offset": offset + cut, "count": count,
+                    "prefix_sha": prefix.hexdigest(), "rows": retained, "inert_refs": "\n".join(inert)})
+            tail = _parse_rows(data[cut:], count)
+            if tail is None:
+                return None
+            visible, visible_inert = list(retained), list(inert)
+            for number, row in tail:
+                if _inert_row(row, source):
+                    if evidence_ref(row):
+                        visible_inert.append(evidence_ref(row))
+                else:
+                    visible.append([number, row])
+                count = number
+            return count, visible, visible_inert
+    except Exception:
+        return None
+
+
+def _cached_artifact_rows(repo: Path) -> Optional[_ReducedRows]:
+    """Retained rows with _source/_ordinal and the dropped rows' count and refs, or None for the full read."""
+    retained = _ReducedRows()
+    inert: List[str] = []
+    total = 0
+    for path in _artifact_paths(repo):
+        source = relative_path(path, repo)
+        result = _cached_file_rows(repo, path, source)
+        if result is None:
+            return None
+        count, rows, refs = result
+        for number, row in rows:
+            copy = dict(row)
+            copy["_source"] = source
+            copy["_ordinal"] = total + number
+            retained.append(copy)
+        inert.extend(refs)
+        total += count
+    retained.total, retained.inert_refs = total, inert
+    return retained
 
 
 def evidence_ref(row: Mapping[str, Any]) -> str:
@@ -414,7 +630,7 @@ def _project_status(items: Sequence[Mapping[str, Any]]) -> str:
     return "inconclusive"
 
 
-def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None, *, use_cache: bool = True) -> Dict[str, Any]:
     base_envelope = dict(base or build_base_envelope(repo))
     criteria = list(base_envelope.get("criteria", []))
     repo_info = base_envelope.get("repo", {}) if isinstance(base_envelope.get("repo"), Mapping) else {}
@@ -423,7 +639,11 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     valid_ids = set(criteria_by_id)
     by_criterion: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
     unbound: List[tuple] = []
-    rows = artifact_rows(repo)
+    rows = artifact_rows(repo, reduced=use_cache)
+    # Rows that no criteria set can act on are dropped from the cache; only
+    # their count (ordinals) and refs (binding lookups) survive.
+    total_rows = getattr(rows, "total", len(rows))
+    inert_refs = getattr(rows, "inert_refs", None)
     resolved = resolved_event_ids(rows)
     row_by_ref = {evidence_ref(row): row for row in rows if evidence_ref(row)}
     plan_criteria = {str(item.get("id")): str(item.get("command_digest", "")) for item in criteria if item.get("source") == "plan" and item.get("command_digest")}
@@ -484,7 +704,11 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
         elif outcome(row) is not None:
             unbound.append((row, support))
     active_bindings = _active_bindings(repo)
-    for binding_index, binding in enumerate(active_bindings, len(rows) + 1):
+    if inert_refs is not None:
+        wanted = {str(binding.get("evidence_ref", "")) for binding in active_bindings} - {""}
+        if wanted and wanted.intersection(inert_refs):
+            return build_coverage(repo, base_envelope, use_cache=False)
+    for binding_index, binding in enumerate(active_bindings, total_rows + 1):
         binding = dict(binding)
         binding["_ordinal"] = binding_index
         criterion_id = str(binding.get("criterion_id", ""))
@@ -513,7 +737,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
         task_ref = "task-verification:%s" % task.get("task_id", "")
         for criterion in criteria:
             if criterion.get("source") == "task" and not by_criterion.get(str(criterion.get("id"))):
-                by_criterion[str(criterion.get("id"))].append({"evidence_ref": task_ref, "kind": "task-verification", "provider": "", "status": "verified", "signal": "execution_feedback", "stale": False, "ts": bounded_line(task.get("metadata", {}).get("updated", task.get("metadata", {}).get("last_activity", "")), 40) if isinstance(task.get("metadata"), dict) else "", "scope_digest": task.get("verify_digest", ""), "support": "fresh-task-gate", "source": ".oms/task/current.md", "_ordinal": len(rows) + len(active_bindings) + 1})
+                by_criterion[str(criterion.get("id"))].append({"evidence_ref": task_ref, "kind": "task-verification", "provider": "", "status": "verified", "signal": "execution_feedback", "stale": False, "ts": bounded_line(task.get("metadata", {}).get("updated", task.get("metadata", {}).get("last_activity", "")), 40) if isinstance(task.get("metadata"), dict) else "", "scope_digest": task.get("verify_digest", ""), "support": "fresh-task-gate", "source": ".oms/task/current.md", "_ordinal": total_rows + len(active_bindings) + 1})
     projected: List[Dict[str, Any]] = []
     counts: collections.Counter = collections.Counter()
     for criterion in criteria:
@@ -525,7 +749,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     total_weight = sum(float(item.get("weight", 1)) for item in projected)
     verified_weight = sum(float(item.get("weight", 1)) for item in projected if item.get("status") == "verified")
     risk_weight = sum(float(item.get("weight", 1)) * {"failed": 1.0, "missing": 0.8, "stale": 0.7, "inconclusive": 0.5, "skipped_with_reason": 0.4}.get(str(item.get("status")), 0.0) for item in projected)
-    return {"schema": RUNTIME_SCHEMA, "criteria": projected, "counts": dict(sorted(counts.items())), "coverage": verified_weight / total_weight if total_weight else 0.0, "risk_score": risk_weight / total_weight if total_weight else 1.0, "complete": bool(projected) and all(item.get("status") == "verified" for item in projected), "unbound_evidence": [_evidence_item(row, repo, support=support, head=head, resolved=resolved) for row, support in unbound[-50:]], "artifact_rows_seen": len(rows)}
+    return {"schema": RUNTIME_SCHEMA, "criteria": projected, "counts": dict(sorted(counts.items())), "coverage": verified_weight / total_weight if total_weight else 0.0, "risk_score": risk_weight / total_weight if total_weight else 1.0, "complete": bool(projected) and all(item.get("status") == "verified" for item in projected), "unbound_evidence": [_evidence_item(row, repo, support=support, head=head, resolved=resolved) for row, support in unbound[-50:]], "artifact_rows_seen": total_rows}
 
 
 def build_envelope(repo: Path, *, status_snapshots: Any = None) -> Dict[str, Any]:

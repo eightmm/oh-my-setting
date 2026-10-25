@@ -371,6 +371,81 @@ class RuntimeFixture(RuntimeFixtureBase):
         statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
         self.assertEqual(statuses['project-safe'], 'stale')
 
+    def test_coverage_row_cache_matches_full_read_across_append_rewrite_and_torn_tail(self) -> None:
+        events = self.repo / '.oms' / 'lifecycle' / 'events.jsonl'
+        events.parent.mkdir(parents=True, exist_ok=True)
+        cache_home = Path(self.tmp.name) / 'xdg-cache'
+
+        def row(name: str, **extra: object) -> str:
+            return json.dumps(dict({'event_id': name, 'kind': 'lifecycle'}, **extra)) + '\n'
+
+        def both() -> dict:
+            cached = evidence.build_coverage(self.repo)
+            self.assertEqual(cached, evidence.build_coverage(self.repo, use_cache=False))
+            return cached
+
+        def cache_files() -> list:
+            with patch.dict(os.environ, {'XDG_CACHE_HOME': str(cache_home)}):
+                path = evidence._rows_cache_path(self.repo, '.oms/lifecycle/events.jsonl')
+            return [path] if path.is_file() else []
+
+        others = evidence.build_coverage(self.repo, use_cache=False)['artifact_rows_seen']
+        with patch.dict(os.environ, {'XDG_CACHE_HOME': str(cache_home)}):
+            events.write_text(row('inert-1') + row('a', status='verified', covers=['project-safe']), encoding='utf-8')
+            first = both()
+            self.assertEqual(first['artifact_rows_seen'], others + 2)
+            self.assertEqual(len(cache_files()), 1)
+            self.assertFalse(str(cache_home).startswith(str(self.repo)))
+
+            with events.open('a', encoding='utf-8') as handle:
+                handle.write(row('inert-2') + row('b', status='failed', covers=['project-safe']))
+            appended = both()
+            self.assertEqual(appended['artifact_rows_seen'], others + 4)
+            self.assertNotEqual(appended['criteria'], first['criteria'])
+
+            # Same size, same inode, different bytes inside the cached prefix.
+            before = events.stat()
+            events.write_bytes(events.read_bytes().replace(b'"a"', b'"z"'))
+            self.assertEqual(events.stat().st_size, before.st_size)
+            both()
+            # Same size, new inode, different content.
+            replacement = events.with_name('events.jsonl.new')
+            replacement.write_bytes(events.read_bytes().replace(b'verified', b'rejected'))
+            os.replace(str(replacement), str(events))
+            self.assertEqual(events.stat().st_size, before.st_size)
+            self.assertNotEqual(events.stat().st_ino, before.st_ino)
+            rewritten = both()
+            self.assertNotEqual(rewritten['criteria'], appended['criteria'])
+            # Truncation below the cached offset.
+            events.write_text(row('only', status='verified', covers=['project-safe']), encoding='utf-8')
+            self.assertEqual(both()['artifact_rows_seen'], others + 1)
+
+            # A torn tail is parsed per call, never cached, and fails like read_jsonl.
+            events.write_text(row('c', status='verified', covers=['project-safe']), encoding='utf-8')
+            both()
+            cached_state = cache_files()[0].read_bytes()
+            with events.open('a', encoding='utf-8') as handle:
+                handle.write('{"event_id": "torn", "stat')
+            with self.assertRaises(CoreError) as torn_cached:
+                evidence.build_coverage(self.repo)
+            with self.assertRaises(CoreError) as torn_full:
+                evidence.build_coverage(self.repo, use_cache=False)
+            self.assertEqual(str(torn_cached.exception), str(torn_full.exception))
+            self.assertEqual(cache_files()[0].read_bytes(), cached_state)
+            # An unterminated but valid last row counts, still uncached.
+            with events.open('a', encoding='utf-8') as handle:
+                handle.write('us": "verified", "covers": ["project-safe"]}')
+            self.assertEqual(both()['artifact_rows_seen'], others + 2)
+            self.assertEqual(cache_files()[0].read_bytes(), cached_state)
+
+            # A corrupt cache falls back to the full read and is rewritten.
+            cache_files()[0].write_text('{not json', encoding='utf-8')
+            both()
+            # A cache write failure is silent.
+            with patch.object(evidence.os, 'replace', side_effect=OSError('read-only')):
+                events.write_text(row('d', status='verified', covers=['project-safe']), encoding='utf-8')
+                both()
+
     def test_context_manifest_selects_target_imports_tests_and_reports_debt(self) -> None:
         target = self.repo / 'scripts' / 'sample.py'
         target.write_text('from __future__ import annotations\nfrom typing import Any\nfrom pathlib import Path\n' + target.read_text(encoding='utf-8'), encoding='utf-8')
