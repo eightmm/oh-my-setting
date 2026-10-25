@@ -231,6 +231,31 @@ test_fail_ledger_hook_resolves_on_success() {
   [ -z "$out" ] || fail "a success is not agent context: $out"
   [ ! -e "$repo/.oms/failures.jsonl" ] || fail "a success seeded a ledger"
 
+  # No open rows means no interpreter: a python3 shim records any start.
+  mkdir -p "$TMP/hook-shim"
+  printf '#!/bin/sh\necho start >> "%s"\nexec "%s" "$@"\n' \
+    "$TMP/hook-shim/calls" "$(command -v python3)" > "$TMP/hook-shim/python3"
+  chmod +x "$TMP/hook-shim/python3"
+  : > "$repo/.oms/failures.jsonl"
+  (cd "$repo" && printf '%s' "$passed" | PATH="$TMP/hook-shim:$PATH" bash "$hook") ||
+    fail "the hook must never exit nonzero"
+  [ ! -e "$TMP/hook-shim/calls" ] ||
+    fail "a success with no open rows must not start python3"
+  # A harness child and a stray attempt id without an oms panel session are
+  # not panel mains, so record_panel_activity is a no-op and they stay fast.
+  (cd "$repo" && printf '%s' "$passed" | OMS_HARNESS_CHILD=1 OMS_PANEL_MAIN_ATTEMPT=attempt \
+    OMS_PANEL_SESSION=oms-fixture PATH="$TMP/hook-shim:$PATH" bash "$hook") ||
+    fail "the hook must never exit nonzero"
+  (cd "$repo" && printf '%s' "$passed" | OMS_PANEL_MAIN_ATTEMPT=attempt \
+    OMS_PANEL_SESSION=plain PATH="$TMP/hook-shim:$PATH" bash "$hook") ||
+    fail "the hook must never exit nonzero"
+  [ ! -e "$TMP/hook-shim/calls" ] ||
+    fail "a child or non-panel session with an idle ledger must not start python3"
+  (cd "$repo" && printf '%s' "$passed" | OMS_PANEL_MAIN_ATTEMPT=attempt \
+    OMS_PANEL_SESSION=oms-fixture PATH="$TMP/hook-shim:$PATH" bash "$hook") || true
+  [ -e "$TMP/hook-shim/calls" ] || fail "a panel main must still reach python3"
+  rm -f "$TMP/hook-shim/calls" "$repo/.oms/failures.jsonl"
+
   (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null ||
     fail "a first failure has nothing to say, so the hook must exit 0"
   # The repeat speaks — on stderr with exit 2, the non-blocking channel Claude
@@ -242,8 +267,9 @@ test_fail_ledger_hook_resolves_on_success() {
     fail "the repeat should carry the ledger's advise hint: $(cat "$repo/hook-ledger.err")"
   [ "$(ledger_rows "$repo")" = 2 ] || fail "two failures should file two rows"
 
-  out="$(cd "$repo" && printf '%s' "$passed" | bash "$hook")" ||
+  out="$(cd "$repo" && printf '%s' "$passed" | PATH="$TMP/hook-shim:$PATH" bash "$hook")" ||
     fail "the success side must never exit nonzero"
+  [ -e "$TMP/hook-shim/calls" ] || fail "a success with an open row must still reach python3"
   [ -z "$out" ] || fail "the resolve receipt is bookkeeping, not context: $out"
   if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
     grep -F 'check.sh focused' > /dev/null; then
@@ -266,6 +292,18 @@ test_fail_ledger_hook_resolves_on_success() {
   [ "$(ledger_rows "$repo")" = "$rows" ] ||
     fail "an interrupted or backgrounded run must not resolve (run_in_background or backgroundTaskId)"
   (cd "$repo" && printf '%s' "$passed" | bash "$hook") >/dev/null
+
+  # An escaped key reads as absent to the shell; launched from another checkout
+  # it must not pick that checkout's (empty) ledger over the target's open row.
+  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null 2>&1 || true
+  mkdir -p "$TMP/hook-other/.oms"
+  git -C "$TMP/hook-other" init -q
+  escaped="$(printf '%s' "$passed" | sed 's|^{|{"c\\u0077d":"'"$repo"'",|')"
+  (cd "$TMP/hook-other" && printf '%s' "$escaped" | bash "$hook") >/dev/null
+  if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
+    grep -F 'check.sh focused' > /dev/null; then
+    fail "an escaped cwd key must fall through to python and resolve the target repo"
+  fi
 
   # Hook inline Python runs isolated: a json.py at the cwd root must not execute.
   printf 'open(%s, "w").close()\n' "'$repo/json-planted'" >"$repo/json.py"
@@ -362,6 +400,15 @@ proc = subprocess.run(["bash", str(root / "scripts/syntax-guard-hook.sh")], cwd=
 message = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
 assert "backward compatibility" in message and "does not parse" in message
 assert not hook_state.live_thread_hint(payload("codex")), "edit and prompt delivery must share the cursor"
+# An escaped "cwd" key launched from another checkout must still reach the target's mail.
+call("append", "--id", "live", "--role", "decision", "--text", "escaped-key-mail")
+elsewhere = repo.parent / "elsewhere-checkout"
+elsewhere.mkdir()
+subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+escaped = dict(payload("codex"), tool_name="Write", tool_input={"file_path": str(repo / "notes.md")})
+proc = subprocess.run(["bash", str(root / "scripts/syntax-guard-hook.sh")], cwd=elsewhere,
+                      input=json.dumps(escaped).replace('"cwd"', '"c\\u0077d"'), capture_output=True, text=True, check=True)
+assert "escaped-key-mail" in proc.stdout, proc.stdout
 # A session that has not acked the thread gets answers as a bounded preview and
 # every other role whole; acking makes it a participant that gets answers whole.
 call("ack", "--id", "live", "--after", first.rsplit("--after ", 1)[1].strip(),

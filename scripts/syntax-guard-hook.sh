@@ -21,6 +21,58 @@ payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# Shell-only precheck: the python pass below judges only sh/bash/py/json/toml
+# and extensionless (shebang) files, but it also delivers live collaboration
+# mail on every edit. Skip it only when the edited path has no checker AND the
+# repo has no .oms/threads directory (so no room or thread can exist), with no
+# room/panel environment. Anything the shell cannot read unambiguously falls
+# through to python unchanged.
+fast_nothing_to_do() {
+  local tool_re path_re cwd_re base rest top file name ext
+  [ -z "${OMS_ROOM_ID:-}" ] && [ -z "${OMS_ROOM_REPO:-}" ] || return 1
+  # Mirrors hook_state.record_panel_activity: it acts only for a panel main.
+  if [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ] && [ "${OMS_HARNESS_CHILD:-}" != 1 ]; then
+    case "${OMS_PANEL_SESSION:-}" in oms-*) return 1 ;; esac
+  fi
+  # A JSON escape can spell a key the shell would read as absent.
+  case "$payload" in *'\u'*) return 1 ;; esac
+  tool_re='"tool_name"[[:space:]]*:[[:space:]]*"(Edit|Write|MultiEdit)"'
+  [[ "$payload" =~ $tool_re ]] || return 1
+  path_re='"file_path"[[:space:]]*:[[:space:]]*"([^"\\]+)"'
+  [[ "$payload" =~ $path_re ]] || return 1
+  file="${BASH_REMATCH[1]}"
+  rest="${payload#*"${BASH_REMATCH[0]}"}"
+  case "$rest" in *'"file_path"'*) return 1 ;; esac
+  name="${file##*/}"
+  name="${name#"${name%%[!.]*}"}"  # splitext ignores leading dots
+  case "$name" in *.*) ext=".${name##*.}" ;; *) return 1 ;; esac
+  case "$(printf '%s' "$ext" | tr 'A-Z' 'a-z')" in
+    .sh|.bash|.py|.json|.toml|.) return 1 ;;
+  esac
+  case "$payload" in *'"currentWorkingDirectory"'*) return 1 ;; esac
+  if [ -n "${OMS_STATE_REPO:-}" ]; then
+    base="$OMS_STATE_REPO"
+  else
+    cwd_re='"cwd"[[:space:]]*:[[:space:]]*"([^"\\]+)"'
+    if [[ "$payload" =~ $cwd_re ]]; then
+      base="${BASH_REMATCH[1]}"
+      rest="${payload#*"${BASH_REMATCH[0]}"}"
+      case "$rest" in *'"cwd"'*) return 1 ;; esac
+    elif [[ "$payload" == *'"cwd"'* ]]; then
+      return 1
+    else
+      base="$PWD"
+    fi
+  fi
+  case "$base" in /*|[A-Za-z]:/*) ;; *) return 1 ;; esac
+  top="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  top="${top//$'\r'/}"
+  [ -n "$top" ] || return 1
+  [ ! -d "$top/.oms/threads" ] && [ ! -e "$top/.oms/threads" ]
+}
+if fast_nothing_to_do; then exit 0; fi
+
 OMS_SGH_PAYLOAD="$payload" python3 -X utf8 -I -B - "$ROOT/scripts/lib" "$BASH" <<'PY' 2>/dev/null || true
 import atexit
 import ast

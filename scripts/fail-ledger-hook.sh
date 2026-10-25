@@ -31,6 +31,58 @@ payload="$(cat 2>/dev/null || true)"
 
 [ -x "$ROOT/scripts/fail-ledger.sh" ] || exit 0
 
+# Shell-only precheck: a PostToolUse (success) event only ever resolves an open
+# ledger row, so with an absent/empty ledger the python pass below would print
+# nothing and touch nothing. It also owns the panel-activity and usage-counter
+# side effects, so those environments, and any payload the shell cannot read
+# unambiguously, fall through to it unchanged.
+fast_idle_success() {
+  local ev_re cwd_re base rest top ledger
+  case "${OMS_USAGE_TRACK:-0}" in
+    0|false|FALSE|no|NO|off|OFF) ;;
+    *) return 1 ;;
+  esac
+  # Mirrors hook_state.record_panel_activity: it acts only for a panel main.
+  if [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ] && [ "${OMS_HARNESS_CHILD:-}" != 1 ]; then
+    case "${OMS_PANEL_SESSION:-}" in oms-*) return 1 ;; esac
+  fi
+  # A JSON escape can spell a key the shell would read as absent.
+  case "$payload" in *'\u'*) return 1 ;; esac
+  case "$payload" in *'"PostToolUseFailure"'*) return 1 ;; esac
+  ev_re='"hook_event_name"[[:space:]]*:[[:space:]]*"PostToolUse"'
+  [[ "$payload" =~ $ev_re ]] || return 1
+  rest="${payload#*"${BASH_REMATCH[0]}"}"
+  case "$rest" in *'"hook_event_name"'*) return 1 ;; esac
+  case "${OMS_FAIL_LEDGER_RESOLVE:-1}" in
+    0|false|FALSE|no|NO|off|OFF) return 0 ;;
+  esac
+  ledger="${OMS_FAIL_LEDGER:-}"
+  if [ -z "$ledger" ]; then
+    if [ -n "${OMS_STATE_REPO:-}" ]; then
+      base="$OMS_STATE_REPO"
+    else
+      case "$payload" in *'"currentWorkingDirectory"'*) return 1 ;; esac
+      cwd_re='"cwd"[[:space:]]*:[[:space:]]*"([^"\\]+)"'
+      if [[ "$payload" =~ $cwd_re ]]; then
+        base="${BASH_REMATCH[1]}"
+        rest="${payload#*"${BASH_REMATCH[0]}"}"
+        case "$rest" in *'"cwd"'*) return 1 ;; esac
+      elif [[ "$payload" == *'"cwd"'* ]]; then
+        return 1
+      else
+        base="$PWD"
+      fi
+    fi
+    case "$base" in /*|[A-Za-z]:/*) ;; *) return 1 ;; esac
+    top="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    top="${top//$'\r'/}"
+    [ -n "$top" ] || return 1
+    ledger="$top/.oms/failures.jsonl"
+  fi
+  [ ! -s "$ledger" ]
+}
+if fast_idle_success; then exit 0; fi
+
 # One python3 pass resolves the event repo and decides everything: which side
 # of the ledger this event is, and — on the success side — whether the
 # fingerprint has an open failure at all. Deliberately not a `check` call:
