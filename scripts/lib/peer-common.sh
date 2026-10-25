@@ -792,7 +792,7 @@ contains_sensitive_content() {
 ma_prompt_has_sensitive_content() {
   local file="$1"
   [ -s "$file" ] || return 1
-  agent_memory_file_has_sensitive_content "$file"
+  agent_memory_file_sensitive_status "$file"
 }
 
 ma_validate_outbound_prompt() {

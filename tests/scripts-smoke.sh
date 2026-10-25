@@ -6097,6 +6097,20 @@ test_agent_memory_append_show_and_rejects_sensitive() {
   assert_file_contains "$project/scanfail-err" "scan failed"
   [ "$(cksum < "$project/.oms/memory/shared.md")" = "$before" ] ||
     fail "memory must stay unchanged when the scan fails"
+
+  # Plain `if` callers are fail-closed; the _status form keeps the raw 2.
+  printf 'ordinary note\n' > "$project/plain-note"
+  PATH="$shim:$PATH" bash -c '
+    . "$1/scripts/lib/agent-memory-common.sh"
+    if agent_memory_file_has_sensitive_content "$2" 2>"$3"; then exit 0; fi
+    exit 9' _ "$ROOT" "$project/plain-note" "$project/plain-err" ||
+    fail "plain sensitive-content predicate must treat a failed scan as sensitive"
+  assert_file_contains "$project/plain-err" "treating the content as sensitive"
+  local status_rc=0
+  PATH="$shim:$PATH" bash -c '
+    . "$1/scripts/lib/agent-memory-common.sh"
+    agent_memory_file_sensitive_status "$2"' _ "$ROOT" "$project/plain-note" || status_rc=$?
+  [ "$status_rc" -eq 2 ] || fail "status form must keep returning 2, got $status_rc"
 }
 
 test_agent_memory_indexes_existing_logs_in_sqlite() {
@@ -14534,10 +14548,10 @@ test_scrubber_tiers_split_secret_from_machine() {
     printf '#!/bin/sh\nexit 2\n' > "$shim/python3"
     chmod +x "$shim/python3"
     printf 'ordinary text\n' > "$f"
-    PATH="$shim:$PATH" agent_memory_file_has_secret_content "$f" || rc=$?
+    PATH="$shim:$PATH" agent_memory_file_secret_status "$f" || rc=$?
     [ "$rc" = 2 ] || fail "interpreter failure must be a scan error, got $rc"
     rc=0
-    PATH="$shim:$PATH" agent_memory_file_has_sensitive_content "$f" || rc=$?
+    PATH="$shim:$PATH" agent_memory_file_sensitive_status "$f" || rc=$?
     [ "$rc" = 2 ] || fail "interpreter failure must be a sensitive scan error, got $rc"
     printf -- '--- a/x\n+++ b/x\n@@ -0,0 +1,1 @@\n+ordinary\n' > "$f.diff"
     rc=0
@@ -14556,10 +14570,10 @@ test_scrubber_tiers_split_secret_from_machine() {
   (
     sed() { printf 'partial ordinary output\n'; return 2; }
     local rc=0
-    agent_memory_file_has_sensitive_content "$f" || rc=$?
+    agent_memory_file_sensitive_status "$f" || rc=$?
     [ "$rc" = 2 ] || fail "filter failure must not become no-match"
     rc=0
-    agent_memory_file_has_secret_content "$f" || rc=$?
+    agent_memory_file_secret_status "$f" || rc=$?
     [ "$rc" = 2 ] || fail "secret filter failure must retain its error"
   )
 

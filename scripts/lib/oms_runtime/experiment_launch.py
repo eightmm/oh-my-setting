@@ -57,7 +57,7 @@ def launch(repo: Path, args) -> int:
         note_path.write_text(note, encoding='utf-8')
         # Keep the ledger's existing outbound-data policy, including path checks.
         scan = subprocess.run([
-            'bash', '-c', '. "$1"; agent_memory_file_has_sensitive_content "$2"',
+            'bash', '-c', '. "$1"; agent_memory_file_sensitive_status "$2"',
             '_', str(scripts / 'lib' / 'agent-memory-common.sh'), str(note_path),
         ], cwd=repo, check=False)
         if scan.returncode != 1:

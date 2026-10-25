@@ -383,7 +383,7 @@ agent_memory_env_secret_hits() {  # FILE
   [ -z "$out" ] || printf '%s\n' "$out" | tr -d '\r'
 }
 
-agent_memory_file_has_secret_content() {
+agent_memory_file_secret_status() {
   local file="$1" rc=0 hits
   [ -s "$file" ] || return 1
   agent_memory_match_file "$file" "$(agent_memory_secret_re)" || rc=$?
@@ -392,13 +392,32 @@ agent_memory_file_has_secret_content() {
   [ -n "$hits" ]
 }
 
-agent_memory_file_has_sensitive_content() {
+agent_memory_file_sensitive_status() {
   local file="$1" rc=0 hits
   [ -s "$file" ] || return 1
   agent_memory_match_file "$file" "$(agent_memory_sensitive_re)" || rc=$?
   [ "$rc" -eq 1 ] || return "$rc"
   hits="$(agent_memory_env_secret_hits "$file")" || return 2
   [ -n "$hits" ]
+}
+
+# Fail-closed predicates for `if helper FILE; then refuse; fi` callers: a scan
+# that failed (status other than 0/1) reads as sensitive. Callers that must
+# tell a failed scan apart use the _status functions.
+agent_memory_file_has_secret_content() {
+  local rc=0
+  agent_memory_file_secret_status "$1" || rc=$?
+  [ "$rc" -ne 1 ] || return 1
+  [ "$rc" -eq 0 ] || echo "warning: sensitive-content scan failed; treating the content as sensitive" >&2
+  return 0
+}
+
+agent_memory_file_has_sensitive_content() {
+  local rc=0
+  agent_memory_file_sensitive_status "$1" || rc=$?
+  [ "$rc" -ne 1 ] || return 1
+  [ "$rc" -eq 0 ] || echo "warning: sensitive-content scan failed; treating the content as sensitive" >&2
+  return 0
 }
 
 # Scan unified-diff additions and report only target-file locations and the
@@ -442,7 +461,7 @@ agent_memory_sensitive_diff_scan() {  # DIFF
     rm -f "$content_file" "$loc_file" "$idx_file"
     return 2
   fi
-  agent_memory_file_has_sensitive_content "$content_file" || rc=$?
+  agent_memory_file_sensitive_status "$content_file" || rc=$?
   if [ "$rc" -eq 0 ]; then
     for tier in secret machine; do
       if [ "$tier" = secret ]; then re="$(agent_memory_secret_re)"; else re="$(agent_memory_machine_re)"; fi
@@ -1006,7 +1025,7 @@ agent_memory_append_file() {
   local scan_rc
 
   scan_rc=0
-  agent_memory_file_has_sensitive_content "$note_file" || scan_rc=$?
+  agent_memory_file_sensitive_status "$note_file" || scan_rc=$?
   case "$scan_rc" in
     1) ;;
     0)
@@ -1098,7 +1117,7 @@ agent_memory_pin_file() {
   local scan_rc
 
   scan_rc=0
-  agent_memory_file_has_sensitive_content "$note_file" || scan_rc=$?
+  agent_memory_file_sensitive_status "$note_file" || scan_rc=$?
   case "$scan_rc" in
     1) ;;
     0)

@@ -543,7 +543,7 @@ run_verifier() {  # COMMAND -> verifier exit status
 }
 
 draft_file_has_sensitive_content() {  # FILE -> matcher status
-  agent_memory_file_has_sensitive_content "$1"
+  agent_memory_file_sensitive_status "$1"
 }
 
 assert_native_git_graph() {
@@ -598,7 +598,7 @@ draft_bounded_file_has_sensitive_content() {  # FILE DEADLINE
   # Keep the complete scan inside the existing deadline, including filtering.
   draft_run_scan "${remaining}s" bash -o pipefail -c '
     . "$1" || exit 125
-    agent_memory_file_has_sensitive_content "$2"
+    agent_memory_file_sensitive_status "$2"
   ' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$file" || scan_rc=$?
   return "$scan_rc"
 }
