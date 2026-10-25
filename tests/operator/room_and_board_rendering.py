@@ -56,6 +56,22 @@ for width, height in ((100, 44), (76, 36), (35, 24), (35, 23), (35, 12)):
             assert all(display_width(line) <= width for line in drawn.splitlines())
 assert graph == render(room_view, "claude", 100, 44, view="graph", frame=1)
 assert json.dumps(room_view, sort_keys=True) == immutable
+# A frame projects its members once; the next frame, or another snapshot, projects again.
+board_view = sys.modules["room_view"]
+projected_snapshot = deepcopy(room_view)
+with mock_patch.object(board_view, "_project_nodes", wraps=board_view._project_nodes) as projected:
+    assert render(room_view, "claude", 100, 44, view="graph", frame=1) == graph and projected.call_count == 1
+    assert render(room_view, "claude", 100, 44, view="graph", frame=1) == graph and projected.call_count == 2
+    relabeled = deepcopy(room_view)
+    next(m for m in relabeled["room"]["participants"]
+         if m["participant"] == child["participant"])["label_override"] = "Relabeled frame"
+    first_view, second_view = map(sys.modules["panel_view"]._render_report, (room_view, relabeled))
+    shown = board_view.nodes(first_view)
+    assert board_view.nodes(first_view) == shown and board_view.nodes(first_view) is not shown
+    relabeled_titles = {m["participant"]: m["title"] for m in board_view.nodes(second_view)}
+    assert relabeled_titles[child["participant"]] == "Relabeled frame" != next(
+        m["title"] for m in shown if m["participant"] == child["participant"]) and projected.call_count == 4
+assert room_view == projected_snapshot
 fallback_nav = {}
 fallback = render(room_view, "claude", 35, 23, view="graph", navigation=fallback_nav)
 assert fallback_nav["surface"] == "tree" and fallback_nav["hits"], fallback

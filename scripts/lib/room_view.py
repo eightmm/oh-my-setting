@@ -34,7 +34,14 @@ def owed(report, call):
 
 
 def nodes(report):
+    """Room members, projected once per frame-local view; callers get their own list over shared member dicts."""
     report = _render_report(report)
+    if report.members is None:
+        report.members = _project_nodes(report)
+    return list(report.members)
+
+
+def _project_nodes(report):
     room = mapping(report.get("room"))
     attempts = mapping(report.get("attempts"))
     room_attempts = mapping(report.get("room_attempts"))

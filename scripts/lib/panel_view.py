@@ -758,6 +758,8 @@ class _RenderReport(dict):
         for row in operations:
             if row.get("attempt_id") and row.get("kind") in {"delegate", "call", "ask", "review", "consult"}:
                 self.room_operations.setdefault((row["attempt_id"], row.get("task_id")), row)
+        # room_view.nodes fills this once; a new snapshot or frame builds a new view and projects again.
+        self.members = None
 
 
 def _render_report(report):
