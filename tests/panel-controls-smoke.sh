@@ -403,3 +403,39 @@ check(jb.calls == [("restart", "s1", "j1", 3)] and "current log: only the" in te
 
 print("panel-controls-smoke: ok")
 PY
+
+# A process started the way a panel starts one caches bytecode outside the repository and never inside it.
+cache_tmp="$(mktemp -d)"
+trap 'rm -rf "$cache_tmp"' EXIT
+cache_tree="$cache_tmp/tree"
+mkdir -p "$cache_tree/.git" "$cache_tree/scripts/lib" "$cache_tmp/xdg" "$cache_tmp/home" "$cache_tree/inner"
+cp "$ROOT/scripts/panel.sh" "$cache_tree/scripts/panel.sh"
+cp "$ROOT/scripts/lib/pycache-env.sh" "$cache_tree/scripts/lib/pycache-env.sh"
+printf 'VALUE = 1\n' > "$cache_tree/scripts/lib/cache_probe.py"
+printf 'import os, sys\nimport cache_probe\nprint(os.environ.get("PYTHONDONTWRITEBYTECODE", ""))\n' \
+  > "$cache_tree/scripts/lib/terminal_panel.py"
+ln -s "$cache_tree/inner" "$cache_tmp/link"
+cache_panel() {  # prints PYTHONDONTWRITEBYTECODE as the child saw it; "$@" are env assignments
+  (cd "$cache_tree" && env -u PYTHONPYCACHEPREFIX -u PYTHONDONTWRITEBYTECODE -u PYTHONPATH \
+    HOME="$cache_tmp/home" "$@" bash "$cache_tree/scripts/panel.sh" | tr -d '\r')
+}
+cache_in_tree() { find "$cache_tree" -name '*.pyc' -print -quit; }
+cache_clean_tree() {
+  [ -z "$(cache_in_tree)" ] && [ ! -e "$cache_tree/.cache" ] && [ ! -e "$cache_tree/inner/oms" ] ||
+    { echo "panel.sh wrote into the repository ($1)" >&2; exit 1; }
+}
+
+[ -z "$(cache_panel XDG_CACHE_HOME="$cache_tmp/xdg")" ] || { echo "panel.sh must not disable bytecode for an external cache" >&2; exit 1; }
+cache_clean_tree external
+[ -n "$(find "$cache_tmp/xdg/oms" -name 'cache_probe*.pyc' -print -quit 2>/dev/null)" ] ||
+  { echo "panel.sh children did not cache bytecode under the OMS cache" >&2; exit 1; }
+
+for cache_case in "XDG_CACHE_HOME=$cache_tree/.cache" "XDG_CACHE_HOME=$cache_tmp/link" "PYTHONPYCACHEPREFIX=$cache_tree/.cache"; do
+  [ "$(cache_panel "$cache_case")" = 1 ] || { echo "panel.sh kept bytecode on for $cache_case" >&2; exit 1; }
+  cache_clean_tree "$cache_case"
+done
+
+# A relative XDG_CACHE_HOME is not a cache root (XDG spec): fall back to HOME, never write relative to the repository.
+cache_panel XDG_CACHE_HOME=.cache >/dev/null
+cache_clean_tree relative
+echo "panel-controls-smoke: bytecode cache ok"
