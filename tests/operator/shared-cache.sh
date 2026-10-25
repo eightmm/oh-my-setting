@@ -1463,6 +1463,26 @@ for key, inputs in cache.KEY_INPUTS.items():
         (scoped / '.oms' / name).parent.mkdir(parents=True, exist_ok=True)
         (scoped / '.oms' / name).write_text('record', encoding='utf-8')
         assert cache.fingerprint(scoped, inputs) != before, (key, name)
+# The whole-.oms walk (the dashboard) ignores live worker output it never opens and still follows every state file.
+walk_project = project / 'walk-churn'
+(walk_project / '.oms/hooks').mkdir(parents=True)
+for relative in ('.oms/panel-state/dispatch-logs/call-1.stream', '.oms/panel-state/dispatch-logs/call-1.transcript',
+                 '.oms/locks/canonical-sync.d/run/process-start', '.oms/artifacts/review/r-1.attempt-1.out',
+                 '.oms/artifacts/review/r-1.attempts.json'):
+    source = walk_project / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text('start', encoding='utf-8')
+    before = cache.fingerprint(walk_project)
+    with source.open('a', encoding='utf-8') as handle:
+        handle.write('worker output')
+    assert cache.fingerprint(walk_project) == before, relative
+for relative in ('.oms/plan/tasks.json', '.oms/task/current.md', '.oms/work-journal/index.sqlite3',
+                 '.oms/artifacts/review/r-1.md', '.oms/lifecycle/attempts/att_1/state.json'):
+    source = walk_project / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    before = cache.fingerprint(walk_project)
+    source.write_text('state', encoding='utf-8')
+    assert cache.fingerprint(walk_project) != before, relative
 ledger = project / '.oms/lifecycle/events.jsonl'
 def ledger_row(kind, **extra):
     return json.dumps({'schema': 'oms.agent-event.v1', 'event_id': 'aevt_' + os.urandom(4).hex(), 'attempt_id': 'a1',

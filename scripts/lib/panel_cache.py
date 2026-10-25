@@ -22,12 +22,25 @@ INTERVAL = 30
 MAX_BYTES = 8 * 1024 * 1024
 DIRECTORY = '.oms/hooks/panel-cache'
 SKIPPED = {DIRECTORY, '.oms/hooks/panel-activity'}
+# Worker output the whole-.oms walk (every key without KEY_INPUTS entry, i.e. the dashboard) provably never opens.
+# Traced with strace -f over `oms dashboard --json` on a copy of a live .oms (43k entries, dispatch logs, review
+# artifacts, locks, work-journal present) plus a read of every collector it starts (state.sh, agent-events list,
+# artifact-index list, oms_runtime.evidence, dashboard_projection): none of these paths was opened or stat'ed.
+#   panel-state/dispatch-logs  live worker streams/transcripts/logs; read only by panel_activity, panel_review, peer-common
+#   locks                      advisory lock dirs and their process-start stamps; read only by lock owners
+#   artifacts/review/*.attempt-N.out, *.attempts.json  provider attempt output; read only by peer-review
+# Kept on purpose: work-journal (journal_storage reports file_count/total_bytes over every file, index.sqlite3
+# included), lifecycle/attempts (a state file there is still an input), git refs, and everything else.
+# One conditional read remains: an evidence binding may declare --depends on such a file; its change then shows
+# at INTERVAL expiry rather than on the next tick, which bounds that staleness to INTERVAL seconds.
+WALK_SKIPPED = {'.oms/panel-state/dispatch-logs', '.oms/locks'}
+_REVIEW_OUTPUT = re.compile(r'\.attempt-[0-9]+\.out$')
 ROOT = Path(__file__).resolve().parents[2]
 LEDGER = '.oms/lifecycle/events.jsonl'
 LEDGER_WINDOW = 256 * 1024
 # The one place a cached read declares its .oms inputs. Only a read whose complete input set is known may be
 # listed; every other key (the dashboard, which aggregates state.sh and the collectors it starts) keeps the
-# whole-.oms walk. A new read_shared key must either list every .oms file it opens here or stay unlisted.
+# whole-.oms walk minus WALK_SKIPPED, so a key that joins that walk must never read those paths. A new read_shared key must either list every .oms file it opens here or stay unlisted.
 #   attempts       agent-events list --json: load_projection reads only lifecycle/events.jsonl
 #                  (scripts/lib/agent-events.py event_list -> load_projection -> read_rows(event_path))
 #   result-records _records (panel_results.py): that attempts list plus read_index of artifacts/index.jsonl
@@ -106,6 +119,10 @@ def fingerprint(repo, inputs=None):
                 relative = label + '/' + child.name
                 # Mains' activity heartbeats are read by each board directly, not through this cache.
                 if relative in SKIPPED or child.name.endswith(('.lock', '.tmp')):
+                    continue
+                if inputs is None and (relative in WALK_SKIPPED or (
+                        label == '.oms/artifacts/review' and (
+                            child.name.endswith('.attempts.json') or _REVIEW_OUTPUT.search(child.name)))):
                     continue
                 try:
                     child_info = child.stat(follow_symlinks=False)
