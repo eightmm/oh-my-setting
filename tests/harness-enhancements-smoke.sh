@@ -964,6 +964,9 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
   operator-unmapped)
     printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator/section.sh","tests/operator/section.py","tests/operator/unmapped.py"],"test_cases":[]}'
     ;;
+  no-operator)
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh"],"test_cases":[]}'
+    ;;
   error) exit 23 ;;
   *)
     printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator/section.sh","tests/operator/section.py","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py","tests/run-smoke-shard.sh"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"},{"id":"symbol:tests/operator/section.py::SectionTest.test_selected","language":"python","name":"test_selected","path":"tests/operator/section.py"}]}'
@@ -1099,8 +1102,12 @@ EOF
   done
   grep -Fxq 'syntax:lib/leaf.py' "$log" || fail "affected syntax check did not select only the changed Python"
   grep -Fxq 'distribution:--docs-only' "$log" || fail "leaf change ran unrelated CI orchestration probes"
-  [ "$(grep -Fxc 'operator-args:--section section-shell,section-python' "$log")" = 1 ] ||
-    fail "affected selection did not run exactly the mapped operator sections"
+  grep -Fxq 'operator=section-shell,section-python' "$TMP/ci-mode" ||
+    fail "CI output omitted the mapped operator sections"
+  ! grep -Fq 'operator-args:' "$log" ||
+    fail "CI output still staged operator-tools in the planning job"
+  grep -Fq 'operator-tools deferred' "$TMP/affected-summary.md" ||
+    fail "CI summary omitted the operator-tools deferral"
   ! grep -Fq operator-fragment-standalone "$log" ||
     fail "affected selection ran an operator section fragment outside its suite"
   if grep -Fq unselected "$log"; then
@@ -1113,6 +1120,22 @@ EOF
     fail "affected gate rejected an unmapped operator path"
   [ "$(grep -Fxc "operator-args:--jobs ${OMS_OPERATOR_JOBS:-4}" "$log")" = 1 ] ||
     fail "an unmapped operator path did not fail open to the whole suite"
+  : > "$log"
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=operator-unmapped OMS_TEST_AFFECTED_LOG="$log" \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
+      --ci-output "$TMP/ci-operator-all" >/dev/null) ||
+    fail "CI selector rejected an unmapped operator path"
+  grep -Fxq 'operator=all' "$TMP/ci-operator-all" ||
+    fail "an unmapped operator path did not defer the whole suite to CI"
+  ! grep -Fq 'operator-args:' "$log" || fail "CI output ran the whole operator suite in the planning job"
+  : > "$log"
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=no-operator OMS_TEST_AFFECTED_LOG="$log" \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
+      --ci-output "$TMP/ci-no-operator" >/dev/null) ||
+    fail "CI selector rejected a plan without operator tests"
+  grep -Fxq 'operator=' "$TMP/ci-no-operator" || fail "CI output omitted the empty operator line"
+  # Without --ci-output the local run keeps operator-tools in place.
+  : > "$log"
   # The same real stage runner must overlap selected suites, cap nested
   # workers, retain timings and propagate a selected lane's failure.
   : > "$TMP/affected-events"
@@ -1129,6 +1152,8 @@ for row in rows:
     peak = max(peak, active)
 assert len(rows) == 4 and active == 0 and peak == 2, (rows, peak)
 PYTEST
+  [ "$(grep -Fxc 'operator-args:--section section-shell,section-python' "$log")" = 1 ] ||
+    fail "affected selection did not run exactly the mapped operator sections"
   grep -Fq 'operator-tools' "$TMP/parallel-summary.md" || fail "parallel operator timing lost"
   grep -Fq 'affected:tests/leaf-smoke.sh' "$TMP/parallel-output" || fail "parallel stage renamed"
   if (cd "$gate" && OMS_TEST_AFFECTED_FAIL=1 OMS_TEST_AFFECTED_LOG="$log" \
@@ -1315,8 +1340,10 @@ EOF
       --ci-output "$TMP/panel-ci-mode" >/dev/null) ||
     fail "CI selector rejected the panel view change"
   grep -Fxq 'mode=affected' "$TMP/panel-ci-mode" || fail "panel cost alone forced unrelated full lanes"
-  [ "$(grep -Fxc 'operator-args:--section section-shell,section-python' "$TMP/panel-inline.log")" = 1 ] ||
-    fail "panel selection did not run its mapped operator sections"
+  grep -Fxq 'operator=section-shell,section-python' "$TMP/panel-ci-mode" ||
+    fail "panel selection did not hand its mapped operator sections to CI"
+  ! grep -Fq 'operator-args:' "$TMP/panel-inline.log" ||
+    fail "panel selection ran operator-tools in the planning job"
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full bash scripts/check.sh --affected \
     --print-affected-mode --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||
     fail "uncertain panel plan failed"

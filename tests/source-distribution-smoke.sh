@@ -438,10 +438,22 @@ import os
 import subprocess
 script = body.split("        run: |\n", 1)[1]
 script = "\n".join(line[10:] for line in script.splitlines())
-full_jobs = required - {"affected_plan"}
+full_jobs = required - {"affected_plan", "affected_operator"}
+operator_job = workflow_text.split("\n  affected_operator:\n", 1)[1].split("\n  #", 1)[0]
+operator_job = re.split(r"\n  [A-Za-z0-9_-]+:\n", operator_job, maxsplit=1)[0]
+assert "    needs: affected_plan\n" in operator_job
+assert "    if: needs.affected_plan.outputs.mode == 'affected' && needs.affected_plan.outputs.operator != ''\n" in operator_job
+assert "    name: operator-tools (affected)\n" in operator_job
+assert 'OPERATOR: ${{ needs.affected_plan.outputs.operator }}' in operator_job
+assert 'bash tests/operator-tools-smoke.sh --jobs 4' in operator_job
+assert 'bash tests/operator-tools-smoke.sh --section "$OPERATOR"' in operator_job
+assert "outputs.operator }}\"" not in operator_job.split("run: |", 1)[1]
 for mode in ("full", "affected"):
+  for operator in ("", "section-shell", "all"):
     for native in ("true", "false"):
-        env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_NATIVE=native, AFFECTED_PLAN_RESULT="success")
+        env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_NATIVE=native, AFFECTED_PLAN_RESULT="success",
+                   AFFECTED_OPERATOR=operator)
+        env["AFFECTED_OPERATOR_RESULT"] = "success" if mode == "affected" and operator else "skipped"
         env.update({name.upper() + "_RESULT": "success" if mode == "full" else "skipped"
                     for name in full_jobs})
         env["PYTHON39_RESULT"] = "success" if native == "true" else "skipped"

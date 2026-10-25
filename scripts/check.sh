@@ -188,7 +188,9 @@ manifest) then the test suites. With no arguments it runs both.
   --print-affected-mode With --affected, print affected or full after planning
                         and exit without running test stages.
   --ci-output FILE      With --affected, append mode=affected|full and
-                        native=true|false to FILE.
+                        native=true|false to FILE; an affected plan also
+                        appends operator=SECTIONS|all|(empty) and leaves
+                        operator-tools to CI's own job.
                         Run affected checks here; defer full checks to CI lanes.
   --ci-parity           With --affected, the oms land default: a full fallback
                         runs lint and the quick lane instead (CI runs the full
@@ -1240,6 +1242,21 @@ PY
 )" || affected_operator_sections=""
     affected_operator_sections="${affected_operator_sections//$'\r'/}"
   fi
+  # CI runs operator-tools in its own job so the suite does not share one
+  # runner with the other selected stages. Local runs keep it in place.
+  if [ -n "$CI_OUTPUT" ]; then
+    affected_operator_value=""
+    if [ -n "$affected_operator_sections" ]; then
+      affected_operator_value="$affected_operator_sections"
+    elif [ "${#affected_operator_paths[@]}" -gt 0 ] || [ "$affected_operator_has_suite" = 1 ]; then
+      affected_operator_value=all
+    fi
+    printf 'operator=%s\n' "$affected_operator_value" >> "$CI_OUTPUT"
+    if [ -n "$affected_operator_value" ]; then
+      echo "operator-tools: deferred to the affected_operator CI job (operator=$affected_operator_value)" >&2
+      AFFECTED_REASONS="${AFFECTED_REASONS:-}; operator-tools deferred to the affected_operator CI job"
+    fi
+  fi
   for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
     [ "$affected_test" = tests/run-smoke-shard.sh ] && continue
     # Operator section fragments only run inside their suite, once.
@@ -1277,7 +1294,9 @@ PY
         stage affected-scripts-smoke env OMS_SMOKE_SUITE="$ROOT/$affected_test" bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
       fi
     elif [ "$affected_test" = tests/operator-tools-smoke.sh ]; then
-      if [ -n "$affected_operator_sections" ]; then
+      if [ -n "$CI_OUTPUT" ]; then
+        :
+      elif [ -n "$affected_operator_sections" ]; then
         stage operator-tools bash "$ROOT/tests/operator-tools-smoke.sh" --section "$affected_operator_sections"
       else
         stage operator-tools bash "$ROOT/tests/operator-tools-smoke.sh" --jobs "${OMS_OPERATOR_JOBS:-4}"

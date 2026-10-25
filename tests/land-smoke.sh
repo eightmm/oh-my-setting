@@ -476,7 +476,7 @@ if [ "$2" = view ]; then
   full='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)"'
   count_file=/dev/null
   case "${OMS_TEST_CI_SCOPE:-affected}" in
-    full|wrong-sha|failed-run|duplicate|extra-failure|settles-full) jobs="$full" ;;
+    full|full-operator-skipped|wrong-sha|failed-run|duplicate|extra-failure|settles-full) jobs="$full" ;;
     ambiguous|ambiguous-null) jobs='"lint","affected_plan","gate","focused (1/4)"' ;;
     lagging)
       count_file="$OMS_TEST_LAND_EVENTS.lagging-count"
@@ -506,6 +506,10 @@ if scope == "ambiguous-null":
     rows[2]["conclusion"] = None
 if scope == "duplicate":
     rows.append({"name": "gate", "conclusion": "success"})
+if scope == "full-operator-skipped":
+    rows.append({"name": "operator-tools (affected)", "conclusion": "skipped"})
+if scope == "affected-operator":
+    rows.append({"name": "operator-tools (affected)", "conclusion": "success"})
 if scope == "extra-failure":
     rows.append({"name": "native (ubuntu-latest, auto)", "conclusion": "failure"})
 print(json.dumps({"headSha": "0" * 40 if scope == "wrong-sha" else sha, "status": "completed",
@@ -1495,6 +1499,17 @@ query_out="$(OMS_TEST_CI_SCOPE=settles-full OMS_TEST_CI_RESULT=success \
   fail "settled full scope query failed: rc=$query_rc output=$query_out stderr=$(cat "$TMP/scope-settles-full.err")"
 [ "$(grep -c '^jobs$' "$TMP/events")" = 4 ] ||
   fail "settled full scope query did not poll four times: $(cat "$TMP/events")"
+# The affected-only operator job is skipped in a full run and passes in an
+# affected run; neither changes the scope.
+for scope in full-operator-skipped affected-operator; do
+  query_rc=0
+  query_out="$(OMS_TEST_CI_SCOPE="$scope" OMS_TEST_CI_RESULT=success \
+    python3 "$ROOT/scripts/lib/ci-query.py" scope fixture/repo 1 "$query_sha" 5 2>&1)" || query_rc=$?
+  want=full
+  [ "$scope" != affected-operator ] || want=affected
+  [ "$query_rc" = 0 ] && [ "$query_out" = "$want" ] ||
+    fail "$scope CI scope was not classified $want: rc=$query_rc output=$query_out"
+done
 # Unreadable, ambiguous or misattributed CI scope blocks the install; the retry
 # resumes and a full-selection run for the exact SHA installs it without
 # re-running the gate.

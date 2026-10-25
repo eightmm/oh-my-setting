@@ -108,6 +108,7 @@ jobs:
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       native: ${{ steps.plan.outputs.native }}
+      operator: ${{ steps.plan.outputs.operator }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -251,11 +252,34 @@ jobs:
           bash tests/install-profile-smoke.sh
           bash tests/codex-hud-config-smoke.sh
 
+  # The affected selection defers operator-tools here: run 40167526634 spent
+  # 1956 s in affected_plan with the suite competing against the other
+  # selected stages on one 4 vCPU runner, versus about 605 s when run alone.
+  affected_operator:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'affected' && needs.affected_plan.outputs.operator != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    name: operator-tools (affected)
+    steps:
+      - uses: actions/checkout@v7
+      - name: operator-tools
+        timeout-minutes: 75
+        env:
+          OPERATOR: ${{ needs.affected_plan.outputs.operator }}
+          OMS_TEST_CALL_TIMEOUT: "240"
+        run: |
+          if [ "$OPERATOR" = all ]; then
+            bash tests/operator-tools-smoke.sh --jobs 4
+          else
+            bash tests/operator-tools-smoke.sh --section "$OPERATOR"
+          fi
+
   # Branch protection can target this fixed name. Only plan-authorized skips
   # are accepted; missing, failed, and cancelled required jobs fail closed.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, affected_plan, install_e2e, python39]
+    needs: [lint, focused, smoke_shard, affected_plan, affected_operator, install_e2e, python39]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -268,6 +292,8 @@ jobs:
           AFFECTED_PLAN_RESULT: ${{ needs.affected_plan.result }}
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
           AFFECTED_NATIVE: ${{ needs.affected_plan.outputs.native }}
+          AFFECTED_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
+          AFFECTED_OPERATOR_RESULT: ${{ needs.affected_operator.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           PYTHON39_RESULT: ${{ needs.python39.result }}
         run: |
@@ -291,6 +317,11 @@ jobs:
               status=1
             fi
           done
+          operator_expected=skipped
+          if [ "$AFFECTED_MODE" = affected ] && [ -n "$AFFECTED_OPERATOR" ]; then
+            operator_expected=success
+          fi
+          [ "$AFFECTED_OPERATOR_RESULT" = "$operator_expected" ] || status=1
           case "$AFFECTED_NATIVE" in
             true) native_expected=success; install_expected=success ;;
             false)
@@ -302,6 +333,6 @@ jobs:
           [ "$INSTALL_E2E_RESULT" = "$install_expected" ] || status=1
           [ "$PYTHON39_RESULT" = "$native_expected" ] || status=1
           if [ "$status" -ne 0 ]; then
-            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT" >&2
+            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
           fi
           exit "$status"
