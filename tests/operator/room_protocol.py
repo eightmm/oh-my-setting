@@ -387,7 +387,7 @@ heartbeat_release="$2/heartbeat-release"
 trap 'touch "$heartbeat_release"; rm -f "$verify_out" "$worker_guard_dir/snapshot"' EXIT
 ma_scripts_dir() {
   touch "$heartbeat_entered"
-  while [ ! -f "$heartbeat_release" ]; do sleep .01; done
+  while [ ! -f "$heartbeat_release" ] && [ -d "$worktree" ]; do sleep .01; done
   printf '%s\n' "${MA_LIB_DIR%/*}"
 }
 verify_clean_env() { :; }

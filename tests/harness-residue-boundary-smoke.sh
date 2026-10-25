@@ -569,4 +569,45 @@ reap_out="$(oms_harness_reap_dead_delegation_markers "$repo" 2>&1)"
 [ -f "$markers/malformed.json" ] || fail "malformed delegation marker was reaped"
 [ -L "$markers/link.json" ] || fail "symlinked delegation marker was reaped"
 
+# The verify heartbeat is a fork of the delegate: before its first command it
+# still carries the delegate's EXIT and signal traps, and a TERM in that window
+# runs the delegate's cleanup in the child, deleting the worktree and verifier
+# output under the live delegate. TERM may follow only the child's ready proof.
+# Every heartbeat fork must go through the shared helpers.
+heartbeat_stop="$TMP/stop-verify-heartbeat.sh"
+sed -n '/^ma_heartbeat_stop() {/,/^}/p' "$ROOT/scripts/lib/peer-common.sh" > "$heartbeat_stop"
+[ -s "$heartbeat_stop" ] || fail "peer-common must define ma_heartbeat_stop"
+heartbeat_signals() {  # READY_STATE -> signals sent by stop_verify_heartbeat
+  local signals="$TMP/heartbeat-signals" proof="$TMP/heartbeat-ready" child
+  : > "$signals"
+  rm -f "$proof"
+  [ "$1" = ready ] && : > "$proof"
+  sleep 30 &
+  child=$!
+  (
+    # shellcheck source=/dev/null
+    . "$heartbeat_stop"
+    sleep() { :; }
+    kill() { printf '%s\n' "${1:-}" >> "$signals"; builtin kill "$@"; }
+    ma_heartbeat_stop "$child" "$proof"
+  )
+  builtin kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  [ ! -e "$proof" ] || fail "ma_heartbeat_stop left its ready proof behind"
+  grep -vxe '-0' "$signals" || true
+}
+if grep -n '(ma_routed_heartbeat' "$ROOT/scripts/peer-delegate.sh" "$ROOT/scripts/lib/peer-common.sh" |
+    grep -v ma_heartbeat_start >/dev/null; then
+  fail "a heartbeat is forked outside ma_heartbeat_start"
+fi
+grep -q 'ma_heartbeat_start verify_heartbeat_pid' "$ROOT/scripts/peer-delegate.sh" &&
+  grep -q 'ma_heartbeat_start heartbeat_pid' "$ROOT/scripts/lib/peer-common.sh" ||
+  fail "both heartbeat sites must use ma_heartbeat_start"
+out="$(heartbeat_signals ready)"
+[ "$(printf '%s\n' "$out" | sed -n '1p')" != -KILL ] && [ -n "$out" ] ||
+  fail "a proven heartbeat child must be stopped with TERM before KILL: $out"
+out="$(heartbeat_signals never-ready)"
+[ "$out" = -KILL ] ||
+  fail "a heartbeat child that never proved its traps are reset must get KILL only, never TERM: $out"
+
 echo "harness-residue-boundary-smoke: ok"

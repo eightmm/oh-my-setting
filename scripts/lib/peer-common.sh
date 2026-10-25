@@ -4113,6 +4113,41 @@ ma_routed_heartbeat() { # EVENTS REPO ATTEMPT OWNER_PID INTERVAL
   done
 }
 
+# The heartbeat child is a fork of the caller: until its first command runs it
+# still carries the caller's EXIT and signal traps, and a TERM landing in that
+# window runs the caller's cleanup inside the child. The child therefore
+# creates READY first, and ma_heartbeat_stop sends TERM only after that proof;
+# a child that never proves it gets KILL, which runs no traps.
+# An empty EVENTS resolves to this checkout's agent-events.sh inside the child.
+ma_heartbeat_start() { # PID_VAR READY EVENTS REPO ATTEMPT OWNER_PID INTERVAL
+  local pid_var="$1" ready="$2" events="$3"
+  shift 3
+  rm -f "$ready"
+  (: > "$ready"; ma_routed_heartbeat "${events:-$(ma_scripts_dir)/agent-events.sh}" "$@") \
+    </dev/null >/dev/null 2>&1 &
+  eval "$pid_var=\$!"
+}
+
+ma_heartbeat_stop() { # PID READY
+  local pid="$1" ready="$2" tries=0
+  [ -n "$pid" ] || return 0
+  while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 200 ]; do
+    sleep 0.05; tries=$((tries + 1))
+  done
+  tries=0
+  if [ -e "$ready" ]; then
+    kill "$pid" 2>/dev/null || true
+    # Bash defers the TERM trap while a ledger append (which may wait on the
+    # ledger lock) runs in the foreground; do not let that hold the caller.
+    while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 20 ]; do
+      sleep 0.1; tries=$((tries + 1))
+    done
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$ready"
+}
+
 ma_read_room_mail() {  # capture IDS_FILE REPOSITORY (prints the quoted mail) | complete IDS_JSON REPOSITORY
   local dispatcher_depth="${OMS_HARNESS_DELEGATE_DEPTH:-0}"
   oms_require_peer_owner || return $?
@@ -4171,7 +4206,7 @@ ma_run_routed_provider() {
   local events
   local token_count=""
   local duration_ms=0
-  local heartbeat_pid="" owner_pid
+  local heartbeat_pid="" heartbeat_ready="" owner_pid
   local native_session="" native_session_file=""
   local heartbeat_seconds="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
   local read_guard_tmp=""
@@ -4266,9 +4301,10 @@ PY
     # BASHPID is absent on stock Bash 3.2; exec inside the substitution makes
     # sh's parent the current caller, including a council's child shell.
     owner_pid="${BASHPID:-$(exec sh -c 'printf "%s" "$PPID"')}"
-    (ma_routed_heartbeat "$events" "$state_repo" "$OMS_ATTEMPT_ID" \
-      "$owner_pid" "$heartbeat_seconds") </dev/null >/dev/null 2>&1 &
-    heartbeat_pid=$!
+    heartbeat_ready="$(agent_memory_mktemp 2>/dev/null)" || heartbeat_ready=""
+    [ -z "$heartbeat_ready" ] ||
+      ma_heartbeat_start heartbeat_pid "$heartbeat_ready" "$events" "$state_repo" \
+        "$OMS_ATTEMPT_ID" "$owner_pid" "$heartbeat_seconds"
   fi
   native_session_file="$(agent_memory_mktemp 2>/dev/null)" || native_session_file=""
   OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
@@ -4305,10 +4341,7 @@ PY
     native_session="$(head -c 100 "$native_session_file" 2>/dev/null | tr -d '\r\n')"
     rm -f "$native_session_file"
   fi
-  if [ -n "$heartbeat_pid" ]; then
-    kill "$heartbeat_pid" 2>/dev/null || true
-    wait "$heartbeat_pid" 2>/dev/null || true
-  fi
+  ma_heartbeat_stop "$heartbeat_pid" "$heartbeat_ready"
   # A zero exit is the liveness proof the no-answer rows claim is missing:
   # whatever the answer's quality, the CLI ran and returned. Clear the seat's
   # unresolved history here, at the same choke point every verb passes through.

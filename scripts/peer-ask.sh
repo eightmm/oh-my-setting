@@ -336,6 +336,10 @@ mkdir -p "$ARTIFACT_DIR"
 status_file="$(mktemp)" || fail "mktemp failed"
 diff_file="$(mktemp)" || fail "mktemp failed"
 prompt_file="$(mktemp)" || fail "mktemp failed"
+# Library temps (the routed heartbeat's ready proof, the native session file)
+# land in one dir that the signal cleanup removes as a whole.
+call_tmpdir="$(mktemp -d)" || fail "mktemp failed"
+export OMS_LIB_TMPDIR="$call_tmpdir"
 debate_dir=""
 MA_COUNCIL_CONTEXT_DIR=""
 cleanup_done=0
@@ -343,6 +347,7 @@ cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
   rm -f "$status_file" "$diff_file" "$prompt_file"
+  rm -rf "$call_tmpdir"
   if [ -n "$debate_dir" ]; then
     rm -rf "$debate_dir"
   fi

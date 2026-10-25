@@ -987,16 +987,7 @@ cleanup_delegated_worktree() {
 }
 
 stop_verify_heartbeat() {
-  local pid="${verify_heartbeat_pid:-}" tries=0
-  [ -n "$pid" ] || return 0
-  kill "$pid" 2>/dev/null || true
-  # Bash defers the TERM trap while a ledger append (which may wait on the
-  # ledger lock) runs in the foreground; do not let that hold the delegate.
-  while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 20 ]; do
-    sleep 0.1; tries=$((tries + 1))
-  done
-  kill -KILL "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  ma_heartbeat_stop "${verify_heartbeat_pid:-}" "${verify_heartbeat_ready:-}"
   verify_heartbeat_pid=""
 }
 
@@ -1016,7 +1007,7 @@ cleanup() {
     [ "$plan_started" = 1 ] && [ "$plan_finalized" = 0 ]; then
     plan_failure_transition >/dev/null 2>&1 || true
   fi
-  rm -f "$prompt_file" "$repair_prompt_file" "$verify_out"
+  rm -f "$prompt_file" "$repair_prompt_file" "$verify_out" "${verify_heartbeat_ready:-}"
   [ -z "$conversation_scratch" ] || rm -rf -- "$conversation_scratch"
   [ -z "$plan_brief_file" ] || rm -f "$plan_brief_file"
   # Remove the liveness marker; a leftover file means the process died without
@@ -2127,12 +2118,9 @@ run_verify() {
   verify_pid="$!"
   if [ "$worker_attempt_owned" = 1 ] && [ "$WORKER_ACCESS" = write ]; then
     heartbeat_interval="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
-    # An explicit subshell drops the delegate's EXIT trap before argument
-    # expansion. A fast verifier can stop this child before the heartbeat
-    # installs its own traps; a bare background function then runs cleanup.
-    (ma_routed_heartbeat "$(ma_scripts_dir)/agent-events.sh" "$REPO" \
-      "$worker_attempt_id" "$verify_pid" "$heartbeat_interval") &
-    verify_heartbeat_pid="$!"
+    verify_heartbeat_ready="$verify_out.heartbeat"
+    ma_heartbeat_start verify_heartbeat_pid "$verify_heartbeat_ready" \
+      "" "$REPO" "$worker_attempt_id" "$verify_pid" "$heartbeat_interval"
   fi
   wait "$verify_pid"
   verify_status=$?

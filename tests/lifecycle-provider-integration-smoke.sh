@@ -670,6 +670,34 @@ attempts = json.load(open(sys.argv[1]))
 assert attempts[-1]["state"] == "blocked", attempts[-1]
 PY
 
+# Cancelling a running routed call must not leak the heartbeat's ready proof
+# or any other library temp: the call's own temp dir is removed whole.
+mkdir -p "$TMP/cancel-tmp" "$TMP/cancel-bin"
+cat > "$TMP/cancel-bin/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) echo 'codex fixture'; exit 0 ;; esac
+cat >/dev/null
+: > "$OMS_TEST_CANCEL_STARTED"
+sleep 30
+EOF
+chmod +x "$TMP/cancel-bin/codex"
+cancel_started="$TMP/cancel.started"
+env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" TMPDIR="$TMP/cancel-tmp" \
+  OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/cancel-bin:/usr/bin:/bin" \
+  OMS_ROUTED_HEARTBEAT_SECONDS=1 OMS_TEST_CANCEL_STARTED="$cancel_started" \
+  "$ROOT/scripts/peer-ask.sh" --repo "$TMP/repo" --providers codex \
+  --prompt 'cancel probe' > "$TMP/cancel.out" 2>&1 &
+cancel_pid=$!
+_cancel_wait=0
+while [ ! -f "$cancel_started" ] && [ "$_cancel_wait" -lt 1200 ]; do
+  sleep .05; _cancel_wait=$((_cancel_wait + 1))
+done
+[ -f "$cancel_started" ] || { cat "$TMP/cancel.out" >&2; fail "cancel probe provider did not start"; }
+kill -TERM "$cancel_pid"
+wait "$cancel_pid" 2>/dev/null || true
+[ -z "$(find "$TMP/cancel-tmp" -mindepth 1 -print)" ] ||
+  fail "a cancelled routed call leaked temp files: $(find "$TMP/cancel-tmp" -mindepth 1 -print)"
+
 # The aggregate verifier must include both the shared lifecycle stream and the
 # private approval store. Corruption in either cannot be hidden behind the
 # older run/artifact validators.
