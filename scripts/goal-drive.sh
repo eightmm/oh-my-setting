@@ -1745,7 +1745,7 @@ intent_commit() {  # LABEL
     park "intent-ref-moved" "the checked-out branch changed before exact publication"
   intent_tree_matches "$patch_abs" ||
     park "commit-mismatch" "working-tree bytes changed before the exact commit could be published"
-  msg="$(printf '%s' "${INTENT_TITLE:-$INTENT_TASK}" | tr -d '\000-\037' | sed 's/^[-[:space:]]*//' | cut -c1-72)"
+  msg="$(printf '%s' "${INTENT_TITLE:-$INTENT_TASK}" | tr -d '\000-\037' | sed 's/^[-[:space:]]*//')"
   # `git commit` runs repository hooks against the mutable real index and reads
   # HEAD again after our checks. A hook or sibling writer could therefore add
   # bytes or change the parent. Build the immutable reviewed tree directly and

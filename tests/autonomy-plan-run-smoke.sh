@@ -580,7 +580,7 @@ git -C "$repo" commit -qm 'test: goal arms join the check contract'
   --accept 'bash scripts/check.sh g1 && bash scripts/check.sh g2' >/dev/null
 "$PLAN" --repo "$repo" add --id g1 --title "feat: goal one lands" \
   --allowed goal1.txt --verify 'bash scripts/check.sh g1' >/dev/null
-"$PLAN" --repo "$repo" add --id g2 --title "feat: goal two lands" --depends g1 \
+"$PLAN" --repo "$repo" add --id g2 --title "feat: goal two lands — 두 번째 목표가 한국어 제목 전체를 커밋 제목으로 보존하고 일흔두 글자 뒤에서도 잘리지 않는다" --depends g1 \
   --allowed goal2.txt --verify 'bash scripts/check.sh g2' >/dev/null
 head0="$(git -C "$repo" rev-parse HEAD)"
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
@@ -591,8 +591,13 @@ grep -Fq 'acceptance passed' "$TMP/gd.out" || fail "acceptance pass missing"
 [ "$(git -C "$repo" rev-list --count "$head0"..HEAD)" = 2 ] ||
   fail "driver should have committed exactly the two landed tasks"
 # Drain git's output: grep -q can turn a match into SIGPIPE under pipefail.
-git -C "$repo" log --format=%s -2 | grep -F 'feat: goal two lands' >/dev/null ||
-  fail "task title should be the commit subject"
+# The plan bounds no title length, so the subject is the whole title: a byte cut
+# at 72 would end mid-word or inside a UTF-8 sequence.
+g2_title="feat: goal two lands — 두 번째 목표가 한국어 제목 전체를 커밋 제목으로 보존하고 일흔두 글자 뒤에서도 잘리지 않는다"
+[ "$(git -C "$repo" log --format=%s -1)" = "$g2_title" ] ||
+  fail "task title should be the whole commit subject"
+git -C "$repo" log --format=%s -1 | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' ||
+  fail "commit subject is not valid UTF-8"
 [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ] ||
   fail "driver left tracked changes uncommitted"
 "$PLAN" --repo "$repo" show --id g2 | grep -F '"state": "done"' > /dev/null || fail "g2 not done"
