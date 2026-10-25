@@ -1524,10 +1524,34 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
                 line = panel_resume_line(dict(payload, source=source))
                 if line:
                     base = line + "\n" + base
-    message = base + panel_plan_hint(payload) + panel_status_hint(payload, room)
+    message = base + panel_dedup_hint(payload, panel_plan_hint(payload) + panel_status_hint(payload, room),
+                                      bool(path) and not state.get("delivered"))
     if path and not state.get("delivered"):
         write_json_atomic(path, dict(state, schema=1, updated_at=utc_now(), delivered=True))
     return message
+
+
+PANEL_HINT_REPEAT = 20
+
+
+def panel_dedup_hint(payload: dict[str, Any], text: str, force: bool) -> str:
+    """Repeat the plan/status text only when it changed, on a context reset, or every PANEL_HINT_REPEAT prompts."""
+    repo = hook_repo(payload)
+    path = repo / ".oms" / "hooks" / "sessions" / f"{session_hash(payload)}.hint.json" if repo else None
+    if path is None:
+        return text
+    digest = sha256_text(text)
+    old = load_state(path)
+    since = old.get("since")
+    since = since + 1 if type(since) is int and since >= 0 else PANEL_HINT_REPEAT
+    omit = bool(text) and not force and old.get("digest") == digest and since < PANEL_HINT_REPEAT
+    if not omit:
+        since = 0
+    try:
+        write_json_atomic(path, {"schema": 1, "digest": digest, "since": since})
+    except Exception:
+        return text  # an unstored counter could never trigger the periodic repeat: fail open
+    return "" if omit else text
 
 
 def plain_line(value: Any, limit: int) -> str:
@@ -2746,6 +2770,10 @@ def cmd_relay_hint(_: argparse.Namespace) -> int:
                 path = resume_pending_path(payload)
                 if path:
                     write_json_atomic(path, {"schema": 1, "updated_at": utc_now(), "source": payload.get("source")})
+        with contextlib.suppress(Exception):
+            repo = hook_repo(payload)
+            if repo:
+                (repo / ".oms" / "hooks" / "sessions" / f"{session_hash(payload)}.hint.json").unlink()
         with contextlib.suppress(Exception):
             line = panel_resume_line(payload) if payload.get("source") in ("compact", "clear") else ""
             if line:

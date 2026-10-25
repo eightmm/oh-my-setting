@@ -1134,6 +1134,31 @@ plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "clai
            {"id": "t3", "state": "ready"}])
 room.send(repo, "binding-room", os.environ["OMS_ROOM_PARTICIPANT"], "all", "Wiring the banner", kind="status")
 assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
+# Repeated identical plan/status text is injected once: changed text, a context reset and every 20th prompt re-emit it.
+def wake():
+    return hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
+# The call above emitted; every later emission is exactly 20 calls after the previous one, cycle after cycle.
+for cycle in range(3):
+    repeats = [wake() for _ in range(19)]
+    assert all("[oms plan]" not in r and r.startswith("[oms panel] control-tower main:") and len(r) < 160 for r in repeats), (cycle, repeats)
+    assert "[oms plan]" in wake(), "every 20th prompt after an emission repeats the plan (cycle %d)" % cycle
+# A cache that cannot be stored fails open: the hint is emitted instead of being suppressed forever.
+assert "[oms plan]" not in wake()
+with patch.object(hook_state, "write_json_atomic", side_effect=OSError("disk full")):
+    assert all("[oms plan]" in wake() for _ in range(40)), "a failed cache write must not suppress the hint"
+plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "done"}, {"id": "t3", "state": "ready"}])
+assert "2 of 3 verified" in wake(), "a changed plan re-emits"
+assert "[oms plan]" not in wake()
+assert "[oms plan]" in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit")), "no prompt: full text"
+for source in ("compact", "clear", "resume"):
+    assert "[oms plan]" not in wake()
+    subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "relay-hint"], capture_output=True, text=True, check=True,
+                   input=json.dumps(dict(payload("tower"), hook_event_name="SessionStart", source=source)))
+    assert "[oms plan]" in wake(), source
+(repo / ".oms/hooks/sessions" / (hook_state.session_hash(payload("tower")) + ".hint.json")).write_text("{bad")
+assert "[oms plan]" in wake(), "an unreadable state file means emit"
+plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
+           {"id": "t3", "state": "ready"}])
 plan_file([{"id": "old-review", "state": "review", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
            {"id": "current-work", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
            {"id": "foreign-work", "state": "running", "claimed_by_participant": "someone-else"}])
