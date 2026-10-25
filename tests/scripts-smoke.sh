@@ -37234,11 +37234,13 @@ goal_drive_batch_verifier_deadline() {
     fail "a 1-second provider and 90-second verifier need a 155-second outer wall, got $out"
 }
 
-# smoke-weight: 626
+# The batch modes are independent, so they split across these functions to keep
+# any one shard from waiting on a single long test; every mode runs exactly once.
+# smoke-weight: 122
 test_goal_drive_parallel_batches() {
   local project="$TMP/goal-batch-skip-candidates" out
   goal_drive_batch_verifier_deadline
-  goal_drive_batch_cases replay-surface replay-floor python pytest replay-backward replay-forward replay-recover parallel shared overlap verifier serial cap unreconciled recover land-recover tamper
+  goal_drive_batch_cases replay-surface replay-floor replay-forward cap unreconciled tamper
   make_committed_repo "$project"
   mkdir -p "$project/checks" "$project/.oms/plan"
   for task in t1 t2 t3 t4 u1 u2 u3; do
@@ -37280,6 +37282,21 @@ PY
     fail "unknown-verifier selector failed: $out"
   [ "$out" = "$(printf 'u1\nu2\nu3')" ] ||
     fail "pytest verifier did not join disjoint tasks: $out"
+}
+
+# smoke-weight: 138
+test_goal_drive_parallel_batches_replay() {
+  goal_drive_batch_cases replay-backward replay-recover recover land-recover
+}
+
+# smoke-weight: 142
+test_goal_drive_parallel_batches_verifiers() {
+  goal_drive_batch_cases python pytest shared verifier
+}
+
+# smoke-weight: 103
+test_goal_drive_parallel_batches_scheduling() {
+  goal_drive_batch_cases parallel overlap serial
 }
 
 # smoke-weight: 197
