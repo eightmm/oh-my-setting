@@ -1308,7 +1308,7 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                 status = ("suppressed_rejected_hypothesis"
                           if rejected_lines[int(match.group(1))] == "rejected"
                           else "held_uncertain_match")
-            elif disposition_keyword == "uncertain":
+            elif re.match(r"uncertain(?:$|[:,\s-])", disposition_keyword):
                 status = "held_uncertain_match"
             elif disposition_keyword.startswith("duplicates task "):
                 match = re.fullmatch(r"duplicates task ([A-Za-z0-9._-]+)", disposition,
@@ -1319,7 +1319,9 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
             elif disposition_keyword == "new":
                 status = "eligible"
             else:
-                raise ValueError("candidate has invalid duplicate_disposition")
+                # Unrecognized wording holds this candidate report-only instead of
+                # discarding the whole answer; only the exact keyword "new" is eligible.
+                status = "held_uncertain_match"
             if status == "eligible" and "speculative" in refs:
                 status = "speculative_report_only"
             elif status == "eligible":
