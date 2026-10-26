@@ -805,6 +805,11 @@ def native_tokens(entry):
         partial = entry.get("partial") is True
         spent = (token_pair(total - output, output, partial) if output is not None and total >= output
                  else amount(total) + ("+" if partial else "") + " tok")
+        cached, ctx = valid_count(entry.get("cached")), valid_count(entry.get("ctx"))
+        if output is not None and total > output and cached is not None:
+            spent += " · %d%% cached" % min(100, cached * 100 // (total - output))
+            if ctx is not None:
+                spent = "ctx %s · %s" % (amount(ctx), spent)
     crowd = "%s/%s agents live" % (live, agents) if live is not None and agents else ""
     return " · ".join(part for part in (crowd, spent) if part)
 

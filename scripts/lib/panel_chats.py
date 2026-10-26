@@ -324,7 +324,7 @@ def _oversized_usage(line):
 
 
 def _transcript_usage(path, budget):
-    """(total tokens, output tokens, partial, counted) from one subagent transcript, or None when it cannot be
+    """(total tokens, output tokens, partial, counted, cache-read tokens, latest context tokens) from one subagent transcript, or None when it cannot be
     examined at all (callers treat that as unread).
 
     Only assistant records holding a usage object are counted, once per message: each streamed content block
@@ -346,7 +346,7 @@ def _transcript_usage(path, budget):
         entry = None
     if entry is None:
         entry = _usage[path] = {"id": ident, "mtime": 0, "offset": 0, "last": None, "counted": False,
-                                "capped": False, "over": False, "total": 0, "output": 0, "read": -1}
+                                "capped": False, "over": False, "total": 0, "output": 0, "cached": 0, "read": -1}
     entry["mtime"], entry["refresh"] = info.st_mtime_ns, _refresh[0]
     if entry["offset"] < info.st_size:
         limit = min(USAGE_FILE_BYTES, budget[0])
@@ -395,13 +395,18 @@ def _transcript_usage(path, budget):
                 if key is not None and last and last[0] == key:
                     entry["total"] -= sum(last[1])
                     entry["output"] -= last[1][3]
+                    entry["cached"] -= last[1][2]
                 entry["total"] += sum(counts)
                 entry["output"] += counts[3]
+                entry["cached"] += counts[2]
                 entry["last"], entry["counted"] = (key, counts), True
             entry["offset"] += end
     # Unread bytes, including a torn last line still being written, leave the total incomplete.
     entry["capped"] = entry["offset"] < info.st_size
-    return entry["total"], entry["output"], entry["capped"] or entry["over"], entry["counted"]
+    # The context is the latest counted message's input side: summed totals grow with every turn re-reading it.
+    context = sum(entry["last"][1][:3]) if entry["last"] else None
+    return (entry["total"], entry["output"], entry["capped"] or entry["over"], entry["counted"],
+            entry["cached"], context)
 
 
 def _native_agents(folder, now, budget):
@@ -418,7 +423,7 @@ def _native_agents(folder, now, budget):
         row = {"id": agent, "title": title, "active": mtime}
         used = _transcript_usage(folder / "subagents" / ("agent-%s.jsonl" % agent), budget)
         if used and used[3]:
-            row.update(tokens=used[0], output=used[1], partial=used[2])
+            row.update(tokens=used[0], output=used[1], partial=used[2], cached=used[4], ctx=used[5])
         found.append(row)
     return found
 
@@ -561,7 +566,7 @@ def _run_agents(run, now, budget):
     counted = [used for used in reads if used and used[3]]
     if counted:
         # An agent left unread or partly read (budget, caps, unreadable) keeps the run's total marked partial.
-        found.update(tokens=sum(u[0] for u in counted), output=sum(u[1] for u in counted),
+        found.update(tokens=sum(u[0] for u in counted), output=sum(u[1] for u in counted), cached=sum(u[4] for u in counted),
                      partial=any(used is None or used[2] for used in reads))
     return found
 

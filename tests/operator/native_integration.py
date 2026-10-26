@@ -1458,7 +1458,20 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     assert panel_chats._usage[str(tokens_log)]["offset"] == tokens_log.stat().st_size
     assert (agent["tokens"], agent["output"], agent["partial"]) == (2478 + 8, 466, False), agent
     text, nav = sub_board(panel_chats.native_subagents([claude_main]), "log")
-    assert "2.0k in / 466 out" in text, text
+    assert "ctx 1 · 2.0k in / 466 out · 49% cached" in text, text
+    # Cache reads and the latest context ride along with the summed total; a repeat of a message replaces its counts.
+    assert (agent["cached"], agent["ctx"]) == (1001, 1), agent
+    ctx_log = write_agent("t4", description="Context", lines=[
+        usage_line("c1", 5, 0, 900, 10), usage_line("c1", 5, 0, 900, 10), usage_line("c2", 20, 80, 1900, 30)])
+    agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["t4"]
+    assert (agent["tokens"], agent["cached"], agent["ctx"]) == (915 + 2030, 2800, 2000), agent
+    text, nav = sub_board(panel_chats.native_subagents([claude_main]), "log")
+    assert "ctx 2000 · 2.9k in / 40 out · 96% cached" in text, text
+    # Without cache data or a context the row keeps its plain token text.
+    assert graph_view.native_tokens({"tokens": 105, "output": 5}) == "100 in / 5 out"
+    assert graph_view.native_tokens({"tokens": 105, "output": 5, "cached": 0, "ctx": 100}) == "ctx 100 · 100 in / 5 out · 0% cached"
+    assert graph_view.native_tokens({"tokens": 105, "output": 5, "cached": 90}) == "100 in / 5 out · 90% cached"
+    ctx_log.unlink()
     # Absent cache counts are zero; a malformed count leaves the total partial instead of looking complete.
     sparse = json.dumps({"type": "assistant", "message": {"id": "s1", "usage": {"input_tokens": 100, "output_tokens": 5}}})
     sparse_log = write_agent("t3", description="Sparse", lines=[sparse])
@@ -1551,6 +1564,7 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     found = panel_chats.native_subagents([claude_main])
     flows = shown(found)["workflows"]
     assert (flows["wf_r1"]["agents"], flows["wf_r1"]["live"], flows["wf_r1"]["tokens"], flows["wf_r1"]["output"]) == (2, 1, 27, 16), flows
+    assert "ctx" not in flows["wf_r1"] and flows["wf_r1"]["cached"] == 0, flows
     assert "agents" not in flows["wf_r2"] and "tokens" not in flows["wf_r2"], flows
     # An agent the per-refresh budget leaves unread keeps the run's total partial until it has been read.
     newest = runs_dir / "wf_r1" / "agent-w1.jsonl"
