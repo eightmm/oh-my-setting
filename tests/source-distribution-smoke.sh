@@ -146,6 +146,21 @@ if [ "${OMS_PARALLEL_CANCEL:-0}" = 1 ]; then
   wait "$child"
 fi
 if [ "${OMS_PARALLEL_FAIL:-0}" = 1 ] && [ "$key" = focused-only-2 ]; then exit 11; fi
+if [ "${OMS_PARALLEL_SLOW:-0}" = 1 ]; then
+  case "$key" in
+    focused-only-1)
+      # Hold the first slot until the third lane starts, bounded so a
+      # scheduler that reaps in launch order still terminates.
+      for _ in $(seq 1 300); do
+        [ -e "$OMS_PARALLEL_PROBE/third.started" ] && break
+        sleep 0.1
+      done
+      touch "$OMS_PARALLEL_PROBE/first.done" ;;
+    focused-only-3)
+      [ -e "$OMS_PARALLEL_PROBE/first.done" ] || touch "$OMS_PARALLEL_PROBE/third.early"
+      touch "$OMS_PARALLEL_PROBE/third.started" ;;
+  esac
+fi
 EOF
   # shellcheck source=scripts/lib/check-parallel.sh
   . "$ROOT/scripts/lib/check-parallel.sh"
@@ -171,6 +186,12 @@ PY
     fail "serial constrained gate failed without lint: $(cat "$probe/no-lint.log")"
   [ "$(find "$probe" -name '*.ran' | wc -l | tr -d ' ')" = 9 ] && [ ! -e "$probe/lint-only.ran" ] ||
     fail "constrained no-lint gate changed partition coverage"
+  # With 2 slots the slow first lane must not hold the slot the fast second
+  # lane freed: the third lane has to start before the first lane finishes.
+  rm -f "$probe/first.done" "$probe/third.started" "$probe/third.early"
+  OMS_CHECK_JOBS=2 OMS_PARALLEL_SLOW=1 oms_check_parallel "$probe/check.sh" "$probe/slow-logs" 1 > "$probe/slow.log" 2>&1 ||
+    fail "slow-lane gate failed: $(cat "$probe/slow.log")"
+  [ -e "$probe/third.early" ] || fail "parallel gate idled a free slot behind a slow lane"
   if OMS_PARALLEL_FAIL=1 oms_check_parallel "$probe/check.sh" "$probe/fail-logs" 0 > "$probe/fail.log" 2>&1; then
     fail "parallel gate swallowed a failing lane"
   fi

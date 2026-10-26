@@ -28,7 +28,7 @@ oms_check_parallel() (
 oms_check_parallel_run() {
   set -euo pipefail
   local check="$1" logs="$2" skip_lint="${3:-0}" queued="${4:-}"
-  local lane i rc=0 next=0 total=0 budget="${OMS_CHECK_JOBS:-10}"
+  local lane rc=0 next=0 total=0 running=0 budget="${OMS_CHECK_JOBS:-10}"
   local pids=() names=()
   mkdir -p "$logs"
   cleanup_parallel() {
@@ -52,36 +52,52 @@ oms_check_parallel_run() {
     # smoke runner and operator fixtures. Nested fans cannot multiply the cap.
     export OMS_LINT_JOBS_MAX=1 OMS_SMOKE_JOBS=1 OMS_OPERATOR_JOBS=1
   fi
+  # Reclaim whichever lane finished first so one slow lane cannot idle free
+  # slots (Bash 3.2 has no wait -n); logs still print in launch order.
   reap_parallel_slot() {
-    wait "${pids[$next]}" || rc=1
-    pids[$next]=""
-    cat "$logs/${names[$next]}.log"
-    next=$((next + 1))
+    local k alive found=0
+    while :; do
+      alive=" $(jobs -pr 2>/dev/null | tr '\n' ' ')"
+      for ((k=next; k<total; k++)); do
+        [ -n "${pids[$k]}" ] || continue
+        case "$alive" in *" ${pids[$k]} "*) continue ;; esac
+        wait "${pids[$k]}" || rc=1
+        pids[$k]=""
+        running=$((running - 1))
+        found=1
+      done
+      [ "$found" = 1 ] && break
+      sleep 0.1
+    done
+    while [ "$next" -lt "$total" ] && [ -z "${pids[$next]}" ]; do
+      cat "$logs/${names[$next]}.log"
+      next=$((next + 1))
+    done
   }
   if [ "$skip_lint" != 1 ] && [ -z "$queued" ]; then
     bash "$check" --lint-only > "$logs/lint.log" 2>&1 &
     pids+=("$!"); names+=(lint)
-    total=$((total + 1))
+    total=$((total + 1)); running=$((running + 1))
   fi
   for lane in 1 2 3 4 5 6 7 8; do
-    if [ $((total - next)) -ge "$budget" ]; then reap_parallel_slot; fi
+    if [ "$running" -ge "$budget" ]; then reap_parallel_slot; fi
     if [ -n "$queued" ]; then
       oms_check_queued_lane "$queued" "$logs" "$lane" > "$logs/focused-$lane.log" 2>&1 &
     else
       bash "$check" --focused-only --focused-lane "$lane/8" > "$logs/focused-$lane.log" 2>&1 &
     fi
     pids+=("$!"); names+=("focused-$lane")
-    total=$((total + 1))
+    total=$((total + 1)); running=$((running + 1))
   done
-  if [ $((total - next)) -ge "$budget" ]; then reap_parallel_slot; fi
+  if [ "$running" -ge "$budget" ]; then reap_parallel_slot; fi
   if [ -n "$queued" ]; then
     oms_check_queued_lane "$queued" "$logs" smoke > "$logs/smoke.log" 2>&1 &
   else
     OMS_SMOKE_JOBS="${OMS_SMOKE_JOBS:-6}" bash "$check" --scripts-smoke-only > "$logs/smoke.log" 2>&1 &
   fi
   pids+=("$!"); names+=(smoke)
-  total=$((total + 1))
-  for ((i=next; i<total; i++)); do
+  total=$((total + 1)); running=$((running + 1))
+  while [ "$running" -gt 0 ]; do
     reap_parallel_slot
   done
   exit "$rc"
