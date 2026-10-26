@@ -785,7 +785,8 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         evidence_paths = (("artifact " + artifact + " and ") if artifact else "") + "patch " + str(patch_path)
         prompt = ("Review the completed write result for task " + task_id + ".\n"
                   "The controller has applied the digest-verified patch to its recorded base in a private candidate checkout.\n"
-                  "Review the complete attached candidate diff and inspect candidate source. "
+                  "Review the complete attached candidate diff; it is already in this prompt, so do not regenerate it with git diff. "
+                  "Inspect candidate source in batched reads limited to the changed functions, their direct callers and callees, and their existing tests. "
                   "The original evidence in the owner state is " + evidence_paths + ".\n"
                   "Assess correctness and safety. Keep the candidate unchanged; the controller runs the verifier there.\n"
                   "End with exactly one final line: GATE: pass or GATE: fail, then concise findings before it.")

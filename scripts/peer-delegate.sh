@@ -1123,6 +1123,7 @@ write_minimal_change_doctrine() {
     codex|claude) printf 'Follow the repository instructions; do not re-read a file already in your context, but read any applicable instruction file that is not. Read PROJECT.md once, only if the task touches its contract.' ;;
     *) printf 'Read applicable repository instructions and PROJECT.md.' ;;
   esac
+  printf ' Batch independent reads and searches into one tool call or parallel calls in one turn; keep dependent reads sequential.'
   printf ' Use source evidence to bound the smallest complete change, preserve contracts and safety, reuse existing tests, and run affected checks. Report changes, evidence, verification and uncertainty; return code as patch artifacts.\n'
 }
 

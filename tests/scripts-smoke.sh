@@ -5465,6 +5465,8 @@ test_delegate_dry_run() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" 'exact-routine-model'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'Follow the repository instructions; do not re-read a file already in your context, but read any applicable instruction file that is not. Read PROJECT.md once, only if the task touches its contract.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
+    'Batch independent reads and searches into one tool call or parallel calls in one turn; keep dependent reads sequential.'
   # A Claude target whose repository has only AGENTS.md loads nothing itself.
   local agents_only="$TMP/delegate-agents-only"
   mkdir -p "$agents_only"

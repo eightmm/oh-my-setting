@@ -113,6 +113,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert dispatch_args[6] == "test -f scripts/fixture.py"
     prompt = dispatch_args[4]
     assert auto_artifact in prompt and auto_patch_path in prompt and str(project) not in prompt
+    assert "do not regenerate it with git diff" in prompt and "direct callers and callees, and their existing tests" in prompt
     assert dispatch_args[2:4] == ("reviewer", "read")
     assert dispatch_args[10]["workload"] == "deep", dispatch_args[10]
     assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
