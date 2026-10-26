@@ -975,13 +975,51 @@ def index_compacted(path, size, expected):
     return not (dropped & protected)
 
 with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
-    for line in f:
+    snapshot_lines = f.readlines()
+    launch_paths = {line.rstrip("\n").split(" ", 1)[0] for line in snapshot_lines}
+    exclusive = os.environ.get("OMS_WORKER_AUTHORITY_EXCLUSIVE") == "1"
+    for line in snapshot_lines:
         parts = line.rstrip("\n").split(" ")
         if len(parts) < 2:
             continue
         rel, kind = parts[0], parts[1]
         path = os.path.join(root, rel)
         if not os.path.exists(path):
+            if kind == "RECEIPT" and len(parts) == 4 and not exclusive:
+                digest = parts[3]
+                archive_rels = ["plan/autopilot-run.%s.json" % digest]
+                plan_dir = os.path.join(root, "plan")
+                if re.fullmatch(r"[0-9a-f]{64}", digest) and os.path.isdir(plan_dir):
+                    # An enumeration error must not abort the checker and hide
+                    # earlier rows; only the exact launch-digest archive remains.
+                    try:
+                        candidates = os.listdir(plan_dir)
+                    except OSError:
+                        candidates = []
+                    for candidate in candidates:
+                        rel_candidate = "plan/" + candidate
+                        match = re.fullmatch(r"plan/autopilot-run\.([0-9a-f]{64})\.json", rel_candidate)
+                        if match and rel_candidate not in launch_paths and rel_candidate not in archive_rels:
+                            archive_rels.append(rel_candidate)
+                accepted = False
+                for archive_rel in archive_rels:
+                    archive = os.path.join(root, archive_rel)
+                    try:
+                        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                        with os.fdopen(os.open(archive, flags), "rb") as handle:
+                            info = os.fstat(handle.fileno())
+                            if (os.path.islink(archive) or not stat.S_ISREG(info.st_mode)
+                                    or info.st_size > 65536):
+                                continue
+                            content = handle.read(65537)
+                        if (len(content) <= 65536 and hashlib.sha256(content).hexdigest()
+                                == os.path.basename(archive)[len("autopilot-run."):-len(".json")]):
+                            accepted = True
+                            break
+                    except OSError:
+                        pass
+                if accepted:
+                    continue
             if (kind == "CACHE"
                     and re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel)):
                 if not os.path.lexists(path):
@@ -1468,7 +1506,8 @@ oms_worker_surface_diff() {
   # Shared state is compared by contract, not by equality: see above. The detail
   # goes to a file because this function runs in a command substitution, where
   # an exported variable would die with the subshell.
-  oms_worker_state_violations "$repo" "$before_dir/omsstate" > "$before_dir/state-detail"
+  oms_worker_state_violations "$repo" "$before_dir/omsstate" > "$before_dir/state-detail" ||
+    printf 'shared-state check failed\n' >> "$before_dir/state-detail"
   [ ! -s "$before_dir/state-detail" ] || changed="${changed:+$changed, }shared-state"
   if [ -n "$operation_snapshot_sha" ]; then
     if [ ! -f "$before_dir/current-operation.json" ] ||
@@ -2864,6 +2903,21 @@ for base, dirs, files in os.walk(root):
         if skip_volatile and rel.startswith(VOLATILE) and not rel.endswith(".jsonl"):
             continue
         if skip_volatile and RUNTIME_TEMP.fullmatch(rel):
+            continue
+        if rel == "plan/autopilot-run.json":
+            try:
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                with os.fdopen(os.open(path, flags), "rb") as f:
+                    opened = os.fstat(f.fileno())
+                    if stat.S_ISREG(opened.st_mode):
+                        digest = hashlib.sha256()
+                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                        rows.append("%s RECEIPT %d %s" % (rel, opened.st_size, digest.hexdigest()))
+                    else:
+                        rows.append("%s EXISTS" % rel)
+            except OSError:
+                rows.append("%s UNREADABLE" % rel)
             continue
         if re.fullmatch(r"project-graph/cache/[0-9a-f]{64}\.json", rel):
             try:

@@ -33303,6 +33303,63 @@ PY
   grep -Fq '"fingerprint":"abc"' "$removed/.oms/failures.jsonl" ||
     fail "deleted shared state should be restored"
 
+  local receipt_case receipt_repo receipt_script
+  receipt_script='
+    . "$1/scripts/lib/harness-residue.sh"
+    . "$1/scripts/lib/oms-common.sh"
+    mkdir -p "$2/.oms/plan"
+    printf "{\"run\":1}\n" > "$2/.oms/plan/autopilot-run.json"
+    if [ "$4" = unlistable ]; then printf "{\"schema\":1}\n" > "$2/.oms/failures.jsonl"; fi
+    oms_worker_surface_capture_one "$2" omsstate "$2" > "$3" || exit 30
+    case "$4" in
+      archive|exclusive|wrong|symlink)
+        digest="$(oms_sha256_file "$2/.oms/plan/autopilot-run.json" | tr -d "\r")"
+        if [ "$4" = wrong ]; then digest="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; fi
+        if [ "$4" = symlink ]; then ln -s autopilot-run.json "$2/.oms/plan/autopilot-run.$digest.json"; else cp "$2/.oms/plan/autopilot-run.json" "$2/.oms/plan/autopilot-run.$digest.json"; fi
+        rm -f "$2/.oms/plan/autopilot-run.json"
+        ;;
+      rewrite)
+        printf "{\"run\":2}\n" > "$2/.oms/plan/autopilot-run.json"
+        digest="$(oms_sha256_file "$2/.oms/plan/autopilot-run.json" | tr -d "\r")"
+        cp "$2/.oms/plan/autopilot-run.json" "$2/.oms/plan/autopilot-run.$digest.json"
+        rm -f "$2/.oms/plan/autopilot-run.json"
+        ;;
+      limit|oversize)
+        dd if=/dev/zero of="$2/.oms/plan/autopilot-run.json" bs=65536 count=1 2>/dev/null
+        if [ "$4" = oversize ]; then printf x >> "$2/.oms/plan/autopilot-run.json"; fi
+        digest="$(oms_sha256_file "$2/.oms/plan/autopilot-run.json" | tr -d "\r")"
+        cp "$2/.oms/plan/autopilot-run.json" "$2/.oms/plan/autopilot-run.$digest.json"
+        rm -f "$2/.oms/plan/autopilot-run.json"
+        ;;
+      plain) rm -f "$2/.oms/plan/autopilot-run.json" ;;
+      unlistable)
+        rm -f "$2/.oms/plan/autopilot-run.json" "$2/.oms/failures.jsonl"
+        chmod 300 "$2/.oms/plan"
+        if ls "$2/.oms/plan" >/dev/null 2>&1; then chmod 755 "$2/.oms/plan"; exit 0; fi
+        ;;
+    esac
+    if [ "$4" = exclusive ]; then
+      OMS_WORKER_AUTHORITY_EXCLUSIVE=1 oms_worker_state_violations "$2" "$3" > "$3-detail"
+    else
+      oms_worker_state_violations "$2" "$3" > "$3-detail"
+    fi
+    if [ "$4" = unlistable ]; then
+      chmod 755 "$2/.oms/plan"
+      grep -Fq "failures.jsonl was deleted" "$3-detail"
+    elif [ "$4" = plain ] || [ "$4" = wrong ] || [ "$4" = symlink ] || [ "$4" = exclusive ] || [ "$4" = oversize ]; then
+      grep -Fq "plan/autopilot-run.json was deleted" "$3-detail"
+    else
+      [ ! -s "$3-detail" ]
+    fi
+  '
+  for receipt_case in archive rewrite limit oversize plain wrong symlink exclusive unlistable; do
+    receipt_repo="$TMP/guard-receipt-$receipt_case"
+    make_guard_repo "$receipt_repo"
+    bash -c "$receipt_script" _ "$ROOT" "$receipt_repo" \
+      "$TMP/guard-receipt-$receipt_case.snapshot" "$receipt_case" ||
+      fail "autopilot receipt retirement case $receipt_case was misclassified"
+  done
+
   local graph_cache="$TMP/guard-state-graph-cache"
   local graph_cache_file="$TMP/guard-state-graph-cache/.oms/project-graph/cache/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
   local graph_cache_snapshot="$TMP/guard-state-graph-cache-snapshot"
