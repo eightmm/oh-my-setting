@@ -123,6 +123,9 @@ Options:
                    intent is also left untouched and makes the command exit
                    nonzero. With --plan-task ID only that task's intents are
                    considered; others are neither recovered nor counted.
+                   Recovery requires the shared plan to be absent or a readable
+                   object with a plan_id and tasks map; an unusable plan aborts
+                   before any intent is changed.
   -h, --help       Show this help.
 
 Sequence: main tree must be clean -> patch-admit returns ADMIT -> git apply
@@ -484,12 +487,70 @@ plan_complete_receipt_converged() {
   [ "$intent_panel_accept" = 0 ] || return 0
   [ -n "$intent_task" ] || return 0
   [ -n "$intent_plan_done_receipt_sha" ] || return 1
-  values="$(plan_receipt_values "$intent_task")" || return 1
+  values="$(plan_receipt_values "$intent_task")" || values=""
   state="$(printf '%s' "$values" | cut -f1)"
   lease="$(printf '%s' "$values" | cut -f2)"
   receipt_sha="$(printf '%s' "$values" | cut -f3)"
-  [ "$state" = "done" ] && [ "$lease" = "$intent_lease" ] &&
-    [ "$receipt_sha" = "$intent_plan_done_receipt_sha" ]
+  if [ "$state" = "done" ] && [ "$lease" = "$intent_lease" ] &&
+    [ "$receipt_sha" = "$intent_plan_done_receipt_sha" ]; then
+    return 0
+  fi
+  if [ "$RECOVERY_PLAN_STATE" = VALID ] &&
+    [ "$RECOVERY_PLAN_ID" = "$intent_plan_id" ]; then
+    return 1
+  fi
+  plan_retired_done_receipt_converged
+}
+
+# A done receipt stays provable after its plan is retired or replaced: the
+# content-addressed archive still holds the task. Only a retirement ledger row
+# for the intent's own plan_id can vouch for it, and a live plan that still
+# owns that plan_id and task remains the sole authority.
+plan_retired_done_receipt_converged() {
+  [ "$intent_panel_accept" = 0 ] || return 1
+  [ -n "$intent_task" ] && [ -n "$intent_plan_id" ] || return 1
+  [ -n "$intent_plan_done_receipt_sha" ] || return 1
+  OMS_PR_REPO="$STATE_REPO" OMS_PR_PLAN_ID="$intent_plan_id" \
+    OMS_PR_TASK="$intent_task" OMS_PR_LEASE="$intent_lease" \
+    OMS_PR_DONE_SHA="$intent_plan_done_receipt_sha" \
+    python3 - "$ROOT/scripts/lib/plan-retire.py" "$ROOT/scripts/lib/plan-receipt.py" <<'PY' >/dev/null 2>&1
+import hashlib, json, os, re, runpy, sys
+
+def refuse(message):
+    raise ValueError(message)
+
+retire = runpy.run_path(sys.argv[1])
+digest = runpy.run_path(sys.argv[2])["digest"]
+retire["validate_retirement_ledger"].__globals__["CONTEXT"] = {"die": refuse, "repo_root": os.path.realpath(os.environ["OMS_PR_REPO"])}
+repo = os.path.realpath(os.environ["OMS_PR_REPO"])
+plan_id = os.environ["OMS_PR_PLAN_ID"]
+task_id = os.environ["OMS_PR_TASK"]
+try:
+    rows = retire["validate_retirement_ledger"](repo)
+    matched = [row for row in rows if row.get("plan_id") == plan_id and
+               row.get("kind") in ("plan-retirement", "plan-replacement")]
+    if len(matched) != 1:
+        raise SystemExit(1)
+    sha = matched[0].get("plan_sha256", "")
+    name = "tasks.%s.archive.json" % sha
+    if (not re.fullmatch(r"[0-9a-f]{64}", sha) or
+            matched[0].get("archive") != ".oms/plan/" + name):
+        raise SystemExit(1)
+    with open(os.path.join(repo, ".oms", "plan", name), "rb") as handle:
+        payload = handle.read()
+    if hashlib.sha256(payload).hexdigest() != sha:
+        raise SystemExit(1)
+    archived = json.loads(payload.decode("utf-8"))
+    if archived.get("plan_id", "") != plan_id:
+        raise SystemExit(1)
+    task = archived["tasks"][task_id]
+except (ValueError, OSError, KeyError, TypeError, AttributeError, SystemExit) as exc:
+    raise SystemExit(exc.code if isinstance(exc, SystemExit) and exc.code else 1)
+ok = (task.get("state") == "done" and
+      task.get("lease_id", "") == os.environ["OMS_PR_LEASE"] and
+      digest(task) == os.environ["OMS_PR_DONE_SHA"])
+raise SystemExit(0 if ok else 1)
+PY
 }
 
 plan_landing_receipt_converged() {
@@ -562,10 +623,11 @@ plan_abandoned_receipt_converged() {
 }
 
 complete_terminal_converged() {
+  COMPLETE_FAILED_CHECK=""
   landing_lineage_exists "$intent_patch" "$intent_patch_sha" \
-    "$intent_task" "$intent_plan_id" || return 1
-  plan_complete_receipt_converged || return 1
-  approval_terminal_converged complete
+    "$intent_task" "$intent_plan_id" || { COMPLETE_FAILED_CHECK="landing lineage row"; return 1; }
+  plan_complete_receipt_converged || { COMPLETE_FAILED_CHECK="plan done receipt"; return 1; }
+  approval_terminal_converged complete || { COMPLETE_FAILED_CHECK="approval receipt"; return 1; }
 }
 
 abandoned_terminal_converged() {
@@ -766,6 +828,36 @@ if [ "$RECOVER" = 1 ]; then
   recovered=0
   abandoned=0
   needs_manual=0
+  # Snapshot authority once under the landings lock. A present but unusable
+  # plan cannot be treated as absence by either filtering or archive recovery.
+  RECOVERY_PLAN_RECORD="$(python3 -c '
+import json,os,stat,sys
+path = sys.argv[1]
+if not os.path.lexists(path):
+    print("ABSENT\t")
+    raise SystemExit(0)
+try:
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise ValueError("not a regular file")
+    with open(path, encoding="utf-8") as handle:
+        plan = json.load(handle)
+    if not isinstance(plan, dict):
+        raise ValueError("not an object")
+    plan_id = plan.get("plan_id")
+    tasks = plan.get("tasks")
+    if not isinstance(plan_id, str) or not plan_id:
+        raise ValueError("missing or invalid plan_id")
+    if not isinstance(tasks, dict):
+        raise ValueError("missing or invalid tasks")
+except (OSError, ValueError, TypeError) as exc:
+    sys.stderr.write("unusable plan file %s: %s\n" % (path, exc))
+    raise SystemExit(3)
+print("VALID\t" + plan_id)
+' "$STATE_REPO/.oms/plan/tasks.json" | tr -d '\r'; exit "${PIPESTATUS[0]}")" ||
+    fail "recovery needs a readable shared plan or no plan file: $STATE_REPO/.oms/plan/tasks.json"
+  RECOVERY_PLAN_STATE="$(printf '%s' "$RECOVERY_PLAN_RECORD" | cut -f1)"
+  RECOVERY_PLAN_ID="$(printf '%s' "$RECOVERY_PLAN_RECORD" | cut -f2)"
+  SCOPE_PLAN_ID="$RECOVERY_PLAN_ID"
   while IFS= read -r intent_row; do
     [ -n "$intent_row" ] || continue
     LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))' | tr -d '\r')"
@@ -785,6 +877,9 @@ if [ "$RECOVER" = 1 ]; then
     intent_approval="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval",""))' | tr -d '\r')"
     intent_approval_version="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_version",""))' | tr -d '\r')"
     [ -z "$PLAN_TASK" ] || [ "$intent_task" = "$PLAN_TASK" ] || continue
+    # Task ids repeat across plans: a scoped recovery owns only the current
+    # plan's intents, so an older plan's t1 is neither recovered nor counted.
+    [ -z "$PLAN_TASK" ] || { [ -n "$intent_plan_id" ] && [ "$intent_plan_id" = "$SCOPE_PLAN_ID" ]; } || continue
     if [ -z "$intent_patch" ] || [ ! -f "$intent_patch" ]; then
       echo "error: patch-land: landing $LANDING_ID has no readable frozen patch" >&2
       echo "error: patch-land: outcome cannot be proven; preserve the intent for manual recovery" >&2
@@ -802,14 +897,17 @@ if [ "$RECOVER" = 1 ]; then
       needs_manual=$((needs_manual + 1))
       continue
     fi
-    if [ "$intent_has_complete" = 1 ] && complete_terminal_converged; then
-      # Only actual receipt convergence can repair a missing native seal.
-      if ! python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" complete; then
-        needs_manual=$((needs_manual + 1))
+    if [ "$intent_has_complete" = 1 ]; then
+      if complete_terminal_converged; then
+        # Only actual receipt convergence can repair a missing native seal.
+        if ! python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" complete; then
+          needs_manual=$((needs_manual + 1))
+          continue
+        fi
+        echo "patch-land: $LANDING_ID already complete (durable receipts converged)" >&2
         continue
       fi
-      echo "patch-land: $LANDING_ID already complete (durable receipts converged)" >&2
-      continue
+      echo "error: landing $LANDING_ID has a complete row but its $COMPLETE_FAILED_CHECK did not converge" >&2
     fi
     if [ "$intent_has_abandoned" = 1 ] && abandoned_terminal_converged; then
       # Only actual receipt convergence can repair a missing native seal.

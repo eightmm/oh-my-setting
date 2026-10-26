@@ -28842,6 +28842,137 @@ PY
   if contains "$out" 'Interrupted landings'; then
     fail "a recovered landing should no longer be outstanding: $out"
   fi
+
+  # A correctly completed plan landing stays provable after its plan is
+  # retired, and an older plan's task id never scopes into a newer plan. An
+  # archived lease or digest that differs from the intent stays manual and
+  # names the failed check instead of the HEAD-moved text.
+  local rproject rpatch rart variant plan_sha task_sha landings_backup
+  local plan="$ROOT/scripts/agent-plan.sh"
+  for variant in exact lease digest; do
+    rproject="$TMP/landing-retired-$variant"
+    rpatch="$TMP/landing-retired-$variant.patch"
+    rart="$TMP/landing-retired-$variant-review.md"
+    make_committed_repo "$rproject"
+    "$plan" --repo "$rproject" add --id t1 --title x --verify true >/dev/null
+    "$plan" --repo "$rproject" claim --id t1 --provider codex >/dev/null
+    printf 'work\n' >> "$rproject/file.txt"
+    git -C "$rproject" diff > "$rpatch"
+    git -C "$rproject" checkout -q file.txt
+    printf 'review\n' > "$rart"
+    "$plan" --repo "$rproject" review --id t1 --artifact "$rart" --patch "$rpatch" >/dev/null
+    ( cd "$rproject" && "$ROOT/scripts/patch-land.sh" --patch "$rpatch" --plan-task t1 --verify true >/dev/null 2>&1 ) ||
+      fail "the plan landing fixture should land"
+    if [ "$variant" = exact ]; then
+      out="$("$ROOT/scripts/patch-land.sh" --repo "$rproject" --recover --plan-task t1 2>&1)" ||
+        fail "a scoped recovery of the live plan's complete landing should succeed: $out"
+      contains "$out" 'already complete' ||
+        fail "the live plan's own intent stays in a scoped recovery: $out"
+      # A cancelled task in the archived plan makes the retirement validator
+      # read the cancellation decision artifact relative to the repository.
+      printf 'Reviewed and rejected.\n' > "$rproject/decision.md"
+      "$plan" --repo "$rproject" add --id t2 --title rejected >/dev/null
+      plan_sha="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rproject/.oms/plan/tasks.json" | tr -d '\r')"
+      task_sha="$("$plan" --repo "$rproject" show --id t2 | python3 -c 'import json,sys;print(json.load(sys.stdin)["task_sha256"])' | tr -d '\r')"
+      "$plan" --repo "$rproject" cancel --id t2 --expected-plan-sha256 "$plan_sha" \
+        --expected-task-sha256 "$task_sha" --expected-state ready --expected-lease-id none \
+        --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+        --expected-decision-artifact-sha256 "$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rproject/decision.md" | tr -d '\r')" >/dev/null ||
+        fail "the cancelled-task fixture should cancel"
+    else
+      VARIANT="$variant" python3 - "$rproject/.oms/plan/tasks.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+plan = json.load(open(path))
+task = plan["tasks"]["t1"]
+if os.environ["VARIANT"] == "lease":
+    task["lease_id"] = "lease_" + "0" * 32
+else:
+    task["title"] = "rewritten after the landing"
+open(path, "w").write(json.dumps(plan))
+PY
+    fi
+    plan_sha="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rproject/.oms/plan/tasks.json" | tr -d '\r')"
+    "$plan" --repo "$rproject" retire --apply --expected-plan-sha256 "$plan_sha" \
+      --disposition superseded --reason "plan replaced" >/dev/null ||
+      fail "the finished plan should retire"
+    if [ "$variant" = exact ]; then
+      # The valid retirement archive cannot substitute for an unreadable live
+      # plan: recovery must refuse before changing landing or capture seals.
+      mkdir -p "$rproject/.oms/plan"
+      printf '{"plan_id":' > "$rproject/.oms/plan/tasks.json"
+      local before_state after_state
+      before_state="$(python3 - "$rproject/.oms" <<'PY'
+import hashlib, os, sys
+root = sys.argv[1]
+for directory, _, names in os.walk(root):
+    for name in sorted(names):
+        path = os.path.join(directory, name)
+        if path.endswith('/plan/tasks.json'):
+            continue
+        with open(path, 'rb') as handle:
+            print(os.path.relpath(path, root), hashlib.sha256(handle.read()).hexdigest())
+PY
+)"
+      rc=0
+      out="$(cd "$TMP" && env -u OMS_REPO "$ROOT/scripts/patch-land.sh" --repo "$rproject" --recover 2>&1)" || rc=$?
+      [ "$rc" != 0 ] || fail "a malformed live plan must block archived receipt recovery: $out"
+      contains "$out" 'tasks.json' || fail "the refusal should name the live plan file: $out"
+      after_state="$(python3 - "$rproject/.oms" <<'PY'
+import hashlib, os, sys
+root = sys.argv[1]
+for directory, _, names in os.walk(root):
+    for name in sorted(names):
+        path = os.path.join(directory, name)
+        if path.endswith('/plan/tasks.json'):
+            continue
+        with open(path, 'rb') as handle:
+            print(os.path.relpath(path, root), hashlib.sha256(handle.read()).hexdigest())
+PY
+)"
+      [ "$after_state" = "$before_state" ] ||
+        fail "a refused recovery must leave landing and seal state unchanged"
+      rm -f "$rproject/.oms/plan/tasks.json"
+    fi
+    rc=0
+    out="$(cd "$TMP" && env -u OMS_REPO "$ROOT/scripts/patch-land.sh" --repo "$rproject" --recover 2>&1)" || rc=$?
+    if [ "$variant" = exact ]; then
+      [ "$rc" = 0 ] || fail "a complete landing of a retired plan should converge, got $rc: $out"
+      contains "$out" 'already complete' ||
+        fail "a retired plan's archive should prove the done receipt: $out"
+    else
+      [ "$rc" = 1 ] || fail "an archived $variant mismatch must stay manual, got $rc: $out"
+      if contains "$out" 'already complete'; then
+        fail "an archived $variant mismatch must not count as complete: $out"
+      fi
+      contains "$out" 'plan done receipt did not converge' ||
+        fail "the manual message should name the plan receipt check: $out"
+    fi
+  done
+
+  rproject="$TMP/landing-retired-exact"
+  landings_backup="$rproject/.oms/landings.before"
+  cp "$rproject/.oms/landings.jsonl" "$landings_backup"
+  # The retired plan's t1 intent is outside a new plan's scoped recovery.
+  "$plan" --repo "$rproject" add --id t1 --title again --verify true >/dev/null
+  "$plan" --repo "$rproject" ensure-lineage >/dev/null ||
+    fail "the new plan should get its lineage id"
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$rproject" --recover --plan-task t1 2>&1)" ||
+    fail "an older plan's intent must not block the new plan's task: $out"
+  contains "$out" '0 recovered, 0 abandoned, 0 need manual' ||
+    fail "an older plan's intent must not be counted for the new plan: $out"
+  # An intent with no plan_id is outside any scoped recovery too.
+  python3 - "$landings_backup" "$rproject/.oms/landings.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+for row in rows:
+    row["plan_id"] = ""
+open(sys.argv[2], "w").write("".join(json.dumps(row) + "\n" for row in rows))
+PY
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$rproject" --recover --plan-task t1 2>&1)" ||
+    fail "an intent without plan_id must not be recovered under --plan-task: $out"
+  contains "$out" '0 recovered, 0 abandoned, 0 need manual' ||
+    fail "an intent without plan_id must not be counted under --plan-task: $out"
 }
 
 test_patch_land_abandons_a_landing_that_never_applied() {
@@ -28908,14 +29039,48 @@ set -o pipefail
 "$real_python3" "\$@" | awk '{ printf "%s%c\\n", \$0, 13 }'
 EOF
   chmod +x "$crlf_bin/python3"
-  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-scoped","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"mine","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":"","panel_accept":"true"}\n' \
-    "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-scoped","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"mine","plan_id":"plan_%s","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":"","panel_accept":"true"}\n' \
+    "$patch" "$patch_sha" "$base_sha" "$(printf '%032d' 7)" > "$project/.oms/landings.jsonl"
+  # A scoped recovery owns only the live plan's intents.
+  mkdir -p "$project/.oms/plan"
+  printf '{"plan_id":"plan_%s","tasks":{}}\n' "$(printf '%032d' 7)" > "$project/.oms/plan/tasks.json"
   out="$(PATH="$crlf_bin:$PATH" "$ROOT/scripts/patch-land.sh" --repo "$project" --recover --plan-task mine 2>&1)" ||
     fail "a matching scoped recovery should succeed with CRLF Python output: $out"
   contains "$out" '1 abandoned, 0 need manual' ||
     fail "a matching scoped recovery must not skip the CRLF task value: $out"
   contains "$(cat "$project/.oms/landings.jsonl")" '"reason": "head-moved-not-applied"' ||
     fail "the matching CRLF task intent should be reconciled"
+
+  # A present but unusable shared plan stops a scoped recovery instead of
+  # narrowing it to nothing; an absent plan file is the only empty scope.
+  local bad_plan landings_before
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-badplan","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"mine","plan_id":"plan_%s","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":"","panel_accept":"true"}\n' \
+    "$patch" "$patch_sha" "$base_sha" "$(printf '%032d' 7)" > "$project/.oms/landings.jsonl"
+  landings_before="$(cat "$project/.oms/landings.jsonl")"
+  for bad_plan in '{"plan_id":' '' '[]' '{"tasks":{}}' '{"plan_id":"","tasks":{}}' \
+    '{"plan_id":7}' '{"plan_id":"plan_00000000000000000000000000000007"}' \
+    '{"plan_id":"plan_00000000000000000000000000000007","tasks":[]}'; do
+    printf '%s\n' "$bad_plan" > "$project/.oms/plan/tasks.json"
+    rc=0
+    out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover --plan-task mine 2>&1)" || rc=$?
+    [ "$rc" != 0 ] || fail "a scoped recovery with plan '$bad_plan' must fail, got 0: $out"
+    contains "$out" 'tasks.json' ||
+      fail "the failure should name the plan file for '$bad_plan': $out"
+    [ "$(cat "$project/.oms/landings.jsonl")" = "$landings_before" ] ||
+      fail "a refused scoped recovery must not write landing rows"
+  done
+  rm -rf "$project/.oms/plan/tasks.json"
+  mkdir "$project/.oms/plan/tasks.json"
+  rc=0
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover --plan-task mine 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "a non-regular plan file must fail a scoped recovery: $out"
+  rmdir "$project/.oms/plan/tasks.json"
+  rc=0
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover --plan-task mine 2>&1)" || rc=$?
+  [ "$rc" = 0 ] && contains "$out" '0 recovered, 0 abandoned, 0 need manual' ||
+    fail "an absent plan file is an empty scope, got $rc: $out"
+  [ "$(cat "$project/.oms/landings.jsonl")" = "$landings_before" ] ||
+    fail "an empty scope must not write landing rows"
 
   # HEAD moved and the patch is already in the tree: stays manual.
   ( cd "$project" && git apply "$patch" && git add file.txt &&
