@@ -631,6 +631,19 @@ def _without_clean_worktrees(repo, task, attempt, execution, evidence):
     return remaining
 
 
+def _unindexed_clean_worktree(repo, task, attempt, execution, item):
+    """True for a registered kept worktree with no delegate record that is clean at its own HEAD."""
+    try:
+        rows = panel_results._query(repo, 'artifact-index', 'list', '1000000').get('rows', [])
+        if any(row.get('kind') == 'delegate' and row.get('task_id') == task and
+               row.get('attempt_id') == attempt for row in rows):
+            return False
+        kept, common, head = _managed(execution, item[len('registered worktree: '):])
+        return not _capture(kept, common, head, head)[0]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return False
+
+
 def _raise_recovery_evidence(evidence, message):
     unreadable = [item.partition(': ')[2] for item in evidence
                   if item.startswith('unreadable provenance: ')]

@@ -498,9 +498,23 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             repo, task_id, last.get("attempt_id"), head_repo, recovery_evidence)
         if recovery_evidence:
             if all(item.startswith(".oms/salvage-provenance/") for item in recovery_evidence):
+                if _newest_salvage_patch(repo, task_id, last.get("attempt_id")) is None:
+                    # Provenance precedes the patch, so a salvage cut short leaves only this file behind.
+                    message = ("recoverable delegate evidence exists for task %s; its salvage may have been "
+                               "interrupted (provenance exists but no published patch is indexed); stopped write "
+                               "work is not transferred by --continue; inspect the recovery, then include recovered "
+                               "work in a fresh dispatch brief (also check this task's salvage artifacts; if the "
+                               "kept worktree still exists, re-run `oms panel --salvage %s --attempt %s` first): %s" %
+                               (task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
+                    panel_salvage._raise_recovery_evidence(recovery_evidence, message)
                 message = ("recoverable delegate evidence exists for task %s and was already salvaged; "
                            "stopped write work is not transferred by --continue; inspect the recovery, then include "
                            "recovered work in a fresh dispatch brief: %s" %
+                           (task_id, ", ".join(recovery_evidence)))
+            elif any(item.startswith("registered worktree: ") and panel_salvage._unindexed_clean_worktree(
+                    repo, task_id, last.get("attempt_id"), head_repo, item) for item in recovery_evidence):
+                message = ("the kept worktree for task %s is clean but no recorded launch base certifies it, so "
+                           "oms panel --salvage cannot succeed; a fresh dispatch is required: %s" %
                            (task_id, ", ".join(recovery_evidence)))
             else:
                 message = ("recoverable delegate evidence exists for task %s; run oms panel --salvage %s "

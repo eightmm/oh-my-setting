@@ -747,22 +747,23 @@ import terminal_panel
 dirty_brief = temporary / 'dirty-salvage-brief.md'
 dirty_brief.write_text('Continue safely.\n')
 dirty_parent = {'attempt_id': 'dirty-parent', 'terminal': False, 'refs': {}}
-dirty_worker = dict(committed_attempt, parent_attempt_id='dirty-parent',
-                    refs=dict(committed_attempt['refs'], panel_access='write', panel_provider='codex',
-                              native_session='fixture-session'))
-def continue_dirty():
+def continue_dirty(attempt=committed_attempt, record=committed_record):
+    worker = dict(attempt, parent_attempt_id='dirty-parent',
+                  refs=dict(attempt['refs'], panel_access='write', panel_provider='codex',
+                            native_session='fixture-session'))
     with patch.dict(os.environ, salvage_env), patch.object(
             panel_results, '_query', side_effect=lambda repo, verb, *args:
-            [committed_attempt] if verb == 'agent-events' else {'rows': [committed_record]}), \
+            [attempt] if verb == 'agent-events' else {'rows': [record] if record else []}), \
             patch.object(terminal_panel, 'owning_attempt', return_value=[dirty_parent]), \
-            patch.object(terminal_panel, 'events', return_value=json.dumps([dirty_parent, dirty_worker])), \
-            patch.object(terminal_panel, '_rework_history', return_value=[dirty_worker]), \
+            patch.object(terminal_panel, 'events', return_value=json.dumps([dirty_parent, worker])), \
+            patch.object(terminal_panel, '_rework_history', return_value=[worker]), \
             patch.object(terminal_panel, 'results', return_value={'rows': [{'calls': []}]}), \
             patch.object(terminal_panel, 'session_stored', return_value=True):
         try:
             panel_dispatch.continuation(
-                salvage_repo, 'codex', 'main', 'committed-task', {'provider': 'codex'}, dirty_brief,
-                {'OMS_ROOM_REPO': str(salvage_repo)}, work_repo=salvage_execution_repo, patch_reference={})
+                salvage_repo, 'codex', 'main', attempt['task_id'], {'provider': 'codex'}, dirty_brief,
+                {'OMS_ROOM_REPO': str(salvage_repo)},
+                work_repo=salvage_execution_repo, patch_reference={})
         except ValueError as error:
             return str(error)
     raise AssertionError('continue resumed stopped write work')
@@ -782,6 +783,43 @@ finally:
         path.rename(path.with_suffix('.json'))
 assert 'already salvaged' not in plain_message and 'fresh dispatch' not in plain_message, plain_message
 assert plain_message.endswith('registered worktree: ' + str(committed_tree)), plain_message
+# A salvage that died after its provenance but before its patch leaves evidence no patch backs: --continue
+# says so and points at a re-run, and names a fresh dispatch once the kept worktree is gone.
+cut_tree, cut_attempt = kept_fixture('cut')
+(cut_tree / 'cut.md').write_text('uncommitted work\n')
+cut_record = {'kind': 'delegate', 'task_id': 'cut-task', 'attempt_id': 'att_cut', 'exit': 124,
+              'base_sha': launch_base[:12]}
+real_mutate = panel_results.DURABLE['atomic_mutate']
+def cut_mutate(*args, **kwargs):
+    if kwargs.get('label') == 'salvage patch':
+        raise OSError('killed before the patch was published')
+    return real_mutate(*args, **kwargs)
+with patch.dict(panel_results.DURABLE, {'atomic_mutate': cut_mutate}):
+    try:
+        kept_salvage(cut_tree, cut_attempt, cut_record)
+    except OSError:
+        pass
+    else:
+        raise AssertionError('salvage survived a failed patch write')
+assert list((salvage_repo / '.oms/salvage-provenance').glob('*.json')), 'provenance was not written first'
+subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'remove', '--force', str(cut_tree)], check=True)
+cut_message = continue_dirty(cut_attempt, cut_record)
+assert '.oms/salvage-provenance/' in cut_message and 'may have been interrupted' in cut_message, cut_message
+assert '`oms panel --salvage cut-task --attempt att_cut`' in cut_message and 'fresh dispatch' in cut_message, cut_message
+assert 'nothing recoverable' not in cut_message and 'already salvaged' not in cut_message, cut_message
+# A clean kept worktree with no delegate record cannot be certified, so --salvage is not offered.
+bare_tree, bare_attempt = kept_fixture('bare')
+bare_receipt = salvage_repo / panel_salvage._empty_provenance_path('bare-task', 'att_bare')
+try:
+    kept_salvage(bare_tree, bare_attempt, {})
+except ValueError as error:
+    assert 'no delegate artifact-index record names its launch base' in str(error), error
+else:
+    raise AssertionError('unindexed clean worktree was certified')
+assert not bare_receipt.exists(), 'unindexed clean worktree left an empty-salvage receipt'
+bare_message = continue_dirty(bare_attempt, {})
+assert 'no recorded launch base' in bare_message and 'fresh dispatch is required' in bare_message, bare_message
+assert 'run oms panel --salvage' not in bare_message, bare_message
 import difflib
 encoding_cases = [
     ('café 한글\n', 'cafe ??\n', True),
