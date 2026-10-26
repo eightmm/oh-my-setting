@@ -608,7 +608,7 @@ def aggregate(repo, since=None, now=None):
             reason = "unknown" if stage != "unknown" else "awaiting_review"
         reason = reason if isinstance(reason, str) and reason else "unknown"
         failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
-        if state == "review" and reason == "awaiting_review":
+        if reason == "no_change" or (state == "review" and reason == "awaiting_review"):
             stage = "none"
         failure_stage_counts[stage] = failure_stage_counts.get(stage, 0) + 1
         if state == "review":

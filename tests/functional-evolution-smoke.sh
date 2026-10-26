@@ -1737,6 +1737,24 @@ assert without_stage["sections"]["ci"]["coverage"]["stage_timing_observations"] 
 import sys
 sys.path.insert(0, "scripts/lib")
 import panel_results, work_discovery
+import panel_metrics, tempfile
+# An exit-6 no-change attempt is counted under its own reason and outside every
+# failing stage; a genuine delegate failure keeps the stage it failed in.
+def _write_attempt(attempt_id, reason):
+    return {"attempt_id": attempt_id, "tool": "peer-delegate", "state": "failed", "reason_code": reason,
+            "updated_at": "2026-10-26T00:00:00Z", "task_id": "t-" + attempt_id,
+            "refs": {"panel_role": "worker", "panel_access": "write"}}
+with tempfile.TemporaryDirectory() as empty_repo:
+    original_history = panel_metrics._attempt_history
+    panel_metrics._attempt_history = lambda _repo: (
+        [_write_attempt("a-nochange", "no_change"), _write_attempt("a-failed", "delegate_failed")], False)
+    try:
+        counted = panel_metrics.aggregate(empty_repo, now=1792972800)["write_attempts"]
+    finally:
+        panel_metrics._attempt_history = original_history
+failed_data = counted["failed_and_undecided"]
+assert failed_data["reason_code"] == {"no_change": 1, "delegate_failed": 1}, counted
+assert failed_data["first_failing_stage"] == {"none": 1, "unknown": 1}, counted
 indexed_reader = panel_results._indexed
 attempts = [
     {"attempt_id": "a-decided", "refs": {"panel_role": "reviewer"}},

@@ -19635,15 +19635,27 @@ EOF
     --artifact-dir "$artifact_dir" --model fixture-model --verify "bash '$verify_script'" --repair 1 \
     --prompt 'Repair to no changes' > "$project/no-change.out" 2>&1 || rc=$?
   [ "$rc" = 6 ] || fail "a panel worker's repaired empty patch must exit 6 by default, got $rc: $(cat "$project/no-change.out")"
-  grep -Fq 'repair: 1/1 round(s) used' "$project/no-change.out" ||
-    fail "repaired empty patch did not run a repair round: $(cat "$project/no-change.out")"
+  # An unchanged tree is not verified: the suite would only re-prove the base.
+  [ ! -e "$TMP/delegate-repair-no-change-verify-count" ] ||
+    fail "an empty patch without --allow-no-change must not run the verify: $(cat "$project/no-change.out")"
+  assert_file_contains "$project/no-change.out" 'verify: NOT RUN (no change)'
+  if grep -Fq 'repair: 1/' "$project/no-change.out"; then
+    fail "an unverified empty patch has nothing to repair: $(cat "$project/no-change.out")"
+  fi
   assert_file_contains "$project/no-change.out" 'patch: none (no changes)'
   artifact="$(sed -n 's/^artifact: //p' "$project/no-change.out" | sed -n '1p')"
+  assert_file_contains "$artifact" 'SKIPPED: no change'
   assert_file_contains "$artifact" 'no_change'
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "repaired no_change exit missing from index"
 import json, sys
 row = json.loads(open(sys.argv[1]).readlines()[-1])
 assert row["exit"] == 6, row
+PY
+  # Nothing to change is its own lifecycle reason, never a worker failure.
+  python3 - "$project/.oms/lifecycle/events.jsonl" <<'PY' || fail "no_change attempt reason missing from lifecycle"
+import json, sys
+reasons = [json.loads(line).get("reason_code") for line in open(sys.argv[1]) if line.strip()]
+assert "no_change" in reasons and "delegate_failed" not in reasons, reasons
 PY
 
   rm -f "$TMP/delegate-repair-no-change-verify-count"
@@ -19674,6 +19686,56 @@ PY
   contains "$out" '--allow-no-change cannot complete a plan task' ||
     fail "plan-task incompatibility should have a clear usage error: $out"
   [ ! -e "$plan_worktree_root" ] || fail "incompatible arguments must fail before worktree setup"
+
+  # A repair that reduces a non-empty patch to nothing ends as no_change, not a
+  # verify failure: the repair round's verify is skipped like the initial one.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+prompt="$(cat)"
+if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt'; then
+  rm -f delegated.txt
+  echo "worker emptied its patch"
+else
+  printf 'broken\n' > delegated.txt
+  echo "worker first try"
+fi
+EOF
+  chmod +x "$bin_dir/codex"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model --verify "grep -q fixed delegated.txt" --repair 1 \
+    --prompt 'Repair down to empty' > "$project/repair-empty.out" 2>&1 || rc=$?
+  [ "$rc" = 6 ] || fail "a repair that empties the patch must exit 6, got $rc: $(cat "$project/repair-empty.out")"
+  grep -Fq 'repair: 1/1 round(s) used' "$project/repair-empty.out" ||
+    fail "the failing first verify should have triggered a repair: $(cat "$project/repair-empty.out")"
+  assert_file_contains "$project/repair-empty.out" 'patch: none (no changes)'
+  artifact="$(sed -n 's/^artifact: //p' "$project/repair-empty.out" | sed -n '1p')"
+  assert_file_contains "$artifact" '## Verify (repair 1)'
+  assert_file_contains "$artifact" 'SKIPPED: no change'
+
+  # An empty first result with --repair 2 skips verification and replay: there
+  # is nothing to repair, and the replay parser must not see an empty status.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "worker completed without changes"
+EOF
+  chmod +x "$bin_dir/codex"
+  rm -f "$TMP/delegate-repair-no-change-verify-count"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model --verify "bash '$verify_script'" --repair 2 \
+    --prompt 'Empty with two repairs' > "$project/repair2-empty.out" 2>&1 || rc=$?
+  [ "$rc" = 6 ] || fail "an empty result with --repair 2 must exit 6, got $rc: $(cat "$project/repair2-empty.out")"
+  if grep -Fq 'invalid int value' "$project/repair2-empty.out"; then
+    fail "repair replay must not see a skipped verify: $(cat "$project/repair2-empty.out")"
+  fi
+  [ ! -e "$TMP/delegate-repair-no-change-verify-count" ] ||
+    fail "the skipped verify must not run under --repair 2"
 
   # Report-only writes allow scratch measurements but reject captured repo edits.
   cat > "$bin_dir/codex" <<'EOF'
@@ -30457,12 +30519,20 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
     --verify "touch '$verify_marker'" 2>&1)" || rc=$?
   [ "$rc" -eq 6 ] || fail "a panel worker's empty write must exit 6 by default, got $rc: $out"
-  [ -f "$verify_marker" ] || fail "the configured verifier must still run for an empty patch"
+  [ ! -f "$verify_marker" ] || fail "an empty patch without --allow-no-change must not run the verifier"
   contains "$out" 'patch: none (no changes)' || fail "empty writes need a clear patch status: $out"
   contains "$out" 'worker: codex exit 0' || fail "the worker exit should remain accurate: $out"
   artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | sed -n '1p')"
+  assert_file_contains "$artifact" 'SKIPPED: no change'
   assert_file_contains "$artifact" 'no_change'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 6'
+
+  # With --allow-no-change the verifier runs as before.
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --allow-no-change --verify "touch '$verify_marker'" 2>&1)" ||
+    fail "an allowed empty write records no_change and exits 0: $out"
+  [ -f "$verify_marker" ] || fail "--allow-no-change must still run the verifier"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
@@ -35640,7 +35710,8 @@ turn = len(previous) + 1
 prompt = sys.stdin.read()
 with log.open("a") as handle:
     handle.write(json.dumps({"args": args, "cwd": os.getcwd(), "prompt": prompt}) + "\n")
-Path("file.txt").write_text("interactive turn %d\n" % turn)
+if os.environ["OMS_TEST_CONVERSATION_CASE"] != "unchanged":
+    Path("file.txt").write_text("interactive turn %d\n" % turn)
 session = "fixture-session"
 if os.environ["OMS_TEST_CONVERSATION_CASE"] == "changed-id" and turn == 2:
     session = "unexpected-session"
@@ -35664,7 +35735,7 @@ EOF
   chmod +x "$fixture/bin/claude" "$fixture/bin/agy"
 
   # A single canonical fixture covers the successful protocol and stop boundaries.
-  for scenario in claude-success antigravity-success denied-success denied-finish tty-success eof changed-id sensitive malformed cap timeout; do
+  for scenario in claude-success antigravity-success denied-success denied-finish unchanged tty-success eof changed-id sensitive malformed cap timeout; do
     if [ "$scenario" = tty-success ]; then
       python3 -c 'import pty, termios' 2>/dev/null || continue
     fi
@@ -35701,6 +35772,9 @@ if scenario == "claude-success":
         assert not (root / "calls.jsonl").exists(), ("provider ran for incompatible mode", incompatible)
 if scenario == "cap":
     command += ["--max-turns", "1"]
+if scenario == "unchanged":
+    # Only orchestrated writes treat an empty patch as a failure (exit 6).
+    os.environ.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="worker")
 if scenario == "timeout":
     command += ["--idle-timeout", "1"]
 sample = "sk-" + "a" * 48
@@ -35738,7 +35812,7 @@ with (root / "stderr").open("w") as errors:
         if scenario == "timeout":
             # Leave stdin open without a message until the bounded reader exits.
             process.wait(timeout=20)
-        elif scenario == "denied-finish":
+        elif scenario in ("denied-finish", "unchanged"):
             process.stdin.write('{"finish":true}\n')
             process.stdin.flush()
         elif scenario == "eof":
@@ -35829,6 +35903,10 @@ else:
     assert process.returncode != 0 and not finished, (scenario, events, (root / "stderr").read_text())
     assert len(turns) == 1, events
     assert not sentinel.exists(), "failed dialogue ran verification"
+    if scenario == "unchanged":
+        failed = [event for event in events if event["event"] == "failed"]
+        assert process.returncode == 6 and len(failed) == 1, (process.returncode, events)
+        assert "verify_exit" in failed[0] and failed[0]["verify_exit"] is None, failed
     assert sample not in (root / "stderr").read_text() and sample not in json.dumps(events)
 PY
   done

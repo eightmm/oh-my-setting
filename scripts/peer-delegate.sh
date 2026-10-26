@@ -2503,6 +2503,20 @@ if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ]; then
   fi
 fi
 
+# An unchanged tree ends as no_change (exit 6) whatever verify says; the suite
+# would only re-prove the base. Empty is not run, as for a dry run. Initial and
+# repair verification share this decision.
+verify_or_skip_no_change() {
+  if [ "$WORKER_ACCESS" = write ] && [ "$ALLOW_NO_CHANGE" != 1 ] &&
+    [ "$worker_status" -eq 0 ] && [ "$patch_capture_complete" = 1 ] &&
+    [ ! -s "$patch_file" ]; then
+    verify_status=""
+    printf 'SKIPPED: no change\n' >> "$artifact"
+  else
+    run_verify
+  fi
+}
+
 verify_status=0
 verify_seconds=0
 if [ -z "$VERIFY_CMD" ]; then
@@ -2525,7 +2539,7 @@ if [ -n "$VERIFY_CMD" ]; then
     printf 'SKIPPED: conversation did not finish successfully.\n' >> "$artifact"
     verify_status=125
   else
-    run_verify
+    verify_or_skip_no_change
   fi
 fi
 
@@ -2608,7 +2622,8 @@ repair_replay_tick() {
   local result decision
   [ "$REPAIR" -gt 1 ] && [ "$DRY_RUN" = 0 ] && [ "$WORKER_ACCESS" = write ] &&
     [ "${OMS_ADVISE_ON_REPEAT:-0}" != 1 ] &&
-    [ -n "$VERIFY_CMD" ] && [ "$repair_replay_disabled" = 0 ] || return 0
+    [ -n "$VERIFY_CMD" ] && [ -n "$verify_status" ] &&
+    [ "$repair_replay_disabled" = 0 ] || return 0
   if [ "$worker_boundary_failed" = 1 ] || [ "${OMS_MODEL_FALLBACK_USED:-0}" = 1 ]; then
     repair_replay_json=""
     repair_replay_disabled=1
@@ -2639,7 +2654,7 @@ repair_used=0
 if [ "$DRY_RUN" != "1" ]; then
   while [ "$repair_used" -lt "$REPAIR" ] && [ "$repair_replay_stop" = 0 ] &&
       [ "$route_retry_terminal" = 0 ] && [ "$worker_status" -ne 126 ] && [ "$worker_status" -ne 127 ] &&
-      { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
+      { [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; }; do
     if ! worker_protected_boundary_check; then
       worker_status=125
       verify_status=125
@@ -2693,7 +2708,7 @@ if [ "$DRY_RUN" != "1" ]; then
     patch_capture_complete=1
     if [ -n "$VERIFY_CMD" ]; then
       printf '\n\n## Verify (repair %s)\n\n- command: %s\n\n' "$repair_used" "$VERIFY_CMD" >> "$artifact"
-      run_verify
+      verify_or_skip_no_change
       [ "$worker_boundary_failed" != 1 ] || break
     else
       delegate_attempt_finish_without_verify
@@ -2952,7 +2967,7 @@ fi
 # here ensures a last-moment pathname/backpointer swap blocks receipts and
 # landing instead of merely leaving a warning during teardown.
 if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ] &&
-  [ "$verify_status" -eq 0 ]; then
+  [ "${verify_status:-0}" -eq 0 ]; then
   if ! cleanup_delegated_worktree; then
     worker_status=125
     route_retry_terminal=1
@@ -3044,7 +3059,7 @@ if [ -n "$THREAD_ID" ]; then
       printf 'Delegated write task to %s: worker exit %s' "$TO" "$worker_status"
       if [ -n "$VERIFY_CMD" ]; then
         if [ -z "$verify_status" ]; then
-          printf ', verify NOT RUN (dry run)'
+          printf ', verify NOT RUN (%s)' "$([ "$DRY_RUN" = 1 ] && echo 'dry run' || echo 'no change')"
         else
           printf ', verify exit %s' "$verify_status"
         fi
@@ -3067,7 +3082,11 @@ echo "worker: $TO exit $worker_status"
 echo "route: $TO / ${OMS_MODEL_SELECTED:-provider-default} / effort=${OMS_REASONING_SELECTED:-native-settings} / $WORKER_ACCESS"
 if [ -n "$VERIFY_CMD" ]; then
   if [ -z "$verify_status" ]; then
-    echo "verify: NOT RUN (dry run)"
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "verify: NOT RUN (dry run)"
+    else
+      echo "verify: NOT RUN (no change)"
+    fi
   else
     echo "verify: exit $verify_status (${verify_seconds}s)"
   fi
@@ -3110,12 +3129,19 @@ if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ] ||
   if [ "$INTERACTIVE" = 1 ]; then
     python3 - "$artifact" "$patch_file" "$worker_status" "$verify_status" <<'PY' >&3
 import json, sys
+# An empty verify status means verification never ran: null, not a passing 0.
 print(json.dumps({"event": "failed", "artifact": sys.argv[1], "patch": sys.argv[2],
-                  "worker_exit": int(sys.argv[3]), "verify_exit": int(sys.argv[4]),
+                  "worker_exit": int(sys.argv[3]),
+                  "verify_exit": int(sys.argv[4]) if sys.argv[4] else None,
                   "applied": False}))
 PY
   fi
-  delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
+  if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
+    # Nothing to change is a finding, not a worker failure.
+    delegate_attempt_fail_if_live no_change delegate-final-no-change || true
+  else
+    delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
+  fi
   plan_failure_transition
   [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ] && exit 6
   # A wall-clock timeout keeps its own code so a caller can offer --continue.
