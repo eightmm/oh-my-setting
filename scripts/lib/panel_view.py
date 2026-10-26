@@ -5,10 +5,11 @@ import re
 import stat
 import unicodedata
 from collections import OrderedDict
+from functools import lru_cache
 from datetime import datetime
 from itertools import chain
 
-from dashboard_projection import (clean, count, display_width, fit, listing, mapping, number,
+from dashboard_projection import (ELLIPSIS, clean, count, display_width as _display_width, fit, listing, mapping, number,
                                   wrap_label as wrapped)
 from panel_routing import policy
 from call_ending import LIVE_STATES, call_ending
@@ -91,8 +92,13 @@ _JUDGMENT_BYTES = 64 * 1024
 
 
 def _repo_root(report):
-    return os.path.realpath(mapping(report.get("repo")).get("path") or
-                            os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_PANEL_REPO") or os.getcwd())
+    """The resolved repo path, resolved once per snapshot view and set of inputs."""
+    given = (mapping(report.get("repo")).get("path") or os.environ.get("OMS_ROOM_REPO")
+             or os.environ.get("OMS_PANEL_REPO") or os.getcwd())
+    memo = report.memo.setdefault("repo_root", {}) if isinstance(report, _RenderReport) else {}
+    if given not in memo:
+        memo[given] = os.path.realpath(given)
+    return memo[given]
 
 
 def _artifact_judgment(report, member):
@@ -368,10 +374,26 @@ def status_alerts(report):
     return alerts
 
 
+_cached_width = lru_cache(maxsize=8192)(_display_width)
+
+
+def display_width(text):
+    try:
+        return _cached_width(text)
+    except TypeError:
+        return _display_width(text)
+
+
 def clipped(text, width):
+    """Frames repeat the same labels at the same widths; the ellipsis mark is part of the key."""
+    return _clipped(str(text), width, ELLIPSIS[0])
+
+
+@lru_cache(maxsize=8192)
+def _clipped(text, width, mark):
     # Preserve layout spaces; clean() deliberately collapses them in data labels.
     text = "".join(" " if ch in "\t\n\r" else "?" if unicodedata.category(ch)[0] == "C"
-                   else ch for ch in str(text)[:2000] if ch not in "\ufe0e\ufe0f")
+                   else ch for ch in text[:2000] if ch not in "\ufe0e\ufe0f")
     if width >= 3:
         return fit(text, width)
     result = ""
@@ -741,7 +763,7 @@ def _attempt_lookup(rows):
 
 
 class _RenderReport(dict):
-    """A frame-local shallow view: indexes never mutate or outlive the caller's snapshot."""
+    """A shallow view: indexes never mutate the caller's report; a plain dict gets a view per frame, freeze_report one per snapshot."""
 
     def __init__(self, report):
         super().__init__(report)
@@ -758,12 +780,19 @@ class _RenderReport(dict):
         for row in operations:
             if row.get("attempt_id") and row.get("kind") in {"delegate", "call", "ask", "review", "consult"}:
                 self.room_operations.setdefault((row["attempt_id"], row.get("task_id")), row)
-        # room_view.nodes fills this once; a new snapshot or frame builds a new view and projects again.
+        # room_view fills these from the report alone: members once, and per-call settle results with clock deadlines.
         self.members = None
+        self.memo = {}
 
 
 def _render_report(report):
     return report if isinstance(report, _RenderReport) else _RenderReport(report)
+
+
+def freeze_report(report):
+    """A view that outlives one frame: its owner promises not to edit the report, and passes the view on every frame
+    of that snapshot so the projections built from it are reused. A plain dict is projected again per frame."""
+    return _render_report(report)
 
 
 def call_tokens(report, attempt_id, state, short=False):

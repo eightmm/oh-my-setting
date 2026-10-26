@@ -31,6 +31,34 @@ finished_call = next(call for call in projected_nodes(finished_join) if call["pa
 assert finished_call["state"] == "done", finished_call
 join_text = render(join_only, "claude", 100, 44, view="tree")
 assert "BUILDERS" in join_text and "BUILDER Luna 6" in join_text and "[queued]" in join_text, join_text
+# A frozen snapshot shares its projections across frames: output equals a plain-dict render, members and clock-bound
+# answers are not recomputed, and the clock still moves a reused answer once a rule can change it.
+import calendar as reuse_calendar
+import time as reuse_time
+from panel_view import freeze_report
+from room_view import call_classifier as reuse_classifier
+reuse_board = sys.modules["room_view"]
+plain_frames = [render(join_only, "claude", 100, 44, view="tree", frame=frame) for frame in range(4)]
+frozen = freeze_report(join_only)
+with mock_patch.object(reuse_board, "_project_nodes", wraps=reuse_board._project_nodes) as reuse_projected:
+    assert [render(frozen, "claude", 100, 44, view="tree", frame=frame) for frame in range(4)] == plain_frames
+    assert reuse_projected.call_count == 1
+reuse_main = next(m["participant"] for m in projected_nodes(frozen) if m.get("role") == "main")
+reuse_ended = reuse_calendar.timegm((2026, 1, 1, 0, 0, 0))
+reuse_call = {"participant": "advisor-reuse", "role": "advisor", "state": "done", "parent": reuse_main,
+              "ended": "2026-01-01T00:00:00Z", "joined_at": "2026-01-01T00:00:00Z"}
+reuse_judge = reuse_classifier(frozen)
+assert reuse_classifier(frozen) is reuse_judge and reuse_classifier(join_only) is not reuse_judge
+# Each clock rule changes only after its deadline: the reused answer at the deadline equals the uncached one, and so does
+# the next second. An unowned review ages out after 12 h, a judge lingers 30 min, an unknown presence ages after 10 min.
+reuse_review = dict(reuse_call, participant="review-reuse", role="worker", state="review", task_id=None)
+reuse_unknown = dict(reuse_call, participant="unknown-reuse", role="worker", state="presence unknown")
+for call, deadline, before, after in ((reuse_call, 1800, "live", "past"), (reuse_review, 43200, "review", "past"),
+                                      (reuse_unknown, 600, None, None)):
+    for offset, expected in ((10, before), (deadline, before), (deadline + 1, after)):
+        with mock_patch.object(reuse_time, "time", return_value=reuse_ended + offset):
+            uncached = reuse_classifier(join_only)(call)
+            assert reuse_judge(call) == uncached and (expected is None or uncached == expected), (call["participant"], offset)
 legacy_join = deepcopy(join_only)
 legacy_member = next(member for member in legacy_join["room"]["participants"]
                      if member["participant"] == child["participant"])

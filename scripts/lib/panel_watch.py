@@ -122,6 +122,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     from terminal_panel import terminal_style, tmux_command, toggle_context_headers, update_context_header
     from panel_navigation import accept_activity_report
     from panel_input import TerminalInput, choose
+    from panel_view import freeze_report
     n, frame, last = 0, 0, None
     capable = terminal_style()[0]
     motion = capable and not no_animation and os.environ.get("OMS_PANEL_NO_ANIMATION") != "1"
@@ -224,6 +225,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             background = BackgroundRead() if inputs.fd is not None or not capable and not sys.stdout.isatty() else None
             previews = BackgroundRead()
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
+            board = freeze_report(state)
             density, filtered = view or board_view("auto"), attention_only
             layout_mode = "work"
             next_read, next_frame, revision = 0, 0, 0
@@ -252,6 +254,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     snapshots += 1
                     os.environ["OMS_ROOM_ID"] = selected_room
                     state, status, notice = hold_state(held, state, status, selected_room)
+                    # Nothing edits this snapshot until the next one, so its frames share one set of projections.
+                    board = freeze_report(state)
                     if view is not None or not managed_session():
                         read_density = navigation.get("view") or read_density
                     if "attention" in navigation:
@@ -296,7 +300,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     from terminal_panel import managed_session
                     nonlocal last
                     drawn_hits = navigation.get("hits")
-                    owner = next((member for member in __import__("room_view").nodes(state)
+                    owner = next((member for member in __import__("room_view").nodes(board)
                                   if member.get("role") == "main"
                                   and main_attempt in (member.get("participant"), member.get("attempt"))), None)
                     # Five tmux reads: redo them when the state is re-read or the selection moves, not on every repaint.
@@ -308,10 +312,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     navigation.update(hits=[], items=[], expanded=expanded, installed=installed,
                                       spawn_busy=any(entry[0].poll() is None for entry in spawns),
                                       spawn_managed=managed_session(),
-                                      main_occupied=status != 0 or bool(navigation.get("capacity_stale")) or bool(main_occupied(state)) or any(m.get("role") == "main" and m.get("state") not in
+                                      main_occupied=status != 0 or bool(navigation.get("capacity_stale")) or bool(main_occupied(board)) or any(m.get("role") == "main" and m.get("state") not in
                                           {"done", "failed", "cancelled", "timed_out", "abandoned"}
-                                          for m in __import__("room_view").nodes(state)))
-                    drawn, size, terminal = frame_view(repo, provider, state, menu=False,
+                                          for m in __import__("room_view").nodes(board)))
+                    drawn, size, terminal = frame_view(repo, provider, board, menu=False,
                         main_attempt=main_attempt, frame=frame if motion else None,
                         view=density, attention_only=filtered, navigation=navigation)
                     if discard_stale_clicks and navigation.get("hits") != drawn_hits:
@@ -685,7 +689,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             probes = []
                             for probe in (0, 1):
                                 probe_navigation = dict(navigation, hits=[], items=[])
-                                probes.append(frame_view(repo, provider, state, menu=False, main_attempt=main_attempt,
+                                probes.append(frame_view(repo, provider, board, menu=False, main_attempt=main_attempt,
                                                          frame=probe, view=density, attention_only=filtered,
                                                          navigation=probe_navigation)[0])
                             animated = (key, probes[0] != probes[1])

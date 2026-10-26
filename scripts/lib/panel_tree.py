@@ -70,9 +70,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                           "_action": ("debate", (row["task"], owner["participant"]))})
     attempts = listing(mapping(report.get("attempts")).get("active_recent")) + listing(mapping(report.get("attempts")).get("recent"))
 
+    panels = {}
+    for a in attempts:
+        if a.get("attempt_id"):
+            panels.setdefault(a["attempt_id"], mapping(a.get("panel")))
+
     def purpose(call):
-        meta = next((mapping(a.get("panel")) for a in attempts if a.get("attempt_id") == call.get("attempt")
-                     and a.get("attempt_id")), {})
+        ident = call.get("attempt")
+        meta = panels.get(ident, {}) if ident and isinstance(ident, (str, int)) else {}
         return meta.get("purpose") or call.get("purpose")
 
     def visual_role(call):

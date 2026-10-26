@@ -5,7 +5,7 @@ import re
 import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
-from panel_view import (amount, token_amount, token_pair, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
+from panel_view import (_RenderReport, amount, token_amount, token_pair, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
                         plan_tail_columns, format_tail_row, clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
@@ -34,10 +34,17 @@ def owed(report, call):
 
 
 def nodes(report):
-    """Room members, projected once per frame-local view; callers get their own list over shared member dicts."""
+    """Room members, projected once per view; callers get their own list over shared member dicts."""
     report = _render_report(report)
-    if report.members is None:
+    reused = report.members is not None
+    if not reused:
         report.members = _project_nodes(report)
+    if reused:
+        # A live call's token label reads its stream, which grows between frames; it is the one field not from the report.
+        for member in report.members:
+            if member.get("role") != "main" and member.get("attempt") and member["state"] in LIVE_STATES:
+                label = call_tokens(report, member["attempt"], member["state"], True)
+                member["tokens"] = label if label != "tok n/a" else None
     return list(report.members)
 
 
@@ -308,8 +315,46 @@ def failure_handled(report, call, read_results=None, closed=None):
                  or bool(call.get("task_id")) and call.get("task_id") in closed))
 
 
+def _stamp_seconds(value):
+    try:
+        return calendar.timegm(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+
+
+def _next_flip(call, now):
+    """Last wall time at which the answer computed at `now` still holds: the rules (`> 600`, `> 12 * 60 * 60`,
+    `<= JUDGE_LINGER`) change only after their deadline, so a deadline equal to `now` is still ahead."""
+    joined, ended = _stamp_seconds(call.get("joined_at")), _stamp_seconds(call.get("ended"))
+    due = [at for at in (joined and joined + 600, joined and joined + 12 * 60 * 60, ended and ended + JUDGE_LINGER)
+           if at and at >= now]
+    return min(due) if due else float("inf")
+
+
+def _memo(report):
+    """The reuse store of a frozen view; any other report is edited by its caller, so its answers are not kept."""
+    return report.memo if isinstance(report, _RenderReport) else {}
+
+
+def _timed(report, bucket, call, compute):
+    """One call's answer from the report alone plus the clock, reused until the clock can change it."""
+    memo = _memo(report).setdefault(bucket, {})
+    now = time.time()
+    hit = memo.get(id(call))
+    if hit and hit[0] is call and hit[1] <= now <= hit[2]:
+        return hit[3]
+    value = compute(call)
+    if len(memo) > 4096:
+        memo.clear()
+    memo[id(call)] = (call, now, _next_flip(call, now), value)
+    return value
+
+
 def settler(report):
     """(settled, aged) for calls: finished, aged-out or handled calls leave the board; shared with the tree."""
+    store = _memo(report)
+    if "settler" in store:
+        return store["settler"]
     room = mapping(report.get("room"))
     read_results = handled_results(room)
     finalized = mapping(report.get("finalized"))
@@ -329,6 +374,9 @@ def settler(report):
         return complete and (joined_seconds(call) or 0) > 600
 
     def settled(call):
+        return _timed(report, "settled", call, _settled)
+
+    def _settled(call):
         # Finished or aged-out calls, and failed ones whose result its main has read, leave the board; the owner's
         # recorded decision on the task settles its failed, review and blocked calls, reading a result settles no review.
         # A decided outcome closes the task's calls; a failed outcome closes only calls that already
@@ -360,17 +408,24 @@ def settler(report):
                 or review and (task_id in closed or unowned_old or handed_off
                                # a later --continue round of the same task carries the decision now
                                or call.get("superseded") is True))
+    store["settler"] = settled, aged
     return settled, aged
 
 
 def call_classifier(report):
     """Display buckets only; admission and lifecycle evidence retain their own authority."""
+    store = _memo(report)
+    if "classifier" in store:
+        return store["classifier"]
     settled, _ = settler(report)
     awaiting = set(listing(report.get("awaiting_admission")))
     # Only a call with a main to sit above can linger there.
     mains = {key for m in nodes(report) if m.get("role") == "main" for key in (m["participant"], m.get("attempt")) if key}
 
     def classify(call):
+        return _timed(report, "classify", call, _classify)
+
+    def _classify(call):
         ending = call_ending(call)
         if ending == "cancelled":
             return "past"
@@ -380,6 +435,7 @@ def call_classifier(report):
                 call["state"] == "done" and call.get("participant") in awaiting and not settled(call)):
             return "review"
         return "past" if settled(call) and not (call.get("parent") in mains and lingering(call)) else "live"
+    store["classifier"] = classify
     return classify
 
 
@@ -543,8 +599,17 @@ def held_split(report, members=None):
     A recorded lease must match the current task lease; otherwise old calls cannot hold a refreshed claim.
     Legacy rows without leases retain the claim-time fallback. No matching call, a live call or an unknown
     call stays claimed; a claim never proves a process."""
+    store = _memo(report)
+    if members is None:
+        now, hit = time.time(), store.get("held_split")
+        if hit and hit[0] <= now <= hit[1]:
+            return set(hit[2][0]), set(hit[2][1])
+        members = nodes(report)
+        result = held_split(report, members)
+        if isinstance(report, _RenderReport):
+            store["held_split"] = now, min([_next_flip(m, now) for m in members], default=float("inf")), result
+        return set(result[0]), set(result[1])
     admission = set(listing(report.get("awaiting_admission")))
-    members = nodes(report) if members is None else members
     classify = call_classifier(report)
     owners = {key: m["participant"] for m in members if m.get("role") == "main"
               for key in (m["participant"], m.get("attempt")) if key}
