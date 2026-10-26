@@ -197,6 +197,23 @@ def wait_for(pane, text, timeout=8):
     raise AssertionError('missing %r on %s: %s' % (text, pane, screen(pane)))
 
 
+def settle(read, ok, message, timeout=8):
+    global checked
+    deadline = time.monotonic() + timeout
+    while True:
+        seen = read()
+        if ok(seen):
+            checked += 1
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError('%s; last observed %r' % (message, seen))
+        time.sleep(.05)
+
+
+def active_pane(session):
+    return tmux('display-message', '-p', '-t', session, '#{pane_id}')
+
+
 def type_to(pane, *lines, wait=.25):
     for line in lines:
         tmux('send-keys', '-t', pane, '-l', line)
@@ -366,12 +383,12 @@ try:
         wait_for(shell_pane, '^[[17~')
         check('^[[18~' in screen(shell_pane) and not marker.exists(), 'fixture F6 and unbound F7 did not pass through to the workspace shell')
         press(b'\x1bOS')
-        check(tmux('display-message', '-p', '-t', ws, '#{pane_id}') == control, 'F4 did not focus the control pane')
+        settle(lambda: active_pane(ws), lambda seen: seen == control, 'F4 did not focus the control pane')
         tmux('select-window', '-t', shell_window)
         tmux('select-pane', '-t', shell_pane)
         press(b'\x1b[15~')
-        check(client_session() == 'origin' and tmux('display-message', '-p', '-t', 'origin', '#{pane_id}') == origin_pane,
-              'F5 did not return to the origin pane')
+        settle(lambda: (client_session(), active_pane('origin')), lambda seen: seen == ('origin', origin_pane),
+               'F5 did not return to the origin pane')
         press(b'\x1b[17~')
         check(marker.exists(), 'user fixture root F6 binding no longer works')
 
@@ -429,9 +446,9 @@ try:
         check((tmux('display-message', '-p', '-t', ws, '#{window_id}\t#{pane_id}'), client_session()) == active,
               'worker callback navigated')
         press(b'\x1bOS')
-        check(tmux('display-message', '-p', '-t', ws, '#{pane_id}') == control, 'ordinary F4 stopped working')
+        settle(lambda: active_pane(ws), lambda seen: seen == control, 'ordinary F4 stopped working')
         press(b'\x1b[15~')
-        check(client_session() == 'origin', 'ordinary F5 stopped working')
+        settle(client_session, lambda seen: seen == 'origin', 'ordinary F5 stopped working')
 
         wrong = subprocess.run([sys.executable, str(root / 'scripts/lib/panel_workspaces.py'), '_key', str(repo), record['id'],
                                 record['state_home'], 'focus', ws, foreign_pane], env=dict(os.environ, TMUX=os.environ['TMUX']),
@@ -449,8 +466,8 @@ try:
         check(controls(origin_pane).returncode == 1 and len(workspace_rows()) == 1, 'replaced control pane accepted')
         tmux('select-window', '-t', shell_window)
         press(b'\x1bOS')
-        check(tmux('display-message', '-p', '-t', ws, '#{pane_id}') != control and
-              tmux('display-message', '-p', '-t', ws, '#{window_id}') == shell_window, 'F4 adopted a replaced pane')
+        settle(lambda: (active_pane(ws), tmux('display-message', '-p', '-t', ws, '#{window_id}')),
+               lambda seen: seen[0] != control and seen[1] == shell_window, 'F4 adopted a replaced pane')
         check(client_session().startswith('oms_ws_') or client_session() == 'origin', 'client lost')
 
         # A positively gone workspace session is not blocking; its record stays untouched.
