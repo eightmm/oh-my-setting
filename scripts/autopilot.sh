@@ -362,15 +362,17 @@ outer_receipt_abandon_locked() {  # REASON
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
-outer_receipt_retire_empty_discovery_locked() {  # EXPECTED DIGEST
+outer_receipt_retire_empty_discovery_locked() {  # EXPECTED DIGEST [REASON]
   local expected="$1"
+  local reason="${2:-discovery-no-eligible-work}"
 
   if [ ! -e "$OUTER_RECEIPT" ] && [ ! -L "$OUTER_RECEIPT" ]; then
     echo "autopilot: empty discovery receipt was not retired; the bound receipt is missing" >&2
     return 1
   fi
   python3 "$RECEIPT_HELPER" discovery-retire "$OUTER_RECEIPT" --repo "$REPO" \
-    --expected "$expected" --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    --expected "$expected" --reason "$reason" \
+    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
 # True when the existing plan still holds work. An unreadable plan counts as
@@ -1448,6 +1450,19 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
       REPLAN_FAILURE="failed"
     fi
     rm -f "$out"
+    # Exit 3 means the planner produced no usable proposal; the discovery
+    # receipt carries nothing to resume, so free it. Other codes (budget
+    # exceeded, interruption) keep it for resume.
+    if [ "${3:-0}" -eq 1 ] && [ "$rc" -eq 3 ]; then
+      if retired_record="$(oms_with_file_lock "$OUTER_RECEIPT" \
+        outer_receipt_retire_empty_discovery_locked "$discovery_receipt_sha" \
+        discovery-no-proposal)"; then
+        retired_record="${retired_record//$'\r'/}"
+        echo "autopilot: receipt retired after a discovery that produced no proposal; the next propose may bind a fresh contract ($retired_record)"
+      else
+        echo "autopilot: receipt was not retired; it changed or no longer matches the discovery retirement conditions" >&2
+      fi
+    fi
     return "$rc"
   fi
   if [ "${3:-0}" -eq 1 ] &&

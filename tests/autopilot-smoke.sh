@@ -3509,6 +3509,26 @@ PY
   [ -f "$none/.oms/plan/autopilot-run.json" ] ||
     fail "propose after base advance did not leave a fresh receipt"
 
+  unusable="$TMP/scratch-refusal-discover-unusable"
+  make_repo "$unusable"
+  mkdir -p "$unusable/calls"
+  rc=0
+  OMS_T_PLAN_RESULT=unextractable run_autopilot "$unusable" propose --discover \
+    --planner claude --allowed 'src,tests' --base main > "$unusable/unusable.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "unusable discovery answer should keep exit 3, got $rc: $(tail -5 "$unusable/unusable.out")"
+  grep -Fq 'the next propose may bind a fresh contract' "$unusable/unusable.out" ||
+    fail "unusable discovery answer did not report the receipt retirement"
+  [ ! -e "$unusable/.oms/plan/autopilot-run.json" ] ||
+    fail "unusable discovery answer left a live outer receipt"
+  grep -Fl '"reason":"discovery-no-proposal"' "$unusable"/.oms/plan/autopilot-run.*.abandoned.json >/dev/null 2>&1 ||
+    fail "unusable discovery answer did not write a discovery-no-proposal abandon record"
+  rc=0
+  run_autopilot "$unusable" propose --discover --planner claude \
+    --allowed 'src,docs' --base main > "$unusable/other-allowed.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "propose with a different envelope after an unusable discovery should bind fresh, got $rc: $(tail -5 "$unusable/other-allowed.out")"
+  [ -f "$unusable/.oms/plan/autopilot-run.json" ] ||
+    fail "propose after an unusable discovery did not bind a new receipt"
+
   interrupted="$TMP/scratch-refusal-discover-interrupted"
   make_repo "$interrupted"
   mkdir -p "$interrupted/calls"

@@ -1866,6 +1866,8 @@ def main() -> int:
     discovery_retire.add_argument("--repo", required=True)
     discovery_retire.add_argument("--expected", required=True)
     discovery_retire.add_argument("--updated", required=True)
+    discovery_retire.add_argument("--reason", default="discovery-no-eligible-work",
+                                  choices=("discovery-no-eligible-work", "discovery-no-proposal"))
     base_moved_retire = sub.add_parser("retire-proposing-base-moved")
     base_moved_retire.add_argument("path")
     base_moved_retire.add_argument("--expected", required=True)
@@ -1949,7 +1951,6 @@ def main() -> int:
                     raise ReceiptError("empty-discovery retirement requires a proposing receipt")
                 if row["proposal"] != {"path": "", "sha256": ""}:
                     raise ReceiptError("empty-discovery retirement requires an unbound proposal")
-                args.reason = "discovery-no-eligible-work"
             elif args.command == "retire-proposing-base-moved":
                 candidate = row_from_args(args)
                 validate_receipt(candidate)
