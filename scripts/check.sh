@@ -1090,6 +1090,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   quick_skills=0
   quick_python=0
   quick_docs=1
+  quick_sourcedist_full=0
   quick_shell_files=()
   quick_python_files=()
   while IFS= read -r -d '' path; do
@@ -1159,6 +1160,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   if [ "$quick_docs" = 1 ] || [ "$quick_harness" = 0 ]; then
     stage source-distribution bash tests/source-distribution-smoke.sh --docs-only
   else
+    quick_sourcedist_full=1
     stage source-distribution bash tests/source-distribution-smoke.sh
   fi
   [ "$quick_harness" = 0 ] || stage codex-hud-config bash tests/codex-hud-config-smoke.sh
@@ -1181,7 +1183,7 @@ fi
 
 affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
   case "$1" in
-    tests/source-distribution-smoke.sh) return 0 ;;
+    tests/source-distribution-smoke.sh) [ "$quick_sourcedist_full" = 1 ]; return ;;
     tests/codex-hud-config-smoke.sh|tests/platform-portability-smoke.sh|tests/bsd-portability-smoke.sh|tests/functional-evolution-smoke.sh|tests/harness-enhancements-smoke.sh)
       [ "$quick_harness" = 1 ]; return ;;
     tests/model-routing-smoke.sh|tests/provider-registry-smoke.sh|tests/models-smoke.sh)

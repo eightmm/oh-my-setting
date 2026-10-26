@@ -978,6 +978,9 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
   no-operator)
     printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh"],"test_cases":[]}'
     ;;
+  sourcedist)
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/source-distribution-smoke.sh"],"test_cases":[]}'
+    ;;
   error) exit 23 ;;
   *)
     printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/operator/section.sh","tests/operator/section.py","tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py","tests/run-smoke-shard.sh"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"},{"id":"symbol:tests/operator/section.py::SectionTest.test_selected","language":"python","name":"test_selected","path":"tests/operator/section.py"}]}'
@@ -1202,6 +1205,20 @@ PYTEST
   printf '%s\n' "$out" | grep >/dev/null -Fx autonomy-hook ||
     fail "graph-reader failure did not fail open to the focused gate: $out"
 
+  # A docs-only quick run does not cover the full source-distribution suite
+  # that graph evidence selects for a non-docs change.
+  boundary_base="$head"
+  printf '# parallel runner changed\n' >> "$gate/scripts/lib/check-parallel.sh"
+  git -C "$gate" add scripts/lib/check-parallel.sh
+  git -C "$gate" commit -qm parallel-runner
+  head="$(git -C "$gate" rev-parse HEAD)"
+  : > "$log"
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=sourcedist OMS_TEST_AFFECTED_LOG="$log" \
+    bash scripts/check.sh --affected --changed-from "$boundary_base" --changed-to "$head" >/dev/null) ||
+    fail "affected gate rejected a source-distribution selection"
+  grep -Fxq 'distribution:--docs-only' "$log" || fail "quick lane skipped the docs-only distribution probe"
+  grep -Fxq 'distribution:' "$log" ||
+    fail "a docs-only quick run deduplicated the graph-selected full source-distribution run: $(cat "$log")"
 
   boundary_base="$head"
   printf '# selector changed\n' >> "$gate/scripts/graph.sh"
