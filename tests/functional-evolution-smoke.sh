@@ -1409,8 +1409,8 @@ try:
 finally:
     h['collect'].__globals__['certificate'] = real_certificate
 # A lookup error is not absence: the first existence probe of that generation
-# fails with PermissionError and later probes succeed; GC must refuse, not
-# scan with the generation missing and then collect it.
+# fails with PermissionError and later probes succeed; GC must preserve that
+# generation (not collect it on a later probe) without aborting the pass.
 custom_directory = h['find'](str(repo), capture=str(custom_capture))['directory']
 custom_bytes = custom.read_bytes()
 real_lstat = h['os'].lstat
@@ -1424,13 +1424,9 @@ h['os'].lstat = flaky_lstat
 try:
     for apply in (True, False):
         probe['failed'] = False
-        try:
-            h['collect'](str(repo), 0, apply)
-        except PermissionError as error:
-            assert 'injected lookup failure' in str(error)
-        else:
-            raise AssertionError('lookup error was treated as absence')
-        assert custom_capture.exists() and custom.read_bytes() == custom_bytes
+        h['collect'](str(repo), 0, apply)
+        assert probe['failed'], 'lookup failure was not injected'
+        assert custom_capture.exists() and custom.read_bytes() == custom_bytes, 'lookup error was treated as absence'
         assert journal.read_bytes() == custom_journal
 finally:
     h['os'].lstat = real_lstat

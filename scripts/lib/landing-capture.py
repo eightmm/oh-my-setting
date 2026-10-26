@@ -996,7 +996,15 @@ def collect(repo, days, apply, private_only=""):
     needles = set()
     # One snapshot decides which generations exist; needles and the collection
     # loop both use it, so a generation that appears later is not collected here.
-    visible = {generation: present(item['directory']) for generation, item in items.items()}
+    # An unknown answer (None) preserves only that generation; its certificate
+    # is unreadable, so it is charged and never collected, and the rest proceed.
+    visible = {}
+    for generation, item in items.items():
+        try:
+            visible[generation] = present(item['directory'])
+        except OSError as error:
+            visible[generation] = None
+            print('warning: managed capture preserved: ' + str(error), file=sys.stderr)
     for generation, item in items.items():
         paths = (os.path.join(item['directory'], item['landing_id'] + '.patch'),
                  os.path.join(repo, '.oms/landing-patches', item['landing_id'] + '.patch'))
@@ -1014,6 +1022,8 @@ def collect(repo, days, apply, private_only=""):
     evidence = reference_bytes(repo, needles=needles)
     for generation, item in items.items():
         if private_only and item['landing_id'] != private_only:
+            continue
+        if visible[generation] is None:
             continue
         if not visible[generation]:
             if not private_only and absent(item['directory']):
