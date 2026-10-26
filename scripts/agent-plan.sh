@@ -715,7 +715,20 @@ plan_run_with_plan_lock() {
     physical_parent="$(printf '%s' "$physical_parent" | tr -d '\r')"
     PLAN_LOCK_FILE="$physical_parent/$base"
   fi
-  oms_with_file_lock "$PLAN_LOCK_FILE" plan_run
+  local default_plan="$STATE_REPO/.oms/plan/tasks.json"
+  if [ "$PLAN_LOCK_FILE" = "$default_plan" ]; then
+    oms_with_file_lock "$PLAN_LOCK_FILE" plan_run
+  else
+    # Capture GC excludes writers only through the default plan lock, but a
+    # custom plan also validates and publishes capture references. Locks are
+    # keyed by path string, so a symlink/hardlink alias of tasks.json is a
+    # distinct key (no self-deadlock) and must still take the default lock.
+    # Default first, then the custom file: GC never takes a custom plan lock
+    # (landings -> marker-set -> default plan -> lifecycle -> index), and
+    # every agent-plan path nests marker-set/landings before this pair.
+    oms_with_file_lock "$default_plan" \
+      oms_with_file_lock "$PLAN_LOCK_FILE" plan_run
+  fi
 }
 plan_run_with_marker_and_plan_locks() {
   oms_with_file_lock "$STATE_REPO/.oms/delegations/.marker-set-lock-target" \

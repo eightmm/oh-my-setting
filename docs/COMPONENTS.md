@@ -672,7 +672,11 @@ metadata, externally modified files or total historical storage.
 `oms gc` preserves legacy, unknown and referenced history. On supported POSIX
 hosts it can reclaim an aged, unreferenced native generation only after checking
 the private directory and retained inode anchors, the actual writer's terminal
-seal, plan/completion/report/index pins, and quiescence. Collection holds the
+seal, plan/completion/report/index pins, and quiescence. Plan `review`/`finish`
+refuse a managed capture reference unless the plan file's replacement destination is under
+a scanned root (`.oms/plan`, `.oms/artifacts`, `.oms/tasks`, `.oms/task`), and a plan file
+other than the default `.oms/plan/tasks.json` also holds the default plan lock that
+collection takes. Collection holds the
 landing, marker, plan, lifecycle and artifact-index writer locks in that order.
 It first quarantines a shared pathname inside the private generation directory
 and checks its inode again. A replacement is restored without overwriting a

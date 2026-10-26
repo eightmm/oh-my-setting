@@ -1305,6 +1305,15 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                 # The plan writer lock excludes capture GC. Refuse a new pin
                 # if collection already won; ordinary patch paths are unchanged.
                 capture = _load(os.path.join(os.path.dirname(__file__), "landing-capture.py"))
+                # GC only scans REFERENCE_ROOTS, so a capture reference saved
+                # elsewhere would dangle. save() os.replace()s the plan's own
+                # pathname (replacing a final symlink, not following it), so
+                # judge that destination: resolved directory + basename.
+                plan_real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+                if not any(plan_real.startswith(os.path.join(os.path.realpath(state_repo()), *root.split("/")) + os.sep)
+                           for root in capture["REFERENCE_ROOTS"]):
+                    die("a managed landing capture can only be referenced by a plan under %s (plan resolves to %s)"
+                        % (", ".join(capture["REFERENCE_ROOTS"]), plan_real))
                 capture["read_patch"](state_repo(), candidate_path)
     if act in {"claim", "start", "review", "repair", "land", "finish"} and (
             t.get("executor_id") or t.get("executor_soul_sha256")):

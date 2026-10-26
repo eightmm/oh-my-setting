@@ -30,6 +30,8 @@ DEFAULT_BYTES = 128 * 1024 * 1024
 DEFAULT_COUNT = 256
 MAX_REFERENCE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_REFERENCE_ENTRIES = 262144
+# The only places GC looks for capture references; a writer must publish inside them.
+REFERENCE_ROOTS = ('.oms/plan', '.oms/artifacts', '.oms/tasks', '.oms/task')
 REFERENCE_SCAN_SECONDS = 120
 
 
@@ -815,7 +817,7 @@ def reference_bytes(repo, trace=None, needles=()):
             raise ValueError('reference scan deadline exceeded in %s (%d entries, limit %d seconds)' %
                              (relative, entries, REFERENCE_SCAN_SECONDS))
 
-    for relative in ('.oms/plan', '.oms/artifacts', '.oms/tasks', '.oms/task'):
+    for relative in REFERENCE_ROOTS:
         root = os.path.join(repo, relative)
         if not os.path.lexists(root):
             continue

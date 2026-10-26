@@ -1609,7 +1609,6 @@ subprocess.run(['bash', str(root / 'scripts/agent-events.sh'), '--repo', str(rep
 capture4, patch4 = new('active')
 h['gc'](str(repo), 0, True)
 assert capture4.exists() and patch4.exists(), 'active native attempt did not veto GC'
-
 # The destructive collector is reachable only through the fully locked gc
 # entrypoint. Its former direct `collect` CLI path must now be rejected.
 rejected_collect = subprocess.run([sys.executable, str(root / 'scripts/lib/landing-capture.py'),
@@ -1649,6 +1648,102 @@ if os.name != 'nt':
         finally:
             holder.wait(timeout=5)
         ready.unlink()
+
+    # A custom plan publishes capture references too, so its writers must take
+    # the default plan lock that GC holds. Hold it with the real helper: a
+    # custom-file mutation waits (and leaves its file alone) while GC preserves.
+    (repo / '.oms/plan').mkdir(parents=True, exist_ok=True)
+    plan_env = {k: v for k, v in os.environ.items()
+                if k not in ('OMS_HARNESS_CHILD', 'OMS_HARNESS_DELEGATE_DEPTH')}
+    plan_env.update(OMS_LOCK_DIR=str(sandbox / 'custom-plan-locks'), OMS_LOCK_TIMEOUT='1')
+    def custom_plan(*words, name='alternate.json'):
+        return subprocess.run(['bash', str(root / 'scripts/agent-plan.sh'), '--repo', str(repo),
+                               '--file', str(repo / '.oms/plan' / name)] + list(words),
+                              env=plan_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    created = custom_plan('init', '--goal', 'custom')
+    assert created.returncode == 0, created.stderr.decode()
+    custom_before = (repo / '.oms/plan/alternate.json').read_bytes()
+    # Locks are keyed by path string, so aliases of the default plan are
+    # distinct keys that must still contend on the default plan lock.
+    default_created = subprocess.run(['bash', str(root / 'scripts/agent-plan.sh'), '--repo', str(repo),
+                                      'init', '--goal', 'default'], env=plan_env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert default_created.returncode == 0, default_created.stderr.decode()
+    os.symlink('tasks.json', repo / '.oms/plan/symlink-alias.json')
+    os.link(repo / '.oms/plan/tasks.json', repo / '.oms/plan/hardlink-alias.json')
+    default_before = (repo / '.oms/plan/tasks.json').read_bytes()
+    ready = sandbox / 'custom-plan-lock-ready'
+    holder = subprocess.Popen([
+        'bash', '-c',
+        '. "$1"; oms_with_file_lock "$2" sh -c \'printf ready > "$1"; sleep 10\' lock-holder "$3"',
+        'custom-plan-lock-holder', str(lock_lib), str(repo / '.oms/plan/tasks.json'), str(ready)],
+        env=plan_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.time() + 5
+        while not ready.exists() and time.time() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), 'default plan lock fixture did not start'
+        blocked = custom_plan('add', '--id', 'held', '--title', 'held')
+        assert blocked.returncode != 0, 'custom plan writer ignored the default plan lock'
+        assert (repo / '.oms/plan/alternate.json').read_bytes() == custom_before
+        for alias in ('symlink-alias.json', 'hardlink-alias.json'):
+            aliased = custom_plan('add', '--id', 'alias', '--title', 'alias', name=alias)
+            assert aliased.returncode != 0, 'aliased default plan writer skipped the default plan lock: ' + alias
+            assert (repo / '.oms/plan/tasks.json').read_bytes() == default_before, alias
+        gc_busy = subprocess.run([sys.executable, str(root / 'scripts/lib/landing-capture.py'),
+                                  'gc', str(repo), '0', '1'], env=plan_env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert gc_busy.returncode == 75, gc_busy.returncode
+        assert capture4.exists() and patch4.exists()
+    finally:
+        holder.wait(timeout=30)
+    plan_env['OMS_LOCK_TIMEOUT'] = '30'
+    released = custom_plan('add', '--id', 'held', '--title', 'held')
+    assert released.returncode == 0, released.stderr.decode()
+    aliased = custom_plan('add', '--id', 'alias', '--title', 'alias', name='symlink-alias.json')
+    assert aliased.returncode == 0, aliased.stderr.decode()
+
+    # GC scans references only under its roots, so review/finish must refuse a
+    # managed capture reference in a plan outside them (or symlinked out).
+    plan_capture, plan_patch = new('plan-root')
+    plan_env['OMS_LOCK_TIMEOUT'] = '30'
+    def review_capture(plan_path, name, via=None):
+        def run(target, *words):
+            return subprocess.run(['bash', str(root / 'scripts/agent-plan.sh'), '--repo', str(repo),
+                                   '--file', str(target)] + list(words),
+                                  env=plan_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for words in (('init', '--goal', name), ('add', '--id', 't', '--title', 't'),
+                      ('claim', '--id', 't', '--provider', 'codex'), ('start', '--id', 't')):
+            step = run(plan_path, *words)
+            assert step.returncode == 0, (words, step.stderr.decode())
+        before = plan_path.read_bytes()
+        return before, run(via or plan_path, 'review', '--id', 't', '--patch', os.path.relpath(plan_patch, repo))
+    outside = repo / 'custom-plan.json'
+    for plan_path, via in ((outside, None),):
+        before, refused = review_capture(plan_path, 'outside', via)
+        assert refused.returncode != 0 and b'.oms/plan' in refused.stderr, (
+            refused.returncode, refused.stdout.decode(), refused.stderr.decode())
+        assert plan_path.read_bytes() == before, 'refused review changed the outside plan'
+    # An outside symlink to an inside plan is replaced by save(), not followed.
+    os.unlink(repo / '.oms/plan/hardlink-alias.json')  # a hard-linked default plan is unusable
+    os.symlink('.oms/plan/tasks.json', repo / 'outside.json')
+    for words in (('add', '--id', 'alias', '--title', 'alias'), ('claim', '--id', 'alias', '--provider', 'codex'),
+                  ('start', '--id', 'alias')):
+        step = subprocess.run(['bash', str(root / 'scripts/agent-plan.sh'), '--repo', str(repo)] + list(words),
+                              env=plan_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert step.returncode == 0, (words, step.stderr.decode())
+    tasks_before = (repo / '.oms/plan/tasks.json').read_bytes()
+    refused = subprocess.run(['bash', str(root / 'scripts/agent-plan.sh'), '--repo', str(repo),
+                              '--file', str(repo / 'outside.json'), 'review', '--id', 'alias',
+                              '--patch', os.path.relpath(plan_patch, repo)],
+                             env=plan_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert refused.returncode != 0 and b'.oms/plan' in refused.stderr, refused.stderr.decode()
+    assert os.readlink(repo / 'outside.json') == '.oms/plan/tasks.json'
+    assert (repo / '.oms/plan/tasks.json').read_bytes() == tasks_before
+    inside = repo / '.oms/plan/inroot.json'
+    _, accepted = review_capture(inside, 'inside')
+    assert accepted.returncode == 0, accepted.stderr.decode()
+    assert plan_capture.exists() and plan_patch.exists()
 PY
 }
 
