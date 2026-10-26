@@ -1135,8 +1135,7 @@ raw="$(agent_memory_mktemp)" || fail "mktemp failed"
 call_args=(--to "$PROVIDER" --repo "$REPO" --operation plan)
 if [ "$DISCOVER" -eq 1 ]; then
   mkdir -p "$PLAN_DIR"
-  agent_memory_ensure_oms_ignore_for_path "$PLAN_DIR" 2>/dev/null || true
-  planner_prompt_file="$(mktemp "$PLAN_DIR/planner-prompt.XXXXXX")" || fail "cannot create planner prompt file"
+  planner_prompt_file="$(agent_memory_mktemp)" || fail "cannot create planner prompt file"
   printf '%s\n' "$prompt" > "$planner_prompt_file"
   call_args+=(--prompt-file "$planner_prompt_file")
 else

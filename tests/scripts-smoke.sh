@@ -10692,6 +10692,10 @@ printf 'run-ref success\n'
 EOF
   cat > "$discovery_bin/codex" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "${OMS_TEST_DISCOVERY_PLAN_DIR:-}" ]; then
+  find "$OMS_TEST_DISCOVERY_PLAN_DIR" -name 'planner-prompt.*' -print -quit \
+    > "$HOME/planner-prompt-in-plan.txt"
+fi
 for temp_file in "$TMPDIR"/*; do
   [ -f "$temp_file" ] || continue
   python3 -c 'import os,sys; assert not (os.stat(sys.argv[1]).st_mode & 0o044)' "$temp_file" || exit 11
@@ -10705,10 +10709,13 @@ EOF
   (
     umask 022
     OMS_WORK_DISCOVERY_SCRIPTS_DIR="$readers" OMS_WORK_DISCOVERY_OMS="$readers/oms" \
+      OMS_TEST_DISCOVERY_PLAN_DIR="$discovery/.oms/plan" \
       OMS_LIB_TMPDIR="$discovery_tmp" TMPDIR="$discovery_tmp" \
       HOME="$discovery_home" NVM_DIR="$discovery_home/.nvm" PATH="$discovery_bin:/usr/bin:/bin" \
       "$ROOT/scripts/plan-from-spec.sh" --repo "$discovery" --to codex --discover
   ) >"$discovery/out" 2>&1 || fail "discover proposal should succeed: $(tail -6 "$discovery/out")"
+  [ ! -s "$discovery_home/planner-prompt-in-plan.txt" ] ||
+    fail "discover created its planner prompt under shared OMS plan state: $(cat "$discovery_home/planner-prompt-in-plan.txt")"
   assert_file_contains "$discovery/out" "evidence packet:"
   assert_file_contains "$discovery/out" "candidate report:"
   assert_file_contains "$discovery_home/discovery-prompt.txt" "failure-ref"
