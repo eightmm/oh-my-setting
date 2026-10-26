@@ -287,6 +287,7 @@ test_file_lock_missing_poll_helper_falls_back() {
   assert_file_contains "$state" "fallback"
 }
 
+# smoke-weight: 5
 test_file_lock_contention_preserves_records_across_backends() {
   local dir="$TMP/file-lock-contention"
   local append_file="$dir/append.txt"
@@ -402,6 +403,7 @@ test_file_lock_contention_preserves_records_across_backends() {
     fail "mkdir-locked appends produced duplicate records"
 }
 
+# smoke-weight: 23
 test_delegate_kill9_recovery_via_gc() {
   local project="$TMP/delegate-kill9"
   local bin="$project/bin"
@@ -489,7 +491,7 @@ PY
   git -C "$project" worktree prune >/dev/null 2>&1 || true
 }
 
-# smoke-weight: 20
+# smoke-weight: 27
 test_delegate_marker_set_lock_does_not_grow_per_run() {
   local project="$TMP/delegate-marker-set-lock"
   local bin_dir="$project/bin"
@@ -1923,6 +1925,7 @@ test_fail_ledger_list_limit_names_omissions() {
     fail "no limit keeps every row: $out"
 }
 
+# smoke-weight: 14
 test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
   local project="$TMP/state-root-scratch"
   local managed="$TMP/state-root-managed"
@@ -2518,6 +2521,7 @@ test_run_ledger_metrics_sanitizes() {
   assert_file_contains "$project/aerr" "not a JSON object"
 }
 
+# smoke-weight: 17
 test_delegate_auto_verify_uses_check_contract() {
   local project="$TMP/delegate-auto-verify"
   local artifact_dir="$project/artifacts"
@@ -2876,6 +2880,7 @@ test_oms_self_ignore_created_for_harness_paths() {
 }
 
 
+# smoke-weight: 24
 test_doctor_warns_bad_harness_index_json() {
   local project="$TMP/doctor-harness-bad-json"
   local home_dir="$TMP/doctor-home-bad-json"
@@ -2897,6 +2902,7 @@ test_doctor_warns_bad_harness_index_json() {
 }
 
 
+# smoke-weight: 24
 test_doctor_warns_missing_oms_gitignore() {
   local project="$TMP/doctor-harness-no-gitignore"
   local home_dir="$TMP/doctor-home-no-gitignore"
@@ -2913,6 +2919,7 @@ test_doctor_warns_missing_oms_gitignore() {
 }
 
 
+# smoke-weight: 6
 test_doctor_warns_when_antigravity_cannot_read_in_headless_mode() {
   local project="$TMP/doctor-agy-perms"
   local home_dir="$TMP/doctor-home-agy-perms"
@@ -2963,6 +2970,7 @@ JSON
     fail "the doctor should name the missing file-read permission: $out"
 }
 
+# smoke-weight: 24
 test_doctor_clean_harness_state_has_no_warnings() {
   local project="$TMP/doctor-harness-clean"
   local home_dir="$TMP/doctor-home-clean"
@@ -2993,6 +3001,7 @@ test_doctor_clean_harness_state_has_no_warnings() {
   fi
 }
 
+# smoke-weight: 23
 test_doctor_fails_when_claude_hooks_unregistered() {
   local project="$TMP/doctor-hooks-missing"
   local home_dir="$TMP/doctor-hooks-missing-home"
@@ -3015,6 +3024,7 @@ test_doctor_fails_when_claude_hooks_unregistered() {
     fail "doctor should point at the remedy: $out"
 }
 
+# smoke-weight: 24
 test_doctor_warns_on_a_damaged_memory_database() {
   local project="$TMP/doctor-memory-db"
   local home_dir="$TMP/doctor-memory-db-home"
@@ -3034,6 +3044,7 @@ test_doctor_warns_on_a_damaged_memory_database() {
     fail "doctor should name the safe rebuild command: $out"
 }
 
+# smoke-weight: 46
 test_doctor_requires_gh_and_reports_unauthenticated() {
   local project="$TMP/doctor-gh"
   local home_dir="$TMP/doctor-gh-home"
@@ -3085,6 +3096,7 @@ STUB
   fi
 }
 
+# smoke-weight: 6
 test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
   local project="$TMP/doctor-provider-auth"
   local home_dir="$TMP/doctor-provider-auth-home"
@@ -3160,6 +3172,7 @@ test_installer_installs_provider_clis_by_default() {
   fi
 }
 
+# smoke-weight: 25
 test_doctor_accepts_a_database_the_tool_just_built() {
   local project="$TMP/doctor-memory-db-current"
   local home_dir="$TMP/doctor-memory-db-current-home"
@@ -3191,6 +3204,7 @@ test_doctor_accepts_a_database_the_tool_just_built() {
   fi
 }
 
+# smoke-weight: 92
 test_doctor_fails_on_corrupt_operations_state() {
   local project="$TMP/doctor-ops-corrupt"
   local home_dir="$TMP/doctor-home-ops"
@@ -3237,6 +3251,7 @@ test_doctor_fails_on_corrupt_operations_state() {
     fail "doctor reported ok over a crashing operations validator: $out"
 }
 
+# smoke-weight: 24
 test_doctor_uses_canonical_artifact_validation() {
   local project="$TMP/doctor-artifact-contract"
   local home_dir="$TMP/doctor-artifact-contract-home"
@@ -3264,6 +3279,7 @@ EOF
 # permanent by design: unlinking a released flock file lets a waiter on the old
 # inode and a new arrival on a fresh one both hold the lock. So: report, never
 # remove, and say why.
+# smoke-weight: 45
 test_doctor_notes_flock_lock_files_without_removing_them() {
   local project="$TMP/doctor-flock-note"
   local home_dir="$TMP/doctor-flock-home"
@@ -3290,6 +3306,7 @@ test_doctor_notes_flock_lock_files_without_removing_them() {
     fail "cleanup must not unlink a flock lock file"
 }
 
+# smoke-weight: 24
 test_doctor_reports_crash_residue_warnings() {
   local project="$TMP/doctor-harness-residue"
   local home_dir="$TMP/doctor-home-residue"
@@ -3325,6 +3342,7 @@ test_doctor_reports_crash_residue_warnings() {
   contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
+# smoke-weight: 47
 test_doctor_reports_malformed_run_state() {
   local project="$TMP/doctor-run-state"
   local home_dir="$TMP/doctor-home-run-state"
@@ -3473,6 +3491,7 @@ EOF
   chmod +x "$bin_dir/$binary"
 }
 
+# smoke-weight: 5
 test_peer_review_gate_all_pass() {
   local project="$TMP/review-gate-pass"
   local artifact_dir="$project/artifacts"
@@ -3579,6 +3598,7 @@ test_prompt_takers_refuse_a_mistyped_option() {
   done
 }
 
+# smoke-weight: 5
 test_peer_review_gate_covers_rides_the_mechanical_verify_receipt() {
   local project="$TMP/review-gate-covers"
   local bin_dir="$project/bin"
@@ -3672,6 +3692,7 @@ PY
     fail "the fail-closed refusal must be named: $(tail -2 "$project/err-closed")"
 }
 
+# smoke-weight: 6
 test_peer_review_gate_binds_complete_diff_and_refuses_truncation() {
   local project="$TMP/review-gate-complete-diff"
   local artifact_dir="$project/artifacts"
@@ -3836,6 +3857,7 @@ assert seat["model_family"] == "anthropic", seat
 PY
 }
 
+# smoke-weight: 21
 test_peer_review_gate_refuses_untracked_content() {
   local project="$TMP/review-gate-untracked"
   local state_repo="$TMP/review-gate-untracked-state"
@@ -4071,6 +4093,7 @@ EOF
     fail "safe diff capture lost raw worktree content"
 }
 
+# smoke-weight: 6
 test_peer_review_signal_cleans_provider_processes() {
   local project="$TMP/review-signal-cleanup"
   local bin_dir="$project/bin"
@@ -4511,6 +4534,7 @@ test_peer_review_synthesize_dry_run() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" 'artifacts/_synthesis-review-synthesize-mode-'
 }
 
+# smoke-weight: 5
 test_peer_review_synthesize_provider_override() {
   local project="$TMP/review-synthesize-codex"
   local artifact_dir="$project/artifacts"
@@ -4892,6 +4916,7 @@ EOF
   chmod +x "$bin_dir/$binary"
 }
 
+# smoke-weight: 5
 test_peer_ask_debate_tracks_dropout() {
   local project="$TMP/ask-debate-dropout"
   local artifact_dir="$project/artifacts"
@@ -4953,6 +4978,7 @@ test_peer_ask_debate_tracks_dropout() {
   assert_file_contains "$project/err" "note: debate dropped providers: claude; their last successful round's answer was used for synthesis"
 }
 
+# smoke-weight: 5
 test_peer_ask_debate_skips_after_dropouts() {
   local project="$TMP/ask-debate-skip"
   local artifact_dir="$project/artifacts"
@@ -4979,6 +5005,7 @@ test_peer_ask_debate_skips_after_dropouts() {
   assert_file_contains "$project/out" 'summary: 3/3 providers succeeded (2 dropped during debate)'
 }
 
+# smoke-weight: 5
 test_peer_ask_debate_sanitizes_provider_auth_noise() {
   local project="$TMP/ask-debate-sanitize"
   local artifact_dir="$project/artifacts"
@@ -5202,7 +5229,7 @@ test_peer_ask_print_timeout() {
     --prompt "Ask with custom print timeout" >/dev/null
 }
 
-# smoke-weight: 21
+# smoke-weight: 20
 test_peer_ask_debate_dry_run() {
   local project="$TMP/ask-debate"
   local artifact_dir="$project/artifacts"
@@ -5404,6 +5431,7 @@ setup_auto_update_fixture() {
   git clone --branch main "$origin" "$work" >/dev/null 2>&1
 }
 
+# smoke-weight: 7
 test_delegate_dry_run() {
   local project="$TMP/delegate-dry"
   local artifact_dir="$project/artifacts"
@@ -5541,6 +5569,7 @@ assert row["model_class"] == "role-default", row
 PY
 }
 
+# smoke-weight: 5
 test_delegate_read_only_rejects_apply() {
   local project="$TMP/delegate-read-only"
   local out artifact
@@ -5691,6 +5720,7 @@ PY_REVIEW
   fi
 }
 
+# smoke-weight: 22
 test_delegate_fake_worker_apply() {
   local project="$TMP/delegate-apply"
   # Landing requires the main tree to stay clean, including untracked files;
@@ -5772,6 +5802,7 @@ EOF
   [ ! -e "$project/nested.txt" ] || fail "nested apply modified the primary tree"
 }
 
+# smoke-weight: 13
 test_delegate_graph_context_is_opt_in_and_snapshot_bound() {
   local project="$TMP/delegate-auto-graph"
   local bin_dir="$TMP/delegate-auto-graph-bin"
@@ -6597,6 +6628,7 @@ test_agent_memory_db_preserves_search_and_adds_ranked_recall() {
     fail "rebuild lost source memory: $out"
 }
 
+# smoke-weight: 6
 test_agent_memory_database_concurrent_appends_converge() {
   local project="$TMP/agent-memory-db-race"
   local home_dir="$project/home"
@@ -6936,7 +6968,7 @@ def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payl
 PY
 }
 
-# smoke-weight: 58
+# smoke-weight: 50
 test_agent_plan_lifecycle_landing_and_main_research() {
   local d="$TMP/agent-plan-life"
   local child_repo="$TMP/agent-plan-child-completion"
@@ -7521,7 +7553,7 @@ PY
   } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
 }
 
-# smoke-weight: 61
+# smoke-weight: 51
 test_agent_plan_lifecycle_read_validation() {
   local XDG_STATE_HOME="$TMP/agent-plan-life-read-state"
   export XDG_STATE_HOME
@@ -7784,7 +7816,7 @@ PY
   } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
 }
 
-# smoke-weight: 62
+# smoke-weight: 63
 test_agent_plan_lifecycle_receipt_history() {
   local XDG_STATE_HOME="$TMP/agent-plan-life-history-state"
   export XDG_STATE_HOME
@@ -8318,7 +8350,7 @@ PY
   } | python3 - "$ROOT" "$completion_repo" || fail "typed local completion contract failed"
 }
 
-# smoke-weight: 58
+# smoke-weight: 53
 test_agent_plan_lifecycle_satisfaction() {
   local XDG_STATE_HOME="$TMP/agent-plan-life-satisfaction-state"
   export XDG_STATE_HOME
@@ -9787,6 +9819,7 @@ PY
   fi
 }
 
+# smoke-weight: 7
 test_agent_plan_retirement_ledger_parser_is_strict() {
   local plan="$ROOT/scripts/agent-plan.sh"
   local variant project plan_sha ledger before after diagnostic out rc
@@ -10429,6 +10462,7 @@ test_agent_call_missing_cli_writes_exit_and_index() {
 }
 
 
+# smoke-weight: 14
 test_plan_from_spec_rejects_delegating_verify() {
   local project="$TMP/plan-from-spec-delegating" allow_project="$TMP/plan-from-spec-project-check" bin_dir out
   bin_dir="$project/bin"
@@ -10510,6 +10544,7 @@ EOF
   assert_file_contains "$allow_project/out" "proposed 1 task(s)"
 }
 
+# smoke-weight: 13
 test_plan_from_spec_proposes_then_applies() {
   local project="$TMP/plan-from-spec"
   local bin_dir="$project/bin"
@@ -11543,6 +11578,7 @@ EOF
     fail "a repo-wide scope must flag its in-scope verifier: $(cat "$project/out")"
 }
 
+# smoke-weight: 5
 test_plan_from_spec_prompt_carries_contract_decisions() {
   local project="$TMP/plan-from-spec-decisions"
   local bin_dir="$project/bin"
@@ -12137,6 +12173,7 @@ test_import_call_result_indexes_call_import() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" "\"source\": \"$source_rel\""
 }
 
+# smoke-weight: 15
 test_delegate_resumes_native_session() {
   local project="$TMP/delegate-resume"
   local bin_dir="$TMP/delegate-resume-bin"
@@ -12492,6 +12529,7 @@ test_cli_argument_validation_rejects_invalid_inputs() {
   fi
 }
 
+# smoke-weight: 5
 test_delegate_auto_verify_prefers_fast() {
   local project="$TMP/delegate-ml-smoke"
   local artifact_dir="$project/artifacts"
@@ -13263,6 +13301,7 @@ test_consult_memory_is_opt_in() {
     fail "consult --memory should attach shared memory"
 }
 
+# smoke-weight: 8
 test_panel_write_workers_get_private_test_state() {
   local fixture="$TMP/panel-private-test-state"
   local root lifecycle repo out retained_root map_output retry_status
@@ -13518,6 +13557,7 @@ PY
     fail 'kept delegate worktree did not retain its fixture root'
 }
 
+# smoke-weight: 6
 test_claude_envelope_carries_stop_reason() {
   local project="$TMP/claude-envelope"
   local bin_dir="$project/bin"
@@ -14219,6 +14259,7 @@ EOF
   fi
 }
 
+# smoke-weight: 6
 test_shared_fast_mode_detection_gates_auto_verify() {
   local dir="$TMP/shared-fast-mode"
   local check_sh="$dir/check.sh"
@@ -15353,6 +15394,7 @@ test_link_removes_dangling_owned_skill_links() {
     fail "foreign dangling link should be preserved"
 }
 
+# smoke-weight: 61
 test_skill_doctor_detects_duplicate_names() {
   local home_dir="$TMP/skill-doctor-dup"
   local root
@@ -15390,6 +15432,7 @@ EOF
   assert_file_contains "$home_dir/out" "duplicate skill name: duplicate-skill"
 }
 
+# smoke-weight: 20
 test_skill_doctor_detects_duplicates_across_codex_roots() {
   local home_dir="$TMP/skill-doctor-codex-overlay"
   mkdir -p "$home_dir/.codex/skills/local" "$home_dir/.agents/skills/shared"
@@ -15458,6 +15501,7 @@ test_unlink_removes_superseded_skill_name() {
   assert_symlink_to "$skills/trace" "$home_dir/user-trace"
 }
 
+# smoke-weight: 40
 test_skill_doctor_reports_superseded_skill_names() {
   local home_dir="$TMP/skill-doctor-legacy"
 
@@ -15599,6 +15643,7 @@ assert not missing, "the rename table points at skills that do not exist: %s" % 
 PY
 }
 
+# smoke-weight: 21
 test_cleanup_dry_run_and_apply() {
   local home_dir="$TMP/cleanup-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
@@ -15699,6 +15744,7 @@ test_cleanup_dry_run_and_apply() {
 }
 
 
+# smoke-weight: 21
 test_cleanup_prunes_stale_worktree_registration() {
   local project="$TMP/cleanup-stale-worktree"
   local home_dir="$TMP/cleanup-stale-home"
@@ -15716,6 +15762,7 @@ test_cleanup_prunes_stale_worktree_registration() {
   assert_file_contains "$project/cleanup.out" "pruned: 1 stale git worktree registration(s)"
 }
 
+# smoke-weight: 20
 test_cleanup_removes_dead_lock_only() {
   local home_dir="$TMP/cleanup-lock-home"
   local runtime="$home_dir/runtime"
@@ -15764,6 +15811,7 @@ test_empty_check_maintenance_marker_remains_active() {
   ) || fail "an empty in-progress maintenance marker must remain conservative"
 }
 
+# smoke-weight: 5
 test_agent_call_term_removes_tmp_prompt() {
   local project="$TMP/agent-call-term"
   local bin_dir="$project/bin"
@@ -17160,6 +17208,7 @@ test_check_gate_hard_fails_without_shellcheck() {
     fail "check.sh missing-tool message absent: $out"
 }
 
+# smoke-weight: 6
 test_check_gate_is_hermetic_to_hook_git_env() {
   # Git exports GIT_DIR to hooks; from a linked worktree it is absolute and
   # redirects every fixture's git calls into the enclosing checkout — a
@@ -17301,6 +17350,7 @@ EOF
 # check.sh exits at the first failing stage. CI runs lint and tests as separate
 # jobs so one shellcheck nit cannot suppress every test result, which only
 # works if each half can run without the other.
+# smoke-weight: 5
 test_check_gate_splits_lint_from_tests() {
   local out
   local shellcheck_stub="$TMP/check-split-shellcheck"
@@ -17334,6 +17384,7 @@ EOF
 
 # Every .sh here is linted; the Python helpers had nothing, and one of them now
 # decides what the installer may delete.
+# smoke-weight: 5
 test_python_helpers_are_syntax_checked() {
   local out dir="$TMP/selected-python" undefined="$TMP/undefined-global.py" defined="$TMP/defined-global.py" vars_file="$TMP/vars-args.py" globals_file="$TMP/globals-write.py" pop_file="$TMP/globals-pop.py" del_file="$TMP/globals-del.py" isolated_repo="$TMP/python-skip-repo" isolated_checker isolated_operator isolated_dynamic
 
@@ -18500,6 +18551,7 @@ EOF
   chmod +x "$bin/sacct" "$bin/squeue"
 }
 
+# smoke-weight: 5
 test_run_reconcile_records_terminal_jobs() {
   local d="$TMP/reconcile"
   local bin="$d/bin"
@@ -18627,7 +18679,7 @@ test_experiment_board_stale_reclaim() {
 }
 
 
-# smoke-weight: 15
+# smoke-weight: 16
 test_experiment_board_claim_is_atomic() {
   local d="$TMP/exp-claim-race"
   local board="$d/.oms/experiments.jsonl"
@@ -18690,7 +18742,7 @@ make_patch_repo() {
   git -C "$repo" branch -q -D feat
 }
 
-# smoke-weight: 12
+# smoke-weight: 11
 test_patch_admit_admits_clean_patch() {
   local repo="$TMP/admit-clean"
   local SH="$ROOT/scripts/patch-admit.sh"
@@ -18822,6 +18874,7 @@ PY_REFERENCE
 
 }
 
+# smoke-weight: 6
 test_patch_admit_scope_uses_canonical_glob_and_deny_precedence() {
   local repo="$TMP/admit-canonical-scope"
   local sh="$ROOT/scripts/patch-admit.sh"
@@ -19173,6 +19226,7 @@ test_oms_run_timeline_merges_streams() {
   contains "$out" "omitted" || fail "--limit should report omitted earlier events"
 }
 
+# smoke-weight: 7
 test_agent_plan_reclaim_requeues_stale_claim() {
   local d="$TMP/plan-reclaim"
   local SH="$ROOT/scripts/agent-plan.sh"
@@ -19300,6 +19354,7 @@ assert snapshot == plan.read_bytes()
 PY
 }
 
+# smoke-weight: 6
 test_delegate_plan_task_lifecycle() {
   local project="$TMP/delegate-plan-task"
   local bin_dir="$project/bin"
@@ -19349,6 +19404,7 @@ EOF
     fail "--plan-task should stamp task_id lineage on artifact-index rows"
 }
 
+# smoke-weight: 7
 test_peer_review_gate_verify_backstop() {
   local project="$TMP/review-gate-verify"
   local artifact_dir="$project/artifacts"
@@ -19431,7 +19487,7 @@ EOF
   fi
 }
 
-# smoke-weight: 84
+# smoke-weight: 58
 test_delegate_repair_retries_failed_verify() {
   local project="$TMP/delegate-repair"
   local kept
@@ -19987,6 +20043,7 @@ test_scrubber_blocks_hpc_cluster_paths() {
   fi
 }
 
+# smoke-weight: 24
 test_doctor_fails_broken_config_symlink() {
   local project="$TMP/doctor-broken-link"
   local home_dir="$TMP/doctor-home-broken-link"
@@ -20022,6 +20079,7 @@ test_agent_state_lands_at_git_root_from_subdir() {
   assert_not_exists "$project/sub/.oms"
 }
 
+# smoke-weight: 7
 test_peer_review_warns_untracked_files() {
   local project="$TMP/review-untracked"
   local clean="$TMP/review-tracked-only"
@@ -20367,6 +20425,7 @@ test_oms_frontdoor_routes_primary_subsystems() {
     fail "peer-review catalog description should distinguish diff review from peer-ask"
 }
 
+# smoke-weight: 23
 test_doctor_detects_foreign_config_link() {
   local project="$TMP/doctor-foreign-link"
   local home_dir="$TMP/doctor-home-foreign-link"
@@ -20606,6 +20665,7 @@ test_patch_admit_rejects_verifier_change() {
     fail "--allow-verifier-change should admit the same patch"
 }
 
+# smoke-weight: 6
 test_patch_admit_rejects_a_patch_that_deletes_assertions() {
   local project="$TMP/admit-test-reduction"
   local report
@@ -20867,6 +20927,7 @@ PY
     fail "touch must preserve the original owner"
 }
 
+# smoke-weight: 24
 test_patch_land_admits_then_applies() {
   local project="$TMP/patch-land"
   local ok_patch="$TMP/patch-land-ok.patch"
@@ -21043,6 +21104,7 @@ EOFHASH
 
 }
 
+# smoke-weight: 5
 test_patch_land_finishes_plan_task() {
   local project="$TMP/patch-land-plan"
   local patch="$TMP/patch-land-plan.patch"
@@ -21212,6 +21274,7 @@ test_delegate_plan_task_hydrates_from_subdir() {
     fail "verify must hydrate from the plan task even when run from a subdirectory"
 }
 
+# smoke-weight: 7
 test_agent_role_and_delegate_injection() {
   local project="$TMP/role-inject"
   local empty_project="$TMP/role-empty"
@@ -21839,7 +21902,7 @@ test_delegation_liveness_in_state() {
   printf '%s' "$out" | grep >/dev/null -E "d2.*live" || fail "a live-pid delegation must show as live"
 }
 
-# smoke-weight: 22
+# smoke-weight: 24
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
   local gc_err="$project/gc.err"
@@ -23516,6 +23579,7 @@ test_gc_strips_native_python_crlf_for_plan_recovery() {
     fail "native Python CRLF prevented exact dead-lease recovery"
 }
 
+# smoke-weight: 5
 test_agent_plan_owner_recovery_is_fenced() {
   local project="$TMP/plan-owner-recovery"
   local sh="$ROOT/scripts/agent-plan.sh"
@@ -23792,6 +23856,7 @@ test_change_guard_status_flags_stale() {
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . end >/dev/null )
 }
 
+# smoke-weight: 13
 test_patch_land_reject_records_and_resolves_fail_ledger() {
   local project="$TMP/land-ledger"
   local err1="$TMP/land-ledger.err1"
@@ -23989,6 +24054,7 @@ assert len(failed) == 1 and failed[0].get("superseded_by"), failed
 PY
 }
 
+# smoke-weight: 5
 test_patch_land_plan_task_supplies_patch() {
   local project="$TMP/land-plan-patch"
   local out="$TMP/land-plan.out"
@@ -24408,6 +24474,7 @@ EOF
   contains "$out" 'oms-gpu-workstation' || fail "real OOM must still route to GPU guidance"
 }
 
+# smoke-weight: 8
 test_skill_router_auto_records_task_prompts() {
   local d="$TMP/skill-router-auto-task"
   local project="$d/project"
@@ -25602,6 +25669,7 @@ test_precompact_handoff_records_refusal_in_fail_ledger() {
     fail "refusal row must name the pre-compact capture"
 }
 
+# smoke-weight: 8
 test_resume_hook_prints_bounded_resume_block() {
   local repo="$TMP/resume-hook-repo"
   local crlf_bin="$TMP/resume-hook-crlf-bin"
@@ -26232,7 +26300,7 @@ test_agent_plan_reopen_only_from_blocked() {
     fail "reopen should return a blocked task to ready"
 }
 
-# smoke-weight: 50
+# smoke-weight: 49
 test_agent_task_lifecycle_rotation_and_bounded_state() {
   # Reference liveness belongs to this shell invocation, not begin's transient
   # Python process or the native caller. A real reconcile overlaps real work.
@@ -27924,6 +27992,7 @@ assert isinstance(d["rows"], list), d
   fi
 }
 
+# smoke-weight: 8
 test_task_verification_is_bound_to_repo_state() {
   local project="$TMP/verify-freshness"
   local out
@@ -27968,6 +28037,7 @@ assert d["verification"] == "stale", d
 ' || fail "status --json should carry verification freshness"
 }
 
+# smoke-weight: 10
 test_task_close_refuses_a_false_green() {
   local project="$TMP/close-gate"
   local out
@@ -28227,6 +28297,7 @@ ARTIFACT
   done
 }
 
+# smoke-weight: 5
 test_consult_falls_back_when_the_first_peer_does_not_answer() {
   local project="$TMP/consult-failover"
   local bin_dir="$project/bin"
@@ -28349,6 +28420,7 @@ assert [a["provider"] for a in answers] == ["codex"], answers
 ' || fail "only the pinned peer should have answered"
 }
 
+# smoke-weight: 8
 test_patch_land_records_a_recoverable_transaction() {
   local project="$TMP/landing-txn"
   local patch="$TMP/landing-txn.patch"
@@ -29000,6 +29072,7 @@ EOF
   chmod +x "$bin_dir/$binary"
 }
 
+# smoke-weight: 6
 test_peer_ask_council_does_not_seat_a_provider_that_never_answered() {
   local project="$TMP/ask-council-nonanswer"
   local artifact_dir="$project/artifacts"
@@ -29125,6 +29198,7 @@ test_peer_review_verdicts_name_a_blocked_provider() {
     fail "a provider that merely omitted the line keeps the plain message: $out"
 }
 
+# smoke-weight: 5
 test_delegate_detects_a_worker_writing_outside_its_worktree() {
   local project="$TMP/worker-guard"
   local bin_dir="$project/bin"
@@ -29206,6 +29280,7 @@ PY
     fail "the guard cannot prevent the write, only report it"
 }
 
+# smoke-weight: 6
 test_delegate_detects_git_config_and_hook_tampering() {
   local project="$TMP/worker-guard-config"
   local bin_dir="$project/bin"
@@ -29279,7 +29354,7 @@ PY
   done
 }
 
-# smoke-weight: 41
+# smoke-weight: 26
 test_delegate_execution_config_guard_runs_before_git_capture() {
   local project="$TMP/worker-exec-config"
   local bin_dir="$project/bin"
@@ -29517,6 +29592,7 @@ EOF
     fail "raw protected-surface capture lost the primary mutation: $out"
 }
 
+# smoke-weight: 19
 test_delegate_rejects_verifier_execution_config_before_repair() {
   local project="$TMP/verifier-exec-config"
   local bin_dir="$project/bin"
@@ -29702,6 +29778,7 @@ PY
     fail "the guard's index signature ignored a cache-tree change"
 }
 
+# smoke-weight: 17
 test_delegate_guards_canonical_checkout_during_sync() {
   # New refresh path; reuse the delegate guard fixture and a real fake-provider
   # call, including the separate-clone canonical snapshot that used to fail.
@@ -29911,6 +29988,7 @@ assert git(repo, 'rev-parse', 'HEAD') == local_tip
 PY
 }
 
+# smoke-weight: 7
 test_delegate_preflights_strict_execution_config() {
   local project="$TMP/worker-exec-config-preflight"
   local marker="$project/preflight-marker-fired"
@@ -30327,6 +30405,7 @@ EOF
     fail "the worker's work should still come back as a patch"
 }
 
+# smoke-weight: 5
 test_delegate_empty_write_is_no_change_unless_allowed() {
   local project="$TMP/worker-no-change"
   local bin_dir="$project/bin"
@@ -31208,6 +31287,7 @@ run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>o
   printf '%s\t%s' "$rc" "$out"
 }
 
+# smoke-weight: 6
 test_worker_guard_sees_planted_and_ignored_files() {
   local project="$TMP/guard-files"
   local result
@@ -31266,7 +31346,7 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
     fail "strict remote-ref violation should be named: $result"
 }
 
-# smoke-weight: 33
+# smoke-weight: 26
 test_worker_guard_still_fails_on_a_local_branch_ref_change() {
   local project="$TMP/guard-hard-local-ref"
   local head
@@ -31307,7 +31387,7 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
   contains "$result" 'outside its worktree: refs' || fail "remote target ref was not hard: $result"
 }
 
-# smoke-weight: 158
+# smoke-weight: 126
 test_worker_guard_reports_foreign_checkout_ref_moves() {
   local project="$TMP/guard-foreign-ref"
   local sibling="$TMP/guard-foreign-ref-sibling"
@@ -31739,6 +31819,7 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
   git -C "$project" worktree remove -f "$target" >/dev/null 2>&1 || true
 }
 
+# smoke-weight: 9
 test_worker_guard_sees_object_store_and_metadata_writes() {
   local project="$TMP/guard-gitmeta"
   local result
@@ -31787,6 +31868,7 @@ PYTEST
     fail "default guard retention did not produce recoverable indexed evidence"
 }
 
+# smoke-weight: 6
 test_worker_guard_rejects_duplicate_live_managed_worktree_metadata() {
   local project="$TMP/guard-gitmeta-duplicate"
   local managed_root="$TMP/guard-gitmeta-managed-root"
@@ -31835,6 +31917,7 @@ EOF
     fail "duplicate managed-looking metadata should be a gitmeta violation: $out"
 }
 
+# smoke-weight: 5
 test_worker_guard_rejects_symlink_worktree_metadata() {
   local project="$TMP/guard-gitmeta-symlink"
   local managed_root="$TMP/guard-gitmeta-symlink-root"
@@ -31919,6 +32002,7 @@ run_delegate_beside_sibling() {  # run_delegate_beside_sibling PROJECT MANAGED_R
   printf '%s\t%s' "$rc" "$out"
 }
 
+# smoke-weight: 20
 test_worker_guard_exempts_a_live_sibling_mid_removal() {
   local project="$TMP/guard-sibling-removal"
   local managed_root="$TMP/guard-sibling-removal-root"
@@ -31987,7 +32071,7 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
     fail "rewriting the worker's own linked-worktree registration must stop the worker: $result"
 }
 
-# smoke-weight: 47
+# smoke-weight: 37
 test_worker_guard_exempts_a_live_sibling_mid_creation() {
   local project="$TMP/guard-sibling-creation"
   local managed_root="$TMP/guard-sibling-creation-root"
@@ -32060,6 +32144,7 @@ mkdir -p $zero_parent && printf 'kind=oh-my-setting-temp\\npid=0\\nrepo=$project
 # marks its registrations, so a parent add and remove mid-run pass; a worker
 # calling it is refused; plain Git registrations are visible foreign changes
 # (strict behavior is in test_worker_guard_sees_submodule_and_worktree_metadata).
+# smoke-weight: 10
 test_worker_guard_exempts_parent_scratch_worktrees() {
   local project="$TMP/guard-scratch"
   local managed_root="$TMP/guard-scratch-root"
@@ -32193,6 +32278,7 @@ git -C SIB branch --set-upstream-to=origin/'"$(git -C "$project-track" symbolic-
     fail "strict mode must keep branch tracking hard: $result"
 }
 
+# smoke-weight: 9
 test_worker_guard_flags_a_sibling_whose_marker_died() {
   local project="$TMP/guard-sibling-dead"
   local managed_root="$TMP/guard-sibling-dead-root"
@@ -32248,7 +32334,7 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
     fail "a stale process-start sibling must remain visible as gitmeta: $result"
 }
 
-# smoke-weight: 16
+# smoke-weight: 14
 test_worker_guard_softens_a_sibling_that_finished_kept() {
   local project="$TMP/guard-sibling-kept"
   local managed_root="$TMP/guard-sibling-kept-root"
@@ -32297,7 +32383,7 @@ git -C SIB -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m
 # sibling new to the baseline is reported softly; strict mode and a sibling on
 # a branch stay hard. A same-UID worker could forge this shape too, so it is
 # false-positive relief for cooperative runs, not attribution.
-# smoke-weight: 83
+# smoke-weight: 69
 test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   local project="$TMP/guard-sibling-late"
   local managed_root="$TMP/guard-sibling-late-root"
@@ -32715,6 +32801,7 @@ test \"\$(git -C $bad_kept/wt rev-parse --git-dir)\" = '$bad_metadata' && printf
 # reported softly; strict mode and a partial removal stay hard.
 # oms land and scratch can run from a linked worktree; their marker then names
 # that checkout, not the primary one. Same Git common dir is the same repository.
+# smoke-weight: 5
 test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
   local project="$TMP/guard-sibling-linked"
   local managed_root="$TMP/guard-sibling-linked-root"
@@ -32736,7 +32823,7 @@ test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
   fi
 }
 
-# smoke-weight: 24
+# smoke-weight: 22
 test_worker_guard_softens_cleanup_of_a_dead_kept_sibling() {
   local project="$TMP/guard-sibling-cleanup"
   local managed_root="$TMP/guard-sibling-cleanup-root"
@@ -32826,7 +32913,7 @@ test_worker_guard_reports_a_bounded_scan() {
     fail "a truncated scan must say so: $out"
 }
 
-# smoke-weight: 206
+# smoke-weight: 112
 test_worker_guard_rejects_any_worker_authority_state_change() {
   local project="$TMP/guard-state"
   local result
@@ -33382,6 +33469,7 @@ printf 'outside remains outside\\n' > $outside/worker-marker
     fail "rollback should not mutate the planted symlink target"
 }
 
+# smoke-weight: 9
 test_parallel_delegates_do_not_erase_each_others_authority_state() {
   local project="$TMP/guard-state-parallel"
   local barrier="$TMP/guard-state-parallel-barrier"
@@ -33487,7 +33575,7 @@ EOF
   fi
 }
 
-# smoke-weight: 127
+# smoke-weight: 96
 test_worker_guard_sees_submodule_and_worktree_metadata() {
   local project="$TMP/guard-submodule"
   local source="$TMP/guard-submodule-src"
@@ -33993,6 +34081,7 @@ test_shared_memory_writes_are_append_only() {
   [ -f "$project/.oms/memory/summary.md" ] || fail "compact should produce a summary"
 }
 
+# smoke-weight: 5
 test_worker_guard_keeps_shared_memory_parent_owned() {
   local project="$TMP/guard-memory"
   local result
@@ -34050,7 +34139,7 @@ test_worker_guard_sees_an_edit_to_an_already_dirty_file() {
     fail "the tracked surface should catch a content change, not just its status: $result"
 }
 
-# smoke-weight: 12
+# smoke-weight: 17
 test_thread_appends_are_serialized() {
   local project="$TMP/thread-race"
   local i
@@ -34669,7 +34758,7 @@ test_worker_guard_spends_its_budget_on_untracked_before_ignored() {
   esac
 }
 
-# smoke-weight: 67
+# smoke-weight: 41
 test_worker_guard_splits_remote_tracking_and_stash_refs() {
   local project="$TMP/guard-remote-refs"
   local snap="$TMP/guard-remote-refs-snap"
@@ -34919,6 +35008,7 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
   )
 }
 
+# smoke-weight: 7
 test_worker_guard_accepts_only_artifact_index_compaction() {
   local project="$TMP/guard-index-compaction"
   local snap="$TMP/guard-index-compaction-snap"
@@ -35277,6 +35367,7 @@ test_memory_recall_spans_notes_and_recorded_failures() {
     fail "recall should still reach the notes: $out"
 }
 
+# smoke-weight: 6
 test_memory_recall_marks_a_resolved_failure() {
   local project="$TMP/memory-failures-resolved"
   local gate='bash -c "grep -q fixed state.txt || { echo ERROR: state.txt not fixed; exit 1; }; echo ok"'
@@ -35357,6 +35448,7 @@ PY
     fail "re-deriving must not lose what is still in the Markdown: $out"
 }
 
+# smoke-weight: 6
 test_task_verify_surfaces_the_advisor_on_a_repeat() {
   local project="$TMP/verify-advise"
   local gate='bash -c "grep -q fixed state.txt || { echo ERROR: not fixed; exit 1; }"'
@@ -35393,6 +35485,7 @@ test_task_verify_surfaces_the_advisor_on_a_repeat() {
     fail "a passing gate should resolve its row: $out"
 }
 
+# smoke-weight: 6
 test_task_close_promotes_the_decision_and_the_pitfall() {
   local project="$TMP/close-promote"
   local out
@@ -35415,6 +35508,7 @@ test_task_close_promotes_the_decision_and_the_pitfall() {
     fail "the pitfall already in the packet should survive close: $out"
 }
 
+# smoke-weight: 5
 test_task_verify_files_and_clears_its_own_failures() {
   local project="$TMP/verify-ledger"
   local gate='bash -c "grep -q fixed state.txt || { echo ERROR: state.txt not fixed; exit 1; }; echo ok"'
@@ -35462,7 +35556,7 @@ test_task_verify_survives_a_gate_with_no_failure_line() {
     fail "a silent passing gate must verify, not abort"
 }
 
-# smoke-weight: 57
+# smoke-weight: 39
 test_delegate_interactive_conversation() {
   local fixture="$TMP/delegate-interactive" case_dir project scenario provider
   mkdir -p "$fixture/bin"
@@ -35710,7 +35804,7 @@ PY
   done
 }
 
-# smoke-weight: 15
+# smoke-weight: 21
 test_delegate_consults_an_advisor_after_a_repair_also_fails() {
   local project="$TMP/delegate-advise"
   local bin="$project/bin"
@@ -35978,6 +36072,7 @@ EOF
   fi
 }
 
+# smoke-weight: 5
 test_landing_refuses_while_another_landing_holds_the_repo() {
   local project="$TMP/landing-serialized"
   local patch="$TMP/landing-serialized.patch"
@@ -36216,6 +36311,7 @@ assert all(f["remedy"] for f in report["findings"]), report
 ' || fail "json report malformed: $out"
 }
 
+# smoke-weight: 6
 test_skill_forge_verify_contract_lifecycle() {
   local project="$TMP/sf-contract"
   local fixture_oms="$TMP/sf template oms"
@@ -37555,7 +37651,7 @@ goal_drive_batch_verifier_deadline() {
 
 # The batch modes are independent, so they split across these functions to keep
 # any one shard from waiting on a single long test; every mode runs exactly once.
-# smoke-weight: 122
+# smoke-weight: 125
 test_goal_drive_parallel_batches() {
   local project="$TMP/goal-batch-skip-candidates" out
   goal_drive_batch_verifier_deadline
@@ -37603,22 +37699,22 @@ PY
     fail "pytest verifier did not join disjoint tasks: $out"
 }
 
-# smoke-weight: 170
+# smoke-weight: 146
 test_goal_drive_parallel_batches_replay() {
   goal_drive_batch_cases replay-backward replay-recover recover land-recover
 }
 
-# smoke-weight: 176
+# smoke-weight: 144
 test_goal_drive_parallel_batches_verifiers() {
   goal_drive_batch_cases python pytest shared verifier
 }
 
-# smoke-weight: 121
+# smoke-weight: 102
 test_goal_drive_parallel_batches_scheduling() {
   goal_drive_batch_cases parallel overlap serial
 }
 
-# smoke-weight: 197
+# smoke-weight: 158
 test_goal_drive_parallel_failure_recovery() {
   goal_drive_batch_cases retained retained-retry failure abandon
   goal_drive_prebatch_rollback_cases
@@ -37973,6 +38069,7 @@ PY
   done
 }
 
+# smoke-weight: 5
 test_state_read_is_nonmutating_and_projection_failures_stay_visible() {
   local project="$TMP/state-read-health"
   local before after state_json inbox_json
@@ -38453,6 +38550,7 @@ assert any(item["code"] == "failure-ledger-corrupt" for item in items), items
     fail "the runtime envelope must survive quarantined ledger junk (rc=$?): $out"
 }
 
+# smoke-weight: 45
 test_doctor_repo_json_and_remediation_plan_are_structured() {
   local project="$TMP/doctor-structured-project"
   local other="$TMP/doctor-structured-other"

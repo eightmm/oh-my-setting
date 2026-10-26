@@ -267,10 +267,10 @@ awk -v timings="$TIMINGS" -v members=" $(printf '%s' "$members" | tr '\n' ' ') "
     if (timings == "1") {
       print "oms_smoke_run_test() {"
       print "  local oms_smoke_name=\"$1\""
-      print "  local oms_smoke_started=\"${SECONDS:-0}\""
+      print "  local oms_smoke_started=\"$(date +%s)\""
       print "  local oms_smoke_elapsed"
       print "  \"$oms_smoke_name\""
-      print "  oms_smoke_elapsed=$((SECONDS - oms_smoke_started))"
+      print "  oms_smoke_elapsed=$(($(date +%s) - oms_smoke_started))"
       print "  printf \047%s\\t%s\\n\047 \"$oms_smoke_elapsed\" \"$oms_smoke_name\" >> \"$OMS_SMOKE_TIMING_FILE\""
       print "}"
     }

@@ -616,19 +616,26 @@ test_smoke_runner_reports_bounded_opt_in_timings() {
   cat > "$suite" <<'EOF'
 set -euo pipefail
 test_slow() {
-  # SECONDS is a Bash 3.2 special variable. Advancing it makes this fixture
-  # deterministic without sleeping in every full gate run.
-  SECONDS=$((SECONDS + 2))
+  # The runner times with the wall clock, so this must really cost more than
+  # the one second a no-work test can record at a clock boundary.
+  sleep 2
 }
 test_fast() {
+  # Leaves SECONDS nonzero for test_reset; the runner must not read it.
+  SECONDS=$((SECONDS + 3))
   [ "${OMS_SMOKE_TIMINGS+x}" != x ] || {
     echo "runner control leaked into the suite" >&2
     return 1
   }
 }
+test_reset() {
+  # A test may reset SECONDS; the runner's clock must not depend on it.
+  SECONDS=0
+}
 # SMOKE_TEST_CALLS_BEGIN
 test_slow
 test_fast
+test_reset
 # SMOKE_TEST_CALLS_END
 EOF
 
@@ -638,10 +645,15 @@ EOF
     fail "timing mode did not report the slow test: $(cat "$timed_out")"
   [ "$(grep -c '^smoke-timing:' "$timed_out")" = 1 ] ||
     fail "timing output ignored OMS_SMOKE_TIMING_LIMIT: $(cat "$timed_out")"
-  grep -Eq '^scripts-smoke: ok \(2 tests, duration=[0-9]+s\)$' "$timed_out" ||
+  grep -Eq '^scripts-smoke: ok \(3 tests, duration=[0-9]+s\)$' "$timed_out" ||
     fail "smoke summary did not report shard duration: $(cat "$timed_out")"
 
-  OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" > "$quiet_out"
+  OMS_SMOKE_SUITE="$suite" OMS_SMOKE_TIMINGS=1 OMS_SMOKE_TIMING_LIMIT=10 \
+    "$ROOT/tests/run-smoke-shard.sh" --only test_fast --only test_reset > "$timed_out"
+  grep -Eq '^smoke-timing: [0-9]+s test_reset$' "$timed_out" ||
+    fail "a test that resets SECONDS corrupted its reported time: $(cat "$timed_out")"
+
+  OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" --only test_fast > "$quiet_out"
   if grep -q '^smoke-timing:' "$quiet_out"; then
     fail "default smoke output should remain one compact summary line"
   fi
@@ -690,6 +702,7 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
   failed-content) printf 'after\n' > "$root/.oms/state"; exit 29 ;;
   timings)
     python3 -c 'import signal; assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN'
+    for n in $(seq 1 30); do echo "smoke-timing: ${n}s test_t$n"; done
     for n in 1 2 3 4 5 6 7; do
       echo "operator-section: ${n}s core/section-$n"
       echo "operator-shard: $n/7 ${n}s"
@@ -776,6 +789,7 @@ EOF
     [ "$(grep -c "^slow-$kind:" "$TMP/timing-output")" = 5 ] || fail "unbounded or missing $kind timings"
     grep -Fq "slow-$kind: 7s" "$TMP/operator-summary" || fail "CI summary discarded successful $kind timings"
   done
+  [ "$(grep -c '^slow-test:' "$TMP/timing-output")" = 25 ] || fail "test timings not bounded to 25 rows"
   python3 - "$gate" "$base" "$head" "$TMP" <<'PY' || fail "stage deadline missed a descendant or lost diagnostics"
 import os, pathlib, signal, subprocess, sys, time
 gate, base, head, tmp = sys.argv[1:]

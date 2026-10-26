@@ -74,7 +74,8 @@ except (OSError, ValueError):
 reason = ' '.join(reasons.split())[:800]
 lines = ['check-summary: mode=%s; exit=%s; reason=%s' % (mode, rc, reason)]
 for kind in ('stage', 'test', 'operator-section', 'operator-shard'):
-    for seconds, _, name in sorted((row for row in rows if row[1] == kind), reverse=True)[:5]:
+    # Tests keep the runner's whole bounded timing list so CI can refresh smoke weights.
+    for seconds, _, name in sorted((row for row in rows if row[1] == kind), reverse=True)[:25 if kind == 'test' else 5]:
         lines.append('slow-%s: %ss %s' % (kind, seconds, name))
 print('\n'.join(lines))
 if summary:
