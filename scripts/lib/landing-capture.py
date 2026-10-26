@@ -28,6 +28,9 @@ MAX_STREAM = 32 * 1024 * 1024
 MAX_OBJECT = 16 * 1024 * 1024
 DEFAULT_BYTES = 128 * 1024 * 1024
 DEFAULT_COUNT = 256
+MAX_REFERENCE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_REFERENCE_ENTRIES = 262144
+REFERENCE_SCAN_SECONDS = 120
 
 
 def encoded(value):
@@ -766,12 +769,51 @@ def reference_spellings(repo, path):
     return result
 
 
-def reference_bytes(repo, trace=None):
-    """Freeze supported evidence namespaces; unreadable/unknown inputs veto GC."""
-    result, total, count = [], 0, 0
+def needle_pattern(needles):
+    """Radix-trie alternation: one pass finds every needle at every offset.
+
+    Each match is the longest needle path starting there; shorter needles on
+    that path are its prefixes, so the caller recovers them by slicing.
+    """
+    root = {}
+    for needle_bytes in needles:
+        node = root
+        for byte in needle_bytes:
+            node = node.setdefault(byte, {})
+        node[None] = True
+
+    def build(node):
+        parts = []
+        for byte, child in node.items():
+            if byte is None:
+                continue
+            literal = [byte]
+            while None not in child and len(child) == 1:
+                byte, child = next(iter(child.items()))
+                literal.append(byte)
+            parts.append(re.escape(bytes(literal)) + build(child))
+        if not parts:
+            return b''
+        return b'(?:' + b'|'.join(parts) + (b')?' if None in node else b')')
+
+    return build(root)
+
+
+def reference_bytes(repo, trace=None, needles=()):
+    """Find exact pins while validating supported evidence namespaces."""
+    found, total, entries = set(), 0, 0
+    deadline = time.monotonic() + REFERENCE_SCAN_SECONDS
+    needles = set(needles)
+    lengths = sorted({len(token) for token in needles})
+    pattern = re.compile(b'(?=(' + needle_pattern(needles) + b'))') if needles else None
 
     def fail_walk(error):
         raise error
+
+    def expired(relative):
+        if time.monotonic() > deadline:
+            raise ValueError('reference scan deadline exceeded in %s (%d entries, limit %d seconds)' %
+                             (relative, entries, REFERENCE_SCAN_SECONDS))
 
     for relative in ('.oms/plan', '.oms/artifacts', '.oms/tasks', '.oms/task'):
         root = os.path.join(repo, relative)
@@ -780,16 +822,22 @@ def reference_bytes(repo, trace=None):
         if os.path.islink(root) or not os.path.isdir(root):
             raise ValueError('unsafe reference namespace')
         for parent, dirs, files in os.walk(root, followlinks=False, onerror=fail_walk):
+            expired(relative)
+            entries += len(dirs) + len(files)
+            if entries > MAX_REFERENCE_ENTRIES:
+                raise ValueError('reference scan limit exceeded in %s (%d entries, limit %d)' %
+                                 (relative, entries, MAX_REFERENCE_ENTRIES))
             for name in dirs:
                 if os.path.islink(os.path.join(parent, name)):
                     raise ValueError('redirected reference directory')
             for name in files:
                 path = os.path.join(parent, name)
+                expired(relative)
                 raw, _ = regular(path)
-                count += 1
                 total += len(raw)
-                if count > 8192 or total > 64 * 1024 * 1024:
-                    raise ValueError('reference scan limit exceeded')
+                if total > MAX_REFERENCE_BYTES:
+                    raise ValueError('reference scan limit exceeded in %s (%d bytes, limit %d)' %
+                                     (relative, total, MAX_REFERENCE_BYTES))
                 if name.endswith('.jsonl') and raw and not raw.endswith(b'\n'):
                     raise ValueError('truncated reference journal')
                 if name.endswith('.json'):
@@ -820,8 +868,13 @@ def reference_bytes(repo, trace=None):
                                 line = historical(line)
                             lines.append(line)
                         raw = b''.join(lines)
-                result.append(raw)
-    return b'\n'.join(result)
+                if pattern:
+                    for match in pattern.finditer(raw):
+                        matched = match.group(1)
+                        found.update(matched[:size] for size in lengths if matched[:size] in needles)
+                expired(relative)
+    expired('end of scan')
+    return found
 
 
 def collect_object(item, obj):
@@ -875,6 +928,19 @@ def collect_object(item, obj):
         D['_fsync_directory_path'](root, 'collected capture generation')
 
 
+def present(path):
+    """True if path exists (even as a dangling link); False only for confirmed absence.
+
+    Unlike os.path.lexists, any other lookup error (EACCES, EIO, ...) is raised
+    so a pin decision never rests on an unknown answer.
+    """
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
 def absent(path):
     """True only for confirmed absence; EACCES and other lookup errors are unknown."""
     try:
@@ -926,11 +992,30 @@ def release_missing(repo, item, log, evidence, days, apply):
 def collect(repo, days, apply, private_only=""):
     # private_only is an internal caller scope, never permission to ignore pins.
     log = rows(repo)
-    evidence = reference_bytes(repo)
-    for item in reservations(repo).values():
+    items = reservations(repo)
+    needles = set()
+    # One snapshot decides which generations exist; needles and the collection
+    # loop both use it, so a generation that appears later is not collected here.
+    visible = {generation: present(item['directory']) for generation, item in items.items()}
+    for generation, item in items.items():
+        paths = (os.path.join(item['directory'], item['landing_id'] + '.patch'),
+                 os.path.join(repo, '.oms/landing-patches', item['landing_id'] + '.patch'))
+        needles.update(spelling.encode() for path in paths for spelling in reference_spellings(repo, path))
+        needles.add(item['sha256'].encode())
+        recorded = []
+        if visible[generation]:
+            try:  # publish() may record any repository-local target
+                recorded = [obj['path'] for obj in certificate(item)['objects'].values()]
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                # Fewer needles would unpin a path-only publication: refuse before any mutation.
+                raise ValueError('capture generation ' + item['generation'] +
+                                 ' certificate unreadable, GC refused: ' + str(error))
+        needles.update(spelling.encode() for path in recorded for spelling in reference_spellings(repo, path))
+    evidence = reference_bytes(repo, needles=needles)
+    for generation, item in items.items():
         if private_only and item['landing_id'] != private_only:
             continue
-        if not os.path.lexists(item['directory']):
+        if not visible[generation]:
             if not private_only and absent(item['directory']):
                 release_missing(repo, item, log, evidence, days, apply)
             continue
@@ -949,7 +1034,10 @@ def collect(repo, days, apply, private_only=""):
             scoped_evidence = evidence
             if terminal['reason'] in ('admission-rejected', 'publication-without-intent'):
                 proof = admission_proof(repo, item, value, 1 if terminal['reason'] == 'admission-rejected' else 0)
-                scoped_evidence = reference_bytes(repo, (proof, item))
+                scoped_needles = [spelling.encode() for obj in objects.values()
+                                  for spelling in reference_spellings(repo, obj['path'])]
+                scoped_needles.append(item['sha256'].encode())
+                scoped_evidence = reference_bytes(repo, (proof, item), scoped_needles)
             paths = [obj['path'] for obj in objects.values()]
             refs = [spelling.encode() for path in paths
                     for spelling in reference_spellings(repo, path)]
@@ -1019,7 +1107,7 @@ def gc_quiescent(repo, days, apply, private_only=""):
 
     with bounded_lifecycle_lock():
         marker_dir = Path(repo) / '.oms/delegations'
-        if os.path.lexists(marker_dir):
+        if present(marker_dir):
             info = marker_dir.lstat()
             if not stat.S_ISDIR(info.st_mode) or D['is_reparse'](info):
                 raise ValueError('delegation marker directory is unproven')

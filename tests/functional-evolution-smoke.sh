@@ -877,9 +877,9 @@ source = sandbox / 'input.patch'
 source.write_bytes(b'bounded payload\n')
 sha = hashlib.sha256(source.read_bytes()).hexdigest()
 
-def new(name, publish=True):
+def new(name, publish=True, target=None):
     capture = pathlib.Path(h['allocate'](str(repo), str(source), 'land-' + name, sha))
-    patch = repo / '.oms/landing-patches' / ('land-' + name + '.patch')
+    patch = target or repo / '.oms/landing-patches' / ('land-' + name + '.patch')
     if publish:
         h['publish'](str(repo), str(capture), str(patch))
         # The owner must seal the exact canonical intent and terminal receipt,
@@ -1341,6 +1341,200 @@ else:
     raise AssertionError('reference scan accepted a final JSONL row without LF')
 assert truncated_reference.read_bytes() == b'{"task":"complete"}'
 truncated_reference.unlink()
+
+# Large evidence trees are scanned without the former 8192-file/64 MiB cap.
+# Missing aged reservations release only when neither path nor digest is pinned.
+evidence_root = repo / '.oms/plan/completions/evidence'
+evidence_root.mkdir(parents=True)
+for index in range(8205):
+    (evidence_root / ('row-%05d.txt' % index)).write_bytes(b'ordinary evidence\n')
+
+def missing_reservation(name, source_bytes):
+    source = sandbox / (name + '.patch')
+    source.write_bytes(source_bytes)
+    expected = hashlib.sha256(source_bytes).hexdigest()
+    path = pathlib.Path(h['allocate'](str(repo), str(source), 'land-' + name, expected))
+    item = h['find'](str(repo), capture=str(path))
+    shutil.rmtree(path.parent)
+    rows = h['rows'](str(repo))
+    reservation = next(row for row in rows if row.get('event') == 'capture-reserved' and
+                       row.get('managed_capture', {}).get('generation') == item['generation'])
+    reservation['ts'] = '2020-01-01T00:00:00Z'
+    journal.write_bytes(b''.join(h['encoded'](row) for row in rows))
+    return item
+
+missing_free = missing_reservation('missing-free', b'free payload')
+missing_pinned = missing_reservation('missing-pinned', b'pinned payload')
+(evidence_root / 'sha-pin.txt').write_bytes(missing_pinned['sha256'].encode())
+h['collect'](str(repo), 1, True)
+released = h['rows'](str(repo))
+assert any(row.get('event') == 'capture-released' and row.get('release_missing') is True and
+           row.get('managed_capture', {}).get('generation') == missing_free['generation'] for row in released), \
+    'large unreferenced evidence tree prevented releasing the missing reservation'
+assert not any(row.get('event') == 'capture-released' and row.get('release_missing') is True and
+               row.get('managed_capture', {}).get('generation') == missing_pinned['generation'] for row in released), \
+    'sha256 evidence did not pin the missing reservation'
+journal_before = journal.read_bytes()
+
+# publish() records whatever repository-local target it was given; a path-only
+# pin on that recorded path must keep the publication.
+custom = repo / '.oms/landing-patches/custom.patch'
+custom_capture, _ = new('custom', True, custom)
+custom_pin = repo / '.oms/plan/completions/custom-pin.json'
+custom_pin.write_text(json.dumps({'artifact': {'path': str(custom)}}))
+collect()
+assert custom_capture.exists() and custom.exists(), 'path-only pin on a nonstandard publication was lost'
+# An unreadable certificate while building needles must veto GC, not drop that
+# generation's recorded paths while a later read succeeds.
+custom_journal = journal.read_bytes()
+real_certificate = h['collect'].__globals__['certificate']
+state = dict(failed=False)
+def flaky_certificate(item):
+    if item['landing_id'] == 'land-custom' and not state['failed']:
+        state['failed'] = True
+        raise ValueError('injected first certificate read failure')
+    return real_certificate(item)
+h['collect'].__globals__['certificate'] = flaky_certificate
+try:
+    for apply in (True, False):
+        state['failed'] = False
+        try:
+            h['collect'](str(repo), 0, apply)
+        except ValueError as error:
+            assert 'certificate unreadable' in str(error) and 'generation' in str(error), str(error)
+        else:
+            raise AssertionError('unreadable certificate did not veto GC')
+        assert custom_capture.exists() and custom.exists(), 'certificate read failure lost the publication'
+        assert journal.read_bytes() == custom_journal
+finally:
+    h['collect'].__globals__['certificate'] = real_certificate
+# A lookup error is not absence: the first existence probe of that generation
+# fails with PermissionError and later probes succeed; GC must refuse, not
+# scan with the generation missing and then collect it.
+custom_directory = h['find'](str(repo), capture=str(custom_capture))['directory']
+custom_bytes = custom.read_bytes()
+real_lstat = h['os'].lstat
+probe = dict(failed=False)
+def flaky_lstat(path, *args, **kwargs):
+    if not probe['failed'] and os.fspath(path) == custom_directory:
+        probe['failed'] = True
+        raise PermissionError('injected lookup failure')
+    return real_lstat(path, *args, **kwargs)
+h['os'].lstat = flaky_lstat
+try:
+    for apply in (True, False):
+        probe['failed'] = False
+        try:
+            h['collect'](str(repo), 0, apply)
+        except PermissionError as error:
+            assert 'injected lookup failure' in str(error)
+        else:
+            raise AssertionError('lookup error was treated as absence')
+        assert custom_capture.exists() and custom.read_bytes() == custom_bytes
+        assert journal.read_bytes() == custom_journal
+finally:
+    h['os'].lstat = real_lstat
+custom_pin.unlink()
+collect()
+assert not custom_capture.exists() and not custom.exists(), 'unpinned nonstandard publication was not reclaimed'
+journal_before = journal.read_bytes()
+
+# Matching cost is linear in evidence size and independent of how many
+# historical reservations contribute needles; a pin split by a megabyte
+# boundary or sitting at a file edge is still found.
+perf = sandbox / 'perf-repo'
+(perf / '.oms/plan').mkdir(parents=True)
+perf_real = os.path.realpath(str(perf))
+perf_needles, perf_paths = set(), {}
+for number in range(512):
+    perf_id = 'land-hist-%04d' % number
+    path = perf_real + '/.oms/landing-patches/' + perf_id + '.patch'
+    perf_paths[number] = path
+    perf_needles.update(v.encode() for v in h['reference_spellings'](perf_real, path))
+    perf_needles.add(hashlib.sha256(perf_id.encode()).hexdigest().encode())
+filler = (b'ordinary evidence line 0123456789abcdef /.oms/plan "x"\n' * 20000)[:1 << 20]
+perf_pin = perf_paths[300].encode()
+perf_sha = hashlib.sha256(b'land-hist-0007').hexdigest().encode()
+bodies = [filler] * 40
+bodies[3] = filler[:-10] + perf_pin + filler  # path pin straddling the 1 MiB mark
+bodies[39] = filler + perf_sha  # digest pin ending exactly at end of file
+for number, body in enumerate(bodies):
+    (perf / '.oms/plan' / ('f%d.txt' % number)).write_bytes(body)
+started = time.monotonic()
+perf_found = h['reference_bytes'](perf_real, needles=perf_needles)
+elapsed = time.monotonic() - started
+assert elapsed < 20, 'reference scan took %.1fs for 512 reservations' % elapsed
+expected = {v.encode() for v in h['reference_spellings'](perf_real, perf_paths[300])
+            if v.encode() in perf_pin} | {perf_sha}
+assert perf_found == expected, (sorted(perf_found), sorted(expected))
+assert perf_pin in perf_found and perf_sha in perf_found
+
+# Entry, byte and deadline budgets fail closed before anything is released.
+missing_limited = missing_reservation('missing-limited', b'limited payload')
+limited_journal = journal.read_bytes()
+scan_globals = h['reference_bytes'].__globals__
+for constant, small, words in (('MAX_REFERENCE_ENTRIES', 100, ('entries', '.oms/plan', 'limit 100')),
+                               ('MAX_REFERENCE_BYTES', 1000, ('bytes', '.oms/plan', 'limit 1000')),
+                               ('REFERENCE_SCAN_SECONDS', -1, ('deadline', '.oms/plan', 'limit -1'))):
+    saved = scan_globals[constant]
+    scan_globals[constant] = small
+    try:
+        try:
+            h['collect'](str(repo), 1, True)
+        except ValueError as error:
+            assert 'reference scan' in str(error) and all(word in str(error) for word in words), (constant, str(error))
+        else:
+            raise AssertionError(constant + ' did not fail closed')
+    finally:
+        scan_globals[constant] = saved
+    assert journal.read_bytes() == limited_journal, constant + ' released despite a refused scan'
+
+# Time spent after the last file also counts: reading and matching it, then
+# trailing directory-only traversal. The clock expires on the second check
+# that follows the last file read, which only a directory step or the final
+# check before returning can make.
+class Clock:
+    def __init__(self):
+        self.armed, self.after = False, 0
+    def monotonic(self):
+        if self.armed:
+            self.after += 1
+        return 1e9 if self.after == 2 else 0.0
+    def __getattr__(self, name):
+        return getattr(time, name)
+real_time, real_regular = scan_globals['time'], scan_globals['regular']
+trailing = repo / '.oms/task/trailing/empty'
+trailing.mkdir(parents=True)
+clock = Clock()
+reads = []
+def counted_regular(*args, **kwargs):
+    result = real_regular(*args, **kwargs)
+    if os.path.relpath(args[0], str(repo)).split(os.sep)[1:2] and \
+            os.path.relpath(args[0], str(repo)).split(os.sep)[1] in ('plan', 'artifacts', 'tasks', 'task'):
+        reads.append(args[0])
+        if len(reads) == files:
+            clock.armed = True
+    return result
+try:
+    files = sum(len(names) for ns in ('plan', 'artifacts', 'tasks', 'task')
+                for _, _, names in os.walk(str(repo / '.oms' / ns)))
+    scan_globals['time'], scan_globals['regular'] = clock, counted_regular
+    try:
+        h['collect'](str(repo), 1, True)
+    except ValueError as error:
+        assert 'deadline' in str(error) and '.oms/' in str(error), str(error)
+    else:
+        raise AssertionError('deadline expiring after the last file did not fail closed')
+    assert len(reads) == files
+finally:
+    scan_globals['time'], scan_globals['regular'] = real_time, real_regular
+    shutil.rmtree(str(repo / '.oms/task'))
+assert journal.read_bytes() == limited_journal, 'released despite a late deadline'
+h['collect'](str(repo), 1, True)
+assert any(row.get('event') == 'capture-released' and row.get('release_missing') is True and
+           row.get('managed_capture', {}).get('generation') == missing_limited['generation']
+           for row in h['rows'](str(repo))), 'default limits did not release the unreferenced reservation'
+journal_before = journal.read_bytes()
 
 # The direct helper CLI must honor both inner quiescence locks as bounded
 # contention, while preserving all evidence and returning the native busy code.
