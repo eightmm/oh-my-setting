@@ -74,6 +74,7 @@ prompt="$(cat)"
   while :; do sleep 1; done
 }
 case "${OMS_TASK_ID:-}:$prompt" in
+  floor-*:*) printf 'exit 0\n' > scripts/subject.sh ;;
   t2:*) printf 'two\n' > delegated2.txt ;;
   t9:*) printf 'one\nrepair\n' > delegated.txt ;;
   executor:*|executor-recovery:*) printf 'executor\n' > executor.txt ;;
@@ -892,6 +893,74 @@ PY
 
 }
 
+test_floor_consent_landing() {
+  local floor_repo="$TMP/floor-landing" mode rc report
+  local floor_reason="--Owner reviewed baseline; preserve 'quotes' and spaces"
+  OMS_T_REAL_BASH="$(command -v bash)"
+  OMS_T_PLAN_RUN_ARGS="$TMP/floor-plan-run-argv"
+  export OMS_T_REAL_BASH OMS_T_PLAN_RUN_ARGS
+  cat > "$bin/bash" <<'EOF'
+#!/bin/bash
+case "${1:-}" in
+  */plan-run.sh) printf '%s\n' "$@" > "$OMS_T_PLAN_RUN_ARGS" ;;
+esac
+exec "$OMS_T_REAL_BASH" "$@"
+EOF
+  chmod +x "$bin/bash"
+  for mode in plan-run goal-drive batch; do
+    floor_repo="$TMP/floor-$mode"
+    git clone -q "$repo" "$floor_repo"
+    git -C "$floor_repo" config user.email test@example.com
+    git -C "$floor_repo" config user.name Test
+    printf 'exit 1\n' > "$floor_repo/scripts/subject.sh"
+    git -C "$floor_repo" add scripts/subject.sh
+    git -C "$floor_repo" commit -qm 'test: failing baseline subject'
+    "$PLAN" --repo "$floor_repo" init --goal 'intentional baseline change' \
+      --accept 'bash scripts/subject.sh' >/dev/null
+    "$PLAN" --repo "$floor_repo" add --id floor-one --title 'fix: baseline subject' \
+      --allowed scripts/subject.sh --verify 'bash scripts/subject.sh' >/dev/null
+    if [ "$mode" = plan-run ]; then
+      rc=0
+      HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$floor_repo" --to codex \
+        --id floor-one --land --allow-verifier-change >"$TMP/floor-land.out" 2>&1 || rc=$?
+      [ "$rc" = 1 ] || fail "unconsented floor must fail landing, got $rc"
+      grep -F 'verify-floor: FAIL' "$floor_repo"/.oms/artifacts/admit/*.md >/dev/null ||
+        fail "landing failed outside the base floor: $(tail -8 "$TMP/floor-land.out")"
+      HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$floor_repo" --to codex \
+        --id floor-one --land --retry-known --allow-verifier-change --allow-floor-change "$floor_reason" \
+        >"$TMP/floor-land.out" 2>&1 || fail "plan-run dropped floor consent: $(tail -8 "$TMP/floor-land.out")"
+    else
+      local width=1
+      [ "$mode" != batch ] || width=2
+      HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+        --repo "$floor_repo" --to codex --max-cycles 1 --max-parallel-tasks "$width" \
+        --allow-verifier-change --allow-floor-change "$floor_reason" \
+        >"$TMP/floor-land.out" 2>&1 || fail "$mode dropped floor consent: $(tail -8 "$TMP/floor-land.out")"
+      grep -Fq 'goal-drive: done' "$TMP/floor-land.out" || fail "$mode acceptance did not pass"
+    fi
+    python3 - "$OMS_T_PLAN_RUN_ARGS" "$floor_reason" <<'PY' || fail "$mode did not forward consent to plan-run"
+import sys
+argv = open(sys.argv[1], encoding="utf-8").read().splitlines()
+assert argv[argv.index("--allow-floor-change") + 1] == sys.argv[2], argv
+assert "--allow-verifier-change" in argv
+PY
+    "$PLAN" --repo "$floor_repo" show --id floor-one | grep -F '"state": "done"' >/dev/null ||
+      fail "$mode consented task did not finish"
+    report="$(python3 - "$floor_repo/.oms/artifacts/index.jsonl" <<'PY' | tr -d '\r'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+print(next(row["artifact"] for row in reversed(rows)
+           if row.get("kind") == "patch-admit" and row.get("exit") == 0))
+PY
+)"
+    case "$report" in /*) ;; *) report="$floor_repo/$report" ;; esac
+    grep -Fq -- "$floor_reason" "$report" || fail "$mode landing lost the exact reason"
+    grep -Fq 'floor_change_used: true' "$report" || fail "$mode did not exercise the failed floor"
+  done
+  rm -f "$bin/bash"
+  unset OMS_T_REAL_BASH OMS_T_PLAN_RUN_ARGS
+}
+
 test_context_pack() {
 # --- --context-pack: typed Project Graph orientation, never a write scope ----
 # The pack says where to look; the brief's allowed_paths stay the only place a
@@ -1095,6 +1164,7 @@ grep -Fq 'ORIENTATION-FILE-BODY' "$TMP/cp-manifest-prompt.txt" ||
 # SMOKE_TEST_CALLS_BEGIN
 test_direct_id_and_release_accept_crlf_python_output
 test_plan_lifecycle
+test_floor_consent_landing
 test_context_pack
 # SMOKE_TEST_CALLS_END
 echo "autonomy-plan-run-smoke: ok"

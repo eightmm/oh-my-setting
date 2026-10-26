@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms autopilot --allow-floor-change REASON` binds immutable owner consent
+  at propose time, preserves older receipts as no consent, and forwards the
+  exact reason through goal-drive and plan-run to every landing attempt.
+  Candidate checks still apply; changing consent requires a fresh contract.
 - `oms autopilot abandon` now prints the remaining plan path, a read-only
   `oms agent-plan retire --check` command and the completion, supersession and
   cancellation requirements when unfinished plan work remains. Unreadable

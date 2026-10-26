@@ -59,6 +59,10 @@ marker and are never prefixed again.
 - `oms autopilot --allow-verifier-change` binds verifier-change consent
   into the run contract, and a consented landing refreezes exactly the
   acceptance-manifest entries its own patch touched.
+- `oms autopilot --allow-floor-change REASON` binds immutable owner consent
+  at propose time and forwards the exact reason through goal-drive and plan-run
+  to patch-land/patch-admit. Candidate checks still apply; changing, adding or
+  dropping the reason requires abandoning the run and proposing a fresh contract.
 
 ## Korean output, if you want it
 

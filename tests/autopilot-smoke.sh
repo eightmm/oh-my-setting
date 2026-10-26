@@ -526,6 +526,7 @@ write_orchestration_stubs() {
 cat > "$bin/goal-drive" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_CALLS/goal-drive"
+printf '%s\n' "$@" > "$OMS_T_CALLS/goal-drive-argv"
 printf 'strict=%s off=%s timeout=%s\n' \
   "${OMS_WORKER_GUARD_STRICT:-}" "${OMS_WORKER_GUARD_OFF:-}" \
   "${OMS_PEER_TIMEOUT:-}" >> "$OMS_T_CALLS/goal-drive-env"
@@ -697,7 +698,7 @@ fi
 proposal="$OMS_T_REPO/.oms/plan/proposal-r1.json"
 mkdir -p "$(dirname "$proposal")"
 cat > "$proposal" <<'JSON'
-{"schema":1,"kind":"agent-plan-proposal","tasks":[{"id":"r1-finish","title":"fix: finish remainder","allowed":["src/"],"verify":"true","depends":["t1"]}]}
+{"schema":1,"kind":"agent-plan-proposal","id_prefix":"r1-","tasks":[{"id":"r1-finish","title":"fix: finish remainder","allowed":["src/"],"verify":"true","depends":["t1"]}]}
 JSON
 echo "plan-from-spec: proposed 1 task(s) -> $proposal"
 echo "plan-from-spec: proposal sha256: $(python3 -c \
@@ -772,6 +773,113 @@ run_autopilot() {
     OMS_AUTOPILOT_PEER_REVIEW="$TMP/bin/peer-review" \
     OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
     "$ROOT/scripts/autopilot.sh" --repo "$repo" "$@"
+}
+
+test_autopilot_floor_consent() {
+  local command reason rc before receipt
+  local repo="$TMP/floor-consent"
+  local floor_reason="--Owner reviewed baseline; preserve 'quotes' and spaces"
+  for command in autopilot goal-drive plan-run; do
+    rc=0
+    bash "$ROOT/scripts/$command.sh" --allow-floor-change >"$TMP/floor-parse.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "$command accepted a missing floor reason"
+    grep -Fq 'requires a reason' "$TMP/floor-parse.out" || fail "$command missing reason diagnostic"
+    for reason in '' '   ' $'one\ntwo' $'one\rtwo' $'one\ttwo' $'one\001two' $'one\177two'; do
+      rc=0
+      bash "$ROOT/scripts/$command.sh" --allow-floor-change "$reason" --help >"$TMP/floor-parse.out" 2>&1 || rc=$?
+      [ "$rc" = 2 ] || fail "$command accepted a malformed floor reason"
+      grep -Eq 'requires a (single-line|nonblank) reason|cannot contain control characters' "$TMP/floor-parse.out" ||
+        fail "$command did not validate the floor reason"
+    done
+    for reason in 0 x --reviewed "$floor_reason"; do
+      bash "$ROOT/scripts/$command.sh" --allow-floor-change "$reason" --help >"$TMP/floor-parse.out" 2>&1 ||
+        fail "$command refused a valid floor reason"
+      grep -Fq -- '--allow-floor-change' "$TMP/floor-parse.out" || fail "$command help omits floor consent"
+    done
+    rc=0
+    OMS_HARNESS_CHILD=1 bash "$ROOT/scripts/$command.sh" --allow-floor-change reviewed --help >"$TMP/floor-parse.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "$command allowed a child to grant floor consent"
+    grep -Fq 'parent-only' "$TMP/floor-parse.out" || fail "$command child refusal omitted authority"
+  done
+
+  make_repo "$repo"
+  mkdir -p "$repo/calls"
+  write_done_plan "$repo" false
+  write_orchestration_stubs "$TMP/bin"
+  receipt="$repo/.oms/plan/autopilot-run.json"
+  rc=0
+  run_autopilot "$repo" propose --allowed 'src,tests' --base main \
+    --allow-verifier-change --allow-floor-change "$floor_reason" >"$repo/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "floor consent did not bind at propose: $(tail -5 "$repo/propose.out")"
+  local resume_args=(--proposal "$repo/.oms/plan/proposal-r1.json" \
+    --expected-proposal-sha256 "$(sha256_file "$repo/.oms/plan/proposal-r1.json")")
+  run_autopilot "$repo" status >"$repo/status.out" 2>&1 || fail "consented status failed"
+  python3 - "$ROOT/scripts/lib/autopilot-receipt.py" "$receipt" "$floor_reason" \
+    "$repo/propose.out" "$repo/status.out" <<'PY' || fail "floor receipt or continuation lost exact consent"
+import copy, json, pathlib, runpy, shlex, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
+api = runpy.run_path(sys.argv[1])
+row = json.load(open(sys.argv[2], encoding="utf-8"))
+assert row["contract"]["allow_floor_change"] == sys.argv[3]
+assert row["contract"]["allow_verifier_change"] is True
+for path in sys.argv[4:]:
+    lines = open(path, encoding="utf-8").read().splitlines()
+    argv = shlex.split(next(line for line in lines if line.startswith("  oms autopilot ")))
+    assert argv[argv.index("--allow-floor-change") + 1] == sys.argv[3], argv
+for invalid in (None, True, 0, "   ", "one\ntwo", "one\rtwo", "one\ttwo", "one\x7ftwo"):
+    changed = copy.deepcopy(row)
+    changed["contract"]["allow_floor_change"] = invalid
+    try:
+        api["validate_receipt"](changed)
+    except api["ReceiptError"]:
+        pass
+    else:
+        raise AssertionError(invalid)
+PY
+  before="$(sha256_file "$receipt")"
+  for reason in '' 'changed reason'; do
+    local consent_args=()
+    [ -z "$reason" ] || consent_args=(--allow-floor-change "$reason")
+    rc=0
+    run_autopilot "$repo" run --allowed 'src,tests' --base main --allow-verifier-change \
+      "${resume_args[@]}" ${consent_args[@]+"${consent_args[@]}"} >"$repo/changed.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "changing floor consent must refuse, got $rc"
+    grep -Fq 'immutable contract changed' "$repo/changed.out" || fail "missing immutable consent refusal"
+    [ "$before" = "$(sha256_file "$receipt")" ] || fail "consent refusal changed the receipt"
+    [ ! -e "$repo/calls/goal-drive" ] || fail "changed consent reached goal-drive"
+  done
+  rc=0
+  run_autopilot "$repo" run --allowed 'src,tests' --base main --allow-verifier-change \
+    "${resume_args[@]}" --allow-floor-change "$floor_reason" >"$repo/run.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "same floor reason did not resume to the drive: $(tail -5 "$repo/run.out")"
+  python3 - "$repo/calls/goal-drive-argv" "$floor_reason" <<'PY' || fail "drive consent was word-split"
+import sys
+argv = open(sys.argv[1], encoding="utf-8").read().splitlines()
+assert argv[argv.index("--allow-floor-change") + 1] == sys.argv[2], argv
+assert "--allow-verifier-change" in argv
+PY
+  python3 - "$receipt" <<'PY' || fail "could not create legacy receipt"
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["contract"].pop("allow_floor_change")
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+PY
+  run_autopilot "$repo" status >"$repo/legacy.out" 2>&1 || fail "legacy receipt did not load"
+  if grep -Fq -- '--allow-floor-change' "$repo/legacy.out"; then fail "legacy receipt invented consent"; fi
+  before="$(sha256_file "$receipt")"
+  rc=0
+  run_autopilot "$repo" run --allowed 'src,tests' --base main --allow-verifier-change \
+    "${resume_args[@]}" --allow-floor-change "$floor_reason" >"$repo/added.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "adding floor consent must refuse"
+  grep -Fq 'immutable contract changed' "$repo/added.out" || fail "missing added consent refusal"
+  [ "$before" = "$(sha256_file "$receipt")" ] || fail "adding consent changed legacy receipt"
+  rc=0
+  run_autopilot "$repo" run --allowed 'src,tests' --base main --allow-verifier-change \
+    "${resume_args[@]}" >"$repo/legacy-run.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "legacy receipt did not resume without consent: $(tail -5 "$repo/legacy-run.out")"
+  if grep -Fq -- '--allow-floor-change' "$repo/calls/goal-drive-argv"; then fail "legacy drive invented consent"; fi
 }
 
 test_autopilot_abandon_plan_guidance() {
@@ -3453,6 +3561,7 @@ test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose
 test_auto_collaboration
 test_atomic_proposal_apply
 test_autopilot_abandon_plan_guidance
+test_autopilot_floor_consent
 test_autopilot_orchestration
 
 echo "autopilot-smoke: ok"

@@ -22,6 +22,7 @@ REPAIR=0
 LAND=0
 AUTO_REPAIR=0
 ALLOW_VERIFIER_CHANGE=0
+ALLOW_FLOOR_CHANGE_REASON=""
 RETRY_KNOWN=0
 DRY_RUN=0
 MODEL=""
@@ -62,6 +63,8 @@ Options:
   --land          Land through patch-land after successful delegation.
   --allow-verifier-change  Forward to patch-land/patch-admit: permit a patch
                   whose task scope includes its own verifier file.
+  --allow-floor-change REASON  Forward owner consent for an intentional failed
+                  base floor to patch-land/patch-admit; candidate checks still apply.
   --auto-repair   With --land: when landing fails, run exactly ONE fenced repair
                   delegation with the failed gate's own output embedded in
                   the worker brief, retry landing once, then park the task
@@ -97,6 +100,15 @@ while [ "$#" -gt 0 ]; do
     --repair) [ "$#" -ge 2 ] || fail "--repair requires N"; REPAIR="$2"; shift 2 ;;
     --land) LAND=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
+    --allow-floor-change)
+      [ "$#" -ge 2 ] || fail "--allow-floor-change requires a reason"
+      [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || fail "--allow-floor-change is parent-only"
+      case "$2" in *$'\n'*|*$'\r'*) fail "--allow-floor-change requires a single-line reason" ;; esac
+      printf '%s' "$2" | LC_ALL=C grep -E '[^[:space:]]' > /dev/null || fail "--allow-floor-change requires a nonblank reason"
+      if printf '%s' "$2" | LC_ALL=C grep -E '[[:cntrl:]]' > /dev/null; then
+        fail "--allow-floor-change reason cannot contain control characters"
+      fi
+      ALLOW_FLOOR_CHANGE_REASON="$2"; shift 2 ;;
     --auto-repair) AUTO_REPAIR=1; [ "$REPAIR" -ge 1 ] || REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --executor) fail "Soul executors were removed; use a fresh plan task and brief" ;;
@@ -493,6 +505,7 @@ if [ "$LAND" -eq 1 ]; then
   # land through this front door without the admission override; the flag is
   # forwarded verbatim, never implied (the live campaign hit exactly this).
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || land_cmd+=(--allow-verifier-change)
+  [ -z "$ALLOW_FLOOR_CHANGE_REASON" ] || land_cmd+=(--allow-floor-change "$ALLOW_FLOOR_CHANGE_REASON")
   land_log="$(agent_memory_mktemp)" || exit 1
   set +e
   "${land_cmd[@]}" >"$land_log" 2>&1

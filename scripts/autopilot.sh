@@ -38,6 +38,7 @@ INITIAL_TASKS=6
 REPLAN_TASKS=2
 AUTO_REPAIR=0
 ALLOW_VERIFIER_CHANGE=0
+ALLOW_FLOOR_CHANGE_REASON=""
 DISCOVER=0
 COLLABORATION=off
 REVIEW_MODE="shadow"
@@ -152,6 +153,10 @@ Options:
                           own verifier can land (base floor still applies).
                           Mid-run discovery cannot add it — abandon the run and
                           propose a fresh contract carrying the flag.
+  --allow-floor-change REASON
+                          Immutable owner consent, bound at propose time, for
+                          an intentional baseline failure. Landing preserves
+                          the reason; candidate verification must still pass.
   --discover              Include bounded work evidence in the initial proposal.
   --provider-timeout DUR  Default per-provider wall clock (default: 5m; max 24h).
   --planner-timeout DUR   Planner override for --provider-timeout.
@@ -242,6 +247,15 @@ while [ "$#" -gt 0 ]; do
     --auto-repair) AUTO_REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
+    --allow-floor-change)
+      [ "$#" -ge 2 ] || fail "--allow-floor-change requires a reason"
+      [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || fail "--allow-floor-change is parent-only"
+      case "$2" in *$'\n'*|*$'\r'*) fail "--allow-floor-change requires a single-line reason" ;; esac
+      printf '%s' "$2" | LC_ALL=C grep -E '[^[:space:]]' > /dev/null || fail "--allow-floor-change requires a nonblank reason"
+      if printf '%s' "$2" | LC_ALL=C grep -E '[[:cntrl:]]' > /dev/null; then
+        fail "--allow-floor-change reason cannot contain control characters"
+      fi
+      ALLOW_FLOOR_CHANGE_REASON="$2"; shift 2 ;;
     --discover) DISCOVER=1; shift ;;
     --provider-timeout)
       [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
@@ -1028,6 +1042,7 @@ outer_receipt_binding_args() {  # COMMAND STAGE EXPECTED
   [ "$AUTO_REPAIR" -eq 0 ] || receipt_args+=(--auto-repair)
   [ "$RETRY_KNOWN" -eq 0 ] || receipt_args+=(--retry-known)
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || receipt_args+=(--allow-verifier-change)
+  [ -z "$ALLOW_FLOOR_CHANGE_REASON" ] || receipt_args+=("--allow-floor-change=$ALLOW_FLOOR_CHANGE_REASON")
   [ "$DRAFT_PR" -eq 0 ] || receipt_args+=(--draft-pr)
 }
 
@@ -1488,6 +1503,7 @@ PY
   [ "$AUTO_REPAIR" -eq 0 ] || continuation+=(--auto-repair)
   [ "$RETRY_KNOWN" -eq 0 ] || continuation+=(--retry-known)
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || continuation+=(--allow-verifier-change)
+  [ -z "$ALLOW_FLOOR_CHANGE_REASON" ] || continuation+=(--allow-floor-change "$ALLOW_FLOOR_CHANGE_REASON")
   [ "$DRAFT_PR" -eq 0 ] || continuation+=(--draft-pr)
   continuation+=(run --proposal "$proposal_path" \
     --expected-proposal-sha256 "$proposal_digest")
@@ -1796,6 +1812,7 @@ drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
 [ "$AUTO_REPAIR" -eq 0 ] || drive_args+=(--auto-repair)
 [ "$RETRY_KNOWN" -eq 0 ] || drive_args+=(--retry-known)
 [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || drive_args+=(--allow-verifier-change)
+[ -z "$ALLOW_FLOOR_CHANGE_REASON" ] || drive_args+=(--allow-floor-change "$ALLOW_FLOOR_CHANGE_REASON")
 # Record this drive's wrapper pid on the run lineage before any provider
 # spends money: a later re-entry distinguishes a live-but-slow session from
 # a dead one by exactly this claim (run-level single-flight).
