@@ -529,12 +529,19 @@ def snapshot(repo, room_id=None, _tick=None):
         state.pop("message_successors", None)
         state.pop("awaiting_admission", None)
         try:
-            # A receipt that says running proves nothing; only the probed lock (active) does.
-            run = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo), "--json"],
-                                 capture_output=True, text=True, timeout=5, check=False, stdin=subprocess.DEVNULL)
-            found = json.loads(run.stdout) if run.returncode == 0 else {}
+            # A receipt that says running proves nothing; only the probed lock (active) does. A land runs
+            # minutes, so every panel process of the repository shares one probe per cache interval.
+            def collect_land():
+                run = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo), "--json", "--active-exit"],
+                                     capture_output=True, text=True, timeout=5, check=False, stdin=subprocess.DEVNULL)
+                # --active-exit prints JSON with or without a receipt: exit 0 free, 3 held, 4 unknown.
+                found = json.loads(run.stdout) if run.returncode in (0, 3, 4) else None
+                if not isinstance(found, dict):
+                    raise ValueError("invalid land status")
+                return {key: found.get(key) for key in ("active", "sha", "step", "minutes")}
+            found = read_shared(repo, 'land-status', collect_land, _tick=_tick)
             if found.get("active") is True:
-                state["land"] = {key: found.get(key) for key in ("active", "sha", "step", "minutes")}
+                state["land"] = found
         except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
             pass
         if ident:

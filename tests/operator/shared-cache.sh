@@ -226,7 +226,7 @@ with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}
         patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as fingerprints:
     anchor = time.time()
     for offset in (*range(0, cache.INTERVAL, 5), cache.INTERVAL):
-        expected = 5 if offset in (0, cache.INTERVAL) else 2
+        expected = 6 if offset in (0, cache.INTERVAL) else 2
         fingerprints.reset_mock()
         tick = cache.TickReads(tick_project)
         with patch.object(cache.time, 'time', return_value=anchor + offset):

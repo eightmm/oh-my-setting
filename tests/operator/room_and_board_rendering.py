@@ -4065,6 +4065,49 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
         patch.object(panel.subprocess, "run", side_effect=fake_run):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, got.get("land")
+# With hook state, the land probe is shared: a second snapshot inside the cache interval does not run it again.
+land_calls = []
+def counting_run(command, **kwargs):
+    if command[2:3] == ["land"]:
+        land_calls.append(command)
+    return fake_run(command, **kwargs)
+with tempfile.TemporaryDirectory() as land_repo:
+    for sub in ("hooks/panel-cache", "artifacts"):
+        (Path(land_repo) / ".oms" / sub).mkdir(parents=True)
+    for _ in range(2):
+        with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
+                patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
+                patch.object(panel, "managed_session", return_value=False), \
+                patch("panel_results._records", return_value=(listed, indexed)), \
+                patch.object(panel, "results", return_value={"rows": []}), \
+                patch.object(panel, "outcomes", return_value={}), \
+                patch.object(panel.subprocess, "run", side_effect=counting_run):
+            cached_got, _ = panel.snapshot(Path(land_repo), "flow-room")
+        assert cached_got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, cached_got.get("land")
+    assert len(land_calls) == 1, land_calls
+    assert "--active-exit" in land_calls[0], land_calls[0]
+# No receipt: --active-exit prints {"active": false} and exits 0; that is a cacheable observation too.
+free_calls = []
+def free_run(command, **kwargs):
+    if command[2:3] == ["land"]:
+        free_calls.append(command)
+        return subprocess.CompletedProcess(command, 0 if "--active-exit" in command else 1,
+                                           '{"active": false}' if "--active-exit" in command else "no landing recorded", "")
+    return fake_run(command, **kwargs)
+with tempfile.TemporaryDirectory() as free_repo:
+    for sub in ("hooks/panel-cache", "artifacts"):
+        (Path(free_repo) / ".oms" / sub).mkdir(parents=True)
+    for _ in range(2):
+        with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
+                patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
+                patch.object(panel, "managed_session", return_value=False), \
+                patch("panel_results._records", return_value=(listed, indexed)), \
+                patch.object(panel, "results", return_value={"rows": []}), \
+                patch.object(panel, "outcomes", return_value={}), \
+                patch.object(panel.subprocess, "run", side_effect=free_run):
+            free_got, _ = panel.snapshot(Path(free_repo), "flow-room")
+        assert "land" not in free_got, free_got.get("land")
+    assert len(free_calls) == 1, free_calls
 assert got["room_attempts"] == {"gone-review": {"state": "failed", "attempt_id": "window-09",
     "updated_at": "2026-01-04T00:00:09Z", "task_id": "t-window-09", "lease_id": None,
     "tokens": 909, "provider_usage": {"input_tokens": 909, "output_tokens": 0, "cache_read_tokens": None,

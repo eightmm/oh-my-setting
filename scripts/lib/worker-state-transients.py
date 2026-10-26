@@ -75,7 +75,7 @@ def is_internal_atomic_temp(root, rel):
         ):
             matched = True
         elif re.fullmatch(
-            r"hooks/panel-cache/(?:dashboard|attempts|result-records|plan-list)(?:\.[0-9a-f]{12})?\.json", target
+            r"hooks/panel-cache/(?:dashboard|attempts|result-records|plan-list|land-status)(?:\.[0-9a-f]{12})?\.json", target
         ):
             matched = True
         else:
