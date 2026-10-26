@@ -124,8 +124,9 @@ Options:
                    nonzero. With --plan-task ID only that task's intents are
                    considered; others are neither recovered nor counted.
                    Recovery requires the shared plan to be absent or a readable
-                   object with a plan_id and tasks map; an unusable plan aborts
-                   before any intent is changed.
+                   object with a tasks map; an unusable plan aborts before any
+                   intent is changed. A legacy plan without a plan_id is
+                   readable but scopes --plan-task to no intent.
   -h, --help       Show this help.
 
 Sequence: main tree must be clean -> patch-admit returns ADMIT -> git apply
@@ -845,8 +846,12 @@ try:
         raise ValueError("not an object")
     plan_id = plan.get("plan_id")
     tasks = plan.get("tasks")
-    if not isinstance(plan_id, str) or not plan_id:
-        raise ValueError("missing or invalid plan_id")
+    # A legacy plan predates lineage: readable, but it owns no plan_id, so a
+    # scoped recovery matches no intent. A present non-string id is malformed.
+    if plan_id is None:
+        plan_id = ""
+    if not isinstance(plan_id, str):
+        raise ValueError("invalid plan_id")
     if not isinstance(tasks, dict):
         raise ValueError("missing or invalid tasks")
 except (OSError, ValueError, TypeError) as exc:

@@ -1050,6 +1050,11 @@ row = {
     "approval": "",
     "approval_version": "",
 }
+# Real plan-task landings record the live plan's lineage before the intent;
+# a scoped recovery owns only intents carrying that plan_id.
+row["plan_id"] = json.loads(
+    (repo / ".oms/plan/tasks.json").read_text(encoding="utf-8")
+)["plan_id"]
 receipt = {"schema": 1}
 for name in (
     "landing_id", "patch", "patch_sha", "base_sha", "task", "lease",

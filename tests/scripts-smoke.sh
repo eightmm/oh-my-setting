@@ -29057,8 +29057,8 @@ EOF
   printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-badplan","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"mine","plan_id":"plan_%s","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":"","panel_accept":"true"}\n' \
     "$patch" "$patch_sha" "$base_sha" "$(printf '%032d' 7)" > "$project/.oms/landings.jsonl"
   landings_before="$(cat "$project/.oms/landings.jsonl")"
-  for bad_plan in '{"plan_id":' '' '[]' '{"tasks":{}}' '{"plan_id":"","tasks":{}}' \
-    '{"plan_id":7}' '{"plan_id":"plan_00000000000000000000000000000007"}' \
+  for bad_plan in '{"plan_id":' '' '[]' \
+    '{"plan_id":7}' '{"plan_id":null,"tasks":[]}' '{"plan_id":"plan_00000000000000000000000000000007"}' \
     '{"plan_id":"plan_00000000000000000000000000000007","tasks":[]}'; do
     printf '%s\n' "$bad_plan" > "$project/.oms/plan/tasks.json"
     rc=0
@@ -29069,6 +29069,23 @@ EOF
     [ "$(cat "$project/.oms/landings.jsonl")" = "$landings_before" ] ||
       fail "a refused scoped recovery must not write landing rows"
   done
+  # A legacy plan without lineage is readable: unscoped recovery proceeds, and
+  # a scoped one matches no intent instead of aborting.
+  for bad_plan in '{"tasks":{}}' '{"plan_id":"","tasks":{}}' '{"plan_id":null,"tasks":{}}'; do
+    printf '%s\n' "$bad_plan" > "$project/.oms/plan/tasks.json"
+    rc=0
+    out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover --plan-task mine 2>&1)" || rc=$?
+    [ "$rc" = 0 ] && contains "$out" '0 recovered, 0 abandoned, 0 need manual' ||
+      fail "a legacy plan '$bad_plan' must scope recovery to nothing, got $rc: $out"
+    [ "$(cat "$project/.oms/landings.jsonl")" = "$landings_before" ] ||
+      fail "a legacy-plan scoped recovery must not write landing rows"
+  done
+  printf '{"tasks":{}}\n' > "$project/.oms/plan/tasks.json"
+  rc=0
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)" || rc=$?
+  [ "$rc" = 0 ] && contains "$out" '1 abandoned, 0 need manual' ||
+    fail "a legacy plan must not abort an unscoped recovery, got $rc: $out"
+  printf '%s\n' "$landings_before" > "$project/.oms/landings.jsonl"
   rm -rf "$project/.oms/plan/tasks.json"
   mkdir "$project/.oms/plan/tasks.json"
   rc=0
