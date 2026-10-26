@@ -410,14 +410,19 @@ def row_state_root(repo: str) -> str:
     return os.path.realpath(value)
 
 
-def validate_live(row: dict[str, Any], repo: str, state_repo: str = "") -> None:
+def validate_live(
+    row: dict[str, Any], repo: str, state_repo: str = "", *, any_checkout: bool = False
+) -> None:
     # A verified scratch drives the run while its receipt and proposals live
     # in the state root; the bound execution checkout (row.repo) answers the
-    # Git and PROJECT.md checks whichever of the two roots is asking.
+    # Git and PROJECT.md checks whichever of the two roots is asking. Read-only
+    # callers (any_checkout) also accept a sibling checkout whose own state
+    # root is this one.
     caller = os.path.realpath(repo)
     state_root = os.path.realpath(state_repo or repo)
     expected_repo = os.path.realpath(row["repo"])
-    if caller not in (expected_repo, state_root):
+    if caller not in (expected_repo, state_root) and (
+            not any_checkout or row_state_root(caller) != state_root):
         raise ReceiptError("outer receipt belongs to a different repository")
     if row_state_root(expected_repo) != state_root:
         raise ReceiptError("outer receipt belongs to a different repository")
@@ -736,6 +741,117 @@ def valid_branch_transition(before: dict[str, Any], after: dict[str, Any]) -> bo
         and before["stage"] in {"proposing", "proposal-review", "parked"}
         and after["stage"] in {"proposing", "proposal-review", "approved", "driving"}
     )
+
+
+def base_moved_retirable(row: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """A proposing receipt with no proposal whose only change is the base commit."""
+    if (row["stage"] != "proposing" or
+            row["proposal"] != {"path": "", "sha256": ""} or
+            candidate["stage"] != "proposing" or
+            candidate["proposal"] != {"path": "", "sha256": ""}):
+        return False
+    before = immutable_view(row)
+    after = immutable_view(candidate)
+    before_contract = row["contract"]
+    after_contract = candidate["contract"]
+    return not (row["spec_sha256"] != candidate["spec_sha256"] or
+                before.keys() != after.keys() or
+                any(before[key] != after[key] for key in before if key != "contract") or
+                before_contract.keys() != after_contract.keys() or
+                before_contract["base_sha"] == after_contract["base_sha"] or
+                any(before_contract[key] != after_contract[key]
+                    for key in before_contract if key != "base_sha"))
+
+
+def check_write(path: Path, row: dict[str, Any], state_repo: str,
+                expected: str | None = None) -> str:
+    """Every check `write` makes before its atomic update; returns the CAS digest."""
+    validate_receipt(row)
+    _repo_root, expected_plan_root = validate_receipt_location(path, state_repo)
+    if row["proposal"]["path"]:
+        proposal_path = Path(row["proposal"]["path"])
+        if os.path.dirname(os.path.realpath(proposal_path)) != expected_plan_root:
+            raise ReceiptError("approved proposal is outside the private plan directory")
+        proposal_payload = regular_bytes(
+            proposal_path, PROPOSAL_LIMIT, "approved proposal"
+        )
+        if digest(proposal_payload) != row["proposal"]["sha256"]:
+            raise ReceiptError("approved proposal digest changed")
+    current = "absent"
+    old_row = None
+    if path.exists() or path.is_symlink():
+        old_row, old_payload = load_receipt(path)
+        current = digest(old_payload)
+    if old_row is None and not row.get("owner_id"):
+        raise ReceiptError("a new outer receipt requires an autopilot owner id")
+    if expected is not None and expected != current:
+        raise ReceiptError("outer receipt CAS changed (expected %s, found %s)" % (expected, current))
+    if old_row is not None:
+        before_view = immutable_view(old_row)
+        after_view = immutable_view(row)
+        if before_view != after_view:
+            # Name the fields, never their values: an envelope or a goal
+            # sentence can carry content this file has no business echoing,
+            # but "which part of the frozen contract you changed" is what
+            # the caller cannot otherwise know. Without it the refusal
+            # reads as a bug in the receipt rather than a decision to make.
+            changed = ", ".join(sorted(
+                key for key in set(before_view) | set(after_view)
+                if before_view.get(key) != after_view.get(key)
+            ))
+            raise ReceiptError(
+                "outer receipt immutable contract changed (%s); the live"
+                " receipt froze these at intake -- rerun with the values it"
+                " holds, or retire it with `oms autopilot abandon --reason"
+                " TEXT` and bind a new contract" % changed
+            )
+        if not valid_transition(old_row["stage"], row["stage"]):
+            # One of these pairs is reachable by an ordinary next step: a
+            # reviewed proposal goes stale (HEAD moved under it, or the
+            # parent wants a different plan) and the obvious move is to
+            # propose again. The proposal binding may only be cleared from
+            # an active drive or a parked receipt -- deliberately, so a
+            # regenerated plan cannot slip under a review that already
+            # happened -- which leaves exactly one way forward, and the
+            # message never said what it was.
+            hint = ""
+            if (old_row["stage"], row["stage"]) == ("proposal-review", "proposing"):
+                hint = (
+                    "; a reviewed proposal is replaced by retiring the receipt --"
+                    " `oms autopilot abandon --reason TEXT`, then propose again"
+                )
+            raise ReceiptError(
+                "outer receipt stage transition is invalid (%s -> %s)%s"
+                % (old_row["stage"], row["stage"], hint)
+            )
+        if not valid_branch_transition(old_row, row):
+            raise ReceiptError("outer receipt branch transition is invalid")
+        if not valid_proposal_transition(old_row, row):
+            raise ReceiptError("outer receipt proposal transition is invalid")
+    return current
+
+
+def preflight_write(argv: list[str]) -> None:
+    """check_write for the `write` argv a later call will pass (internal entry).
+
+    It runs ahead of a plan retirement or branch switch, against the live
+    receipt that write will meet: a done receipt is archived and a proposing
+    receipt whose base moved is retired before it, so neither binds the call.
+    """
+    parser = argparse.ArgumentParser(prog="autopilot-receipt preflight")
+    parser.add_argument("command", choices=("write",))
+    parser.add_argument("path")
+    parser.add_argument("--expected", required=True)
+    add_binding_args(parser)
+    args = parser.parse_args(argv)
+    path = Path(args.path)
+    row = row_from_args(args)
+    if not (path.exists() or path.is_symlink()):
+        return
+    live, _payload = load_receipt(path)
+    if live["stage"] == "done" or base_moved_retirable(live, row):
+        return
+    check_write(path, row, args.state_repo or args.repo)
 
 
 def option_args(row: dict[str, Any]) -> list[str]:
@@ -2007,26 +2123,18 @@ def main() -> int:
             elif args.command == "retire-proposing-base-moved":
                 candidate = row_from_args(args)
                 validate_receipt(candidate)
-                if (row["stage"] != "proposing" or
-                        row["proposal"] != {"path": "", "sha256": ""} or
-                        candidate["stage"] != "proposing" or
-                        candidate["proposal"] != {"path": "", "sha256": ""}):
-                    return 0
-                before = immutable_view(row)
-                after = immutable_view(candidate)
-                before_contract = row["contract"]
-                after_contract = candidate["contract"]
-                if (row["spec_sha256"] != candidate["spec_sha256"] or
-                        before.keys() != after.keys() or
-                        any(before[key] != after[key] for key in before if key != "contract") or
-                        before_contract.keys() != after_contract.keys() or
-                        before_contract["base_sha"] == after_contract["base_sha"] or
-                        any(before_contract[key] != after_contract[key]
-                            for key in before_contract if key != "base_sha")):
+                if not base_moved_retirable(row, candidate):
                     return 0
                 args.reason = "proposing-base-moved"
             if row["stage"] == "done":
                 raise ReceiptError("a done outer receipt is archived, not abandoned")
+            # The receipt must belong to this state root, the check status
+            # makes; a bound checkout that no longer exists cannot answer it,
+            # and abandon stays its exit.
+            bound = os.path.realpath(row["repo"])
+            if (os.path.lexists(bound) and
+                    row_state_root(bound) != os.path.realpath(args.state_repo or args.repo)):
+                raise ReceiptError("outer receipt belongs to a different repository")
             if not UPDATED.fullmatch(args.updated):
                 raise ReceiptError("abandon requires a valid --updated timestamp")
             reason = args.reason.strip()
@@ -2330,7 +2438,7 @@ def main() -> int:
         if args.command == "inspect":
             validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
-            validate_live(row, args.repo, args.state_repo)
+            validate_live(row, args.repo, args.state_repo, any_checkout=True)
             print("outer run: stage=%s receipt=%s" % (row["stage"], digest(payload)))
             if row.get("diagnostic"):
                 diagnostic = row["diagnostic"]
@@ -2347,68 +2455,7 @@ def main() -> int:
                 print("  " + " ".join(shlex.quote(value) for value in option_args(row)))
             return 0
         row = row_from_args(args)
-        validate_receipt(row)
-        _repo_root, expected_plan_root = validate_receipt_location(path, args.state_repo or args.repo)
-        if row["proposal"]["path"]:
-            proposal_path = Path(row["proposal"]["path"])
-            if os.path.dirname(os.path.realpath(proposal_path)) != expected_plan_root:
-                raise ReceiptError("approved proposal is outside the private plan directory")
-            proposal_payload = regular_bytes(
-                proposal_path, PROPOSAL_LIMIT, "approved proposal"
-            )
-            if digest(proposal_payload) != row["proposal"]["sha256"]:
-                raise ReceiptError("approved proposal digest changed")
-        current = "absent"
-        old_row = None
-        if path.exists() or path.is_symlink():
-            old_row, old_payload = load_receipt(path)
-            current = digest(old_payload)
-        if old_row is None and not row.get("owner_id"):
-            raise ReceiptError("a new outer receipt requires an autopilot owner id")
-        if args.expected != current:
-            raise ReceiptError("outer receipt CAS changed (expected %s, found %s)" % (args.expected, current))
-        if old_row is not None:
-            before_view = immutable_view(old_row)
-            after_view = immutable_view(row)
-            if before_view != after_view:
-                # Name the fields, never their values: an envelope or a goal
-                # sentence can carry content this file has no business echoing,
-                # but "which part of the frozen contract you changed" is what
-                # the caller cannot otherwise know. Without it the refusal
-                # reads as a bug in the receipt rather than a decision to make.
-                changed = ", ".join(sorted(
-                    key for key in set(before_view) | set(after_view)
-                    if before_view.get(key) != after_view.get(key)
-                ))
-                raise ReceiptError(
-                    "outer receipt immutable contract changed (%s); the live"
-                    " receipt froze these at intake -- rerun with the values it"
-                    " holds, or retire it with `oms autopilot abandon --reason"
-                    " TEXT` and bind a new contract" % changed
-                )
-            if not valid_transition(old_row["stage"], row["stage"]):
-                # One of these pairs is reachable by an ordinary next step: a
-                # reviewed proposal goes stale (HEAD moved under it, or the
-                # parent wants a different plan) and the obvious move is to
-                # propose again. The proposal binding may only be cleared from
-                # an active drive or a parked receipt -- deliberately, so a
-                # regenerated plan cannot slip under a review that already
-                # happened -- which leaves exactly one way forward, and the
-                # message never said what it was.
-                hint = ""
-                if (old_row["stage"], row["stage"]) == ("proposal-review", "proposing"):
-                    hint = (
-                        "; a reviewed proposal is replaced by retiring the receipt --"
-                        " `oms autopilot abandon --reason TEXT`, then propose again"
-                    )
-                raise ReceiptError(
-                    "outer receipt stage transition is invalid (%s -> %s)%s"
-                    % (old_row["stage"], row["stage"], hint)
-                )
-            if not valid_branch_transition(old_row, row):
-                raise ReceiptError("outer receipt branch transition is invalid")
-            if not valid_proposal_transition(old_row, row):
-                raise ReceiptError("outer receipt proposal transition is invalid")
+        current = check_write(path, row, args.state_repo or args.repo, args.expected)
         payload = (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         if len(payload) > RECEIPT_LIMIT:
             raise ReceiptError("outer receipt exceeds its size limit")

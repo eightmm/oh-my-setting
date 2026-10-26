@@ -331,13 +331,19 @@ STATE_REPO="${STATE_REPO//$'\r'/}"
 # A verified scratch is the execution checkout (Git, PROJECT.md, work branch)
 # while plan, receipt, proposals and markers stay in the canonical state root.
 # oms_state_root does not check liveness, but the worker guard exempts a
-# scratch's registration only while its owner lives.
-if [ "$STATE_REPO" != "$REPO" ]; then
-  scratch_parent="$(oms_harness_residue_parent "$REPO")" ||
-    fail "cannot locate the OMS scratch marker for $REPO"
-  oms_harness_marker_owner_alive "$scratch_parent/.oh-my-setting-tmp" ||
-    fail "the owner of OMS scratch worktree $REPO has exited; it awaits cleanup and cannot run autopilot $ACTION"
-fi
+# scratch's registration only while its owner lives, so only status and
+# abandon run from a scratch whose owner has exited.
+case "$ACTION" in
+  status|abandon) ;;
+  *)
+    if [ "$STATE_REPO" != "$REPO" ]; then
+      scratch_parent="$(oms_harness_residue_parent "$REPO")" ||
+        fail "cannot locate the OMS scratch marker for $REPO"
+      oms_harness_marker_owner_alive "$scratch_parent/.oh-my-setting-tmp" ||
+        fail "the owner of OMS scratch worktree $REPO has exited; it awaits cleanup and cannot run autopilot $ACTION"
+    fi
+    ;;
+esac
 PLAN_FILE="$STATE_REPO/.oms/plan/tasks.json"
 PROGRESS_FILE="$STATE_REPO/.oms/plan/progress.jsonl"
 SPEC="$REPO/PROJECT.md"
@@ -346,36 +352,37 @@ OUTER_RECEIPT="$STATE_REPO/.oms/plan/autopilot-run.json"
 # One admission rule, ahead of every Git, ref, lease, claim, plan, ledger or
 # receipt write: the state root shares one receipt among its checkouts, and
 # only the bound execution checkout (row.repo, whose scratch owner the check
-# above proved live) may act on it. Any checkout may read status, and abandon
-# stays the one cross-root exit once the bound scratch is gone. A done receipt
-# binds nothing. Elsewhere an unreadable receipt falls to the helper's own
-# validation, but a scratch cannot prove its binding from it and stops here.
+# above proved live) may act on it. A done receipt binds nothing: any checkout
+# of the state root may start the next campaign, which archives it. Any checkout
+# of the state root may read status, and abandon stays the one cross-root exit
+# once the bound scratch is gone. The receipt is read by the helper's bounded
+# reader (regular file, no symlink, size cap, schema), so a receipt that
+# cannot prove its binding refuses every mutating action from every checkout.
 case "$ACTION" in
   status|abandon) ;;
   *)
     if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
       receipt_admission=0
-      receipt_bound="$(python3 - "$OUTER_RECEIPT" "$REPO" <<'PY'
-import json, os, sys
+      receipt_bound="$(python3 - "$ROOT/scripts/lib" "$OUTER_RECEIPT" "$REPO" <<'PY'
+import os, runpy, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+rules = runpy.run_path(os.path.join(sys.argv[1], "autopilot-receipt.py"))
 try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        row = json.load(handle)
-    bound, stage = row["repo"], row["stage"]
-except (OSError, ValueError, KeyError, TypeError):
+    row, _payload = rules["load_receipt"](Path(sys.argv[2]))
+except (OSError, rules["ReceiptError"]) as exc:
+    print(exc)
     raise SystemExit(4)
-if not isinstance(bound, str) or not bound or not isinstance(stage, str):
-    raise SystemExit(4)
-if stage != "done" and os.path.realpath(bound) != os.path.realpath(sys.argv[2]):
-    print(bound)
+if row["stage"] != "done" and os.path.realpath(row["repo"]) != os.path.realpath(sys.argv[3]):
+    print(row["repo"])
     raise SystemExit(3)
 PY
 )" || receipt_admission=$?
       receipt_bound="${receipt_bound//$'\r'/}"
       case "$receipt_admission" in
         0) ;;
-        3) fail "the live autopilot receipt is bound to execution checkout $receipt_bound, not $REPO; only status and abandon run from another checkout" ;;
-        4) [ "$STATE_REPO" = "$REPO" ] ||
-             fail "cannot read the outer receipt binding; a scratch cannot run autopilot $ACTION against it" ;;
+        3) fail "the autopilot receipt is bound to execution checkout $receipt_bound, not $REPO; only status and abandon run from another checkout" ;;
+        4) fail "cannot read the outer receipt binding ($receipt_bound); no checkout can run autopilot $ACTION against it" ;;
         *) fail "cannot read the outer receipt binding" ;;
       esac
     fi
@@ -1134,6 +1141,27 @@ outer_receipt_retire_base_moved_locked() {
   python3 "$RECEIPT_HELPER" "${receipt_args[@]}"
 }
 
+# The receipt write that follows a plan retirement or a work-branch switch
+# must not refuse after it: run that write's checks first, without writing.
+# The owner binding stays local: a done receipt is archived before the write
+# and must not lend the new contract its identity.
+outer_receipt_preflight() {  # STAGE
+  local AUTOPILOT_OWNER_ID="$AUTOPILOT_OWNER_ID" OMS_AUTOPILOT_OWNER_ID="${OMS_AUTOPILOT_OWNER_ID:-}"
+  local -a receipt_args
+  autopilot_owner_prepare
+  outer_receipt_binding_args write "$1" absent || return $?
+  python3 - "$ROOT/scripts/lib" "${receipt_args[@]}" <<'PY'
+import os, runpy, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+rules = runpy.run_path(os.path.join(sys.argv[1], "autopilot-receipt.py"))
+try:
+    rules["preflight_write"](sys.argv[2:])
+except (OSError, rules["ReceiptError"], ValueError, KeyError, subprocess.SubprocessError) as exc:
+    print("error: %s" % exc, file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+
 outer_receipt_write() {  # STAGE
   local value
   autopilot_owner_prepare
@@ -1616,7 +1644,6 @@ if [ "$ACTION" = propose ]; then
     if plan_has_open_tasks; then
       fail "the plan in .oms/plan/ is bound to a different contract and still has unfinished tasks; finish or resolve and retire it through the plan lifecycle before proposing against the adopted PROJECT.md; oms autopilot abandon only retires a frozen outer receipt, not this plan"
     fi
-    archive_superseded_plan || fail "cannot preserve the superseded plan"
     allowed_source="explicit"
     if [ "$ALLOWED_EXPLICIT" -eq 0 ]; then
       scope="$("$PLAN_FROM_SPEC" --repo "$REPO" --scope-only)" ||
@@ -1632,6 +1659,13 @@ if [ "$ACTION" = propose ]; then
       esac
     fi
     echo "autopilot: allowed: $ALLOWED ($allowed_source)"
+    ALLOWED="$(normalize_allowed "$ALLOWED")" || fail "--allowed is not a safe path envelope"
+    BOUND_SPEC_SHA="$propose_spec_sha"
+    review_base_sha="$(resolve_review_base_sha)"
+    mkdir -p "$STATE_REPO/.oms/plan" || fail "cannot create the private plan directory"
+    outer_receipt_preflight proposing ||
+      fail "cannot bind this planning call to the durable outer receipt"
+    archive_superseded_plan || fail "cannot preserve the superseded plan"
     propose_tasks "" "$INITIAL_TASKS" "$DISCOVER" || exit $?
   fi
   bind_plan_contract
@@ -1810,6 +1844,10 @@ ensure_work_branch() {
   [ -z "$recovery_branch" ] ||
     park "autopilot-recovery-branch-exists" \
       "checkout $recovery_branch and rerun the same autopilot command"
+  # The approved receipt write follows this switch; check it first so its
+  # refusal cannot leave the switch behind.
+  outer_receipt_preflight approved ||
+    fail "cannot bind this run to the durable outer receipt"
   # Registration of a guarded call takes the same gate, so the live-entry
   # check and the checkout form one critical section: a call either registers
   # before it (and defers the switch) or waits until the switch is done.

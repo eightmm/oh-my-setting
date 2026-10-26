@@ -777,6 +777,51 @@ run_autopilot() {
     "$ROOT/scripts/autopilot.sh" --repo "$repo" "$@"
 }
 
+# The first checkout's refs, every checkout's HEAD, and every .oms entry by
+# lstat: a symlink reads as its target and a FIFO as its type, never opened.
+checkout_state() {  # CHECKOUT...
+  local checkout
+  git -C "$1" for-each-ref
+  for checkout in "$@"; do
+    git -C "$checkout" symbolic-ref --quiet HEAD || true
+    git -C "$checkout" rev-parse HEAD
+  done
+  python3 - "$@" <<'PY'
+import hashlib, os, stat, sys
+rows = []
+for checkout in sys.argv[1:]:
+    for root, dirs, files in os.walk(os.path.join(checkout, ".oms")):
+        for name in dirs + files:
+            path = os.path.join(root, name)
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode):
+                rows.append("%s -> %s" % (path, os.readlink(path)))
+            elif stat.S_ISREG(mode):
+                with open(path, "rb") as handle:
+                    rows.append("%s %s" % (path, hashlib.sha256(handle.read()).hexdigest()))
+            else:
+                rows.append("%s %o" % (path, stat.S_IFMT(mode)))
+print("\n".join(sorted(rows)))
+PY
+}
+
+# Run a command in its own process group, killed at the suite's call timeout,
+# so a call blocked on a FIFO fails with 124 instead of hanging the suite.
+run_bounded() {  # OUTPUT COMMAND...
+  python3 - "${OMS_TEST_CALL_TIMEOUT:-60}" "$@" <<'PY'
+import os, signal, subprocess, sys
+with open(sys.argv[2], "wb") as output:
+    child = subprocess.Popen(sys.argv[3:], stdin=subprocess.DEVNULL, stdout=output,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        raise SystemExit(child.wait(timeout=float(sys.argv[1])))
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+        raise SystemExit(124)
+PY
+}
+
 test_autopilot_floor_consent() {
   local command reason rc before receipt
   local repo="$TMP/floor-consent"
@@ -1043,6 +1088,93 @@ PY
   run_autopilot "$copied" status > "$copied/status.out" 2>&1 || true
   grep -Fq 'outer run: invalid receipt' "$copied/status.out" ||
     fail "a copied receipt validated in another checkout: $(cat "$copied/status.out")"
+  # Nor may it abandon there: the receipt's checkout answers to another state root.
+  local copied_before
+  copied_before="$(checkout_state "$copied" "$repo")"
+  rc=0
+  run_autopilot "$copied" abandon --reason 'copied receipt' > "$copied/abandon.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] && grep -Fq 'belongs to a different repository' "$copied/abandon.out" ||
+    fail "a copied receipt was abandoned in another checkout, got $rc: $(tail -3 "$copied/abandon.out")"
+  [ "$copied_before" = "$(checkout_state "$copied" "$repo")" ] ||
+    fail "a refused copied-receipt abandon changed HEAD, refs or .oms state"
+
+  # A receipt that cannot prove its binding (a symlink to a FIFO, oversized
+  # valid JSON, malformed JSON) refuses run, propose and reenter from the
+  # canonical checkout and a live scratch alike: promptly, before any effect.
+  local hostile="$TMP/hostile-receipt" hostile_managed="$TMP/hostile-managed"
+  local hostile_scratch hostile_receipt hostile_kinds hostile_kind hostile_caller
+  local hostile_action hostile_before
+  make_repo "$hostile"
+  mkdir -p "$hostile/calls" "$hostile_managed"
+  hostile="$(cd "$hostile" && pwd -P)"
+  write_done_plan "$hostile" false
+  hostile_scratch="$(OMS_DELEGATE_WORKTREE_ROOT="$hostile_managed" \
+    "$ROOT/scripts/scratch-worktree.sh" add --repo "$hostile" --owner-pid $$)" ||
+    fail "hostile receipt scratch fixture creation failed"
+  mkdir -p "$hostile_scratch/calls"
+  hostile_receipt="$hostile/.oms/plan/autopilot-run.json"
+  hostile_kinds="oversized malformed"
+  if mkfifo "$TMP/hostile-fifo" 2>/dev/null &&
+    ln -s "$TMP/hostile-fifo" "$TMP/hostile-link" 2>/dev/null && [ -L "$TMP/hostile-link" ]; then
+    hostile_kinds="fifo $hostile_kinds"
+  fi
+  for hostile_kind in $hostile_kinds; do
+    rm -f "$hostile_receipt"
+    case "$hostile_kind" in
+      fifo) ln -s "$TMP/hostile-fifo" "$hostile_receipt" ;;
+      oversized)
+        python3 - "$hostile_receipt" "$hostile" <<'PY' ;;
+import json, sys
+json.dump({"repo": sys.argv[2], "stage": "proposing", "pad": "x" * 70000},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
+      malformed) printf '{"repo": "%s", "stage": ' "$hostile" > "$hostile_receipt" ;;
+    esac
+    for hostile_caller in "$hostile" "$hostile_scratch"; do
+      for hostile_action in run propose reenter; do
+        hostile_before="$(checkout_state "$hostile" "$hostile_scratch")"
+        rc=0
+        OMS_DELEGATE_WORKTREE_ROOT="$hostile_managed" OMS_T_REPO="$hostile_caller" \
+          OMS_T_CALLS="$hostile_caller/calls" OMS_T_STATE_REPO="$hostile" \
+          OMS_AUTOPILOT_GOAL_DRIVE="$TMP/bin/goal-drive" \
+          OMS_AUTOPILOT_PLAN_FROM_SPEC="$TMP/bin/plan-from-spec" \
+          OMS_AUTOPILOT_PEER_REVIEW="$TMP/bin/peer-review" \
+          OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
+          run_bounded "$hostile/hostile.out" "$ROOT/scripts/autopilot.sh" --repo "$hostile_caller" \
+            "$hostile_action" --planner claude --worker codex --reviewer claude \
+            --allowed 'src,tests' --base main || rc=$?
+        [ "$rc" = 2 ] && grep -Fq 'cannot read the outer receipt binding' "$hostile/hostile.out" ||
+          fail "$hostile_action from $hostile_caller over a $hostile_kind receipt must refuse at admission, got $rc: $(tail -5 "$hostile/hostile.out")"
+        [ "$hostile_before" = "$(checkout_state "$hostile" "$hostile_scratch")" ] ||
+          fail "$hostile_action from $hostile_caller over a $hostile_kind receipt changed HEAD, refs or .oms state"
+      done
+    done
+  done
+  rm -f "$hostile_receipt"
+  # A receipt write that refuses after a branch switch or a plan retirement
+  # leaves that effect behind, so both check the write first: a proposing
+  # receipt cannot be run without its reviewed proposal, and a changed
+  # PROJECT.md cannot be proposed under the receipt that froze the old one.
+  git -C "$hostile" switch -q main
+  rc=0
+  OMS_T_PLAN_RC=3 run_autopilot "$hostile" propose --planner claude --allowed 'src,tests' \
+    --base main > "$hostile/hostile.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "late-refusal fixture should leave a proposing receipt, got $rc: $(tail -5 "$hostile/hostile.out")"
+  write_done_plan "$hostile" true 0 1
+  for hostile_action in run propose; do
+    if [ "$hostile_action" = propose ]; then
+      printf '\n- Goal: a changed contract\n' >> "$hostile/PROJECT.md"
+      git -C "$hostile" commit -qam 'docs: change the contract'
+    fi
+    hostile_before="$(checkout_state "$hostile" "$hostile_scratch")"
+    rc=0
+    run_autopilot "$hostile" "$hostile_action" --planner claude --worker codex --reviewer claude \
+      --allowed 'src,tests' --base main > "$hostile/hostile.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] && grep -Eq 'stage transition is invalid|immutable contract changed' "$hostile/hostile.out" ||
+      fail "$hostile_action under a mismatched live receipt must refuse at its receipt write, got $rc: $(tail -5 "$hostile/hostile.out")"
+    [ "$hostile_before" = "$(checkout_state "$hostile" "$hostile_scratch")" ] ||
+      fail "refused $hostile_action under a mismatched live receipt switched a branch or retired the plan"
+  done
 
   write_done_plan "$repo" false
   rc=0
@@ -3402,7 +3534,8 @@ test_autopilot_runs_from_verified_scratch_and_allows_ordinary_propose() {
   local main="$TMP/scratch-run-main" managed="$TMP/scratch-run-managed"
   local scratch dead_scratch dead_owner normal discovered refused failed none rc=0 parent_env
   local original_receipt abandoned_archive abandon_record interrupted_branch candidate
-  local target frozen_base status_repo receipt_before matrix owner
+  local target frozen_base status_repo receipt_before matrix owner unrelated bound stage caller action
+  local expected status_line
   make_repo "$main"
   # The main checkout holds the base branch, so the scratch stays detached at it.
   git -C "$main" switch -q main
@@ -3462,21 +3595,7 @@ json.dump({
 PY
     fail "could not plant the dead scratch's lease"
   matrix_state() {
-    local checkout file
-    git -C "$main" for-each-ref
-    for checkout in "$main" "$dead_scratch" "$scratch"; do
-      git -C "$checkout" symbolic-ref --quiet HEAD || true
-      git -C "$checkout" rev-parse HEAD
-    done
-    for checkout in "$main" "$dead_scratch" "$scratch"; do
-      [ ! -d "$checkout/.oms" ] || find "$checkout/.oms" -print
-    done | LC_ALL=C sort | while IFS= read -r file; do
-      if [ -f "$file" ]; then
-        printf '%s %s\n' "$file" "$(sha256_file "$file")"
-      else
-        printf '%s\n' "$file"
-      fi
-    done
+    checkout_state "$main" "$dead_scratch" "$scratch" "$unrelated"
   }
   matrix_refused() {  # CHECKOUT EXPECTED-TEXT ACTION ARGS...
     local checkout="$1" expected="$2" action="$3" before matrix_rc=0
@@ -3490,30 +3609,121 @@ PY
     ) > "$matrix/$action.out" 2>&1 || matrix_rc=$?
     [ "$matrix_rc" = 2 ] ||
       fail "autopilot $action from $checkout must refuse, got $matrix_rc: $(tail -5 "$matrix/$action.out")"
-    grep -Fq "$expected" "$matrix/$action.out" ||
+    grep -Fq -- "$expected" "$matrix/$action.out" ||
       fail "autopilot $action from $checkout was not refused by admission: $(tail -5 "$matrix/$action.out")"
     [ "$before" = "$(matrix_state)" ] ||
       fail "refused autopilot $action from $checkout changed HEAD, refs or .oms state"
   }
-  matrix_refused "$dead_scratch" 'has exited' run --worker codex --reviewer claude --base main --review-mode gate
-  matrix_refused "$dead_scratch" 'has exited' reenter
-  matrix_refused "$dead_scratch" 'has exited' status
-  matrix_refused "$dead_scratch" 'has exited' propose --planner claude --allowed 'src,tests' --base main
+  matrix_bind() {  # BOUND-CHECKOUT STAGE: restore the plan with the receipt rebound
+    rm -rf "$main/.oms/plan"
+    cp -R "$matrix/plan" "$main/.oms/plan"
+    python3 - "$main/.oms/plan/autopilot-run.json" "$1" "$2" <<'PY' ||
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+row["repo"], row["stage"] = sys.argv[2], sys.argv[3]
+open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(row, sort_keys=True) + "\n")
+PY
+      fail "could not rebind the matrix receipt"
+  }
+  # Caller x bound owner x stage x action. status reads from every checkout of
+  # the state root and abandon retires from any of them, whatever the owner;
+  # run, reenter, propose and shadow admit only the bound checkout of a live
+  # owner, except that a done receipt binds nothing. An admitted run, reenter or propose stops at the
+  # --collaboration probe right after admission, before any effect.
+  unrelated="$TMP/scratch-run-unrelated"
+  make_repo "$unrelated"
+  mkdir -p "$unrelated/calls"
+  cp -R "$main/.oms/plan" "$matrix/plan"
+  for bound in "$dead_scratch" "$scratch"; do
+    for stage in proposing 'done'; do
+      matrix_bind "$bound" "$stage"
+      status_line=""
+      for caller in "$main" "$scratch" "$dead_scratch" "$unrelated"; do
+        for action in status abandon run reenter propose shadow; do
+          case "$caller:$action" in
+            "$unrelated":status|"$unrelated":abandon|"$unrelated":shadow) expected="" ;;
+            "$unrelated":*) expected='--collaboration must be off or auto' ;;
+            *:status|*:abandon) expected="" ;;
+            "$dead_scratch":*) expected='has exited' ;;
+            "$bound":shadow) expected="" ;;
+            "$bound":*) expected='--collaboration must be off or auto' ;;
+            *) expected='is bound to execution checkout' ;;
+          esac
+          # A done receipt binds nothing: a foreign checkout may start the next
+          # campaign over it (shadow only observes, so its cell is skipped).
+          if [ "$stage" = 'done' ] && [ "$expected" = 'is bound to execution checkout' ]; then
+            case "$action" in
+              shadow) continue ;;
+              *) expected='--collaboration must be off or auto' ;;
+            esac
+          fi
+          case "$action" in
+            run|reenter|propose) set -- --collaboration probe ;;
+            shadow) set -- --session matrix ;;
+            abandon) set -- --reason 'matrix abandon' ;;
+            *) set -- ;;
+          esac
+          if [ -n "$expected" ]; then
+            matrix_refused "$caller" "$expected" "$action" "$@"
+            continue
+          fi
+          receipt_before="$(matrix_state)"
+          rc=0
+          (
+            unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+            OMS_DELEGATE_WORKTREE_ROOT="$managed" run_autopilot "$caller" "$action" "$@"
+          ) > "$matrix/$action.out" 2>&1 || rc=$?
+          case "$caller:$action:$stage" in
+            *:status:*|"$unrelated":*|*:abandon:done)
+              [ "$receipt_before" = "$(matrix_state)" ] ||
+                fail "autopilot $action from $caller changed HEAD, refs or .oms state" ;;
+          esac
+          case "$caller:$action:$stage" in
+            "$unrelated":status:*|"$unrelated":shadow:*)
+              [ "$rc" = 0 ] && ! grep -Fq 'outer run:' "$matrix/$action.out" &&
+                ! grep -Fq 'would-' "$matrix/$action.out" ||
+                fail "$action from an unrelated repository read the shared receipt: $(tail -5 "$matrix/$action.out")" ;;
+            "$unrelated":abandon:*)
+              [ "$rc" = 2 ] && grep -Fq 'no live autopilot receipt' "$matrix/$action.out" ||
+                fail "abandon from an unrelated repository reached the shared receipt, got $rc: $(tail -5 "$matrix/$action.out")" ;;
+            *:status:*)
+              # Every checkout of the state root diagnoses the receipt alike.
+              [ "$rc" = 0 ] || fail "autopilot status from $caller failed: $(tail -5 "$matrix/$action.out")"
+              [ -n "$status_line" ] || status_line="$(grep -F 'outer run:' "$matrix/$action.out" || true)"
+              [ "$status_line" = "$(grep -F 'outer run:' "$matrix/$action.out" || true)" ] ||
+                fail "autopilot status from $caller diagnosed the $stage receipt unlike the canonical checkout: $(cat "$matrix/$action.out")"
+              [ "$stage" = 'done' ] || [ "$status_line" = 'outer run: stage=proposing receipt='"$(sha256_file "$main/.oms/plan/autopilot-run.json")" ] ||
+                fail "autopilot status from $caller did not validate the proposing receipt: $(cat "$matrix/$action.out")" ;;
+            *:abandon:done)
+              [ "$rc" = 2 ] && grep -Fq 'archived, not abandoned' "$matrix/$action.out" ||
+                fail "abandon of a done receipt from $caller must refuse, got $rc: $(tail -5 "$matrix/$action.out")" ;;
+            *:abandon:*)
+              [ "$rc" = 0 ] && [ ! -e "$main/.oms/plan/autopilot-run.json" ] ||
+                fail "abandon from $caller did not retire the shared receipt, got $rc: $(tail -5 "$matrix/$action.out")"
+              matrix_bind "$bound" "$stage" ;;
+            *:shadow:*)
+              [ "$rc" = 0 ] && grep -Fq 'would-' "$matrix/$action.out" ||
+                fail "shadow from the live bound checkout was not admitted, got $rc: $(tail -5 "$matrix/$action.out")"
+              matrix_bind "$bound" "$stage" ;;
+          esac
+        done
+      done
+    done
+  done
+  # A finished scratch campaign whose owner exited does not lock the canonical
+  # checkout out: its propose archives the done receipt and binds a new one.
+  matrix_bind "$dead_scratch" 'done'
+  rm -f "$main/.oms/plan/tasks.json"
+  receipt_before="$(sha256_file "$main/.oms/plan/autopilot-run.json")"
+  rc=0
   (
     unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
-    OMS_DELEGATE_WORKTREE_ROOT="$managed" run_autopilot "$main" status
-  ) > "$matrix/canonical-status.out" 2>&1 || fail "canonical autopilot status failed: $(tail -5 "$matrix/canonical-status.out")"
-  grep -Fq 'outer run: stage=proposing' "$matrix/canonical-status.out" ||
-    fail "canonical autopilot status did not read the dead scratch's receipt: $(cat "$matrix/canonical-status.out")"
-  # A sibling scratch of the same state root is just as foreign as the canonical checkout.
-  for status_repo in "$main" "$scratch"; do
-    matrix_refused "$status_repo" 'is bound to execution checkout' run --worker codex --reviewer claude \
-      --base main --review-mode gate
-    matrix_refused "$status_repo" 'is bound to execution checkout' reenter
-    matrix_refused "$status_repo" 'is bound to execution checkout' shadow --session matrix
-    matrix_refused "$status_repo" 'is bound to execution checkout' propose --planner claude \
-      --allowed 'src,tests' --base main
-  done
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" OMS_T_STATE_REPO="$main" \
+      run_autopilot "$main" propose --planner claude --allowed 'src,tests' --base main
+  ) > "$matrix/done-propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] && [ -f "$main/.oms/plan/autopilot-run.$receipt_before.json" ] ||
+    fail "canonical propose over a dead scratch's done receipt must archive it, got $rc: $(tail -5 "$matrix/done-propose.out")"
+  matrix_bind "$dead_scratch" proposing
   # A scratch cannot prove its binding from an unreadable receipt.
   cp "$main/.oms/plan/autopilot-run.json" "$matrix/receipt"
   for receipt_before in '{' '' '{"repo": "", "stage": "driving"}'; do
