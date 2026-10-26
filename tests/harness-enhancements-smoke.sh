@@ -606,6 +606,53 @@ EOF
   esac
   [ -z "$(find "$signal_tmp" -maxdepth 1 -name 'oms-smoke-run.*' -print -quit)" ] ||
     fail "a terminated smoke shard left its run log behind"
+
+  # A shard that finishes on its own must not leave its background child
+  # running, whether the shard passed or failed and whether it ignores TERM.
+  local reap_suite="$TMP/reap-smoke.sh"
+  local reap_tmp="$TMP/reap-tmp" reap_pid reap_state
+  mkdir -p "$reap_tmp"
+  cat > "$reap_suite" <<'EOF'
+test_leaves_child_ok() {
+  sleep 60 >/dev/null 2>&1 &
+  echo "$!" >> "$OMS_TEST_REAP_FILE"
+  sh -c "trap '' TERM; sleep 60" >/dev/null 2>&1 &
+  echo "$!" >> "$OMS_TEST_REAP_FILE"
+}
+test_leaves_child_failing() {
+  sleep 60 >/dev/null 2>&1 &
+  echo "$!" >> "$OMS_TEST_REAP_FILE"
+  sh -c "trap '' TERM; sleep 60" >/dev/null 2>&1 &
+  echo "$!" >> "$OMS_TEST_REAP_FILE"
+  return 1
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_leaves_child_ok
+test_leaves_child_failing
+# SMOKE_TEST_CALLS_END
+EOF
+  status=0
+  TMPDIR="$reap_tmp" OMS_TEST_REAP_FILE="$reap_tmp/pids" OMS_SMOKE_SUITE="$reap_suite" \
+    OMS_TEST_KILL_LOG="$reap_tmp/kills" BASH_ENV="$signal_tmp/kill-log.bash" \
+    "$ROOT/tests/run-smoke-shard.sh" --jobs 2 >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 1 ] || fail "the failing reaped shard should fail the run, got $status"
+  # Each reaped group is signalled inside its own reap step and then dropped,
+  # so no later cleanup pass signals a retained (possibly reused) group again.
+  [ "$(grep -c -- ' -TERM -- -' "$reap_tmp/kills")" = 2 ] ||
+    fail "each reaped shard group must get exactly one TERM: $(tr '\n' ';' < "$reap_tmp/kills")"
+  [ "$(wc -l < "$reap_tmp/pids" | tr -d ' ')" = 4 ] || fail "both reap-test shards must record their children"
+  while IFS= read -r reap_pid; do
+    for _ in $(seq 1 200); do
+      reap_state="$(ps -o stat= -p "$reap_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+      case "$reap_state" in ''|Z*) break ;; esac
+      sleep 0.05
+    done
+    case "$reap_state" in
+      ''|Z*) ;;
+      *) kill -KILL "$reap_pid" 2>/dev/null || true
+         fail "a reaped smoke shard's background process survived the run: $reap_pid" ;;
+    esac
+  done < "$reap_tmp/pids"
 }
 
 test_smoke_runner_reports_bounded_opt_in_timings() {

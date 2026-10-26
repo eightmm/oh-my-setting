@@ -238,9 +238,24 @@ if [ -n "$JOBS" ]; then
   set +m
   status=0
   i=1
+  tries=0
   for pid in $PIDS; do
     if ! wait "$pid"; then
       status=1
+    fi
+    # Leftovers of a reaped shard die inside this step, while the group is
+    # still verified ours (see cleanup_workers); the PID is never kept.
+    if ! kill -0 "$pid" >/dev/null 2>&1 && kill -0 -- "-$pid" >/dev/null 2>&1; then
+      kill -TERM -- "-$pid" >/dev/null 2>&1 || true
+      tries=0
+      while [ "$tries" -lt 10 ] && ! kill -0 "$pid" >/dev/null 2>&1 &&
+          kill -0 -- "-$pid" >/dev/null 2>&1; do
+        sleep 0.1
+        tries=$((tries + 1))
+      done
+      if ! kill -0 "$pid" >/dev/null 2>&1 && kill -0 -- "-$pid" >/dev/null 2>&1; then
+        kill -KILL -- "-$pid" >/dev/null 2>&1 || true
+      fi
     fi
     # A reaped shard leaves the cleanup set before its PID can be reused.
     PIDS="$(printf ' %s ' $PIDS | sed "s/ $pid / /")"
