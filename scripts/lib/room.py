@@ -1616,17 +1616,34 @@ def _structured_rows(repo, ident, rows=None):
     if rows is None:
         ident = resolve(repo, ident, fresh=True)
         rows = records(repo, ident)
-    histories = [records(repo, old) for old in _sealed_predecessors(repo, ident)] if repo is not None else []
+    histories = [_sealed_events(repo, old) for old in _sealed_predecessors(repo, ident)] if repo is not None else []
+    return [row for history in reversed(histories) for row in history] + _structured_of(rows)
+
+
+def _structured_of(rows):
     events = []
-    for history in list(reversed(histories)) + [rows]:
-        for row in history:
-            event = row.get("room_event", {})
-            if event.get("kind") in {"call-result", "review-dispatch", "review-dispatch-failed"}:
-                event_shape(event)
-                if event["kind"] != "call-result" and not _controller_review_ids(event):
-                    continue
-                events.append(row)
+    for row in rows:
+        event = row.get("room_event", {})
+        if event.get("kind") in {"call-result", "review-dispatch", "review-dispatch-failed"}:
+            event_shape(event)
+            if event["kind"] != "call-result" and not _controller_review_ids(event):
+                continue
+            events.append(row)
     return events
+
+
+def _log_stamp(repo, ident):
+    info = thread_live.thread_path(repo, ident).stat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _sealed_events(repo, ident):
+    """A sealed log's own structured rows, decoded once per file identity; callers only read the shared rows."""
+    stamp = _log_stamp(repo, ident)
+    cached = _SEALED_EVENTS.get((str(repo), ident))
+    if not cached or cached[0] != stamp:
+        cached = _SEALED_EVENTS[(str(repo), ident)] = (stamp, _structured_of(records(repo, ident)))
+    return cached[1]
 
 
 def structured_events(repo, ident, rows=None):
@@ -1899,8 +1916,8 @@ def messages(repo, room):
     return project(records(repo, resolve(repo, room)))["messages"]
 
 
-def status(repo, room, exact=False):
-    rows = records(repo, room if exact else resolve(repo, room))
+def status(repo, room, exact=False, _rows=None):
+    rows = records(repo, room if exact else resolve(repo, room)) if _rows is None else _rows
     state = project(rows)
     if state["successor"]:
         _later_receipts(repo, state)
@@ -1971,16 +1988,17 @@ def _later_receipts(repo, state):
         cur = nxt
 
 
-_SEALED_VIEWS = {}
+# Sealed logs never change: what readers derive from one is kept per file identity, in process memory only.
+_SEALED_VIEWS, _SEALED_EVENTS = {}, {}
 
 
 def _sealed(repo, ident):
-    """(predecessor, successor, settled calls, publications, call seqs) of a sealed log, read once per change."""
-    info = thread_live.thread_path(repo, ident).stat()
-    stamp = (info.st_dev, info.st_ino, info.st_size)
+    """(predecessor, successor, settled calls, publications, call seqs, swaps) of a sealed log, read once per change."""
+    stamp = _log_stamp(repo, ident)
     cached = _SEALED_VIEWS.get((str(repo), ident))
     if not cached or cached[0] != stamp:
-        before = status(repo, ident, exact=True)
+        rows = records(repo, ident)
+        before = status(repo, ident, exact=True, _rows=rows)
         calls = []
         for member in before["participants"]:
             result = before["call_results"].get(member["participant"])
@@ -1990,9 +2008,16 @@ def _sealed(repo, ident):
             calls.append(dict(member, state="done" if code == 0 else "failed", ended=result["ts"], exit=code,
                               read=result["read"], attempt=None, title=member.get("label"), _predecessor=ident))
         seqs = {member["participant"]: member["seq"] for member in before["participants"] if member.get("parent")}
+        _SEALED_EVENTS[(str(repo), ident)] = (stamp, _structured_of(rows))
         cached = _SEALED_VIEWS[(str(repo), ident)] = (stamp, (before.get("predecessor"), before.get("successor"),
-                                                               calls, before.get("publications") or {}, seqs))
+                                                               calls, before.get("publications") or {}, seqs,
+                                                               before["swaps"]))
     return cached[1]
+
+
+def sealed_swaps(repo, ident):
+    """The recorded main swaps of a sealed log, oldest first, as copies."""
+    return [dict(swap) for swap in _sealed(repo, ident)[5]]
 
 
 def lineage(repo, state):
@@ -2005,7 +2030,7 @@ def lineage(repo, state):
         if not old or old in seen:
             break
         try:
-            before, successor, calls, published, seqs = _sealed(repo, old)
+            before, successor, calls, published, seqs, _ = _sealed(repo, old)
         except (OSError, ValueError, KeyError, TypeError):
             break
         if successor != later:

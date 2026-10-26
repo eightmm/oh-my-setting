@@ -677,12 +677,6 @@ def snapshot(repo, room_id=None, _tick=None):
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 try:
-                    # Succession reuses this tick's evidence; a failed read leaves mail with its original main.
-                    from room_view import message_successors, nodes
-                    state["message_successors"] = message_successors(attempt_rows, nodes(state))
-                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
-                    state.pop("message_successors", None)
-                try:
                     import panel_chats
                     state["native_advisors"] = panel_chats.native_advisors(state["room"]["participants"])
                     state["native_subagents"] = panel_chats.native_subagents(state["room"]["participants"])
@@ -701,8 +695,17 @@ def snapshot(repo, room_id=None, _tick=None):
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 state["awaiting_admission"] = awaiting_admission(repo, state, _tick=_tick)
+                try:
+                    # Succession reuses this tick's evidence; a failed read leaves mail with its original main.
+                    # It reads only the mains, which neither decisions nor pending admissions change.
+                    from panel_cache import shared_board
+                    from room_view import message_successors, nodes
+                    state["message_successors"] = message_successors(attempt_rows, nodes(shared_board(_tick, state)))
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+                    state.pop("message_successors", None)
+        from panel_cache import shared_board
         from review_backlog import project
-        state["review_backlog"] = project(state)
+        state["review_backlog"] = project(shared_board(_tick, state))
         return state, status
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
         state = {"repo": {"name": repo.name}, "collection": {"ok": False}}
@@ -743,8 +746,9 @@ def awaiting_admission(repo, state, _tick=None):
     this repository never sees, and the owner's decision settles the board hint."""
     from terminal_panel import INBOX_LIMIT, outcomes
     from room_view import nodes
+    from panel_cache import shared_board
     from panel_results import settled_pending_admissions
-    members = [member for member in nodes(dict(state, awaiting_admission=None))
+    members = [member for member in nodes(shared_board(_tick, dict(state, awaiting_admission=None)))
                if member.get("role") == "worker" and member.get("access") == "write"
                and member["state"] == "done" and member.get("task_id")]
     try:

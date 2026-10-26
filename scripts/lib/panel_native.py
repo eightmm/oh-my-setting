@@ -1109,9 +1109,9 @@ def _latest_swap(repo, state, chain=None):
     if state.get("swaps"):
         return state["swaps"][-1]
     for old, *_ in (room.lineage(repo, state) if chain is None else chain):
-        prior = room.project(room.records(repo, old))
-        if prior.get("swaps"):
-            return prior["swaps"][-1]
+        swaps = room.sealed_swaps(repo, old)
+        if swaps:
+            return swaps[-1]
     return None
 
 

@@ -287,6 +287,7 @@ class TickReads:
         self.repo = repo
         self.values = {}
         self.errors = {}
+        self.view = None
 
     def _once(self, key, collect):
         if key in self.errors:
@@ -315,11 +316,23 @@ class TickReads:
         return self._once('attempts', lambda: read_shared(
             self.repo, 'attempts', lambda: self._once('agent-events', collect), _tick=self))
 
+    def board(self, report):
+        """This collection's board view: room members project once while the inputs they read stay the same."""
+        from room_view import shared_view
+        self.view = shared_view(self.view, report)
+        return self.view
+
     def records(self):
         from panel_results import _records
         return self._once('result-records', lambda: read_shared(
             self.repo, 'result-records', lambda: self._once('records-query',
                 lambda: _records(self.repo, _attempts=self.attempts())), _tick=self))
+
+
+def shared_board(tick, report):
+    """The collection's shared board view of report, or report itself for a tick that keeps none."""
+    board = getattr(tick, 'board', None)
+    return board(report) if callable(board) else report
 
 
 PLAN_INPUT_LIMIT = 16384

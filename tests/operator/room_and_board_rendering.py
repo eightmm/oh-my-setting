@@ -4196,6 +4196,76 @@ for pending_tasks in ({"admission-task"}, set()):
         assert report.get("awaiting_admission") == expected, report
         worker = next(m for m in graph_text.nodes(report) if m["participant"] == "admission-worker")
         assert graph_text.call_classifier(report)(worker) == ("review" if expected else "past")
+# One read projects the room's calls once for every board reader; a pending admission that withdraws an earlier
+# room's call re-arranges the members from that projection, and each reader still sees what a fresh projection shows.
+earlier_room = dict(admission_room, predecessor_calls=[{"participant": "earlier-worker", "role": "worker",
+    "parent": "admission-main", "joined": True, "_predecessor": "admission-old", "state": "done", "exit": 0}])
+earlier_state = deepcopy(admission_state)
+earlier_state["attempts"]["recent"].append({"attempt_id": "earlier-worker", "task_id": "earlier-task", "state": "done",
+    "panel": {"room_id": "admission-room", "room_participant": "earlier-worker", "role": "worker", "access": "write"}})
+for pending_tasks in ({"admission-task"}, {"admission-task", "earlier-task"}):
+    with patch.object(panel, "dashboard", side_effect=lambda *a, **k: (deepcopy(earlier_state), 0)), \
+            patch.object(room_module, "status", side_effect=lambda *a: deepcopy(earlier_room)), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel_results, "pending_admissions", return_value=pending_tasks), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "[]", "")), \
+            patch.dict(os.environ, {"OMS_ROOM_ID": "admission-room"}), \
+            patch.object(graph_text, "_project_nodes", wraps=graph_text._project_nodes) as projected:
+        watched = panel.read_panel(Path("."), "codex", "graph", False)[0]
+        assert projected.call_count == 1, projected.call_count
+    fresh = dict(watched)
+    kept = "earlier-task" in pending_tasks
+    assert watched["awaiting_admission"] == ["admission-worker"] + ["earlier-worker"] * kept, watched
+    assert ("earlier-worker" in {m["participant"] for m in graph_text.nodes(fresh)}) is kept
+    import review_backlog
+    assert watched["review_backlog"] == review_backlog.project(fresh) == {"threshold": 8, "counts": {
+        "admission-main": 1 + kept}}, watched["review_backlog"]
+# A board view reuses the projection only while every key it reads is the same object; a new decision projects again.
+from panel_cache import TickReads
+shared_tick = TickReads(Path("."))
+with patch.object(graph_text, "_project_nodes", wraps=graph_text._project_nodes) as projected:
+    assert graph_text.nodes(shared_tick.board(fresh)) == graph_text.nodes(shared_tick.board(dict(fresh, review_backlog={})))
+    assert projected.call_count == 1, projected.call_count
+    decided = graph_text.nodes(shared_tick.board(dict(fresh, finalized={"earlier-task": "accepted"})))
+    assert projected.call_count == 2 and "earlier-worker" not in {m["participant"] for m in decided}, decided
+# A sealed room the board continues is decoded by the first read only (once for its structured evidence, once for its
+# summary); every later read reuses both while its file is unchanged.
+sealed_repo = temporary / "sealed lineage repo"
+sealed_repo.mkdir()
+subprocess.run(["git", "init", "-q", str(sealed_repo)], check=True)
+with patch.dict(os.environ, {}):
+    for name in [n for n in os.environ if n.startswith(("OMS_ROOM_", "OMS_PANEL_")) or n in (
+            "OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "TMUX", "TMUX_PANE")]:
+        del os.environ[name]
+    sealed_old = room_module.create(sealed_repo, title="Sealed lineage")
+    room_module.join(sealed_repo, sealed_old, "sealed-main", "claude", "main")
+    # A swap row as swap_main writes it, without the native attempt update it also makes.
+    sealed_swap = {"kind": "main-swap", "participant": "sealed-main", "provider": "codex", "model": "gpt-6.1-sol",
+                   "attempt": "att_" + "a" * 32, "harness": "codex"}
+    sealed_rows = room_module.records(sealed_repo, sealed_old)
+    with (sealed_repo / ".oms/threads" / (sealed_old + ".jsonl")).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"schema": 1, "ts": sealed_rows[-1]["ts"], "thread": sealed_old,
+                                 "seq": sealed_rows[-1]["seq"] + 1, "role": "note", "agent": "agent",
+                                 "text": "Main swapped to gpt-6.1-sol", "room_event": sealed_swap}) + "\n")
+    sealed_new = room_module.rollover(sealed_repo, sealed_old, "sealed-main")
+    decoded = []
+    with patch.object(panel, "dashboard", side_effect=lambda *a, **k: ({"repo": {"name": "sealed"}}, 0)), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")), \
+            patch.object(room_module, "decode_records", wraps=room_module.decode_records) as decodes:
+        for read in range(3):
+            if read == 2:
+                # Any change to the sealed file's identity reads it again.
+                sealed_log = sealed_repo / ".oms/threads" / (sealed_old + ".jsonl")
+                os.utime(sealed_log, ns=(sealed_log.stat().st_atime_ns, sealed_log.stat().st_mtime_ns + 2 * 10 ** 9))
+            decodes.reset_mock()
+            sealed_read, _ = panel.snapshot(sealed_repo, sealed_new)
+            decoded.append(sum(call.args[1] == sealed_old and len(call.args[0].splitlines()) > 2
+                               for call in decodes.call_args_list))
+            assert sealed_read["room"]["lineage"] == [sealed_old], sealed_read["room"]
+            assert [(s["participant"], s["model"]) for s in sealed_read["room"]["swaps"]] == [
+                (sealed_swap["participant"], sealed_swap["model"])], sealed_read["room"]
+    assert decoded[0] <= 2 and decoded[1] == 0 and decoded[2] >= 1, decoded
 # Record-only admission reads every retained call, without loading patch or answer bytes.
 admission_records = [
     {"kind": "delegate", "task_id": ident, "patch": ".oms/artifacts/change.patch", "patch_sha256": "a" * 64}

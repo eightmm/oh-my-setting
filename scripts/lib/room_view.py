@@ -9,7 +9,7 @@ from panel_view import (_RenderReport, amount, token_amount, token_pair, _usage_
                         plan_tail_columns, format_tail_row, clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
-                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tone, _render_report)
+                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tone, _render_report, freeze_report)
 
 DECIDED = frozenset({"completed", "accepted", "rejected"})
 
@@ -38,7 +38,11 @@ def nodes(report):
     report = _render_report(report)
     reused = report.members is not None
     if not reused:
-        report.members = _project_nodes(report)
+        calls = report.memo.get("calls")
+        reused = calls is not None
+        if not reused:
+            calls = report.memo["calls"] = _project_nodes(report)
+        report.members = _arrange(report, calls)
     if reused:
         # A live call's token label reads its stream, which grows between frames; it is the one field not from the report.
         for member in report.members:
@@ -46,6 +50,25 @@ def nodes(report):
                 label = call_tokens(report, member["attempt"], member["state"], True)
                 member["tokens"] = label if label != "tok n/a" else None
     return list(report.members)
+
+
+# Report keys the projection never reads; only _arrange reads awaiting_admission, through owed().
+_UNREAD = frozenset({"awaiting_admission", "message_successors", "native_advisors", "native_subagents", "review_backlog"})
+
+
+def shared_view(previous, report):
+    """A frozen view of report that keeps previous's projected calls while every other key is the same object, and its
+    members too while every earlier-room call keeps its owed() verdict; any other change projects again."""
+    view = freeze_report(report)
+    if (previous is not None and previous is not view and "calls" in previous.memo
+            and all(view.get(key) is previous.get(key) for key in (view.keys() | previous.keys()) - _UNREAD)):
+        view.memo["calls"] = previous.memo["calls"]
+        verdicts = previous.memo.get("owed")
+        if previous.members is not None and verdicts is not None and all(
+                bool(owed(view, call)) == kept for call, kept in verdicts):
+            view.members = previous.members
+            view.memo["owed"] = verdicts
+    return view
 
 
 def _project_nodes(report):
@@ -142,8 +165,20 @@ def _project_nodes(report):
                            harness=mapping(attempt.get("panel")).get("harness"),
                            title=member.get("label_override") or meta.get("label") or member.get("label"),
                            alias=extra.get("alias") or mapping(extra.get("refs")).get("panel_alias") or meta.get("alias")))
-        if member.get("_predecessor") and not owed(report, output[-1]):
-            output.pop()
+    return output
+
+
+def _arrange(report, calls):
+    """Board members from projected calls; only this step reads pending admissions, and it edits its own copies."""
+    room = mapping(report.get("room"))
+    verdicts = report.memo["owed"] = []
+    output = []
+    for call in calls:
+        if call.get("_predecessor"):
+            verdicts.append((call, bool(owed(report, call))))
+            if not verdicts[-1][1]:
+                continue
+        output.append(dict(call))
     # Seq numbers restart in every room: calls launched in the rooms this one continues come first, the oldest room
     # first, a carried call by the room it was launched in.
     depth = {old: -n for n, old in enumerate(listing(room.get("lineage")), 1)}

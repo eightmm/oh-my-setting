@@ -204,9 +204,10 @@ def codex_weekly_reading(now):
 
 def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
     from panel_chats import current_models, windows
+    from panel_cache import shared_board
     from room_view import nodes
     room = mapping(report.get("room"))
-    mains = [m for m in nodes(report) if m.get("role") == "main" and m.get("harness") != "pi"]
+    mains = [m for m in nodes(shared_board(_tick, report)) if m.get("role") == "main" and m.get("harness") != "pi"]
     panes = windows(repo, room["id"], room, _tick=_tick) if repo is not None and room.get("id") else {}
     now = time.time() if now is None else now
     current = current_models(repo, mains)
