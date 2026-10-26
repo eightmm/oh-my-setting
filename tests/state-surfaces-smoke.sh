@@ -1323,6 +1323,25 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
   fi
   grep -q '"autopilot-shadow.jsonl"' "$out" ||
     fail "the ambient shadow entry is path-precise, not a name match"
+
+  # A concurrent session's lifecycle transition appends to the event ledger;
+  # a suite that forgets --repo starts an attempt, which stays covered.
+  local before
+  mkdir -p "$state/lifecycle"
+  printf 'one\n' > "$state/lifecycle/events.jsonl"
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out"
+  before=$(cat "$out")
+  printf 'two\n' >> "$state/lifecycle/events.jsonl"
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out"
+  [ "$before" = "$(cat "$out")" ] ||
+    fail "an appended lifecycle event is written by a concurrent session and must not change the inventory"
+  mkdir -p "$state/lifecycle/attempts/att_x"
+  printf '{}\n' > "$state/lifecycle/attempts/att_x/spec.json"
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out"
+  [ "$before" != "$(cat "$out")" ] ||
+    fail "a started attempt under lifecycle/attempts must stay covered"
+  grep -q '"lifecycle/attempts/att_x/spec.json"' "$out" ||
+    fail "the attempt spec must be inventoried"
 }
 
 # --- claude/codex registration ---------------------------------------------

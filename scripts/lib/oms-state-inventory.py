@@ -10,10 +10,12 @@ Ambient entries are excluded because the live agent session writes them on its
 own schedule, with no relation to the gate: hooks/ and work-journal/ on every
 turn, ci.jsonl whenever the CI watcher records a run for a push, project-graph/
 whenever a graph reader refreshes its regenerable cache, an explicit graph
-shadow observation, and the autopilot shadow judgment at session start — a
-green 25-minute gate is a wide window for those to land and read as a suite
-defect. Everything else stays covered, including failures.jsonl, where a
-forgotten --repo is exactly the bug worth catching.
+shadow observation, the autopilot shadow judgment at session start, and the
+lifecycle event ledger that any panel or delegate lifecycle transition from a
+concurrent session appends to — a green 25-minute gate is a wide window for
+those to land and read as a suite defect. Everything else stays covered,
+including failures.jsonl and lifecycle/attempts/, where a forgotten --repo is
+exactly the bug worth catching.
 
 Usage: oms-state-inventory.py OMS_DIR
 """
@@ -37,7 +39,11 @@ AMBIENT_FILES = {"ci.jsonl", ".gitignore"}
 # autopilot judgment, while an explicit graph shadow may append a route row.
 # Only the ledgers themselves are ambient — every other plan/ or graph/ entry
 # (receipts, tasks, claims, runs, events) stays covered.
-AMBIENT_PATHS = {"plan/autopilot-shadow.jsonl", "graph/shadow.jsonl"}
+AMBIENT_PATHS = {
+    "plan/autopilot-shadow.jsonl",
+    "graph/shadow.jsonl",
+    "lifecycle/events.jsonl",
+}
 
 
 def _holds_only_ambient(rel: str, listed: set[str]) -> bool:
