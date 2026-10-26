@@ -19679,7 +19679,7 @@ EOF
     --prompt "Gate verify backstop" >"$project/out" 2>&1 || rc=$?
   [ "$rc" = "1" ] || fail "failing mechanical verify must force gate fail, got $rc"
   # An explicit verifier stays authoritative even without a fast mode.
-  assert_file_contains "$project/out" "gate verify: fail (exit 1, 0s"
+  assert_file_contains "$project/out" "gate verify: fail (exit 1, "
   assert_file_contains "$project/out" "claude: pass"
   assert_one_artifact_contains "$artifact_dir" '_verify-gate-verify-backstop-*.md' 'contract broken'
 
