@@ -152,7 +152,9 @@ PY
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 SPEC="$REPO/PROJECT.md"
-PLAN_DIR="$REPO/.oms/plan"
+# A parent's scratch worktree proposes against its own tree into the main checkout's plan.
+STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
+PLAN_DIR="${STATE_REPO//$'\r'/}/.oms/plan"
 PLAN_FILE="$PLAN_DIR/tasks.json"
 planner_prompt_file=""
 discovery_packet_file=""

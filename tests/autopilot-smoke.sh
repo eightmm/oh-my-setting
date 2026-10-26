@@ -577,11 +577,13 @@ if [ "${OMS_T_GOAL_INSTALL_DIFF:-0}" = 1 ]; then
   git -C "$OMS_T_REPO" config diff.external \
     "sh -c ': > \"$marker\"; exit 1'"
 fi
+# A scratch run commits in OMS_T_REPO but keeps plan state in OMS_T_STATE_REPO.
+state_repo="${OMS_T_STATE_REPO:-$OMS_T_REPO}"
 terminal_row() {
-  mkdir -p "$OMS_T_REPO/.oms/plan"
+  mkdir -p "$state_repo/.oms/plan"
   printf '{"schema":1,"kind":"terminal","run_id":"%s","receipt":"%s","status":"park","reason":"%s"}\n' \
     "$run_id" "$receipt" "$1" \
-    >> "$OMS_T_REPO/.oms/plan/progress.jsonl"
+    >> "$state_repo/.oms/plan/progress.jsonl"
 }
 terminal_result() {
   printf 'goal-drive: terminal-v1 run=%s receipt=%s status=park reason=%s\n' \
@@ -590,7 +592,7 @@ terminal_result() {
 case "${OMS_T_GOAL_RESULT:-success}" in
   success)
     terminal_row acceptance-pass
-    python3 - "$OMS_T_REPO/.oms/plan/progress.jsonl" <<'PY'
+    python3 - "$state_repo/.oms/plan/progress.jsonl" <<'PY'
 import json, sys
 path = sys.argv[1]
 rows = []
@@ -636,7 +638,7 @@ PY
     # to the genuine reason and must be the only replan authority.
     terminal_row task-failed
     printf '{"schema":1,"kind":"terminal","run_id":"%s","receipt":"%s","status":"park","reason":"tasks-exhausted"}\n' \
-      "$run_id" "$receipt" > "$OMS_T_REPO/.oms/plan/progress.jsonl"
+      "$run_id" "$receipt" > "$state_repo/.oms/plan/progress.jsonl"
     terminal_result task-failed
     exit 3 ;;
   duplicate-terminal)
@@ -1031,6 +1033,16 @@ PY
   then
     fail "an empty replan did not leave a parked receipt"
   fi
+
+  # A receipt copied into an unrelated checkout still names the original
+  # execution checkout; inspection (the gate every resume passes) must not trust it there.
+  local copied="$TMP/copied-receipt"
+  make_repo "$copied"
+  mkdir -p "$copied/.oms/plan" "$copied/calls"
+  cp "$repo/.oms/plan/autopilot-run.json" "$copied/.oms/plan/autopilot-run.json"
+  run_autopilot "$copied" status > "$copied/status.out" 2>&1 || true
+  grep -Fq 'outer run: invalid receipt' "$copied/status.out" ||
+    fail "a copied receipt validated in another checkout: $(cat "$copied/status.out")"
 
   write_done_plan "$repo" false
   rc=0
@@ -3386,36 +3398,245 @@ EOF
   done
 }
 
-test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose() {
-  local main="$TMP/scratch-refusal-main" managed="$TMP/scratch-refusal-managed"
-  local scratch normal discovered refused failed none rc=0 parent_env
+test_autopilot_runs_from_verified_scratch_and_allows_ordinary_propose() {
+  local main="$TMP/scratch-run-main" managed="$TMP/scratch-run-managed"
+  local scratch dead_scratch dead_owner normal discovered refused failed none rc=0 parent_env
   local original_receipt abandoned_archive abandon_record interrupted_branch candidate
+  local target frozen_base status_repo receipt_before matrix owner
   make_repo "$main"
+  # The main checkout holds the base branch, so the scratch stays detached at it.
+  git -C "$main" switch -q main
   mkdir -p "$main/calls" "$TMP/bin" "$managed"
   write_orchestration_stubs "$TMP/bin"
   main="$(cd "$main" && pwd -P)"
+  frozen_base="$(git -C "$main" rev-parse HEAD)"
+  target="oms/autopilot-$(sha256_file "$main/PROJECT.md" | cut -c1-12)"
   parent_env="env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH OMS_DELEGATE_WORKTREE_ROOT=$managed"
+
+  # Admission matrix: a receipt bound to one execution checkout admits only
+  # status and abandon from any other checkout, and nothing from a bound
+  # scratch whose owner has exited; every refusal leaves Git and .oms intact.
+  sleep 300 &
+  dead_owner=$!
+  dead_scratch="$($parent_env "$ROOT/scripts/scratch-worktree.sh" add --repo "$main" --owner-pid "$dead_owner")" ||
+    fail "dead-owner scratch fixture creation failed"
   scratch="$($parent_env "$ROOT/scripts/scratch-worktree.sh" add --repo "$main" --owner-pid $$)" ||
     fail "scratch worktree fixture creation failed"
-  git -C "$scratch" switch -q main
-  mkdir -p "$scratch/calls"
+  matrix="$TMP/scratch-run-matrix"
+  mkdir -p "$dead_scratch/calls" "$scratch/calls" "$matrix"
+  rc=0
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" OMS_T_PLAN_RC=3 \
+      run_autopilot "$dead_scratch" propose --planner claude --allowed 'src,tests' --base main
+  ) > "$matrix/bind.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "the soon-dead scratch should leave an interrupted receipt, got $rc: $(tail -5 "$matrix/bind.out")"
+  kill "$dead_owner"
+  wait "$dead_owner" 2>/dev/null || true
+  owner="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" owner-id "$main/.oms/plan/autopilot-run.json")" ||
+    fail "the interrupted scratch receipt has no owner"
+  owner="${owner//$'\r'/}"
+  # The dead session left a markerless claimed lease that reenter would recover.
+  python3 - "$main/.oms/plan/tasks.json" "$main/PROJECT.md" "$owner" <<'PY' ||
+import datetime, hashlib, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+spec = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
+json.dump({
+    "schema": 3, "goal": "finish", "accept": "true",
+    "project_contract": {
+        "schema": 1, "spec_sha256": spec,
+        "allowed_envelope": ["src", "tests"],
+        "acceptance_files": [], "acceptance_manifest": [],
+    },
+    "tasks": {"t9": {
+        "id": "t9", "title": "feat: t9", "state": "claimed",
+        "depends": [], "allowed_paths": ["src/"], "forbidden_paths": [],
+        "verify": "true", "role": "", "provider": "codex", "ttl": "",
+        "artifact": "", "patch": "", "reason": "", "claimed_at": now,
+        "executor_id": "", "executor_soul_sha256": "", "lease_epoch": 1,
+        "lease_id": "lease-dead-claim", "review_lease_id": "",
+        "repair_count": 0, "repair_artifact": "", "created": now, "updated": now,
+        "autopilot_owner_id": sys.argv[3],
+    }},
+}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+    fail "could not plant the dead scratch's lease"
+  matrix_state() {
+    local checkout file
+    git -C "$main" for-each-ref
+    for checkout in "$main" "$dead_scratch" "$scratch"; do
+      git -C "$checkout" symbolic-ref --quiet HEAD || true
+      git -C "$checkout" rev-parse HEAD
+    done
+    for checkout in "$main" "$dead_scratch" "$scratch"; do
+      [ ! -d "$checkout/.oms" ] || find "$checkout/.oms" -print
+    done | LC_ALL=C sort | while IFS= read -r file; do
+      if [ -f "$file" ]; then
+        printf '%s %s\n' "$file" "$(sha256_file "$file")"
+      else
+        printf '%s\n' "$file"
+      fi
+    done
+  }
+  matrix_refused() {  # CHECKOUT EXPECTED-TEXT ACTION ARGS...
+    local checkout="$1" expected="$2" action="$3" before matrix_rc=0
+    shift 3
+    before="$(matrix_state)"
+    (
+      unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+      OMS_DELEGATE_WORKTREE_ROOT="$managed" OMS_T_STATE_REPO="$main" \
+        OMS_T_GOAL_RESULT=success OMS_T_GOAL_COMMIT=1 OMS_T_REVIEW_RC=0 \
+        run_autopilot "$checkout" "$action" "$@"
+    ) > "$matrix/$action.out" 2>&1 || matrix_rc=$?
+    [ "$matrix_rc" = 2 ] ||
+      fail "autopilot $action from $checkout must refuse, got $matrix_rc: $(tail -5 "$matrix/$action.out")"
+    grep -Fq "$expected" "$matrix/$action.out" ||
+      fail "autopilot $action from $checkout was not refused by admission: $(tail -5 "$matrix/$action.out")"
+    [ "$before" = "$(matrix_state)" ] ||
+      fail "refused autopilot $action from $checkout changed HEAD, refs or .oms state"
+  }
+  matrix_refused "$dead_scratch" 'has exited' run --worker codex --reviewer claude --base main --review-mode gate
+  matrix_refused "$dead_scratch" 'has exited' reenter
+  matrix_refused "$dead_scratch" 'has exited' status
+  matrix_refused "$dead_scratch" 'has exited' propose --planner claude --allowed 'src,tests' --base main
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" run_autopilot "$main" status
+  ) > "$matrix/canonical-status.out" 2>&1 || fail "canonical autopilot status failed: $(tail -5 "$matrix/canonical-status.out")"
+  grep -Fq 'outer run: stage=proposing' "$matrix/canonical-status.out" ||
+    fail "canonical autopilot status did not read the dead scratch's receipt: $(cat "$matrix/canonical-status.out")"
+  # A sibling scratch of the same state root is just as foreign as the canonical checkout.
+  for status_repo in "$main" "$scratch"; do
+    matrix_refused "$status_repo" 'is bound to execution checkout' run --worker codex --reviewer claude \
+      --base main --review-mode gate
+    matrix_refused "$status_repo" 'is bound to execution checkout' reenter
+    matrix_refused "$status_repo" 'is bound to execution checkout' shadow --session matrix
+    matrix_refused "$status_repo" 'is bound to execution checkout' propose --planner claude \
+      --allowed 'src,tests' --base main
+  done
+  # A scratch cannot prove its binding from an unreadable receipt.
+  cp "$main/.oms/plan/autopilot-run.json" "$matrix/receipt"
+  for receipt_before in '{' '' '{"repo": "", "stage": "driving"}'; do
+    printf '%s' "$receipt_before" > "$main/.oms/plan/autopilot-run.json"
+    matrix_refused "$scratch" 'cannot read the outer receipt binding' run --worker codex --reviewer claude \
+      --base main --review-mode gate
+  done
+  cp "$matrix/receipt" "$main/.oms/plan/autopilot-run.json"
 
+  # Abandon is the cross-root exit and retires the batch the dead scratch bound.
+  python3 - "$main/.oms/plan/progress.jsonl" "$dead_scratch" "$owner" <<'PY' ||
+import json, sys
+row = {"schema": 1, "kind": "goal-batch", "phase": "prepared", "batch_id": "batch-scratch",
+       "contract_id": sys.argv[3], "worktree": sys.argv[2], "tasks": []}
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(row) + "\n")
+PY
+    fail "could not seed the scratch batch"
   (
     unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
     OMS_DELEGATE_WORKTREE_ROOT="$managed" \
+      run_autopilot "$main" abandon --reason 'scratch run fixture'
+  ) > "$matrix/abandon.out" 2>&1 || fail "autopilot abandon from the canonical checkout failed: $(tail -5 "$matrix/abandon.out")"
+  grep -Fq '"batch_id": "batch-scratch"' "$main/.oms/plan/progress.jsonl" &&
+    grep -F '"batch_id": "batch-scratch"' "$main/.oms/plan/progress.jsonl" | grep -Fq '"phase": "complete"' ||
+    fail "canonical abandon did not retire the scratch's prepared batch"
+  [ ! -e "$main/.oms/plan/autopilot-run.json" ] ||
+    fail "scratch abandon left the shared receipt live"
+  find "$main/.oms/plan" -maxdepth 1 -name 'autopilot-run.*.abandoned.json' -print | grep -q . ||
+    fail "scratch abandon did not record its exit in the main plan"
+  [ ! -e "$main/.oms/plan/autopilot-reentries.jsonl" ] && [ ! -e "$main/.oms/plan/autopilot-shadow.jsonl" ] ||
+    fail "a refused reenter or shadow wrote its ledger"
+  rm -f "$main/.oms/plan/tasks.json"
+
+  mkdir -p "$TMP/scratch-run-bin"
+  # The real plan-from-spec writes the proposal; only the provider is stubbed.
+  cat > "$TMP/scratch-run-bin/agent-call" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$OMS_T_CALLS/planner-args"
+artifact="$OMS_T_CALLS/planner-artifact.md"
+printf '## Output\n\n%s\n' '{"tasks":[{"id":"t1","title":"feat: bounded change","allowed":["src/"],"verify":"true","depends":[]}]}' > "$artifact"
+echo "artifact: $artifact"
+EOF
+  chmod +x "$TMP/scratch-run-bin/agent-call"
+  git -C "$scratch" -c user.name=OMS -c user.email=oms@example.invalid \
+    commit -q --allow-empty -m 'detached work off the base'
+  rc=0
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" OMS_T_STATE_REPO="$main" \
       run_autopilot "$scratch" propose --planner claude --allowed 'src,tests' --base main
+  ) > "$scratch/detached.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a scratch detached off the frozen base must refuse, got $rc: $(tail -5 "$scratch/detached.out")"
+  grep -Fq 'HEAD detached at the frozen base' "$scratch/detached.out" ||
+    fail "detached-off-base refusal did not explain the accepted HEAD"
+  [ ! -e "$main/.oms/plan/autopilot-run.json" ] && [ ! -f "$scratch/calls/plan-from-spec" ] ||
+    fail "a scratch detached off the frozen base bound a receipt or reached the planner"
+  git -C "$scratch" checkout -q --detach "$frozen_base"
+  rc=0
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" OMS_T_CALLS="$scratch/calls" \
+      OMS_PLAN_FROM_SPEC_AGENT_CALL="$TMP/scratch-run-bin/agent-call" \
+      "$ROOT/scripts/autopilot.sh" --repo "$scratch" propose --planner claude \
+        --allowed 'src,tests' --base main
   ) > "$scratch/propose.out" 2>&1 || rc=$?
-  [ ! -f "$scratch/calls/plan-from-spec" ] ||
-    fail "autopilot propose from verified scratch reached the stub planner"
+  [ "$rc" = 4 ] || fail "autopilot propose from verified scratch should reach review, got $rc: $(tail -5 "$scratch/propose.out")"
+  [ -f "$scratch/calls/planner-args" ] ||
+    fail "autopilot propose from verified scratch did not reach the planner"
+  if find "$scratch/.oms/plan" -name 'proposal-*.json' -print 2>/dev/null | grep -q .; then
+    fail "plan-from-spec wrote the scratch proposal in the scratch"
+  fi
   [ ! -e "$scratch/.oms/plan/autopilot-run.json" ] ||
-    fail "autopilot propose from verified scratch wrote an outer receipt"
-  [ "$rc" = 2 ] || fail "autopilot propose from verified scratch must refuse, got $rc"
-  grep -Fq "$scratch" "$scratch/propose.out" ||
-    fail "scratch refusal did not name the execution checkout"
-  grep -Fq "$main" "$scratch/propose.out" ||
-    fail "scratch refusal did not name the canonical checkout"
-  grep -Fq 'run oms autopilot from the main checkout' "$scratch/propose.out" ||
-    fail "scratch refusal did not direct the user to the main checkout"
+    fail "autopilot propose from verified scratch wrote its receipt in the scratch"
+  python3 - "$main/.oms/plan/autopilot-run.json" "$scratch" "$main/.oms/plan" <<'PY' ||
+import json, os, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["stage"] == "proposal-review", row["stage"]
+assert os.path.realpath(row["repo"]) == os.path.realpath(sys.argv[2]), row["repo"]
+proposal = os.path.realpath(row["proposal"]["path"])
+assert os.path.dirname(proposal) == os.path.realpath(sys.argv[3]), proposal
+PY
+    fail "scratch propose receipt is not in the main plan or does not bind the scratch checkout"
+  [ -z "$(git -C "$scratch" symbolic-ref --quiet HEAD 2>/dev/null)" ] &&
+    [ "$(git -C "$scratch" rev-parse HEAD)" = "$frozen_base" ] ||
+    fail "scratch propose moved the scratch off its detached base"
+  for status_repo in "$scratch" "$main"; do
+    (
+      unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+      OMS_DELEGATE_WORKTREE_ROOT="$managed" run_autopilot "$status_repo" status
+    ) > "$status_repo/status.out" 2>&1 || fail "autopilot status failed in $status_repo"
+    grep -Fq 'outer run: stage=proposal-review' "$status_repo/status.out" ||
+      fail "autopilot status in $status_repo did not read the shared receipt: $(cat "$status_repo/status.out")"
+  done
+  write_done_plan "$main" true
+  rc=0
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" OMS_T_STATE_REPO="$main" \
+      OMS_T_GOAL_RESULT=success OMS_T_GOAL_COMMIT=1 OMS_T_REVIEW_RC=0 \
+      run_autopilot "$scratch" run --worker codex --reviewer claude \
+        --base main --review-mode gate
+  ) > "$scratch/run.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "autopilot run from verified scratch should finish, got $rc: $(tail -8 "$scratch/run.out")"
+  [ "$(git -C "$scratch" branch --show-current)" = "$target" ] ||
+    fail "scratch run did not drive the deterministic work branch in the scratch"
+  [ "$(git -C "$scratch" log -1 --format=%s)" = 'feat: implement planned work' ] ||
+    fail "scratch run did not commit the drive on the scratch work branch"
+  [ "$(git -C "$main" branch --show-current)" = main ] &&
+    [ "$(git -C "$main" rev-parse HEAD)" = "$frozen_base" ] ||
+    fail "scratch run moved the main checkout"
+  [ -f "$main/.oms/plan/progress.jsonl" ] && [ ! -e "$scratch/.oms/plan/progress.jsonl" ] ||
+    fail "scratch run progress did not stay in the main plan"
+  python3 - "$main/.oms/plan/autopilot-run.json" "$scratch" "$target" <<'PY' ||
+import json, os, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["stage"] == "done", row["stage"]
+assert os.path.realpath(row["repo"]) == os.path.realpath(sys.argv[2]), row["repo"]
+assert row["branch"] == sys.argv[3], row["branch"]
+PY
+    fail "scratch run did not finish its receipt in the main plan"
+  [ ! -e "$scratch/.oms/plan/autopilot-run.json" ] ||
+    fail "scratch run wrote a receipt in the scratch"
 
   normal="$TMP/scratch-refusal-normal"
   make_repo "$normal"
@@ -3615,7 +3836,7 @@ PY
 }
 
 test_autopilot_acceptance_reuse
-test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose
+test_autopilot_runs_from_verified_scratch_and_allows_ordinary_propose
 test_auto_collaboration
 test_atomic_proposal_apply
 test_autopilot_abandon_plan_guidance

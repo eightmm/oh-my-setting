@@ -387,9 +387,39 @@ def resolve_base(repo: str, remote: str, base: str) -> str:
     raise ReceiptError("bound base cannot be resolved")
 
 
-def validate_live(row: dict[str, Any], repo: str) -> None:
-    expected_repo = os.path.realpath(repo)
-    if os.path.realpath(row["repo"]) != expected_repo:
+# Git Bash paths are not native Windows Python paths; mirror agent-plan.sh
+# python_path_for_host and emit the mixed drive spelling (cygpath -m).
+SHELL_STATE_ROOT = (
+    '. "$1" && root="$(oms_state_root "$2")" || exit $?; '
+    'case "$(uname -s 2>/dev/null)" in '
+    'MINGW*|MSYS*|CYGWIN*) root="$(cygpath -m "$root" | tr -d "\\r")" || exit $? ;; esac; '
+    'printf "%s\\n" "$root"'
+)
+
+
+def row_state_root(repo: str) -> str:
+    """The state root the shell derives for a bound checkout (oms_state_root)."""
+    lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), "agent-memory-common.sh")
+    result = subprocess.run(
+        ["bash", "-c", SHELL_STATE_ROOT, "_", lib, repo],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
+    )
+    value = result.stdout.strip().replace("\r", "")
+    if result.returncode != 0 or not value:
+        raise ReceiptError("outer receipt repository state root is unresolvable")
+    return os.path.realpath(value)
+
+
+def validate_live(row: dict[str, Any], repo: str, state_repo: str = "") -> None:
+    # A verified scratch drives the run while its receipt and proposals live
+    # in the state root; the bound execution checkout (row.repo) answers the
+    # Git and PROJECT.md checks whichever of the two roots is asking.
+    caller = os.path.realpath(repo)
+    state_root = os.path.realpath(state_repo or repo)
+    expected_repo = os.path.realpath(row["repo"])
+    if caller not in (expected_repo, state_root):
+        raise ReceiptError("outer receipt belongs to a different repository")
+    if row_state_root(expected_repo) != state_root:
         raise ReceiptError("outer receipt belongs to a different repository")
     spec_payload = regular_bytes(Path(expected_repo) / "PROJECT.md", PROPOSAL_LIMIT, "PROJECT.md")
     if digest(spec_payload) != row["spec_sha256"]:
@@ -405,6 +435,20 @@ def validate_live(row: dict[str, Any], repo: str) -> None:
         check=False,
     )
     current_branch = branch.stdout.strip()
+    on_branch = branch.returncode == 0
+    if not on_branch and row["stage"] in {"proposing", "proposal-review", "parked"}:
+        # A scratch cannot check out a base branch the main checkout holds;
+        # before work-branch selection it stands detached at the frozen base.
+        head = subprocess.run(
+            ["git", "-C", expected_repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if head.returncode == 0 and head.stdout.strip() == contract["base_sha"]:
+            on_branch = True
+            current_branch = contract["base"]
     allowed_branches = {row["branch"]}
     if row["stage"] in {"proposing", "proposal-review", "parked"}:
         allowed_branches.add(contract["base"])
@@ -412,12 +456,12 @@ def validate_live(row: dict[str, Any], repo: str) -> None:
     if row["stage"] in {"proposing", "proposal-review", "parked"} and row["branch"] == canonical_branch:
         if re.fullmatch(re.escape(canonical_branch) + r"-r[1-9][0-9]*", current_branch):
             allowed_branches.add(current_branch)
-    if branch.returncode != 0 or current_branch not in allowed_branches:
+    if not on_branch or current_branch not in allowed_branches:
         raise ReceiptError("current branch differs from the outer receipt")
     proposal = row["proposal"]
     if proposal["path"]:
         proposal_path = Path(proposal["path"])
-        plan_root = os.path.realpath(os.path.join(expected_repo, ".oms", "plan"))
+        plan_root = os.path.realpath(os.path.join(state_root, ".oms", "plan"))
         if os.path.dirname(os.path.realpath(proposal_path)) != plan_root:
             raise ReceiptError("approved proposal is outside the private plan directory")
         proposal_payload = regular_bytes(proposal_path, PROPOSAL_LIMIT, "approved proposal")
@@ -534,7 +578,7 @@ def lineage_claims(
 
 def reenter_judgment(
     path: Path, row: dict[str, Any], repo: str, self_pid: int,
-    self_native_pid: int, scan_claims: bool
+    self_native_pid: int, scan_claims: bool, state_repo: str = ""
 ) -> tuple[str, int, int, int, int]:
     """The reenter gate's decision sequence, shared with shadow observation.
 
@@ -569,7 +613,7 @@ def reenter_judgment(
         )
     else:
         try:
-            validate_live(row, repo)
+            validate_live(row, repo, state_repo)
         except ReceiptError as exc:
             refusal = "digest gate: %s" % exc
     if not refusal and scan_claims:
@@ -841,6 +885,7 @@ def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
 def add_binding_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stage", required=True)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--state-repo", default="")
     parser.add_argument("--spec-sha256", required=True)
     for role in ("planner", "worker", "reviewer"):
         parser.add_argument("--%s" % role, required=True)
@@ -1844,6 +1889,7 @@ def main() -> int:
     inspect = sub.add_parser("inspect")
     inspect.add_argument("path")
     inspect.add_argument("--repo", required=True)
+    inspect.add_argument("--state-repo", default="")
     inspect.add_argument("--continuation", action="store_true")
     digest_parser = sub.add_parser("digest")
     digest_parser.add_argument("path")
@@ -1854,16 +1900,19 @@ def main() -> int:
     archive = sub.add_parser("archive-done")
     archive.add_argument("path")
     archive.add_argument("--repo", required=True)
+    archive.add_argument("--state-repo", default="")
     archive.add_argument("--expected", required=True)
     abandon = sub.add_parser("abandon")
     abandon.add_argument("path")
     abandon.add_argument("--repo", required=True)
+    abandon.add_argument("--state-repo", default="")
     abandon.add_argument("--expected", required=True)
     abandon.add_argument("--reason", required=True)
     abandon.add_argument("--updated", required=True)
     discovery_retire = sub.add_parser("discovery-retire")
     discovery_retire.add_argument("path")
     discovery_retire.add_argument("--repo", required=True)
+    discovery_retire.add_argument("--state-repo", default="")
     discovery_retire.add_argument("--expected", required=True)
     discovery_retire.add_argument("--updated", required=True)
     discovery_retire.add_argument("--reason", default="discovery-no-eligible-work",
@@ -1875,6 +1924,7 @@ def main() -> int:
     reenter = sub.add_parser("reenter")
     reenter.add_argument("path")
     reenter.add_argument("--repo", required=True)
+    reenter.add_argument("--state-repo", default="")
     reenter.add_argument("--reason", default="")
     reenter.add_argument("--updated", required=True)
     reenter.add_argument("--pid", type=int, default=0)
@@ -1883,6 +1933,7 @@ def main() -> int:
     drive_claim = sub.add_parser("drive-claim")
     drive_claim.add_argument("path")
     drive_claim.add_argument("--repo", required=True)
+    drive_claim.add_argument("--state-repo", default="")
     drive_claim.add_argument("--pid", type=int, required=True)
     drive_claim.add_argument("--native-pid", type=int, default=0)
     drive_claim.add_argument("--native-pid-source", default="")
@@ -1890,6 +1941,7 @@ def main() -> int:
     reenter_note = sub.add_parser("reenter-note")
     reenter_note.add_argument("path")
     reenter_note.add_argument("--repo", required=True)
+    reenter_note.add_argument("--state-repo", default="")
     reenter_note.add_argument("--requeued", required=True)
     reenter_note.add_argument("--dead-pid", type=int, required=True)
     reenter_note.add_argument("--dead-native-pid", type=int, default=0)
@@ -1899,6 +1951,7 @@ def main() -> int:
     shadow = sub.add_parser("shadow-judge")
     shadow.add_argument("path")
     shadow.add_argument("--repo", required=True)
+    shadow.add_argument("--state-repo", default="")
     shadow.add_argument("--updated", required=True)
     shadow.add_argument("--session", default="")
     supervisor = sub.add_parser("supervise")
@@ -1941,7 +1994,7 @@ def main() -> int:
             # the exact bytes, then a typed abandon record naming the
             # predecessor digest and reason. The live path frees for a fresh
             # propose with a new contract; nothing is mutated or lost.
-            validate_receipt_location(path, args.repo)
+            validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
             current = digest(payload)
             if current != args.expected:
@@ -2004,7 +2057,7 @@ def main() -> int:
                 (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
             )
             goal_batch_command(str(path.with_name("tasks.json")), str(path.with_name("progress.jsonl")),
-                               os.path.realpath(args.repo), row.get("owner_id", ""),
+                               os.path.realpath(row["repo"]), row.get("owner_id", ""),
                                row["contract"]["max_parallel_tasks"], "", "abandon", [])
             os.unlink(path)
             fsync_directory(path.parent)
@@ -2022,7 +2075,7 @@ def main() -> int:
             # an approval (proposal-review) or override an operator decision
             # (parked) refuse; digest drift refuses through the same
             # validate_live gate every resume already passes.
-            validate_receipt_location(path, args.repo)
+            validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
             current = digest(payload)
             if not UPDATED.fullmatch(args.updated):
@@ -2068,7 +2121,8 @@ def main() -> int:
                     "reenter requires a proven native Windows pid")
             (refusal, superseded_pid, superseded_native_pid,
              _live_pid, _live_native_pid) = reenter_judgment(
-                path, row, args.repo, self_pid, self_native_pid, bool(self_pid)
+                path, row, args.repo, self_pid, self_native_pid, bool(self_pid),
+                args.state_repo
             )
             record = {
                 "schema": 1,
@@ -2119,7 +2173,7 @@ def main() -> int:
             # dead one. The wrapper is not exec'd on the run path, so the pid
             # stays checkable for the whole drive; a resumed continuation
             # recording another claim is a harmless duplicate.
-            validate_receipt_location(path, args.repo)
+            validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
             if not UPDATED.fullmatch(args.updated):
                 raise ReceiptError("drive-claim requires a valid --updated timestamp")
@@ -2160,7 +2214,7 @@ def main() -> int:
         if args.command == "reenter-note":
             # Recoveries are records too: the requeue of a dead predecessor's
             # leases names the task ids and the pid whose death authorized it.
-            validate_receipt_location(path, args.repo)
+            validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
             current = digest(payload)
             if not UPDATED.fullmatch(args.updated):
@@ -2209,7 +2263,7 @@ def main() -> int:
             # Analysis caveat lives with the data: the hook fires on every
             # session start, so a would-resume row with no later reenter is
             # not by itself operator disagreement.
-            validate_receipt_location(path, args.repo)
+            validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
             if not UPDATED.fullmatch(args.updated):
                 raise ReceiptError("shadow-judge requires a valid --updated timestamp")
@@ -2218,7 +2272,7 @@ def main() -> int:
                 raise ReceiptError("shadow-judge --session is too long (max 128 chars)")
             (refusal, superseded_pid, superseded_native_pid,
              live_pid, live_native_pid) = reenter_judgment(
-                path, row, args.repo, 0, 0, True
+                path, row, args.repo, 0, 0, True, args.state_repo
             )
             record = {
                 "schema": 1,
@@ -2255,7 +2309,7 @@ def main() -> int:
                 print("would-resume (stage %s): oms autopilot reenter" % row["stage"])
             return 0
         if args.command == "archive-done":
-            validate_receipt_location(path, args.repo)
+            validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
             current = digest(payload)
             if current != args.expected:
@@ -2274,9 +2328,9 @@ def main() -> int:
             print(archive_path)
             return 0
         if args.command == "inspect":
-            validate_receipt_location(path, args.repo)
+            validate_receipt_location(path, args.state_repo or args.repo)
             row, payload = load_receipt(path)
-            validate_live(row, args.repo)
+            validate_live(row, args.repo, args.state_repo)
             print("outer run: stage=%s receipt=%s" % (row["stage"], digest(payload)))
             if row.get("diagnostic"):
                 diagnostic = row["diagnostic"]
@@ -2294,7 +2348,7 @@ def main() -> int:
             return 0
         row = row_from_args(args)
         validate_receipt(row)
-        _repo_root, expected_plan_root = validate_receipt_location(path, args.repo)
+        _repo_root, expected_plan_root = validate_receipt_location(path, args.state_repo or args.repo)
         if row["proposal"]["path"]:
             proposal_path = Path(row["proposal"]["path"])
             if os.path.dirname(os.path.realpath(proposal_path)) != expected_plan_root:

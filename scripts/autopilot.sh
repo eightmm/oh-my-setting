@@ -328,18 +328,59 @@ STATE_REPO="$(oms_state_root "$REPO")" || fail "cannot resolve the canonical sta
 STATE_REPO="${STATE_REPO//$'\r'/}"
 STATE_REPO="$(cd "$STATE_REPO" && pwd -P)" || fail "cannot resolve the physical state repository path"
 STATE_REPO="${STATE_REPO//$'\r'/}"
+# A verified scratch is the execution checkout (Git, PROJECT.md, work branch)
+# while plan, receipt, proposals and markers stay in the canonical state root.
+# oms_state_root does not check liveness, but the worker guard exempts a
+# scratch's registration only while its owner lives.
 if [ "$STATE_REPO" != "$REPO" ]; then
-  case "$ACTION" in
-    status) ;;
-    *)
-      fail "autopilot $ACTION cannot run from verified OMS scratch worktree $REPO because plan state is in canonical repository $STATE_REPO; run oms autopilot from the main checkout ($STATE_REPO)"
-      ;;
-  esac
+  scratch_parent="$(oms_harness_residue_parent "$REPO")" ||
+    fail "cannot locate the OMS scratch marker for $REPO"
+  oms_harness_marker_owner_alive "$scratch_parent/.oh-my-setting-tmp" ||
+    fail "the owner of OMS scratch worktree $REPO has exited; it awaits cleanup and cannot run autopilot $ACTION"
 fi
-PLAN_FILE="$REPO/.oms/plan/tasks.json"
-PROGRESS_FILE="$REPO/.oms/plan/progress.jsonl"
+PLAN_FILE="$STATE_REPO/.oms/plan/tasks.json"
+PROGRESS_FILE="$STATE_REPO/.oms/plan/progress.jsonl"
 SPEC="$REPO/PROJECT.md"
-OUTER_RECEIPT="$REPO/.oms/plan/autopilot-run.json"
+OUTER_RECEIPT="$STATE_REPO/.oms/plan/autopilot-run.json"
+
+# One admission rule, ahead of every Git, ref, lease, claim, plan, ledger or
+# receipt write: the state root shares one receipt among its checkouts, and
+# only the bound execution checkout (row.repo, whose scratch owner the check
+# above proved live) may act on it. Any checkout may read status, and abandon
+# stays the one cross-root exit once the bound scratch is gone. A done receipt
+# binds nothing. Elsewhere an unreadable receipt falls to the helper's own
+# validation, but a scratch cannot prove its binding from it and stops here.
+case "$ACTION" in
+  status|abandon) ;;
+  *)
+    if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+      receipt_admission=0
+      receipt_bound="$(python3 - "$OUTER_RECEIPT" "$REPO" <<'PY'
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        row = json.load(handle)
+    bound, stage = row["repo"], row["stage"]
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit(4)
+if not isinstance(bound, str) or not bound or not isinstance(stage, str):
+    raise SystemExit(4)
+if stage != "done" and os.path.realpath(bound) != os.path.realpath(sys.argv[2]):
+    print(bound)
+    raise SystemExit(3)
+PY
+)" || receipt_admission=$?
+      receipt_bound="${receipt_bound//$'\r'/}"
+      case "$receipt_admission" in
+        0) ;;
+        3) fail "the live autopilot receipt is bound to execution checkout $receipt_bound, not $REPO; only status and abandon run from another checkout" ;;
+        4) [ "$STATE_REPO" = "$REPO" ] ||
+             fail "cannot read the outer receipt binding; a scratch cannot run autopilot $ACTION against it" ;;
+        *) fail "cannot read the outer receipt binding" ;;
+      esac
+    fi
+    ;;
+esac
 
 if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
   case "$ACTION" in
@@ -357,7 +398,7 @@ outer_receipt_abandon_locked() {  # REASON
   expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" ||
     return $?
   expected="${expected//$'\r'/}"
-  python3 "$RECEIPT_HELPER" abandon "$OUTER_RECEIPT" --repo "$REPO" \
+  python3 "$RECEIPT_HELPER" abandon "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" \
     --expected "$expected" --reason "$reason" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
@@ -370,7 +411,7 @@ outer_receipt_retire_empty_discovery_locked() {  # EXPECTED DIGEST [REASON]
     echo "autopilot: empty discovery receipt was not retired; the bound receipt is missing" >&2
     return 1
   fi
-  python3 "$RECEIPT_HELPER" discovery-retire "$OUTER_RECEIPT" --repo "$REPO" \
+  python3 "$RECEIPT_HELPER" discovery-retire "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" \
     --expected "$expected" --reason "$reason" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
@@ -417,7 +458,7 @@ if [ "$ACTION" = shadow ]; then
   [ -f "$OUTER_RECEIPT" ] || exit 0
   oms_git_assert_safe_execution_config "$REPO" ||
     fail "unsafe repository Git execution config"
-  python3 "$RECEIPT_HELPER" shadow-judge "$OUTER_RECEIPT" --repo "$REPO" \
+  python3 "$RECEIPT_HELPER" shadow-judge "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     ${ACTION_SESSION:+--session "$ACTION_SESSION"} || exit $?
   exit 0
@@ -547,7 +588,7 @@ if [ "$ACTION" = status ]; then
     fail "skip-worktree/assume-unchanged flags make autopilot status unsafe"
   if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
     if ! python3 "$RECEIPT_HELPER" inspect "$OUTER_RECEIPT" \
-      --repo "$REPO" --continuation; then
+      --repo "$REPO" --state-repo "$STATE_REPO" --continuation; then
       echo "outer run: invalid receipt (no continuation)"
     fi
   fi
@@ -572,7 +613,7 @@ if latest:
     print("latest drive: %s (%s)" % (latest.get("status", "?"), latest.get("reason", "?")))
 PY
   fi
-  python3 - "$REPO/.oms/plan" <<'PY'
+  python3 - "$STATE_REPO/.oms/plan" <<'PY'
 import json, pathlib, sys
 directory = pathlib.Path(sys.argv[1])
 def sort_key(path):
@@ -863,7 +904,7 @@ if [ "$ACTION" = reenter ]; then
   # native pid alive as a waiting parent anchor. Either identity therefore
   # remains checkable for the resumed run; liveness is the claim's expiry.
   oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter \
-    "$OUTER_RECEIPT" --repo "$REPO" --reason "${ACTION_REASON:-}" \
+    "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" --reason "${ACTION_REASON:-}" \
     --pid "$$" --native-pid "$AUTOPILOT_NATIVE_PID" \
     --native-pid-source "$AUTOPILOT_NATIVE_PID_SOURCE" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$reenter_out" || exit $?
@@ -930,7 +971,7 @@ EOF
       [ -n "$AUTOPILOT_OWNER_ID" ] && [ -f "$PLAN_FILE" ]; then
     reenter_recovery="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" \
       recover-owner --owner-id "$AUTOPILOT_OWNER_ID" \
-      --markers-dir "$REPO/.oms/delegations" --json)" ||
+      --markers-dir "$STATE_REPO/.oms/delegations" --json)" ||
       fail "could not recover the dead session's owned leases"
     reenter_recovery="${reenter_recovery//$'\r'/}"
     reenter_requeued="$(OMS_REENTER_RECOVERY="$reenter_recovery" python3 - <<'PY'
@@ -943,7 +984,7 @@ PY
     reenter_requeued="${reenter_requeued//$'\r'/}"
     if [ -n "$reenter_requeued" ]; then
       oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter-note \
-        "$OUTER_RECEIPT" --repo "$REPO" --requeued "$reenter_requeued" \
+        "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" --requeued "$reenter_requeued" \
         --dead-pid "$reenter_dead_pid" \
         --dead-native-pid "$reenter_dead_native_pid" \
         --expected-owner-id "$AUTOPILOT_OWNER_ID" \
@@ -1007,11 +1048,24 @@ resolve_review_base_sha() {
   printf '%s\n' "$sha"
 }
 
+# The checked-out branch, or BASE for a HEAD detached at the frozen base: a
+# scratch cannot check out a base branch that the main checkout holds.
+current_branch_or_base() {
+  local current head
+  if current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
+    printf '%s\n' "${current//$'\r'/}"
+    return 0
+  fi
+  [ -n "$review_base_sha" ] || return 1
+  head="$(git -C "$REPO" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)" || return 1
+  [ "${head//$'\r'/}" = "$review_base_sha" ] || return 1
+  printf '%s\n' "$BASE"
+}
+
 outer_receipt_branch() {
   local current target
-  current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
-    fail "autopilot requires a branch for its outer receipt"
-  current="${current//$'\r'/}"
+  current="$(current_branch_or_base)" ||
+    fail "autopilot requires a branch, or a HEAD detached at the frozen base, for its outer receipt"
   target="oms/autopilot-$(printf '%.12s' "$BOUND_SPEC_SHA")"
   if [ "$current" = "$BASE" ]; then printf '%s\n' "$target"; else printf '%s\n' "$current"; fi
 }
@@ -1022,7 +1076,7 @@ outer_receipt_binding_args() {  # COMMAND STAGE EXPECTED
   [ -n "$receipt_branch" ] || receipt_branch="$(outer_receipt_branch)" || return $?
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   receipt_args=("$command" "$OUTER_RECEIPT" --expected "$expected" --stage "$stage" \
-    --repo "$REPO" --spec-sha256 "$BOUND_SPEC_SHA" \
+    --repo "$REPO" --state-repo "$STATE_REPO" --spec-sha256 "$BOUND_SPEC_SHA" \
     --planner "$PLANNER" --worker "$WORKER" --reviewer "$REVIEWER" \
     --planner-model "$PLANNER_MODEL" --worker-model "$WORKER_MODEL" \
     --reviewer-model "$REVIEWER_MODEL" \
@@ -1113,7 +1167,7 @@ outer_receipt_archive_done_locked() {
   receipt_sha="$(printf '%s\n' "$metadata" | awk -F '\t' '{print $3}')"
   [ "$stage" = "done" ] || return 4
   python3 "$RECEIPT_HELPER" archive-done "$OUTER_RECEIPT" \
-    --repo "$REPO" --expected "$receipt_sha" >/dev/null
+    --repo "$REPO" --state-repo "$STATE_REPO" --expected "$receipt_sha" >/dev/null
 }
 
 outer_receipt_prepare_new() {
@@ -1407,7 +1461,7 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
   [ -n "$BOUND_SPEC_SHA" ] || BOUND_SPEC_SHA="$(oms_sha256_file "$SPEC")" ||
     fail "cannot hash PROJECT.md"
   [ -n "$review_base_sha" ] || review_base_sha="$(resolve_review_base_sha)"
-  mkdir -p "$REPO/.oms/plan" || fail "cannot create the private plan directory"
+  mkdir -p "$STATE_REPO/.oms/plan" || fail "cannot create the private plan directory"
   APPROVED_PROPOSAL_PATH=""
   APPROVED_PROPOSAL_SHA=""
   outer_receipt_prepare_new || fail "cannot archive the completed outer receipt"
@@ -1485,7 +1539,7 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
   proposal_digest="${proposal_digest//$'\r'/}"
   [ -n "$proposal_path" ] && [ -n "$proposal_digest" ] ||
     fail "the proposal was generated without a path/digest receipt"
-  proposal_path="$(python3 - "$REPO" "$proposal_path" <<'PY' | tr -d '\r'
+  proposal_path="$(python3 - "$STATE_REPO" "$proposal_path" <<'PY' | tr -d '\r'
 import os, sys
 value = sys.argv[2]
 if not os.path.isabs(value):
@@ -1601,7 +1655,7 @@ fi
 git check-ref-format --branch "$BASE" >/dev/null 2>&1 || fail "--base is not a valid branch name"
 
 if [ -n "$PROPOSAL" ]; then
-  reviewed_proposal_path="$(python3 - "$REPO" "$PROPOSAL" <<'PY' | tr -d '\r'
+  reviewed_proposal_path="$(python3 - "$STATE_REPO" "$PROPOSAL" <<'PY' | tr -d '\r'
 import os, sys
 value = sys.argv[2]
 if not os.path.isabs(value):
@@ -1720,9 +1774,8 @@ ensure_work_branch() {
     fail "unsafe repository Git execution config before branch selection"
   oms_git_assert_plain_index "$REPO" ||
     fail "hidden Git index flags before branch selection"
-  current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
-    fail "autopilot requires a branch, not detached HEAD"
-  current="${current//$'\r'/}"
+  current="$(current_branch_or_base)" ||
+    fail "autopilot requires a branch, or a HEAD detached at the frozen base"
   git check-ref-format --branch "$current" >/dev/null 2>&1 || fail "current branch is invalid"
   target="oms/autopilot-$(printf '%.12s' "$BOUND_SPEC_SHA")"
   if [ "$current" != "$BASE" ]; then
@@ -1858,7 +1911,7 @@ drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
 # a dead one by exactly this claim (run-level single-flight).
 autopilot_native_pid_prepare
 oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" drive-claim \
-  "$OUTER_RECEIPT" --repo "$REPO" --pid "$$" \
+  "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" --pid "$$" \
     --native-pid "$AUTOPILOT_NATIVE_PID" \
     --native-pid-source "$AUTOPILOT_NATIVE_PID_SOURCE" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
@@ -2102,7 +2155,7 @@ PY
     fi
   else
     PARK_PHASE="semantic-review"
-    PARK_EVIDENCE_PATH="$REPO/.oms/plan/autopilot-review-$AUTOPILOT_OWNER_ID.out"
+    PARK_EVIDENCE_PATH="$STATE_REPO/.oms/plan/autopilot-review-$AUTOPILOT_OWNER_ID.out"
     if chmod 600 "$review_out" 2>/dev/null && mv "$review_out" "$PARK_EVIDENCE_PATH"; then
       :
     else

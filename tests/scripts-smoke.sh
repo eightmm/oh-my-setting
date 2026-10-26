@@ -23364,7 +23364,7 @@ receipt = root / "autopilot-run.json"
 ledger = root / "autopilot-reentries.jsonl"
 row = {"stage": "proposing", "spec_sha256": "a" * 64,
        "branch": "main", "owner_id": "owner_" + "1" * 32}
-module.validate_live = lambda _row, _repo: None
+module.validate_live = lambda _row, _repo, _state_repo='': None
 original_os_name = module.os.name
 module.os.name = "nt"
 try:
@@ -23485,7 +23485,7 @@ receipt = root / "autopilot-run.json"
 ledger = root / "autopilot-reentries.jsonl"
 row = {"stage": "proposing", "spec_sha256": "a" * 64,
        "branch": "main", "owner_id": "owner_" + "1" * 32}
-module.validate_live = lambda _row, _repo: None
+module.validate_live = lambda _row, _repo, _state_repo='': None
 
 def reset_ledger():
     if ledger.is_dir():

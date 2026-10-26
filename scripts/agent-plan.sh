@@ -867,7 +867,7 @@ fi
 # read-only until its final receipt, so validate its existing authority files
 # before any mkdir/ignore helper could follow a planted state-directory link.
 if [ "$ACTION" = accept ]; then
-  python3 - "$REPO" "$PLAN_FILE" <<'PY' ||
+  python3 - "$STATE_REPO" "$PLAN_FILE" <<'PY' ||
 import os, stat, sys
 repo = os.path.realpath(sys.argv[1])
 target = os.path.abspath(sys.argv[2])
