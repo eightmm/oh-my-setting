@@ -11,6 +11,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/canonical-sync.sh
+. "$ROOT/scripts/lib/canonical-sync.sh"
 # shellcheck source=scripts/lib/project-state.sh
 . "$ROOT/scripts/lib/project-state.sh"
 # shellcheck source=scripts/lib/model-routing.sh
@@ -1675,8 +1677,30 @@ review_base_sha="$(resolve_review_base_sha)"
 git -C "$REPO" merge-base --is-ancestor "$review_base_sha" HEAD 2>/dev/null ||
   fail "the frozen base commit is not an ancestor of the implementation branch"
 
+# Runs under the canonical sync gate with ensure_work_branch's target and
+# current_head. Registry entries are only read, never removed.
+switch_work_branch_when_idle() {
+  local live target_head
+  # Guarded worker calls compare this checkout's index and refs before and
+  # after their run; switching branches here would stop them.
+  live="$(oms_canonical_sync_live_entries "$REPO" | wc -l | tr -d '[:space:]')"
+  if [ "${live:-0}" -gt 0 ]; then
+    echo "autopilot: $live guarded call(s) are live in $REPO; not switching its branch. Retry after they finish, or run the campaign from a linked worktree." >&2
+    return 75
+  fi
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$target"; then
+    target_head="$(git -C "$REPO" rev-parse "refs/heads/$target")"
+    [ "$target_head" = "$current_head" ] || return 11
+    git -C "$REPO" checkout -q "$target" || return 12
+    echo "autopilot: resumed local branch $target"
+  else
+    git -C "$REPO" checkout -qb "$target" || return 13
+    echo "autopilot: created local branch $target"
+  fi
+}
+
 ensure_work_branch() {
-  local current target current_head target_head recovery_branch recovery_suffix
+  local current target current_head target_head recovery_branch recovery_suffix switch_rc
   oms_git_assert_safe_execution_config "$REPO" ||
     fail "unsafe repository Git execution config before branch selection"
   oms_git_assert_plain_index "$REPO" ||
@@ -1718,18 +1742,19 @@ ensure_work_branch() {
   [ -z "$recovery_branch" ] ||
     park "autopilot-recovery-branch-exists" \
       "checkout $recovery_branch and rerun the same autopilot command"
-  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$target"; then
-    target_head="$(git -C "$REPO" rev-parse "refs/heads/$target")"
-    [ "$target_head" = "$current_head" ] ||
-      park "autopilot-branch-has-work" "inspect and explicitly resume the existing $target branch"
-    git -C "$REPO" checkout -q "$target" ||
-      park "autopilot-branch-busy" "use a dedicated worktree for $target"
-    echo "autopilot: resumed local branch $target"
-  else
-    git -C "$REPO" checkout -qb "$target" ||
-      park "autopilot-branch-create-failed" "create a clean feature branch"
-    echo "autopilot: created local branch $target"
-  fi
+  # Registration of a guarded call takes the same gate, so the live-entry
+  # check and the checkout form one critical section: a call either registers
+  # before it (and defers the switch) or waits until the switch is done.
+  oms_canonical_sync_prepare "$REPO" || fail "cannot prepare the canonical sync registry"
+  switch_rc=0
+  oms_canonical_sync_gate "$REPO" switch_work_branch_when_idle || switch_rc=$?
+  case "$switch_rc" in
+    0) ;;
+    75) exit 75 ;;
+    11) park "autopilot-branch-has-work" "inspect and explicitly resume the existing $target branch" ;;
+    12) park "autopilot-branch-busy" "use a dedicated worktree for $target" ;;
+    *) park "autopilot-branch-create-failed" "create a clean feature branch" ;;
+  esac
   [ -z "$(git -c core.fsmonitor=false -C "$REPO" \
     status --porcelain --untracked-files=all)" ] ||
     park "dirty-after-branch" "inspect the branch checkout"

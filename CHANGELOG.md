@@ -16,6 +16,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `oms agent-plan retire --check` command and the completion, supersession and
   cancellation requirements when unfinished plan work remains. Unreadable
   plans also receive guidance; abandonment still succeeds without editing them.
+- A worker-guard stop caused by an index or branch-ref change now says the usual cause is a commit, checkout or fast-forward in the canonical or source-clone main checkout during the run, and points to `oms sync-shared` or a linked worktree. `oms autopilot` defers with exit 75 instead of switching the canonical checkout to its work branch while guarded calls are live, leaving their registry entries untouched.
 - The panel main's launch instructions now count the two-line direct-edit allowance per task instead of per edit, send release bookkeeping (changelog, version, manifest, inventory) to the worker whose change needs it or one documenter per landing batch, and assign experiments: the main authorizes launches, builders edit run scripts and configs, an investigate worker reads outputs, and jobs get one background wait instead of polling. An audit of three panel mains found these gaps behind most direct work.
 
 ### Removed

@@ -2895,6 +2895,44 @@ EOF
   foreign_target="oms/autopilot-$(sha256_file "$foreign_repo/PROJECT.md" | cut -c1-12)"
   rm -f "$foreign_repo/.oms/plan/autopilot-run.json"
   git -C "$foreign_repo" switch -q main
+  # A live guarded call (an unreadable entry counts as live) defers the branch
+  # switch with 75 and keeps its registry entry.
+  mkdir -p "$foreign_repo/.oms/locks/canonical-sync.d/fake-live-call"
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
+    --base main > "$foreign_repo/live.out" 2>&1 || rc=$?
+  [ "$rc" = 75 ] || fail "a live guarded call should defer the branch switch with 75, got $rc"
+  grep -Fq '1 guarded call(s) are live' "$foreign_repo/live.out" ||
+    fail "the deferral should name the live count"
+  [ -d "$foreign_repo/.oms/locks/canonical-sync.d/fake-live-call" ] ||
+    fail "autopilot removed a live registry entry"
+  [ "$(git -C "$foreign_repo" symbolic-ref --short HEAD)" = main ] ||
+    fail "autopilot switched branches despite a live guarded call"
+  rmdir "$foreign_repo/.oms/locks/canonical-sync.d/fake-live-call"
+  rm -f "$foreign_repo/.oms/plan/autopilot-run.json"
+  # With no live entry, a held canonical sync gate (where a worker registers)
+  # still blocks the switch: the check and checkout run under that gate.
+  local gate_held="$TMP/gate-held" gate_release="$TMP/gate-release" gate_waited=0
+  rm -f "$gate_held" "$gate_release"
+  ( bash -c '. "$1/scripts/lib/canonical-sync.sh"
+      oms_canonical_sync_prepare "$2" &&
+      oms_canonical_sync_gate "$2" bash -c "touch \"\$1\"; while [ ! -e \"\$2\" ]; do sleep 0.2; done" _ "$3" "$4"' \
+      _ "$ROOT" "$foreign_repo" "$gate_held" "$gate_release" ) &
+  local gate_pid=$!
+  while [ ! -e "$gate_held" ] && [ "$gate_waited" -lt "${OMS_TEST_CALL_TIMEOUT:-60}" ]; do
+    sleep 0.2
+    gate_waited=$((gate_waited + 1))
+  done
+  [ -e "$gate_held" ] || { : > "$gate_release"; fail "the test could not hold the canonical sync gate"; }
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
+    --base main > "$foreign_repo/gate.out" 2>&1 || rc=$?
+  : > "$gate_release"
+  wait "$gate_pid" || true
+  [ "$rc" = 75 ] || fail "a held canonical sync gate should defer the branch switch with 75, got $rc"
+  [ "$(git -C "$foreign_repo" symbolic-ref --short HEAD)" = main ] ||
+    fail "autopilot switched branches without holding the canonical sync gate"
+  rm -f "$foreign_repo/.oms/plan/autopilot-run.json"
   git -C "$foreign_repo" switch -qc "$foreign_target-vendor"
   rc=0
   OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \

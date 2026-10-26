@@ -2897,6 +2897,16 @@ if len(details) > 8:
       } >> "$artifact"
     fi
     guard_failure_hint="Protected surfaces changed outside this worker's worktree during the run. The guard does not identify the actor; concurrent causes can include the parent editing shared Git metadata or the plan, or another worker adding or removing a worktree on this repository. Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change."
+    # A commit, checkout or fast-forward in a main checkout moves its index and
+    # branch ref; the guard sees the change but not who made it.
+    case "$guard_execution_details" in
+      *"component=execution-state canonical index"*|*"component=execution-state source index"*) guard_main_checkout_moved=1 ;;
+      *) guard_main_checkout_moved=0 ;;
+    esac
+    case ",$worker_guard_changed," in *,refs,*) guard_main_checkout_moved=1 ;; esac
+    if [ "$guard_main_checkout_moved" = 1 ]; then
+      guard_failure_hint="$guard_failure_hint The usual cause of an index or branch-ref change is a commit, checkout or fast-forward in the canonical or source-clone main checkout during the run; move it with oms sync-shared (which waits for live calls) or commit in a linked worktree."
+    fi
     guard_failure_summary="worker guard stopped run; changed surfaces: $worker_guard_changed; execution-state: $guard_execution_details; changed paths/refs: $guard_metadata_details"
     guard_failure_summary="${guard_failure_summary:0:1200}"
     # The breach is loud now (this run exits 1), but a later patch-land or

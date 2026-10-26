@@ -29340,6 +29340,30 @@ PY
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
     grep -F 'worker guard stopped run' > /dev/null ||
     fail "the violation should be recorded in the fail-ledger"
+  if printf '%s' "$out" | grep -F 'oms sync-shared' >/dev/null; then
+    fail "a config-only change should not blame a main-checkout commit: $out"
+  fi
+
+  # A commit in the main checkout moves its branch ref; the hint names the
+  # usual cause and the remedy.
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+git -C "$project" commit --allow-empty -qm 'test: main checkout moved'
+echo "done"
+EOF
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "a main-checkout commit should fail the run: $out"
+  python3 - "$project" <<'PY' || fail "main-checkout hint missing from the fail-ledger"
+import json, sys
+from pathlib import Path
+rows = [json.loads(l) for l in (Path(sys.argv[1]) / ".oms/failures.jsonl").read_text().splitlines()]
+row = [r for r in rows if r.get("cmd") == "peer-delegate --to codex worker-authority"][-1]
+assert "commit, checkout or fast-forward" in row["next"] and "oms sync-shared" in row["next"], row
+assert "`" not in row["next"], row
+PY
 
   # Branch-tracking relief stops at the shape Git writes: a remote that is not
   # configured, or an indented "[core]" Git reads as a new section, stays hard.
