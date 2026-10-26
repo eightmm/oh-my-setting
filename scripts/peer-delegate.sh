@@ -1218,7 +1218,10 @@ fi
     printf '%s\n' '- Admission also runs the checks restored from HEAD, so changing or deleting existing tests cannot make verify pass.'
     printf '%s\n' '- Keep secret-related key words and an equals sign off the same added line, including in variable names and fixtures; build fixtures at runtime (for example "pass" + "word"). Such a line makes the outbound scan refuse review and --continue.'
     printf '%s\n' '- Keep literal absolute home, Users or cluster-storage paths out of added lines too; the same scan refuses them. Write fixtures in a variable-prefixed or relative form, for example "$TMP/home/user".'
-    printf '%s\n' '- Before returning, search tests/ and scripts/ (for example with rg) for each function, CLI option, JSON key, output text or file name you changed, and run the tests that use them.'
+    printf '%s\n' '- Before returning, search tests/, scripts/, docs/, README files, and the changed command usage or --help text for each changed function, CLI option, JSON key, output text, or file name; update prose describing the change and run the tests that use them.'
+    printf '%s\n' '- Save a git diff of non-test changes to a temporary patch, apply it in reverse, run each new or changed test once, then reapply it; do not use git stash, and the test must fail while reverted.'
+    printf '%s\n' '- For each new branch or limit, exercise its failure exit and its edge: empty, zero, equal to the limit, and malformed input.'
+    printf '%s\n' '- For each file, ref or record your change writes, say in your report what a second concurrent call, or a kill between two writes, leaves behind.'
     [ -z "$plan_allowed" ] || printf -- '- allowed paths: %s\n' "$plan_allowed"
     [ -z "$plan_forbidden" ] || printf -- '- forbidden paths: %s\n' "$plan_forbidden"
     printf '\n'

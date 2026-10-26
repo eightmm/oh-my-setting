@@ -5461,6 +5461,12 @@ test_delegate_dry_run() {
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'run the tests that use them'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'docs/, README files, and the changed command usage or --help text'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'update prose describing the change'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Save a git diff of non-test changes to a temporary patch, apply it in reverse'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'do not use git stash'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'For each new branch or limit, exercise its failure exit and its edge'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'For each file, ref or record your change writes'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'verify: `bash scripts/check.sh fast`'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'After you return, the harness runs `bash scripts/check.sh fast`.'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'do not run this full command just to confirm completion'
