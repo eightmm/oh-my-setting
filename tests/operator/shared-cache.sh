@@ -171,7 +171,7 @@ def board(now=None):
     return json.loads(subprocess.check_output(command, text=True, timeout=5))
 
 assert board() == board() == {'number': 1}, counter.read_text()
-path = project / cache.DIRECTORY / 'dashboard.json'
+path = project / cache.DIRECTORY / Path(cache._entry('dashboard')).name
 created = json.loads(path.read_text())['created']
 with panel_results._lock(project, 'panel-cache-dashboard', timeout=0):
     start = time.monotonic()
@@ -195,6 +195,23 @@ entry = json.loads(path.read_text())
 entry['created'] = 10 ** 400
 path.write_text(json.dumps(entry), encoding='utf-8')
 assert board() == {'number': 8}, 'overflowing cache timestamp did not trigger recollection'
+
+# Boards running different code versions keep separate entries instead of invalidating each other.
+versions = project / 'versions'
+(versions / '.oms/hooks').mkdir(parents=True)
+(versions / '.oms/artifacts').mkdir()
+version_runs = []
+def version_collect():
+    version_runs.append(cache.VERSION)
+    return {'n': len(version_runs)}
+for version in ('aaaaaaaaaaaa', 'bbbbbbbbbbbb') * 2:
+    with patch.object(cache, 'VERSION', version):
+        assert cache.read_shared(versions, 'dashboard', version_collect)['n'] in (1, 2)
+        cache.read_shared(versions, 'dashboard', version_collect)
+assert version_runs == ['aaaaaaaaaaaa', 'bbbbbbbbbbbb'], version_runs
+folder = versions / cache.DIRECTORY
+assert sorted(item.name for item in folder.glob('dashboard.*.json')) == [
+    'dashboard.aaaaaaaaaaaa.json', 'dashboard.bbbbbbbbbbbb.json']
 
 # One collection shares its starting generation across all three persistent reads.
 assert cache.INTERVAL > 5, 'cache expires before the next watch collection'
@@ -260,7 +277,7 @@ else:
     assert cache.fingerprint(scan_project) == scan_before, 'followed a directory link'
 with patch.object(cache.os, 'scandir', side_effect=PermissionError('fixture denied')):
     assert cache.read_shared(scan_project, 'unreadable', lambda: 42) == 42
-assert not (scan_project / cache.DIRECTORY / 'unreadable.json').exists()
+assert not (scan_project / cache.DIRECTORY / Path(cache._entry('unreadable')).name).exists()
 
 # Plan reads outlive the dashboard interval, including across board processes.
 plan.write_text('{"tasks": {}}', encoding='utf-8')
@@ -284,7 +301,7 @@ assert plan_board(now + 20) == {'tasks': [{'number': 11}]}, 'mtime change was mi
 # five-second tick clocks so this regression needs no sleep or live repository.
 plan.write_text(json.dumps({'schema': 3, 'tasks': {
     'cache-task': {'id': 'cache-task', 'state': 'ready', 'depends': [], 'title': 'fixture'}}}), encoding='utf-8')
-plan_cache = project / cache.DIRECTORY / 'plan-list.json'
+plan_cache = project / cache.DIRECTORY / Path(cache._entry('plan-list')).name
 plan_cache.unlink()
 real_run = subprocess.run
 calls = []
@@ -495,7 +512,7 @@ if len(sys.argv) > 3:
     exec(Path(sys.argv[3]).read_bytes(), previous)
     readers = [('round2', previous['read_plan_list']), ('round3', cache.read_plan_list)]
 for label, reader in readers:
-    (closed / cache.DIRECTORY / 'plan-list.json').unlink(missing_ok=True)
+    (closed / cache.DIRECTORY / Path(cache._entry('plan-list')).name).unlink(missing_ok=True)
     result = measure(reader, closed, 'closed-000', detailed=True)
     assert result['tick_calls'] == ([1, 0, 0] if label in ('round2', 'round3') else [1, 1, 1]), result
     print('closed-plan unchanged %s: %s' % (label, json.dumps(result)))
@@ -1292,14 +1309,14 @@ def changing():
     return {'number': 42}
 # A read that overlapped a write is this board's answer, but it is not published for the others.
 assert cache.read_shared(project, 'race', changing) == {'number': 42}
-assert not (project / cache.DIRECTORY / 'race.json').exists()
+assert not (project / cache.DIRECTORY / Path(cache._entry('race')).name).exists()
 # A later key still compares against the tick's original generation before storing.
 tick = cache.TickReads(project)
 with patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as fingerprints:
     assert cache.read_shared(project, 'tick-before-race', lambda: 1, _tick=tick) == 1
     assert cache.read_shared(project, 'tick-race', changing, _tick=tick) == {'number': 42}
     assert fingerprints.call_count == 3
-assert not (project / cache.DIRECTORY / 'tick-race.json').exists()
+assert not (project / cache.DIRECTORY / Path(cache._entry('tick-race')).name).exists()
 # Records derive from the tick's attempts: a ledger advance between the two reads must not publish them.
 derived = project / 'derived-reads'
 (derived / '.oms/hooks').mkdir(parents=True)
@@ -1316,7 +1333,7 @@ with patch.object(cache.subprocess, 'run', side_effect=derived_run), \
     assert tick.attempts() == ['generation A']
     derived_ledger.write_text('generation B\n', encoding='utf-8')
     assert tick.records()[0] == ['generation A']
-    assert not (derived / cache.DIRECTORY / 'result-records.json').exists(), 'stale records were published'
+    assert not (derived / cache.DIRECTORY / Path(cache._entry('result-records')).name).exists(), 'stale records were published'
     tick = cache.TickReads(derived)
     assert tick.records()[0] == ['generation B'], 'stale records were reused on the next tick'
 # Mains' activity heartbeats change all the time and are read directly; they do not invalidate shared reads.

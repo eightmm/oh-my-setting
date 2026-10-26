@@ -34,6 +34,10 @@ SKIPPED = {DIRECTORY, '.oms/hooks/panel-activity'}
 PRUNED = {'.oms/artifacts': ('index.jsonl', 'admit'), '.oms/lifecycle': ('events.jsonl',), '.oms/panel-state': ()}
 WALK_SKIPPED = {'.oms/locks'}
 ROOT = Path(__file__).resolve().parents[2]
+# Processes that survive an install keep running old code with old fingerprints; a per-code entry name
+# stops them and the reloaded watchers from overwriting and invalidating each other's entries.
+# Entries of earlier versions are orphaned, never deleted (a worker run treats deletion as a state change): ~1 MB per change to this file.
+VERSION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
 LEDGER = '.oms/lifecycle/events.jsonl'
 LEDGER_WINDOW = 256 * 1024
 # The one place a cached read declares its .oms inputs. Only a read whose complete input set is known may be
@@ -199,6 +203,10 @@ def _body(value):
     return json.dumps(value, ensure_ascii=True, sort_keys=True, allow_nan=False).encode()
 
 
+def _entry(key):
+    return DIRECTORY + '/' + key + '.' + VERSION + '.json'
+
+
 def _load(repo, relative, identity, stamp):
     try:
         raw = DURABLE['read_no_follow'](str(repo), relative, 'panel cache',
@@ -226,7 +234,7 @@ def read_shared(repo, key, collect, cacheable=None, _tick=None):
     if not (repo / '.oms/hooks').is_dir():
         return collect()
     identity = hashlib.sha256(str(repo).encode()).hexdigest()
-    relative = DIRECTORY + '/' + key + '.json'
+    relative = _entry(key)
     cached = None
     try:
         inputs = KEY_INPUTS.get(key)
@@ -660,7 +668,7 @@ def read_plan_list(repo, collect):
         return value
 
     identity = hashlib.sha256(str(repo).encode()).hexdigest()
-    relative = DIRECTORY + '/plan-list.json'
+    relative = _entry('plan-list')
     try:
         generation = stamp()
         if generation is None:

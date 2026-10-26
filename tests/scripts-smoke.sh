@@ -33024,6 +33024,8 @@ PY
     "artifacts/quarantine/.artifact-index-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.raw.tmp.123.0123456789abcdef0123456789abcdef"
     "hooks/panel-cache/.dashboard.json.tmp.123.0123456789abcdef0123456789abcdef"
     "hooks/panel-cache/.plan-list.json.tmp.123.0123456789abcdef0123456789abcdef"
+    "hooks/panel-cache/.dashboard.0123456789ab.json.tmp.123.0123456789abcdef0123456789abcdef"
+    "hooks/panel-cache/.result-records.0123456789ab.json.tmp.123"
     "artifacts/panel-results/.result-task-0123456789abcdef01234567.json.tmp.123.0123456789abcdef0123456789abcdef"
     "artifacts/panel-results/.delivery-task-0123456789abcdef01234567-0123456789abcdef-pending.json.tmp.123.0123456789abcdef0123456789abcdef"
   )
@@ -33043,6 +33045,30 @@ PY
     if printf '%s' "$result" | grep -F 'shared-state' > /dev/null; then
       fail "captured writer-temp cleanup was reported as shared-state in mode $transient_mode: $result"
     fi
+  done
+
+  # A versioned panel-cache entry first appears after an install: its staging
+  # file is created, renamed into place and the old entry stays; none of it is a
+  # violation. A captured non-cache file there is still authority state.
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-panel-cache-$transient_mode"
+    make_guard_repo "$transient"
+    mkdir -p "$transient/.oms/hooks/panel-cache"
+    printf '{}\n' > "$transient/.oms/hooks/panel-cache/dashboard.json"
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" run_guarded_worker "$transient" \
+      "d='$transient/.oms/hooks/panel-cache'; printf 'x\\n' > \"\$d/.dashboard.0123456789ab.json.tmp.1.0123456789abcdef0123456789abcdef\"; mv \"\$d/.dashboard.0123456789ab.json.tmp.1.0123456789abcdef0123456789abcdef\" \"\$d/dashboard.0123456789ab.json\"")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode a new versioned panel-cache entry should pass: $result"
+    [ -f "$transient/.oms/hooks/panel-cache/dashboard.0123456789ab.json" ] ||
+      fail "the versioned panel-cache entry should be kept"
+    transient="$TMP/guard-state-panel-cache-forged-$transient_mode"
+    make_guard_repo "$transient"
+    mkdir -p "$transient/.oms/hooks/panel-cache"
+    printf '{}\n' > "$transient/.oms/hooks/panel-cache/.forged.0123456789ab.json.tmp.1.0123456789abcdef0123456789abcdef"
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" run_guarded_worker "$transient" \
+      "rm -f '$transient/.oms/hooks/panel-cache/.forged.0123456789ab.json.tmp.1.0123456789abcdef0123456789abcdef'")"
+    [ "${result%%	*}" != 0 ] ||
+      fail "exclusive=$transient_mode deleting a forged non-cache file under panel-cache should fail: $result"
   done
 
   # Transcript retention is owner bookkeeping: panel_activity.py prunes old
