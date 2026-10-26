@@ -831,6 +831,55 @@ def _reserve_alias(repo, room_id, role, requested, call_rows):
         raise ValueError("panel alias reservation refused") from error
 
 
+_MODULE_PROBE = ("import sys, importlib.util as u; "
+                 "sys.exit(0 if u.find_spec(sys.argv[1]) is not None else 3)")
+_NO_PROBE_WORDS = {"||", ";", "|", "&", "export", "env", "cd", "pushd", "popd", "source", ".",
+                   "set", "unset", "exec", "eval"}
+
+
+def _warn_missing_module(repo, verify):
+    """Advise when the verify's first command is `python -m MODULE` and MODULE is absent.
+
+    Advisory only: earlier commands, hooks or the worker's own edits can still supply it, so
+    this never refuses. It probes only a plain `&&` chain of simple commands, and only the
+    top-level name (no parent package is imported)."""
+    if not isinstance(verify, str) or "\n" in verify or "\r" in verify:
+        return
+    try:
+        lexer = shlex.shlex(verify, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        words = list(lexer)
+    except ValueError:
+        return
+    if any(word in _NO_PROBE_WORDS or any(mark in word for mark in "(){}`") for word in words):
+        return
+    segments, current = [], []
+    for word in words + ["&&"]:
+        if word != "&&":
+            current.append(word)
+        elif current:
+            segments.append(current)
+            current = []
+        else:
+            return
+    if any(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", segment[0]) for segment in segments):
+        return
+    first = segments[0]
+    if first[0] not in ("python", "python3") or len(first) < 3 or first[1] != "-m":
+        return
+    top = first[2].split(".", 1)[0]
+    if not top.isidentifier():
+        return
+    try:
+        probe = subprocess.run([first[0], "-c", _MODULE_PROBE, top], cwd=str(repo), timeout=5,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if probe.returncode == 3 and not probe.stdout.strip():
+        print("warning: verify may fail: %s cannot find module %s" % (first[0], top), file=sys.stderr)
+
+
 def _validate_dispatch_verifier(repo, verify):
     """Refuse missing suite files and unknown selectors before launching a worker."""
     from terminal_panel import _read_suite, _uses_smoke_runner
@@ -2121,6 +2170,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         execution = native_repository(repo)
     if candidate is None:
         _validate_dispatch_verifier(execution, verify)
+        if access == "write":
+            _warn_missing_module(execution, verify)
     # Candidate suite/selector validation runs after materialization in peer-review.
     if dry_run:
         _validate_dry_run_inputs(prompt, brief)

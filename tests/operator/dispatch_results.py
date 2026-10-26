@@ -211,6 +211,48 @@ try:
     raise AssertionError("verifier present only in source repo was accepted")
 except ValueError as error:
     assert "missing suite file" in str(error), error
+# A write dispatch warns about a `python -m` module the probe cannot find, and is never refused for it.
+def dispatch_verify(command, scope=("tests/",)):
+    """Dry-run a write dispatch; the stub route fails with KeyError only after every verify check passed."""
+    captured = io.StringIO()
+    try:
+        with redirect_stderr(captured):
+            panel.run_dispatch(root, "codex", "builder", "write", "x", None, command,
+                               None, True, None, {"kind": "worker", "purpose": "implement"}, None, None,
+                               list(scope))
+        raise AssertionError("stub route was expected to stop the dispatch: " + repr(command))
+    except KeyError:
+        return captured.getvalue()
+for command in ("python3 -m surely_missing_module_xyz", "python3 -m surely_missing_module_xyz.sub && true"):
+    interpreter = command.split()[0]
+    expected = ("warning: verify may fail: %s cannot find module surely_missing_module_xyz\n" % interpreter
+                if shutil.which(interpreter) else "")  # an interpreter that cannot run is no claim
+    assert dispatch_verify(command) == expected, command
+# Absence checks and every other verify shape are not refused, and stay silent.
+for quiet in ("test ! -e tests/surely-missing-preflight-negative.py", "python3 -m json.tool", "python3 -m", "",
+              "PYTHONPATH=scripts/lib python3 -m surely_missing_module_xyz",
+              "env python3 -m surely_missing_module_xyz",
+              "export PYTHONPATH=scripts/lib; python3 -m surely_missing_module_xyz",
+              "true || python3 -m surely_missing_module_xyz",
+              "true && python3 -m surely_missing_module_xyz",
+              "python3 -m surely_missing_module_xyz\ntrue",
+              "python3 -m surely_missing_module_xyz || true",
+              "venv/bin/python3 -m surely_missing_module_xyz",
+              'printf "%s\\n" python3 -m surely_missing_module_xyz'):
+    assert dispatch_verify(quiet) == "", quiet
+# The probe finds a module through the inherited PYTHONPATH and the repo root, and runs no package code.
+sentinel_root = Path(temporary) / "sentinel-pkg"
+(sentinel_root / "sentinelpkg").mkdir(parents=True)
+(sentinel_root / "sentinelpkg" / "__init__.py").write_text(
+    "from pathlib import Path\nPath(__file__).with_name('ran').write_text('x')\n")
+with patch.dict(os.environ, {"PYTHONPATH": str(sentinel_root)}):
+    assert dispatch_verify("python3 -m sentinelpkg.sub") == ""
+    os.environ.pop("PYTHONPATH")
+    assert dispatch_verify("python3 -m panel_dispatch") != ""
+with patch.dict(os.environ, {"PYTHONPATH": str(Path(root) / "scripts/lib")}):
+    assert dispatch_verify("python3 -m panel_dispatch") == ""
+assert dispatch_verify("python3 -m scripts.lib.surely_missing_module_xyz") == ""
+assert not (sentinel_root / "sentinelpkg" / "ran").exists(), "probe executed package initialization"
 try:
     panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section not-a-section")
     raise AssertionError("unknown operator section was accepted")
