@@ -321,7 +321,7 @@ agent_memory_match_file() {
 
 # Literal values of this process's secret-named environment variables (and the
 # password part of URL-with-userinfo values) found bare in FILE. Prints
-# "LINE:env:VARNAME" only -- values are read in-process, never put on argv,
+# "LINE:env:env-secret" only -- values are read in-process, never put on argv,
 # disk or output. Returns 0 (hits or none), or 2 when python3 exists but the
 # scan failed. Only an absent python3 skips silently; the regex tier stays
 # authoritative then. Callers keep these records apart from raw grep output.
@@ -368,10 +368,10 @@ for value, name in needles.items():
     needle = value.encode('utf-8', 'replace')
     at = data.find(needle)
     while at >= 0:
-        seen.add((data.count(b'\n', 0, at) + 1, name))
+        seen.add(data.count(b'\n', 0, at) + 1)
         at = data.find(needle, at + 1)
-for number, name in sorted(seen):
-    print('%d:env:%s' % (number, name))
+for number in sorted(seen):
+    print('%d:env:env-secret' % number)
 PY
 }
 
@@ -428,8 +428,9 @@ agent_memory_file_has_sensitive_content() {
 # file header; inside a hunk it is added content. A "+" line outside any hunk
 # is still scanned, so a miscounted hunk header cannot hide an addition.
 agent_memory_sensitive_diff_scan() {  # DIFF
-  local file="$1" content_file loc_file idx_file rc=0 tier re n pattern
+  local file="$1" content_file loc_file idx_file rc=0 tier re n pattern location line_number
   local reported shown cap=10 scan_status=() records env_hits
+  MA_OUTBOUND_EVIDENCE=""
   content_file="$(agent_memory_mktemp)" || return 2
   loc_file="$(agent_memory_mktemp)" || { rm -f "$content_file"; return 2; }
   idx_file="$(agent_memory_mktemp)" || { rm -f "$content_file" "$loc_file"; return 2; }
@@ -488,17 +489,28 @@ agent_memory_sensitive_diff_scan() {  # DIFF
       while IFS= read -r n; do
         [ -n "$n" ] || continue
         pattern=""
-        case "$n" in env:*) n="${n#env:}"; pattern="${n#*:}"; n="${n%%:*}" ;; esac
+        case "$n" in env:*) n="${n#env:}"; pattern="${n#*:env:}"; n="${n%%:*}" ;; esac
         reported=$((reported + 1))
         [ "$shown" -lt "$cap" ] || continue
+        location="$(LC_ALL=C sed -n "${n}p" "$loc_file")"
+        line_number="${location##*:}"
+        case "$line_number" in ''|*[!0-9]*|0) continue ;; esac
         shown=$((shown + 1))
         [ -n "$pattern" ] ||
           pattern="$(agent_memory_sensitive_line_pattern "$tier" "$(LC_ALL=C sed -n "${n}p" "$content_file")")"
-        printf '%s: %s-tier match: %s\n' "$(LC_ALL=C sed -n "${n}p" "$loc_file")" "$tier" "$pattern"
+        MA_OUTBOUND_EVIDENCE="${MA_OUTBOUND_EVIDENCE}${MA_OUTBOUND_EVIDENCE:+
+}${tier},${pattern},diff,${line_number}"
+        printf '%s: %s-tier match: %s\n' "$location" "$tier" "$pattern"
       done <<EOF
 $records
 EOF
-      [ "$reported" -le "$shown" ] || printf '%s-tier: +%s more added-line matches\n' "$tier" "$((reported - shown))"
+      if [ "$reported" -gt "$shown" ]; then
+        if [ "$shown" -eq 0 ]; then
+          printf '%s-tier: +%s added-line matches\n' "$tier" "$reported"
+        else
+          printf '%s-tier: +%s more added-line matches\n' "$tier" "$((reported - shown))"
+        fi
+      fi
     done
   fi
   rm -f "$content_file" "$loc_file" "$idx_file"
@@ -548,7 +560,7 @@ agent_memory_sensitive_report() {  # FILE
       number="${line%%:*}"
       case "$number" in *[!0-9]*|"") continue ;; esac
       case "$line" in
-        *:env:*) pattern="${line#*:}" ;;
+        *:env:*) pattern="${line#*:env:}" ;;
         *)
           line="$(sed -n "${number}p" "$file")"
           pattern="$(agent_memory_sensitive_line_pattern "$tier" "$line")" ;;

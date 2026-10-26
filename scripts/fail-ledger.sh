@@ -235,19 +235,32 @@ case "$ACTION" in
   record)
     [ -n "$CMD" ] || fail "record requires --cmd"
     case "$EXIT_CODE" in *[!0-9]*|"") fail "record requires --exit N (non-negative integer)" ;; esac
+    valid_outbound_evidence=()
+    dropped_outbound_evidence=0
     for evidence in "${OUTBOUND_EVIDENCE[@]}"; do
+      valid=1
+      case "$evidence" in *$'\n'*|*$'\r'*) valid=0 ;; esac
       IFS=, read -r evidence_tier evidence_pattern evidence_source evidence_line <<EOF
 $evidence
 EOF
-      case "$evidence_tier" in secret|machine) ;; *) fail "invalid outbound evidence tier" ;; esac
-      case "$evidence_pattern" in
-        credential-assignment|authorization|bearer|url-credentials|webhook-url|machine-login|token-assignment|github-token|npm-token|hf-token|gitlab-token|stripe-key|jwt-like|aws-key|google-key|private-key|token-like|home-path|user-path|scratch-path|lustre-path|gpfs-path|beegfs-path|ssh-dir|aws-dir|cluster-field|partition-field|nodelist-field|sbatch-partition) ;;
-        *) fail "invalid outbound evidence pattern" ;;
+      case "$evidence_tier" in
+        secret|machine) ;;
+        *) valid=0 ;;
       esac
-      case "$evidence_source" in prompt|brief-file|context-bundle) ;; *) fail "invalid outbound evidence source" ;; esac
-      case "$evidence_line" in ''|*[!0-9]*) fail "invalid outbound evidence line" ;; esac
-      [ "$evidence_line" -gt 0 ] || fail "outbound evidence line must be positive"
+      case "$evidence_pattern" in
+        credential-assignment|authorization|bearer|url-credentials|webhook-url|machine-login|token-assignment|github-token|npm-token|hf-token|gitlab-token|stripe-key|jwt-like|aws-key|google-key|private-key|token-like|home-path|user-path|scratch-path|lustre-path|gpfs-path|beegfs-path|ssh-dir|aws-dir|cluster-field|partition-field|nodelist-field|sbatch-partition|env-secret) ;;
+        *) valid=0 ;;
+      esac
+      case "$evidence_source" in prompt|brief-file|context-bundle|diff) ;; *) valid=0 ;; esac
+      case "$evidence_line" in ''|*[!0-9]*) valid=0 ;; *) [ "$evidence_line" -gt 0 ] || valid=0 ;; esac
+      if [ "$valid" = 1 ]; then
+        valid_outbound_evidence+=("$evidence")
+      else
+        dropped_outbound_evidence=$((dropped_outbound_evidence + 1))
+      fi
     done
+    [ "$dropped_outbound_evidence" -eq 0 ] ||
+      echo "fail-ledger: dropped $dropped_outbound_evidence invalid outbound evidence entr$( [ "$dropped_outbound_evidence" -eq 1 ] && printf 'y' || printf 'ies')" >&2
     # Refuse secret-tier content; machine paths were already normalized above.
     scan="$(mktemp)" || fail "mktemp failed"
     printf '%s\n%s\n' "$CMD" "$SUMMARY" > "$scan"
@@ -262,7 +275,7 @@ EOF
     agent_memory_ensure_oms_ignore_for_path "$LEDGER" 2>/dev/null || true
     row_tmp="$(mktemp)" || fail "mktemp failed"
     outbound_evidence=""
-    for evidence in "${OUTBOUND_EVIDENCE[@]}"; do
+    for evidence in "${valid_outbound_evidence[@]}"; do
       outbound_evidence="${outbound_evidence}${outbound_evidence:+
 }${evidence}"
     done

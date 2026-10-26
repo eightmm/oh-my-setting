@@ -4579,6 +4579,10 @@ run_provider() {
   ma_default_read_effort "$provider" read
 
   if ! ma_validate_outbound_prompt "$prompt_file"; then
+    # Provider calls run in background children; carry only the scrubber's
+    # tier/pattern/location labels back to the parent that writes the ledger.
+    [ -z "${MA_OUTBOUND_EVIDENCE:-}" ] ||
+      { rm -f "${artifact}.outbound-evidence"; (umask 077; set -C; printf '%s\n' "$MA_OUTBOUND_EVIDENCE" > "${artifact}.outbound-evidence") 2>/dev/null || true; }
     {
       printf '# %s %s\n\n' "$provider" "$MA_KIND"
       printf -- '- started: %s\n' "$started"
@@ -4798,6 +4802,7 @@ ma_council_call() {
           repair="${3%.md}-repair.md"
           rejected="${3%.md}-repair-rejected.md"
           run_provider "$1" "$prompt" "$repair" || repair_rc=$?
+          rm -f "${repair}.outbound-evidence"
           if [ "$repair_rc" -ne 0 ] || [ -n "$(ma_council_nonanswer "$repair")" ]; then
             [ ! -f "$repair" ] || mv -f "$repair" "$rejected"
           fi
@@ -4827,7 +4832,7 @@ ma_council_call() {
 # dropped, dropped_names, nonanswers, nonanswer_names, failed, failed_names,
 # seat_quality, seat_reason, seat_exit.
 ma_run_round1() {
-  local provider artifact i provider_list quality rc guard_reason
+  local provider artifact i provider_list quality rc guard_reason evidence_file
   if [ "${DEBATE:-0}" -gt 0 ]; then
     ma_prepare_council_context || return 2
   fi
@@ -4885,7 +4890,15 @@ ma_run_round1() {
       failed_names+=("${provider_names[i]} (exit $rc)")
       guard_reason=""
       [ ! -s "${artifacts[i]}.read-guard" ] || guard_reason="$(head -n 1 "${artifacts[i]}.read-guard" | tr -d '\r')"
+      evidence_file="${artifacts[i]}.outbound-evidence"
+      if [ -s "$evidence_file" ]; then
+        MA_OUTBOUND_EVIDENCE="$(tr -d '\r' < "$evidence_file")"
+        rm -f "$evidence_file"
+      else
+        MA_OUTBOUND_EVIDENCE=""
+      fi
       ma_record_seat_failure "${provider_names[i]}" "$rc" "$guard_reason"
+      MA_OUTBOUND_EVIDENCE=""
       continue
     fi
     artifacts[i]="$(ma_council_answer_artifact "${artifacts[i]}")"
@@ -5278,6 +5291,7 @@ ma_run_debate_rounds() {
       quality=""
       rc=0
       wait "${r_pids[k]}" || rc=$?
+      rm -f "${r_arts[k]}.outbound-evidence"
       if [ "$rc" -eq 0 ]; then
         # A banner that exits 0 in round 2 would otherwise be promoted over the
         # round-1 answer and published as the "final answer after debate".

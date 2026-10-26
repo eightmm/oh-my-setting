@@ -313,12 +313,14 @@ record_thread_exchange() {  # record_thread_exchange [FAILED_EXIT]
 }
 
 if run_provider "$TO" "$prompt_file" "$artifact"; then
+  rm -f "${artifact}.outbound-evidence"
   record_thread_exchange
   echo "artifact: $artifact"
 else
   rc=$?
   record_thread_exchange "$rc"
   ma_record_seat_failure "$TO" "$rc"
+  rm -f "${artifact}.outbound-evidence"
   echo "artifact: $artifact"
   # Propagate run_provider's code: 3 = blocked by scrubber, 1 = provider failed.
   exit "$rc"

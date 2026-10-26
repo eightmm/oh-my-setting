@@ -728,6 +728,7 @@ load_user_tool_paths
 status_file="$(mktemp)" || fail "mktemp failed"
 diff_file="$(mktemp)" || fail "mktemp failed"
 raw_diff_file="$(mktemp)" || fail "mktemp failed"
+diff_scan_report_file="$(mktemp)" || fail "mktemp failed"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 gate_verify_temp="$(mktemp)" || fail "mktemp failed"
 debate_dir=""
@@ -738,7 +739,7 @@ cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
-  rm -f "$status_file" "$diff_file" "$raw_diff_file" "$prompt_file" "$gate_verify_temp"
+  rm -f "$status_file" "$diff_file" "$raw_diff_file" "$diff_scan_report_file" "$prompt_file" "$gate_verify_temp"
   if [ -n "$debate_dir" ]; then
     rm -rf "$debate_dir"
   fi
@@ -925,11 +926,13 @@ if [ "$NO_DIFF" -eq 0 ]; then
     "$diff_base" -- "${MA_SAFE_PATHS[@]}" > "$raw_diff_file" ||
     fail "git diff failed for $MA_READ_SOURCE_REPO"
   diff_scan_status=0
-  diff_scan_report="$(contains_sensitive_content "$raw_diff_file")" || diff_scan_status=$?
+  contains_sensitive_content "$raw_diff_file" > "$diff_scan_report_file" || diff_scan_status=$?
+  diff_scan_report="$(cat "$diff_scan_report_file")"
   case "$diff_scan_status" in
     0)
       echo "external review skipped: sensitive-looking diff content detected" >&2
       printf '%s\n' "$diff_scan_report" >&2
+      ma_record_seat_failure "" 3
       exit 3
       ;;
     1) ;;

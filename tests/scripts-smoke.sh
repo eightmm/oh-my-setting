@@ -4313,7 +4313,10 @@ test_peer_export_only_blocks_sensitive_prompt() {
 
 test_blocked_outbound_context_is_not_a_seat_failure() {
   local project="$TMP/outbound-scrub-ledger"
+  local review_prompt="$TMP/outbound-review-prompt"
+  local review_diff="$TMP/outbound-review-diff"
   local rc=0
+  local review_prompt_evidence=0 review_diff_evidence=0
 
   make_committed_repo "$project"
   OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/agent-call.sh" \
@@ -4321,6 +4324,9 @@ test_blocked_outbound_context_is_not_a_seat_failure() {
     --prompt "Assess private path /hom""e/researcher/secret" \
     >"$project/out" 2>"$project/error" || rc=$?
   [ "$rc" = 3 ] || fail "a scrubbed outbound context should exit 3, got $rc"
+  if find "$project" -type f -name '*.outbound-evidence' 2>/dev/null | grep . > /dev/null; then
+    fail "direct refusal left an outbound-evidence hand-off file behind"
+  fi
 
   # The seat was never called, so the row must not accumulate onto its
   # fingerprint (which drives drop-the-seat advice) and must not read as a
@@ -4366,6 +4372,141 @@ assert re.search(r"secret-tier match in prompt at line [1-9][0-9]*:token-assignm
                  open(sys.argv[2], encoding="utf-8").read())
 PY
   [ "$?" = "0" ] || fail "secret refusal evidence should identify tier, pattern, source and line without the token"
+
+  make_committed_repo "$review_prompt"
+  rc=0
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
+    --repo "$review_prompt" --providers codex --prompt \
+    "Review private path /hom""e/researcher/secret" \
+    >"$review_prompt/out" 2>"$review_prompt/error" || rc=$?
+  [ "$rc" = "1" ] || fail "a refused review prompt should preserve peer-review's exit 1, got $rc"
+  assert_file_contains "$review_prompt/error" "outbound provider context contains sensitive-looking content"
+  if python3 - "$review_prompt/.oms/failures.jsonl" "$review_prompt/error" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert len(rows) == 1, rows
+row = rows[0]
+matches = row.get("outbound_evidence", [])
+assert any(m.get("tier") == "machine" and m.get("pattern") == "home-path"
+           and m.get("source") == "prompt" and isinstance(m.get("line"), int)
+           and m["line"] > 0 for m in matches), matches
+assert "/hom" + "e/researcher/secret" not in open(sys.argv[1], encoding="utf-8").read()
+assert "/hom" + "e/researcher/secret" not in open(sys.argv[2], encoding="utf-8").read()
+PY
+  then :; else review_prompt_evidence=1; fi
+
+  make_committed_repo "$review_diff"
+  printf 'private path /hom''e/researcher/diff-secret\n' >> "$review_diff/file.txt"
+  rc=0
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
+    --repo "$review_diff" --providers codex --prompt 'Review the diff' \
+    >"$review_diff/out" 2>"$review_diff/error" || rc=$?
+  [ "$rc" = "3" ] || fail "a refused review diff should exit 3, got $rc"
+  if python3 - "$review_diff/.oms/failures.jsonl" "$review_diff/error" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert len(rows) == 1, rows
+row = rows[0]
+matches = row.get("outbound_evidence", [])
+assert any(m.get("tier") == "machine" and m.get("pattern") == "home-path"
+           and m.get("source") == "diff" and isinstance(m.get("line"), int)
+           and m["line"] == 2 for m in matches), matches
+assert "diff-secret" not in open(sys.argv[1], encoding="utf-8").read()
+assert "diff-secret" not in open(sys.argv[2], encoding="utf-8").read()
+PY
+  then :; else review_diff_evidence=1; fi
+  [ "$review_prompt_evidence" = "0" ] || fail "peer-review prompt row should identify tier/pattern/source/line without the match"
+  [ "$review_diff_evidence" = "0" ] || fail "peer-review diff row should identify tier/pattern/source/line without the match"
+
+  local env_project="$TMP/outbound-env-probe-prompt"
+  local env_diff_project="$TMP/outbound-env-probe-diff"
+  local env_name
+  env_name="OMS_TEST_$(printf 'PASS')$(printf 'WORD')"
+  local env_sample='fake-value-9284'
+  make_committed_repo "$env_project"
+  export "$env_name=$env_sample"
+  rc=0
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
+    --repo "$env_project" --providers codex --prompt "Review context $env_sample" \
+    >"$env_project/out" 2>"$env_project/error" || rc=$?
+  [ "$rc" = "1" ] || fail "an env-secret review-prompt refusal should preserve peer-review's exit 1, got $rc"
+  if find "$env_project" -type f -name '*.outbound-evidence' 2>/dev/null | grep . > /dev/null; then
+    fail "review refusal left an outbound-evidence hand-off file behind"
+  fi
+python3 - "$env_project/.oms/failures.jsonl" "$env_project/error" "$env_name" "$env_sample" <<'PY'
+import json, sys
+ledger, error, name, value = sys.argv[1:]
+pattern_label = 'env-' + 'sec' + 'ret'
+tier_label = 'se' + 'c' + 'ret'
+rows = [json.loads(line) for line in open(ledger, encoding='utf-8')]
+assert len(rows) == 1, rows
+evidence = rows[0].get('outbound_evidence', [])
+assert len(evidence) == 1, evidence
+assert all(item.get('tier') == tier_label and item.get('pattern') == pattern_label
+           for item in evidence), evidence
+assert evidence[0].get('source') == 'prompt', evidence
+text = open(ledger, encoding='utf-8').read() + open(error, encoding='utf-8').read()
+assert value not in text and name not in text
+PY
+  [ "$?" = "0" ] || fail "env-secret prompt refusal should retain one content-free evidence row"
+
+  make_committed_repo "$env_diff_project"
+  printf 'review addition %s\n' "$env_sample" >> "$env_diff_project/file.txt"
+  rc=0
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
+    --repo "$env_diff_project" --providers codex --prompt 'Review the diff' \
+    >"$env_diff_project/out" 2>"$env_diff_project/error" || rc=$?
+  unset "$env_name"
+  [ "$rc" = "3" ] || fail "an env-secret diff refusal should exit 3, got $rc"
+  python3 - "$env_diff_project/.oms/failures.jsonl" "$env_diff_project/error" "$env_name" "$env_sample" <<'PY'
+import json, sys
+ledger, error, name, value = sys.argv[1:]
+pattern_label = 'env-' + 'sec' + 'ret'
+tier_label = 'se' + 'c' + 'ret'
+rows = [json.loads(line) for line in open(ledger, encoding='utf-8')]
+assert len(rows) == 1, rows
+evidence = rows[0].get('outbound_evidence', [])
+assert len(evidence) == 1, evidence
+assert evidence[0].get('tier') == tier_label and evidence[0].get('pattern') == pattern_label, evidence
+assert evidence[0].get('source') == 'diff' and evidence[0].get('line') == 2, evidence
+text = open(ledger, encoding='utf-8').read() + open(error, encoding='utf-8').read()
+assert value not in text and name not in text
+PY
+  [ "$?" = "0" ] || fail "env-secret diff refusal should retain one content-free evidence row"
+
+  local ledger_project="$TMP/outbound-invalid-evidence"
+  make_committed_repo "$ledger_project"
+  "$ROOT/scripts/fail-ledger.sh" --repo "$ledger_project" record \
+    --cmd 'safe evidence validation' --exit 1 \
+    --outbound-evidence 'secret,env-secret,prompt,1' \
+    --outbound-evidence 'secret,env-secret,prompt,0' \
+    --outbound-evidence 'secret,unknown,prompt,2' \
+    --outbound-evidence 'secret,env-secret,prompt,not-a-line' \
+    --outbound-evidence '' \
+    --outbound-evidence "$(printf 'secret,env-secret,prompt,1\nsecret,unlisted,prompt,2')" \
+    >"$ledger_project/out" 2>"$ledger_project/error" || fail "invalid evidence should not reject a failure row"
+  python3 - "$ledger_project/.oms/failures.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8')]
+assert len(rows) == 1, rows
+assert rows[0].get('outbound_evidence') == [
+    {'tier': 'secret', 'pattern': 'env-secret', 'source': 'prompt', 'line': 1}], rows
+PY
+  [ "$?" = "0" ] || fail "invalid outbound evidence should be dropped individually"
+  assert_file_contains "$ledger_project/error" 'dropped 5 invalid outbound evidence entries'
+
+  local bad_line_diff="$TMP/outbound-invalid-diff-lines"
+  printf '+private path /hom''e/researcher/secret\n' > "$bad_line_diff"
+  rc=0
+  bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_diff_scan "$2"; rc=$?; [ "$rc" = 0 ] && [ -z "$MA_OUTBOUND_EVIDENCE" ]' \
+    _ "$ROOT" "$bad_line_diff" >"$TMP/outbound-invalid-diff-out" || rc=$?
+  [ "$rc" = "0" ] || fail "a sensitive addition without a hunk line should match without scan failure or evidence"
+  printf '%s\n' '--- a/file.txt' '+++ b/file.txt' '@@ -0,0 +0,0 @@' \
+    '+private path /hom''e/researcher/secret' > "$bad_line_diff"
+  rc=0
+  bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_diff_scan "$2"; rc=$?; [ "$rc" = 0 ] && [ -z "$MA_OUTBOUND_EVIDENCE" ]' \
+    _ "$ROOT" "$bad_line_diff" >"$TMP/outbound-invalid-diff-out" || rc=$?
+  [ "$rc" = "0" ] || fail "a sensitive addition with line zero should match without scan failure or evidence"
 
   local scan_project="$TMP/outbound-scan-failure"
   local scan_bin="$TMP/outbound-scan-bin"
@@ -14554,8 +14695,8 @@ test_scrubber_tiers_split_secret_from_machine() {
   agent_memory_file_has_secret_content "$f" ||
     fail "credential assignment must match the secret tier"
 
-  # Env tier: literal values of secret-named variables are caught bare, and
-  # reported by variable name only. Fixtures are built at runtime.
+  # Env tier: literal values of secret-named variables are caught bare and
+  # reported with a fixed label. Fixtures are built at runtime.
   local envval="Zq8vN3xK" dbpass="Hs7TgW2pLm9RcQ4"
   envval="${envval}t5Yb1JdFw6UeA0Xi"
   local envname="FIXTURE_API_""KEY"
@@ -14566,14 +14707,21 @@ test_scrubber_tiers_split_secret_from_machine() {
     agent_memory_file_has_sensitive_content "$f" || fail "bare env secret value must block the combined tier"
     local report
     report="$(agent_memory_sensitive_report "$f")"
-    printf '%s\n' "$report" | grep -F "secret-tier match in prompt at line 1:env:$envname" >/dev/null ||
-      fail "env secret report must name the variable and line: $report"
+    printf '%s\n' "$report" | grep -F 'secret-tier match in prompt at line 1:env-secret' >/dev/null ||
+      fail "env secret report must name the fixed label and line: $report"
+    case "$report" in *"$envname"*) fail "env secret variable name leaked into the report" ;; esac
     case "$report" in *"$envval"*) fail "env secret value leaked into the report" ;; esac
     printf -- '--- a/x\n+++ b/x\n@@ -0,0 +1,1 @@\n+pasted %s\n' "$envval" > "$f.diff"
     report="$(agent_memory_sensitive_diff_scan "$f.diff")" && rc=0 || rc=$?
     [ "$rc" = 0 ] || fail "diff scan must flag an added env secret value"
-    case "$report" in *"x:1: secret-tier match: env:$envname"*) ;; *) fail "diff scan env label unexpected: $report" ;; esac
+    case "$report" in *'x:1: secret-tier match: env-secret'*) ;; *) fail "diff scan env label unexpected: $report" ;; esac
+    case "$report" in *"$envname"*) fail "diff scan env variable name leaked into the report" ;; esac
     case "$report" in *"$envval"*) fail "env secret value leaked into the diff report" ;; esac
+    printf -- '--- a/x\n+++ b/x\n@@ -0,0 +0,0 @@\n+pasted %s\n' "$envval" > "$f.diff"
+    report="$(agent_memory_sensitive_diff_scan "$f.diff")" && rc=0 || rc=$?
+    [ "$rc" = 0 ] || fail "a match without a positive hunk line must remain a match"
+    case "$report" in *'secret-tier: +1 added-line matches'*) ;; *) fail "empty shown set summary is unclear: $report" ;; esac
+    case "$report" in *'more added-line matches'*) fail "empty shown set must not be summarized as more: $report" ;; esac
   )
   (
     export "$envname=short"
@@ -14593,8 +14741,11 @@ test_scrubber_tiers_split_secret_from_machine() {
     printf 'my phrase is %s ok\n' "$phrase" > "$f"
     agent_memory_file_has_secret_content "$f" || fail "passphrase containing spaces must match"
     printf 'header Basic dXNlcjpwYXNzd29yZA end\n' > "$f"
-    agent_memory_sensitive_report "$f" | grep -F ":env:$aname" >/dev/null ||
-      fail "bare authorization value must be reported by variable name"
+    local report
+    report="$(agent_memory_sensitive_report "$f")"
+    printf '%s\n' "$report" | grep -F ':env-secret' >/dev/null ||
+      fail "bare authorization value must be reported with the fixed label"
+    case "$report" in *"$aname"*) fail "authorization variable name leaked into the report" ;; esac
     printf 'contact someone.fixture@example.test\n' > "$f"
     if agent_memory_file_has_secret_content "$f"; then fail "author variables must not match"; fi
   )
@@ -14605,8 +14756,11 @@ test_scrubber_tiers_split_secret_from_machine() {
     printf 'pasted:\n%s\ndone\n' "$ml" > "$f"
     agent_memory_file_has_secret_content "$f" || fail "multi-line passphrase pasted verbatim must match"
     printf 'one\ntwo\vthree\n%s\n' "$ml" > "$f"
-    agent_memory_sensitive_report "$f" | grep -F 'at line 3:env:' >/dev/null ||
+    local report
+    report="$(agent_memory_sensitive_report "$f")"
+    printf '%s\n' "$report" | grep -F 'at line 3:env-secret' >/dev/null ||
       fail "vertical tab must not shift the LF-based line number"
+    case "$report" in *'FIXTURE_PASS'*) fail "passphrase variable name leaked into the report" ;; esac
   )
   (
     # Qualification: plain words, metadata-suffixed names and drive paths are
@@ -14641,8 +14795,11 @@ test_scrubber_tiers_split_secret_from_machine() {
     export FIXTURE_DATABASE_URL="postgres://dbuser${sep}${dbpass}@db.example.test/app"
     printf 'connect with %s please\n' "$dbpass" > "$f"
     agent_memory_file_has_secret_content "$f" || fail "bare URL userinfo password must match the secret tier"
-    agent_memory_sensitive_report "$f" | grep -F ':env:FIXTURE_DATABASE_URL' >/dev/null ||
-      fail "URL password report must name the variable"
+    local report
+    report="$(agent_memory_sensitive_report "$f")"
+    printf '%s\n' "$report" | grep -F ':env-secret' >/dev/null ||
+      fail "URL password report must use the fixed label"
+    case "$report" in *'FIXTURE_DATABASE_URL'*) fail "URL variable name leaked into the report" ;; esac
   )
 
   (
