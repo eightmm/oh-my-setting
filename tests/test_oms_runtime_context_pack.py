@@ -48,6 +48,18 @@ class ContextPackValidatorTest(unittest.TestCase):
         self.path.write_text(text or json.dumps(value), encoding="utf-8")
         return self.path
 
+    def test_automatic_pack_omits_absolute_paths_from_task(self) -> None:
+        (self.repo / 'lease.py').write_text('def recover_lease(): return 1\n', encoding='utf-8')
+        parent = Path(self.tmp.name) / 'parent'
+        parent.mkdir()
+        link = '/tmp/tmp.ABC/scripts/x.sh:12'
+        pack = automatic_context_pack(self.repo, parent, Path(self.tmp.name) / 'abs',
+                                      'recover lease, see [finding](%s) for detail' % link)
+        self.assertNotIn('/tmp/', pack['task'])
+        self.assertIn('recover lease', pack['task'])
+        self.assertIn('lease.py', pack['files'])
+        validate_context_pack(self.write(pack), self.repo)
+
     def test_automatic_pack_cold_warm_and_mixed_cache_generations(self) -> None:
         from oms_graph.project import build
 

@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
-    from .common import CoreError, sensitive_text, sha256_bytes
+    from .common import ABSOLUTE_PATH_RE, CoreError, sensitive_text, sha256_bytes
 except ImportError:  # direct execution: python3 .../oms_runtime/context_pack.py
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from oms_runtime.common import CoreError, sensitive_text, sha256_bytes
+    from oms_runtime.common import ABSOLUTE_PATH_RE, CoreError, sensitive_text, sha256_bytes
 
 MAX_PACK_BYTES = 262144
 MAX_ENTRIES = 200
@@ -238,6 +238,9 @@ def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> 
         checked = _fresh_graph(repo, state=state)
     if checked is None:
         raise CoreError("automatic context graph is stale, unsafe or inconsistent")
+    # Continuation prompts quote findings linking into another checkout; the
+    # pack validator refuses absolute paths, so drop them from the task text.
+    task = ABSOLUTE_PATH_RE.sub("[absolute-path-omitted]", task)
     return context_pack(repo, checked[0], task=task[:2000], max_files=8, state=state)
 
 
