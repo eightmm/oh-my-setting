@@ -1382,7 +1382,9 @@ oms_worker_surface_diff() {
   local changed=""
   local name
   local common
+  local surface_git_dir
 
+  surface_git_dir="$(oms_worker_surface_git_dir "$repo")"
   : > "$before_dir/gitmeta-managed-added"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
@@ -1390,12 +1392,12 @@ oms_worker_surface_diff() {
       OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
         OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$before_dir/gitmeta-managed-complete" \
         oms_worker_surface_capture_one "$repo" "$name" \
-        "$current_worktree_physical" > "$before_dir/files.after" || return 2
+        "$current_worktree_physical" "$surface_git_dir" > "$before_dir/files.after" || return 2
       cmp -s "$before_dir/files.after" "$before_dir/files" && continue
     elif OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
       OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$before_dir/gitmeta-managed-complete" \
       oms_worker_surface_capture_one "$repo" "$name" \
-      "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
+      "$current_worktree_physical" "$surface_git_dir" | cmp -s - "$before_dir/$name"; then
       continue
     fi
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_settles "$repo" \
@@ -2673,10 +2675,8 @@ oms_worker_worktree_identity_check() {  # REPO WORKTREE PHYSICAL GITDIR COMMON G
   return 0
 }
 
-oms_worker_surface_capture_one() {
+oms_worker_surface_git_dir() {
   local repo="$1"
-  local name="$2"
-  local current_worktree_physical="${3:-}"
   local git_dir
 
   git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
@@ -2685,6 +2685,16 @@ oms_worker_surface_capture_one() {
     /*) ;;
     *) git_dir="$repo/$git_dir" ;;
   esac
+  printf '%s\n' "$git_dir"
+}
+
+oms_worker_surface_capture_one() {
+  local repo="$1"
+  local name="$2"
+  local current_worktree_physical="${3:-}"
+  local git_dir="${4:-}"
+
+  [ -n "$git_dir" ] || git_dir="$(oms_worker_surface_git_dir "$repo")"
   case "$name" in
     config) git -C "$repo" config --local --list 2>/dev/null | LC_ALL=C sort ;;
     remotes) git -C "$repo" remote -v 2>/dev/null | LC_ALL=C sort ;;
@@ -3354,8 +3364,10 @@ oms_worker_surface_snapshot_capture_once() {
   local dir="$2"
   local current_worktree_physical="${3:-}"
   local name common entry target ref
+  local surface_git_dir
 
   mkdir -p "$dir" || return 1
+  surface_git_dir="$(oms_worker_surface_git_dir "$repo")"
   : > "$dir/gitmeta-exempt"
   : > "$dir/gitmeta-residue"
   : > "$dir/gitmeta-managed-paths"
@@ -3368,7 +3380,7 @@ oms_worker_surface_snapshot_capture_once() {
       OMS_WG_GITMETA_MANAGED_METADATA_OUT="$dir/gitmeta-managed-metadata" \
       OMS_WG_ARTIFACT_INDEX_COPY="$dir/omsstate.artifact-index" \
       oms_worker_surface_capture_one "$repo" "$name" \
-      "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
+      "$current_worktree_physical" "$surface_git_dir" > "$dir/$name" 2>/dev/null || true
     # Deterministic race coverage for the baseline consistency test. The
     # barrier is inert outside the smoke runner and without all three paths.
     if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" = 1 ] &&
