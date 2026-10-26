@@ -741,6 +741,47 @@ assert drop_clean() == clean_evidence, 'a dirtied checkout stopped counting as r
 subprocess.run(['git', '-C', str(clean_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test',
                 'commit', '-q', '--allow-empty', '-m', 'empty worker commit'], check=True)
 assert drop_clean() == [], 'an empty worker commit changed the clean outcome'
+# --continue stays refused after salvaging a dirty kept worktree; the refusal names the salvage patch.
+import panel_dispatch
+import terminal_panel
+dirty_brief = temporary / 'dirty-salvage-brief.md'
+dirty_brief.write_text('Continue safely.\n')
+dirty_parent = {'attempt_id': 'dirty-parent', 'terminal': False, 'refs': {}}
+dirty_worker = dict(committed_attempt, parent_attempt_id='dirty-parent',
+                    refs=dict(committed_attempt['refs'], panel_access='write', panel_provider='codex',
+                              native_session='fixture-session'))
+def continue_dirty():
+    with patch.dict(os.environ, salvage_env), patch.object(
+            panel_results, '_query', side_effect=lambda repo, verb, *args:
+            [committed_attempt] if verb == 'agent-events' else {'rows': [committed_record]}), \
+            patch.object(terminal_panel, 'owning_attempt', return_value=[dirty_parent]), \
+            patch.object(terminal_panel, 'events', return_value=json.dumps([dirty_parent, dirty_worker])), \
+            patch.object(terminal_panel, '_rework_history', return_value=[dirty_worker]), \
+            patch.object(terminal_panel, 'results', return_value={'rows': [{'calls': []}]}), \
+            patch.object(terminal_panel, 'session_stored', return_value=True):
+        try:
+            panel_dispatch.continuation(
+                salvage_repo, 'codex', 'main', 'committed-task', {'provider': 'codex'}, dirty_brief,
+                {'OMS_ROOM_REPO': str(salvage_repo)}, work_repo=salvage_execution_repo, patch_reference={})
+        except ValueError as error:
+            return str(error)
+    raise AssertionError('continue resumed stopped write work')
+dirty_message = continue_dirty()
+dirty_patch = committed['patch']
+assert dirty_message.startswith('recoverable delegate evidence exists for task committed-task; run oms panel '
+                                '--salvage committed-task --attempt att_committed and inspect: '), dirty_message
+assert 'registered worktree: ' + str(committed_tree) in dirty_message, dirty_message
+assert 'already salvaged as ' + dirty_patch in dirty_message and 'fresh dispatch' in dirty_message, dirty_message
+# Without a salvage record the refusal is unchanged.
+for path in (salvage_repo / '.oms/salvage-provenance').glob('*.json'):
+    path.rename(path.with_suffix('.hidden'))
+try:
+    plain_message = continue_dirty()
+finally:
+    for path in (salvage_repo / '.oms/salvage-provenance').glob('*.hidden'):
+        path.rename(path.with_suffix('.json'))
+assert 'already salvaged' not in plain_message and 'fresh dispatch' not in plain_message, plain_message
+assert plain_message.endswith('registered worktree: ' + str(committed_tree)), plain_message
 import difflib
 encoding_cases = [
     ('café 한글\n', 'cafe ??\n', True),

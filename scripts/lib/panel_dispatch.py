@@ -309,6 +309,32 @@ def _codex_resume_usage_baseline(usage):
     return json.dumps(dict(zip(fields, values)), separators=(",", ":"))
 
 
+def _newest_salvage_patch(repo, task_id, attempt_id):
+    """Repo-relative path of the newest published salvage patch of this attempt, or None."""
+    import panel_salvage
+    newest = None
+    try:
+        for sidecar in (Path(repo) / ".oms/artifacts/delegate").glob("salvage-%s-*.patch.json" % task_id):
+            if sidecar.is_symlink() or not sidecar.is_file():
+                continue
+            try:
+                meta = json.loads(panel_salvage._read(
+                    Path(repo), sidecar.relative_to(repo).as_posix(), panel_salvage.MAX_EVIDENCE))
+                origin = meta.get("salvaged_from") if isinstance(meta, dict) else None
+                patch = meta.get("patch") if isinstance(meta, dict) else None
+                if (isinstance(origin, dict) and origin.get("task") == task_id
+                        and origin.get("attempt") == attempt_id and isinstance(patch, str)
+                        and patch.startswith(".oms/artifacts/delegate/") and (Path(repo) / patch).is_file()):
+                    stamp = sidecar.stat().st_mtime
+                    if newest is None or stamp >= newest[0]:
+                        newest = (stamp, patch)
+            except (OSError, ValueError, TypeError):
+                continue
+    except OSError:
+        return None
+    return newest[1] if newest else None
+
+
 def _stopped_write_continuation(last, eligible_result):
     refs = last.get("refs", {})
     return (refs.get("panel_access") == "write" and not eligible_result
@@ -480,6 +506,13 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                 message = ("recoverable delegate evidence exists for task %s; run oms panel --salvage %s "
                            "--attempt %s and inspect: %s" %
                            (task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
+                salvaged = (_newest_salvage_patch(repo, task_id, last.get("attempt_id"))
+                            if any(item.startswith(".oms/salvage-provenance/") for item in recovery_evidence)
+                            else None)
+                if salvaged:
+                    message += ("; already salvaged as %s; stopped write work is not carried by --continue: if the "
+                                "worktree has not changed since, start a fresh dispatch whose brief includes that "
+                                "patch; salvage again only after it changed" % salvaged)
             panel_salvage._raise_recovery_evidence(recovery_evidence, message)
         payload_sha = panel_salvage._empty_provenance_identity(task_id, last.get("attempt_id"))
         relative = panel_salvage._empty_provenance_path(task_id, last.get("attempt_id"))
