@@ -5,7 +5,7 @@ import re
 import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
-from panel_view import (_RenderReport, amount, token_amount, token_pair, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
+from panel_view import (_RenderReport, amount, token_amount, token_pair, _usage_label, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
                         plan_tail_columns, format_tail_row, clipped, fixed_column, message_rows, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
@@ -839,9 +839,11 @@ def native_advisors(report, members):
              "state": "working" if mapping(calls.get(m["participant"])).get("running", True) else "done",
              "model": clean(mapping(calls.get(m["participant"])).get("model")) or "Advisor",
              "_native": clean(mapping(calls.get(m["participant"])).get("started")) or "earlier",
+             "_started_at": clean(mapping(calls.get(m["participant"])).get("started_at")) or None,
              "_finished": clean(mapping(calls.get(m["participant"])).get("finished")) or None,
              "_elapsed": mapping(calls.get(m["participant"])).get("elapsed_seconds"),
              "_input_tokens": mapping(calls.get(m["participant"])).get("input_tokens"),
+             "_cache_read_tokens": mapping(calls.get(m["participant"])).get("cache_read_tokens"),
              "_output_tokens": mapping(calls.get(m["participant"])).get("output_tokens"),
              "_calls": mapping(calls.get(m["participant"])).get("calls"),
              "_tokens": mapping(calls.get(m["participant"])).get("tokens"),
@@ -857,15 +859,30 @@ def native_running(calls):
                                                                 sum(c["_kind"] == "workflow" for c in shown))] if shown else []
 
 
+def advisor_token_label(call, short=False):
+    inputs, output = call.get("_input_tokens"), call.get("_output_tokens")
+    if not isinstance(inputs, int) or not isinstance(output, int):
+        return ""
+    usage = {"input_tokens": inputs, "output_tokens": output, "cache_in_input": True}
+    cache_read = call.get("_cache_read_tokens")
+    if isinstance(cache_read, int):
+        usage["cache_read_tokens"] = cache_read
+    return _usage_label(usage, inputs + output, short=short)
+
+
 def advisor_stats(call):
     duration, tokens = "", []
     if isinstance(call.get("_elapsed"), int) and call["_elapsed"] >= 0:
         seconds = call["_elapsed"]
         duration = "%sm%02ds" % divmod(seconds, 60) if seconds >= 60 else "%ss" % seconds
-    if isinstance(call.get("_input_tokens"), int):
-        tokens.append(token_amount(call["_input_tokens"]) + " in")
-    if isinstance(call.get("_output_tokens"), int):
-        tokens.append(token_amount(call["_output_tokens"]) + " out")
+    token_label = advisor_token_label(call)
+    if token_label:
+        tokens.append(token_label)
+    else:
+        if isinstance(call.get("_input_tokens"), int):
+            tokens.append(token_amount(call["_input_tokens"]) + " in")
+        if isinstance(call.get("_output_tokens"), int):
+            tokens.append(token_amount(call["_output_tokens"]) + " out")
     return " · ".join(([duration] if duration else []) + ([" / ".join(tokens)] if tokens else []))
 
 
@@ -874,7 +891,7 @@ def advisor_total(call):
     if isinstance(call.get("_calls"), int):
         values.append("%s calls" % call["_calls"])
     if isinstance(call.get("_tokens"), int) and call["_tokens"]:
-        values.append(amount(call["_tokens"]) + " tok" + ("+" if call.get("_partial") else ""))
+        values.append(token_amount(call["_tokens"]) + " tok" + ("+" if call.get("_partial") else ""))
     return " · ".join(values)
 
 
@@ -1468,10 +1485,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     band_tails = {}
     for member in gates + counsel + workers:
         tag = tagged(member)
-        advisor_figures = advisor_stats(member) if member.get("_kind") == "advisor" else ""
+        advisor_figures = advisor_token_label(member, short=True) if member.get("_kind") == "advisor" else ""
         band_tails[id(member)] = [(tag, judgment_tone(tag, call_ending(member) or member.get("state"))),
                                   (advisor_figures or member.get("tokens") or "", "metadata"),
-                                  ("" if advisor_figures else elapsed(member.get("joined_at")) or "unknown", "metadata")]
+                                  (elapsed(member.get("joined_at") or member.get("_started_at")) or "unknown", "metadata")]
     tail_plan = plan_tail_columns(list(band_tails.values()), width, prefix_width=stem + 5, optional=(1,))
     band_tails = dict(zip(band_tails, tail_plan["rows"]))
 

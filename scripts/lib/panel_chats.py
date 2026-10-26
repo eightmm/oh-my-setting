@@ -1,7 +1,7 @@
 """Explicit native-chat navigation; never mix transcripts into shared room state."""
 
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -245,7 +245,8 @@ def native_advisors(members):
             elapsed = max(0, int(((finished or now) - started).total_seconds()))
             info = usage_by_call.get(call[0])
             result = {"model": info.get("model") if info and isinstance(info.get("model"), str) else label,
-                      "started": started.strftime("%H:%M"), "running": running,
+                      "started": started.strftime("%H:%M"),
+                      "started_at": started.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "running": running,
                       "elapsed_seconds": elapsed, "calls": len(calls), "partial": partial}
             def valid_usage(value):
                 return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
@@ -254,6 +255,9 @@ def native_advisors(members):
                 output = valid_usage(info.get("output_tokens"))
                 if all(value is not None for value in inputs):
                     result["input_tokens"] = sum(inputs)
+                cache_read = valid_usage(info.get("cache_read_input_tokens"))
+                if cache_read is not None:
+                    result["cache_read_tokens"] = cache_read
                 if output is not None:
                     result["output_tokens"] = output
             token_rows = [usage_by_call[cid] for cid, _ in calls if cid in usage_by_call]

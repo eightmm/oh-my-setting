@@ -1272,11 +1272,13 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     advisor_log.write_text(advisor_log.read_text() + json.dumps({"timestamp": (advisor_start + timedelta(seconds=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), "message": {"id": "msg-advisor-1", "content": [
         {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1", "content": "ciphertext"}], "usage": {"iterations": [
             {"type": "message", "model": "main-model", "input_tokens": 999999},
-            {"type": "advisor_message", "model": "claude-fable-5-1", "input_tokens": 249548,
-             "output_tokens": 4326, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}]}}}) + "\n")
+            {"type": "advisor_message", "model": "claude-fable-5-1", "input_tokens": 200000,
+             "output_tokens": 4326, "cache_read_input_tokens": 49548, "cache_creation_input_tokens": 0}]}}}) + "\n")
     answered_call = panel_chats.native_advisors([claude_main])
     assert answered_call["adv-main"]["running"] is False and len(answered_call["adv-main"]["finished"]) == 5, answered_call
     assert answered_call["adv-main"]["input_tokens"] == 249548 and answered_call["adv-main"]["output_tokens"] == 4326, answered_call
+    assert answered_call["adv-main"]["cache_read_tokens"] == 49548, answered_call
+    assert answered_call["adv-main"]["started_at"].endswith("Z"), answered_call
     assert answered_call["adv-main"]["elapsed_seconds"] == 72 and answered_call["adv-main"]["model"] == "claude-fable-5-1", answered_call
     two_calls = dict(advisor_use, timestamp=(advisor_start + timedelta(seconds=80)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                      message={"id": "msg-advisor-pair", "content": [
@@ -1291,6 +1293,8 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     advisor_log.write_text(json.dumps(two_calls) + "\n" + json.dumps(paired_result) + "\n")
     paired = panel_chats.native_advisors([claude_main])["adv-main"]
     assert paired["input_tokens"] == 200 and paired["output_tokens"] == 20 and paired["calls"] == 2, paired
+    paired_member = graph_view.native_advisors({"native_advisors": {"adv-main": paired}}, [claude_main])[-1]
+    assert "200 in / 20 out" in graph_view.advisor_stats(paired_member), paired_member
     paired_result["message"]["usage"]["iterations"].pop()
     advisor_log.write_text(json.dumps(two_calls) + "\n" + json.dumps(paired_result) + "\n")
     mismatch = panel_chats.native_advisors([claude_main])["adv-main"]
@@ -1347,6 +1351,8 @@ assert "Built-in advisor: last answered " + answered_call["adv-main"]["finished"
 finished_advisor = graph_view.native_advisors({"native_advisors": answered_call}, [claude_main])[-1]
 advisor_words = " ".join(graph_view.detail(finished_advisor, {}, 120)[0])
 assert "1m12s" in advisor_words and "249.5k in" in advisor_words and "4.3k out" in advisor_words, advisor_words
+assert "19% cached" in advisor_words, advisor_words
+assert graph_view.lingering(finished_advisor)
 for token_count, rendered in ((40, "40 out"), (50, "50 out"), (999, "999 out"),
                               (1049, "1.0k out"), (249548, "249.5k out")):
     assert rendered in graph_view.advisor_stats({"_output_tokens": token_count}), (token_count, rendered)
@@ -1355,6 +1361,12 @@ advisor_selected_nav = {"tab": "detail", "selected": ("result", "native-advisor-
 advisor_selected_board = graph_view.render_graph(dict(board, native_advisors=answered_call), 120, 40,
                                                  navigation=advisor_selected_nav)
 assert "1m12s" in advisor_selected_board and "249.5k in" in advisor_selected_board and "4.3k out" in advisor_selected_board, advisor_selected_board
+advisor_tail_time = graph_view.elapsed(answered_call["adv-main"]["started_at"])
+assert advisor_tail_time and (advisor_tail_time == "<1m" or
+                              advisor_tail_time.endswith("m") and advisor_tail_time[:-1].isdigit()), advisor_tail_time
+assert "19% cached" in advisor_selected_board and advisor_tail_time in advisor_selected_board, advisor_selected_board
+assert "5.4k tok" in graph_view.advisor_total({"_calls": 2, "_tokens": 5432})
+assert "5.4k tok+" in graph_view.advisor_total({"_calls": 2, "_tokens": 5432, "_partial": True})
 running_nav = {"tab": "detail", "selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 assert "Built-in advisor: asked " in graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=running_nav)
 # Claude Code's own subagents and Workflow runs: read-only rows that show only what the session files prove.
