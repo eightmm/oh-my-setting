@@ -774,6 +774,100 @@ run_autopilot() {
     "$ROOT/scripts/autopilot.sh" --repo "$repo" "$@"
 }
 
+test_autopilot_abandon_plan_guidance() {
+  local variant repo plan rc name task_sha
+  write_orchestration_stubs "$TMP/bin"
+  for variant in open no-plan empty 'done' cancelled malformed empty-file; do
+    repo="$TMP/abandon plan guidance/$variant"
+    make_repo "$repo"
+    mkdir -p "$repo/calls"
+    rc=0
+    OMS_T_PLAN_RC=3 run_autopilot "$repo" propose --planner claude \
+      --allowed 'src,tests' --base main > "$repo/propose.out" 2>&1 || rc=$?
+    [ "$rc" = 3 ] || fail "$variant: failed to prepare an interrupted receipt ($rc)"
+    plan="$repo/.oms/plan/tasks.json"
+    if [ "$variant" != no-plan ]; then
+      write_done_plan "$repo" true 0 1
+      case "$variant" in
+        malformed) printf '{' > "$plan" ;;
+        empty-file) : > "$plan" ;;
+        *)
+          python3 - "$plan" "$variant" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    row = json.load(handle)
+if sys.argv[2] == "empty":
+    row["tasks"] = {}
+elif sys.argv[2] in {"open", "cancelled"}:
+    row["tasks"]["t1"]["state"] = "ready"
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+PY
+          ;;
+      esac
+      if [ "$variant" = cancelled ]; then
+        printf 'Work withdrawn by the fixture owner.\n' > "$repo/.oms/cancel-decision.txt"
+        "$ROOT/scripts/agent-plan.sh" --repo "$repo" show --id t1 > "$repo/task.json"
+        task_sha="$(python3 - "$repo/task.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle)["task_sha256"])
+PY
+)"
+        "$ROOT/scripts/agent-plan.sh" --repo "$repo" cancel --id t1 \
+          --expected-plan-sha256 "$(sha256_file "$plan")" \
+          --expected-task-sha256 "$task_sha" --expected-state ready \
+          --expected-lease-id lease --operator-consent cancel --reason "work withdrawn" \
+          --decision-artifact .oms/cancel-decision.txt \
+          --expected-decision-artifact-sha256 "$(sha256_file "$repo/.oms/cancel-decision.txt")" \
+          > "$repo/cancel.out" 2>&1 || fail "cancel fixture: $(cat "$repo/cancel.out")"
+      fi
+    fi
+    for name in tasks.json progress.jsonl; do
+      [ ! -e "$repo/.oms/plan/$name" ] || cp "$repo/.oms/plan/$name" "$repo/$name.before"
+    done
+    printf '\nOwner changed the spec after interruption.\n' >> "$repo/PROJECT.md"
+    run_autopilot "$repo" abandon --reason "retire interrupted contract" \
+      > "$repo/abandon.out" 2>&1 || fail "$variant: abandon failed: $(cat "$repo/abandon.out")"
+    grep -Fq 'autopilot: receipt abandoned; the exact contract is preserved and the exit recorded at ' \
+      "$repo/abandon.out" || fail "$variant: receipt record output changed"
+    grep -Fxq 'autopilot: a fresh propose may now bind a new contract' "$repo/abandon.out" ||
+      fail "$variant: fresh propose guidance changed"
+    case "$variant" in
+      open|malformed|empty-file)
+        grep -Fxq "autopilot: plan still needs resolution: $plan" "$repo/abandon.out" ||
+          fail "$variant: remaining plan path missing"
+        python3 - "$repo/abandon.out" "$repo" <<'PY' || fail "$variant: retirement command quoting"
+import shlex, sys
+prefix = "autopilot: inspect plan retirement: "
+with open(sys.argv[1], encoding="utf-8") as handle:
+    command = next(line[len(prefix):] for line in handle if line.startswith(prefix))
+assert shlex.split(command) == ["oms", "agent-plan", "--repo", sys.argv[2], "retire", "--check"]
+PY
+        grep -Fq -- '--disposition completed-external fails when acceptance files changed' "$repo/abandon.out" ||
+          fail "$variant: missing completed-external constraint"
+        grep -Fq -- '--disposition superseded requires every task to be done or cancelled' "$repo/abandon.out" ||
+          fail "$variant: missing superseded constraint"
+        grep -Fq -- '--operator-consent cancel, --reason, --decision-artifact and --expected-decision-artifact-sha256' \
+          "$repo/abandon.out" || fail "$variant: missing cancellation requirements"
+        ;;
+      *)
+        if grep -Eq 'plan still needs resolution|retire --check|--disposition|--operator-consent' "$repo/abandon.out"; then
+          fail "$variant: closed or absent plan received retirement guidance"
+        fi
+        ;;
+    esac
+    for name in tasks.json progress.jsonl; do
+      if [ -e "$repo/$name.before" ]; then
+        cmp -s "$repo/$name.before" "$repo/.oms/plan/$name" || fail "$variant: abandon edited $name"
+      else
+        [ ! -e "$repo/.oms/plan/$name" ] || fail "$variant: abandon created $name"
+      fi
+    done
+    [ ! -e "$repo/.oms/plan/retirements.jsonl" ] || fail "$variant: abandon retired the plan"
+  done
+}
+
 test_autopilot_orchestration() {
   local repo="$TMP/orchestrate"
   local contract_repo="$TMP/contract-resume"
@@ -3358,6 +3452,7 @@ test_autopilot_acceptance_reuse
 test_autopilot_refuses_verified_scratch_and_allows_ordinary_propose
 test_auto_collaboration
 test_atomic_proposal_apply
+test_autopilot_abandon_plan_guidance
 test_autopilot_orchestration
 
 echo "autopilot-smoke: ok"

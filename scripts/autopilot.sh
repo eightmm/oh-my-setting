@@ -102,6 +102,8 @@ one optional remainder proposal, semantic review, and optionally a Draft PR.
                           reason, and a fresh propose may bind a new contract.
                           For receipts whose frozen contract cannot finish
                           (e.g. a provider wall that kills every call).
+                          If unfinished plan work remains, print retirement
+                          checks and cancellation requirements for that plan.
   reenter [--reason TEXT] Re-enter the live run from a fresh session with no
                           re-explanation: validate the receipt through the
                           same digest gate every resume passes, append a
@@ -355,6 +357,19 @@ outer_receipt_retire_empty_discovery_locked() {  # EXPECTED DIGEST
     --expected "$expected" --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
+# True when the existing plan still holds work. An unreadable plan counts as
+# holding work: nothing here may decide that an unparseable record is spent.
+plan_has_open_tasks() {
+  [ -f "$PLAN_FILE" ] || return 1
+  local snapshot
+  snapshot="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null)" || return 0
+  printf '%s' "$snapshot" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+raise SystemExit(0 if row.get("has_unfinished") else 1)
+'
+}
+
 # abandon retires the receipt and owned batch before the spec/tree gates:
 # the receipt being unfinishable (a frozen contract whose own value killed
 # the run) is exactly when the operator needs this exit, and a dirty tree or
@@ -366,6 +381,13 @@ if [ "$ACTION" = abandon ]; then
   record="${record//$'\r'/}"
   echo "autopilot: receipt abandoned; the exact contract is preserved and the exit recorded at $record"
   echo "autopilot: a fresh propose may now bind a new contract"
+  if plan_has_open_tasks; then
+    echo "autopilot: plan still needs resolution: $PLAN_FILE"
+    printf 'autopilot: inspect plan retirement: oms agent-plan --repo %q retire --check\n' "$REPO"
+    echo "autopilot: --disposition completed-external fails when acceptance files changed."
+    echo "autopilot: --disposition superseded requires every task to be done or cancelled."
+    echo "autopilot: cancel requires exact plan/task/state/lease checks, --operator-consent cancel, --reason, --decision-artifact and --expected-decision-artifact-sha256."
+  fi
   exit 0
 fi
 
@@ -1274,19 +1296,6 @@ if not isinstance(contract, dict):
     raise SystemExit(1)
 raise SystemExit(0 if contract.get("spec_sha256") == os.environ["OMS_AP_SPEC"] else 1)
 PY
-}
-
-# True when the existing plan still holds work. An unreadable plan counts as
-# holding work: nothing here may decide that an unparseable record is spent.
-plan_has_open_tasks() {
-  [ -f "$PLAN_FILE" ] || return 1
-  local snapshot
-  snapshot="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null)" || return 0
-  printf '%s' "$snapshot" | python3 -c '
-import json, sys
-row = json.load(sys.stdin)
-raise SystemExit(0 if row.get("has_unfinished") else 1)
-'
 }
 
 # A plan belongs to the contract that produced it. plan-from-spec creates a
