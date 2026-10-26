@@ -325,6 +325,12 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                 repaint()
             navigation.pop("queued", None)
             if time.monotonic() >= deadline:
+                stamps = navigation.get("reload_stamps")
+                if (stamps is not None and not events and not navigation.get("detail")
+                        and not navigation.get("reader_open") and not navigation.get("finalize_call")):
+                    from terminal_panel import ReloadWatcher, reload_ready
+                    if reload_ready(stamps):
+                        raise ReloadWatcher()  # menu_input restores the terminal; terminal_panel re-executes
                 return "9"
 
 
@@ -335,7 +341,7 @@ def interactive(repo, view="auto", attention_only=False):
     from terminal_panel import main_occupied, main_owner, managed_session, menu_rows, native_binary
     from terminal_panel import open_native, panel_mains, panel_room, private_capacity, provider_catalog
     from terminal_panel import raw_keys, read_choice, read_field, recorded_room, reopen_panel, retry_delivery
-    from terminal_panel import room_listing, room_open, run, safe_label, show_providers, snapshot
+    from terminal_panel import room_listing, room_open, run, safe_label, show_providers, snapshot, source_stamps
     from terminal_panel import stale_notice, swap_choices, swap_main, terminal_style, tmux_command
     harness = os.environ.get("OMS_PANEL_HARNESS") or (panel_mains() or ["claude"])[0]
     provider = main_owner(harness)
@@ -343,6 +349,7 @@ def interactive(repo, view="auto", attention_only=False):
     navigation = {}
     held = {}
     next_room_poll = 0
+    stamps = source_stamps()
     while True:
         if managed_session() and time.monotonic() >= next_room_poll:
             next_room_poll = time.monotonic() + 5
@@ -380,6 +387,7 @@ def interactive(repo, view="auto", attention_only=False):
         cache = {"held": held}
         navigation["installed"] = [name for name in MAIN_HARNESSES if main_installed(name)]
         navigation["line_input"] = not raw_keys()
+        navigation["reload_stamps"] = stamps
         try:
             choice = read_choice(repo, provider, previous, view, attention_only, navigation, cache)
             if choice == "u":

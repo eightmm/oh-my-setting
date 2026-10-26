@@ -1612,6 +1612,36 @@ with patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]):
             clock[0] += 1.1
             assert panel.reload_ready({}) is False   # changed again since the first sighting
 panel.REJECTED_RELOAD.clear()
+# The inline host reloads at an idle refresh only, after menu_input restored the terminal.
+restored = []
+class IdleInput:
+    fd = 0
+    def __init__(self, batches=None): self.batches = batches or []
+    def __enter__(self): return self
+    def __exit__(self, *exc): restored.append(True); return False
+    def wait(self, seconds): return self.batches.pop(0) if self.batches else []
+def idle_read(inputs, navigation):
+    ticks = iter(range(0, 1000, 10))
+    with patch.object(panel, "menu_input", return_value=inputs), patch.object(panel, "show"), \
+            patch.object(sys.modules["panel_interaction"].time, "monotonic", side_effect=lambda: next(ticks)):
+        return panel.read_choice(Path("."), "codex", "ready", "auto", False, navigation, {})
+with patch.object(panel, "reload_ready", return_value=True) as ready:
+    try:
+        idle_read(IdleInput(), {"reload_stamps": {}})
+    except panel.ReloadWatcher:
+        assert restored == [True] and ready.call_args.args == ({},), (restored, ready.call_args)
+    else:
+        raise AssertionError("an idle inline refresh must raise ReloadWatcher when sources changed")
+    for held_nav in ({"detail": {"target": ("result", "w1")}}, {"reader_open": True}):
+        held_nav.setdefault("reload_stamps", {})
+        ready.reset_mock()
+        assert idle_read(IdleInput(), held_nav) == "9" and not ready.called, held_nav
+    ready.reset_mock()
+    assert idle_read(IdleInput([[("x",)]]), {"reload_stamps": {}}) == "x" and not ready.called
+    no_fd = IdleInput(); no_fd.fd = None
+    with patch.object(panel, "read_field", return_value="q"):
+        assert idle_read(no_fd, {"reload_stamps": {}}) == "q" and not ready.called
+# A text prompt reads outside read_choice, so it never reaches the idle check.
 # A finished worker's kept worktree opens only when its label names exactly one git worktree.
 kept_parent = temporary / "oh-my-setting-delegate.fixture"
 kept_parent.mkdir()
