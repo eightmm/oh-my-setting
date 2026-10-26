@@ -2890,9 +2890,11 @@ for base, dirs, files in os.walk(root):
         # those are tracked by presence alone.
         append_only = rel.endswith(".jsonl") or rel in (
             "memory/shared.md", "memory/pins.md")
-        # The resume hint is a cache the parent's own prompt hook consumes
-        # (hook_state.py panel_main_hint unlinks it) while a worker runs.
-        if rel.startswith("hooks/sessions/") and rel.endswith(".resume.json"):
+        # The resume and panel-dedup hints are caches the parent's own hooks
+        # consume (hook_state.py panel_main_hint, SessionStart cleanup) while a
+        # worker runs.
+        if rel.startswith("hooks/sessions/") and rel.endswith(
+                (".resume.json", ".hint.json")):
             continue
         # Existing launch/exit/pending records are immutable controller state.
         # New sibling records remain possible while another controller runs;

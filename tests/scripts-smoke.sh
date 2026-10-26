@@ -33187,6 +33187,12 @@ PY
   printf '{"source":"compact"}\n' > "$hint/.oms/hooks/sessions/abc.resume.json"
   result="$(run_guarded_worker "$hint" "rm -f $hint/.oms/hooks/sessions/abc.resume.json")"
   [ "${result%%	*}" = 0 ] || fail "a consumed hook session hint is not worker authority: $result"
+  printf '{"hint":1}\n' > "$hint/.oms/hooks/sessions/abc.hint.json"
+  result="$(run_guarded_worker "$hint" "rm -f $hint/.oms/hooks/sessions/abc.hint.json")"
+  [ "${result%%	*}" = 0 ] || fail "a consumed panel dedup hint is not worker authority: $result"
+  printf '{"s":1}\n' > "$hint/.oms/hooks/sessions/abc.json"
+  result="$(run_guarded_worker "$hint" "rm -f $hint/.oms/hooks/sessions/abc.json")"
+  [ "${result%%	*}" != 0 ] || fail "other hooks/sessions files stay worker authority: $result"
 
   # Known same-directory writer temps are scratch while present in either
   # provider snapshot. Their cleanup after capture must not look like deleting
