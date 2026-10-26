@@ -640,11 +640,18 @@ if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
   delegate_worktree_repo="$(oms_state_root "$DELEGATE_SOURCE_REPO")" || fail "cannot resolve delegated worktree owner"
   delegate_worktree_repo="${delegate_worktree_repo//$'\r'/}"
   delegate_worktree_repo="$(cd "$delegate_worktree_repo" && pwd -P)" || fail "cannot resolve physical worktree owner"
-  REPO="$(oms_state_root "${OMS_ROOM_REPO:-$DELEGATE_SOURCE_REPO}")" || fail "cannot resolve canonical panel state"
-  REPO="${REPO//$'\r'/}"
-  REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve physical panel state"
 fi
-[ "$APPLY" = 0 ] || [ "$delegate_worktree_repo" = "$REPO" ] ||
+# Plain dispatch from a verified scratch must read plan/operation state and
+# write liveness markers where the parent's board lives; elsewhere this is REPO.
+delegate_state_probe="$DELEGATE_SOURCE_REPO"
+[ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && delegate_state_probe="${OMS_ROOM_REPO:-$DELEGATE_SOURCE_REPO}"
+REPO="$(oms_state_root "$delegate_state_probe")" || fail "cannot resolve canonical state root"
+REPO="${REPO//$'\r'/}"
+REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve physical state root"
+# A plain dispatch from a verified scratch lands in the scratch itself
+# (delegate_worktree_repo) while its records stay in REPO; only panel
+# dispatch must apply onto the state repository.
+[ "$APPLY" = 0 ] || [ "${OMS_PANEL_DISPATCH:-0}" != 1 ] || [ "$delegate_worktree_repo" = "$REPO" ] ||
   fail "--apply cannot land a patch built in $delegate_worktree_repo onto panel state repository $REPO"
 # peer-delegate is a public front door, so the orientation pack is revalidated
 # here rather than trusted from plan-run: a malformed, oversized, traversing or
@@ -1247,7 +1254,7 @@ fi
 # files are fine: git apply fails on collision anyway, and the artifact dir
 # itself lives untracked inside the repo.
 if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 0 ] \
-  && [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
+  && [ -n "$(git -C "$delegate_worktree_repo" status --porcelain --untracked-files=no)" ]; then
   fail "refusing --apply: main tree has uncommitted changes"
 fi
 
@@ -2260,6 +2267,7 @@ worker_guard_worktree_physical=""
 worker_git_execution_snapshot_sha=""
 worker_worktree_execution_snapshot_sha=""
 worker_source_guard_dir=""
+worker_source_guard_exclude=""
 worker_source_execution_snapshot_sha=""
 if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   oms_canonical_call_acquire "$REPO" "${OMS_HARNESS_CALL_ID:-$timestamp}" ||
@@ -2268,23 +2276,40 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   # directory, and our own stdout/stderr when the caller redirected them into
   # the repo (`peer-delegate ... > run.log` is an ordinary thing to do). The fd
   # lookup is Linux-only; elsewhere it simply contributes nothing.
-  OMS_WORKER_GUARD_EXCLUDE=""
-  case "$ARTIFACT_DIR" in
-    "$REPO"/*) OMS_WORKER_GUARD_EXCLUDE="${ARTIFACT_DIR#"$REPO"/}" ;;
-  esac
+  # Exclusions are relative to the snapshot root they sit in: the canonical
+  # REPO and a separate source checkout each get only their own.
+  guard_stream_targets=""
   # Duplicate the real streams first: inside $( ) fd 1 is the capture pipe, so
   # reading it there resolves to the substitution, never to the caller's file.
   exec 9>&1 8>&2
   for guard_fd in 9 8; do
     guard_target="$(readlink -f "/proc/self/fd/$guard_fd" 2>/dev/null || true)"
-    case "$guard_target" in
-      "$REPO"/*)
-        OMS_WORKER_GUARD_EXCLUDE="${OMS_WORKER_GUARD_EXCLUDE:+$OMS_WORKER_GUARD_EXCLUDE
-}${guard_target#"$REPO"/}"
-        ;;
-    esac
+    case "$guard_target" in *$'\n'*) guard_target="" ;; esac
+    [ -z "$guard_target" ] ||
+      guard_stream_targets="${guard_stream_targets:+$guard_stream_targets
+}$guard_target"
   done
   exec 9>&- 8>&-
+  guard_exclude_for() {
+    local root="$1" out="" target=""
+    case "$ARTIFACT_DIR" in
+      *$'\n'*) ;;
+      "$root"/*) out="${ARTIFACT_DIR#"$root"/}" ;;
+    esac
+    while IFS= read -r target; do
+      case "$target" in
+        "$root"/*) out="${out:+$out
+}${target#"$root"/}" ;;
+      esac
+    done <<EOF_GUARD_TARGETS
+$guard_stream_targets
+EOF_GUARD_TARGETS
+    printf '%s' "$out"
+  }
+  OMS_WORKER_GUARD_EXCLUDE="$(guard_exclude_for "$REPO")"
+  worker_source_guard_exclude="$OMS_WORKER_GUARD_EXCLUDE"
+  [ "$delegate_worktree_repo" = "$REPO" ] ||
+    worker_source_guard_exclude="$(guard_exclude_for "$delegate_worktree_repo")"
   export OMS_WORKER_GUARD_EXCLUDE
   worker_guard_worktree_physical="$worker_identity_physical"
   [ -n "$worker_guard_worktree_physical" ] ||
@@ -2315,7 +2340,8 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
       fail "could not hash delegated worktree Git execution config snapshot"
     if [ "$delegate_worktree_repo" != "$REPO" ]; then
       worker_source_guard_dir="$worker_guard_dir/source"
-      if ! delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+      if ! OMS_WORKER_GUARD_EXCLUDE="$worker_source_guard_exclude" \
+        delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
         delegate_surface_snapshot "$delegate_worktree_repo" "$worker_source_guard_dir" \
         "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
         snapshot_error="$(cat "$worker_guard_snapshot_error_file" 2>/dev/null || true)"
@@ -2394,7 +2420,8 @@ worker_protected_surface_diff() {
     oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
     "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
   if [ -n "$worker_source_guard_dir" ]; then
-    source_changed="$(delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+    source_changed="$(OMS_WORKER_GUARD_EXCLUDE="$worker_source_guard_exclude" \
+      delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
       oms_worker_surface_diff "$delegate_worktree_repo" "$worker_source_guard_dir" \
       "" "$worker_guard_worktree_physical")" || return 2
     if [ -n "$source_changed" ]; then
@@ -3036,7 +3063,7 @@ elif [ "$APPLY" = 1 ]; then
       plan_reviewed=1
     fi
     land_script="$(ma_scripts_dir)/patch-land.sh"
-    land_args=(--patch "$patch_file" --repo "$REPO")
+    land_args=(--patch "$patch_file" --repo "$delegate_worktree_repo")
     [ -n "$VERIFY_CMD" ] && land_args+=(--verify "$VERIFY_CMD")
     [ -n "$PLAN_TASK_ID" ] && land_args+=(--plan-task "$PLAN_TASK_ID")
     [ "$ALLOW_RESTRUCTURE" = 1 ] && land_args+=(--allow-restructure)
@@ -3105,14 +3132,14 @@ fi
 if [ "$WORKER_ACCESS" = read ]; then
   :
 elif [ "$applied" = 1 ]; then
-  echo "applied: yes (review with: git -C $REPO diff)"
+  echo "applied: yes (review with: git -C $delegate_worktree_repo diff)"
 elif [ "$no_change" = 1 ]; then
   echo "applied: no (no changes)"
 else
   # Printed landing commands use the admission front door, never a gate bypass:
   # a raw `git apply` would land an unreviewed patch outside patch-land's
   # dirty-tree refusal, lock, and admission checks.
-  if [ -n "$PLAN_TASK_ID" ] && [ "$delegate_worktree_repo" != "$REPO" ]; then
+  if [ -n "$PLAN_TASK_ID" ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$delegate_worktree_repo" != "$REPO" ]; then
     echo "applied: no (review patch; plan task $PLAN_TASK_ID belongs to panel state repository $REPO; patch is based on $delegate_worktree_repo's HEAD; cross-repository plan landing requires owner coordination)"
   elif [ -n "$PLAN_TASK_ID" ]; then
     echo "applied: no (review patch, then: oms patch-land --repo $delegate_worktree_repo --patch $patch_file --plan-task $PLAN_TASK_ID)"

@@ -2144,6 +2144,70 @@ written = [row for row in rows if row.get("kind") == "commit-intent"
            and row.get("phase") == "committed" and row.get("intent_id") == "scratch-own"]
 assert written and all(row.get("worktree") == sys.argv[2] for row in written), written
 PY
+  # A plain (non-panel) plan-task dispatch from the scratch binds its operation snapshot and
+  # liveness marker to the main checkout; the scratch gets neither.
+  local fake_bin="$TMP/state-root-fake-bin"
+  mkdir -p "$fake_bin" "$TMP/state-root-fake-home"
+  cat > "$fake_bin/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+# Capability probes also run from the caller's cwd; only the worker invocation may write.
+case "\$*" in *exec*) ;; *) exit 0 ;; esac
+ls "$main/.oms/delegations" > "$TMP/state-root-live.seen" 2>&1
+printf 'plain\n' > plain-delegated.txt
+EOF
+  chmod +x "$fake_bin/codex"
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id plain-dispatch --title t >/dev/null
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" claim --id plain-dispatch --provider codex >/dev/null
+  ( cd "$scratch" && $parent HOME="$TMP/state-root-fake-home" PATH="$fake_bin:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$scratch" \
+      --artifact-dir "$TMP/state-root-plain-artifacts" --plan-task plain-dispatch \
+      --prompt "plain scratch dispatch" >"$TMP/state-root-plain.log" 2>&1 ) ||
+    fail "a plain plan-task dispatch from a parent's scratch must resolve the main checkout's state: $(cat "$TMP/state-root-plain.log")"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id plain-dispatch | grep '"state": "review"' > /dev/null ||
+    fail "a scratch dispatch must move the main checkout's plan task to review"
+  grep -Eq '^[0-9A-Za-z_.-]+\.json$' "$TMP/state-root-live.seen" &&
+    [ ! -e "$scratch/.oms/delegations" ] && [ ! -e "$scratch/.oms/plan/tasks.json" ] ||
+    fail "a scratch dispatch must keep its liveness marker under the main checkout: $(cat "$TMP/state-root-live.seen")"
+  # --apply from the scratch lands in the scratch only; plan and landing rows stay in the main checkout.
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id plain-apply --title t \
+    --verify true --allowed plain-delegated.txt >/dev/null
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" claim --id plain-apply --provider codex >/dev/null
+  ( cd "$scratch" && $parent HOME="$TMP/state-root-fake-home" PATH="$fake_bin:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$scratch" --apply --verify true \
+      --artifact-dir "$TMP/state-root-plain-artifacts" --plan-task plain-apply \
+      --prompt "plain scratch apply" >"$TMP/state-root-apply.log" 2>&1 ) ||
+    fail "a plain --apply from a parent's scratch must land: $(cat "$TMP/state-root-apply.log")"
+  [ -f "$scratch/plain-delegated.txt" ] && [ ! -e "$main/plain-delegated.txt" ] &&
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id plain-apply | grep '"state": "done"' > /dev/null &&
+    grep -q "\"worktree\": \"$scratch\"" "$main/.oms/landings.jsonl" &&
+    [ ! -e "$scratch/.oms/landings.jsonl" ] && [ ! -e "$scratch/.oms/plan/tasks.json" ] ||
+    fail "a scratch --apply must patch the scratch only and record plan and landing in the main checkout: $(cat "$TMP/state-root-apply.log")"
+  # Guard exclusions are per snapshot root: a scratch-local artifact dir passes strict mode, and
+  # the same relative path written in the main checkout is still a violation.
+  local stray_bin="$TMP/state-root-stray-bin"
+  mkdir -p "$stray_bin"
+  cat > "$stray_bin/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+case "\$*" in *exec*) ;; *) exit 0 ;; esac
+printf 'plain\n' > plain-delegated.txt
+mkdir -p "$main/output" && printf stray > "$main/output/stray.txt"
+EOF
+  chmod +x "$stray_bin/codex"
+  ( cd "$scratch" && $parent OMS_WORKER_GUARD_STRICT=1 HOME="$TMP/state-root-fake-home" \
+      PATH="$fake_bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$scratch" \
+      --artifact-dir "$scratch/output" --prompt "strict scratch-local artifacts" \
+      >"$TMP/state-root-strict.log" 2>&1 ) ||
+    fail "a strict scratch dispatch must not flag its own scratch-local artifacts: $(cat "$TMP/state-root-strict.log")"
+  if ( cd "$scratch" && $parent OMS_WORKER_GUARD_STRICT=1 HOME="$TMP/state-root-fake-home" \
+      PATH="$stray_bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$scratch" \
+      --artifact-dir "$scratch/output" --prompt "strict stray in main" \
+      >"$TMP/state-root-strict-stray.log" 2>&1 ); then
+    fail "a scratch-relative exclusion must not hide the same path written in the main checkout"
+  fi
+  grep -Fq 'changed protected state outside its worktree: files' "$TMP/state-root-strict-stray.log" ||
+    fail "the main-checkout write must be reported as a surface change: $(cat "$TMP/state-root-strict-stray.log")"
   plain="$managed/oh-my-setting-scratch.plain/wt-plain"
   git -C "$project" worktree add --quiet --detach "$plain" HEAD
   [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||
