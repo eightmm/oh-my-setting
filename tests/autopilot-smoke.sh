@@ -1151,6 +1151,22 @@ PY
     done
   done
   rm -f "$hostile_receipt"
+  # An absent receipt still gets the location check before any branch switch.
+  local plan_real="$TMP/hostile-plan-real"
+  git -C "$hostile" switch -q main
+  mv "$hostile/.oms/plan" "$plan_real"
+  ln -s "$plan_real" "$hostile/.oms/plan"
+  hostile_before="$(checkout_state "$hostile" "$hostile_scratch")"
+  rc=0
+  run_autopilot "$hostile" run --planner claude --worker codex --reviewer claude \
+    --allowed 'src,tests' --base main > "$hostile/hostile.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] && grep -Fq 'cannot bind this run to the durable outer receipt' "$hostile/hostile.out" ||
+    fail "run over a symlinked plan directory must refuse before branch selection, got $rc: $(tail -5 "$hostile/hostile.out")"
+  [ "$hostile_before" = "$(checkout_state "$hostile" "$hostile_scratch")" ] &&
+    [ "$(git -C "$hostile" branch --show-current)" = main ] ||
+    fail "refused run over a symlinked plan directory switched a branch"
+  rm "$hostile/.oms/plan"
+  mv "$plan_real" "$hostile/.oms/plan"
   # A receipt write that refuses after a branch switch or a plan retirement
   # leaves that effect behind, so both check the write first: a proposing
   # receipt cannot be run without its reviewed proposal, and a changed
@@ -3723,6 +3739,45 @@ PY
   ) > "$matrix/done-propose.out" 2>&1 || rc=$?
   [ "$rc" = 4 ] && [ -f "$main/.oms/plan/autopilot-run.$receipt_before.json" ] ||
     fail "canonical propose over a dead scratch's done receipt must archive it, got $rc: $(tail -5 "$matrix/done-propose.out")"
+  # The helper itself refuses a state-root caller on a mutating path, for the
+  # race where the shell admission saw no receipt and a scratch bound one after.
+  matrix_bind "$scratch" proposing
+  receipt_before="$(matrix_state)"
+  rc=0
+  OMS_DELEGATE_WORKTREE_ROOT="$managed" env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH \
+    python3 "$ROOT/scripts/lib/autopilot-receipt.py" reenter "$main/.oms/plan/autopilot-run.json" \
+    --repo "$main" --state-repo "$main" --updated 2026-01-01T00:00:00Z \
+    > "$matrix/helper-reenter.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "helper reenter by the state-root caller must refuse, got $rc: $(tail -3 "$matrix/helper-reenter.out")"
+  grep -Fq 'digest gate: outer receipt belongs to a different repository' "$matrix/helper-reenter.out" ||
+    fail "helper reenter was not refused by the bound-checkout check: $(tail -3 "$matrix/helper-reenter.out")"
+  grep -Fq '"disposition":"resumed"' "$main/.oms/plan/autopilot-reentries.jsonl" 2>/dev/null &&
+    fail "helper reenter by the state-root caller recorded a resume"
+  # A completed legacy receipt (written before owner_id existed) is archived by
+  # the next run, which generates its own owner.
+  local legacy="$TMP/scratch-run-legacy"
+  make_repo "$legacy"
+  mkdir -p "$legacy/calls"
+  write_done_plan "$legacy" true
+  OMS_T_GOAL_RESULT=success run_autopilot "$legacy" run --worker codex --reviewer claude \
+    --base main --review-mode gate > "$legacy/first.out" 2>&1 ||
+    fail "legacy receipt fixture run failed: $(tail -5 "$legacy/first.out")"
+  python3 - "$legacy/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["stage"] == "done", row["stage"]
+del row["owner_id"]
+open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(row, sort_keys=True) + "\n")
+PY
+  write_done_plan "$legacy" true 0 1
+  # From the base, the run switches branches, which its preflight guards.
+  git -C "$legacy" switch -q main
+  receipt_before="$(sha256_file "$legacy/.oms/plan/autopilot-run.json")"
+  OMS_T_GOAL_RESULT=success run_autopilot "$legacy" run --worker codex --reviewer claude \
+    --base main --review-mode gate > "$legacy/second.out" 2>&1 ||
+    fail "a run over a completed legacy receipt must be admitted: $(tail -5 "$legacy/second.out")"
+  [ -f "$legacy/.oms/plan/autopilot-run.$receipt_before.json" ] ||
+    fail "a run over a completed legacy receipt did not archive it"
   matrix_bind "$dead_scratch" proposing
   # A scratch cannot prove its binding from an unreadable receipt.
   cp "$main/.oms/plan/autopilot-run.json" "$matrix/receipt"

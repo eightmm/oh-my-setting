@@ -421,8 +421,12 @@ def validate_live(
     caller = os.path.realpath(repo)
     state_root = os.path.realpath(state_repo or repo)
     expected_repo = os.path.realpath(row["repo"])
-    if caller not in (expected_repo, state_root) and (
-            not any_checkout or row_state_root(caller) != state_root):
+    # Mutating callers must be the bound checkout itself: the state root is
+    # accepted only for a read, so a race past the shell admission cannot
+    # claim another checkout's continuation.
+    if caller != expected_repo and (
+            not any_checkout or
+            (caller != state_root and row_state_root(caller) != state_root)):
         raise ReceiptError("outer receipt belongs to a different repository")
     if row_state_root(expected_repo) != state_root:
         raise ReceiptError("outer receipt belongs to a different repository")
@@ -764,7 +768,7 @@ def base_moved_retirable(row: dict[str, Any], candidate: dict[str, Any]) -> bool
 
 
 def check_write(path: Path, row: dict[str, Any], state_repo: str,
-                expected: str | None = None) -> str:
+                expected: str | None = None, *, fresh: bool = False) -> str:
     """Every check `write` makes before its atomic update; returns the CAS digest."""
     validate_receipt(row)
     _repo_root, expected_plan_root = validate_receipt_location(path, state_repo)
@@ -782,7 +786,11 @@ def check_write(path: Path, row: dict[str, Any], state_repo: str,
     if path.exists() or path.is_symlink():
         old_row, old_payload = load_receipt(path)
         current = digest(old_payload)
-    if old_row is None and not row.get("owner_id"):
+    if fresh:
+        old_row = None
+    # A fresh predecessor (absent, or archived before the write) leaves the
+    # write to generate the owner id; a legacy receipt's empty one is no bar.
+    if old_row is None and not fresh and not row.get("owner_id"):
         raise ReceiptError("a new outer receipt requires an autopilot owner id")
     if expected is not None and expected != current:
         raise ReceiptError("outer receipt CAS changed (expected %s, found %s)" % (expected, current))
@@ -846,12 +854,17 @@ def preflight_write(argv: list[str]) -> None:
     args = parser.parse_args(argv)
     path = Path(args.path)
     row = row_from_args(args)
-    if not (path.exists() or path.is_symlink()):
+    # For a run, an absent, done or base-moved predecessor skips only the transition
+    # checks; the candidate and the receipt location are always checked.
+    fresh = True
+    if path.exists() or path.is_symlink():
+        live, _payload = load_receipt(path)
+        fresh = live["stage"] == "done" or base_moved_retirable(live, row)
+    if fresh and row["stage"] != "approved":
+        # A propose reaches its planner's own refusals first; only the run
+        # path, whose branch switch is the effect at stake, is checked here.
         return
-    live, _payload = load_receipt(path)
-    if live["stage"] == "done" or base_moved_retirable(live, row):
-        return
-    check_write(path, row, args.state_repo or args.repo)
+    check_write(path, row, args.state_repo or args.repo, fresh=fresh)
 
 
 def option_args(row: dict[str, Any]) -> list[str]:
