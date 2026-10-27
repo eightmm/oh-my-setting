@@ -594,7 +594,7 @@ such rows.
 | 6 Implement | Optional tier; scoped brief and verifier required |
 | a Advisor | Optional tier, else frontier; read-only |
 | 7 Review | Optional tier, else frontier; mandatory review verifier |
-| c Council | Opus, Sol, Sonnet and Luna by default; `--workload frontier` swaps Sonnet and Luna for Fable and Astra |
+| c Council | Opus, Sol, Sonnet and Terra by default; `--workload frontier` swaps Sonnet and Terra for Fable and Astra |
 | r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
 | f Finalize | Record owner outcome, summary and evidence; request app delivery |
 | n Retry delivery | Explicitly retry a saved result; an uncertain earlier send may duplicate |
@@ -633,7 +633,7 @@ Routing is provider-neutral within the configured light, routine, deep and front
 | Tier | Configured model candidates (effort) |
 | --- | --- |
 | light | `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
-| routine | `claude-sonnet-5-5` (medium), `gpt-6-luna` (medium) |
+| routine | `claude-sonnet-5-5` (medium), `gpt-6.1-terra` (medium) |
 | deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
 | frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
 
@@ -814,7 +814,7 @@ ID`. `--dry-run` prints the chosen route and argv without running a model.
 
 The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
 front doors. Its four seats cover both families: the deep pair (Opus, Sol) plus the
-routine pair (Sonnet, Luna) by default, or plus the frontier pair (Fable, Astra) with
+routine pair (Sonnet, Terra) by default, or plus the frontier pair (Fable, Astra) with
 `--workload frontier`. One rebuttal round means eight primary seat calls; two
 means twelve. Format repair can add one call per
 primary call. `--dry-run` exposes both counts without executing a model. Every
@@ -1038,7 +1038,8 @@ native state (including WAL state without its reader files) shows the current
 model as unavailable; the launch setting stays
 separate in its detail. Historical Sol 6 calls retain their original identity,
 while current Sol defaults and Sol 6.1 calls are labelled accordingly. GPT
-labels include their model version (Sol 6, Luna 6, Astra 6 and Sol 6.1). Native
+labels are the family and version read from the model ID (Sol 6, Luna 6, Astra 6,
+Sol 6.1 and Terra 6.1). Native
 chat rows are never updated; SQLite may coordinate its existing reader locks.
 
 Expanded main details list calls as Needs attention, Active, No record and Finished,
@@ -1611,10 +1612,15 @@ provider capability checks. With an explicit model or custom route, omitting
 effort retains the front door's native settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
 Preset roles use a capability tier ordered by weekly quota left, with readings within the 15-point tie band going to fewer room dispatches, then away from the main (see Roles below).
-Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
-panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
+Codex delegated routes accept a versioned model of the Astra, Sol, Terra and Luna
+families (cost order, highest first). Model-family versions are distinct from roles. Preset dispatch chooses the newest
 configured/catalog numeric version within its existing family and pins the exact ID;
-a newer Astra never replaces a Luna or Sol route. Explicit CLI selections retain
+a newer Astra never replaces a Terra, Luna or Sol route. `oms models` routes a
+family only at its newest version, and not at all while that version is a major
+generation behind the others (any 5.6 model once 6.x is listed). Preset dispatch
+applies the same rule: a tier candidate whose family is not routed is ineligible, the
+usual availability and quota rules choose among the rest, and with none eligible the dispatch
+is refused. Explicit CLI selections retain
 the caller's exact model request. A compact model preview does not limit routing.
 
 ```bash

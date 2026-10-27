@@ -39,13 +39,13 @@ both = {"claude", "codex"}
 assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku-5-5"
 assert allocate("claude", tier="light", installed={"codex"})["model"] == "gpt-6-luna"
 assert allocate("codex", installed={"claude"})["model"] == "claude-sonnet-5-5"
-assert allocate("claude", installed={"codex"})["model"] == "gpt-6-luna"
+assert allocate("claude", installed={"codex"})["model"] == "gpt-6.1-terra"
 for role, model in (("worker", "claude-sonnet-5-5"), ("builder", "claude-sonnet-5-5"), ("refactorer", "claude-sonnet-5-5"),
                     ("release-engineer", "claude-sonnet-5-5"),
                     ("performance-engineer", "claude-opus-5-5"), ("integrator", "claude-opus-5-5")):
     for owner in both:
         expected = model if owner == "codex" else ("gpt-6.1-sol" if role in (
-            "performance-engineer", "integrator") else "gpt-6-luna")
+            "performance-engineer", "integrator") else "gpt-6.1-terra")
         assert allocate(owner, role=role, installed=both)["model"] == expected
     assert allocate("claude", role=role, installed={"codex"})["provider"] == "codex"
 assert allocate("codex", role="documenter", installed=both)["model"] == "claude-haiku-5-5"
@@ -134,7 +134,7 @@ for role, tier in routing_roles.items():
             assert selected["workload"] == tier
             assert selected["model"] == {
                 ("light", "claude"): "claude-haiku-5-5", ("light", "codex"): "gpt-6-luna",
-                ("routine", "claude"): "claude-sonnet-5-5", ("routine", "codex"): "gpt-6-luna",
+                ("routine", "claude"): "claude-sonnet-5-5", ("routine", "codex"): "gpt-6.1-terra",
                 ("deep", "claude"): "claude-opus-5-5", ("deep", "codex"): "gpt-6.1-sol",
                 ("frontier", "claude"): "claude-fable-5-1", ("frontier", "codex"): "gpt-6-astra",
             }[(tier, expected)]
@@ -198,7 +198,7 @@ for markers, expected in (({}, "codex"), ({"CODEX_SANDBOX": "1"}, "codex"),
         assert panel.main(["--repo", str(project), "--council", "--task-id", "detected-council",
                            "--label", "Inspect source", "--prompt", "Inspect source.", "--dry-run"]) == 0
         assert detected.call_args.args[1] == expected
-for target, model, effort in (("codex", "gpt-6-luna", "medium"), ("claude", "claude-sonnet-5-5", "medium")):
+for target, model, effort in (("codex", "gpt-6.1-terra", "medium"), ("claude", "claude-sonnet-5-5", "medium")):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
                "--to", target, "--prompt", "Inspect source.", "--dry-run"]
     planned = json.loads(call(request))

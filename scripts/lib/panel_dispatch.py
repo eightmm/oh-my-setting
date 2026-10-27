@@ -189,7 +189,7 @@ def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candid
 
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
                    repo=None, room_id=None, main=None, task_id=None, candidate=None, routing_readings=None):
-    from terminal_panel import MODEL_IDS, PROVIDERS, allocate, newest_route_model, policy, provider_catalog
+    from terminal_panel import MODEL_IDS, PROVIDERS, allocate, policy, provider_catalog, routable_route_model
     from terminal_panel import route_family, routing_status
     if owner not in PROVIDERS:
         owner = provider_catalog(owner)[0]["provider"]
@@ -207,11 +207,12 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
                                     if routing_readings is not None else
                                     ({}, None, None) if target else route_inputs(
                                         owner, repo, room_id, main, task_id, candidate))
+        catalogs = {row["provider"]: row.get("catalog_models", row.get("models", [])) for row in rows}
         route = allocate(owner, role, workload, access, purpose,
-                         {row["provider"] for row in rows if row["installed"]}, readings, recent, writer)
+                         {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs)
         peer = next(row for row in rows if row["provider"] == route["provider"])
-        route.update(binary=peer["binary"], model=newest_route_model(
-            route["provider"], route["model"], peer.get("catalog_models", peer.get("models", []))))
+        route.update(binary=peer["binary"], model=routable_route_model(
+            route["provider"], route["model"], catalogs[route["provider"]]))
         if model and model != route["model"]:
             raise ValueError("researchers require the newest configured/catalog Luna or Haiku model")
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
@@ -231,7 +232,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         raise ValueError("custom write providers require explicit OMS_PROVIDER_WRITE_ADAPTERS opt-in")
     if peer["provider"] == "codex" and model not in MODEL_IDS["codex"] and not (
             route_family("codex", model) and model in peer.get("catalog_models", peer.get("models", []))):
-        raise ValueError("Codex workers require a known versioned Sol, Luna or Astra model")
+        raise ValueError("Codex workers require a known versioned Astra, Sol, Terra or Luna model")
     return dict(route, provider=peer["provider"], binary=peer["binary"], model=model, effort=effort)
 
 
@@ -718,7 +719,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
              candidate=None, allow_stale_base=False, from_task=None):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
-    from terminal_panel import continuation, events, newest_route_model, provider_catalog, routing_status
+    from terminal_panel import continuation, events, provider_catalog, routable_route_model, routing_status
     from terminal_panel import run_dispatch, safe_label, selected_route
     dispatch_env = child_environment(owner, repo)
     room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
@@ -795,7 +796,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                     peer = provider_catalog(fallback["provider"])[0]
                     if (peer["installed"] and access in peer["access"] and peer["exact_model_override"]):
                         fallback["binary"] = peer["binary"]
-                        fallback["model"] = newest_route_model(
+                        fallback["model"] = routable_route_model(
                             fallback["provider"], fallback["model"],
                             peer.get("catalog_models", peer.get("models", [])))
                     else:

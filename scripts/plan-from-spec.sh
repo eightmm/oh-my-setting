@@ -1122,8 +1122,10 @@ PYCOUNCIL
 Auto collaboration allocation: implementation transport is $WORKER_PROVIDER.
 Never assign tasks to another transport; the opposite provider must remain an
 independent reviewer. For a Codex assignment explicitly use gpt-6-luna for
-simple bounded work, gpt-6.1-sol for implementation, or gpt-6-astra for difficult
-reasoning. Any Codex fallback must be one of those three. Omit assignment to
+simple bounded work, gpt-6.1-terra for routine implementation, gpt-6.1-sol for
+harder implementation, or gpt-6-astra for difficult reasoning; a newer version
+of the same family (GPT-6 or later) is also accepted, a 5.x model never. Any Codex
+fallback must follow the same rule. Omit assignment to
 inherit the campaign route. Do not override this rule with the generic routine
 assignment example above. Claude assignments may use its model/workload controls.
 Resolve the council's disagreements against source evidence; record any material

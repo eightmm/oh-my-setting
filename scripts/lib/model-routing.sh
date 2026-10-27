@@ -21,26 +21,29 @@ oms_model_validate_name() {
   fi
 }
 
+# A known Codex family at GPT-6 or newer: the rule task-assignment.py and
+# autopilot-receipt.py apply (panel_routing.CODEX_MIN_MAJOR); 5.x is never used.
+oms_collaboration_codex_model() {
+  local major
+  [ -n "$(oms_codex_route_family "$1" 2>/dev/null || true)" ] || return 1
+  major="${1#gpt-}"; major="${major%%[.-]*}"
+  [ "$((10#$major))" -ge 6 ]
+}
+
 # This opt-in campaign authorizes two transports, not arbitrary recovery peers.
 # Empty Codex routes are pinned by the caller before any catalog/default logic.
 oms_collaboration_route_validate() {
-  local provider="$1" model="$2" fallback="${3:-}" family
+  local provider="$1" model="$2" fallback="${3:-}"
   case "$provider" in
     claude) return 0 ;;
     codex)
-      case "$model" in gpt-6-*|gpt-6.*) ;; *)
-        echo 'error: auto collaboration requires a recognized GPT-6 Codex model' >&2; return 2 ;; esac
-      family="$(oms_codex_route_family "$model" 2>/dev/null || true)"
-      [ -n "$family" ] || {
-        echo 'error: auto collaboration requires a recognized GPT-6 Codex model' >&2
+      oms_collaboration_codex_model "$model" || {
+        echo 'error: auto collaboration requires a recognized GPT-6 or newer Codex model' >&2
         return 2
       }
       [ -z "$fallback" ] && return 0
-      case "$fallback" in gpt-6-*|gpt-6.*) ;; *)
-        echo 'error: auto collaboration forbids a non-GPT-6 fallback' >&2; return 2 ;; esac
-      family="$(oms_codex_route_family "$fallback" 2>/dev/null || true)"
-      [ -n "$family" ] && return 0
-      echo 'error: auto collaboration forbids a non-GPT-6 fallback' >&2 ;;
+      oms_collaboration_codex_model "$fallback" && return 0
+      echo 'error: auto collaboration forbids a fallback that is not a recognized GPT-6 or newer Codex model' >&2 ;;
     *) echo 'error: auto collaboration authorizes only codex and claude' >&2 ;;
   esac
   return 2
@@ -172,11 +175,8 @@ $routable
 EOF
   fi
   if [ "$provider" = codex ] && [ "$codex_tiers" -eq 1 ]; then
-    order="$(oms_provider_price_order codex 6.0 2>/dev/null || true)"
-    # shellcheck disable=SC2086 # Registry seed contains fixed family IDs.
-    for candidate in $order; do
-      family="$(oms_codex_route_family "$candidate" 2>/dev/null || true)"
-      [ -n "$family" ] || continue
+    # shellcheck disable=SC2086 # Fixed family names.
+    for family in $(oms_codex_route_families); do
       while IFS= read -r model; do
         [ -n "$model" ] || continue
         model_name="${model%%	*}"

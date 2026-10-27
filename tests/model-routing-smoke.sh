@@ -70,13 +70,13 @@ prepare_gen() {  # prepare_gen PROVIDER EXPLICIT ERRFILE REPORT-EXPRESSION
     bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare "$1" 2>"$2"; eval "$3"' _ "$1" "$3" "$4"
 }
 out="$(routable codex)"
-[ "$out" = 'gpt-5.6-sol gpt-5.6-luna ' ] ||
+[ "$out" = 'gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna ' ] ||
   fail "codex routable set must be the newest generation only: $out"
 out="$(routable antigravity)"
 [ "$out" = 'gemini-3.7-flash-high gemini-3.7-flash-low ' ] ||
   fail "antigravity routable set must drop the older pro line and re-hosted foreign families: $out"
 out="$(prepare_gen codex '' "$TMP/gen.err" 'printf "%s|%s" "$OMS_MODEL_ALTERNATE" "$(printf "%s" "$OMS_MODEL_DISTINCT_CHAIN" | tr "\n" " ")"')"
-[ "$out" = 'gpt-5.6-sol|gpt-5.6-sol gpt-5.6-luna' ] ||
+[ "$out" = 'gpt-5.6-sol|gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna' ] ||
   fail "provider-default recovery must stay inside the newest generation: $out"
 # A named previous-generation model still runs — it was named — but says so.
 out="$(prepare_gen codex gpt-5.5 "$TMP/gen.err" 'printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_PREVIOUS_GENERATION"')"
@@ -124,8 +124,8 @@ role_prepare() {  # role_prepare PROVIDER OPERATION ROLE ERRFILE
 }
 printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\n' > "$gen/codex.models"
 out="$(role_prepare codex delegate implementation-worker "$TMP/role.err")"
-[ "$out" = 'gpt-5.6-sol|role-default|role:worker|gpt-5.6-luna' ] ||
-  fail "a standard worker uses Sol and tries Luna recovery first: $out"
+[ "$out" = 'gpt-5.6-sol|role-default|role:worker|gpt-5.6-terra' ] ||
+  fail "a standard worker uses Sol and tries the next cheaper family, Terra, first: $out"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine.err")"
 case "$out" in 'gpt-5.6-luna|role-default|role:routine-worker|'*) ;; *) fail "routine work must select the lowest routable seeded rank: $out" ;; esac
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare claude delegate implementation-worker "$TMP/routine-claude.err")"
@@ -172,6 +172,20 @@ out="$(prepare_gen codex gpt-6.1-sol "$TMP/current-sol.err" 'printf "%s|%s" "$OM
 # known families; legacy unknown-generation behavior remains covered above.
 printf 'gpt-6.2-sol\ngpt-6.10-sol\n' > "$gen/codex.models"
 [ "$(routable codex)" = 'gpt-6.10-sol ' ] || fail '6.10 must compare newer than 6.2'
+# Terra sits between Sol and Luna. A family whose newest ID is a major
+# generation behind the others (any 5.x beside 6.x) is not routed, and a newer
+# family version (6.2 Astra) replaces the older one without a seed change.
+printf 'gpt-6.1-sol\ngpt-6.2-astra\ngpt-6-astra\ngpt-6.1-terra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\n' > "$gen/codex.models"
+out="$(routable codex)"
+[ "$out" = 'gpt-6.1-sol gpt-6.2-astra gpt-6.1-terra gpt-6-luna ' ] || fail "Terra 6.1 routes and no 5.6 model does: $out"
+out="$(role_prepare codex delegate implementation-worker "$TMP/role-terra.err")"
+[ "$out" = 'gpt-6.1-sol|role-default|role:worker|gpt-6.1-terra' ] || fail "Terra is the first cheaper recovery after Sol: $out"
+out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-terra.err")"
+case "$out" in 'gpt-6-luna|role-default|role:routine-worker|gpt-6.1-terra') ;; *) fail "routine recovery climbs to Terra before Sol: $out" ;; esac
+out="$(prepare_gen codex gpt-5.6-terra "$TMP/old-terra.err" 'printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_PREVIOUS_GENERATION"')"
+[ "$out" = 'gpt-5.6-terra|1' ] || fail "a 5.6 Terra pin runs only as named and is flagged: $out"
+printf 'gpt-6.1-sol\ngpt-6-astra\ngpt-5.6-terra\n' > "$gen/codex.models"
+[ "$(routable codex)" = 'gpt-6.1-sol gpt-6-astra ' ] || fail "a family left on 5.x must not route beside 6.x: $(routable codex)"
 printf 'gpt-6.10-astra\ngpt-6.2-nova\ngpt-6..10-luna\n' > "$gen/codex.models"
 [ "$(routable codex)" = 'gpt-6.10-astra ' ] || fail 'absent tiers and malformed IDs must not be fabricated'
 out="$(role_prepare codex delegate implementation-worker "$TMP/role-absent.err")"
@@ -685,18 +699,18 @@ for bad in gpt-5.5 gpt-5.6-sol provider-default; do
     fail "collaboration accepted fallback $bad"
   fi
 done
-for current in gpt-6.10-astra gpt-6.2-sol gpt-6.10-luna; do
+for current in gpt-6.10-astra gpt-6.2-sol gpt-6.1-terra gpt-6.10-luna gpt-7.1-sol gpt-10-terra; do
   OMS_AUTOPILOT_COLLABORATION=auto bash -c \
     '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex "$2"' _ "$ROOT" "$current" ||
-    fail "collaboration rejected a newer recognized GPT-6 family model: $current"
+    fail "collaboration rejected a recognized GPT-6-or-newer family model: $current"
   OMS_AUTOPILOT_COLLABORATION=auto bash -c \
     '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex gpt-6.1-sol "$2"' _ "$ROOT" "$current" ||
-    fail "collaboration rejected a newer recognized GPT-6 fallback: $current"
+    fail "collaboration rejected a recognized GPT-6-or-newer fallback: $current"
   out="$(OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT="$current" bash -c \
     '. "$1/scripts/lib/model-routing.sh"; oms_model_prepare codex && printf "%s" "$OMS_MODEL_PRIMARY"' _ "$ROOT")"
   [ "$out" = "$current" ] || fail "collaboration rewrote an explicit model pin: $out"
 done
-for bad in gpt-6.10-nova gpt-6..10-luna gpt-7.1-sol gpt-6.1-unknown; do
+for bad in gpt-6.10-nova gpt-6..10-luna gpt-7.1.1-sol gpt-6.1-unknown gpt-5.6-terra gpt-5-sol gpt-sol gpt-x-luna; do
   if OMS_AUTOPILOT_COLLABORATION=auto bash -c \
     '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex "$2"' _ "$ROOT" "$bad" >/dev/null 2>&1; then
     fail "collaboration accepted an unknown or malformed Codex family: $bad"
@@ -706,6 +720,10 @@ for bad in gpt-6.10-nova gpt-6..10-luna gpt-7.1-sol gpt-6.1-unknown; do
     fail "collaboration accepted an unknown or malformed fallback family: $bad"
   fi
 done
+if OMS_AUTOPILOT_COLLABORATION=auto bash -c \
+  '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex ""' _ "$ROOT" >/dev/null 2>&1; then
+  fail 'collaboration accepted an empty Codex model'
+fi
 if OMS_AUTOPILOT_COLLABORATION=auto bash -c \
   '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare antigravity' >/dev/null 2>&1; then
   fail 'collaboration widened provider authority'

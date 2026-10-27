@@ -126,6 +126,17 @@ assert row['not_routed'] == ['gpt-6-astra', 'gpt-6.2-astra', 'gpt-6-sol', 'gpt-6
                              'gpt-6..11-sol', 'gpt-6.10-nova', 'claude-opus-6-10'], row['not_routed']
 PY
 
+# The live catalog shape: Terra 6.1 is routed, the 5.6 generation is not.
+printf '%s\n' gpt-6.1-sol gpt-6-astra gpt-6.1-terra gpt-6-sol gpt-6-luna \
+  gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna > "$gen/codex.models"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" "$ROOT/scripts/models.sh" --json --providers codex)"
+OMS_MODELS_JSON="$out" python3 - <<'PY'
+import json, os
+row = json.loads(os.environ['OMS_MODELS_JSON'])['providers'][0]
+assert row['routable'] == ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.1-terra', 'gpt-6-luna'], row['routable']
+assert row['not_routed'] == ['gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'], row['not_routed']
+PY
+
 # Cached ID/display-name rows and progress banners must never become routes.
 printf 'Fetching available models...\r\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\r\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\r\ngemini-3.8-flash-high\tDuplicate\n' > "$gen/antigravity.models"
 PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" bash -c '

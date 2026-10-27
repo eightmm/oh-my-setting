@@ -11,7 +11,7 @@ from itertools import chain
 
 from dashboard_projection import (ELLIPSIS, clean, count, display_width as _display_width, fit, listing, mapping, number,
                                   wrap_label as wrapped)
-from panel_routing import policy
+from panel_routing import policy, route_family
 from call_ending import LIVE_STATES, call_ending
 
 
@@ -314,9 +314,18 @@ TERMINAL_STATES = {"done", "failed", "cancelled", "timed_out", "abandoned"}
 TASK_NAMES = {"peer-delegate": "Implement patch", "delegate": "Implement patch",
               "ask": "Investigate / advise", "consult": "Investigate / advise",
               "review": "Review changes", "peer-review": "Review changes"}
-MODEL_NAMES = {"gpt-6.1-sol": "Sol 6.1", "gpt-6-sol": "Sol 6", "gpt-6-luna": "Luna 6", "gpt-6-astra": "Astra 6",
-               "claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
-               "claude-fable-5-1": "Fable 5.1", "claude-haiku-5-5": "Haiku 5.5"}
+class _ModelNames(dict):
+    """Explicit display names; a Codex role model otherwise reads as family and version (gpt-6.1-terra: Terra 6.1)."""
+
+    def get(self, model, default=None):
+        if model in self:
+            return self[model]
+        family = route_family("codex", model) if isinstance(model, str) else None
+        return "%s %s" % (family[0].title(), ".".join(map(str, family[1]))) if family else default
+
+
+MODEL_NAMES = _ModelNames({"claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
+                           "claude-fable-5-1": "Fable 5.1", "claude-haiku-5-5": "Haiku 5.5"})
 PURPOSE_NAMES = {"implement": "Implement patch", "explain": "Explain code",
                  "investigate": "Inspect source", "review": "Review changes", "advise": "Advise decision",
                  "research": "Look up sources",

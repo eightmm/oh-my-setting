@@ -3395,6 +3395,27 @@ assert row['contract']['review_mode'] == 'gate'
 assert row['routing']['worker']['model'] == 'gpt-6.1-sol'
 args = rules['option_args'](row)
 assert args[args.index('--collaboration')+1] == 'auto'
+# Any GPT-6-or-newer version of a known family passes both validators; 5.x, unknown families and
+# malformed or empty IDs do not.
+assignment = runpy.run_path(sys.argv[2] + '/task-assignment.py')
+for model, fallback, accepted in (('gpt-6.1-terra', '', True), ('gpt-6.2-astra', 'gpt-6.1-terra', True),
+                                  ('gpt-5.6-terra', '', False), ('gpt-6.1-sol', 'gpt-5.6-terra', False),
+                                  ('gpt-6.1-nova', '', False), ('gpt-6.1.1-sol', '', False),
+                                  ('gpt-7-terra', '', True), ('gpt-7.1-astra', 'gpt-6-luna', True),
+                                  ('gpt-6.1-sol', 'gpt-7..1-sol', False), ('', '', False)):
+    try:
+        assignment['validate_collaboration']({'assignment': {'provider': 'codex', 'model': model,
+                                                             'fallback_model': fallback}}, 'codex')
+        assigned = True
+    except ValueError:
+        assigned = False
+    worker = dict(row['routing']['worker'], model=model, fallback_model=fallback)
+    try:
+        rules['validate_receipt'](dict(row, routing=dict(row['routing'], worker=worker)))
+        received = True
+    except rules['ReceiptError']:
+        received = False
+    assert assigned is accepted and received is accepted, (model, fallback, assigned, received)
 PYTEST
   proposal="$(sed -n 's/^plan-from-spec: proposed .* -> //p' "$repo/propose.out")"
   sha="$(sha256_file "$proposal")"
@@ -3465,6 +3486,7 @@ PYTEST
   for assignment in '{"provider":"codex","model":"gpt-5.5"}' \
     '{"provider":"codex","workload":"routine"}' \
     '{"provider":"codex","model":"gpt-6.1-sol","fallback_model":"gpt-5.6-sol"}' \
+    '{"provider":"codex","model":"gpt-5.6-terra"}' \
     '{"provider":"claude","model":"claude-opus-5-5"}'; do
     write_proposal "$rejected/proposal.json"
     python3 - "$rejected/proposal.json" "$assignment" <<'PYTEST'

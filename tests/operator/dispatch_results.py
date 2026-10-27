@@ -478,7 +478,7 @@ for owner in panel.PROVIDERS:
 cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
          ("codex", "worker", None, "read", "explain", "claude-sonnet-5-5"),
          ("codex", "worker", "deep", "read", "investigate", "claude-opus-5-5"),
-         ("claude", "builder", None, "write", None, "gpt-6-luna"),
+         ("claude", "builder", None, "write", None, "gpt-6.1-terra"),
          ("claude", "advisor", None, "read", None, "gpt-6-astra"),
          ("codex", "advisor", "deep", "read", None, "claude-opus-5-5"),
          ("claude", "reviewer", None, "read", None, "gpt-6-astra"),
@@ -647,15 +647,40 @@ for owner in panel.PROVIDERS:
 # A researcher keeps the cheap family, read-only strategy and source evidence.
 from panel_routing import newest_route_model
 assert newest_route_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna", "gpt-7-astra"]) == "gpt-6.10-luna"
+assert newest_route_model("codex", "gpt-6-astra", ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.1-terra"]) == "gpt-6.2-astra"
+assert newest_route_model("codex", "gpt-6.1-terra", ["gpt-5.6-terra", "gpt-6.1-terra", "gpt-6.1-sol"]) == "gpt-6.1-terra"
 assert newest_route_model("claude", "claude-haiku-5-5", ["claude-haiku-5-6", "claude-opus-9-9"]) == "claude-haiku-5-6"
 codex_only = {"provider": "codex", "binary": "codex", "installed": True, "exact_model_override": True, "access": ["read", "write"], "models": ["gpt-6-sol"],
-              "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"]}
+              "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-astra"]}
 with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert panel.selected_route("codex", "worker", "deep", "read", "investigate")["model"] == "gpt-6.2-sol"
     assert panel.selected_route("codex", "worker", "light", "read", "explain")["model"] == "gpt-6-luna"
     assert panel.selected_route("codex", "reviewer", None, "read", None)["provider"] == "codex"
     explicit = panel.selected_route("claude", "worker", None, "read", None, "codex")
-    assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6-luna" and explicit["effort"] == "medium"
+    assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6.1-terra" and explicit["effort"] == "medium"
+# Like the shell's routable set, a family whose newest member is a major generation behind the newest
+# Codex family model in the catalog is not routed: the tier's other provider serves, or dispatch is refused.
+from panel_routing import routable_route_model
+seven = ["gpt-7-astra", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6-astra"]
+assert routable_route_model("codex", "gpt-6-astra", seven) == "gpt-7-astra"
+for configured in ("gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-luna"):
+    try:
+        routable_route_model("codex", configured, seven)
+        raise AssertionError("a family behind gpt-7 was routed: " + configured)
+    except ValueError as error:
+        assert "not routed" in str(error), error
+assert routable_route_model("codex", "gpt-6.1-terra", []) == "gpt-6.1-terra"
+assert routable_route_model("codex", "gpt-6.1-terra", ["gpt-6-sol", "gpt-7..1-astra", "gpt-7-nova"]) == "gpt-6.1-terra"
+assert routable_route_model("codex", "gpt-7-terra", ["gpt-6.1-terra", "gpt-6-astra"]) == "gpt-7-terra"
+assert routable_route_model("claude", "claude-haiku-5-5", ["claude-opus-9-9"]) == "claude-haiku-5-5"
+seven_row = dict(codex_only, catalog_models=seven)
+with patch.object(panel, "provider_catalog", return_value=[seven_row]):
+    assert panel.selected_route("codex", "worker", "frontier", "read", "investigate")["model"] == "gpt-7-astra"
+    try:
+        panel.selected_route("claude", "worker", None, "read", None, "codex")
+        raise AssertionError("routine routed Terra 6.1 beside gpt-7")
+    except ValueError as error:
+        assert "gpt-6.1-terra" in str(error) and "not routed" in str(error), error
 from panel_routing import alternate_route
 automatic = allocate("claude", role="builder", tier="routine", access="write",
                      installed={"codex", "claude"})
@@ -715,6 +740,21 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_ca
         patch("panel_metrics.collect", side_effect=ValueError("unavailable reading")):
     assert panel.selected_route("codex", "worker", None, "read", None,
                                 repo=project, room_id="quota-room")["provider"] == "claude"
+with patch.object(panel, "provider_catalog", return_value=[seven_row, dict(claude_candidate, installed=True)]):
+    assert panel.selected_route("claude", "worker", None, "read", None)["model"] == "claude-sonnet-5-5"
+# Family exclusion is candidate filtering, not reselection: the provider it leaves still passes the
+# quota guard, so a Claude at or past 90% weekly use is refused with the usual exhaustion error.
+for used, expected in ((89, "claude-sonnet-5-5"), (90, None), (99, None)):
+    with patch.object(panel, "provider_catalog", return_value=[seven_row, dict(claude_candidate, installed=True)]), \
+            patch.object(panel, "snapshot", return_value=({"room": {"id": "quota-room"}}, 0)), \
+            patch("panel_metrics.collect", return_value={"codex": {"weekly_used": 20}, "claude": {"weekly_used": used}}):
+        try:
+            selected = panel.selected_route("codex", "worker", None, "read", None,
+                                            repo=project, room_id="quota-room", main="quota-main")
+        except ValueError as error:
+            assert expected is None and "all installed providers in the routine tier have <=10% weekly quota left" in str(error), (used, error)
+        else:
+            assert selected["model"] == expected, (used, selected)
 with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, installed=False)]):
     try:
         panel.selected_route("codex", "worker", None, "read", None)
@@ -957,7 +997,7 @@ for rounds in (1, 2):
     assert planned["primary_calls"] == 4 * (rounds + 1) and planned["max_calls"] == 8 * (rounds + 1)
     assert planned["families"] == 2 and planned["executes"] is False
     assert planned["argv"][planned["argv"].index("--providers") + 1] == \
-        "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-sonnet-5-5,codex:model=gpt-6-luna"
+        "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
     assert len(planned["argv"][planned["argv"].index("--providers") + 1].split(",")) == 4 == planned["seats"]
 frontier_plan = json.loads(call(council_args + ["--workload", "frontier", "--dry-run"]))
 assert frontier_plan["argv"][frontier_plan["argv"].index("--providers") + 1] == \
@@ -979,7 +1019,7 @@ council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "-
 council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]
 assert any(a["tool"] == "panel-council" and a["state"] == "done" for a in council_attempts)
 assert {a["refs"].get("panel_model") for a in council_attempts if a["tool"] != "panel-council"} == \
-    {"gpt-6.1-sol", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-luna"}, council_attempts
+    {"gpt-6.1-sol", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6.1-terra"}, council_attempts
 assert all(a.get("parent_attempt_id") == main_attempts["codex"] for a in council_attempts)
 # A control-menu council has no inherited main: it binds the room's one live main, or refuses, so Debate can show it.
 class CouncilBound(Exception):

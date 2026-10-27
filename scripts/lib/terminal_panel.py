@@ -38,7 +38,7 @@ from dashboard_projection import clean
 from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
-                           TIERS, WRITERS, newest_route_model, route_family)
+                           TIERS, WRITERS, newest_route_model, routable_route_model, route_family)
 from panel_results import (DURABLE, _read, _write, _lock, accept, finalize, outcomes, results, results_snapshot,
                            retry_delivery, verified_patch, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
@@ -634,13 +634,13 @@ def main(argv=None):
             installed = {row["provider"] for row in rows if row["installed"]}
             owner = caller_owner()
             readings, recent, _ = route_inputs(owner, args.repo, args.room)
+            catalogs = {row["provider"]: row.get("catalog_models", row.get("models", [])) for row in rows}
             chosen = {}
             for role in routes["roles"]:
                 try:
-                    route = allocate(owner, role, installed=installed, provider_status=readings, recent=recent)
-                    peer = next(row for row in rows if row["provider"] == route["provider"])
-                    route["model"] = newest_route_model(route["provider"], route["model"],
-                        peer.get("catalog_models", peer.get("models", [])))
+                    route = allocate(owner, role, installed=installed, provider_status=readings, recent=recent,
+                                     catalogs=catalogs)
+                    route["model"] = routable_route_model(route["provider"], route["model"], catalogs[route["provider"]])
                     chosen[role] = {key: route[key] for key in ("provider", "model", "effort")}
                 except ValueError as error:
                     chosen[role] = {"error": str(error)}

@@ -391,16 +391,20 @@ oms_model_generation_newer() {
   [ "$((10#$a_major))" -eq "$((10#$b_major))" ] && [ "$((10#$a_minor))" -gt "$((10#$b_minor))" ]
 }
 
+# Codex role families in cost order, most capable first. The order holds
+# across generations; each family routes at its own newest catalog version.
+oms_codex_route_families() {
+  printf 'astra sol terra luna\n'
+}
+
 # Codex role families have independent version numbers. Accept only exact,
-# versioned IDs for the three role families whose price order the registry knows.
+# versioned IDs of a family oms_codex_route_families names. The Python twin is
+# route_family in scripts/lib/panel_routing.py.
 oms_codex_route_family() {
   local model="$1" version major minor family
-  case "$model" in gpt-*-astra|gpt-*-sol|gpt-*-luna) ;; *) return 1 ;; esac
-  case "$model" in
-    *-astra) version="${model#gpt-}"; version="${version%-astra}"; family=astra ;;
-    *-sol) version="${model#gpt-}"; version="${version%-sol}"; family=sol ;;
-    *-luna) version="${model#gpt-}"; version="${version%-luna}"; family=luna ;;
-  esac
+  case "$model" in gpt-*-astra|gpt-*-sol|gpt-*-terra|gpt-*-luna) ;; *) return 1 ;; esac
+  family="${model##*-}"
+  version="${model#gpt-}"; version="${version%-"$family"}"
   case "$version" in ''|*[!0-9.]*) return 1 ;; esac
   case "$version" in *.*.*|.*|*.) return 1 ;; esac
   major="${version%%.*}"
@@ -412,12 +416,14 @@ oms_codex_route_family() {
   printf '%s\n' "$family"
 }
 
-# Codex's known Astra, Sol and Luna families route at each family's newest
-# numeric version. Other providers retain the existing provider-family rule.
-# Previous generations and re-hosted foreign families still run when named.
+# Codex's known role families route at each family's newest numeric version,
+# and only while that version shares the newest major generation among them:
+# a family left behind on 5.x once 6.x exists is not routed. Other providers
+# retain the existing provider-family rule. Previous generations and re-hosted
+# foreign families still run when named.
 # Same exit contract as oms_capability_models: 1 means the catalog is unknown.
 oms_capability_routable_models() {
-  local provider="$1" primary catalog model family generation i j superseded codex_tiers
+  local provider="$1" primary catalog model family generation i j superseded codex_tiers codex_major=0
   local -a models=() families=() generations=()
   provider="$(oms_provider_normalize "$provider")" || return 2
   catalog="$(oms_capability_models "$provider")" || return 1
@@ -437,6 +443,7 @@ EOF
       if [ -n "$family" ]; then
         generation="$(oms_model_generation "$model" 2>/dev/null || true)"
         [ -n "$generation" ] || continue
+        [ "$((10#${generation%%.*}))" -le "$codex_major" ] || codex_major="$((10#${generation%%.*}))"
         models+=("$model")
         families+=("codex-$family")
         generations+=("$generation")
@@ -473,6 +480,9 @@ EOF
       fi
       j=$((j + 1))
     done
+    case "${families[$i]}" in
+      codex-*) [ "$((10#${generations[$i]%%.*}))" -eq "$codex_major" ] || superseded=1 ;;
+    esac
     [ "$superseded" -eq 1 ] || printf '%s\n' "${models[$i]}"
     i=$((i + 1))
   done

@@ -41,6 +41,7 @@ capped_texts = control_row_texts(capped_lines)
 assert "g1 exit 1" in capped_texts[0] and "g2 exit 0" in capped_texts[1], capped_texts
 use_unicode(True)
 assert call_identity("worker", "gpt-6.1-sol", "Routing") == "WORKER Sol 6.1 · Routing"
+assert call_identity("worker", "gpt-6.1-terra") == "WORKER Terra 6.1" and call_identity("worker", "gpt-6.2-astra") == "WORKER Astra 6.2"
 assert call_identity("reviewer", "gpt-6.1-sol", "Goal verification", purpose="verifier") == "VERIFIER Sol 6.1 · Goal verification"
 assert call_identity("reviewer", "gpt-6.1-sol", purpose="security-auditor") == "SECURITY AUDITOR Sol 6.1"
 assert call_identity("worker", "gpt-6.1-sol", "Routing", alias="B7") == "B7 WORKER Sol 6.1 · Routing"

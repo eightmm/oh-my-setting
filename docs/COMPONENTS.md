@@ -532,7 +532,7 @@ explicit session IDs, and connects either owner to the same consult/delegate/
 review paths. Optional installed tmux keeps native conversations beside shared
 status; the portable inline menu works without it. Provider workers do not gain
 owner or recursive delegation authority. The panel adds an explicit role policy:
-Sol/Opus mains, Haiku/Luna light research, Sonnet/Luna routine implementation or
+Sol/Opus mains, Haiku/Luna light research, Sonnet/Terra routine implementation or
 explanation, and Astra/Fable advisors and reviewers. The native main judges the workload and dispatches
 through existing front doors. Separate advisor/worker sections show recorded
 model, task, authority and execution location, bound to the native main's
@@ -941,7 +941,7 @@ even when the child did not emit its own summary.
 The bounded synthesis feeds the planner as untrusted evidence before
 normal exact parent proposal review. The durable contract retains this mode
 through resume and enforces gated opposite-provider review. Codex routes are
-pinned to GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna, including reviewed assignments and optional
+pinned to a GPT-6-or-newer version of Astra, Sol, Terra or Luna, including reviewed assignments and optional
 capacity fallbacks. Claude Code can implement with `--worker claude`, leaving
 Codex as the reviewer; each campaign keeps one implementation transport to
 preserve independent review. The existing provider-neutral behavior is unchanged

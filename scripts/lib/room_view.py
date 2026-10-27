@@ -2041,7 +2041,9 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 from panel_view import MODEL_NAMES
                 identities = [member_identity(m, False) for m in members]
                 if active == "debate":
+                    # Codex seat names derive from the model ID, so read them off the line.
                     identities += [call_identity("council", model) for model in MODEL_NAMES]
+                    identities += re.findall(r"COUNCIL [A-Z][a-z]+ \d+(?:\.\d+)?", line)
                 for identity in sorted(identities, key=display_width, reverse=True):
                     if identity in line:
                         style_key = role_style(identity.split(" ", 1)[0].lower())

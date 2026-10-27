@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from panel_routing import CODEX_MIN_MAJOR, route_family
 from process_liveness import pid_alive
 
 
@@ -343,10 +344,11 @@ def validate_receipt(row: dict[str, Any]) -> None:
             if providers[role] not in {"codex", "claude"}:
                 raise ReceiptError("auto collaboration transport is not authorized")
             if providers[role] == "codex":
-                allowed_models = {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
-                if (routing[role]["model"] not in allowed_models or
-                        routing[role]["fallback_model"] not in allowed_models | {""}):
-                    raise ReceiptError("auto collaboration requires GPT-6 Codex routes")
+                fallback = routing[role]["fallback_model"]
+                for model in (routing[role]["model"],) + ((fallback,) if fallback else ()):
+                    family = route_family("codex", model)
+                    if family is None or family[1][0] < CODEX_MIN_MAJOR:
+                        raise ReceiptError("auto collaboration requires GPT-6 or newer Codex family routes")
     if contract.get("review_mode") not in {"shadow", "gate", "off"}:
         raise ReceiptError("review mode is invalid")
     if not isinstance(proposal, dict) or set(proposal) != {"path", "sha256"}:

@@ -15,6 +15,10 @@ EFFORTS = {"auto", "low", "medium", "high", "xhigh", "max", "ultra"}
 TRANSPORT_ALIASES = {"agy", "cursor-agent", "grok-build", "gemini-cli", "qwen-code",
                      "opencode2", "dsh", "deepseek-harness", "mistral-vibe",
                      "github-copilot", "factory-droid"}
+# A known Codex role family at any version from panel_routing.CODEX_MIN_MAJOR
+# on: route_family's codex pattern, inlined because this file also runs copied
+# alone and through runpy.
+CODEX_ROUTE = re.compile(r"gpt-0*(?:[6-9]|[1-9]\d+)(?:\.\d+)?-(?:astra|sol|terra|luna)")
 
 
 def validate(value):
@@ -61,10 +65,10 @@ def validate_collaboration(task, worker):
     if task.get("provider") and task["provider"] != worker:
         raise ValueError("auto collaboration plan contains another implementation provider")
     if assignment and worker == "codex":
-        allowed = {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
-        if (assignment.get("model") not in allowed or
-                assignment.get("fallback_model", "") not in allowed | {""}):
-            raise ValueError("auto collaboration assignment requires an exact GPT-6 route")
+        fallback = assignment.get("fallback_model", "")
+        if (not CODEX_ROUTE.fullmatch(assignment.get("model", "")) or
+                fallback and not CODEX_ROUTE.fullmatch(fallback)):
+            raise ValueError("auto collaboration assignment requires a GPT-6 or newer Astra, Sol, Terra or Luna route")
 
 
 def main():

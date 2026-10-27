@@ -5,9 +5,11 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL_IDS = {"codex": {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"},
+MODEL_IDS = {"codex": {"gpt-6.1-sol", "gpt-6-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-astra"},
              "claude": {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"}}
 TIERS = ("light", "routine", "deep", "frontier")
+# The 5.x Codex generation is never used (user decision 2026-10-27).
+CODEX_MIN_MAJOR = 6
 # Role strategy -> the board kind recorded as panel_role; acceptance, scopes and continuation key on the kind.
 KINDS = {"worker": "worker", "builder": "worker", "refactorer": "worker", "documenter": "worker",
          "integrator": "worker", "performance-engineer": "worker", "release-engineer": "worker",
@@ -22,7 +24,8 @@ TIE_BAND_DEFAULTS = {"gap": 15}
 
 
 def route_family(provider, model):
-    pattern = {"codex": r"gpt-(\d+(?:\.\d+)*)-(sol|luna|astra)",
+    """(family, version) of a versioned role model; scripts/lib/model-capability.sh oms_codex_route_family is the shell twin."""
+    pattern = {"codex": r"gpt-(\d+(?:\.\d+)?)-(astra|sol|terra|luna)",
                "claude": r"claude-(opus|sonnet|fable|haiku)-(\d+(?:-\d+)*)"}.get(provider)
     match = re.fullmatch(pattern, model) if pattern and isinstance(model, str) else None
     if not match:
@@ -43,10 +46,25 @@ def newest_route_model(provider, configured, catalog):
     return max(candidates, key=lambda model: (route_family(provider, model)[1], model == configured, model))
 
 
+def routable_route_model(provider, configured, catalog):
+    """newest_route_model, refused when that model's major generation is behind the newest Codex family
+    model the catalog lists; oms_capability_routable_models drops the same family from the shell's routable set."""
+    model = newest_route_model(provider, configured, catalog)
+    if provider == "codex":
+        majors = [family[1][0] for family in (route_family(provider, m) for m in catalog) if family]
+        if majors and route_family(provider, model)[1][0] < max(majors):
+            raise ValueError("codex %s is a major generation behind gpt-%d in the catalog; the %s family is not routed"
+                             % (model, max(majors), route_family(provider, model)[0]))
+    return model
+
+
 def valid_route(route):
+    # A Codex route names any version of a known family; the catalog picks the newest one at dispatch.
     return (isinstance(route, dict) and set(route) == {"provider", "model", "effort"}
             and isinstance(route.get("provider"), str) and route["provider"] in MODEL_IDS
-            and isinstance(route.get("model"), str) and route["model"] in MODEL_IDS[route["provider"]]
+            and isinstance(route.get("model"), str)
+            and (route_family("codex", route["model"]) is not None if route["provider"] == "codex"
+                 else route["model"] in MODEL_IDS[route["provider"]])
             and isinstance(route.get("effort"), str) and route["effort"] in {"low", "medium", "high"})
 
 
@@ -95,10 +113,11 @@ def weekly_used(provider_status, provider):
 
 
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
-             recent=None, writer=None):
+             recent=None, writer=None, catalogs=None):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
-    recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task."""
+    recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task.
+    catalogs maps provider -> listed models; a candidate routable_route_model refuses there is ineligible."""
     if not owner or role not in KINDS:
         raise ValueError("choose a supported main and role")
     routes = policy()
@@ -125,7 +144,20 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     if not usable:
         raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
             tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
-    if len(usable) > 1:
+    # Quota guards any choice among installed providers, including the one family exclusion leaves.
+    several = len(usable) > 1
+    if catalogs is not None:
+        eligible, refused = [], None
+        for candidate in usable:
+            try:
+                routable_route_model(candidate["provider"], candidate["model"], catalogs.get(candidate["provider"], []))
+                eligible.append(candidate)
+            except ValueError as error:
+                refused = error
+        if not eligible:
+            raise refused
+        usable = eligible
+    if several:
         # Use the board's rounded reading; stale, malformed and missing readings remain available.
         available, used_by = [], {}
         for candidate in usable:
