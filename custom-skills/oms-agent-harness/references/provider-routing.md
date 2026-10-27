@@ -29,6 +29,11 @@ OMS recognizes these built-in transports when their executables are on PATH:
 | `kimi` | `kimi` | write calls only; print mode auto-approves tools |
 | `kiro` | `kiro-cli` | write calls only; headless docs do not establish refusal of untrusted tools |
 | `continue` | `cn` | headless prompt with read-only or auto mode |
+| `goose` | `goose` | headless run with automatic tool mode; write calls only |
+| `cline` | `cline` | headless task with explicit tool auto-approval; write calls only |
+| `kilo` | `kilo` | autonomous run with configured tool permissions; write calls only |
+| `openhands` | `openhands` | headless mode auto-approves actions; write calls only |
+| `auggie` | `auggie` | print mode with explicit write-tool permissions; write calls only |
 
 Physical discovery only resolves an executable. Automatic routing additionally
 requires a bounded `--version`/`--help` usability probe; a hanging or stale shim
@@ -79,8 +84,47 @@ without one, so OMS treats it as write-only too. These providers are refused
 before launch for read calls and are excluded from automatic read/council pools.
 Write calls remain available through the worker-owned clone.
 
+Goose chat mode disables all tools rather than providing a useful repository
+read mode. Cline's plan option is documented, but its CLI reference does not
+promise that shell access is blocked, so OMS does not admit it as a read seat.
+Kilo has no documented read-only command mode in its CLI reference. Auggie's
+ask mode permits retrieval and non-editing tools, but its installed MCP/plugin
+configuration can add tools outside the documented core fence; OMS keeps it
+write-only. OpenHands headless mode always approves every action. These
+transports are excluded from automatic read/council candidate lists and from
+the core/council read-capability profiles.
+
+The one-shot forms are `goose run -t`, positional `cline PROMPT`, `kilo run
+--auto PROMPT`, `openhands --headless -t`, and `auggie --print PROMPT`. Each
+exits after its submitted task. Goose's `auto` mode is selected for write calls;
+Cline's writes explicitly set `--auto-approve true`; Kilo writes use `--auto`;
+OpenHands headless mode itself always approves actions; Auggie writes explicitly
+allow its edit, write, and terminal tools. Goose, Cline, and Kilo accept a model
+override. Kilo exposes model-specific reasoning variants through `--variant`;
+valid levels depend on the selected model. OpenHands and Auggie's available docs
+do not confirm an effort flag, so OMS leaves effort at the configured default.
+OpenHands also has no confirmed per-invocation model flag.
+Goose, Cline, Kilo, OpenHands, and Auggie can carry models across vendors, so
+their family is inferred from the selected model ID.
+
+Provider credentials and initial setup must be completed before headless use:
+Goose `configure`, Cline `auth`, Kilo `/connect`, and Auggie `login` have
+interactive setup surfaces. The OMS invocation disconnects stdin so these
+surfaces cannot block a worker; if setup is missing, the CLI call fails and the
+operator must configure it first. Goose updates (`goose update`), Cline updates
+(`--update`), and Kilo upgrades (`kilo upgrade`) are explicit commands. Auggie
+documents automatic updates and OMS disables them for the invocation with
+`AUGMENT_DISABLE_AUTO_UPDATE=1`. No extra update flag is passed to OpenHands.
+
+Junie and Crush remain custom-adapter candidates for now. Junie's documented
+headless entry can prompt for approval of sensitive actions, while the documented
+plan invocation is interactive; no headless auto-approval flag is established.
+Crush's `run` surface is one-shot, but its documentation does not confirm a
+headless write-approval flag. A custom adapter can define a reviewed local
+policy without OMS guessing either CLI's behavior.
+
 The argv shapes below follow the cited vendor documentation and have not yet
-been exercised against the real provider CLIs. Kiro carries models from multiple
+been exercised against real provider CLIs. Kiro carries models from multiple
 vendors, so OMS infers its family from the model ID. Continue likewise carries
 configured models from multiple vendors.
 
@@ -98,6 +142,16 @@ configured models from multiple vendors.
 - [Kiro CLI v3 permissions migration](https://kiro.dev/docs/cli/v3/migration-guide/)
 - [Kiro model families](https://kiro.dev/docs/cli/models/)
 - [Continue CLI quickstart](https://docs.continue.dev/cli/quickstart)
+- [Goose CLI commands and run mode](https://goose-docs.ai/docs/guides/goose-cli-commands/)
+- [Cline CLI reference](https://github.com/cline/cline/blob/main/docs/cli/cli-reference.mdx)
+- [Kilo CLI and autonomous run mode](https://kilo.ai/docs/code-with-ai/platforms/cli)
+- [Kilo CLI command reference](https://kilo.ai/docs/code-with-ai/platforms/cli-reference)
+- [OpenHands headless mode](https://docs.openhands.dev/openhands/usage/cli/headless)
+- [OpenHands CLI command reference](https://docs.openhands.dev/openhands/usage/cli/command-reference)
+- [Auggie CLI reference](https://docs.augmentcode.com/cli/reference)
+- [Auggie tool permissions](https://docs.augmentcode.com/cli/permissions)
+- [Junie CLI quickstart and approvals](https://junie.jetbrains.com/docs/junie-cli.html)
+- [Crush source and command README](https://github.com/charmbracelet/crush/blob/main/README.md)
 
 ## Custom adapters
 

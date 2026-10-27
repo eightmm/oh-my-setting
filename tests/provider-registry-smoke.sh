@@ -30,7 +30,15 @@ case "${1:-}" in
   --help|-h)
     printf '%s help\n' "$name" >> "$OMS_TEST_LOG_DIR/probes"
     if [ "$name" = cn ]; then printf 'Continue CLI help\n'; else printf 'usage: %s [headless options]\n' "$name"; fi
+    if [ "$name" = goose ]; then printf 'Goose CLI commands: goose run, goose session\n'; fi
     exit 0
+    ;;
+  run)
+    if [ "${2:-}" = --help ]; then
+      if [ "$name" = goose ]; then printf 'Goose CLI commands: goose run, goose session\n';
+      else printf 'usage: %s run [options]\n' "$name"; fi
+      exit 0
+    fi
     ;;
   models|--list-models) printf 'provider/model-a\nprovider/model-b\n'; exit 0 ;;
   --no-auto-update)
@@ -43,6 +51,8 @@ esac
 printf '%s\n' "$@" > "$OMS_TEST_LOG_DIR/$name.argv"
 printf 'DSH_PERMISSION_MODE=%s\n' "${DSH_PERMISSION_MODE:-}" > "$OMS_TEST_LOG_DIR/$name.env"
 printf 'DSH_TELEMETRY_DISABLED=%s\n' "${DSH_TELEMETRY_DISABLED:-}" >> "$OMS_TEST_LOG_DIR/$name.env"
+printf 'GOOSE_MODE=%s\n' "${GOOSE_MODE:-}" >> "$OMS_TEST_LOG_DIR/$name.env"
+printf 'AUGMENT_DISABLE_AUTO_UPDATE=%s\n' "${AUGMENT_DISABLE_AUTO_UPDATE:-}" >> "$OMS_TEST_LOG_DIR/$name.env"
 cat > "$OMS_TEST_LOG_DIR/$name.stdin"
 if [ "${OMS_TEST_WRITE:-0}" = 1 ]; then
   printf 'written by %s\n' "$name" > "$PWD/$name-write.txt"
@@ -50,7 +60,7 @@ fi
 printf '%s returned a complete independent answer with enough detail.\n' "$name"
 FAKE
 chmod +x "$TMP/bin/provider-fake"
-for binary in cursor-agent grok gemini qwen opencode dsh vibe copilot droid aider muse kimi kiro-cli cn; do
+for binary in cursor-agent grok gemini qwen opencode dsh vibe copilot droid aider muse kimi kiro-cli cn goose cline kilo openhands auggie; do
   ln -s provider-fake "$TMP/bin/$binary"
 done
 
@@ -128,7 +138,12 @@ aider
 muse
 kimi
 kiro
-continue'
+continue
+goose
+cline
+kilo
+openhands
+auggie'
 [ "$(oms_provider_supported_names)" = "$expected_supported" ] ||
   fail "supported provider catalog is incomplete: $(oms_provider_supported_names 2>&1 || true)"
 
@@ -136,6 +151,9 @@ for provider in muse kimi kiro; do
   if oms_provider_supports_access "$provider" read; then
     fail "$provider must not support read calls"
   fi
+done
+for provider in goose cline kilo openhands auggie; do
+  if oms_provider_supports_access "$provider" read; then fail "$provider must not support read calls"; fi
 done
 
 cat > "$TMP/bin/unrelated-cn" <<'BAD_CN'
@@ -169,12 +187,49 @@ ln -s provider-fake "$TMP/bin/cn"
 OMS_PROVIDER_PROBE_CACHE='|'
 oms_provider_cli_available continue || fail 'Continue identity probe rejected the Continue CLI'
 
+cat > "$TMP/bin/unrelated-goose" <<'BAD_GOOSE'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version) echo 'Goose version 1.0.0' ;;
+  --help) echo 'usage: goose [options]' ;;
+esac
+BAD_GOOSE
+chmod +x "$TMP/bin/unrelated-goose"
+rm -f "$TMP/bin/goose"
+ln -s unrelated-goose "$TMP/bin/goose"
+OMS_PROVIDER_PROBE_CACHE='|'
+if oms_provider_cli_available goose; then
+  fail 'an unrelated goose executable entered the provider pool'
+fi
+ln -sf provider-fake "$TMP/bin/goose"
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_provider_cli_available goose || fail 'Goose identity probe rejected its CLI'
+
+cat > "$TMP/bin/unrelated-kilo" <<'BAD_KILO'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version) echo 'kilo version 1.0.0' ;;
+  --help) echo 'usage: kilo [options]' ;;
+  run) echo 'usage: kilo [options]' ;;
+esac
+BAD_KILO
+chmod +x "$TMP/bin/unrelated-kilo"
+rm -f "$TMP/bin/kilo"
+ln -s unrelated-kilo "$TMP/bin/kilo"
+OMS_PROVIDER_PROBE_CACHE='|'
+if oms_provider_cli_available kilo; then
+  fail 'an unrelated kilo executable entered the provider pool'
+fi
+ln -sf provider-fake "$TMP/bin/kilo"
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_provider_cli_available kilo || fail 'Kilo identity probe rejected its CLI'
+
 oms_provider_cli_discovered pi || fail 'the stale Pi wrapper should remain visible to diagnostics'
 if oms_provider_cli_available pi; then
   fail 'a hanging PATH wrapper must not enter the usable provider pool'
 fi
 
-for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli' 'continue cn'; do
+for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli' 'continue cn' 'goose goose' 'cline cline' 'kilo kilo' 'openhands openhands' 'auggie auggie'; do
   set -- $pair
   oms_provider_cli_discovered "$1" || fail "$2 should be discovered from PATH"
   rm -f "$TMP/bin/$2"
@@ -225,6 +280,11 @@ for pair in \
   'factory-droid droid' \
   'kiro-cli kiro' \
   'cn continue' \
+  'goose goose' \
+  'cline cline' \
+  'kilo kilo' \
+  'openhands openhands' \
+  'auggie auggie' \
   'localfoo localfoo'; do
   set -- $pair
   [ "$(oms_provider_normalize "$1")" = "$2" ] || fail "provider alias $1"
@@ -255,7 +315,7 @@ for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid 
   oms_provider_supports_access "$provider" read || fail "$provider should support read calls"
   oms_provider_supports_access "$provider" write || fail "$provider should support isolated writes"
 done
-for provider in muse kimi kiro; do
+for provider in muse kimi kiro goose cline kilo openhands auggie; do
   if oms_provider_supports_access "$provider" read; then fail "$provider must not support read calls"; fi
   oms_provider_supports_access "$provider" write || fail "$provider should support writes"
   if oms_provider_requires_read_isolation "$provider"; then
@@ -277,7 +337,7 @@ OMS_PROVIDER_WRITE_ADAPTERS=localfoo oms_provider_supports_access localfoo write
 case ",$(oms_provider_peer_candidates claude | tr '\n' ',')" in
   *,localfoo,*) fail 'custom adapter leaked into the automatic peer pool' ;;
 esac
-for provider in muse kimi kiro; do
+for provider in muse kimi kiro goose cline kilo openhands auggie; do
   case ",$(oms_provider_peer_candidates claude "$provider" | tr '\n' ',')" in
     *,"$provider",*) fail "$provider was selected as a preferred read seat" ;;
   esac
@@ -328,7 +388,7 @@ done
 
 read_refusal_prompt="$TMP/read-refusal-prompt"
 printf 'Review without changing anything\n' > "$read_refusal_prompt"
-for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli'; do
+for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli' 'goose goose' 'cline cline' 'kilo kilo' 'openhands openhands' 'auggie auggie'; do
   set -- $pair
   rm -f "$TMP/logs/probes" "$TMP/logs/$2.argv"
   rc=0
@@ -466,7 +526,7 @@ run_write_attempt() {
       provider-default '' provider-registry '' "write-$provider"
 }
 
-for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid aider muse kimi kiro continue; do
+for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid aider muse kimi kiro continue goose cline kilo openhands auggie; do
   run_write_attempt "$provider" || fail "$provider write transport failed"
 done
 assert_argv() {
@@ -511,6 +571,30 @@ run_exact continue write provider-default ''
 assert_argv cn -p 'make one bounded test change' --auto
 run_exact continue write continue-model ''
 assert_argv cn -p 'make one bounded test change' --model continue-model --auto
+run_exact goose write provider-default ''
+assert_argv goose run --no-session -t 'make one bounded test change'
+grep -Fxq 'GOOSE_MODE=auto' "$TMP/logs/goose.env" || fail 'Goose auto mode was not forced for writes'
+run_exact goose write openai/model-x ''
+assert_argv goose run --no-session --model openai/model-x -t 'make one bounded test change'
+run_exact cline write provider-default ''
+assert_argv cline --auto-approve true 'make one bounded test change'
+run_exact cline write model-x ''
+assert_argv cline --model model-x --auto-approve true 'make one bounded test change'
+run_exact cline write model-x high
+assert_argv cline --model model-x --thinking high --auto-approve true 'make one bounded test change'
+run_exact kilo write provider-default ''
+assert_argv kilo run --auto 'make one bounded test change'
+run_exact kilo write provider-x/model-y ''
+assert_argv kilo run --auto --model provider-x/model-y 'make one bounded test change'
+run_exact kilo write provider-x/model-y high
+assert_argv kilo run --auto --model provider-x/model-y --variant high 'make one bounded test change'
+run_exact openhands write provider-default ''
+assert_argv openhands --headless -t 'make one bounded test change'
+run_exact auggie write provider-default ''
+assert_argv auggie --print --permission edit:allow --permission write:allow --permission terminal:allow 'make one bounded test change'
+[ "$(tail -n 1 "$TMP/logs/auggie.env")" = 'AUGMENT_DISABLE_AUTO_UPDATE=1' ] || fail 'Auggie auto-update was not suppressed'
+run_exact auggie write model-x ''
+assert_argv auggie --print --model model-x --permission edit:allow --permission write:allow --permission terminal:allow 'make one bounded test change'
 run_prompt_limit_case() {
   local provider="$1" binary="$2" size="$3"
   local out="$TMP/logs/$provider.limit-$size" rc=0
@@ -534,7 +618,7 @@ run_prompt_limit_case() {
     [ -e "$TMP/logs/$binary.argv" ] || fail "$provider did not launch at $size bytes"
   fi
 }
-for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli' 'continue cn'; do
+for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli' 'continue cn' 'goose goose' 'cline cline' 'kilo kilo' 'openhands openhands' 'auggie auggie'; do
   set -- $pair
   run_prompt_limit_case "$1" "$2" 0
   run_prompt_limit_case "$1" "$2" 120000
@@ -620,9 +704,9 @@ OMS_MODELS_JSON="$models_json" python3 - <<'PY' || fail 'models surface omitted 
 import json, os
 x = json.loads(os.environ["OMS_MODELS_JSON"])
 providers = {row["provider"]: row for row in x["providers"]}
-for name in ("codex", "claude", "antigravity", "cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "localfoo"):
+for name in ("codex", "claude", "antigravity", "cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "goose", "cline", "kilo", "openhands", "auggie", "localfoo"):
     assert name in providers, (name, providers)
-for name in ("cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "localfoo"):
+for name in ("cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "goose", "cline", "kilo", "openhands", "auggie", "localfoo"):
     assert providers[name]["present"] is True, (name, providers[name])
     assert providers[name]["usable"] is True, (name, providers[name])
 PY
@@ -632,7 +716,7 @@ OMS_DOCTOR_JSON="$doctor_json" python3 - <<'PY' || fail 'model-doctor auto detec
 import json, os
 x = json.loads(os.environ["OMS_DOCTOR_JSON"])
 names = [row["provider"] for row in x["providers"]]
-assert names == ["cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "localfoo"], names
+assert names == ["cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "goose", "cline", "kilo", "openhands", "auggie", "localfoo"], names
 assert all(row["installed"] and row["usable"] and row["provider_default_reachable"] for row in x["providers"]), x
 PY
 
@@ -643,7 +727,7 @@ server = runpy.run_path(os.path.join(os.environ["OMS_MCP_ROOT"], "scripts/oms-mc
 assignment = runpy.run_path(os.path.join(os.environ["OMS_MCP_ROOT"], "scripts/lib/task-assignment.py"))
 with open(os.path.join(os.environ["OMS_MCP_ROOT"], "config/capability-profiles.json"), encoding="utf-8") as stream:
     config_profiles = json.load(stream)["profiles"]
-write_only = {"muse", "kimi", "kiro-cli"}
+write_only = {"muse", "kimi", "kiro-cli", "goose", "cline", "kilo", "openhands", "auggie"}
 for profile_name in ("core", "council"):
     profile = config_profiles[profile_name]
     names = set(profile["any_of"][0] if profile["any_of"] else profile["min_present"]["commands"])
@@ -661,6 +745,8 @@ assert not error, error
 assert targets == ["deepseek", "vibe", "copilot:model=gpt-5.3-codex", "localfoo"], targets
 targets, error = server["peer_targets"]("kiro-cli,cn")
 assert not error and targets == ["kiro", "continue"], (targets, error)
+targets, error = server["peer_targets"]("goose,cline,kilo,openhands,auggie")
+assert not error and targets == ["goose", "cline", "kilo", "openhands", "auggie"], (targets, error)
 for alias in ("kiro-cli", "cn"):
     try:
         assignment["validate"]({"provider": alias})

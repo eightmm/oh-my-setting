@@ -13,12 +13,13 @@ oms_provider_core_names() {
 
 oms_provider_supported_names() {
   printf '%s\n' codex claude antigravity cursor grok gemini qwen opencode \
-    deepseek vibe pi copilot droid aider muse kimi kiro continue
+    deepseek vibe pi copilot droid aider muse kimi kiro continue goose cline \
+    kilo openhands auggie
 }
 
 oms_provider_is_builtin() {
   case "$1" in
-    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode|deepseek|vibe|pi|copilot|droid|aider|muse|kimi|kiro|continue) return 0 ;;
+    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode|deepseek|vibe|pi|copilot|droid|aider|muse|kimi|kiro|continue|goose|cline|kilo|openhands|auggie) return 0 ;;
   esac
   return 1
 }
@@ -123,7 +124,7 @@ oms_provider_normalize() {
     factory-droid) printf 'droid\n' ;;
     kiro-cli) printf 'kiro\n' ;;
     cn) printf 'continue\n' ;;
-    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode|deepseek|vibe|pi|copilot|droid|aider|muse|kimi|kiro|continue)
+    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode|deepseek|vibe|pi|copilot|droid|aider|muse|kimi|kiro|continue|goose|cline|kilo|openhands|auggie)
       printf '%s\n' "$1"
       ;;
     *)
@@ -158,6 +159,11 @@ oms_provider_binary() {
     kimi) printf 'kimi\n' ;;
     kiro) printf 'kiro-cli\n' ;;
     continue) printf 'cn\n' ;;
+    goose) printf 'goose\n' ;;
+    cline) printf 'cline\n' ;;
+    kilo) printf 'kilo\n' ;;
+    openhands) printf 'openhands\n' ;;
+    auggie) printf 'auggie\n' ;;
     opencode)
       if command -v opencode >/dev/null 2>&1; then
         printf 'opencode\n'
@@ -216,7 +222,7 @@ OMS_PROVIDER_PROBE_CACHE="${OMS_PROVIDER_PROBE_CACHE:-|}"
 # not an installed provider for routing purposes until a bounded, local,
 # no-inference version/help probe proves the executable can start.
 oms_provider_cli_usable() {
-  local provider binary timeout_seconds arg result=1 probe_output=""
+  local provider binary timeout_seconds arg result=1 probe_output="" identity_pattern=""
   local probe_output_file=""
   local -a probe
   provider="$(oms_provider_normalize "$1")" || return 1
@@ -231,18 +237,23 @@ oms_provider_cli_usable() {
     [ "$timeout_seconds" -gt 0 ] 2>/dev/null || timeout_seconds=5
     probe=("$binary")
     for arg in $(oms_provider_version_args "$provider"); do probe+=("$arg"); done
-    if [ "$provider" = continue ]; then
-      probe_output_file="$(mktemp "${TMPDIR:-/tmp}/oms-continue-probe.XXXXXX")" || return 1
+    if [ "$provider" = continue ] || [ "$provider" = goose ] || [ "$provider" = kilo ]; then
+      case "$provider" in
+        continue) identity_pattern='(^|[^[:alnum:]])continue([^[:alnum:]]|$)' ;;
+        goose) identity_pattern='(^|[^[:alnum:]])goose[[:space:]]+run([^[:alnum:]]|$)' ;;
+        kilo) identity_pattern='(^|[^[:alnum:]])kilo[[:space:]]+run([^[:alnum:]]|$)' ;;
+      esac
+      probe_output_file="$(mktemp "${TMPDIR:-/tmp}/oms-provider-probe.XXXXXX")" || return 1
       if oms_provider_run_bounded "$timeout_seconds" "$probe_output_file" "${probe[@]}" </dev/null; then
         probe_output="$(head -c 4096 "$probe_output_file" | tr -d '\r')"
-        printf '%s\n' "$probe_output" | grep -Eiq '(^|[^[:alnum:]])continue([^[:alnum:]]|$)' && result=0
+        printf '%s\n' "$probe_output" | grep -Eiq "$identity_pattern" && result=0
       fi
       if [ "$result" -ne 0 ]; then
         probe=("$binary")
         for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
         if oms_provider_run_bounded "$timeout_seconds" "$probe_output_file" "${probe[@]}" </dev/null; then
           probe_output="$(head -c 4096 "$probe_output_file" | tr -d '\r')"
-          printf '%s\n' "$probe_output" | grep -Eiq '(^|[^[:alnum:]])continue([^[:alnum:]]|$)' && result=0
+          printf '%s\n' "$probe_output" | grep -Eiq "$identity_pattern" && result=0
         fi
       fi
       rm -f "$probe_output_file"
@@ -300,7 +311,7 @@ oms_provider_supports_access() {
   case "$access" in
     read)
       if oms_provider_is_builtin "$provider"; then
-        case "$provider" in muse|kimi|kiro) return 1 ;; esac
+        case "$provider" in muse|kimi|kiro|goose|cline|kilo|openhands|auggie) return 1 ;; esac
       fi
       return 0
       ;;
@@ -327,7 +338,7 @@ oms_provider_supports_model_override() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider" in
-    deepseek|vibe) return 1 ;;
+    deepseek|vibe|openhands) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -441,7 +452,7 @@ oms_provider_effort_mechanism() {
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider" in
     codex) printf 'config\n' ;;
-    claude|antigravity|grok|pi|copilot|droid|aider|muse|kiro) printf 'flag\n' ;;
+    claude|antigravity|grok|pi|copilot|droid|aider|muse|kiro|cline|kilo) printf 'flag\n' ;;
     *) printf 'none\n' ;;
   esac
 }
@@ -455,6 +466,8 @@ oms_provider_effort_flag() {
     pi) printf -- '--thinking\n' ;;
     droid|aider|muse) printf -- '--reasoning-effort\n' ;;
     kiro) printf -- '--effort\n' ;;
+    cline) printf -- '--thinking\n' ;;
+    kilo) printf -- '--variant\n' ;;
     *) printf '\n' ;;
   esac
 }
@@ -464,6 +477,7 @@ oms_provider_effort_values() {
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider" in
     codex|claude|antigravity|grok|aider|muse|kiro) printf 'low medium high\n' ;;
+    cline) printf 'none low medium high xhigh\n' ;;
     pi) printf 'low medium high xhigh max\n' ;;
     copilot|droid) printf 'low medium high xhigh max\n' ;;
     *) printf '\n' ;;
@@ -478,6 +492,8 @@ oms_provider_help_args() {
     codex) printf 'exec --help\n' ;;
     muse) printf 'exec --help\n' ;;
     kiro) printf 'chat --help\n' ;;
+    goose) printf 'run --help\n' ;;
+    kilo) printf 'run --help\n' ;;
     grok) printf -- '--no-auto-update --help\n' ;;
     *) printf -- '--help\n' ;;
   esac

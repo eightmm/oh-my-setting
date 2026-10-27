@@ -3433,6 +3433,67 @@ ma_provider_attempt() {
         cmd+=(--readonly)
       fi
       ;;
+    goose)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Goose headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=(env GOOSE_MODE=auto "$binary" run --no-session)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      cmd+=(-t "$(cat "$prompt_file")")
+      ;;
+    cline)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Cline headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=("$binary")
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--thinking "$effort")
+      cmd+=(--auto-approve true "$(cat "$prompt_file")")
+      ;;
+    kilo)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Kilo headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=("$binary" run --auto)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--variant "$effort")
+      cmd+=("$(cat "$prompt_file")")
+      ;;
+    openhands)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the OpenHands headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=("$binary" --headless -t "$(cat "$prompt_file")")
+      ;;
+    auggie)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Auggie headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=(env AUGMENT_DISABLE_AUTO_UPDATE=1 "$binary" --print)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      cmd+=(--permission edit:allow --permission write:allow --permission terminal:allow
+        "$(cat "$prompt_file")")
+      ;;
     *)
       binary="$(oms_provider_binary "$provider" 2>/dev/null)" || {
         echo "error: unsupported provider: $provider" > "$output_file"
