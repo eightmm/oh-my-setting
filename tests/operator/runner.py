@@ -66,8 +66,10 @@ def body(name):
     if filename:
         return (HERE / filename).read_text(encoding="utf-8"), str(HERE / filename)
     source = SOURCE.read_text(encoding="utf-8")
-    return (source.split("# OPERATOR_SECTION_BEGIN dispatch_exit\n", 1)[1].split(
-        "# OPERATOR_SECTION_END dispatch_exit\n", 1)[0], str(SOURCE))
+    head, rest = source.split("# OPERATOR_SECTION_BEGIN dispatch_exit\n", 1)
+    # Blank lines up to and including the marker keep traceback numbers equal to SOURCE's lines.
+    padding = "\n" * (head.count("\n") + 1)
+    return padding + rest.split("# OPERATOR_SECTION_END dispatch_exit\n", 1)[0], str(SOURCE)
 
 
 def self_check(total):
@@ -89,6 +91,13 @@ def self_check(total):
     for name, _, filename in SECTIONS:
         if not filename or filename.endswith(".py"):
             ast.parse(body(name)[0], filename or str(SOURCE))
+    tree = ast.parse(body("dispatch-exit")[0], str(SOURCE))
+    defined = [node.lineno for node in tree.body if isinstance(node, ast.FunctionDef)
+               and node.name == "exercise_dispatch_exit_evidence"]
+    declared = [number for number, line in enumerate(source.splitlines(), 1)
+                if line.startswith("def exercise_dispatch_exit_evidence(")]
+    if defined != declared:
+        raise ValueError("dispatch-exit traceback lines differ from the source file")
     for filename in expected - set(files):
         ast.parse((HERE / filename).read_text(encoding="utf-8"), filename)
     assignments = [name for index in range(1, total + 1) for name in selected("%s/%s" % (index, total))]

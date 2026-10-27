@@ -1852,7 +1852,8 @@ time.sleep(60)
             before_force = Mock(side_effect=failure("dispatch process record unavailable"))
             with patch.object(resistant, "wait", side_effect=bounded_wait), \
                     redirect_stderr(io.StringIO()) as notices:
-                assert panel._stop_dispatch(resistant, identity, before_force=before_force)
+                assert panel._stop_dispatch(resistant, identity, before_force=before_force), \
+                    "TERM-resistant dispatch was not stopped; notices=%r" % notices.getvalue()
             before_force.assert_called_once_with()
             assert resistant.poll() == -signal.SIGKILL
             assert panel_terminals.process_gone(resistant.pid, identity)
