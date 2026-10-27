@@ -723,6 +723,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         except (OSError, ValueError, subprocess.SubprocessError):
             reason = "native_command_failed"
             raise
+        import panel_dispatch
+        panel_dispatch._prepare_panel_graph(repo, wait=False)
         # A Pi child must not register until its genuine launcher identity is durable.
         with _lock(repo, "panel-pi-registration") if harness == "pi" else nullcontext():
             launch_inflight = True

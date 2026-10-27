@@ -356,6 +356,19 @@ timeout_fixture.mkdir()
 with patch.object(dispatch.subprocess, "run", side_effect=subprocess.TimeoutExpired("graph", 20)):
     dispatch._prepare_panel_graph(timeout_fixture)
 assert not (timeout_fixture / ".oms/project-graph").exists()
+# wait=False returns after starting exactly one detached child; the autobuild gate spawns none.
+with patch.object(dispatch.subprocess, "Popen") as detached, patch.object(dispatch.subprocess, "run") as waited:
+    dispatch._prepare_panel_graph(timeout_fixture, wait=False)
+    assert detached.call_count == 1 and not waited.called, (detached.call_args_list, waited.call_args_list)
+    detached_kwargs = detached.call_args.kwargs
+    assert detached_kwargs["stdin"] == subprocess.DEVNULL and detached_kwargs["stdout"] == subprocess.DEVNULL
+    assert detached_kwargs.get("start_new_session") is True if os.name == "posix" else "creationflags" in detached_kwargs
+    with patch.dict(os.environ, {"OMS_GRAPH_AUTOBUILD": "0"}):
+        dispatch._prepare_panel_graph(timeout_fixture, wait=False)
+        dispatch._prepare_panel_graph(timeout_fixture)
+    assert detached.call_count == 1 and not waited.called
+with patch.object(dispatch.subprocess, "Popen", side_effect=OSError("no spawn")):
+    dispatch._prepare_panel_graph(timeout_fixture, wait=False)
 
 # Dry runs return before warming any graph cache.
 preview_route = {"kind": "worker", "provider": "codex", "model": "gpt-6-luna", "effort": "low",

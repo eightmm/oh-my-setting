@@ -2754,8 +2754,14 @@ def peer_command(action, provider, repo, prompt=None, brief=None, verify=None):
     raise ValueError("unknown peer action")
 
 
-def _prepare_panel_graph(repo):
-    """Best-effort refresh so the delegate's bounded graph pack can reuse it."""
+def _prepare_panel_graph(repo, wait=True):
+    """Best-effort refresh so the delegate's bounded graph pack can reuse it.
+
+    wait=False starts one detached child and returns; the project-graph-build lock
+    keeps it from duplicating a concurrent worker warm.
+    """
+    if os.environ.get("OMS_GRAPH_AUTOBUILD", "1") == "0":
+        return
     graph_lib = Path(__file__).resolve().parent
     # Run the same raw Git-config guard as peer-delegate before context-pack Git queries.
     script = ("import sys\n"
@@ -2775,6 +2781,16 @@ def _prepare_panel_graph(repo):
               "with file_lock(repo/'.oms'/'locks'/'project-graph-build', timeout_seconds=3):\n"
               "    validate_automatic_graph_state(repo, repo/'.oms'/'project-graph')\n"
               "    build.ensure(repo)\n" % (str(graph_lib), str(graph_lib / "oms-common.sh"), str(graph_lib)))
+    if not wait:
+        detach = ({"start_new_session": True} if os.name == "posix"
+                  else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
+        try:
+            subprocess.Popen([sys.executable, "-I", "-B", "-c", script, str(repo)], cwd=str(graph_lib),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, **detach)
+        except (OSError, ValueError):
+            pass
+        return
     try:
         subprocess.run([sys.executable, "-I", "-B", "-c", script, str(repo)], cwd=str(graph_lib),
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

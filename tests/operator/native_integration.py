@@ -837,7 +837,7 @@ native_adapter.write_text("#!/usr/bin/env python3\n" +
     "if os.environ.get('OMS_OPEN_SIGNAL'):\n" +
     " os.kill(os.getppid(), getattr(signal, os.environ['OMS_OPEN_SIGNAL']))\n time.sleep(300)\n")
 native_adapter.chmod(0o755)
-with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=shared, OMS_OPEN_LOG=str(open_log),
+with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=shared, OMS_OPEN_LOG=str(open_log), OMS_GRAPH_AUTOBUILD="0",
                                 OMS_OPEN_CONTEXT=str(open_context), OMS_PROVIDER_NATIVE_ADAPTERS="roomtest"), clear=True):
     inventory = panel.provider_catalog("roomtest")[0]
     assert inventory["native_launch"] and not open_log.exists(), "discovery must not execute open"
@@ -2202,6 +2202,7 @@ try:
                 patch.object(panel.room, "join"), patch.object(panel, "managed_session", return_value=False), \
                 patch.object(panel_host, "herdr_active", return_value=False), patch.object(panel, "bootstrap", return_value="fixture"), \
                 patch.object(panel, "native_command", return_value=["fixture-native"]), \
+                patch.dict(os.environ, {"OMS_GRAPH_AUTOBUILD": "0"}), \
                 patch.object(panel.subprocess, "Popen", return_value=mock_native) as native_launch:
             assert panel._run_native("codex", release_repo) == 0
             start_args = recorded.call_args_list[0].args
