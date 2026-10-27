@@ -403,6 +403,23 @@ def _completion_inputs(repo, room_id, member, caller, task_id, record, context):
     from terminal_panel import _write_brief_artifact, caller_owner
     artifact = record.get("artifact")
     worker = context.get("call_id")
+    try:
+        import panel_results
+        attempts, rows = panel_results._records(repo, full=True, task_id=task_id)
+        attempt = next(a for a in reversed(attempts)
+                       if a.get("task_id") == task_id and a.get("refs", {}).get("panel_room_participant") == worker
+                       and a.get("refs", {}).get("panel_access") == "write")
+        row = next(r for r in reversed(rows) if r.get("kind") == "delegate"
+                   and r.get("attempt_id") == attempt.get("attempt_id")
+                   and r.get("patch_sha256") == context.get("patch_sha256"))
+        drift = panel_results._scope_drift(panel_results._patch_paths(panel_results.verified_patch(repo, row)),
+                                            panel_results._worker_owns(repo, attempt))
+        if drift:
+            return (" Acceptance will refuse: %s path(s) outside the declared scope: %s. "
+                    "The owner can finalize completed or re-dispatch with the scope covering those paths."
+                    % (len(drift), ", ".join(drift[:8])))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration, subprocess.SubprocessError):
+        pass
     if not worker or not _safe_patch_path(artifact) or not artifact.startswith(".oms/artifacts/"):
         return ""
     verifier = _review_verifier(repo, room_id, worker, caller, task_id)

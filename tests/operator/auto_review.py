@@ -789,7 +789,7 @@ for case_number, (case, expected_draft) in enumerate((
         ("private-verifier", False),
         ("missing-candidate", False), ("wrong-candidate-digest", False),
         ("unsafe-candidate-root", False), ("relative-candidate-root", False),
-        ("no-priorities", False), ("passed-gate", False), ("missing-context", False),
+        ("no-priorities", False), ("passed-gate", False), ("passed-drift", False), ("missing-context", False),
         ("bad-digest", False), ("private-path", False), ("stale-review", False),
         ("failed-provider", False), ("failed-verifier", False), ("oversized", False))):
     fix_task = "fix-draft-" + case
@@ -835,7 +835,7 @@ for case_number, (case, expected_draft) in enumerate((
         review_answer += "\n  Read %s." % (Path.home() / "oms-unrelated-private.txt")
     if case in {"truncated-summary", "oversized"}:
         review_answer += "\n  " + "complete evidence " * (2300 if case == "truncated-summary" else 5000)
-    gate = "pass" if case == "passed-gate" else "fail"
+    gate = "pass" if case in {"passed-gate", "passed-drift"} else "fail"
     review_answer = "> P0: quoted example\n```\nP1: fenced example\n```\n" + review_answer + "\nGATE: " + gate
     review_relative = ".oms/artifacts/fixture/review-" + case + ".md"
     review_file = project / review_relative
@@ -871,6 +871,8 @@ for case_number, (case, expected_draft) in enumerate((
             notice = "검" * (size // 3) + "x" * (size % 3)
         return notice
     with patch.object(panel_result_store, "_records", return_value=(fix_history, fix_products + [review_index, outcome_index])), \
+            patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+            patch.object(panel_result_store, "_worker_owns", return_value=["docs/fixture.py"] if case == "passed-drift" else ["scripts/fixture.py"]), \
             patch.object(panel, "_review_fix_notice", side_effect=notice_at_limit), \
             patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": projected_answer,
                 "answer_truncated": case == "truncated-summary"}]}]}), \
@@ -929,6 +931,31 @@ for case_number, (case, expected_draft) in enumerate((
         if case == "truncated-summary":
             assert "complete evidence " * 2300 in draft_text
         assert draft_file.stat().st_mode & 0o077 == 0
+    if case == "passed-drift":
+        assert "scripts/fixture.py" in draft_mail[0]["text"] and "1 path" in draft_mail[0]["text"], draft_mail
+        assert "Acceptance will refuse" in draft_mail[0]["text"] and "--outcome accepted" not in draft_mail[0]["text"], draft_mail
+        assert "finalize completed" in draft_mail[0]["text"] and "re-dispatch" in draft_mail[0]["text"], draft_mail
+        with patch.object(panel_result_store, "_records", return_value=(fix_history, fix_products)), \
+                patch.object(panel_result_store, "_worker_owns", return_value=["allowed/"]), \
+                patch.object(panel, "_review_verifier", return_value=verifier), \
+                patch.object(panel, "_write_brief_artifact"):
+            context = {"call_id": fix_worker, "patch_sha256": auto_digest}
+            def completion_for(data):
+                with patch.object(panel_result_store, "verified_patch", return_value=data):
+                    return panel._completion_inputs(project, shared, fix_reviewer, room_owner, fix_task,
+                                                    {"artifact": review_relative}, context)
+            baseline = completion_for(b"")
+            assert "--outcome accepted" in baseline
+            assert completion_for(b"diff --git malformed\n") == baseline
+            for count in (8, 9):
+                paths = ["outside/file%d" % i for i in range(count)]
+                data = b"".join(("diff --git a/%s b/%s\n" % (p, p)).encode() for p in paths)
+                result = completion_for(data)
+                assert "%d path(s)" % count in result and all(p in result for p in paths[:8]), result
+                assert (paths[-1] in result) == (count == 8) and "--outcome accepted" not in result
+            with patch.object(panel_result_store, "verified_patch", side_effect=OSError("unavailable")):
+                assert panel._completion_inputs(project, shared, fix_reviewer, room_owner, fix_task,
+                                                {"artifact": review_relative}, context) == baseline
     if case == "passed-gate":
         completion = project / (".oms/artifacts/panel-results/completion-%s.md" % fix_reviewer)
         assert completion.is_file() and verifier in completion.read_text()
