@@ -29877,6 +29877,47 @@ PY
     fail "a config-only change should not blame a main-checkout commit: $out"
   fi
 
+  printf '#!/usr/bin/env bash\necho done\n' > "$bin_dir/codex"
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_OFF=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || fail "unguarded delegate should finish: $out"
+  ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
+    grep -F 'worker guard stopped run' > /dev/null ||
+    fail "an unguarded run must not resolve the violation"
+
+  python3 - "$project/.oms/failures.jsonl" <<'PY' || fail "timed out waiting for a later guard snapshot"
+import datetime, json, os, sys, time
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+stamp = next(row['ts'] for row in reversed(rows) if row.get('cmd') == 'peer-delegate --to codex worker-authority')
+deadline = time.monotonic() + int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
+while datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ') <= stamp:
+    if time.monotonic() >= deadline:
+        sys.exit(1)
+    time.sleep(0.05)
+PY
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || fail "clean guarded delegate should finish: $out"
+  if ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
+    grep -F 'worker guard stopped run' > /dev/null; then
+    fail "a clean guarded run should resolve the violation"
+  fi
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || fail "second clean guarded delegate should finish: $out"
+  python3 - "$project/.oms/failures.jsonl" <<'PY' || fail "clean runs should resolve the violation only once"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+fp = next(row['fingerprint'] for row in rows if row.get('cmd') == 'peer-delegate --to codex worker-authority')
+assert sum(row.get('event') == 'resolved' and row.get('fingerprint') == fp for row in rows) == 1
+PY
+
   # A commit in the main checkout moves its branch ref; the hint names the
   # usual cause and the remedy.
   cat > "$bin_dir/codex" <<EOF

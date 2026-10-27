@@ -2316,6 +2316,7 @@ EOF_GUARD_TARGETS
     fail "could not resolve delegated worktree identity for the worker guard"
   worker_guard_dir="$worktree_parent/worker-guard"
   worker_guard_snapshot_error_file="$worktree_parent/worker-guard-snapshot.error"
+  worker_guard_snapshot_time="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   if delegate_with_worktree_registry_lock "$REPO" \
     delegate_surface_snapshot "$REPO" "$worker_guard_dir" \
     "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
@@ -2974,6 +2975,33 @@ if len(details) > 8:
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition
     exit 1
+  fi
+  if [ "$worker_provider_launched" = 1 ]; then
+    (
+      cd "$REPO" || exit 0
+      guard_ledger="$(ma_scripts_dir)/fail-ledger.sh"
+      guard_cmd="peer-delegate --to $TO worker-authority"
+      guard_check=0
+      "$guard_ledger" check --cmd "$guard_cmd" --ignore-state >/dev/null 2>&1 || guard_check=$?
+      if [ "$guard_check" -eq 3 ] &&
+        "$guard_ledger" list --unresolved --json | python3 -I -c '
+import datetime, json, sys
+cmd, snapshot = sys.argv[1:]
+try:
+    rows = [r for r in json.load(sys.stdin)["failures"] if r.get("cmd") == cmd]
+    stamp = rows[0]["ts"] if len(rows) == 1 else ""
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    failure = datetime.datetime.strptime(stamp, fmt)
+    start = datetime.datetime.strptime(snapshot, fmt)
+    if failure.strftime(fmt) != stamp or start.strftime(fmt) != snapshot or failure >= start:
+        sys.exit(1)
+except (ValueError, TypeError, KeyError, IndexError):
+    sys.exit(1)
+' "$guard_cmd" "$worker_guard_snapshot_time"; then
+        "$guard_ledger" resolve --cmd "$guard_cmd" \
+          --how "a later guarded run on this repo found no protected-state change"
+      fi
+    ) >/dev/null 2>&1 || true
   fi
 fi
 
