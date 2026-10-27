@@ -2945,6 +2945,11 @@ ma_provider_attempt() {
   local prompt_file="$3"
   local output_file="$4"
 
+  OMS_PROVIDER_ERROR_CLASSIFICATION=""
+  OMS_PROVIDER_ERROR_EXIT=""
+  OMS_PROVIDER_ERROR_PROVIDER=""
+  export OMS_PROVIDER_ERROR_CLASSIFICATION OMS_PROVIDER_ERROR_EXIT OMS_PROVIDER_ERROR_PROVIDER
+
   IFS= read -r -n 1 prompt_first < "$prompt_file" || :
   if [ "$prompt_first" != '-' ]; then
     ma_provider_attempt_run "$@" || rc=$?
@@ -2998,10 +3003,6 @@ ma_provider_attempt_run() {
   local room_relay_dir="" room_relay_pid="" room_relay_ready=0 room_relay_attempt=0
   local -a cmd
 
-  OMS_PROVIDER_ERROR_CLASSIFICATION=""
-  OMS_PROVIDER_ERROR_EXIT=""
-  OMS_PROVIDER_ERROR_PROVIDER=""
-  export OMS_PROVIDER_ERROR_CLASSIFICATION OMS_PROVIDER_ERROR_EXIT OMS_PROVIDER_ERROR_PROVIDER
   provider="$(oms_provider_normalize "$provider")" || {
     echo "error: unsupported provider: $provider" > "$output_file"
     return 2

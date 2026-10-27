@@ -759,6 +759,29 @@ assert pathlib.Path(sys.argv[1].replace(".argv", ".argv0")).read_bytes().split(b
 PY
     [ "$(find "$temp_dir" -name 'oms.*' -type f -print | LC_ALL=C sort)" = "$before" ] ||
       fail "$provider left a normalized prompt copy after option prompt"
+    local copy_error_out="$TMP/logs/$provider.copy-allocation-error"
+    rc=0
+    (
+      set -u
+      agent_memory_mktemp() { return 1; }
+      OMS_PROVIDER_ERROR_CLASSIFICATION=stale
+      OMS_PROVIDER_ERROR_EXIT=stale
+      OMS_PROVIDER_ERROR_PROVIDER=stale
+      export OMS_PROVIDER_ERROR_CLASSIFICATION OMS_PROVIDER_ERROR_EXIT OMS_PROVIDER_ERROR_PROVIDER
+      ma_provider_attempt "$provider" write "$dash_prompt" "$copy_error_out" "$repo" \
+        provider-default '' provider-registry '' "dash-copy-allocation-$provider" || rc=$?
+      [ "$rc" -eq 2 ] || fail "$provider copy allocation failure returned $rc, expected 2"
+      grep -Fq 'could not prepare a leading-dash prompt copy' "$copy_error_out" ||
+        fail "$provider copy allocation failure omitted its diagnostic"
+      [ "${OMS_PROVIDER_ERROR_CLASSIFICATION+x}" = x ] &&
+        [ "${OMS_PROVIDER_ERROR_EXIT+x}" = x ] &&
+        [ "${OMS_PROVIDER_ERROR_PROVIDER+x}" = x ] ||
+        fail "$provider copy allocation failure left an error global unset"
+      [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] &&
+        [ -z "$OMS_PROVIDER_ERROR_EXIT" ] &&
+        [ -z "$OMS_PROVIDER_ERROR_PROVIDER" ] ||
+        fail "$provider copy allocation failure left stale error globals"
+    ) || fail "$provider copy allocation failure case failed"
     printf '%s' '--help' > "$dash_prompt"
     rc=0
     OMS_TEST_FAIL_LAUNCH=1 MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
