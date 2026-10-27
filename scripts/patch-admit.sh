@@ -817,6 +817,7 @@ PY
     # have host-side effects even when the final verdict says REJECT. Explicit
     # overrides turn their respective gates into PASS and intentionally allow
     # the candidate run; otherwise both verification projections stay inert.
+    # Match the panel worker verification budget in lib/panel_dispatch.py.
     preverify_failed=0
     case "$ladder" in *"	FAIL	"*) preverify_failed=1 ;; esac
     prefix_failed=0
@@ -828,12 +829,12 @@ PY
       prefix_verify="${prefix_verify_raw%__OMS_PREFIX_END__}"
       if [ "$preverify_failed" = 1 ] || [ "$prefix_failed" = 1 ]; then
         record "verify-prefix-$prefix_id" "SKIP" "earlier policy, integrity or prefix gate failed"
-      elif prefix_started="$(date +%s)" && prefix_out="$(cd "$worktree" && OMS_TASK_ID="$prefix_id" run_verify_with_timeout bash -c "$prefix_verify" 2>&1)"; then
+      elif prefix_started="$(date +%s)" && prefix_out="$(cd "$worktree" && OMS_TASK_ID="$prefix_id" OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" run_verify_with_timeout bash -c "$prefix_verify" 2>&1)"; then
         record "verify-prefix-$prefix_id" "PASS" "$prefix_verify — $(( $(date +%s) - prefix_started ))s"
       else
         prefix_exit=$?
         prefix_failed=1
-        timeout_note="$(ma_verify_timeout_note "$prefix_exit")"
+        timeout_note="$(OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" ma_verify_timeout_note "$prefix_exit")"
         record "verify-prefix-$prefix_id" "FAIL" "$prefix_verify${timeout_note:+ — $timeout_note}"
         echo "patch-admit: earlier task $prefix_id verifier failed; candidate refused" >&2
         verify_out="$prefix_out"
@@ -847,7 +848,7 @@ PY
         record "verify" "SKIP" "earlier task prefix verification failed"
       else
         verify_started="$(date +%s)"
-        if verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
+        if verify_out="$(cd "$worktree" && OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
           VERIFICATION="command"
           VERIFY_EXIT=0
         else
@@ -858,7 +859,7 @@ PY
         if [ "$VERIFY_EXIT" -eq 0 ]; then
           record "verify" "PASS" "$VERIFY — ${verify_seconds}s"
         else
-          timeout_note="$(ma_verify_timeout_note "$VERIFY_EXIT")"
+          timeout_note="$(OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" ma_verify_timeout_note "$VERIFY_EXIT")"
           record "verify" "FAIL" "$VERIFY — ${verify_seconds}s${timeout_note:+ — $timeout_note}"
         fi
       fi
@@ -924,11 +925,11 @@ EOF
                 prefix_verify_raw="$(prefix_field "$prefix_index" verify)" || fail "cannot read batch floor verifier"
                 prefix_id="${prefix_id_raw%__OMS_PREFIX_END__}"
                 prefix_verify="${prefix_verify_raw%__OMS_PREFIX_END__}"
-                if prefix_out="$(cd "$floor_worktree" && OMS_TASK_ID="$prefix_id" run_verify_with_timeout bash -c "$prefix_verify" 2>&1)"; then
+                if prefix_out="$(cd "$floor_worktree" && OMS_TASK_ID="$prefix_id" OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" run_verify_with_timeout bash -c "$prefix_verify" 2>&1)"; then
                   record "verify-prefix-floor-$prefix_id" "PASS" "$prefix_verify (restored from HEAD: $surface_detail)"
                 else
                   prefix_exit=$?
-                  timeout_note="$(ma_verify_timeout_note "$prefix_exit")"
+                  timeout_note="$(OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" ma_verify_timeout_note "$prefix_exit")"
                   record "verify-prefix-floor-$prefix_id" "FAIL" "$prefix_verify${timeout_note:+ — $timeout_note}"
                   echo "patch-admit: earlier task $prefix_id verifier failed with HEAD checks restored; candidate refused" >&2
                   floor_verify_out="$prefix_out"
@@ -936,7 +937,7 @@ EOF
                 prefix_index=$((prefix_index + 1))
               done
               floor_verify_started="$(date +%s)"
-              if floor_verify_out="$(cd "$floor_worktree" && run_verify_with_timeout bash -c "$floor_verify" 2>&1)"; then
+              if floor_verify_out="$(cd "$floor_worktree" && OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" run_verify_with_timeout bash -c "$floor_verify" 2>&1)"; then
                 floor_verify_exit=0
                 floor_verify_status=0
               else
@@ -947,7 +948,7 @@ EOF
               if [ "$floor_verify_status" -eq 0 ]; then
                 record "verify-floor" "PASS" "$floor_verify (restored from HEAD: $surface_detail) — ${floor_verify_seconds}s"
               else
-                floor_timeout_note="$(ma_verify_timeout_note "$floor_verify_exit")"
+                floor_timeout_note="$(OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" ma_verify_timeout_note "$floor_verify_exit")"
                 if [ -n "$ALLOW_FLOOR_CHANGE_REASON" ] && [ "$VERIFY_EXIT" = 0 ] && [ "$VERIFICATION" = command ]; then
                   FLOOR_CHANGE_USED=true
                   record "verify-floor" "PASS" "owner override: base floor failed (exit $floor_verify_exit); reason: $ALLOW_FLOOR_CHANGE_REASON; $floor_verify (restored from HEAD: $surface_detail) — ${floor_verify_seconds}s${floor_timeout_note:+ — $floor_timeout_note}"

@@ -20866,6 +20866,19 @@ test_verify_timeout_bounds_hung_verify() {
     fail "the outer phase budget must retain the verifier default"
   [ "$seconds" = 600 ] || fail "default verifier timeout should be 600 seconds, got $seconds"
 
+  project="$TMP/admit-verify-budget"
+  make_patch_repo "$project" $'base\nmore\n'
+  env -u OMS_PEER_VERIFY_TIMEOUT "$ROOT/scripts/patch-admit.sh" --repo "$project" \
+    --patch "$project/change.patch" --verify ". '$ROOT/scripts/lib/peer-common.sh'; [ \"\$(ma_verify_timeout_seconds)\" = 1200 ]" >/dev/null ||
+    fail "patch admission should default to a 1200 second verify budget"
+  OMS_PEER_VERIFY_TIMEOUT=30s "$ROOT/scripts/patch-admit.sh" --repo "$project" \
+    --patch "$project/change.patch" --verify ". '$ROOT/scripts/lib/peer-common.sh'; [ \"\$(ma_verify_timeout_seconds)\" = 30 ]" >/dev/null ||
+    fail "patch admission should honor an explicit verify budget"
+  for seconds in '' 20m; do
+    OMS_PEER_VERIFY_TIMEOUT="$seconds" "$ROOT/scripts/patch-admit.sh" --repo "$project" \
+      --patch "$project/change.patch" --verify ". '$ROOT/scripts/lib/peer-common.sh'; [ \"\$(ma_verify_timeout_seconds)\" = 1200 ]" >/dev/null ||
+      fail "patch admission should accept an empty or 20m verify budget"
+  done
   project="$TMP/autopilot-phase-wall-cap"
   planner="$TMP/autopilot-phase-wall-planner"
   planner_called="$TMP/autopilot-phase-wall-planner-called"
