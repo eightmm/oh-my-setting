@@ -30,12 +30,15 @@ case "${1:-}" in
   --help|-h)
     printf '%s help\n' "$name" >> "$OMS_TEST_LOG_DIR/probes"
     if [ "$name" = cn ]; then printf 'Continue CLI help\n'; else printf 'usage: %s [headless options]\n' "$name"; fi
-    if [ "$name" = goose ]; then printf 'Goose CLI commands: goose run, goose session\n'; fi
+    if [ "$name" = goose ]; then printf 'Execute commands from an instruction file or stdin\n'; fi
+    if [ "$name" = kilo ]; then printf 'upgrade kilo to the latest or a specific version\n'; fi
     exit 0
     ;;
   run)
     if [ "${2:-}" = --help ]; then
+      printf '%s run --help\n' "$name" >> "$OMS_TEST_LOG_DIR/$name.run-probe"
       if [ "$name" = goose ]; then printf 'Goose CLI commands: goose run, goose session\n';
+      elif [ "$name" = kilo ]; then printf 'usage: kilo run [options]\n--variant <name>\n';
       else printf 'usage: %s run [options]\n' "$name"; fi
       exit 0
     fi
@@ -111,6 +114,8 @@ export OMS_PROVIDER_PROBE_TIMEOUT=1
 
 # shellcheck source=scripts/lib/provider-registry.sh
 . "$ROOT/scripts/lib/provider-registry.sh"
+# shellcheck source=scripts/lib/model-capability.sh
+. "$ROOT/scripts/lib/model-capability.sh"
 
 [ "$(oms_provider_transport codex)" = cli-exec ] || fail "default CLI transport changed"
 for retired_transport in app-server unknown; do
@@ -160,7 +165,7 @@ cat > "$TMP/bin/unrelated-cn" <<'BAD_CN'
 #!/usr/bin/env sh
 case "${1:-}" in
   --version) echo 'CodeNode 1.0.0' ;;
-  --help) echo 'usage: cn command' ;;
+  --help) echo 'Continue a previous operation' ;;
 esac
 BAD_CN
 chmod +x "$TMP/bin/unrelated-cn"
@@ -192,6 +197,7 @@ cat > "$TMP/bin/unrelated-goose" <<'BAD_GOOSE'
 case "${1:-}" in
   --version) echo 'Goose version 1.0.0' ;;
   --help) echo 'usage: goose [options]' ;;
+  run) echo 'goose run [options]' > "$OMS_TEST_LOG_DIR/unrelated-goose.run-probe" ;;
 esac
 BAD_GOOSE
 chmod +x "$TMP/bin/unrelated-goose"
@@ -201,16 +207,27 @@ OMS_PROVIDER_PROBE_CACHE='|'
 if oms_provider_cli_available goose; then
   fail 'an unrelated goose executable entered the provider pool'
 fi
+if [ -e "$TMP/logs/unrelated-goose.run-probe" ]; then
+  fail 'Goose identity probe invoked the operational run subcommand'
+fi
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_capability_refresh goose >/dev/null || fail 'Goose capability refresh failed'
+if [ -e "$TMP/logs/unrelated-goose.run-probe" ]; then
+  fail 'Goose capability probe invoked run before identity passed'
+fi
 ln -sf provider-fake "$TMP/bin/goose"
 OMS_PROVIDER_PROBE_CACHE='|'
 oms_provider_cli_available goose || fail 'Goose identity probe rejected its CLI'
+if [ -e "$TMP/logs/goose.run-probe" ]; then
+  fail 'Goose identity probe invoked the operational run subcommand'
+fi
 
 cat > "$TMP/bin/unrelated-kilo" <<'BAD_KILO'
 #!/usr/bin/env sh
 case "${1:-}" in
   --version) echo 'kilo version 1.0.0' ;;
   --help) echo 'usage: kilo [options]' ;;
-  run) echo 'usage: kilo [options]' ;;
+  run) echo 'kilo run [options]' > "$OMS_TEST_LOG_DIR/unrelated-kilo.run-probe" ;;
 esac
 BAD_KILO
 chmod +x "$TMP/bin/unrelated-kilo"
@@ -220,9 +237,24 @@ OMS_PROVIDER_PROBE_CACHE='|'
 if oms_provider_cli_available kilo; then
   fail 'an unrelated kilo executable entered the provider pool'
 fi
+if [ -e "$TMP/logs/unrelated-kilo.run-probe" ]; then
+  fail 'Kilo identity probe invoked the operational run subcommand'
+fi
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_capability_refresh kilo >/dev/null || fail 'Kilo capability refresh failed'
+if [ -e "$TMP/logs/unrelated-kilo.run-probe" ]; then
+  fail 'Kilo capability probe invoked run before identity passed'
+fi
 ln -sf provider-fake "$TMP/bin/kilo"
 OMS_PROVIDER_PROBE_CACHE='|'
 oms_provider_cli_available kilo || fail 'Kilo identity probe rejected its CLI'
+if [ -e "$TMP/logs/kilo.run-probe" ]; then
+  fail 'Kilo identity probe invoked the operational run subcommand'
+fi
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_capability_refresh kilo >/dev/null || fail 'Kilo capability refresh failed'
+[ -e "$TMP/logs/kilo.run-probe" ] ||
+  fail 'Kilo effort probe did not run after its identity passed'
 
 oms_provider_cli_discovered pi || fail 'the stale Pi wrapper should remain visible to diagnostics'
 if oms_provider_cli_available pi; then
@@ -595,6 +627,26 @@ assert_argv auggie --print --permission edit:allow --permission write:allow --pe
 [ "$(tail -n 1 "$TMP/logs/auggie.env")" = 'AUGMENT_DISABLE_AUTO_UPDATE=1' ] || fail 'Auggie auto-update was not suppressed'
 run_exact auggie write model-x ''
 assert_argv auggie --print --model model-x --permission edit:allow --permission write:allow --permission terminal:allow 'make one bounded test change'
+run_leading_dash_prompt_case() {
+  local provider="$1" binary="$2" out="$TMP/logs/$1.leading-dash" rc=0
+  local dash_prompt="$TMP/prompt-leading-dash"
+  local previous_argv="$TMP/logs/$binary.leading-dash-before"
+  printf '%s' '--help' > "$dash_prompt"
+  cp "$TMP/logs/$binary.argv" "$previous_argv" || fail "$provider lacks its prior argv record"
+  MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+    MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+    ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
+      provider-default '' provider-registry '' "dash-$provider" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "$provider accepted a leading-dash positional prompt"
+  grep -Fq "prompt begins with '-'" "$out" || fail "$provider leading-dash refusal omitted its reason"
+  cmp -s "$previous_argv" "$TMP/logs/$binary.argv" ||
+    fail "$provider launched for a leading-dash positional prompt"
+  rm -f "$previous_argv"
+}
+for pair in 'muse muse' 'kiro kiro-cli' 'cline cline' 'kilo kilo' 'opencode opencode' 'deepseek dsh' 'auggie auggie'; do
+  set -- $pair
+  run_leading_dash_prompt_case "$1" "$2"
+done
 run_prompt_limit_case() {
   local provider="$1" binary="$2" size="$3"
   local out="$TMP/logs/$provider.limit-$size" rc=0

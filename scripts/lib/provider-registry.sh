@@ -239,9 +239,9 @@ oms_provider_cli_usable() {
     for arg in $(oms_provider_version_args "$provider"); do probe+=("$arg"); done
     if [ "$provider" = continue ] || [ "$provider" = goose ] || [ "$provider" = kilo ]; then
       case "$provider" in
-        continue) identity_pattern='(^|[^[:alnum:]])continue([^[:alnum:]]|$)' ;;
-        goose) identity_pattern='(^|[^[:alnum:]])goose[[:space:]]+run([^[:alnum:]]|$)' ;;
-        kilo) identity_pattern='(^|[^[:alnum:]])kilo[[:space:]]+run([^[:alnum:]]|$)' ;;
+        continue) identity_pattern='continue[[:space:]]+cli' ;;
+        goose) identity_pattern='execute commands from an instruction file or stdin' ;;
+        kilo) identity_pattern='upgrade[[:space:]]+kilo[[:space:]]+to[[:space:]]+the[[:space:]]+latest' ;;
       esac
       probe_output_file="$(mktemp "${TMPDIR:-/tmp}/oms-provider-probe.XXXXXX")" || return 1
       if oms_provider_run_bounded "$timeout_seconds" "$probe_output_file" "${probe[@]}" </dev/null; then
@@ -249,8 +249,7 @@ oms_provider_cli_usable() {
         printf '%s\n' "$probe_output" | grep -Eiq "$identity_pattern" && result=0
       fi
       if [ "$result" -ne 0 ]; then
-        probe=("$binary")
-        for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
+        probe=("$binary" --help)
         if oms_provider_run_bounded "$timeout_seconds" "$probe_output_file" "${probe[@]}" </dev/null; then
           probe_output="$(head -c 4096 "$probe_output_file" | tr -d '\r')"
           printf '%s\n' "$probe_output" | grep -Eiq "$identity_pattern" && result=0

@@ -229,7 +229,16 @@ oms_capability_refresh() {
       local -a probe=("$binary")
       local arg
       for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
-      oms_capability_run_bounded 10 "$help_file" "${probe[@]}" </dev/null || true
+      case "$provider" in
+        goose|kilo)
+          # Their effort flags live under `run --help`; establish the binary's
+          # top-level identity before asking that operational subcommand.
+          if oms_provider_cli_available "$provider"; then
+            oms_capability_run_bounded 10 "$help_file" "${probe[@]}" </dev/null || true
+          fi
+          ;;
+        *) oms_capability_run_bounded 10 "$help_file" "${probe[@]}" </dev/null || true ;;
+      esac
     fi
     values="$(oms_provider_effort_values "$provider")"
     if [ "$mechanism" = flag ]; then

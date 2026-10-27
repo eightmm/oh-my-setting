@@ -107,6 +107,10 @@ OpenHands also has no confirmed per-invocation model flag.
 Goose, Cline, Kilo, OpenHands, and Auggie can carry models across vendors, so
 their family is inferred from the selected model ID.
 
+For transports that pass the prompt as a positional argument, OMS refuses a
+prompt beginning with `-` rather than guessing whether that CLI supports an
+option terminator.
+
 Provider credentials and initial setup must be completed before headless use:
 Goose `configure`, Cline `auth`, Kilo `/connect`, and Auggie `login` have
 interactive setup surfaces. The OMS invocation disconnects stdin so these
