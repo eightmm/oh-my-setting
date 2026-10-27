@@ -206,6 +206,27 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     from contextlib import redirect_stderr
     from unittest.mock import Mock, patch
     from panel_routing import allocate
+    def complete_descendants(pid):
+        observations = []
+        for unused in range(3):
+            observations.append(panel._dispatch_descendants(pid))
+            if observations[-1] is not None:
+                return observations[-1]
+        raise AssertionError("incomplete descendant snapshots for pid %s: %r" % (pid, observations))
+
+    with patch.object(panel, "_dispatch_descendants", side_effect=[None, [{"pid": 1}]]):
+        assert complete_descendants(1) == [{"pid": 1}]
+    with patch.object(panel, "_dispatch_descendants", return_value=[]):
+        assert complete_descendants(1) == []
+    with patch.object(panel, "_dispatch_descendants", side_effect=[None, None, []]) as final_attempt:
+        assert complete_descendants(1) == [] and final_attempt.call_count == 3
+    with patch.object(panel, "_dispatch_descendants", return_value=None) as incomplete:
+        try:
+            complete_descendants(1)
+        except AssertionError as error:
+            assert "incomplete" in str(error) and incomplete.call_count == 3, str(error)
+        else:
+            raise AssertionError("incomplete snapshots accepted")
     # Every interpreter, including the directly spawned supervisor, uses this
     # fixture's durable state home rather than the invoking user's state.
     os.environ["XDG_STATE_HOME"] = room_env["XDG_STATE_HOME"]
@@ -722,7 +743,7 @@ CONTINUATION
                     time.sleep(.02)
                 assert ready.exists(), "normal child did not become ready"
                 assert process.poll() is None, "fixture supervisor exited before its descendants"
-                panel._record_dispatch_pending(project, call, 1, task, {"descendants": panel._dispatch_descendants(process.pid)})
+                panel._record_dispatch_pending(project, call, 1, task, {"descendants": complete_descendants(process.pid)})
                 row = json.loads(panel.events(project, "show", "--attempt", attempt_path.read_text(), "--json", output=True))
                 yield dict(name=name, member=member, call=call, process=process, release=release,
                            ready=ready, row=row, digest=digest, supervisor=supervisor)
@@ -1044,7 +1065,7 @@ CONTINUATION
             assert cancel_preflight == "ready", (cancel_preflight, main_fixture_row)
             assert process.poll() is None and panel._dispatch_supervisor_receipt(project, call)["exit"] is None, \
                 "cancellation preflight signalled before confirmation"
-            tree = panel._dispatch_descendants(process.pid)
+            tree = complete_descendants(process.pid)
             assert tree and not panel._dispatch_group_gone(process.pid), "long-running provider tree was not observed"
             foreign_nav = dict(selected_nav, cancel_owner={"participant": "foreign-main", "attempt": main_attempt})
             assert cancel_as_main(project, selected_state, foreign_nav, main_attempt) != "ready", \
@@ -1121,7 +1142,7 @@ CONTINUATION
                     "provider descendant survived supervisor cancellation"
                 assert panel._dispatch_group_gone(process.pid), "supervisor process group survived cancellation"
                 panel._record_dispatch_pending(project, call, 143, "cancel-selected-call",
-                                               {"descendants": panel._dispatch_descendants(process.pid) or []})
+                                               {"descendants": complete_descendants(process.pid)})
                 panel._write(project, panel._dispatch_call_path(name, True), panel._dispatch_exit_record(call, 143))
                 panel._settle_dispatch(project, shared, name, 143)
                 panel.deliver_result(project, shared, name, room_owner, "cancel-selected-call", 143)
@@ -1338,7 +1359,7 @@ CONTINUATION
                 assert (os.getpgid(child) == child) is (topology != "shared"), "detached group was not observed"
                 if topology == "group":
                     assert os.getsid(child) == process.pid and os.getpgid(child) == child, "same-session group survivor escaped fixture"
-                snapshots = [panel._dispatch_descendants(process.pid) for unused in range(2)]
+                snapshots = [complete_descendants(process.pid) for unused in range(2)]
                 assert len(snapshots) >= 2 and all(snapshots), snapshots
                 snapshot = snapshots[-1]
                 assert any(row["pid"] == child for row in snapshot), "snapshot missed the survivor"
@@ -1733,7 +1754,7 @@ time.sleep(60)
         while not subtree_file.exists() and subtree.poll() is None and time.monotonic() < deadline:
             time.sleep(.02)
         detached = int(subtree_file.read_text())
-        snapshot = panel._dispatch_descendants(subtree.pid)
+        snapshot = complete_descendants(subtree.pid)
         assert snapshot and any(row["pid"] == row["group"] == detached for row in snapshot), snapshot
         assert all(panel_terminals.matches(row["pid"], row["identity"]) for row in snapshot)
         assert not panel._dispatch_descendants_gone(snapshot)
@@ -1824,7 +1845,7 @@ time.sleep(60)
                     time.sleep(.02)
                 child_pids = json.loads(advisor_pids.read_text())
                 advisor_identity = panel_terminals.process(advisor.pid)["identity"]
-                advisor_records = panel._dispatch_descendants(advisor.pid)
+                advisor_records = complete_descendants(advisor.pid)
                 assert advisor_records and {row["pid"] for row in advisor_records} >= set(child_pids), advisor_records
                 evidence = {"descendants": advisor_records}
                 panel._observe_dispatch_session(advisor, advisor_identity, evidence)
