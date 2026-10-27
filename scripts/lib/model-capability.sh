@@ -203,7 +203,7 @@ oms_capability_refresh() {
   local provider="$1"
   local supplied_help="${2:-}"
   local binary flag help_file models_file tmp efforts_tmp values detected mechanism dir
-  local models_probe
+  local models_probe usable=0
   local own_help=1
   provider="$(oms_provider_normalize "$provider")" || return 2
   binary="$(oms_provider_binary "$provider")"
@@ -225,15 +225,15 @@ oms_capability_refresh() {
   # untouched, which is not the same as having asked and got nothing.
   models_probe=skipped
   if command -v "$binary" >/dev/null 2>&1; then
-    if [ "$own_help" -eq 1 ]; then
+    # Check identity even when help was supplied by the caller.
+    if oms_provider_cli_available "$provider"; then
+      usable=1
+    fi
+    if [ "$own_help" -eq 1 ] && [ "$usable" -eq 1 ]; then
       local -a probe=("$binary")
       local arg
       for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
-      # Operational help can invoke a provider subcommand; establish the
-      # binary's top-level identity before asking it for any provider.
-      if oms_provider_cli_available "$provider"; then
-        oms_capability_run_bounded 10 "$help_file" "${probe[@]}" </dev/null || true
-      fi
+      oms_capability_run_bounded 10 "$help_file" "${probe[@]}" </dev/null || true
     fi
     values="$(oms_provider_effort_values "$provider")"
     if [ "$mechanism" = flag ]; then
@@ -247,7 +247,7 @@ oms_capability_refresh() {
         values=""
       fi
     fi
-    if oms_provider_supports_model_listing "$provider" &&
+    if [ "$usable" -eq 1 ] && oms_provider_supports_model_listing "$provider" &&
       [ "${OMS_CAPABILITY_SKIP_MODELS:-0}" != 1 ]; then
       models_probe=failed
       tmp="$(mktemp "${TMPDIR:-/tmp}/oms-cap-models.XXXXXX")" || tmp=""

@@ -223,6 +223,7 @@ cat > "$TMP/bin/probe-codex-rejected" <<'REJECTED_CODEX'
 case "${1:-}" in
   --version|--help) exit 1 ;;
   exec) echo 'exec --help' > "$OMS_TEST_LOG_DIR/codex.exec-probe"; exit 0 ;;
+  app-server) echo invoked > "$OMS_TEST_LOG_DIR/codex.models-probe"; exit 1 ;;
 esac
 exit 1
 REJECTED_CODEX
@@ -234,7 +235,35 @@ OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh codex >/dev/null ||
   fail 'Codex capability refresh failed'
 [ ! -e "$TMP/logs/codex.exec-probe" ] ||
   fail 'Codex capability probe invoked operational help before identity passed'
+unset OMS_CAPABILITY_SKIP_MODELS
+OMS_CAPABILITY_RPC_WAIT=0 oms_capability_refresh codex >/dev/null ||
+  fail 'Codex capability refresh with model discovery failed'
+[ ! -e "$TMP/logs/codex.models-probe" ] ||
+  fail 'Codex capability probe invoked app-server before identity passed'
+[ "$(oms_capability_read_field "$(oms_capability_file codex)" models_probe)" = skipped ] ||
+  fail 'Codex rejected identity did not skip model discovery'
 rm -f "$TMP/bin/codex"
+
+cat > "$TMP/bin/probe-opencode-rejected" <<'REJECTED_OPENCODE'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version|--help) exit 1 ;;
+  models) echo invoked > "$OMS_TEST_LOG_DIR/opencode.models-probe"; exit 1 ;;
+esac
+exit 1
+REJECTED_OPENCODE
+chmod +x "$TMP/bin/probe-opencode-rejected"
+ln -sf probe-opencode-rejected "$TMP/bin/opencode"
+OMS_PROVIDER_PROBE_CACHE='|'
+printf 'supplied help\n' > "$TMP/supplied-help"
+oms_capability_refresh opencode "$TMP/supplied-help" >/dev/null ||
+  fail 'OpenCode capability refresh failed'
+[ ! -e "$TMP/logs/opencode.models-probe" ] ||
+  fail 'OpenCode capability probe invoked models before identity passed'
+[ "$(oms_capability_read_field "$(oms_capability_file opencode)" models_probe)" = skipped ] ||
+  fail 'OpenCode rejected identity did not skip model discovery'
+ln -sf provider-fake "$TMP/bin/opencode"
+OMS_PROVIDER_PROBE_CACHE='|'
 
 cat > "$TMP/bin/probe-grok" <<'PROBE_GROK'
 #!/usr/bin/env sh
