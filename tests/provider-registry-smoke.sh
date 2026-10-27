@@ -52,11 +52,22 @@ case "${1:-}" in
     ;;
 esac
 printf '%s\n' "$@" > "$OMS_TEST_LOG_DIR/$name.argv"
+printf '%s\0' "$@" > "$OMS_TEST_LOG_DIR/$name.argv0"
+prompt_path=""
+previous=""
+for argument do
+  case "$previous:$argument" in
+    --message-file:*|-f:*) prompt_path="$argument" ;;
+  esac
+  previous="$argument"
+done
+[ -z "$prompt_path" ] || cat "$prompt_path" > "$OMS_TEST_LOG_DIR/$name.prompt"
 printf 'DSH_PERMISSION_MODE=%s\n' "${DSH_PERMISSION_MODE:-}" > "$OMS_TEST_LOG_DIR/$name.env"
 printf 'DSH_TELEMETRY_DISABLED=%s\n' "${DSH_TELEMETRY_DISABLED:-}" >> "$OMS_TEST_LOG_DIR/$name.env"
 printf 'GOOSE_MODE=%s\n' "${GOOSE_MODE:-}" >> "$OMS_TEST_LOG_DIR/$name.env"
 printf 'AUGMENT_DISABLE_AUTO_UPDATE=%s\n' "${AUGMENT_DISABLE_AUTO_UPDATE:-}" >> "$OMS_TEST_LOG_DIR/$name.env"
 cat > "$OMS_TEST_LOG_DIR/$name.stdin"
+if [ "${OMS_TEST_FAIL_LAUNCH:-0}" = 1 ]; then exit 9; fi
 if [ "${OMS_TEST_WRITE:-0}" = 1 ]; then
   printf 'written by %s\n' "$name" > "$PWD/$name-write.txt"
 fi
@@ -682,20 +693,82 @@ run_leading_dash_prompt_case() {
   local dash_prompt="$TMP/prompt-leading-dash"
   local argv_log="$TMP/logs/$binary.argv"
   local stdin_log="$TMP/logs/$binary.stdin"
+  local baseline_log="$TMP/logs/$binary.leading-dash-baseline.argv0"
+  local temp_dir="$TMP/agent-temps"
+  mkdir -p "$temp_dir"
+  local before=""
+  before="$(find "$temp_dir" -name 'oms.*' -type f -print | LC_ALL=C sort)"
+  printf '%s' 'leading dash baseline' > "$dash_prompt"
+  MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+    MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+    OMS_LIB_TMPDIR="$temp_dir" ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
+      provider-default '' provider-registry '' "dash-baseline-$provider" >/dev/null 2>&1 ||
+      fail "$provider baseline launch failed"
+  cp "$TMP/logs/$binary.argv0" "$baseline_log"
   printf '%s' '--help' > "$dash_prompt"
   MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
     MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
-    ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
+    OMS_LIB_TMPDIR="$temp_dir" ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
       provider-default '' provider-registry '' "dash-$provider" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "$provider refused a leading-dash positional prompt (exit $rc)"
   [ -e "$argv_log" ] || fail "$provider did not launch for a leading-dash prompt"
-  python3 - "$argv_log" "$stdin_log" <<'PY'
+  python3 - "$provider" "$argv_log" "$baseline_log" "$stdin_log" "$dash_prompt" <<'PY'
 import pathlib, sys
-argv = pathlib.Path(sys.argv[1]).read_bytes()
-stdin_path = pathlib.Path(sys.argv[2])
-stdin = stdin_path.read_bytes() if stdin_path.exists() else b""
-assert b"\n--help" in argv or stdin.startswith(b"\n--help"), (argv, stdin)
+provider, argv_path, baseline_path, stdin_path, prompt_path = sys.argv[1:]
+argv = pathlib.Path(argv_path.replace(".argv", ".argv0")).read_bytes().split(b"\0")[:-1]
+baseline = pathlib.Path(baseline_path).read_bytes().split(b"\0")[:-1]
+stdin_file = pathlib.Path(stdin_path)
+stdin = stdin_file.read_bytes() if stdin_file.exists() else b""
+prompt = pathlib.Path(prompt_path).read_bytes()
+normalized = b"\n" + prompt
+argv_transports = {"antigravity", "grok", "deepseek", "vibe", "pi", "copilot",
+                   "muse", "kimi", "kiro", "continue", "goose", "cline",
+                   "kilo", "openhands", "auggie"}
+file_transports = {"droid", "aider"}
+null_stdin = {"deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse",
+              "kimi", "kiro", "continue", "goose", "cline", "kilo", "openhands", "auggie"}
+if provider in argv_transports:
+    assert argv == [normalized if item == b"leading dash baseline" else item for item in baseline], (provider, argv, baseline)
+    if provider == "continue":
+        assert argv == [b"-p", normalized, b"--auto"], argv
+    if provider in null_stdin:
+        assert stdin == b"", (provider, stdin)
+elif provider in file_transports:
+    assert pathlib.Path(str(argv_path).replace(".argv", ".prompt")).read_bytes() == normalized
+    assert stdin == b"", (provider, stdin)
+elif provider == "localfoo":
+    assert pathlib.Path(prompt_path).read_bytes() == prompt
+    assert stdin == normalized, (provider, stdin)
+else:
+    assert stdin == normalized, (provider, stdin)
+    assert provider not in null_stdin, (provider, stdin)
 PY
+  [ "$(find "$temp_dir" -name 'oms.*' -type f -print | LC_ALL=C sort)" = "$before" ] ||
+    fail "$provider left a normalized prompt copy after success"
+  if [ "$provider" = continue ]; then
+    printf '%s' '-p' > "$dash_prompt"
+    rc=0
+    MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+      MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+      OMS_LIB_TMPDIR="$temp_dir" ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
+        provider-default '' provider-registry '' "dash-option-$provider" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || fail "$provider refused an option-shaped prompt"
+    python3 - "$argv_log" <<'PY'
+import pathlib, sys
+assert pathlib.Path(sys.argv[1].replace(".argv", ".argv0")).read_bytes().split(b"\0")[:-1] == [b"-p", b"\n-p", b"--auto"]
+PY
+    [ "$(find "$temp_dir" -name 'oms.*' -type f -print | LC_ALL=C sort)" = "$before" ] ||
+      fail "$provider left a normalized prompt copy after option prompt"
+    printf '%s' '--help' > "$dash_prompt"
+    rc=0
+    OMS_TEST_FAIL_LAUNCH=1 MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+      MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+      OMS_LIB_TMPDIR="$temp_dir" ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
+        provider-default '' provider-registry '' "dash-failure-$provider" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "$provider failed-launch fixture returned success"
+    [ "$(find "$temp_dir" -name 'oms.*' -type f -print | LC_ALL=C sort)" = "$before" ] ||
+      fail "$provider left a normalized prompt copy after failed launch"
+  fi
 }
 created_binaries=""
 for provider in $(oms_provider_supported_names); do
