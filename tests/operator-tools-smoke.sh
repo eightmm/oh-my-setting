@@ -206,6 +206,22 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     from contextlib import redirect_stderr
     from unittest.mock import Mock, patch
     from panel_routing import allocate
+    atomic_ready = ("def publish_ready(path, content):\n"
+                    "    path = Path(path)\n"
+                    "    sibling = path.with_name(path.name + '.' + str(os.getpid()) + '.tmp')\n"
+                    "    sibling.write_text(content)\n"
+                    "    os.replace(str(sibling), str(path))\n")
+    readiness_probe = temporary / "atomic-readiness-probe"
+    namespace = {"Path": Path, "os": os}
+    exec(atomic_ready, namespace)
+    def observe_readiness_write(path, content):
+        with path.open("w") as stream:
+            assert not readiness_probe.exists(), "readiness visible before write completed"
+            stream.write(content)
+    with patch.object(Path, "write_text", observe_readiness_write):
+        namespace["publish_ready"](readiness_probe, "123")
+    assert readiness_probe.read_text() == "123"
+    readiness_probe.unlink()
     def complete_descendants(pid):
         observations = []
         for unused in range(3):
@@ -714,7 +730,7 @@ CONTINUATION
             attempt_path = temporary / (name + ".attempt")
             header = ("import os,sys,time,subprocess; from pathlib import Path\n"
                       "sys.path.insert(0," + repr(str(root / "scripts/lib")) + ")\n"
-                      "import terminal_panel as panel, room\n"
+                      "import terminal_panel as panel, room\n" + atomic_ready +
                       "repo=Path(os.environ['OMS_ROOM_REPO']); ident=os.environ['OMS_ROOM_ID']; "
                       "member=os.environ['OMS_ROOM_PARTICIPANT']\n"
                       "attempt=panel.events(repo,'start','--provider','codex','--tool','peer-delegate',"
@@ -725,8 +741,8 @@ CONTINUATION
                       "release=" + repr(str(release)) + "; ready=" + repr(str(ready)) + "\n")
             if body is None and task == "cancel-selected-call":
                 body = ("child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])\n"
-                        "Path(" + repr(str(ready)) + ").write_text(str(child.pid)); time.sleep(60)\n")
-            body = body or ("Path(ready).write_text(str(os.getpid()))\n"
+                        "publish_ready(" + repr(str(ready)) + ", str(child.pid)); time.sleep(60)\n")
+            body = body or ("publish_ready(ready, str(os.getpid()))\n"
                             "while not Path(release).exists(): time.sleep(.02)\n")
             env = dict(room_env, OMS_ROOM_PARTICIPANT=name, OMS_ROOM_ADMITTED_PARTICIPANT=name)
             process = subprocess.Popen([sys.executable, str(root / "scripts/lib/dispatch_supervisor.py"),
@@ -1339,9 +1355,9 @@ CONTINUATION
         # Session/group membership and snapshots cannot hide an adopted survivor or authorize release.
         for topology in ("group", "session", "shared"):
             detached = topology == "session"
-            body = ("child_code='import os,time; from pathlib import Path; "
+            body = ("child_code=" + repr("import os,time\nfrom pathlib import Path\n" + atomic_ready) + " + '"
                     + ("os.setpgrp(); " if topology == "group" else "") +
-                    "Path(' + repr(ready) + ').write_text(str(os.getpid())); "
+                    "publish_ready(' + repr(ready) + ', str(os.getpid())); "
                     "\\nwhile not Path(' + repr(release) + ').exists(): time.sleep(.02)\\n'\n"
                     "subprocess.Popen([sys.executable,'-c',child_code],start_new_session=" + repr(detached) + ")\n"
                     "while not Path(ready).exists(): time.sleep(.01)\n")
@@ -1578,18 +1594,18 @@ CONTINUATION
 
         # A double fork creates an orphan in a new session between observations.
         pid_file, release_file = temporary / "subreaper-orphan.pid", temporary / "subreaper-release"
-        code = '''import os,time
+        code = ('''import os,time
 from pathlib import Path
-if os.fork() == 0:
+''' + atomic_ready + '''if os.fork() == 0:
     os.setsid()
     if os.fork() == 0:
-        Path(PID).write_text(str(os.getpid()))
+        publish_ready(PID, str(os.getpid()))
         while not Path(RELEASE).exists(): time.sleep(.02)
         os._exit(0)
     os._exit(0)
 os.wait()
 while not Path(PID).exists(): time.sleep(.01)
-'''.replace("PID", repr(str(pid_file))).replace("RELEASE", repr(str(release_file)))
+''').replace("PID", repr(str(pid_file))).replace("RELEASE", repr(str(release_file)))
         try:
             with patch.object(panel, "_dispatch_descendants", return_value=None):
                 status, member, notice = dispatch_case(code, "subreaper-orphan")
@@ -1737,15 +1753,15 @@ time.sleep(60)
     # Observe a real provider in a new session, with its parent reaping it during fixture cleanup.
     subtree_file = temporary / "provider-subtree.pid"
     subtree_child = temporary / "provider-subtree.py"
-    subtree_child.write_text('''import signal, subprocess, sys, time
+    subtree_child.write_text('''import os, signal, subprocess, sys, time
 from pathlib import Path
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+''' + atomic_ready + '''child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
 def stop(number, frame):
     child.terminate()
     child.wait(timeout=5)
     sys.exit(0)
 signal.signal(signal.SIGTERM, stop)
-Path(sys.argv[1]).write_text(str(child.pid))
+publish_ready(sys.argv[1], str(child.pid))
 time.sleep(60)
 ''')
     subtree = subprocess.Popen([sys.executable, str(subtree_child), str(subtree_file)], start_new_session=True)
@@ -1820,10 +1836,10 @@ time.sleep(60)
     advisor_child = temporary / "advisor-subtree.py"
     advisor_child.write_text('''import json, os, signal, subprocess, sys, time
 from pathlib import Path
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
+''' + atomic_ready + '''signal.signal(signal.SIGTERM, signal.SIG_IGN)
 child = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
                          start_new_session=True)
-Path(sys.argv[1]).write_text(json.dumps([os.getpid(), child.pid]))
+publish_ready(sys.argv[1], json.dumps([os.getpid(), child.pid]))
 time.sleep(60)
 ''')
     parent_group = os.getpgrp()
