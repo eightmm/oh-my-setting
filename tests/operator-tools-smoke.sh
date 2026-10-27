@@ -1738,8 +1738,27 @@ time.sleep(60)
         assert all(panel_terminals.matches(row["pid"], row["identity"]) for row in snapshot)
         assert not panel._dispatch_descendants_gone(snapshot)
         if sys.platform == "linux":
-            with patch.object(panel_terminals, "process", return_value=None):
-                assert panel._dispatch_descendants(subtree.pid) == snapshot, "snapshot required a later identity read"
+            captured = None
+            for unused in range(3):
+                try:
+                    captured = panel._dispatch_process_snapshot()
+                except (OSError, ValueError, IndexError, KeyError):
+                    continue
+                if captured is not None:
+                    break
+            assert captured is not None, "process snapshot unavailable"
+            members = {subtree.pid} | {pid for pid, row in captured.items() if row["session"] == subtree.pid}
+            while True:
+                expanded = members | {pid for pid, row in captured.items() if row["parent"] in members}
+                if expanded == members:
+                    break
+                members = expanded
+            expected = [{key: captured[pid][key] for key in ("pid", "identity", "group")}
+                        for pid in sorted(members - {subtree.pid})]
+            assert any(row["pid"] == detached for row in expected), expected
+            with patch.object(panel, "_dispatch_process_snapshot", return_value=captured), \
+                    patch.object(panel_terminals, "process", side_effect=AssertionError("identity re-read")):
+                assert panel._dispatch_descendants(subtree.pid) == expected, "snapshot required a later identity read"
     finally:
         subtree.terminate()
         subtree.wait(timeout=5)
