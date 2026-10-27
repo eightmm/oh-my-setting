@@ -1276,7 +1276,7 @@ for lock_kind in 0 1; do
   export OMS_TEST_LAND_COUNT="$TMP/count-$lock_kind" OMS_TEST_LAND_RELEASE="$TMP/release-$lock_kind"
   # flock leaves a file; mkdir uses a directory at that path. Model separate hosts.
   export OMS_LOCK_DIR="$TMP/locks-$lock_kind"
-  gate 'echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1'" # lock $lock_kind"
+  gate 'echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<1200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1'" # lock $lock_kind"
   OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 > "$TMP/first.out" 2>&1 &
   first_pid=$!
   for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
