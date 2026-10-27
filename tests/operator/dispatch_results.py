@@ -2876,6 +2876,20 @@ with patch.dict(os.environ, environment, clear=True), \
         patch.object(saved, "_register"), patch.object(saved, "_plan_hint"), \
         patch.object(saved.room, "status", return_value=scope_member):
     simple_patch = extra_patch.split(b"diff --git a/other.txt")[0]
+    # BEGIN missing-admission diagnostic regression.
+    diagnostic_workers = [dict(scope_worker, attempt_id=name) for name in ("att_missing_1", "att_landed", "att_missing_2")]
+    with patch.object(saved, "_worker_owns", return_value=[]):
+        try:
+            saved._review_preflight(project, "scope-result", diagnostic_workers, [], [None, {"patch_sha256": "x"}, None])
+            raise AssertionError("missing admissions accepted")
+        except ValueError as error:
+            message = str(error)
+            assert "matching landed patch" in message and "att_missing_1, att_missing_2" in message, message
+            assert "att_landed" not in message and "oms patch-land" in message, message
+            assert "worker's own patch" in message and "exact delegate patch bytes" in message, message
+            assert "landing is recorded" in message and "--outcome completed" in message, message
+            assert "\n" not in message, message
+    # END missing-admission diagnostic regression.
     unreviewed_rows = scope_evidence(simple_patch, reviewed=False)
     with patch.object(saved, "_records", return_value=([scope_worker], unreviewed_rows)):
         try:

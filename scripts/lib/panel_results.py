@@ -747,11 +747,9 @@ def _live_review_read_passes(repo):
 
 def _review_preflight(repo, task_id, workers, rows, admissions=None):
     """Share scope and digest-bound review checks before application and acceptance."""
-    if admissions is not None and any(not item for item in admissions):
-        # Scope evidence is checked first, including for unlanded candidates.
-        missing_admission = True
-    else:
-        missing_admission = False
+    # Scope evidence is checked first, including for unlanded candidates.
+    missing_admission = [workers[index].get('attempt_id', 'unknown') if index < len(workers) else 'unknown'
+                         for index, admission in enumerate(admissions) if not admission] if admissions is not None else []
     missing_reviews = []
     passing_gates = []
     for index, worker in enumerate(workers):
@@ -784,7 +782,8 @@ def _review_preflight(repo, task_id, workers, rows, admissions=None):
                                   'gate_verify_exit': latest['review'].get('gate_verify_exit'),
                                   'seat_verdicts': [seat.get('verdict') for seat in latest['review']['seats']]})
     if missing_admission:
-        raise ValueError('write worker needs matching landed patch evidence')
+        raise ValueError("write worker call(s) lack matching landed patch evidence: %s; acceptance needs oms patch-land of each worker's own patch using the exact delegate patch bytes so the landing is recorded; otherwise finalize with --outcome completed"
+                         % ', '.join(missing_admission))
     if missing_reviews:
         raise ValueError('write worker call(s) lack a passing review gate: %s; run the review or finalize completed instead'
                          % ', '.join(missing_reviews))
