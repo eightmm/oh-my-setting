@@ -1041,7 +1041,8 @@ for forged_release in (False, True):
     quota_journal.write_bytes(quota_before)
     if forged_release:
         h['append'](str(quota_repo), 'capture-released', quota_item)
-    assert h['usage'](str(quota_repo)) == (1, 2 * h['MAX_OBJECT'])
+    expected_charge = 2 * h['MAX_OBJECT'] if forged_release else quota_item['bytes']
+    assert h['usage'](str(quota_repo)) == (1, expected_charge)
 # Hash consistency is not enough: the probe's partial terminal/certificate and
 # object inventory must never waive a moved, still-retained generation.
 quota_journal.write_bytes(quota_before)
@@ -1109,7 +1110,7 @@ try:
 finally:
     collect_globals['append'] = original_append
 assert not crash_capture.parent.exists()
-assert h['usage'](str(crash_repo)) == (1, 2 * h['MAX_OBJECT'])
+assert h['usage'](str(crash_repo)) == (1, 2 * len(source.read_bytes()))
 assert any(row['event'] == 'capture-release-ready' for row in h['rows'](str(crash_repo)))
 assert not any(row['event'] == 'capture-released' for row in h['rows'](str(crash_repo)))
 
@@ -1362,6 +1363,40 @@ def missing_reservation(name, source_bytes):
     reservation['ts'] = '2020-01-01T00:00:00Z'
     journal.write_bytes(b''.join(h['encoded'](row) for row in rows))
     return item
+
+# Missing private directories retain the recorded charge only when the canonical
+# publication is absent or agrees with the reservation.
+quota_journal = journal.read_bytes()
+for name, payload, kind in (('charge-empty', b'', 'matching'),
+                            ('charge-matching', b'quota payload', 'matching'),
+                            ('charge-limit', b'x' * h['MAX_OBJECT'], 'matching'),
+                            ('charge-absent', b'absent payload', 'absent'),
+                            ('charge-mismatch', b'mismatch payload', 'mismatch'),
+                            ('charge-directory', b'directory payload', 'directory'),
+                            ('charge-link', b'link payload', 'link')):
+    item = missing_reservation(name, payload)
+    publication = repo / '.oms/landing-patches' / (item['landing_id'] + '.patch')
+    if kind == 'matching':
+        publication.write_bytes(payload)
+    elif kind == 'mismatch':
+        publication.write_bytes(payload + b'x')
+    elif kind == 'directory':
+        publication.mkdir()
+    elif kind == 'link':
+        try:
+            publication.symlink_to(source)
+        except (OSError, NotImplementedError):
+            journal.write_bytes(quota_journal)
+            continue  # Symlink creation may be unavailable on Windows.
+    count, charged = h['usage'](str(repo))
+    journal.write_bytes(quota_journal)
+    baseline_count, baseline = h['usage'](str(repo))
+    expected = 2 * h['MAX_OBJECT'] if kind in ('mismatch', 'directory', 'link') else item['bytes']
+    assert (count, charged) == (baseline_count + 1, baseline + expected), (name, charged, baseline, expected)
+    if kind == 'directory':
+        publication.rmdir()
+    elif publication.is_symlink() or publication.exists():
+        publication.unlink()
 
 os.environ['OMS_LANDING_CAPTURE_BYTES'] = str(16 * h['MAX_OBJECT'])
 missing_free = missing_reservation('missing-free', b'free payload')

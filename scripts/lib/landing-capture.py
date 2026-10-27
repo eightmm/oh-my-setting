@@ -311,9 +311,23 @@ def usage(repo):
                     else:
                         raise ValueError('missing quota generation anchor')
             else:
-                # A crash before certificate creation is retained, never treated
-                # as zero or as a caller-declared release permitting allocation.
-                raise ValueError('quota generation missing without native release proof')
+                # Confirm absence: lexists alone suppresses other lstat errors.
+                try:
+                    os.lstat(item['directory'])
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError('quota generation existence changed')
+                publication = os.path.join(repo, '.oms/landing-patches', item['landing_id'] + '.patch')
+                try:
+                    info = os.lstat(publication)
+                except FileNotFoundError:
+                    info = None
+                if info is not None and (not stat.S_ISREG(info.st_mode) or D['is_reparse'](info) or
+                                         info.st_size * 2 != item['bytes']):
+                    raise ValueError('publication contradicts quota reservation')
+                # Allocation reserves twice the verified input before either copy;
+                # publication copies those same bytes, so this bounds the payload.
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Unknown bounded generations remain reserved at their maximum
             # peak size; they cannot waive quota or authorize collection.
