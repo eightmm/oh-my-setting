@@ -157,6 +157,34 @@ import sys
 text = json.load(open(sys.argv[1]))["text"]
 assert open(sys.argv[2], encoding="utf-8").read() == text + "\n", "brief differs from the cached text"
 PY
+# Repository paths in the brief must not be able to add injected lines.
+control_repo="$work/orientation-controls"
+mkdir -p "$control_repo"
+control_file_rc=0
+python3 - "$control_repo" <<'PY' || control_file_rc=$?
+from pathlib import Path
+import sys
+repo = Path(sys.argv[1])
+try:
+    (repo / "alpha\nINJECTED\x01.py").write_text("def safe_name():\n    return 1\n")
+except OSError:
+    raise SystemExit(77)  # This filesystem cannot represent the test name.
+PY
+if [ "$control_file_rc" -eq 0 ]; then
+  git -C "$control_repo" init -q -b main
+  "$OMS" graph --repo "$control_repo" project build > "$work/orientation-controls-build.out" 2>&1 \
+    || fail "control-character orientation build failed: $(cat "$work/orientation-controls-build.out")"
+  python3 - "$control_repo/.oms/project-graph/orientation.json" <<'PY'
+import json
+import sys
+text = json.load(open(sys.argv[1], encoding="utf-8"))["text"]
+lines = text.splitlines()
+assert lines and lines[0].startswith("[oms graph] "), "orientation framing must remain the first line"
+assert not any(line.startswith("INJECTED") for line in lines), text
+PY
+elif [ "$control_file_rc" -ne 77 ]; then
+  fail "could not create control-character fixture (status $control_file_rc)"
+fi
 # Conflicting map options are refused before any automatic refresh: an absent
 # graph is not built and a stale one is not replaced.
 brief_state="$tmp/.oms/project-graph"

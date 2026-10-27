@@ -20,13 +20,18 @@ AREAS = 3
 FILENAME = "orientation.json"
 
 
+def _plain(value: Any) -> str:
+    """Keep repository-derived labels on one printable line."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in str(value or "")).split())
+
+
 def _areas(areas: Mapping[str, Any]) -> str:
     rows = sorted(areas.items(), key=lambda item: (-item[1]["files"], item[0]))
     parts = []
     for name, row in rows[:AREAS]:
         languages = sorted(row["languages"].items(), key=lambda item: (-item[1], item[0]))
         mix = ", ".join("%s %d" % pair for pair in languages[:2]) if len(languages) > 1 else ""
-        parts.append("%s %d%s" % (name, row["files"], " (%s)" % mix if mix else ""))
+        parts.append("%s %d%s" % (_plain(name), row["files"], " (%s)" % mix if mix else ""))
     if len(rows) > AREAS:
         parts.append("+%d" % (len(rows) - AREAS))
     return " · ".join(parts)
@@ -39,11 +44,12 @@ def brief_text(summary: Mapping[str, Any], manifest: Mapping[str, Any], repo_nam
     need = int(counts.get("needs-evidence", 0)) + int(counts.get("attention", 0))
     built = str(manifest.get("generated_at", ""))[:16].replace("T", " ")
     lines = ["[oms graph] %s revision %s · built %s UTC · %d files, %d nodes" % (
-        repo_name, str(summary.get("revision", ""))[:12], built or "unknown",
+        _plain(repo_name), str(summary.get("revision", ""))[:12], built or "unknown",
         int(stats.get("files", 0)), int(stats.get("nodes", 0)))]
     if summary.get("areas"):
         lines.append("areas: " + _areas(summary["areas"]))
-    hubs = ["%s %d" % (str(item["id"]).split(":", 1)[-1], item["degree"]) for item in summary.get("file_hubs", [])[:FILE_HUBS]]
+    hubs = ["%s %d" % (_plain(str(item["id"]).split(":", 1)[-1]), item["degree"])
+            for item in summary.get("file_hubs", [])[:FILE_HUBS]]
     if hubs:
         lines.append("file hubs: " + " · ".join(hubs))
     if need:

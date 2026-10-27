@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A panel main's prompt hook now appends the cached project-graph orientation
+  once per graph revision and context generation, marked as reference data and
+  capped at 4096 UTF-8 bytes. It reads only the cache; refresh remains on the
+  panel-start warm path and dispatch preparation.
 - `oms autopilot --allow-floor-change REASON` binds immutable owner consent
   at propose time, preserves older receipts as no consent, and forwards the
   exact reason through goal-drive and plan-run to every landing attempt.

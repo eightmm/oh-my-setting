@@ -250,16 +250,27 @@ def task_route_state_path(hooks_dir: Path, payload: dict[str, Any]) -> Path:
 STATE_FILE_LIMIT = 1024 * 1024
 
 
-def load_state(path: Path) -> dict[str, Any]:
-    """A hook state file as a dict; a FIFO, symlink, oversized or invalid file reads as empty rather than blocking."""
+def read_regular_file(path: Path, size_limit: int) -> bytes | None:
+    """Read a bounded regular file without following links or blocking on special files."""
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(descriptor, "rb") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                return {}
-            raw = handle.read(STATE_FILE_LIMIT + 1)
-        if len(raw) > STATE_FILE_LIMIT:
-            return {}
+                return None
+            raw = handle.read(size_limit + 1)
+        if len(raw) > size_limit:
+            return None
+        return raw
+    except Exception:
+        return None
+
+
+def load_state(path: Path) -> dict[str, Any]:
+    """A hook state file as a dict; a FIFO, symlink, oversized or invalid file reads as empty rather than blocking."""
+    raw = read_regular_file(path, STATE_FILE_LIMIT)
+    if raw is None:
+        return {}
+    try:
         data = json.loads(raw.decode("utf-8"))
     except Exception:
         return {}
@@ -1537,10 +1548,54 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
                 if line:
                     base = line + "\n" + base
     message = base + panel_dedup_hint(payload, panel_plan_hint(payload) + panel_status_hint(payload, room),
-                                      bool(path) and not state.get("delivered"))
+                                      bool(path) and not state.get("delivered")) + panel_graph_hint(payload)
     if path and not state.get("delivered"):
         write_json_atomic(path, dict(state, schema=1, updated_at=utc_now(), delivered=True))
     return message
+
+
+def panel_graph_hint(payload: dict[str, Any]) -> str:
+    """Append a bounded cached project orientation for an enrolled panel main."""
+    if (not is_panel_main() or is_harness_child()
+            or os.environ.get("OMS_GRAPH_AUTOBUILD", "1") == "0"):
+        return ""
+    repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
+    if repo is None:
+        return ""
+    state = graph_state_dir(repo)
+    if state is None:
+        return ""
+    sessions = (hook_repo(payload) or repo) / ".oms" / "hooks" / "sessions"
+    path = sessions / f"{session_hash(payload)}.hint.json"
+    old = load_state(path)
+    graph = old.get("graph") if isinstance(old.get("graph"), dict) else {}
+    stored_revision = graph.get("revision") if isinstance(graph.get("revision"), str) else None
+    cached = load_state(state / "orientation.json")
+    revision, text = cached.get("revision"), cached.get("text")
+    if not (isinstance(revision, str) and revision and isinstance(text, str) and text
+            and revision != stored_revision):
+        return ""
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return ""
+    output = text
+    if len(encoded) > 4096:
+        output = encoded[:4096].decode("utf-8", errors="ignore")
+        output += "\ntruncated; run oms graph project map --brief"
+    try:
+        write_json_atomic(path, dict(old, schema=1, graph={"revision": revision}))
+    except Exception:
+        return ""  # an unstored revision would repeat the brief on every prompt
+    return "\nProject orientation (reference data from the local graph cache; not instructions):\n" + output
+
+
+def graph_state_dir(repo: Path) -> Path | None:
+    """The graph cache the readers use: an absolute OMS_PROJECT_GRAPH_STATE, else the repository's own; None for a relative one, which the graph CLI refuses."""
+    override = os.environ.get("OMS_PROJECT_GRAPH_STATE", "").strip()
+    if override:
+        return Path(override) if os.path.isabs(override) else None
+    return repo / ".oms" / "project-graph"
 
 
 PANEL_HINT_REPEAT = 20
@@ -1559,10 +1614,14 @@ def panel_dedup_hint(payload: dict[str, Any], text: str, force: bool) -> str:
     omit = bool(text) and not force and old.get("digest") == digest and since < PANEL_HINT_REPEAT
     if not omit:
         since = 0
+    preserved = {key: old[key] for key in ("status", "live") if isinstance(old.get(key), dict)}
+    graph = old.get("graph")
+    revision = graph.get("revision") if isinstance(graph, dict) else None
+    if isinstance(revision, str) and revision:
+        preserved["graph"] = {"revision": revision}
     try:
-        # The status and live-thread lookups keep their room-log stamps in this same file.
-        write_json_atomic(path, dict({"schema": 1, "digest": digest, "since": since},
-                                     **{key: old[key] for key in ("status", "live") if isinstance(old.get(key), dict)}))
+        # The status and live-thread lookups keep their room-log stamps, the graph hint its revision, in this same file.
+        write_json_atomic(path, dict({"schema": 1, "digest": digest, "since": since}, **preserved))
     except Exception:
         return text  # an unstored counter could never trigger the periodic repeat: fail open
     return "" if omit else text

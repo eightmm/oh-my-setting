@@ -1679,6 +1679,14 @@ room, plan task, open questions, running workers and declared status (ids,
 counts and names only). The board shows `ctx N%` on the main's card
 when known, with `compact soon` at 15% or less.
 
+A panel main's prompt hook also appends the cached project orientation
+(`oms graph project map --brief`) once per graph revision and context
+generation; compact, clear and resume re-emit it, and a missing cache stays
+silent. It reads only the existing cache and never starts a graph refresh;
+refresh remains on the panel-start warm path and dispatch preparation. The
+hook stays silent when `OMS_GRAPH_AUTOBUILD=0` or
+`OMS_PROJECT_GRAPH_STATE` is relative. Other sessions are unaffected.
+
 
 ## Contract and verification
 
