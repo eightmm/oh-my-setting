@@ -126,6 +126,9 @@ Read project progress and next decisions with `oms dashboard`. See the
 
 Your agent finds these on its own; the full catalog is in
 [docs/COMPONENTS.md](docs/COMPONENTS.md).
+Installed peer CLIs can also include Muse (`muse`), Kimi Code (`kimi`), Kiro
+(`kiro-cli`) and Continue (`cn`); see the [provider routing reference](custom-skills/oms-agent-harness/references/provider-routing.md)
+for their access boundaries.
 
 ## Notes
 

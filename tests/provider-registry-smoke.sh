@@ -22,8 +22,16 @@ cat > "$TMP/bin/provider-fake" <<'FAKE'
 set -u
 name="$(basename "$0")"
 case "${1:-}" in
-  --version|-v|version) printf '%s version\n' "$name" >> "$OMS_TEST_LOG_DIR/probes"; printf '%s 1.0.0\n' "$name"; exit 0 ;;
-  --help|-h) printf '%s help\n' "$name" >> "$OMS_TEST_LOG_DIR/probes"; printf 'usage: %s [headless options]\n' "$name"; exit 0 ;;
+  --version|-v|version)
+    printf '%s version\n' "$name" >> "$OMS_TEST_LOG_DIR/probes"
+    if [ "$name" = cn ]; then printf 'Continue CLI 1.0.0\n'; else printf '%s 1.0.0\n' "$name"; fi
+    exit 0
+    ;;
+  --help|-h)
+    printf '%s help\n' "$name" >> "$OMS_TEST_LOG_DIR/probes"
+    if [ "$name" = cn ]; then printf 'Continue CLI help\n'; else printf 'usage: %s [headless options]\n' "$name"; fi
+    exit 0
+    ;;
   models|--list-models) printf 'provider/model-a\nprovider/model-b\n'; exit 0 ;;
   --no-auto-update)
     case "${2:-}" in
@@ -42,7 +50,7 @@ fi
 printf '%s returned a complete independent answer with enough detail.\n' "$name"
 FAKE
 chmod +x "$TMP/bin/provider-fake"
-for binary in cursor-agent grok gemini qwen opencode dsh vibe copilot droid aider; do
+for binary in cursor-agent grok gemini qwen opencode dsh vibe copilot droid aider muse kimi kiro-cli cn; do
   ln -s provider-fake "$TMP/bin/$binary"
 done
 
@@ -116,14 +124,63 @@ vibe
 pi
 copilot
 droid
-aider'
+aider
+muse
+kimi
+kiro
+continue'
 [ "$(oms_provider_supported_names)" = "$expected_supported" ] ||
   fail "supported provider catalog is incomplete: $(oms_provider_supported_names 2>&1 || true)"
+
+for provider in muse kimi kiro; do
+  if oms_provider_supports_access "$provider" read; then
+    fail "$provider must not support read calls"
+  fi
+done
+
+cat > "$TMP/bin/unrelated-cn" <<'BAD_CN'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version) echo 'CodeNode 1.0.0' ;;
+  --help) echo 'usage: cn command' ;;
+esac
+BAD_CN
+chmod +x "$TMP/bin/unrelated-cn"
+rm -f "$TMP/bin/cn"
+ln -s unrelated-cn "$TMP/bin/cn"
+OMS_PROVIDER_PROBE_CACHE='|'
+if oms_provider_cli_available continue; then
+  fail 'an unrelated cn executable entered the Continue provider pool'
+fi
+cat > "$TMP/bin/help-named-cn" <<'HELP_NAMED_CN'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version) echo 'cn 1.0.0' ;;
+  --help) echo 'Continue CLI usage' ;;
+esac
+HELP_NAMED_CN
+chmod +x "$TMP/bin/help-named-cn"
+rm -f "$TMP/bin/cn"
+ln -s help-named-cn "$TMP/bin/cn"
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_provider_cli_available continue || fail 'Continue identity probe ignored its help output'
+rm -f "$TMP/bin/cn"
+ln -s provider-fake "$TMP/bin/cn"
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_provider_cli_available continue || fail 'Continue identity probe rejected the Continue CLI'
 
 oms_provider_cli_discovered pi || fail 'the stale Pi wrapper should remain visible to diagnostics'
 if oms_provider_cli_available pi; then
   fail 'a hanging PATH wrapper must not enter the usable provider pool'
 fi
+
+for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli' 'continue cn'; do
+  set -- $pair
+  oms_provider_cli_discovered "$1" || fail "$2 should be discovered from PATH"
+  rm -f "$TMP/bin/$2"
+  if oms_provider_cli_discovered "$1"; then fail "$2 should be absent when removed from PATH"; fi
+  ln -s provider-fake "$TMP/bin/$2"
+done
 
 broken_json="$(bash "$ROOT/scripts/models.sh" --providers all --json)"
 OMS_MODELS_JSON="$broken_json" python3 - <<'PY' || fail 'models hid the discovered-but-broken provider'
@@ -166,6 +223,8 @@ for pair in \
   'mistral-vibe vibe' \
   'github-copilot copilot' \
   'factory-droid droid' \
+  'kiro-cli kiro' \
+  'cn continue' \
   'localfoo localfoo'; do
   set -- $pair
   [ "$(oms_provider_normalize "$1")" = "$2" ] || fail "provider alias $1"
@@ -181,12 +240,27 @@ fi
 [ "$(oms_provider_model_family cursor GLM-5.1)" = zhipu ] || fail 'Cursor GLM family'
 [ "$(oms_provider_model_family opencode provider-default)" = unknown ] ||
   fail 'multi-model provider defaults must not invent independence'
+[ "$(oms_provider_model_family muse provider-default)" = meta ] || fail 'Muse family'
+[ "$(oms_provider_model_family kimi provider-default)" = moonshot ] || fail 'Kimi family'
+[ "$(oms_provider_model_family kiro openai/gpt-5.6-sol)" = openai ] || fail 'Kiro model family inference'
+[ -z "$(oms_provider_primary_family kiro)" ] || fail 'Kiro is a multi-family carrier'
+[ "$(oms_provider_model_family continue anthropic/claude-sonnet-5)" = anthropic ] || fail 'Continue model family inference'
+[ "$(oms_provider_model_family kiro minimax-m2.5)" = minimax ] || fail 'Kiro open-weight model family inference'
+[ "$(oms_provider_primary_family muse)" = meta ] || fail 'Muse primary family'
+[ "$(oms_provider_primary_family kimi)" = moonshot ] || fail 'Kimi primary family'
 [ "$(oms_provider_effort_values pi)" = 'low medium high xhigh max' ] ||
   fail 'Pi effort scale must include the documented max level'
 
-for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid aider; do
+for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid aider continue; do
   oms_provider_supports_access "$provider" read || fail "$provider should support read calls"
   oms_provider_supports_access "$provider" write || fail "$provider should support isolated writes"
+done
+for provider in muse kimi kiro; do
+  if oms_provider_supports_access "$provider" read; then fail "$provider must not support read calls"; fi
+  oms_provider_supports_access "$provider" write || fail "$provider should support writes"
+  if oms_provider_requires_read_isolation "$provider"; then
+    fail "$provider should be refused reads instead of isolated"
+  fi
 done
 oms_provider_requires_read_isolation aider ||
   fail 'Aider read calls must isolate provider-created repo-map state'
@@ -203,6 +277,19 @@ OMS_PROVIDER_WRITE_ADAPTERS=localfoo oms_provider_supports_access localfoo write
 case ",$(oms_provider_peer_candidates claude | tr '\n' ',')" in
   *,localfoo,*) fail 'custom adapter leaked into the automatic peer pool' ;;
 esac
+for provider in muse kimi kiro; do
+  case ",$(oms_provider_peer_candidates claude "$provider" | tr '\n' ',')" in
+    *,"$provider",*) fail "$provider was selected as a preferred read seat" ;;
+  esac
+  case ",$(oms_provider_peer_candidates "$provider" '' all | tr '\n' ',')" in
+    *,"$provider",*) fail "$provider was selected as a read-seat fallback" ;;
+  esac
+done
+(
+  oms_provider_cli_available() { return 1; }
+  [ -z "$(oms_provider_peer_candidates kimi)" ] ||
+    fail 'a write-only caller was used as the last-resort read seat'
+)
 case ",$(oms_provider_peer_candidates claude '' all | tr '\n' ',')" in
   *,localfoo,*) ;;
   *) fail 'explicit all scope should include the custom adapter' ;;
@@ -237,6 +324,21 @@ for access in read write; do
       retired "$repo" "retired-$access" 2>/dev/null || rc=$?
     [ "$rc" = 2 ] || fail "retired transport did not fail closed for $access"
   )
+done
+
+read_refusal_prompt="$TMP/read-refusal-prompt"
+printf 'Review without changing anything\n' > "$read_refusal_prompt"
+for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli'; do
+  set -- $pair
+  rm -f "$TMP/logs/probes" "$TMP/logs/$2.argv"
+  rc=0
+  ma_provider_attempt "$1" read "$read_refusal_prompt" "$TMP/logs/$1.read-refused" \
+    "$TMP" provider-default '' provider-registry '' "refused-read-$1" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "$1 read call was not refused before launch"
+  grep -Fq "provider '$1' does not support read access" "$TMP/logs/$1.read-refused" ||
+    fail "$1 read refusal did not use the typed access error"
+  [ ! -e "$TMP/logs/probes" ] || fail "$1 read refusal ran a CLI probe"
+  [ ! -e "$TMP/logs/$2.argv" ] || fail "$1 read refusal launched the CLI"
 done
 
 call_provider() {
@@ -317,6 +419,12 @@ aider_scratch="$(awk 'previous == "--env-file" { print; exit } { previous=$0 }' 
 aider_scratch="$(dirname "$aider_scratch")"
 [ ! -e "$aider_scratch" ] || fail 'Aider private invocation state was not cleaned up'
 
+call_provider continue
+grep -Fxq -- '--readonly' "$TMP/logs/cn.argv" || fail 'Continue read-only mode missing'
+for binary in muse kimi kiro-cli cn; do
+  [ ! -s "$TMP/logs/$binary.stdin" ] || fail "$binary received a duplicate prompt on stdin"
+done
+
 for binary in dsh vibe pi copilot droid aider; do
   [ ! -s "$TMP/logs/$binary.stdin" ] ||
     fail "$binary received the prompt twice through its documented argv/file input and stdin"
@@ -358,8 +466,79 @@ run_write_attempt() {
       provider-default '' provider-registry '' "write-$provider"
 }
 
-for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid aider; do
+for provider in cursor grok gemini qwen opencode deepseek vibe pi copilot droid aider muse kimi kiro continue; do
   run_write_attempt "$provider" || fail "$provider write transport failed"
+done
+assert_argv() {
+  local binary="$1"
+  shift
+  printf '%s\n' "$@" > "$TMP/expected.argv"
+  cmp -s "$TMP/expected.argv" "$TMP/logs/$binary.argv" ||
+    fail "$binary argv mismatch: $(tr '\n' ' ' < "$TMP/logs/$binary.argv")"
+}
+run_exact() {
+  local provider="$1" access="$2" model="$3" effort="$4"
+  rm -f "$repo"/*-write.txt
+  OMS_TEST_WRITE="$([ "$access" = write ] && printf 1 || printf 0)" \
+    MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+    MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+    ma_provider_attempt "$provider" "$access" "$prompt_file" \
+      "$TMP/logs/$provider.exact-output" "$repo" "$model" "$effort" \
+      provider-registry '' "exact-$provider-$access" >/dev/null 2>&1 ||
+      fail "$provider $access exact argv call failed"
+}
+run_exact continue read provider-default ''
+assert_argv cn -p 'make one bounded test change' --readonly
+run_exact continue read continue-model ''
+assert_argv cn -p 'make one bounded test change' --model continue-model --readonly
+run_exact muse write provider-default ''
+assert_argv muse exec --disable-approval 'make one bounded test change'
+run_exact muse write meta-model ''
+assert_argv muse exec --model meta-model --disable-approval 'make one bounded test change'
+run_exact muse write meta-model high
+assert_argv muse exec --model meta-model --reasoning-effort high --disable-approval 'make one bounded test change'
+run_exact kimi write provider-default ''
+assert_argv kimi -p 'make one bounded test change'
+run_exact kimi write moonshot-model ''
+assert_argv kimi --model moonshot-model -p 'make one bounded test change'
+run_exact kiro write provider-default ''
+assert_argv kiro-cli chat --v3 --no-interactive --trust-all-tools 'make one bounded test change'
+run_exact kiro write model-id ''
+assert_argv kiro-cli chat --v3 --no-interactive --model model-id --trust-all-tools 'make one bounded test change'
+run_exact kiro write model-id high
+assert_argv kiro-cli chat --v3 --no-interactive --model model-id --effort high --trust-all-tools 'make one bounded test change'
+run_exact continue write provider-default ''
+assert_argv cn -p 'make one bounded test change' --auto
+run_exact continue write continue-model ''
+assert_argv cn -p 'make one bounded test change' --model continue-model --auto
+run_prompt_limit_case() {
+  local provider="$1" binary="$2" size="$3"
+  local out="$TMP/logs/$provider.limit-$size" rc=0
+  local limit_prompt="$TMP/prompt-limit"
+  if [ "$size" -eq 0 ]; then
+    : > "$limit_prompt"
+  else
+    awk -v bytes="$size" 'BEGIN { for (i = 0; i < bytes; i++) printf "x" }' > "$limit_prompt"
+  fi
+  rm -f "$TMP/logs/$binary.argv"
+  OMS_TEST_WRITE=1 MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+    MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
+    ma_provider_attempt "$provider" write "$limit_prompt" "$out" "$repo" \
+      provider-default '' provider-registry '' "size-$provider-$size" >/dev/null 2>&1 || rc=$?
+  if [ "$size" -gt 120000 ]; then
+    [ "$rc" -eq 2 ] || fail "$provider accepted an oversized argv prompt"
+    grep -Fq 'prompt is 120001B' "$out" || fail "$provider oversized-prompt error omitted its size"
+    [ ! -e "$TMP/logs/$binary.argv" ] || fail "$provider launched on an oversized prompt"
+  else
+    [ "$rc" -eq 0 ] || fail "$provider refused a prompt of $size bytes"
+    [ -e "$TMP/logs/$binary.argv" ] || fail "$provider did not launch at $size bytes"
+  fi
+}
+for pair in 'muse muse' 'kimi kimi' 'kiro kiro-cli' 'continue cn'; do
+  set -- $pair
+  run_prompt_limit_case "$1" "$2" 0
+  run_prompt_limit_case "$1" "$2" 120000
+  run_prompt_limit_case "$1" "$2" 120001
 done
 grep -Fxq -- '--force' "$TMP/logs/cursor-agent.argv" || fail 'Cursor write authority missing'
 
@@ -441,9 +620,9 @@ OMS_MODELS_JSON="$models_json" python3 - <<'PY' || fail 'models surface omitted 
 import json, os
 x = json.loads(os.environ["OMS_MODELS_JSON"])
 providers = {row["provider"]: row for row in x["providers"]}
-for name in ("codex", "claude", "antigravity", "cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "localfoo"):
+for name in ("codex", "claude", "antigravity", "cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "localfoo"):
     assert name in providers, (name, providers)
-for name in ("cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "localfoo"):
+for name in ("cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "localfoo"):
     assert providers[name]["present"] is True, (name, providers[name])
     assert providers[name]["usable"] is True, (name, providers[name])
 PY
@@ -453,19 +632,42 @@ OMS_DOCTOR_JSON="$doctor_json" python3 - <<'PY' || fail 'model-doctor auto detec
 import json, os
 x = json.loads(os.environ["OMS_DOCTOR_JSON"])
 names = [row["provider"] for row in x["providers"]]
-assert names == ["cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "localfoo"], names
+assert names == ["cursor", "grok", "gemini", "qwen", "opencode", "deepseek", "vibe", "pi", "copilot", "droid", "aider", "muse", "kimi", "kiro", "continue", "localfoo"], names
 assert all(row["installed"] and row["usable"] and row["provider_default_reachable"] for row in x["providers"]), x
 PY
 
 OMS_MCP_ROOT="$ROOT" python3 - <<'PY' || fail 'MCP provider routing diverged from the shell registry'
-import os, runpy
+import json, os, runpy, sys
 
 server = runpy.run_path(os.path.join(os.environ["OMS_MCP_ROOT"], "scripts/oms-mcp-server.py"))
+assignment = runpy.run_path(os.path.join(os.environ["OMS_MCP_ROOT"], "scripts/lib/task-assignment.py"))
+with open(os.path.join(os.environ["OMS_MCP_ROOT"], "config/capability-profiles.json"), encoding="utf-8") as stream:
+    config_profiles = json.load(stream)["profiles"]
+write_only = {"muse", "kimi", "kiro-cli"}
+for profile_name in ("core", "council"):
+    profile = config_profiles[profile_name]
+    names = set(profile["any_of"][0] if profile["any_of"] else profile["min_present"]["commands"])
+    assert not names.intersection(write_only), (profile_name, names)
+sys.path.insert(0, os.path.join(os.environ["OMS_MCP_ROOT"], "scripts/lib"))
+from oms_runtime.profiles import BUILTIN_PROFILE_DEFS
+for profile_name in ("core", "council"):
+    profile = BUILTIN_PROFILE_DEFS[profile_name]
+    names = set(profile["any_of"][0] if profile["any_of"] else profile["min_present"]["commands"])
+    assert not names.intersection(write_only), (profile_name, names)
 targets, error = server["peer_targets"](
     "dsh,mistral-vibe,github-copilot:model=gpt-5.3-codex,localfoo"
 )
 assert not error, error
 assert targets == ["deepseek", "vibe", "copilot:model=gpt-5.3-codex", "localfoo"], targets
+targets, error = server["peer_targets"]("kiro-cli,cn")
+assert not error and targets == ["kiro", "continue"], (targets, error)
+for alias in ("kiro-cli", "cn"):
+    try:
+        assignment["validate"]({"provider": alias})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("transport alias must not be persisted: " + alias)
 targets, error = server["peer_targets"]("glm")
 assert not targets and "registered provider" in error, (targets, error)
 PY

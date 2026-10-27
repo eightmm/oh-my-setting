@@ -1013,7 +1013,7 @@ if [ "$RUN_INVARIANTS" = 1 ]; then
     set -e
     . scripts/lib/provider-registry.sh
     for provider in $(oms_provider_supported_names); do oms_provider_is_builtin "$provider"; done
-    for alias in agy cursor-agent grok-build gemini-cli qwen-code opencode2 dsh deepseek-harness mistral-vibe github-copilot factory-droid; do
+    for alias in agy cursor-agent grok-build gemini-cli qwen-code opencode2 dsh deepseek-harness mistral-vibe github-copilot factory-droid kiro-cli cn; do
       normalized="$(oms_provider_normalize "$alias")"
       oms_provider_is_builtin "$normalized"
     done

@@ -123,6 +123,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 | **Typed runtime** | 작업 계약과 증거 범위를 살핀다. [Runtime 안내](docs/OMS-RUNTIME.md) |
 
 agent가 알아서 골라 쓴다. 전체 목록은 [docs/COMPONENTS.md](docs/COMPONENTS.md)에 있다.
+설치된 peer CLI로 Muse(`muse`), Kimi Code(`kimi`), Kiro(`kiro-cli`), Continue(`cn`)도
+사용할 수 있다. 접근 경계는 [provider 라우팅 안내](custom-skills/oms-agent-harness/references/provider-routing.md)를 참고한다.
 
 ## 참고
 

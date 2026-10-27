@@ -14,7 +14,7 @@ EFFORTS = {"auto", "low", "medium", "high", "xhigh", "max", "ultra"}
 # CLI aliases from provider-registry.sh are conveniences, not persisted IDs.
 TRANSPORT_ALIASES = {"agy", "cursor-agent", "grok-build", "gemini-cli", "qwen-code",
                      "opencode2", "dsh", "deepseek-harness", "mistral-vibe",
-                     "github-copilot", "factory-droid"}
+                     "github-copilot", "factory-droid", "kiro-cli", "cn"}
 # A known Codex role family at any version from panel_routing.CODEX_MIN_MAJOR
 # on: route_family's codex pattern, inlined because this file also runs copied
 # alone and through runpy.

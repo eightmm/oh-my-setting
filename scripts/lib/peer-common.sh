@@ -3373,6 +3373,66 @@ ma_provider_attempt() {
       fi
       cmd+=(--message-file "$prompt_file")
       ;;
+    muse)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Muse headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=("$binary" exec)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
+      if [ "$access" = write ]; then
+        cmd+=(--disable-approval)
+      fi
+      cmd+=("$(cat "$prompt_file")")
+      ;;
+    kimi)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Kimi headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=("$binary")
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      # Kimi's documented -p mode auto-approves tools and rejects --plan, so
+      # provider access policy refuses read calls before this write transport.
+      cmd+=(-p "$(cat "$prompt_file")")
+      ;;
+    kiro)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Kiro headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=("$binary" chat --v3 --no-interactive)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--effort "$effort")
+      [ "$access" != write ] || cmd+=(--trust-all-tools)
+      cmd+=("$(cat "$prompt_file")")
+      ;;
+    continue)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Continue headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      cmd=("$binary" -p "$(cat "$prompt_file")")
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      if [ "$access" = write ]; then
+        cmd+=(--auto)
+      else
+        cmd+=(--readonly)
+      fi
+      ;;
     *)
       binary="$(oms_provider_binary "$provider" 2>/dev/null)" || {
         echo "error: unsupported provider: $provider" > "$output_file"

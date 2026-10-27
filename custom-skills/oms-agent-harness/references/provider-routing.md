@@ -25,6 +25,10 @@ OMS recognizes these built-in transports when their executables are on PATH:
 | `copilot` | `copilot` | programmatic mode with MCP, shell, URL, and memory writes denied |
 | `droid` | `droid` | default read-only or bounded `--auto low` edits |
 | `aider` | `aider` | ask/dry-run or code mode; commits and shell suggestions off |
+| `muse` | `muse` | write calls only; no documented headless read-only mode |
+| `kimi` | `kimi` | write calls only; print mode auto-approves tools |
+| `kiro` | `kiro-cli` | write calls only; headless docs do not establish refusal of untrusted tools |
+| `continue` | `cn` | headless prompt with read-only or auto mode |
 
 Physical discovery only resolves an executable. Automatic routing additionally
 requires a bounded `--version`/`--help` usability probe; a hanging or stale shim
@@ -67,10 +71,18 @@ credentials, or organization policy that the CLI loads before the turn. Audit
 those layers separately when the repository or provider configuration is not
 already trusted.
 
-The built-in set is deliberately narrower than “every agent executable.” Kimi
-CLI prompt mode currently conflicts with plan mode and auto-approves tools;
-Trae, OpenHands, Goose, and similar surfaces stay custom-adapter candidates
-until a stable noninteractive read/write permission contract can be pinned.
+Read seats are admitted only when the OMS invocation uses a documented read-only
+or plan mode. Kimi's print mode auto-approves tools and cannot combine with
+`--plan`; Muse has no documented headless read-only mode. Kiro's headless docs
+describe explicit trust flags but do not state that untrusted tools are refused
+without one, so OMS treats it as write-only too. These providers are refused
+before launch for read calls and are excluded from automatic read/council pools.
+Write calls remain available through the worker-owned clone.
+
+The argv shapes below follow the cited vendor documentation and have not yet
+been exercised against the real provider CLIs. Kiro carries models from multiple
+vendors, so OMS infers its family from the model ID. Continue likewise carries
+configured models from multiple vendors.
 
 ## Upstream contracts
 
@@ -80,6 +92,12 @@ until a stable noninteractive read/write permission contract can be pinned.
 - [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
 - [Factory Droid Exec](https://docs.factory.ai/droid-exec/overview)
 - [Aider scripting](https://aider.chat/docs/scripting.html)
+- [Meta Muse Code headless and approval flags](https://dev.meta.ai/docs/muse-code/extending)
+- [Kimi Code CLI command reference](https://moonshotai.github.io/kimi-code/en/reference/kimi-command)
+- [Kiro CLI headless mode](https://kiro.dev/docs/cli/headless/)
+- [Kiro CLI v3 permissions migration](https://kiro.dev/docs/cli/v3/migration-guide/)
+- [Kiro model families](https://kiro.dev/docs/cli/models/)
+- [Continue CLI quickstart](https://docs.continue.dev/cli/quickstart)
 
 ## Custom adapters
 
