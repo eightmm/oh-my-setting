@@ -208,6 +208,19 @@ $path"
   fi
 }
 
+record_live_sibling() {  # PATH STAGE REPORT
+  local physical="$1" stage="$2" report="$3"
+
+  if [ -n "$SIBLING_LIVE" ]; then
+    SIBLING_LIVE="$SIBLING_LIVE; $physical $stage"
+  else
+    SIBLING_LIVE="$physical $stage"
+    SIBLING_FIRST_PATH="$physical"
+    SIBLING_FIRST_STAGE="$stage"
+  fi
+  [ "$report" -eq 0 ] || note "land $SHORT: live sibling worktree $physical ($stage)"
+}
+
 collect_sibling_worktree() {  # PATH BARE PRUNABLE REPORT
   local path="$1" bare="$2" prunable="$3" report="$4"
   local physical receipt metadata stage
@@ -227,14 +240,46 @@ collect_sibling_worktree() {  # PATH BARE PRUNABLE REPORT
     proposing|proposal-review|driving) ;;
     *) return 0 ;;
   esac
-  if [ -n "$SIBLING_LIVE" ]; then
-    SIBLING_LIVE="$SIBLING_LIVE; $physical $stage"
-  else
-    SIBLING_LIVE="$physical $stage"
-    SIBLING_FIRST_PATH="$physical"
-    SIBLING_FIRST_STAGE="$stage"
+  record_live_sibling "$physical" "$stage" "$report"
+}
+
+# A campaign executing in a scratch keeps its receipt in the canonical state
+# root, bound to the scratch: no sibling checkout holds a receipt of its own.
+collect_state_root_campaign() {  # REPORT
+  local report="$1" root receipt metadata stage bound physical
+
+  root="$(oms_state_root "$REPO" 2>/dev/null)" || return 0
+  root="$(oms_strip_cr "$root")"
+  root="$(cd "$root" 2>/dev/null && pwd -P)" || return 0
+  receipt="$root/.oms/plan/autopilot-run.json"
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 0
+  metadata="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" metadata "$receipt" 2>/dev/null)" || {
+    note_invalid_sibling_receipt "$root"
+    return 0
+  }
+  metadata="$(oms_strip_cr "$metadata")"
+  stage="${metadata%%$'\t'*}"
+  case "$stage" in
+    proposing|proposal-review|driving) ;;
+    *) return 0 ;;
+  esac
+  bound="${metadata#*$'\t'*$'\t'*$'\t'}"
+  [ -n "$bound" ] || return 0
+  # The receipt spells its repo natively (C:\work\project on Windows); an
+  # unresolvable one cannot be proven to be this checkout, so it counts as live.
+  physical="$bound"
+  if command -v oms_platform_is_windows >/dev/null 2>&1 && oms_platform_is_windows &&
+    command -v cygpath >/dev/null 2>&1; then
+    physical="$(cygpath -u "$bound" 2>/dev/null)" && physical="$(oms_strip_cr "$physical")" ||
+      physical=""
   fi
-  [ "$report" -eq 0 ] || note "land $SHORT: live sibling worktree $physical ($stage)"
+  # An empty path never reaches cd, which would succeed in the cwd (this checkout).
+  if [ -n "$physical" ]; then
+    physical="$(cd "$physical" 2>/dev/null && pwd -P)" || physical=""
+  fi
+  [ -n "$physical" ] || { record_live_sibling "$bound" "$stage" "$report"; return 0; }
+  [ "$physical" != "$REPO" ] || return 0
+  record_live_sibling "$physical" "$stage" "$report"
 }
 
 collect_live_siblings() {  # REPORT (0 or 1)
@@ -263,6 +308,7 @@ collect_live_siblings() {  # REPORT (0 or 1)
 $listing
 EOF
   collect_sibling_worktree "$path" "$bare" "$prunable" "$report"
+  collect_state_root_campaign "$report"
 }
 
 wait_for_live_siblings() {

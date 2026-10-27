@@ -229,7 +229,7 @@ python3 "$AUTOPILOT_RECEIPT" metadata "$sibling/.oms/plan/autopilot-run.json" |
   grep '^driving	' > /dev/null || fail "fixture sibling must carry a typed driving receipt"
 gate 'echo sibling gate ok'
 before="$(remote_tip)"
-if "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
+if bash -x "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
   > "$TMP/sibling-blocked.out" 2>&1; then
   fail "a live sibling must block before push: $(cat "$TMP/sibling-blocked.out")"
 fi
@@ -317,6 +317,84 @@ gate 'echo invalid sibling gate ok'
 [ "$(grep -c "ignoring invalid sibling autopilot receipt: $sibling_physical" "$TMP/sibling-invalid.err")" = 1 ] ||
   fail "the invalid receipt must be noted exactly once: $(cat "$TMP/sibling-invalid.err")"
 git -C "$repo" worktree remove --force "$sibling"
+
+# a scratch campaign keeps its receipt in the canonical root, bound to the scratch
+scratch="$TMP/scratch.. worktree"
+git -C "$repo" worktree add -q -b oms/autopilot-bbbbbbbbbbbb "$scratch" HEAD
+scratch_physical="$(cd "$scratch" && pwd -P)"
+canonical_receipt="$repo/.oms/plan/autopilot-run.json"
+rm -f "$canonical_receipt"
+write_autopilot_receipt "$repo" driving
+python3 - "$canonical_receipt" "$scratch_physical" <<'PY' || fail "cannot bind the canonical receipt to the scratch"
+import json, os, sys
+row = json.load(open(sys.argv[1]))
+row["repo"] = sys.argv[2]
+json.dump(row, open(sys.argv[1], "w"))
+PY
+python3 "$AUTOPILOT_RECEIPT" metadata "$canonical_receipt" | cut -f4 | grep -Fx -- "$scratch_physical" > /dev/null ||
+  fail "fixture canonical receipt must be bound to the scratch"
+gate 'echo scratch campaign gate ok'
+before="$(remote_tip)"
+if bash -x "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
+  > "$TMP/scratch-blocked.out" 2>&1; then
+  fail "a canonical-root campaign in a scratch must block: $(cat "$TMP/scratch-blocked.out")"
+fi
+[ "$(remote_tip)" = "$before" ] || fail "a blocked scratch campaign landing must not push"
+grep -Fq "sibling worktree $scratch_physical still driving" "$TMP/scratch-blocked.out" ||
+  fail "the blocked landing must name the scratch: $(cat "$TMP/scratch-blocked.out")"
+grep -Fq "siblings: $scratch_physical driving (waited 0s)" "$TMP/scratch-blocked.out" ||
+  fail "status must record the scratch campaign: $(cat "$TMP/scratch-blocked.out")"
+# a receipt repo that cannot be resolved is never proven to be this checkout
+python3 - "$canonical_receipt" "$TMP/no-such-checkout" <<'PY' || fail "cannot rebind the canonical receipt"
+import json, sys
+row = json.load(open(sys.argv[1]))
+row["repo"] = sys.argv[2]
+json.dump(row, open(sys.argv[1], "w"))
+PY
+if bash -x "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
+  > "$TMP/scratch-gone.out" 2>&1; then
+  fail "an unresolvable campaign repo must count as live: $(cat "$TMP/scratch-gone.out")"
+fi
+# a failed or empty Windows path conversion must not read as this checkout
+# (cd "" succeeds in the cwd): the campaign stays a live sibling
+mkdir -p "$TMP/cygpath-fail" "$TMP/cygpath-empty"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/cygpath-fail/cygpath"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/cygpath-empty/cygpath"
+chmod +x "$TMP/cygpath-fail/cygpath" "$TMP/cygpath-empty/cygpath"
+python3 - "$canonical_receipt" "$repo" <<'PY' || fail "cannot rebind the canonical receipt"
+import json, sys
+row = json.load(open(sys.argv[1]))
+row["repo"] = sys.argv[2]
+json.dump(row, open(sys.argv[1], "w"))
+PY
+for stub in cygpath-fail cygpath-empty; do
+  before="$(remote_tip)"
+  if env PATH="$TMP/$stub:$PATH" OMS_PLATFORM_OVERRIDE=windows \
+    "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
+    > "$TMP/scratch-$stub.out" 2>&1; then
+    fail "a $stub conversion must keep the campaign live: $(cat "$TMP/scratch-$stub.out")"
+  fi
+  [ "$(remote_tip)" = "$before" ] || fail "a $stub conversion must not push"
+  grep -Fq "still driving" "$TMP/scratch-$stub.out" ||
+    fail "a $stub conversion must wait on the campaign: $(cat "$TMP/scratch-$stub.out")"
+done
+
+# the landing checkout's own campaign is not a sibling
+# a non-normalized spelling of the same checkout (a symlink) is still this checkout
+ln -s "$repo" "$TMP/repo-link"
+python3 - "$canonical_receipt" "$TMP/repo-link" <<'PY' || fail "cannot rebind the canonical receipt"
+import json, os, sys
+row = json.load(open(sys.argv[1]))
+row["repo"] = sys.argv[2]
+json.dump(row, open(sys.argv[1], "w"))
+PY
+"$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
+  > "$TMP/scratch-own.out" 2>&1 ||
+  fail "a campaign bound to the landing checkout must not block: $(cat "$TMP/scratch-own.out")"
+grep -Fq "live sibling" "$TMP/scratch-own.out" &&
+  fail "the landing checkout's own campaign is not a sibling: $(cat "$TMP/scratch-own.out")"
+rm -f "$canonical_receipt"
+git -C "$repo" worktree remove --force "$scratch"
 
 # --- 4. red gate: failure recorded, nothing pushed -----------------------------
 gate 'echo boom; echo "check: affected:tests/demo-smoke.sh FAILED (1s)"; echo "check: scripts-smoke.test_demo FAILED"; exit 3'

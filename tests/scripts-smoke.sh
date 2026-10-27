@@ -11460,7 +11460,64 @@ EOF
     > "$project/live-out" 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "a live receipt must refuse adopt, got $rc"
   assert_file_contains "$project/live-out" "abandon"
+  # A typed receipt bound to this checkout blocks; one bound to another
+  # checkout (a scratch campaign elsewhere) does not guard this PROJECT.md.
+  write_bound_receipt() {  # REPO
+    python3 "$ROOT/scripts/lib/autopilot-receipt.py" write \
+      "$project/.oms/plan/autopilot-run.json" --expected absent \
+      --stage driving --repo "$1" --state-repo "$project" \
+      --spec-sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+      --planner codex --worker codex --reviewer codex \
+      --planner-reasoning-effort low --worker-reasoning-effort low \
+      --reviewer-reasoning-effort low --provider-timeout 1m --planner-timeout 1m \
+      --worker-timeout 1m --reviewer-timeout 1m --allowed . --base main \
+      --base-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --remote origin --max-cycles 1 \
+      --initial-tasks 1 --replan-tasks 1 --review-mode shadow \
+      --branch oms/autopilot-aaaaaaaaaaaa \
+      --owner-id owner_00000000000000000000000000000000 \
+      --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
+      fail "cannot write the bound receipt fixture"
+  }
   rm -f "$project/.oms/plan/autopilot-run.json"
+  write_bound_receipt "$project"
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-good \
+    > "$project/live-typed-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a receipt bound to this checkout must refuse adopt, got $rc"
+  assert_file_contains "$project/live-typed-out" "abandon"
+  rm -f "$project/.oms/plan/autopilot-run.json"
+  # a non-normalized spelling (symlink) of this checkout is still this checkout
+  ln -s "$project" "$TMP/project-link"
+  write_bound_receipt "$project"
+  python3 - "$project/.oms/plan/autopilot-run.json" "$TMP/project-link" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+row["repo"] = sys.argv[2]
+json.dump(row, open(sys.argv[1], "w"))
+PY
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-good \
+    > "$project/live-link-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a receipt bound through a symlink to this checkout must refuse adopt, got $rc"
+  assert_file_contains "$project/live-link-out" "abandon"
+  rm -f "$project/.oms/plan/autopilot-run.json"
+  # a failed or empty Windows path conversion cannot prove the receipt is elsewhere
+  mkdir -p "$TMP/cygpath-fail" "$TMP/cygpath-empty" "$TMP/elsewhere-scratch"
+  printf '#!/bin/sh\nexit 1\n' > "$TMP/cygpath-fail/cygpath"
+  printf '#!/bin/sh\nexit 0\n' > "$TMP/cygpath-empty/cygpath"
+  chmod +x "$TMP/cygpath-fail/cygpath" "$TMP/cygpath-empty/cygpath"
+  for stub in cygpath-fail cygpath-empty; do
+    write_bound_receipt "$TMP/elsewhere-scratch"
+    rc=0
+    (cd "$TMP" && env PATH="$TMP/$stub:$PATH" OMS_PLATFORM_OVERRIDE=windows \
+      "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-good \
+      > "$project/live-$stub-out" 2>&1) || rc=$?
+    [ "$rc" = 2 ] || fail "a $stub conversion must refuse adopt, got $rc"
+    assert_file_contains "$project/live-$stub-out" "abandon"
+    rm -f "$project/.oms/plan/autopilot-run.json"
+  done
+  mkdir -p "$TMP/elsewhere-scratch"
+  write_bound_receipt "$TMP/elsewhere-scratch"
 
   # Happy path: acceptance fails now (tests/greet.sh does not exist), adopt
   # confirms, provenance and body land byte-preserved.
@@ -11470,6 +11527,7 @@ EOF
   assert_file_contains "$project/PROJECT.md" "- State: confirmed"
   assert_file_contains "$project/PROJECT.md" "- Required checks: bash tests/greet.sh"
   assert_file_contains "$project/adopt-out" "plan-from-spec"
+  rm -f "$project/.oms/plan/autopilot-run.json"
 
   # An existing PROJECT.md refuses: overwriting a contract is deliberate.
   rc=0

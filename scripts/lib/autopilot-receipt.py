@@ -2109,7 +2109,7 @@ def main() -> int:
             return 0
         if args.command == "metadata":
             row, payload = load_receipt(path)
-            print("%s\t%s\t%s" % (row["stage"], row["spec_sha256"], digest(payload)))
+            print("%s\t%s\t%s\t%s" % (row["stage"], row["spec_sha256"], digest(payload), row["repo"]))
             return 0
         if args.command == "owner-id":
             row, _payload = load_receipt(path)

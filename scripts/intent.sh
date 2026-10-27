@@ -19,6 +19,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 . "$SCRIPT_DIR/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/work-journal.sh
 . "$SCRIPT_DIR/lib/work-journal.sh"
+# shellcheck source=scripts/lib/platform.sh
+. "$SCRIPT_DIR/lib/platform.sh"
 
 ACTION=""
 REPO="$PWD"
@@ -96,7 +98,31 @@ done
 REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
 INTENT_DIR="$REPO/.oms/intents"
 SPEC="$REPO/PROJECT.md"
-OUTER_RECEIPT="$REPO/.oms/plan/autopilot-run.json"
+OUTER_RECEIPT="$(oms_state_root "$REPO")" || fail "cannot resolve the state root"
+OUTER_RECEIPT="${OUTER_RECEIPT//$'\r'/}/.oms/plan/autopilot-run.json"
+
+# A scratch's campaign receipt lives in the canonical root, bound to the
+# scratch; a receipt bound to another checkout does not guard this PROJECT.md.
+outer_receipt_blocks() {
+  local metadata bound
+  [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ] || return 1
+  metadata="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" metadata "$OUTER_RECEIPT" 2>/dev/null)" ||
+    return 0
+  metadata="${metadata//$'\r'/}"
+  bound="${metadata#*$'\t'*$'\t'*$'\t'}"
+  [ "$bound" != "$metadata" ] || return 0
+  # The receipt spells its repo natively (C:\work\project on Windows). An
+  # empty bound or conversion never reaches cd, which would succeed in the cwd.
+  [ -n "$bound" ] || return 0
+  if oms_platform_is_windows && command -v cygpath >/dev/null 2>&1; then
+    bound="$(cygpath -u "$bound" 2>/dev/null)" || return 0
+    bound="${bound//$'\r'/}"
+    [ -n "$bound" ] || return 0
+  fi
+  bound="$(cd "$bound" 2>/dev/null && pwd -P)" || return 0
+  [ "$bound" != "$REPO" ] || return 0
+  return 1
+}
 
 # Bare names only: an id with a slash is a path, and paths are not ids. The
 # same rule the handoff store follows.
@@ -773,7 +799,7 @@ if [ "$ACTION" = adopt ]; then
 
   # A spec swap under a live autopilot run only bricks it into spec-changed
   # park — the same immutability the receipt enforces, said one step earlier.
-  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+  if outer_receipt_blocks; then
     fail "a live autopilot receipt exists; adopting a new contract under it would only brick the run — finish it or run: oms autopilot abandon --reason ..."
   fi
   if [ -e "$SPEC" ] || [ -L "$SPEC" ]; then
@@ -877,7 +903,7 @@ PY
     local live_sha=""
     local create_rc=0
 
-    if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+    if outer_receipt_blocks; then
       fail "a live autopilot receipt appeared during adopt; PROJECT.md was not published"
     fi
     if [ -e "$SPEC" ] || [ -L "$SPEC" ]; then
