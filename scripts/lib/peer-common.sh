@@ -2979,15 +2979,11 @@ ma_provider_attempt() {
     echo "error: provider '$provider' does not support $access access through this transport" > "$output_file"
     return 2
   fi
-  case "$provider" in
-    muse|kiro|cline|kilo|opencode|deepseek|auggie)
-      IFS= read -r -n 1 prompt_first < "$prompt_file" || :
-      if [ "$prompt_first" = '-' ]; then
-        echo "error: prompt begins with '-' and would be parsed as a CLI option by provider '$provider'" > "$output_file"
-        return 2
-      fi
-      ;;
-  esac
+  IFS= read -r -n 1 prompt_first < "$prompt_file" || :
+  if [ "$prompt_first" = '-' ]; then
+    echo "error: prompt begins with '-' and would be parsed as a CLI option by provider '$provider'" > "$output_file"
+    return 2
+  fi
   if [ "$model" != provider-default ] &&
     ! oms_provider_supports_model_override "$provider"; then
     echo "error: provider '$provider' has no documented per-invocation model override; configure its native profile or omit --model" > "$output_file"

@@ -259,8 +259,10 @@ oms_provider_cli_usable() {
     elif oms_provider_probe_quiet "$timeout_seconds" "${probe[@]}"; then
       result=0
     else
-      probe=("$binary")
-      for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
+      case "$provider" in
+        grok) probe=("$binary" --no-auto-update --help) ;;
+        *) probe=("$binary" --help) ;;
+      esac
       oms_provider_probe_quiet "$timeout_seconds" "${probe[@]}" && result=0
     fi
   fi

@@ -192,6 +192,56 @@ ln -s provider-fake "$TMP/bin/cn"
 OMS_PROVIDER_PROBE_CACHE='|'
 oms_provider_cli_available continue || fail 'Continue identity probe rejected the Continue CLI'
 
+cat > "$TMP/bin/probe-codex" <<'PROBE_CODEX'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version) echo 'codex version unavailable'; exit 1 ;;
+  --help) echo 'Codex top-level help'; exit 0 ;;
+  exec) echo 'exec --help' > "$OMS_TEST_LOG_DIR/codex.exec-probe"; exit 0 ;;
+esac
+exit 1
+PROBE_CODEX
+chmod +x "$TMP/bin/probe-codex"
+ln -sf probe-codex "$TMP/bin/codex"
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_provider_cli_available codex || fail 'top-level Codex help did not establish usability'
+[ ! -e "$TMP/logs/codex.exec-probe" ] ||
+  fail 'Codex usability probe invoked operational exec help'
+cat > "$TMP/bin/probe-codex-rejected" <<'REJECTED_CODEX'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version|--help) exit 1 ;;
+  exec) echo 'exec --help' > "$OMS_TEST_LOG_DIR/codex.exec-probe"; exit 0 ;;
+esac
+exit 1
+REJECTED_CODEX
+chmod +x "$TMP/bin/probe-codex-rejected"
+ln -sf probe-codex-rejected "$TMP/bin/codex"
+rm -f "$TMP/logs/codex.exec-probe"
+OMS_PROVIDER_PROBE_CACHE='|'
+OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh codex >/dev/null ||
+  fail 'Codex capability refresh failed'
+[ ! -e "$TMP/logs/codex.exec-probe" ] ||
+  fail 'Codex capability probe invoked operational help before identity passed'
+rm -f "$TMP/bin/codex"
+
+cat > "$TMP/bin/probe-grok" <<'PROBE_GROK'
+#!/usr/bin/env sh
+case "$*" in
+  '--no-auto-update version') exit 1 ;;
+  '--no-auto-update --help') echo 'Grok protected top-level help'; exit 0 ;;
+  --help) echo 'bare help invoked' > "$OMS_TEST_LOG_DIR/grok.bare-help-probe"; exit 0 ;;
+esac
+exit 1
+PROBE_GROK
+chmod +x "$TMP/bin/probe-grok"
+ln -sf probe-grok "$TMP/bin/grok"
+OMS_PROVIDER_PROBE_CACHE='|'
+oms_provider_cli_available grok || fail 'Grok protected top-level help did not establish usability'
+[ ! -e "$TMP/logs/grok.bare-help-probe" ] ||
+  fail 'Grok usability probe invoked help without update suppression'
+ln -sf provider-fake "$TMP/bin/grok"
+
 cat > "$TMP/bin/unrelated-goose" <<'BAD_GOOSE'
 #!/usr/bin/env sh
 case "${1:-}" in
@@ -631,22 +681,41 @@ run_leading_dash_prompt_case() {
   local provider="$1" binary="$2" out="$TMP/logs/$1.leading-dash" rc=0
   local dash_prompt="$TMP/prompt-leading-dash"
   local previous_argv="$TMP/logs/$binary.leading-dash-before"
+  local prior_probes="$TMP/logs/probes.leading-dash-before"
+  local had_argv=0
   printf '%s' '--help' > "$dash_prompt"
-  cp "$TMP/logs/$binary.argv" "$previous_argv" || fail "$provider lacks its prior argv record"
+  if [ -e "$TMP/logs/$binary.argv" ]; then
+    cp "$TMP/logs/$binary.argv" "$previous_argv"
+    had_argv=1
+  fi
+  cp "$TMP/logs/probes" "$prior_probes" 2>/dev/null || : > "$prior_probes"
   MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
     MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
     ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
       provider-default '' provider-registry '' "dash-$provider" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 2 ] || fail "$provider accepted a leading-dash positional prompt"
   grep -Fq "prompt begins with '-'" "$out" || fail "$provider leading-dash refusal omitted its reason"
-  cmp -s "$previous_argv" "$TMP/logs/$binary.argv" ||
-    fail "$provider launched for a leading-dash positional prompt"
-  rm -f "$previous_argv"
+  if [ "$had_argv" -eq 1 ]; then
+    cmp -s "$previous_argv" "$TMP/logs/$binary.argv" ||
+      fail "$provider launched for a leading-dash positional prompt"
+  else
+    [ ! -e "$TMP/logs/$binary.argv" ] || fail "$provider launched for a leading-dash positional prompt"
+  fi
+  cmp -s "$prior_probes" "$TMP/logs/probes" 2>/dev/null ||
+    fail "$provider probed a CLI for a leading-dash positional prompt"
+  rm -f "$previous_argv" "$prior_probes"
 }
-for pair in 'muse muse' 'kiro kiro-cli' 'cline cline' 'kilo kilo' 'opencode opencode' 'deepseek dsh' 'auggie auggie'; do
-  set -- $pair
-  run_leading_dash_prompt_case "$1" "$2"
+created_binaries=""
+for provider in $(oms_provider_supported_names); do
+  binary="$(oms_provider_binary "$provider")"
+  [ -n "$binary" ] || fail "$provider has no binary for leading-dash test"
+  if [ ! -e "$TMP/bin/$binary" ] && [ ! -L "$TMP/bin/$binary" ]; then
+    ln -s provider-fake "$TMP/bin/$binary"
+    created_binaries="$created_binaries$binary "
+  fi
+  run_leading_dash_prompt_case "$provider" "$binary"
 done
+for binary in $created_binaries; do rm -f "$TMP/bin/$binary"; done
 run_prompt_limit_case() {
   local provider="$1" binary="$2" size="$3"
   local out="$TMP/logs/$provider.limit-$size" rc=0
