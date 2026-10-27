@@ -678,6 +678,8 @@ a scanned root (`.oms/plan`, `.oms/artifacts`, `.oms/tasks`, `.oms/task`), and a
 other than the default `.oms/plan/tasks.json` also holds the default plan lock that
 collection takes. Collection holds the
 landing, marker, plan, lifecycle and artifact-index writer locks in that order.
+A live panel main session does not itself prevent collection; marked reference
+writers still prevent it until terminal, and other live attempts remain pins.
 It first quarantines a shared pathname inside the private generation directory
 and checks its inode again. A replacement is restored without overwriting a
 new occupant, or preserved in quarantine; it is never deleted as native data.

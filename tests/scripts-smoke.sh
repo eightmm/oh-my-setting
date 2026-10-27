@@ -26886,7 +26886,7 @@ if os.name != 'nt':
         assert result.returncode == 0, (mode,result.stdout,result.stderr)
 # GC quiescence: a non-terminal attempt pins captures only while it can still
 # publish a reference. Marked reference writers always veto; any other attempt
-# vetoes while its heartbeat is live, and stops once long expired (the age rule
+# except a panel main vetoes while its heartbeat is live, and stops once long expired (the age rule
 # of agent-events reconcile), since it will never reach a terminal state.
 import contextlib, io
 gc_repo = fixture/'gc-quiescence'; gc_repo.mkdir()
@@ -26912,6 +26912,10 @@ if os.name != 'nt':  # gc_quiescent preserves unconditionally on Windows before 
         e['append_lifecycle'](gc_repo, e['new_event'](k, attempts[k]['sequence'] + 1, 'attempt.state_changed',
                               from_state='starting', to_state='failed', actor={'kind': 'system', 'name': 'fixture'}))
     assert 'native attempt not terminal' not in gc_output(), 'long-expired foreign attempt pinned GC'
+    start('claude', 'panel-main')
+    assert 'native attempt not terminal' not in gc_output(), 'live panel main pinned GC'
+    start('codex', 'agent-task')
+    assert 'native attempt not terminal' in gc_output(), 'live capture-capable attempt did not veto GC'
 repo = fixture/'live'; repo.mkdir()
 packet = repo/'.oms/task/current.md'
 script = r'''

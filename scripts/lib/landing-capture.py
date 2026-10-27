@@ -1136,6 +1136,9 @@ def gc_quiescent(repo, days, apply, private_only=""):
             # their liveness is the owner's, so they veto regardless of age.
             if (attempt.get('refs') or {}).get('reference_writer') == 'landing-reference-v1':
                 return True
+            # A panel main is a session, not a capture or reference writer.
+            if attempt.get('tool') == 'panel-main':
+                return False
             # Any other attempt vetoes while its heartbeat is live (the age
             # rule of `agent-events reconcile`, default 300s); a long-expired
             # one never finishes and must not pin the quota. Unparseable
