@@ -626,6 +626,35 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     with handle:
         handle.write(text)
     return Path(handle.name), resume, note
+def continuation_defaults(repo, owner, main, task_id, env, room_id=None):
+    """Role, scope, workload and verifier of the newest recorded write dispatch for this main's task."""
+    from terminal_panel import _dispatch_call_record, _rework_history, events, owning_attempt, repository
+    from terminal_panel import resolve_call_alias
+    if env.get("OMS_ROOM_REPO"):
+        repo = repository(env["OMS_ROOM_REPO"])
+    task_id = resolve_call_alias(repo, room_id, task_id)
+    parents = owning_attempt(repo, owner, main, env)
+    rows = json.loads(events(repo, "list", "--json", output=True))
+    for row in reversed(_rework_history(rows, task_id, parents)):
+        refs = row.get("refs", {})
+        member = refs.get("panel_room_participant")
+        parent = next((r for r in rows if r.get("attempt_id") == row.get("parent_attempt_id")), {})
+        caller = parent.get("refs", {}).get("panel_room_participant", parent.get("attempt_id"))
+        if not (isinstance(member, str) and member and isinstance(caller, str) and caller
+                and isinstance(refs.get("panel_room_id"), str)):
+            continue
+        call = _dispatch_call_record(repo, refs["panel_room_id"], {"participant": member, "parent": caller})
+        if not call or call.get("schema") != 2 or call.get("task_id") != task_id:
+            continue
+        anchor = dispatch_store.read(repo, member + "-launch.json")
+        original = anchor.get("rework") if isinstance(anchor, dict) else None
+        if isinstance(original, dict):
+            return {"role": original["role"], "scope": list(original["scope"]),
+                    "workload": original["workload"], "verify": anchor.get("verify"),
+                    "purpose": refs.get("panel_purpose")}
+    return None
+
+
 def moved_main(repo, owner, env):
     """(room, participant) of the Claude main this session continues, when its panel identity is gone.
 

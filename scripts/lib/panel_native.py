@@ -109,7 +109,7 @@ def bootstrap(provider, repo):
         "Use fresh scoped briefs with paths, authority, constraints, success "
         "criteria and a return contract. Inspect the returned artifacts and "
         "patch, use patch-admit/patch-land when authorized, and verify the result. "
-        "Continue reviewed work with --continue TASK_ID. Salvage stopped write work first with --salvage TASK_ID. "
+        "Continue reviewed work with --continue TASK_ID --brief-file F (role, scopes, verify and workload default to the original write dispatch). Salvage stopped write work first with --salvage TASK_ID. "
         "Worker completion is not acceptance. Workers cannot recursively "
         "orchestrate. Do not commit, push or install without user authority. "
         "OMS records are shared; native conversations are separate. "

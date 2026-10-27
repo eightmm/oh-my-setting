@@ -765,7 +765,11 @@ Continue reviewed work with `--continue TASK_ID`: `oms panel --repo . --dispatch
 --continue TASK_ID --access write --brief-file next.md --verify COMMAND` takes the same role,
 workload and access checks; any write-capable role may continue (a builder session can
 become a refactorer), while reviewer, verifier, security-auditor, critic and the other
-read-only roles never resume. It finds the latest worker of that task owned by this
+read-only roles never resume. The short form `oms panel --repo . --owner claude
+--continue TASK_ID --brief-file next.md` takes the role, `--access write`, workload, every
+`--scope` and `--verify` from the task's newest recorded write dispatch in this main's
+lineage; any flag you pass overrides its recorded value, and a task with no recoverable
+write dispatch is refused with a message to pass `--dispatch ROLE`. It finds the latest worker of that task owned by this
 main, and starts a new run in a new worktree at the current HEAD that resumes
 the worker's native session (recorded as `refs.native_session` in the attempt,
 never in room text). A continuation transfers native conversation history only when

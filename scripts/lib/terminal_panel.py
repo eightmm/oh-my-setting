@@ -103,6 +103,7 @@ from panel_dispatch import _read_suite
 from panel_dispatch import _uses_smoke_runner
 from panel_dispatch import plan_link
 from panel_dispatch import _read_dispatch_brief
+from panel_dispatch import continuation_defaults
 from panel_dispatch import _validate_dry_run_inputs
 from panel_review import _safe_patch_path
 from panel_review import _AUTO_REVIEW_FRONTIER_PATHS
@@ -407,7 +408,7 @@ def main(argv=None):
     parser.add_argument("--result-id", help="saved result revision for --retry-delivery")
     parser.add_argument("--workload", choices=TIERS,
                         help="capability tier instead of the role's default; council accepts deep or frontier")
-    parser.add_argument("--access", choices=("read", "write"), default="read")
+    parser.add_argument("--access", choices=("read", "write"))
     parser.add_argument("--purpose", choices=("explain", "investigate", "implement"), help="plain worker task kind")
     parser.add_argument("--prompt", help="bounded read task for --dispatch")
     parser.add_argument("--brief-file", help="scoped task brief for --dispatch")
@@ -423,6 +424,41 @@ def main(argv=None):
     parser.add_argument("--alias", help="short unique room call name (1-8 letters, digits or hyphens)")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
+    if args.continue_task and args.brief_file and not (args.prompt or args.task_id) and args.access in (None, "write"):
+        # A follow-up round repeats the original write dispatch's inputs unless a flag overrides them.
+        inherited, unavailable = None, "no recorded write dispatch for the task"
+        try:
+            continue_owner = args.owner or caller_owner()
+            continue_repo = panel_repository(os.environ.get("OMS_ROOM_REPO") or args.repo)
+            if args.room:
+                room.identifier(args.room, "room")
+            continue_env = child_environment(continue_owner, continue_repo)
+            if args.room:
+                continue_env["OMS_ROOM_ID"] = args.room
+            inherited = continuation_defaults(continue_repo, continue_owner, args.main, args.continue_task,
+                                              continue_env, continue_env.get("OMS_ROOM_ID"))
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            unavailable = clean(str(error), 160)
+        if inherited:
+            args.dispatch = args.dispatch or inherited["role"]
+            args.access = "write"
+            if args.dispatch == "worker" and not args.purpose:
+                # Report-only (investigate) work must not turn into implement by omission.
+                # Named writers record their role as purpose; a move to a plain worker keeps the implement default.
+                if inherited["role"] == "worker":
+                    if inherited["purpose"] not in ("investigate", "implement"):
+                        parser.error("the original worker purpose was not recoverable; pass --purpose")
+                    args.purpose = inherited["purpose"]
+            # An explicit route (--to/--model) is incompatible with a capability tier.
+            if not (args.to or args.model):
+                args.workload = args.workload or inherited["workload"]
+            args.scope = args.scope or inherited["scope"] or None
+            args.verify = args.verify or inherited["verify"]
+        elif not args.dispatch:
+            parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no "
+                         "--prompt or --task-id; the original role was not recoverable (%s), so pass --dispatch ROLE "
+                         "--access write" % unavailable)
+    args.access = args.access or "read"
     if args.settle_review:
         if args.accept or args.finalize or args.results or args.retry_delivery:
             parser.error("--settle-review cannot be combined with result actions")

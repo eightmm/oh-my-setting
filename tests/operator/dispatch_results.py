@@ -624,6 +624,25 @@ for owner in panel.PROVIDERS:
     assert finalized["outcome"] == "completed", finalized
     assert counts(json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                    "--room", scratch_room, "--json"], scratch_env))["dashboard"]).get(main_attempts[owner], 0) == 0
+    # A short continuation keeps purpose=investigate, so a changed repository file is still rejected.
+    again_task = scratch_task + "-again"
+    again_room = room.create(project, again_task, "Report-only continuation")
+    room.join(project, again_room, main_attempts[owner], owner, "main")
+    again_env = dict(scratch_env, OMS_ROOM_ID=again_room)
+    first_round = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", again_room,
+                   "--dispatch", "worker", "--owner", owner, "--purpose", "investigate", "--access", "write",
+                   "--brief-file", str(scratch_brief), "--scope", "value.txt", "--verify", "test -f value.txt",
+                   "--task-id", again_task]
+    call(first_round, again_env)
+    short = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", again_room, "--owner", owner,
+             "--brief-file", str(scratch_brief), "--continue", again_task]
+    plan = json.loads(call(short + ["--dry-run"], again_env))
+    assert plan["route"]["purpose"] == "investigate" and "--allow-no-change" in plan["argv"], plan
+    assert plan["argv"][plan["argv"].index("--role") + 1] == "analysis-worker", plan
+    edited = subprocess.run(short, env=dict(again_env, PANEL_TEST_MODE="write"), capture_output=True, text=True,
+                            timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+    assert edited.returncode != 0 and "report-only investigation changed repository files" in (
+        edited.stdout + edited.stderr), edited
 
 # A researcher keeps the cheap family, read-only strategy and source evidence.
 from panel_routing import newest_route_model

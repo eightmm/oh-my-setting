@@ -1272,16 +1272,33 @@ for dry_run in (False, True):
     ) in refused.stderr, refused
     assert worker_log.read_bytes() == before, "cross-repository apply launched a worker"
     assert (other_project / "value.txt").read_text() == (project / "value.txt").read_text() == "old\n"
-for task_id, explicit_room, writing, continuing in (
-        ("cross-repo-explicit", True, False, False),
-        ("cross-repo-inherited", False, False, False),
-        ("cross-repo-write", True, True, False),
-        ("cross-repo-write", False, True, True)):
+cross_verify = 'git rev-parse --git-common-dir HEAD > "$PANEL_TEST_VERIFY_LOG"'
+# "short" omits role, access, workload, scope and verify; "override" omits all but --verify.
+for task_id, explicit_room, writing, continuing, form in (
+        ("cross-repo-explicit", True, False, False, ""),
+        ("cross-repo-inherited", False, False, False, ""),
+        ("cross-repo-write", True, True, False, ""),
+        ("cross-repo-write", False, True, True, ""),
+        ("cross-repo-write", False, True, True, "short"),
+        ("cross-repo-write", True, True, True, "override"),
+        ("cross-repo-write", False, True, True, "route"),
+        ("cross-repo-write", False, True, True, "role")):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(other_project),
                "--dispatch", "worker", "--owner", "claude", "--workload", "light"]
-    if writing:
+    if form:
+        request = ["bash", str(panel.ENTRY), "panel", "--repo", str(other_project), "--owner", "claude",
+                   "--brief-file", cross_brief.name, "--continue", task_id]
+        if form == "override":
+            request += ["--verify", cross_verify + '; echo override >> "$PANEL_TEST_VERIFY_LOG"']
+        if form == "role":
+            # Naming only the role still inherits access, scope, verify and workload.
+            request += ["--dispatch", "worker"]
+        if form == "route":
+            # An explicit provider route keeps working: the inherited workload tier must not join it.
+            request += ["--dispatch", "worker", "--access", "write", "--to", "codex", "--model", "gpt-6-luna"]
+    elif writing:
         request += ["--purpose", "implement", "--access", "write", "--brief-file", cross_brief.name,
-                    "--verify", 'git rev-parse --git-common-dir HEAD > "$PANEL_TEST_VERIFY_LOG"',
+                    "--scope", "value.txt", "--verify", cross_verify,
                     "--continue" if continuing else "--task-id", task_id]
     else:
         request += ["--purpose", "investigate", "--prompt", "Inspect value.txt without edits.", "--task-id", task_id]
@@ -1291,6 +1308,7 @@ for task_id, explicit_room, writing, continuing in (
     call_env = {key: value for key, value in room_env.items() if not (writing and key == "OMS_PEER_TIMEOUT")}
     call_env["OMS_AGENT"] = "claude"  # Match the fixture main independently of the host provider.
     before_calls = len(worker_log.read_text().splitlines())
+    verify_log.unlink() if verify_log.exists() else None
     answer = call(request, dict(call_env, PANEL_TEST_MODE="write" if writing else "",
                                PANEL_TEST_VERIFY_LOG=str(verify_log)))
     assert "artifact:" in answer, answer
@@ -1308,17 +1326,21 @@ for task_id, explicit_room, writing, continuing in (
         reviewer, = [row for row in calls if row["role"] == "reviewer"]
         assert reviewer["head"] == other_head and reviewer["git_common"] != observed["git_common"], reviewer
         assert Path(reviewer["cwd"]) not in (other_project, project, Path(observed["cwd"])), reviewer
-        expected_value = "old\n" + "new\n" * (2 if continuing else 1)
+        rounds = {"": 2 if continuing else 1, "short": 3, "override": 4, "route": 5, "role": 6}[form]
+        expected_value = "old\n" + "new\n" * rounds
         expected_blob = subprocess.check_output(["git", "-C", str(other_project), "hash-object", "--stdin"],
                                                 input=expected_value, text=True).strip()
         assert "100644 %s 0\tvalue.txt\n" % expected_blob in reviewer["index"], reviewer
-        assert verify_log.read_text().splitlines() == [reviewer["git_common"], other_head], "verifier missed the candidate"
+        assert verify_log.read_text().splitlines() == [reviewer["git_common"], other_head] + (
+            # The newest round's verifier is the one a later short form inherits.
+            ["override"] if form in ("override", "route", "role") else []), (form, "verifier missed the candidate", verify_log.read_text())
         assert not Path(reviewer["cwd"]).exists(), "cross-repository candidate cleanup failed"
         assert "applied: no (review patch, then: oms patch-land --repo %s --patch " % other_project in answer, answer
         assert "oms patch-land --repo %s --patch " % project not in answer, answer
     state = room.status(project, shared)
     enrolled = room.participant(state, observed["participant"])
     assert enrolled["parent"] == room_owner and enrolled["role"] == "worker", enrolled
+    assert enrolled["owns"] == (["value.txt"] if writing else []), enrolled
     messages = state["messages"]
     assert any(m["recipient"] == observed["participant"] and m["text"].startswith("Assigned:") for m in messages), messages
     assert any(m["sender"] == observed["participant"] and m["recipient"] == room_owner
@@ -1336,6 +1358,26 @@ for task_id, explicit_room, writing, continuing in (
     assert not (other_project / ".oms/artifacts/index.jsonl").exists(), "call artifact split into work repository"
     assert (other_project / "value.txt").read_text() == "old\n", "worker edited the source repository"
     assert (project / "value.txt").read_text() == "old\n", "worker edited the state repository"
+# A short-form continuation never widens an explicit flag or skips operation validation.
+for refused_flags, refused_text in ((["--access", "read"], "--continue requires a write-capable --dispatch role"),
+                                    (["--json"], "--json is only available"),
+                                    (["--watch"], "choose one panel operation")):
+    before = worker_log.read_bytes()
+    refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(other_project), "--owner", "claude",
+                              "--brief-file", cross_brief.name, "--continue", "cross-repo-write"] + refused_flags,
+                             env=dict(room_env, OMS_AGENT="claude"), capture_output=True, text=True, timeout=30)
+    assert refused.returncode == 2 and refused_text in refused.stderr, (refused_flags, refused)
+    assert worker_log.read_bytes() == before, "refused short-form continuation launched a worker"
+# A named writer's recorded purpose is its role: continuing as a plain worker keeps the implement default.
+named_env = dict(room_env, OMS_AGENT="claude", PANEL_TEST_MODE="write", PANEL_TEST_VERIFY_LOG=str(verify_log))
+call(["bash", str(panel.ENTRY), "panel", "--repo", str(other_project), "--room", shared, "--dispatch", "builder",
+      "--owner", "claude", "--access", "write", "--workload", "light", "--brief-file", cross_brief.name,
+      "--verify", cross_verify, "--task-id", "cross-repo-named"], named_env)
+named_plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(other_project), "--room", shared,
+                              "--dispatch", "worker", "--access", "write", "--owner", "claude",
+                              "--brief-file", cross_brief.name, "--continue", "cross-repo-named", "--dry-run"],
+                             named_env))
+assert named_plan["route"]["purpose"] == "implement" and named_plan["route"]["role"] == "worker", named_plan
 cross_brief.unlink()
 board = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results", "--json"], room_env))
 assert {row["task_id"] for row in board["rows"]} >= {
