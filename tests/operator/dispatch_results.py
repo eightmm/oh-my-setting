@@ -895,10 +895,10 @@ assert explicit_plan["task_id"] == explicit_id and explicit_plan["route"]["purpo
 assert explicit_plan["argv"][explicit_plan["argv"].index("--task-id") + 1] == explicit_id
 
 # Registered transports join the same task tree without a native launcher or
-# changes to preset allocation. Muse is a synthetic custom-adapter fixture.
+# changes to preset allocation. Lumen is a synthetic custom-adapter fixture.
 external_base = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
                  "--owner", "codex", "--purpose", "investigate", "--prompt", "Inspect value.txt without edits."]
-for target, expected in (("grok", "grok"), ("agy", "antigravity"), ("muse", "muse")):
+for target, expected in (("grok", "grok"), ("agy", "antigravity"), ("lumen", "lumen")):
     request = external_base + ["--to", target, "--model", target + "-fixture",
                                "--task-id", "external-" + target, "--label", "Inspect with " + target]
     planned = json.loads(call(request + ["--dry-run"]))
@@ -916,16 +916,16 @@ for target, expected in (("grok", "grok"), ("agy", "antigravity"), ("muse", "mus
     assert attempt["refs"]["panel_model"] == target + "-fixture" and attempt["state"] == "done"
     execution = json.loads(worker_log.read_text().splitlines()[-1])
     assert execution["cwd"] != str(project) and execution["parent"] == main_attempts["codex"]
-    if target == "muse":
+    if target == "lumen":
         assert execution["argv"][0] == "run" and "--access" in execution["argv"]
-        assert execution["argv"][execution["argv"].index("--model") + 1] == "muse-fixture"
+        assert execution["argv"][execution["argv"].index("--model") + 1] == "lumen-fixture"
 
-for options in (["--to", "muse"], ["--to", "muse", "--model", "provider-default"],
-                ["--to", "muse,grok", "--model", "fixture"], ["--to", "unregistered", "--model", "fixture"],
+for options in (["--to", "lumen"], ["--to", "lumen", "--model", "provider-default"],
+                ["--to", "lumen,grok", "--model", "fixture"], ["--to", "unregistered", "--model", "fixture"],
                 ["--to", "deepseek", "--model", "fixture"], ["--to", "codex", "--model", "gpt-5.6-sol"],
                 ["--to", "grok", "--model", "fixture", "--workload", "deep"],
                 ["--model", "fixture"], ["--reasoning-effort", "extreme"],
-                ["--to", "muse", "--model", "fixture", "--access", "write", "--purpose", "implement",
+                ["--to", "lumen", "--model", "fixture", "--access", "write", "--purpose", "implement",
                  "--brief-file", str(brief), "--verify", "test -f value.txt"]):
     before = worker_log.read_bytes()
     failure = subprocess.run(external_base + options + ["--dry-run"], cwd=project,
@@ -943,7 +943,7 @@ assert profile_route["route"]["model"] == "provider-default" and "--model" not i
 answer = call(external_base + ["--to", "vibe", "--task-id", "external-profile", "--label", "Inspect native profile"],
               dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 assert "artifact:" in answer
-for role, target in (("advisor", "grok"), ("reviewer", "muse")):
+for role, target in (("advisor", "grok"), ("reviewer", "lumen")):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
                "--owner", "codex", "--to", target, "--model", target + "-fixture", "--prompt", "Inspect source.",
                "--task-id", "external-" + role, "--label", "Inspect with " + role]
@@ -955,10 +955,10 @@ for role, target in (("advisor", "grok"), ("reviewer", "muse")):
         assert planned["argv"][planned["argv"].index("--strategy") + 1] == "advisor", planned["argv"]
     assert "--reasoning-effort" not in planned["argv"]
     call(request, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
-opted_in = dict(environment, OMS_PROVIDER_WRITE_ADAPTERS="muse")
+opted_in = dict(environment, OMS_PROVIDER_WRITE_ADAPTERS="lumen")
 write_request = [a for a in external_base[:external_base.index("--purpose")]] + [
-    "--to", "muse", "--model", "muse-fixture", "--access", "write", "--purpose", "implement",
-    "--brief-file", str(brief), "--verify", 'test "$(tail -1 value.txt)" = new', "--task-id", "external-muse-write",
+    "--to", "lumen", "--model", "lumen-fixture", "--access", "write", "--purpose", "implement",
+    "--brief-file", str(brief), "--verify", 'test "$(tail -1 value.txt)" = new', "--task-id", "external-lumen-write",
     "--label", "Implement with adapter"]
 assert json.loads(call(write_request + ["--dry-run"], opted_in))["route"]["access"] == "write"
 write_env = dict(opted_in, PANEL_TEST_MODE="write", OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"])
@@ -968,9 +968,9 @@ with patch.object(panel, "managed_session", return_value=False), patch.object(pa
         patch.object(panel, "provider_catalog", return_value=list(registered.values())), \
         patch.object(panel, "dispatch", return_value=0) as routed, \
         patch.object(panel.sys, "stdout", io.StringIO()), \
-        patch.object(panel, "read_field", side_effect=["p", "muse", "5", "muse-fixture", "", "Inspect source", "", "q"]):
+        patch.object(panel, "read_field", side_effect=["p", "lumen", "5", "lumen-fixture", "", "Inspect source", "", "q"]):
     assert panel.interactive(project) == 0
-    assert routed.call_args.kwargs == {"target": "muse", "model": "muse-fixture", "effort": None}
+    assert routed.call_args.kwargs == {"target": "lumen", "model": "lumen-fixture", "effort": None}
 snapshot = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))["dashboard"]
 panel_rows = [row for row in snapshot["attempts"]["recent"] if row.get("panel")]
 assert {row["panel"]["role"] for row in panel_rows} >= {"worker", "advisor", "reviewer"}, panel_rows

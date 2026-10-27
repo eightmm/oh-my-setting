@@ -680,30 +680,22 @@ assert_argv auggie --print --model model-x --permission edit:allow --permission 
 run_leading_dash_prompt_case() {
   local provider="$1" binary="$2" out="$TMP/logs/$1.leading-dash" rc=0
   local dash_prompt="$TMP/prompt-leading-dash"
-  local previous_argv="$TMP/logs/$binary.leading-dash-before"
-  local prior_probes="$TMP/logs/probes.leading-dash-before"
-  local had_argv=0
+  local argv_log="$TMP/logs/$binary.argv"
+  local stdin_log="$TMP/logs/$binary.stdin"
   printf '%s' '--help' > "$dash_prompt"
-  if [ -e "$TMP/logs/$binary.argv" ]; then
-    cp "$TMP/logs/$binary.argv" "$previous_argv"
-    had_argv=1
-  fi
-  cp "$TMP/logs/probes" "$prior_probes" 2>/dev/null || : > "$prior_probes"
   MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
     MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' \
     ma_provider_attempt "$provider" write "$dash_prompt" "$out" "$repo" \
       provider-default '' provider-registry '' "dash-$provider" >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 2 ] || fail "$provider accepted a leading-dash positional prompt"
-  grep -Fq "prompt begins with '-'" "$out" || fail "$provider leading-dash refusal omitted its reason"
-  if [ "$had_argv" -eq 1 ]; then
-    cmp -s "$previous_argv" "$TMP/logs/$binary.argv" ||
-      fail "$provider launched for a leading-dash positional prompt"
-  else
-    [ ! -e "$TMP/logs/$binary.argv" ] || fail "$provider launched for a leading-dash positional prompt"
-  fi
-  cmp -s "$prior_probes" "$TMP/logs/probes" 2>/dev/null ||
-    fail "$provider probed a CLI for a leading-dash positional prompt"
-  rm -f "$previous_argv" "$prior_probes"
+  [ "$rc" -eq 0 ] || fail "$provider refused a leading-dash positional prompt (exit $rc)"
+  [ -e "$argv_log" ] || fail "$provider did not launch for a leading-dash prompt"
+  python3 - "$argv_log" "$stdin_log" <<'PY'
+import pathlib, sys
+argv = pathlib.Path(sys.argv[1]).read_bytes()
+stdin_path = pathlib.Path(sys.argv[2])
+stdin = stdin_path.read_bytes() if stdin_path.exists() else b""
+assert b"\n--help" in argv or stdin.startswith(b"\n--help"), (argv, stdin)
+PY
 }
 created_binaries=""
 for provider in $(oms_provider_supported_names); do

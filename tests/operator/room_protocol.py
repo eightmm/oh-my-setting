@@ -27,11 +27,11 @@ inventory = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(pr
 registered = {row["provider"]: row for row in inventory["providers"]}
 assert inventory["executes"] is False and inventory["kind"] == "oms-panel-providers"
 assert not log.exists() and not worker_log.exists() and not (project / ".oms").exists()
-for name in ("grok", "antigravity", "muse"):
+for name in ("grok", "antigravity", "lumen"):
     assert registered[name]["installed"] and not registered[name]["native_launch"], registered[name]
     assert registered[name]["session_messaging"] == "room_polling"
     assert registered[name]["native_hook_wiring"] == "unverified"
-assert registered["muse"]["access"] == ["read"]
+assert registered["lumen"]["access"] == ["read"]
 assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
 # Roles pick by tier, quota and availability; missing readings spread load away from the owner.

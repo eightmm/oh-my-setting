@@ -26,7 +26,7 @@ brief = temporary / "panel-brief.md"
 brief.write_text("Task: append new to value.txt. No primary edits or recursive workers.\n")
 log = temporary / "panel-native-log.jsonl"
 worker_log = temporary / "panel-worker-log.jsonl"
-for provider in (*panel.PROVIDERS, "grok", "agy", "vibe", "oms-agent-adapter-muse"):
+for provider in (*panel.PROVIDERS, "grok", "agy", "vibe", "oms-agent-adapter-lumen"):
     executable = binary / provider
     executable.write_text('''#!/usr/bin/env bash
 set -eu

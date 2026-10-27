@@ -107,10 +107,12 @@ OpenHands also has no confirmed per-invocation model flag.
 Goose, Cline, Kilo, OpenHands, and Auggie can carry models across vendors, so
 their family is inferred from the selected model ID.
 
-Every transport refuses a prompt beginning with `-` rather than guessing
-whether that CLI supports an option terminator. Provider usability probes use
-only top-level version and help commands; provider-specific operational help
-is queried only after the usability probe passes.
+For a prompt beginning with `-`, every transport receives a temporary copy with
+one leading newline. This keeps CLI transports from parsing the prompt as an
+option while preserving the same prompt bytes after that newline; stdin
+transports receive the copy through stdin. Provider usability probes use only
+top-level version and help commands; provider-specific operational help is
+queried only after the usability probe passes.
 
 Provider credentials and initial setup must be completed before headless use:
 Goose `configure`, Cline `auth`, Kilo `/connect`, and Auggie `login` have

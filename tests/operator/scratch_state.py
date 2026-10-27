@@ -185,7 +185,7 @@ with patch.dict(os.environ, dict(selected_env, **{repo_paths.EXECUTION_ENV: str(
         command = created.call_args.args[0]
         assert command[command.index("-c") + 1] == str(working_root), command
     with patch.object(panel, "native_binary", return_value="resolution-adapter"):
-        adapter = panel.native_command("muse", shared_root)
+        adapter = panel.native_command("lumen", shared_root)
         assert adapter[adapter.index("--workdir") + 1] == str(working_root), adapter
     with patch.object(panel.panel_host, "herdr_active", return_value=True), \
             patch.object(panel.panel_host, "open_native") as host_launch:

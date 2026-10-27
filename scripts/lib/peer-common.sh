@@ -2958,6 +2958,7 @@ ma_provider_attempt() {
   local binary
   local prompt_arg=""
   local prompt_first=""
+  local prompt_copy=""
   local prompt_bytes=0
   local provider_stdin="$prompt_file"
   local provider_scratch=""
@@ -2980,10 +2981,6 @@ ma_provider_attempt() {
     return 2
   fi
   IFS= read -r -n 1 prompt_first < "$prompt_file" || :
-  if [ "$prompt_first" = '-' ]; then
-    echo "error: prompt begins with '-' and would be parsed as a CLI option by provider '$provider'" > "$output_file"
-    return 2
-  fi
   if [ "$model" != provider-default ] &&
     ! oms_provider_supports_model_override "$provider"; then
     echo "error: provider '$provider' has no documented per-invocation model override; configure its native profile or omit --model" > "$output_file"
@@ -3626,8 +3623,36 @@ PY
         export TMUX_TMPDIR="$panel_worker_root/tmux"
         unset TMUX TMUX_PANE
       fi
+      if [ "$prompt_first" = '-' ]; then
+        prompt_copy="$(mktemp "${prompt_file}.oms-prompt.XXXXXX")" || {
+          echo 'error: could not prepare a leading-dash prompt copy' > "$output_file"
+          exit 2
+        }
+        trap 'rm -f "$prompt_copy"' EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        if ! { printf '\n' > "$prompt_copy" && cat "$prompt_file" >> "$prompt_copy"; } ||
+          ! chmod 600 "$prompt_copy"; then
+          rm -f "$prompt_copy"
+          exit 2
+        fi
+        provider_stdin="$prompt_copy"
+        prompt_arg="$(cat "$prompt_file")"
+        local prompt_index
+        for prompt_index in "${!cmd[@]}"; do
+          if [ "${cmd[$prompt_index]}" = "$prompt_file" ]; then
+            cmd[$prompt_index]="$prompt_copy"
+          elif [ -n "$prompt_arg" ] && [ "${cmd[$prompt_index]}" = "$prompt_arg" ]; then
+            cmd[$prompt_index]="
+$prompt_arg"
+          fi
+        done
+      fi
       cd "$workdir" || exit 1
-      run_with_timeout "${cmd[@]}" < "$provider_stdin"
+      if run_with_timeout "${cmd[@]}" < "$provider_stdin"; then prompt_status=0; else prompt_status=$?; fi
+      [ -z "$prompt_copy" ] || rm -f "$prompt_copy"
+      exit "$prompt_status"
     ) > "$output_file" 2>&1 &
     local pid="$!"
 
