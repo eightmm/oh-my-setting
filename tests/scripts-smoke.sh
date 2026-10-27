@@ -22855,8 +22855,8 @@ PY
     [ "$(grep -c '"release_missing":true' "$project/.oms/landings.jsonl")" = 1 ] &&
       grep -F '"release_missing":true' "$project/.oms/landings.jsonl" | grep -F "$(printf 'a%.0s' $(seq 1 32))" > /dev/null ||
       fail "gc should release only the aged reservation whose directory is confirmed gone"
-    # Count drops by exactly the released reservation; pinned and locked stay charged.
-    [ "$(capture_usage)" = "$((${charge_before% *} - 1)) $((${charge_before#* } - 33554432))" ] ||
+    # Count drops by exactly the released reservation bytes; pinned and locked stay charged.
+    [ "$(capture_usage)" = "$((${charge_before% *} - 1)) $((${charge_before#* } - 2048))" ] ||
       fail "gc changed the quota of an inaccessible or digest-pinned reservation: $(capture_usage)"
   fi
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -F '"state": "ready"' > /dev/null ||
