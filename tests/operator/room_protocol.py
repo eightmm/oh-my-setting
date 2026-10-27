@@ -1335,8 +1335,10 @@ for task_id, explicit_room, writing, continuing, form in (
             # The newest round's verifier is the one a later short form inherits.
             ["override"] if form in ("override", "route", "role") else []), (form, "verifier missed the candidate", verify_log.read_text())
         assert not Path(reviewer["cwd"]).exists(), "cross-repository candidate cleanup failed"
-        assert "applied: no (review patch, then: oms patch-land --repo %s --patch " % other_project in answer, answer
-        assert "oms patch-land --repo %s --patch " % project not in answer, answer
+        assert "acceptance records landings under %s" % project in answer, answer
+        assert "oms scratch-worktree add --repo %s" % project in answer, answer
+        assert "oms patch-land --repo <that worktree> --patch " in answer, answer
+        assert "oms patch-land --repo %s --patch " % other_project not in answer, answer
     state = room.status(project, shared)
     enrolled = room.participant(state, observed["participant"])
     assert enrolled["parent"] == room_owner and enrolled["role"] == "worker", enrolled

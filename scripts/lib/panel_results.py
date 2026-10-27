@@ -782,7 +782,7 @@ def _review_preflight(repo, task_id, workers, rows, admissions=None):
                                   'gate_verify_exit': latest['review'].get('gate_verify_exit'),
                                   'seat_verdicts': [seat.get('verdict') for seat in latest['review']['seats']]})
     if missing_admission:
-        raise ValueError("write worker call(s) lack matching landed patch evidence: %s; acceptance needs oms patch-land of each worker's own patch using the exact delegate patch bytes so the landing is recorded; otherwise finalize with --outcome completed"
+        raise ValueError("write worker call(s) lack matching landed patch evidence: %s; acceptance needs oms patch-land of each worker's own patch using the exact delegate patch bytes so the landing is recorded; landing evidence is read from this state repository, so a patch-land run in an independent clone does not count; land from this checkout or an oms scratch-worktree; otherwise finalize with --outcome completed"
                          % ', '.join(missing_admission))
     if missing_reviews:
         raise ValueError('write worker call(s) lack a passing review gate: %s; run the review or finalize completed instead'

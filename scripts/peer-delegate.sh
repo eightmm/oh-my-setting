@@ -3171,6 +3171,8 @@ else
     echo "applied: no (review patch; plan task $PLAN_TASK_ID belongs to panel state repository $REPO; patch is based on $delegate_worktree_repo's HEAD; cross-repository plan landing requires owner coordination)"
   elif [ -n "$PLAN_TASK_ID" ]; then
     echo "applied: no (review patch, then: oms patch-land --repo $delegate_worktree_repo --patch $patch_file --plan-task $PLAN_TASK_ID)"
+  elif [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$delegate_worktree_repo" != "$REPO" ]; then
+    echo "applied: no (review patch; acceptance records landings under $REPO: create oms scratch-worktree add --repo $REPO, then oms patch-land --repo <that worktree> --patch $patch_file)"
   else
     echo "applied: no (review patch, then: oms patch-land --repo $delegate_worktree_repo --patch $patch_file)"
   fi

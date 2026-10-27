@@ -2888,6 +2888,8 @@ with patch.dict(os.environ, environment, clear=True), \
             assert "att_landed" not in message and "oms patch-land" in message, message
             assert "worker's own patch" in message and "exact delegate patch bytes" in message, message
             assert "landing is recorded" in message and "--outcome completed" in message, message
+            assert "state repository" in message and "independent clone" in message, message
+            assert "this checkout" in message and "oms scratch-worktree" in message, message
             assert "\n" not in message, message
     # END missing-admission diagnostic regression.
     unreviewed_rows = scope_evidence(simple_patch, reviewed=False)
