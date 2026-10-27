@@ -1363,10 +1363,32 @@ def missing_reservation(name, source_bytes):
     journal.write_bytes(b''.join(h['encoded'](row) for row in rows))
     return item
 
+os.environ['OMS_LANDING_CAPTURE_BYTES'] = str(16 * h['MAX_OBJECT'])
 missing_free = missing_reservation('missing-free', b'free payload')
 missing_pinned = missing_reservation('missing-pinned', b'pinned payload')
+missing_terminal = missing_reservation('missing-terminal', b'terminal payload')
+missing_recent = missing_reservation('missing-recent', b'recent terminal payload')
+missing_path_pin = missing_reservation('missing-path-pin', b'path pin payload')
+missing_ready = missing_reservation('missing-ready', b'ready payload')
+missing_unknown = missing_reservation('missing-unknown', b'unknown payload')
+missing_bad_time = missing_reservation('missing-bad-time', b'bad time payload')
+for item in (missing_terminal, missing_recent, missing_path_pin, missing_ready, missing_unknown, missing_bad_time):
+    h['append'](str(repo), 'capture-terminal', item)
+rows = h['rows'](str(repo))
+for row in rows:
+    if row.get('event') == 'capture-terminal' and row.get('managed_capture') in (
+            missing_terminal, missing_path_pin, missing_ready, missing_unknown, missing_bad_time):
+        row['ts'] = '2020-01-01T00:00:00Z'
+    if row.get('event') == 'capture-terminal' and row.get('managed_capture') == missing_bad_time:
+        row['ts'] = 'malformed'
+journal.write_bytes(b''.join(h['encoded'](row) for row in rows))
+h['append'](str(repo), 'capture-release-ready', missing_ready)
+h['append'](str(repo), 'capture-unrecognized', missing_unknown)
+(evidence_root / 'path-pin.txt').write_text(str(repo / '.oms/landing-patches' /
+                                               (missing_path_pin['landing_id'] + '.patch')))
 (evidence_root / 'sha-pin.txt').write_bytes(missing_pinned['sha256'].encode())
 h['collect'](str(repo), 1, True)
+os.environ.pop('OMS_LANDING_CAPTURE_BYTES')
 released = h['rows'](str(repo))
 assert any(row.get('event') == 'capture-released' and row.get('release_missing') is True and
            row.get('managed_capture', {}).get('generation') == missing_free['generation'] for row in released), \
@@ -1374,6 +1396,14 @@ assert any(row.get('event') == 'capture-released' and row.get('release_missing')
 assert not any(row.get('event') == 'capture-released' and row.get('release_missing') is True and
                row.get('managed_capture', {}).get('generation') == missing_pinned['generation'] for row in released), \
     'sha256 evidence did not pin the missing reservation'
+def missing_released(item):
+    return any(row.get('event') == 'capture-released' and row.get('release_missing') is True and
+               row.get('managed_capture') == item for row in released)
+assert missing_released(missing_terminal), 'aged missing terminal generation stayed charged'
+for item in (missing_recent, missing_path_pin, missing_ready, missing_unknown, missing_bad_time):
+    assert not missing_released(item), 'unsafe missing generation was released: ' + item['landing_id']
+journal.write_bytes(b''.join(h['encoded'](row) for row in released if row.get('managed_capture') not in (
+    missing_terminal, missing_recent, missing_path_pin, missing_ready, missing_unknown, missing_bad_time)))
 journal_before = journal.read_bytes()
 
 # publish() records whatever repository-local target it was given; a path-only

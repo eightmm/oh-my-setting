@@ -961,7 +961,7 @@ def absent(path):
 
 
 def release_missing(repo, item, log, evidence, days, apply):
-    """Release an aged reservation whose generation directory is gone.
+    """Release an aged reservation or terminal generation whose directory is gone.
 
     Nothing private can remain once the directory is absent, so the only
     surviving state is a publication path or a reference to it; either
@@ -969,9 +969,11 @@ def release_missing(repo, item, log, evidence, days, apply):
     """
     try:
         mine = [r for r in log if r.get('managed_capture', {}).get('generation') == item['generation']]
-        if any(r.get('event') != 'capture-reserved' for r in mine):  # terminal/ready rows own another path
+        if any(r.get('event') not in ('capture-reserved', 'capture-terminal') or
+               r.get('schema') != 1 or r.get('managed_capture') != item or
+               r.get('landing_id') != item['landing_id'] for r in mine):
             return
-        stamp = calendar.timegm(time.strptime(mine[0]['ts'], '%Y-%m-%dT%H:%M:%SZ'))
+        stamp = max(calendar.timegm(time.strptime(r['ts'], '%Y-%m-%dT%H:%M:%SZ')) for r in mine)
         if stamp > time.time() - days * 86400:
             return
         paths = [os.path.join(item['directory'], item['landing_id'] + '.patch'),
