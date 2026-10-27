@@ -1062,7 +1062,8 @@ result handoff. Sensitive summaries are withheld with an `oms panel --results --
 room races can still prevent delivery, while the indexed evidence remains available.
 Each reviewer result sends one addressed handoff containing the judgment and a
 findings pointer. A passing automatic review also prepares an editable completion
-summary and an owner finalization command; admission and acceptance remain explicit.
+summary and an owner finalization command, or names the paths outside the worker's
+declared scope instead of a command acceptance would refuse; admission and acceptance remain explicit.
 Room hook delivery still requires explicit `oms room ack` after consumption.
 Acknowledgment reminders are at most once per five minutes per session and are
 omitted when that hook delivers new mail.
