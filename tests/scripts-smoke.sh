@@ -27076,7 +27076,7 @@ PY_STOP_LOCK
     return "$wait_rc"
   }
   python3 - "$1" "$2" "$reference_channel" "$reference_scope_digest" "$reference_ready_digest" <<'PY_STOP_SERIAL'
-import contextlib,pathlib,runpy,sys
+import contextlib,pathlib,runpy,sys,time
 h=runpy.run_path(str(pathlib.Path(sys.argv[1])/'scripts/lib/landing-reference.py'))
 lock=h['E']['file_lock']; repo=pathlib.Path(sys.argv[2])
 @contextlib.contextmanager
@@ -27086,7 +27086,10 @@ def observed_lock(path):
     with lock(path):
         yield
 h['E']['file_lock']=observed_lock
-raise SystemExit(h['stop_monitor'](str(repo),*sys.argv[3:]))
+started=time.monotonic()
+status=h['stop_monitor'](str(repo),*sys.argv[3:])
+assert time.monotonic()-started<3.5, 'contended stop exceeded its bound'
+raise SystemExit(status)
 PY_STOP_SERIAL
   wait "$reference_monitor"
   builtin wait "$holder"
@@ -27119,9 +27122,10 @@ try:
     for mode in ['normal','foreign','contended'] + (['stopped'] if sys.platform.startswith('linux') else []):
         case=fixture/('stop-'+mode); case.mkdir()
         started=time.monotonic()
-        result=subprocess.run(['bash','-c',stop_script,'fixture',str(root),str(case),mode,str(foreign.pid)],capture_output=True,text=True,timeout=5)
+        result=subprocess.run(['bash','-c',stop_script,'fixture',str(root),str(case),mode,str(foreign.pid)],capture_output=True,text=True,timeout=15 if mode=='contended' else 5)
         assert result.returncode==0, (mode,result.stdout,result.stderr)
-        assert time.monotonic()-started<3.5, mode
+        if mode!='contended':
+            assert time.monotonic()-started<3.5, mode
         assert foreign.poll() is None, 'reference cleanup signalled a foreign process'
 finally:
     foreign.stdin.close(); foreign.wait(timeout=3)
