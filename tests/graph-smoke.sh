@@ -138,6 +138,56 @@ assert not summary["counts"]["kind"].get("test"), summary["counts"]
 assert summary["hubs"] and set(summary["hubs"][0]) == {"id", "kind", "degree"}, summary["hubs"]
 PY
 
+# The build caches a compact orientation brief; --brief prints that exact text.
+python3 - "$tmp/.oms/project-graph" "$work/map.json" <<'PY'
+import json
+import sys
+cached = json.load(open(sys.argv[1] + "/orientation.json"))
+summary = json.load(open(sys.argv[2]))
+assert cached["schema"] == 1 and cached["revision"] == summary["revision"], cached
+assert summary["areas"] and summary["file_hubs"], sorted(summary)
+assert all(row["kind"] == "file" for row in summary["file_hubs"]), summary["file_hubs"]
+PY
+run_graph "$work/brief.txt" project map --brief --no-refresh
+[ "$graph_rc" -eq 0 ] || fail "map --brief exited $graph_rc: $(cat "$work/brief.txt")"
+[ "$(wc -c < "$work/brief.txt")" -le 1537 ] || fail "the brief outgrew its byte cap"
+python3 - "$tmp/.oms/project-graph/orientation.json" "$work/brief.txt" <<'PY'
+import json
+import sys
+text = json.load(open(sys.argv[1]))["text"]
+assert open(sys.argv[2], encoding="utf-8").read() == text + "\n", "brief differs from the cached text"
+PY
+# Conflicting map options are refused before any automatic refresh: an absent
+# graph is not built and a stale one is not replaced.
+brief_state="$tmp/.oms/project-graph"
+printf '\n# stale\n' >> "$tmp/alpha.py"
+stale_sig="$(cat "$brief_state/graph.json" "$brief_state/manifest.json" "$brief_state/orientation.json" | cksum)"
+stale_mtime="$(ls -l --time-style=+%s "$brief_state/graph.json" 2>/dev/null || ls -l "$brief_state/graph.json")"
+for conflict in "--json" "--ui-model" "--html-fragment $work/brief-conflict.html"; do
+  # shellcheck disable=SC2086
+  run_graph "$work/brief-conflict.out" project map --brief $conflict
+  [ "$graph_rc" -eq 2 ] || fail "map --brief $conflict (stale graph) exited $graph_rc, expected 2"
+  [ "$(cat "$brief_state/graph.json" "$brief_state/manifest.json" "$brief_state/orientation.json" | cksum)" = "$stale_sig" ] \
+    || fail "map --brief $conflict refreshed a stale graph before refusing"
+  [ "$(ls -l --time-style=+%s "$brief_state/graph.json" 2>/dev/null || ls -l "$brief_state/graph.json")" = "$stale_mtime" ] \
+    || fail "map --brief $conflict rewrote graph.json"
+  [ ! -e "$work/brief-conflict.html" ] || fail "map --brief $conflict wrote an HTML fragment"
+  absent_out="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-brief-absent.XXXXXX")"
+  rm -rf "$absent_out/state"
+  graph_rc=0
+  OMS_PROJECT_GRAPH_STATE="$absent_out/state" "$OMS" graph --repo "$tmp" project map --brief $conflict \
+    > "$work/brief-conflict.out" 2>&1 || graph_rc=$?
+  [ "$graph_rc" -eq 2 ] || fail "map --brief $conflict (absent graph) exited $graph_rc, expected 2"
+  [ ! -e "$absent_out/state" ] || fail "map --brief $conflict built a graph before refusing"
+  rm -rf "$absent_out"
+done
+python3 - "$tmp/alpha.py" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, newline="").read()
+open(path, "w", newline="").write(text[:-len("\n# stale\n")])
+PY
+
 run_graph "$work/map-tests.json" project map --json --include-tests
 [ "$graph_rc" -eq 0 ] || fail "map --include-tests exited $graph_rc: $(cat "$work/map-tests.json")"
 python3 - "$work/map-tests.json" <<'PY'

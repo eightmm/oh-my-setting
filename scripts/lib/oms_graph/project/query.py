@@ -336,11 +336,17 @@ class Graph:
         by_kind: Dict[str, int] = {}
         by_language: Dict[str, int] = {}
         groups: Dict[str, List[str]] = {}
+        areas: Dict[str, Dict[str, Any]] = {}
         confidence_counts: Dict[str, int] = {}
         for node in self.nodes.values():
             by_kind[node["kind"]] = by_kind.get(node["kind"], 0) + 1
             language = node.get("language", "") or "unknown"
             by_language[language] = by_language.get(language, 0) + 1
+            if node["kind"] == "file":
+                path = node.get("path", "")
+                area = areas.setdefault(path.split("/", 1)[0] + "/" if "/" in path else "./", {"files": 0, "languages": {}})
+                area["files"] += 1
+                area["languages"][language] = area["languages"].get(language, 0) + 1
             if node["kind"] == "module":
                 path = node.get("path", "")
                 groups.setdefault(path.split("/", 1)[0] if "/" in path else "root", []).append(node["id"])
@@ -350,8 +356,12 @@ class Graph:
             confidence = str(edge.get("confidence", "AMBIGUOUS") or "AMBIGUOUS")
             confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
         ranked_degree = evidence_degrees(list(self.nodes.values()), self.graph.get("edges", []))
-        hubs = sorted(({"id": ident, "kind": node["kind"], "degree": ranked_degree[ident]["total"]} for ident, node in self.nodes.items()),
-                      key=lambda item: (-item["degree"], item["id"]))[:10]
+        ranked = sorted(({"id": ident, "kind": node["kind"], "degree": ranked_degree[ident]["total"]} for ident, node in self.nodes.items()),
+                        key=lambda item: (-item["degree"], item["id"]))
+        hubs = ranked[:10]
+        file_hubs = [item for item in ranked if item["kind"] == "file"][:8]
+        areas = {key: {"files": value["files"], "languages": dict(sorted(value["languages"].items()))}
+                 for key, value in sorted(areas.items())}
         return {"revision": str(self.graph.get("revision", "")), "counts": {"kind": dict(sorted(by_kind.items())), "language": dict(sorted(by_language.items())),
                                                                                "confidence": dict(sorted(confidence_counts.items()))},
-                "hubs": hubs, "groups": {key: sorted(value) for key, value in sorted(groups.items())}}
+                "hubs": hubs, "file_hubs": file_hubs, "areas": areas, "groups": {key: sorted(value) for key, value in sorted(groups.items())}}

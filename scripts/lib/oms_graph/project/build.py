@@ -23,6 +23,7 @@ GRAPH_BYTES_LIMIT = 256 * 1024 * 1024
 # whoever built it already made that decision.
 AUTOBUILD_MAX_FILES = 20000
 
+from . import orientation
 from .cache import cache_key, load_cached, prune, store
 from .extract import discover_files, extract_file
 from .parsers import parser_for
@@ -121,6 +122,7 @@ def build(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = 
                 "coverage": _coverage(discovery),
                 "stats": {"files": len(files), "nodes": len(nodes), "edges": len(edges), "cached": cached_count, "parsed": len(files) - cached_count}}
     atomic_write_json(directory / "manifest.json", manifest)
+    orientation.write(directory, graph, manifest, repo_name=repo.name)
     prune(directory, keys)
     return manifest
 

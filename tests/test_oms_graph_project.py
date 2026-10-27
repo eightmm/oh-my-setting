@@ -787,6 +787,35 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(ensure(self.repo, state=self.state)["action"], "refreshed")
         self.assertTrue(check(self.repo, state=self.state)["fresh"])
 
+    def test_map_summary_reports_areas_and_file_hubs_and_build_caches_orientation(self) -> None:
+        self.write("pkg/a.py", "def fail(): pass\n")
+        self.write("pkg/b.py", "from a import fail\ndef g(): return fail()\n")
+        self.write("run.sh", "fail() { :; }\nfail\n")
+        summary = Graph(self.graph()).map_summary()
+        self.assertEqual(summary["areas"]["pkg/"]["files"], 2)
+        self.assertEqual(summary["areas"]["pkg/"]["languages"], {"python": 2})
+        self.assertEqual(summary["areas"]["./"]["files"], 1)
+        self.assertTrue(summary["file_hubs"])
+        self.assertLessEqual(len(summary["file_hubs"]), 8)
+        self.assertEqual({item["kind"] for item in summary["file_hubs"]}, {"file"})
+        self.assertFalse([item for item in summary["file_hubs"] if "::" in item["id"]])
+        cached = json.loads((self.state / "orientation.json").read_text(encoding="utf-8"))
+        self.assertEqual(cached["schema"], 1)
+        self.assertEqual(cached["revision"], summary["revision"])
+        self.assertLessEqual(len(cached["text"].encode("utf-8")), 1536)
+        self.assertIn(summary["revision"][:12], cached["text"])
+
+    def test_orientation_brief_truncates_whole_lines_and_survives_empty_input(self) -> None:
+        from oms_graph.project.orientation import BRIEF_BYTES, brief_text
+        self.assertIn("[oms graph]", brief_text({}, {}, "r"))
+        summary = {"revision": "a" * 64, "areas": {"d%d/" % i: {"files": 1, "languages": {"python": 1}} for i in range(5)},
+                   "file_hubs": [{"id": "file:" + "p" * 400 + str(i), "kind": "file", "degree": i} for i in range(8)]}
+        text = brief_text(summary, {"stats": {"files": 1, "nodes": 2}}, "r")
+        self.assertLessEqual(len(text.encode("utf-8")), BRIEF_BYTES)
+        self.assertTrue(text.startswith("[oms graph]"))
+        self.assertNotIn("ask the graph", text)
+        self.assertNotIn("file hubs", text)
+
     def test_overview_views_drop_tests_unless_asked(self) -> None:
         self.write("a.py", "def f(): pass\n")
         self.write("tests/test_a.py", "from a import f\ndef test_f():\n    assert f() is None\n")

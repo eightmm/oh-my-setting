@@ -19,6 +19,7 @@ from .project import blast as project_blast
 from .project import history as project_history
 from .project import build as project_build
 from .project import context as project_context
+from .project import orientation as project_orientation
 from .project.query import Graph
 from oms_runtime.common import CoreError, atomic_write_bytes, read_json, repo_root
 
@@ -82,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     show_map.add_argument("--limit", type=int, default=100, help="maximum nodes in a visual output (1-200)")
     show_map.add_argument("--depth", type=int, default=2, help="neighbor depth in the HTML overview (0-4)")
     show_map.add_argument("--json", action="store_true")
+    show_map.add_argument("--brief", action="store_true", help="print the cached orientation brief (not combinable with --json or visual outputs)")
     map_visual = show_map.add_mutually_exclusive_group()
     map_visual.add_argument("--html-fragment", default="", metavar="ABSOLUTE_PATH",
                             help="write a bounded interactive HTML fragment for an agent UI")
@@ -276,14 +278,29 @@ def _project_check(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 3
 
 
-def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
+def _validate_map_args(args: argparse.Namespace) -> None:
+    """Refuse bad map options before dispatch's auto-refresh can touch graph state."""
     if args.limit < 1 or args.limit > 200:
         raise GraphError("project map --limit must be between 1 and 200")
     if args.depth < 0 or args.depth > 4:
         raise GraphError("project map --depth must be between 0 and 4")
     if args.json and args.ui_model:
         raise GraphError("project map cannot combine --json with a visual output")
+    if args.brief and (args.json or args.ui_model or args.html_fragment):
+        raise GraphError("project map --brief cannot combine with --json, --ui-model or --html-fragment")
+
+
+def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
     full_graph, index = _index(repo, state)
+    if args.brief:
+        revision = str(full_graph.get("revision", ""))
+        text = project_orientation.read(state, revision)
+        if not text:
+            manifest = read_json(state / "manifest.json", {})
+            text = project_orientation.brief_text(project_orientation.summarize(full_graph),
+                                                  manifest if isinstance(manifest, dict) else {}, repo.name)
+        print(text)
+        return 0
     graph = full_graph
     if not args.include_tests:
         index = index.without_tests()
@@ -814,6 +831,8 @@ def _auto_refresh(args: argparse.Namespace, repo: Path, state: Path) -> None:
 def dispatch(args: argparse.Namespace) -> int:
     if args.group == "project" and args.action in PROJECT_ACTIONS:
         repo, state = _project_state(args)
+        if args.action == "map":
+            _validate_map_args(args)
         _auto_refresh(args, repo, state)
         return PROJECT_ACTIONS[args.action](args, repo, state)
     if args.group == "exec" and args.action in EXEC_ACTIONS:

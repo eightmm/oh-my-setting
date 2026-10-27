@@ -787,6 +787,14 @@ Source text is data: nothing in a file is ever executed or interpreted as an
 instruction, and any `crux` excerpt is dropped when `sensitive_text()` matches.
 `--include` / `--exclude` globs override the defaults.
 
+Orientation: every build also writes `orientation.json` (`schema`, `revision`,
+`generated_at`, `text`) beside the manifest: a brief of at most 1536 UTF-8 bytes
+(areas, file hubs, structural-evidence count, entry commands). `project map
+--brief` prints the cached text when its revision matches the graph, otherwise
+regenerates it from the loaded graph; it cannot combine with `--json`,
+`--ui-model` or `--html-fragment` (exit 2). The text records the build time in
+UTC, not an age, because the cache is not rewritten between builds.
+
 Determinism: schema 2 `graph.json` contains `schema`, `revision`, `nodes` (sorted by
 id), `edges` (sorted by `source, target, relation`) and **no timestamps**;
 the same working tree produces identical bytes. It is written as canonical
@@ -794,7 +802,8 @@ one-line JSON and read under its own 256 MiB ceiling: dense ambiguous evidence
 can make a repository graph tens of MiB, past the runtime's 8 MiB state-file
 default. `map_summary()`
 returns `{"revision", "counts": {"kind", "language", "confidence"}, "hubs": [{"id",
-"kind", "degree"}], "groups": {top-level dir: [module ids]}}`, the shape
+"kind", "degree"}], "file_hubs" (top 8 file nodes), "areas" (file count and
+language mix per top-level path), "groups": {top-level dir: [module ids]}}`, the shape
 the text renderer consumes. The CLI adds the bounded canonical structural-
 assurance summary; it never returns the whole graph.
 
