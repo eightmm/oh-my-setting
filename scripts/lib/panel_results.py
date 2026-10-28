@@ -704,19 +704,26 @@ def _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding):
     if not main_id:
         return
     if binding is not None:
-        # Finished tasks retain their claimant and lease, so retries use the same check.
+        from panel_dispatch import PlanBinding
+        from panel_state import active_mains
         try:
-            _owned_task(repo, repo, owner, task_id)
-        except ValueError as error:
-            from panel_dispatch import PlanBinding
-            try:
-                plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
-                                  object_pairs_hook=PlanBinding.unique_fields)
-                task = plan.get('tasks', {}).get(task_id)
-                if isinstance(task, dict) and task.get('id') == task_id and not task.get('claimed_by_participant'):
-                    return
-            except (OSError, TypeError, ValueError, AttributeError):
-                pass
+            plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
+                              object_pairs_hook=PlanBinding.unique_fields)
+            task = plan.get('tasks', {}).get(task_id)
+            if not isinstance(task, dict) or task.get('id') != task_id:
+                raise ValueError('plan task is unavailable')
+            claimant = task.get('claimed_by_participant')
+            if claimant is None or claimant == '':
+                return
+            caller = os.environ.get('OMS_ROOM_PARTICIPANT')
+            ident = os.environ.get('OMS_ROOM_ID')
+            if not isinstance(claimant, str) or not caller or not ident or claimant != caller:
+                raise ValueError('plan claimant does not match')
+            state = room.project(room.records(repo, ident))
+            main = active_mains(repo, ident, state, owner, caller=caller, attempt=main_id).get(caller)
+            if state['closed'] or not main or main['attempt_id'] != main_id:
+                raise ValueError('current room main is unavailable')
+        except (OSError, TypeError, ValueError, AttributeError) as error:
             raise ValueError('finalize task %s is not owned by the calling main: %s'
                              % (task_id, error)) from error
         return
@@ -732,7 +739,8 @@ def _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding):
         ident, seen = attempt.get('attempt_id'), set()
         while ident not in eligible:
             if not ident or ident in seen or ident not in by_id:
-                raise ValueError('finalize task %s does not descend from the calling main' % task_id)
+                raise ValueError('finalize task %s attempt %s does not descend from the calling main'
+                                 % (task_id, attempt.get('attempt_id')))
             seen.add(ident)
             ident = by_id[ident].get('parent_attempt_id')
 

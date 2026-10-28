@@ -1606,7 +1606,7 @@ def exercise_finalize_task_ownership():
     prior_worker = call(swap_events + ["start", "--provider", "local", "--tool", "peer-delegate",
         "--task-id", "owned-task", "--parent-attempt-id", prior, "--ref", "panel_role=worker",
         "--then", "starting", "--then", "working"], swap_env).strip()
-    call(swap_events + ["transition", "--attempt", prior, "--state", "abandoned",
+    call(swap_events + ["transition", "--attempt", prior, "--state", "blocked", "--then", "abandoned",
                        "--actor", "panel-main", "--reason-code", "main_swapped"], swap_env)
     with patch.dict(os.environ, swap_env, clear=True):
         room.swap_main(swap_repo, swap_env["OMS_ROOM_ID"], swap_env["OMS_ROOM_PARTICIPANT"],
