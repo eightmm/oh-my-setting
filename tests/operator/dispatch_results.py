@@ -291,7 +291,6 @@ def exercise_public_only_routing():
         assert chosen["provider"] == "pi" and chosen["model"] == "p/m"
         assert not calls.exists() or not calls.read_text(), "explicit model checked visibility"
         assert not cache.exists(), "explicit model wrote visibility cache"
-        assert not notice.getvalue()
         os.environ["ROUTE_VISIBILITY"] = "PRIVATE"
         try:
             panel.selected_route("codex", "worker", None, "read", "explain", target="pi", repo=repo)

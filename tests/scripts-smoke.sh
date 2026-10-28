@@ -21027,25 +21027,25 @@ test_delegate_worker_does_not_receive_primary_state_env() {
 cat > /dev/null
 printf '%s\n' "$TMPDIR" "$TMP" "$TEMP" "$(pwd -P)" > "$HOME/worker-temp-env"
 [ -d "$TMPDIR" ] || exit 1
+case "$(ls -ld "$TMPDIR")" in ?????w* | ????????w*) exit 1 ;; esac
 printf 'state_repo=%s agent=%s\n' "${OMS_STATE_REPO:-}" "${OMS_AGENT:-}" > worker-env.txt
 echo "worker done"
 EOF
   chmod +x "$bin_dir/codex"
 
-  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  (umask 0002; HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$project/artifacts" \
     --no-verify \
-    --prompt "Report harness env" >/dev/null 2>&1 ||
+    --prompt "Report harness env") >/dev/null 2>&1 ||
     fail "stub delegation should succeed"
   local worker_tmp worker_tmp_alias worker_temp worker_tree
   { IFS= read -r worker_tmp; IFS= read -r worker_tmp_alias; IFS= read -r worker_temp; IFS= read -r worker_tree; } < "$home_dir/worker-temp-env"
   [ "$worker_tmp" = "${worker_tree%/*}/tmp" ] || fail "worker temporary directory is outside its worktree parent"
   [ "$worker_tmp_alias" = "$worker_tmp" ] && [ "$worker_temp" = "$worker_tmp" ] || fail "temporary directory aliases differ"
   [ ! -e "$worker_tmp" ] || fail "worker temporary directory survived cleanup"
-  assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'agent=codex'
   assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'state_repo= agent=codex'
   if grep -Fq "$project" "$project"/artifacts/*.patch; then
     fail "write worker patch must not contain the primary state path"

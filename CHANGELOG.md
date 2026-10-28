@@ -38,6 +38,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 - A consumed main-swap release can no longer be replayed. An identical retry is a no-op, and any other event naming a consumed or superseded main attempt is refused, so a replay cannot clear the successor main's binding.
 - Explicit standalone review settlement now selects workers whose parent attempt record was compacted away, so already-orphaned review workers can be closed. Lifecycle compaction also keeps a terminal attempt while a retained attempt names it as parent, preventing a compacted main from orphaning its review workers.
+- Room-bound standalone review workers with no parent main settle once their exit is proven by the index and their launch record
+  shows the call finished. Without a launch record they settle on exit proof plus age; any read error leaves them pending.
+- A delegate worker's temporary directory is created mode 0700. Under umask 0002 it was group-writable, so operator suites
+  run inside the worker refused it as an unsafe dispatch state ancestor.
 
 ### Removed
 

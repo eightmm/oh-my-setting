@@ -1972,7 +1972,7 @@ run_worker() {
   fi
   OMS_LAST_ATTEMPT_ID=""
   OMS_LAST_ATTEMPT_OWNED=0
-  if ! mkdir -p "$worktree_parent/tmp"; then
+  if ! mkdir -p "$worktree_parent/tmp" || ! chmod 700 "$worktree_parent/tmp"; then
     echo "error: could not create delegate temporary directory" >&2
     worker_status=125
     route_retry_terminal=1
