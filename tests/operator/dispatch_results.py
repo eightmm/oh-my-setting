@@ -215,6 +215,7 @@ def run_continuation_fixture(room_repo, work_repo, base):
                 "patch_sha256": call["patch_sha256"], "event_id": call["event_id"], "base_sha": base}
     brief = temporary / "continuation-regression-brief.md"
     brief.write_text("Continue the task.\n")
+    reference = {}
     with patch.object(panel, "work_repository", side_effect=lambda path: Path(path)), \
          patch.object(panel, "owning_attempt", return_value=["parent"]), \
          patch.object(panel, "events", return_value=json.dumps(rows)), \
@@ -225,7 +226,9 @@ def run_continuation_fixture(room_repo, work_repo, base):
          patch.object(continuation_results, "_records", return_value=([], [artifact])):
         materialized, _, note = dispatch.continuation(
             room_repo, "codex", None, "continuation-regression", {"provider": "codex"}, brief, {},
-            work_repo=work_repo, patch_reference={})
+            work_repo=work_repo, patch_reference=reference)
+    if reference:
+        assert reference["attempt"] == previous["attempt_id"], reference
     text = Path(materialized).read_text()
     Path(materialized).unlink()
     return note, text
@@ -3453,6 +3456,20 @@ with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_regi
             settled_retry = review_settlement._settle(project, [previous], [], {"scope-main"},
                 {"scope-result": (accepted_retry, {"ts": "2026-10-17T00:00:00Z"})})
             assert not settled_retry["pending"] and settled_retry["superseded"][0]["attempt"] == previous["attempt_id"]
+    previous = dict(failed_worker, state="review")
+    continued = dict(retry_worker, refs=dict(retry_worker["refs"], panel_continues=previous["attempt_id"]))
+    with patch.object(saved, "_records", return_value=([previous, continued], [failed_row] + retry_rows)):
+        result = saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+        assert result["superseded_attempts"] == [{"attempt_id": previous["attempt_id"],
+            "superseded_by": continued["attempt_id"], "reason": "continued"}], result
+    middle = dict(continued, attempt_id="att_middle", created_at="2026-10-16T00:00:01.5Z")
+    last = dict(continued, refs=dict(continued["refs"], panel_continues=middle["attempt_id"]))
+    selected, landed, superseded = saved._write_candidates([previous, middle, last], [None, None, {"event_id": "landed"}], [], "codex")
+    assert selected == [last] and len(superseded) == 2 and all(item["reason"] == "continued" for item in superseded)
+    for ref in (None, "", "malformed", "att_missing"):
+        candidate = dict(continued, refs=dict(continued["refs"], panel_continues=ref))
+        selected, _, superseded = saved._write_candidates([previous, candidate], [None, {"event_id": "landed"}], [], "codex")
+        assert selected == [previous, candidate] and not superseded
     # A -> B -> C retains one participant even after both write parents stop.
     gone = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
     gone_refs = dict(panel_release.process_refs(gone.pid, "wrapper"), **panel_release.process_refs(gone.pid, "native"))

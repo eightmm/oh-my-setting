@@ -669,8 +669,22 @@ def _write_candidates(workers, admissions, attempts, owner, main_id=None):
     superseded, selected, landed, lineages = [], [], [], {}
     for index, worker in enumerate(workers):
         replacement = None
+        reason = None
+        if not admissions[index] and worker.get('task_id'):
+            for end in range(index + 1, len(workers)):
+                if not admissions[end] or workers[end].get('task_id') != worker['task_id']:
+                    continue
+                cursor = end
+                while cursor > index:
+                    previous = workers[cursor].get('refs', {}).get('panel_continues')
+                    cursor = next((pos for pos in range(cursor - 1, index - 1, -1)
+                                   if workers[pos].get('attempt_id') == previous
+                                   and workers[pos].get('task_id') == worker['task_id']), -1)
+                if cursor == index:
+                    replacement, reason = workers[end], 'continued'
+                    break
         # Unassigned writes and distinct aliases cannot be assumed to be retries.
-        if (not admissions[index] and worker.get('task_id') and worker.get('parent_attempt_id')
+        if (not replacement and not admissions[index] and worker.get('task_id') and worker.get('parent_attempt_id')
                 and worker.get('state') in {'failed', 'timed_out', 'cancelled', 'abandoned'}):
             for later, admission in zip(workers[index + 1:], admissions[index + 1:]):
                 parent = later.get('parent_attempt_id')
@@ -692,7 +706,7 @@ def _write_candidates(workers, admissions, attempts, owner, main_id=None):
         if replacement:
             superseded.append({'attempt_id': worker['attempt_id'],
                                'superseded_by': replacement['attempt_id'],
-                               'reason': worker.get('reason_code') or worker['state']})
+                               'reason': reason or worker.get('reason_code') or worker['state']})
         else:
             selected.append(worker)
             landed.append(admissions[index])

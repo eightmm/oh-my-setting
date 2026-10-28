@@ -608,7 +608,8 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                          % name)
             else:
                 drift_note = _continuation_base_note(head_repo, base, body, allow_stale_base)
-                patch_reference.update(patch=patch, sha256=call.get("patch_sha256"), base=base)
+                patch_reference.update(patch=patch, sha256=call.get("patch_sha256"), base=base,
+                                       attempt=last["attempt_id"])
                 where = (" The harness applies your previous patch (%s) at its original base before this round. "
                          "Continue from the applied changes; do not reapply it. The patch you return is against "
                          "that original base, not the current HEAD." % name)
@@ -2289,8 +2290,12 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     env.pop("OMS_RESUME_USAGE_BASELINE", None)
     if resume_usage_baseline:
         env["OMS_RESUME_USAGE_BASELINE"] = resume_usage_baseline
+    env.pop("OMS_PANEL_CONTINUES", None)
     if continuation_patch:
-        env["OMS_PANEL_CONTINUATION"] = json.dumps(continuation_patch, separators=(",", ":"))
+        if continuation_patch.get("attempt"):
+            env["OMS_PANEL_CONTINUES"] = continuation_patch["attempt"]
+        env["OMS_PANEL_CONTINUATION"] = json.dumps(
+            {key: value for key, value in continuation_patch.items() if key != "attempt"}, separators=(",", ":"))
     if access == "write" and not env.get("OMS_PEER_TIMEOUT"):
         # A scoped build plus its own checks outlasts the 30m delegate wall; high effort gets the longest.
         env["OMS_PEER_TIMEOUT"] = "60m" if route.get("effort") == "high" else "40m"

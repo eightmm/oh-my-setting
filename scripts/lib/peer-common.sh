@@ -954,7 +954,7 @@ ma_export_child_env() {
   # it prevents accidental/confused-deputy use while the repository guards
   # detect a direct reach-around. Read passes retain a read-only state pointer.
   unset OMS_STATE_REPO OMS_PANEL_CALL_ID OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
-    OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE
+    OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_PANEL_CONTINUES
   if [ "$access" = read ]; then
     unset OMS_ROOM_RELAY_QUEUE OMS_ROOM_RELAY_ALLOWED
   fi
@@ -4436,6 +4436,14 @@ ma_run_routed_provider() {
           --ref "panel_effort=${OMS_REASONING_SELECTED:-auto}")
         [ -z "${OMS_PANEL_LABEL:-}" ] || start_args+=(--ref "panel_label=$OMS_PANEL_LABEL")
         [ -z "${OMS_PANEL_ALIAS:-}" ] || start_args+=(--ref "panel_alias=$OMS_PANEL_ALIAS")
+        case "${OMS_PANEL_CONTINUES:-}" in
+          att_*)
+            local continued_hex="${OMS_PANEL_CONTINUES#att_}"
+            case "$continued_hex" in
+              ''|*[!0123456789abcdef]*) ;;
+              *) start_args+=(--ref "panel_continues=$OMS_PANEL_CONTINUES") ;;
+            esac ;;
+        esac
         local panel_location
         panel_location="$(python3 - "$state_repo" "$5" <<'PY'
 import sys
