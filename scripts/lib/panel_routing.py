@@ -12,8 +12,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_OWNERS = ("claude", "codex", "pi", "antigravity")
-# Print the public-only skip notice at most once per process.
-_public_only_skip_printed = False
 
 
 def main_owner_matches(harness, owner):
@@ -173,8 +171,8 @@ def repository_public(repo):
                                     capture_output=True, text=True, timeout=5, check=True,
                                     stdin=subprocess.DEVNULL).stdout.strip()
         cache = Path(authoritative) / ".oms/panel-state/public-route-visibility.json"
-        # Cache both successes (1 day) and failures/unknowns (10 minutes).
-        def _cache_entry(public, ttl=86400):
+        # Every answer expires after 10 minutes, so a repository made private stops free routes soon.
+        def _cache_entry(public):
             try:
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 fd, tmp = tempfile.mkstemp(prefix=".visibility-", dir=str(cache.parent))
@@ -192,7 +190,7 @@ def repository_public(repo):
             age = time.time() - data["checked_at"]
             origin_match = data.get("origin") == normalized
             is_bool = type(data.get("public")) is bool
-            if origin_match and is_bool and 0 <= age < (86400 if data["public"] else 600):
+            if origin_match and is_bool and 0 <= age < 600:
                 return data["public"]
         except (OSError, ValueError, TypeError, KeyError):
             pass
@@ -204,22 +202,18 @@ def repository_public(repo):
             if visibility not in ("PUBLIC", "PRIVATE", "INTERNAL"):
                 raise ValueError("unknown visibility: %s" % visibility)
             public = visibility == "PUBLIC"
-            _cache_entry(public, 86400)
+            _cache_entry(public)
             return public
         except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
-            # Blocked network or missing CLI: cache not-public for 10 minutes.
-            _cache_entry(False, 600)
+            # Blocked network or missing CLI: cache not-public.
+            _cache_entry(False)
             return False
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return False
 
 
 def public_candidates(candidates, repo):
-    global _public_only_skip_printed
     if any(c.get("public_only") for c in candidates) and not repository_public(repo):
-        if not _public_only_skip_printed:
-            print("public-only route skipped: repository visibility unverified or private", file=sys.stderr)
-            _public_only_skip_printed = True
         return [c for c in candidates if not c.get("public_only")]
     return candidates
 

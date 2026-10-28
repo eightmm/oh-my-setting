@@ -194,10 +194,10 @@ def exercise_public_only_routing():
         assert calls.read_text() == "x"
         saved_cache = json.loads(cache.read_text())
         now = saved_cache["checked_at"]
-        for age in (0, 86399):
+        for age in (0, 599):
             with patch.object(panel_routing.time, "time", return_value=now + age):
                 assert panel_routing.repository_public(repo)
-        with patch.object(panel_routing.time, "time", return_value=now + 86400):
+        with patch.object(panel_routing.time, "time", return_value=now + 600):
             assert not panel_routing.repository_public(repo)
         assert calls.read_text() == "xx"
         for bad in ("", "0", "malformed"):
@@ -205,7 +205,7 @@ def exercise_public_only_routing():
             assert not panel_routing.repository_public(repo)
         cache.unlink()
         notice = io.StringIO()
-        with patch.object(panel_routing, "_public_only_skip_printed", False), redirect_stderr(notice):
+        with redirect_stderr(notice):
             chosen = allocate("codex", installed={"pi", "claude"}, repo=repo)
             assert chosen["provider"] == "claude", chosen
             assert panel_routing.alternate_route(chosen, {"pi"}, repo=repo) is None
@@ -215,7 +215,7 @@ def exercise_public_only_routing():
                 pass
             else:
                 raise AssertionError("private repository received its sole public-only route")
-        assert notice.getvalue().count("public-only route skipped") == 1
+        assert not notice.getvalue(), "public-only filtering wrote to stderr"
         os.environ["OMS_PANEL_PUBLIC_ROUTE_OPT_IN"] = "1"
         assert allocate("codex", installed={"pi", "claude"}, repo=repo)["provider"] == "pi"
         assert panel_routing.alternate_route(chosen, {"pi"}, repo=repo)["provider"] == "pi"
@@ -279,7 +279,7 @@ def exercise_public_only_routing():
     subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin", "https://github.com/example/sample.git"], check=True)
     notice = io.StringIO()
     with patch.dict(os.environ, env), patch.object(panel, "provider_catalog", side_effect=route_catalog), \
-            patch.object(panel_routing, "_public_only_skip_printed", False), redirect_stderr(notice):
+            redirect_stderr(notice):
         chosen = panel.selected_route("codex", "worker", None, "read", "explain", target="pi", model="p/m", repo=repo)
         assert chosen["provider"] == "pi" and chosen["model"] == "p/m"
         assert not calls.exists() or not calls.read_text(), "explicit model checked visibility"
@@ -293,7 +293,7 @@ def exercise_public_only_routing():
         else:
             raise AssertionError("private tier route was accepted")
         assert calls.read_text() == "x"
-        assert "public-only route skipped" in notice.getvalue()
+        assert not notice.getvalue(), "public-only filtering wrote to stderr"
     with patch.dict(os.environ, {"OMS_PANEL_PUBLIC_ROUTE_OPT_IN": ""}), \
             patch.object(panel, "provider_catalog", side_effect=route_catalog), \
             patch.object(dispatch, "route_inputs", return_value=({}, None, None)):
