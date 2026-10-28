@@ -414,7 +414,8 @@ try:
                 tmux('bind-key', '-T', record['key_table'], key,
                      *workspaces._key_command(repo, record['id'], record['state_home'], action))
 
-        check(controls(origin_pane).returncode == 0, 'untampered key bindings refused')
+        untampered = controls(origin_pane)
+        check(untampered.returncode == 0, 'untampered key bindings refused: ' + (untampered.stdout + untampered.stderr)[-400:])
         press(b'\x1b[15~')
         good_f5 = workspaces._key_command(repo, record['id'], record['state_home'], 'origin')
         good_f4 = workspaces._key_command(repo, record['id'], record['state_home'], 'focus')
