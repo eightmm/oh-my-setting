@@ -1312,6 +1312,94 @@ for new_owner, harness, model in (("codex", "pi", "gpt-6.1-sol"),
     else:
         raise AssertionError("unknown swap owner accepted")
     assert room.records(project, owner_room) == before_invalid
+
+
+def test_main_swap_replay():
+    # Real lifecycle fixtures exercise validation inside thread.sh's append lock,
+    # including the metadata scan and the caller's successful no-op return.
+    replay_room = room.create(project, "swap-replay", "Swap replay regression")
+    member = "replay-main"
+    room.join(project, replay_room, member, "codex", model="gpt-6.1-sol")
+
+    def start_main(ident=replay_room, harness="codex", tool="panel-main"):
+        return panel.events(project, "start", "--provider", "codex", "--tool", tool,
+            "--ref", "panel_role=main", "--ref", "panel_room_id=" + ident,
+            "--ref", "panel_room_participant=" + member, "--ref", "panel_harness=" + harness,
+            "--then", "starting", "--then", "working", output=True)
+
+    def release(attempt):
+        panel.events(project, "transition", "--attempt", attempt, "--state", "blocked",
+                     "--then", "abandoned", "--reason-code", "main_swapped")
+
+    empty_history = room.records(project, replay_room)
+    try:
+        room.swap_main(project, replay_room, member, "codex", "gpt-6.1-sol", "att_" + "0" * 32, "pi")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("missing lifecycle evidence authorized a swap")
+    assert room.records(project, replay_room) == empty_history
+
+    stale = start_main()
+    release(stale)
+    first = start_main()
+    release(first)
+    swap = dict(kind="main-swap", participant=member, provider="codex",
+                model="gpt-6.1-sol", attempt=first, harness="pi")
+    room.append(project, replay_room, swap, "Main swapped")
+    successor = start_main(harness="pi")
+    room.bind(project, replay_room, member, "replay-successor")
+    before = room.records(project, replay_room)
+    binding = room.participant(room.project(before), member)
+    assert binding["consumer"] and binding["initial_consumer"] == binding["consumer"]
+    # Retrying the released event after its successor starts must preserve both
+    # binding fields and every log row, even when two callers retry together.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as retries:
+        list(retries.map(lambda _: room.append(project, replay_room, swap, "Retry swap"), range(2)))
+    assert room.records(project, replay_room) == before, "replay appended a row and cleared the successor binding"
+    assert room.participant(room.status(project, replay_room), member) == binding
+
+    for changed in ({"provider": "claude"}, {"model": "gpt-6.1-terra"}, {"harness": "codex"},
+                    {"participant": "another-main"}, {"attempt": stale}):
+        try:
+            room.append(project, replay_room, dict(swap, **changed), "Conflicting swap")
+        except ValueError as error:
+            assert "swapped main release is unverified" in str(error), error
+        else:
+            raise AssertionError("consumed or non-latest main release accepted: %r" % changed)
+        assert room.records(project, replay_room) == before
+
+    for attempt in ("", 0, None, "att_" + "a" * 31, "att_" + "0" * 32):
+        try:
+            room.append(project, replay_room, dict(swap, attempt=attempt), "Invalid swap")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid or missing main release accepted: %r" % attempt)
+        assert room.records(project, replay_room) == before
+
+    # A newer attempt in another room or a council record cannot change this
+    # participant's latest native main; a later update cannot revive stale work.
+    foreign_room = room.create(project, "swap-replay-foreign", "Unrelated main")
+    foreign = start_main(ident=foreign_room)
+    council = start_main(tool="panel-council")
+    panel.events(project, "usage", "--attempt", stale, "--ref", "fixture_update=later")
+    release(successor)
+    second = dict(swap, attempt=successor, harness="codex", model="gpt-6.1-terra")
+    room.append(project, replay_room, second, "Second main swapped")
+    room.bind(project, replay_room, member, "replay-second-successor")
+    after_second = room.records(project, replay_room)
+    assert len(room.project(after_second)["swaps"]) == 2
+    for retry in (swap, second):
+        room.append(project, replay_room, retry, "Retry historical swap")
+        assert room.records(project, replay_room) == after_second
+    for attempt in (foreign, council):
+        panel.events(project, "transition", "--attempt", attempt, "--state", "cancelled")
+
+
+test_main_swap_replay()
+
 room.join(project, single_room, single_owner, "codex", model="gpt-6.1-sol")
 assert len(room.status(project, single_room)["participants"]) == 1
 room.join(project, single_room, "terminal-successor", "codex")

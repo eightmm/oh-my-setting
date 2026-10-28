@@ -622,12 +622,28 @@ def validate_event(rows, event, text, repo=None):
     elif kind == "main-swap":
         if not isinstance(event["attempt"], str) or not re.fullmatch(r"att_[0-9a-f]{32}", event["attempt"]):
             raise ValueError("invalid swapped main attempt")
-        result = subprocess.run(["bash", str(ENTRY), "agent-events", "--repo", str(repo), "show",
-                                 "--attempt", event["attempt"], "--json"],
-                                capture_output=True, text=True, check=False, timeout=30, stdin=subprocess.DEVNULL)
-        if result.returncode:
-            raise ValueError("swapped main release is unavailable")
-        validate_main_swap(repo, state, event, json.loads(result.stdout))
+        # The room lock serializes consumption; retries must not clear a successor's binding.
+        consumed = next((row["room_event"] for row in rows
+                         if row.get("room_event", {}).get("kind") == "main-swap"
+                         and row["room_event"].get("attempt") == event["attempt"]), None)
+        if consumed is not None:
+            if consumed == event:
+                return False
+            raise ValueError("swapped main release is unverified")
+        # Creation order, including same-second starts, survives lifecycle projection.
+        # CLI lists sort by updated_at, which can move a stale attempt past its successor.
+        import runpy
+        source = runpy.run_path(str(ROOT / "scripts/lib/agent-events.py"))
+        try:
+            _, attempts = source["load_projection"](Path(repo))
+        except (OSError, ValueError, source["OpsError"]) as error:
+            raise ValueError("swapped main release is unavailable") from error
+        related = [attempt for attempt in attempts.values() if attempt.get("tool") == "panel-main"
+                   and attempt.get("refs", {}).get("panel_room_participant", attempt.get("attempt_id")) == event["participant"]
+                   and same_room(repo, attempt.get("refs", {}).get("panel_room_id"), state["id"])]
+        if not related or related[-1].get("attempt_id") != event["attempt"]:
+            raise ValueError("swapped main release is unverified")
+        validate_main_swap(repo, state, event, related[-1])
     elif kind == "describe":
         member = participant(state, event["participant"])
         if member["role"] != "main":
