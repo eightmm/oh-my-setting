@@ -1016,7 +1016,7 @@ assert "set your status: oms room send" in tower and "--kind status" in tower, t
 with patch.object(hook_state, "panel_status_hint", return_value=""):
     short = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 assert len(short) < 160 and short.startswith("[oms panel] control-tower main:") and "your system prompt" in short, short
-assert "fixes totaling at most two lines per task" in tower and "longer than the edit" not in tower, tower
+assert all(phrase in tower for phrase in ("cause is known", "one or two files", "brief costs more than the edit", "failed the same bounded task twice", "larger multi-file or parallelisable work", "long verification", "authentication, permissions, secrets, install, deletion, hooks", "oms peer-review --gate --verify", "same landing path")), tower
 assert all(phrase in tower for phrase in ("Release bookkeeping (changelog, version, manifest, inventory files)",
                                           "paid compute needs the user's authority", "oms job-digest")), tower
 assert "oms room scope" in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))

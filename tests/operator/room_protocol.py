@@ -243,7 +243,9 @@ for owner in panel.PROVIDERS:
         "performance-engineer when performance needs measurement", "documenter at completion",
         "release-engineer when deploying", "not all by default", "a context apart"))
     assert all(phrase in panel.bootstrap(owner, project) for phrase in (
-        "at most two lines per task", "counting every direct edit", "Release bookkeeping (changelog, version, manifest, inventory files)",
+        "cause is known", "one or two files", "brief costs more than the edit", "failed the same bounded task twice",
+        "larger multi-file or parallelisable work", "long verification", "authentication, permissions, secrets, install, deletion, hooks", "oms peer-review --gate --verify", "same landing path",
+        "Release bookkeeping (changelog, version, manifest, inventory files)",
         "one documenter worker per landing batch", "paid compute needs the user's authority", "--purpose investigate",
         "oms job-digest", "one background wait or notification, not repeated polls"))
     assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
@@ -2690,10 +2692,10 @@ with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": room_owner, "OMS_PANEL_SE
     assert "oms room scope" in tower
     # The recovery text and the launch bootstrap carry one ownership rule; they must not drift.
     def ownership_rule(text):
-        start = text.index("Edit directly only")
+        start = text.index("Edit directly for")
         return text[start:text.index("repeated polls.", start)]
     assert ownership_rule(tower) == ownership_rule(panel_native.bootstrap("codex", project)), tower
-    assert "at most two lines per task" in tower and "one documenter worker per landing batch" in tower
+    assert "cause is known" in tower and "one documenter worker per landing batch" in tower
     assert "--purpose investigate" in tower and "a fix of at most two lines" not in tower
 # Same task reuse cannot return another participant's artifact as the result.
 assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
