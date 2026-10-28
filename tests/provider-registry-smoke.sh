@@ -577,6 +577,7 @@ call_provider pi
 grep -Fxq -- '--no-session' "$TMP/logs/pi.argv" || fail 'Pi ephemeral mode missing'
 grep -Fxq -- '--no-approve' "$TMP/logs/pi.argv" || fail 'Pi project resource fence missing'
 grep -Fxq -- 'read,grep,find,ls' "$TMP/logs/pi.argv" || fail 'Pi read tool belt missing'
+if grep -Eq -- '(^|,)bash(,|$)' "$TMP/logs/pi.argv"; then fail 'Pi read call exposed bash'; fi
 
 call_provider copilot
 grep -Fxq -- '--no-ask-user' "$TMP/logs/copilot.argv" || fail 'Copilot noninteractive mode missing'
@@ -914,7 +915,7 @@ if grep -Fxq -- 'search_replace' "$TMP/logs/vibe.argv"; then
   fail 'Vibe received its removed search_replace tool name'
 fi
 if grep -Fxq -- 'bash' "$TMP/logs/vibe.argv"; then fail 'Vibe write call exposed bash'; fi
-grep -Fxq -- 'read,edit,write,grep,find,ls' "$TMP/logs/pi.argv" || fail 'Pi write tool belt missing'
+grep -Fxq -- 'read,bash,edit,write,grep,find,ls' "$TMP/logs/pi.argv" || fail 'Pi write tool belt missing'
 grep -Fxq -- 'view,grep,glob,edit,create,apply_patch' "$TMP/logs/copilot.argv" ||
   fail 'Copilot write tool belt missing'
 grep -Fxq -- 'read,write' "$TMP/logs/copilot.argv" || fail 'Copilot write approval missing'

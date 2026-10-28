@@ -3335,7 +3335,8 @@ ma_provider_attempt_run() {
       [ -z "$effort" ] || cmd+=(--thinking "$effort")
       cmd+=(--tools)
       if [ "$access" = write ]; then
-        cmd+=("read,edit,write,grep,find,ls")
+        # Pi has no sandbox; write containment is the worktree, worker guard and admission.
+        cmd+=("read,bash,edit,write,grep,find,ls")
       else
         cmd+=("read,grep,find,ls")
       fi
