@@ -23,6 +23,7 @@ RECEIPT = runpy.run_path(str(HERE / 'plan-receipt.py'))
 SCOPE = runpy.run_path(str(HERE / 'path_scope.py'))
 CAPTURE = runpy.run_path(str(HERE / 'landing-capture.py'))
 MAX_JSON = 4 * 1024 * 1024
+PATCH_MAX = 16 * 1024 * 1024
 KINDS = {'accept-research': 'research-accepted', 'accept-main-research': 'main-research-accepted',
          'satisfy': 'satisfied-by'}
 HEX = re.compile(r'[0-9a-f]{64}\Z')
@@ -1109,7 +1110,7 @@ def research(repo, bundle, task, plan_id, frozen_index=None, unavailable_evidenc
     ancillary = None
     if row.get('patch'):
         ancillary = {'path': relative(row['patch']), 'sha256': digest(row.get('patch_sha256'))}
-        if not ancillary['path'].endswith('.patch') or reference(repo, ancillary, 8 * 1024 * 1024) != b'':
+        if not ancillary['path'].endswith('.patch') or reference(repo, ancillary, PATCH_MAX) != b'':
             fail('read producer ancillary patch must be exactly empty')
     elif row.get('patch_sha256'):
         fail('ancillary patch digest without a path')
@@ -1206,7 +1207,7 @@ def main_research(repo, bundle, task, reviewer):
         fail('bound producer report cannot use legacy report adoption')
     if row.get('patch'):
         ancillary = {'path': relative(row['patch']), 'sha256': digest(row.get('patch_sha256'))}
-        if reference(repo, ancillary, 8 * 1024 * 1024) != b'':
+        if reference(repo, ancillary, PATCH_MAX) != b'':
             fail('main research cannot relabel a nonempty producer patch')
     elif row.get('patch_sha256'):
         fail('producer patch digest without a path')
@@ -1328,7 +1329,7 @@ def satisfaction(repo, bundle, tasks, plan_id):
             intent['patch'] != task.get('patch') or intent['base_sha'] != bundle['base_commit']):
         fail('successor lacks exact terminal successful patch-land receipt')
     patch_ref = {'path': legacy_relative(repo, intent['patch']), 'sha256': digest(intent['patch_sha'])}
-    patch = reference(repo, patch_ref, 8 * 1024 * 1024)
+    patch = reference(repo, patch_ref, PATCH_MAX)
     if not patch.strip():
         fail('no-op patch cannot satisfy obligations')
     index, _ = rows(repo, '.oms/artifacts/index.jsonl')

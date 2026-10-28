@@ -45,6 +45,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   landing-capture ceiling instead of the 1 MiB evidence ceiling, so a task
   whose patch exceeds 1 MiB can be accepted and still gets the check that the
   landing is present in the verifier checkout.
+  Plan acceptance, plan completion and delegate patch readers use the same
+  16 MiB ceiling (they were 1, 8 and 4 MiB).
 - The accepted-finalize check that a landed patch is present in the verifier
   checkout reads `.oms/landing-patches/` publications through the landing
   capture reader. They are hard links, so the generic reader refused every real

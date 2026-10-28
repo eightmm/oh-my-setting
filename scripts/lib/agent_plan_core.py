@@ -16,6 +16,7 @@ def _load(path):
 import contextlib, datetime, hashlib, io, json, math, os, re, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
+PATCH_MAX = 16 * 1024 * 1024
 path = os.environ["OMS_PLAN_FILE"]
 act = os.environ["OMS_ACTION"]
 ts = os.environ["OMS_TS"]
@@ -537,7 +538,7 @@ def panel_accept_record(task_id, task, plan_id, record_input=None, from_task=Fal
         if rel != record[key] or rel != expected:
             die("panel acceptance %s differs from the reviewed task evidence" % key)
     patch_path = os.path.join(state_repo(), *record["patch"].split("/"))
-    patch = read_regular_bytes(patch_path, "panel acceptance patch", 1024 * 1024)
+    patch = read_regular_bytes(patch_path, "panel acceptance patch", PATCH_MAX)
     if hashlib.sha256(patch).hexdigest() != record["patch_sha256"]:
         die("panel acceptance patch digest changed")
     repo = env("OMS_REPO")
@@ -589,7 +590,7 @@ def require_panel_acceptance_publication(task_id, task, plan_id, landed_commit):
     if record is None:
         die("task %s panel acceptance record is missing" % task_id)
     patch_path = os.path.join(state_repo(), *record["patch"].split("/"))
-    patch_bytes = read_regular_bytes(patch_path, "panel acceptance patch", 1024 * 1024)
+    patch_bytes = read_regular_bytes(patch_path, "panel acceptance patch", PATCH_MAX)
     try:
         from panel_results import _publication_contains_acceptance
         _publication_contains_acceptance(env("OMS_REPO"), landed_commit, record, patch_bytes)

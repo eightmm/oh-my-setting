@@ -254,7 +254,7 @@ def _review_run_order(run_id):
     return (match.group(1), int(match.group(2))) if match else ('', 0)
 
 
-def verified_patch(repo, row, maximum=4 * 1024 * 1024):
+def verified_patch(repo, row, maximum=PATCH_MAX):
     """Bytes of a recorded patch, read bounded and without following links, only while its digest matches."""
     path = row.get('patch', '')
     if not isinstance(path, str) or not path.startswith('.oms/artifacts/'):
