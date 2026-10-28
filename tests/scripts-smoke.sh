@@ -21405,7 +21405,10 @@ test_patch_land_admits_then_applies() {
   git -C "$project" diff > "$ok_patch"
   git -C "$project" checkout -q file.txt
 
-  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ) ||
+  # A repo-relative --patch, as panel hints print it, resolves against --repo from any directory.
+  mkdir -p "$project/.oms/artifacts/delegate"
+  cp "$ok_patch" "$project/.oms/artifacts/delegate/ok.patch"
+  ( cd "$TMP" && "$ROOT/scripts/patch-land.sh" --repo "$project" --patch .oms/artifacts/delegate/ok.patch --verify 'bash scripts/check.sh' >/dev/null 2>&1 ) ||
     fail "a clean-tree benign patch should land"
   grep -Fq landed "$project/file.txt" || fail "patch-land should apply the patch to the tree"
   grep -Fq '"kind": "patch-land"' "$project/.oms/artifacts/index.jsonl" ||

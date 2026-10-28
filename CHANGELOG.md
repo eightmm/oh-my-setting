@@ -44,6 +44,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   shows the call finished. Without a launch record they settle on exit proof plus age; any read error leaves them pending.
 - A delegate worker's temporary directory is created mode 0700. Under umask 0002 it was group-writable, so operator suites
   run inside the worker refused it as an unsafe dispatch state ancestor.
+- `oms patch-land --patch` resolves a repository-relative path against the state repository when it does not exist from the
+  current directory, so the panel's `Next step: oms patch-land --repo R --patch .oms/...` hint works from any directory.
+- The next action for a timed-out panel worker no longer mentions a revision-round cap and owner override that do not exist.
 
 ### Removed
 

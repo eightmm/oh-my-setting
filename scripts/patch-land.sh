@@ -1193,6 +1193,8 @@ fi
   [ -z "$PLAN_REVIEW_EXECUTOR_ID$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ] ||
     fail "Soul executor review is retired; preserve this patch and use a fresh task"
 }
+# A repo-relative path (as panel hints print) also resolves against the state repository.
+case "$PATCH" in /*) ;; *) [ -f "$PATCH" ] || [ ! -f "$STATE_REPO/$PATCH" ] || PATCH="$STATE_REPO/$PATCH" ;; esac
 [ -f "$PATCH" ] || fail "patch not found: $PATCH"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd -P)/$(basename "$PATCH")"
 SOURCE_PATCH="$PATCH"

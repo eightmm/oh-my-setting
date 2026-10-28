@@ -2062,7 +2062,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             representative = 'timed out'
             if failed_stage != 'review':
                 stages[failed_stage]['state'] = 'timed out'
-            action = 'continue with --continue TASK_ID; at the revision-round cap use the owner override'
+            action = 'continue with --continue TASK_ID'
         elif ending == 'verify_failed':
             representative, action = 'verify failed', 'retry verify'
             stages[failed_stage]['state'] = 'verify failed'
@@ -2099,7 +2099,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 'cancelled': 'salvage or re-dispatch',
                 'failed': 'inspect failure and retry',
                 'abandoned': 'salvage or re-dispatch',
-                'timed_out': 'continue with --continue TASK_ID; at the revision-round cap use the owner override',
+                'timed_out': 'continue with --continue TASK_ID',
             }[last['state']]
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),

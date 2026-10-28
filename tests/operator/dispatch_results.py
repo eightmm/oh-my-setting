@@ -4035,7 +4035,7 @@ with patch.dict(os.environ, environment, clear=True):
         ("guard", {"exit": 1, "state": "failed", "guard": "scope"},
          "implement guard stop (scope)", "guard stop (scope)", "inspect guard stop and salvage partial work"),
         ("timeout", {"exit": 124, "state": "timed_out"},
-         "timed out", "timed out", "continue with --continue TASK_ID; at the revision-round cap use the owner override"),
+         "timed out", "timed out", "continue with --continue TASK_ID"),
         ("verify", {"exit": 0, "verify_exit": 1, "state": "done", "reason_code": "verification_failed"},
          "verify failed", "verify failed", "retry verify"),
         ("provider", {"exit": 1, "state": "failed", "provider_error_exit": 1},
