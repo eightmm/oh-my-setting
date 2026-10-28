@@ -567,6 +567,22 @@ run_job() {
         --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }} (see $LOG)" >/dev/null 2>&1 || true
       finish failed "gate exit $rc"; return 1
     fi
+    # The gate runs outside the agent's shell, so the pass hook never clears its
+    # earlier failure. Like that hook, resolve clears the command's fingerprint;
+    # require the newest failed commit to be contained here, so a passing landing
+    # of an unrelated line in a shared-ledger scratch worktree does not clear it.
+    ledger_rc=0
+    failed_sha="$("$ROOT/scripts/fail-ledger.sh" --repo "$REPO" check --cmd "$GATE" --ignore-state 2>&1 >/dev/null)" ||
+      ledger_rc=$?
+    if [ "$ledger_rc" -eq 3 ]; then
+      failed_sha="$(printf '%s\n' "$failed_sha" | tr -d '\r' |
+        sed -n 's/^fail-ledger: [0-9a-f]* already failed [0-9]*x (last exit [^)]*): land: gate failed for \([0-9a-f]\{7,40\}\).*$/\1/p' |
+        head -n 1)"
+      if [ -n "$failed_sha" ] && git merge-base --is-ancestor "$failed_sha" "$SHA" 2>/dev/null; then
+        "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" resolve --cmd "$GATE" \
+          --how "land gate passed for $SHORT" >/dev/null 2>&1 || true
+      fi
+    fi
     # An affected selection lightens the push; installing needs a gate that proved the full check.
     if grep -qsE '^check: ok( \(parallel complete gate\)| \(affected tests; mode=full\))?$' "$LOG"; then
       rset gate.scope=full

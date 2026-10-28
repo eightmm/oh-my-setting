@@ -416,6 +416,14 @@ if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/retry-first.out" 2>&1; then
 fi
 "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/retry-second.out" 2>&1 ||
   fail "the same landing request must pass on retry: $(cat "$TMP/retry-second.out")"
+"$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved 2>/dev/null | grep -F old-smoke > /dev/null &&
+  fail "a passing land gate must resolve the same gate's earlier failure"
+# A failure filed for a commit this landing does not contain (another scratch
+# branch sharing the ledger) stays open through the next passing gate.
+gate_cmd="$(python3 -c 'import json,sys; print([r["cmd"] for r in map(json.loads, open(sys.argv[1])) if "old-smoke" in r.get("summary", "")][-1])' "$repo/.oms/failures.jsonl")"
+orphan="$(git -C "$repo" commit-tree -m orphan "$(git -C "$repo" rev-parse 'HEAD^{tree}')")"
+"$ROOT/scripts/fail-ledger.sh" --repo "$repo" record --kind verify --cmd "$gate_cmd" --exit 3 \
+  --summary "land: gate failed for ${orphan:0:7} (see elsewhere)" >/dev/null 2>&1
 retry_sha="$(git -C "$repo" rev-parse HEAD)"
 retry_receipt="$(find "$receipt_dir" -type f -name "$retry_sha-*.json" -print)"
 [ -n "$retry_receipt" ] || fail "retry must leave a passed receipt"
@@ -445,6 +453,8 @@ fi
 wait
 [ "$(remote_tip)" = "$before" ] || fail "a moved HEAD must not push"
 grep -q 'HEAD or the tree changed' "$TMP/moved.out" || fail "moved-HEAD reason missing: $(cat "$TMP/moved.out")"
+"$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved 2>/dev/null | grep -F "${orphan:0:7}" > /dev/null ||
+  fail "a passing gate must not resolve a failure filed for a commit it does not contain"
 
 # --- 6. refusals before any job: dirty tree, diverged remote -----------------
 gate 'echo gate ok'

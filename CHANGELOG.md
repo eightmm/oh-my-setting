@@ -41,6 +41,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A passing `oms land` gate resolves its gate command's fail-ledger entry, as
+  the post-command pass hook does for commands run in the agent's shell, when
+  the passing commit contains the newest failed one. Session starts stop
+  listing an already-fixed land failure as actionable.
 - `oms panel --continue` after a worktree-missing `--salvage` recovered from the indexed patch now says the work was already salvaged and names the patch, instead of repeating "run --salvage".
 - Accepted panel finalization refuses to verify a checkout where a matching landed patch still applies cleanly, directing the owner to the checkout containing the landing.
 - A consumed main-swap release can no longer be replayed. An identical retry is a no-op, and any other event naming a consumed or superseded main attempt is refused, so a replay cannot clear the successor main's binding.
