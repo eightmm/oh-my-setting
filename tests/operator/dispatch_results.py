@@ -3529,7 +3529,13 @@ with patch.dict(os.environ, environment, clear=True), \
     # A digest-bound landing in the state repo must be present in the verifier tree.
     landing = project / ".oms/landing-patches/land-scope.patch"
     landing.parent.mkdir(parents=True, exist_ok=True)
-    landing.write_bytes(simple_patch)
+    # A real landing publication is a hard link owned by the capture store (link count 2).
+    capture_store = runpy.run_path(str(root / "scripts/lib/landing-capture.py"))
+    capture_source = temporary / "landing-source.patch"
+    capture_source.write_bytes(simple_patch)
+    capture_store["publish"](str(project), capture_store["allocate"](
+        str(project), str(capture_source), "land-scope", hashlib.sha256(simple_patch).hexdigest()), str(landing))
+    assert landing.stat().st_nlink == 2, landing.stat().st_nlink
     landed_rows = scope_evidence(simple_patch)
     landed_rows[1]["patch"] = ".oms/landing-patches/land-scope.patch"
     landing_execution = temporary / "landing-verifier-checkout"
@@ -3549,11 +3555,14 @@ with patch.dict(os.environ, environment, clear=True), \
         landing.write_bytes(simple_patch)
         verifier.reset_mock()
         write.reset_mock()
+        landing_stderr = io.StringIO()
         try:
-            saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+            with redirect_stderr(landing_stderr):
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
             raise AssertionError("accepted a verifier tree missing the landing")
         except ValueError as error:
             assert landed_rows[1]["patch"] in str(error) and "--repo WORKTREE" in str(error), error
+        assert landing_stderr.getvalue() == "", landing_stderr.getvalue()
         verifier.assert_not_called()
         write.assert_not_called()
         run_command = subprocess.run

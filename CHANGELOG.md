@@ -41,6 +41,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The accepted-finalize check that a landed patch is present in the verifier
+  checkout reads `.oms/landing-patches/` publications through the landing
+  capture reader. They are hard links, so the generic reader refused every real
+  landing, the check never ran and finalize printed a stray `error:` line.
 - A standalone gated reviewer whose seat answers `GATE: fail` now notifies the
   main that the review gate failed, instead of the "failed or is inconclusive"
   text a crashed or verdict-less review gets.

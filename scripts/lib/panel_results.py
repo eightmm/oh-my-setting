@@ -1627,15 +1627,21 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
                     continue
                 path = admission.get('patch')
                 try:
-                    if _relative(repo, path)['sha256'] != admission.get('patch_sha256'):
-                        continue
-                    data = _read(repo, path, 1024 * 1024)
+                    if (isinstance(path, str) and path.startswith('.oms/landing-patches/')
+                            and path.count('/') == 2 and path.endswith('.patch')):
+                        # Landing publications are hard links owned by the capture store.
+                        data = runpy.run_path(str(ROOT / 'scripts/lib/landing-capture.py'))['read_patch'](
+                            str(repo), path, 1024 * 1024)
+                    else:
+                        if _relative(repo, path)['sha256'] != admission.get('patch_sha256'):
+                            continue
+                        data = _read(repo, path, 1024 * 1024)
                     if hashlib.sha256(data).hexdigest() != admission.get('patch_sha256'):
                         continue
                     check = subprocess.run(['git', 'apply', '--check'], cwd=str(execution), input=data,
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                            check=False, timeout=60)
-                except (OSError, ValueError, subprocess.SubprocessError):
+                except (OSError, ValueError, SystemExit, subprocess.SubprocessError):
                     continue
                 if check.returncode == 0:
                     raise ValueError('landed patch %s applies cleanly to the verifier checkout; finalize from '
