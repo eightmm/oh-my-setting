@@ -699,6 +699,44 @@ def _write_candidates(workers, admissions, attempts, owner, main_id=None):
     return selected, landed, superseded
 
 
+def _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding):
+    """Fence panel mains while preserving standalone and unclaimed plan results."""
+    if not main_id:
+        return
+    if binding is not None:
+        # Finished tasks retain their claimant and lease, so retries use the same check.
+        try:
+            _owned_task(repo, repo, owner, task_id)
+        except ValueError as error:
+            from panel_dispatch import PlanBinding
+            try:
+                plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
+                                  object_pairs_hook=PlanBinding.unique_fields)
+                task = plan.get('tasks', {}).get(task_id)
+                if isinstance(task, dict) and task.get('id') == task_id and not task.get('claimed_by_participant'):
+                    return
+            except (OSError, TypeError, ValueError, AttributeError):
+                pass
+            raise ValueError('finalize task %s is not owned by the calling main: %s'
+                             % (task_id, error)) from error
+        return
+    task_attempts = [a for a in attempts if a.get('task_id') == task_id]
+    if not task_attempts:
+        return
+    from panel_state import lineage_ids_from_rows
+    # The snapshot validates this main; continuation evidence is needed for earlier parents.
+    eligible = {main_id}
+    eligible.update(lineage_ids_from_rows(attempts, owner, os.environ.get('OMS_ROOM_PARTICIPANT'), main_id))
+    by_id = {a.get('attempt_id'): a for a in attempts}
+    for attempt in task_attempts:
+        ident, seen = attempt.get('attempt_id'), set()
+        while ident not in eligible:
+            if not ident or ident in seen or ident not in by_id:
+                raise ValueError('finalize task %s does not descend from the calling main' % task_id)
+            seen.add(ident)
+            ident = by_id[ident].get('parent_attempt_id')
+
+
 def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
     binding = _plan_bindings(repo, {task_id}).get(task_id)
     attempts, rows = _records(repo, full=True, task_id=task_id)
@@ -1528,6 +1566,7 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
             _review_preflight(repo, task_id, workers, rows, admissions)
         if outcome == 'accepted' and (not verify or not refs):
             raise ValueError('accepted requires an evidence reference and a passing verifier')
+        _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding)
     verification = {'status': 'not_run'}
     if verify:
         # Output remains local; a verifier transcript is never exported as a summary.
@@ -1545,6 +1584,7 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
         current_evidence = [_relative(repo, ref['path']) for ref in refs]
         current, attempts, rows, related, workers, admissions = _finalize_snapshot(
             repo, owner, task_id, main_id, current_evidence)
+        _finalize_owns_task(repo, owner, task_id, main_id, attempts, current['binding'])
         for field, message in (
                 ('binding', 'plan task changed during result verification'),
                 ('evidence', 'evidence changed during verification'),

@@ -1471,6 +1471,173 @@ assert json.loads(plan_path.read_text())["tasks"]["elsewhere-task"]["state"] == 
 # Retrying an older finalize revision never settles against the newer decision.
 superseded = review_settlement.after_finalize(project, dict(outside, main_attempt_id=main_attempts["codex"]))
 assert superseded.get("skipped") == "superseded_revision", superseded
+def finalize_plan_fixture(label, assigned):
+    repo = temporary / label
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    env = dict(environment, OMS_AGENT="claude", OMS_ROOM_REPO=str(repo),
+               OMS_ROOM_ID="bound-finalize-room", OMS_ROOM_PARTICIPANT="bound-finalize-main")
+    with patch.dict(os.environ, env, clear=True):
+        room.create(repo, env["OMS_ROOM_ID"], "Bound finalize")
+        room.join(repo, env["OMS_ROOM_ID"], env["OMS_ROOM_PARTICIPANT"], "claude")
+    env["OMS_PANEL_MAIN_ATTEMPT"] = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(repo),
+        "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+        "--ref", "panel_room_id=" + env["OMS_ROOM_ID"],
+        "--ref", "panel_room_participant=" + env["OMS_ROOM_PARTICIPANT"],
+        "--ref", "panel_harness=claude", "--then", "starting", "--then", "working"], env).strip()
+    command = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(repo)]
+    call(command + ["init", "--goal", "Bound finalize ownership"], env)
+    call(command + ["add", "--id", "owned-task", "--title", "Assigned result", "--allowed", "value.txt",
+                    "--verify", "true", "--assignment", json.dumps({"provider": assigned, "workload": "routine"})], env)
+    call(command + ["claim", "--id", "owned-task", "--provider", "claude"], env)
+    task = json.loads(call(command + ["evidence-snapshot", "--id", "owned-task"], env))
+    assert task["provider"] == assigned and task["claimed_by_participant"] == env["OMS_ROOM_PARTICIPANT"], task
+    return repo, env, task
+
+# Ownership checks fail closed without changing accepted-result diagnostics.
+def exercise_finalize_ownership_snapshot():
+    main = dict(attempt_id="own-main", tool="panel-main", provider="codex", state="working",
+                terminal=False, refs={"panel_role": "main", "panel_room_participant": "own"})
+    other = dict(main, attempt_id="other-main", refs={"panel_role": "main", "panel_room_participant": "other"})
+    prior = dict(main, attempt_id="prior-main", state="cancelled", terminal=True)
+    worker = dict(attempt_id="worker", task_id="owned-task", parent_attempt_id="own-main", refs={})
+    nested = dict(worker, attempt_id="nested", parent_attempt_id="worker")
+    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": "own"}):
+        for rows in ([], [main], [main, worker], [prior, main, dict(worker, parent_attempt_id="prior-main")],
+                     [main, worker, nested],
+                     [{"attempt_id": "own-main", "tool": "panel-main", "provider": "codex"}, worker]):
+            saved._finalize_owns_task(project, "codex", "owned-task", "own-main", rows, None)
+        saved._finalize_owns_task(project, "codex", "owned-task", None, [main, worker], None)
+        invalid_rows = [[main, other, dict(worker, parent_attempt_id=parent)]
+                        for parent in (None, "", 0, "missing", "worker", "other-main")]
+        invalid_rows += [[main, worker, dict(worker, attempt_id="foreign", parent_attempt_id="other-main"), other],
+                         [dict(main, refs={"panel_role": "main", "panel_room_participant": "other"}), prior,
+                          dict(worker, parent_attempt_id="prior-main")]]
+        for rows in invalid_rows:
+            try:
+                saved._finalize_owns_task(project, "codex", "owned-task", "own-main", rows, None)
+            except ValueError as error:
+                assert "calling main" in str(error), error
+            else:
+                raise AssertionError("invalid main lineage accepted")
+    bound_repo, bound_env, bound_task = finalize_plan_fixture("assigned-finalize", "codex")
+    with patch.dict(os.environ, bound_env, clear=True):
+        for outcome in ("completed", "failed", "rejected"):
+            result = saved.finalize(bound_repo, "claude", "owned-task", str(summary), outcome)
+            assert result["outcome"] == outcome and result["owner"] == "claude", result
+        # Accept/finish keeps its stricter provider contract.
+        try:
+            saved._owned_task(bound_repo, bound_repo, "claude", "owned-task")
+        except ValueError as error:
+            assert "owner/lease" in str(error), error
+        else:
+            raise AssertionError("accept/finish provider mismatch accepted")
+        for state in ("claimed", "done"):
+            plan = {"tasks": {"owned-task": dict(bound_task, state=state)}}
+            with patch.object(saved, "_read", return_value=json.dumps(plan)):
+                saved._finalize_owns_task(bound_repo, "claude", "owned-task", bound_env["OMS_PANEL_MAIN_ATTEMPT"], [], {})
+        for holder in ("other", 0, [], {}):
+            plan = {"tasks": {"owned-task": dict(bound_task, claimed_by_participant=holder)}}
+            with patch.object(saved, "_read", return_value=json.dumps(plan)):
+                try:
+                    saved._finalize_owns_task(bound_repo, "claude", "owned-task", bound_env["OMS_PANEL_MAIN_ATTEMPT"], [], {})
+                except ValueError as error:
+                    assert "not owned by the calling main" in str(error), error
+                else:
+                    raise AssertionError("foreign or malformed plan claimant accepted")
+        for task in ({"id": "owned-task"}, {"id": "owned-task", "claimed_by_participant": ""}):
+            with patch.object(saved, "_read", return_value=json.dumps({"tasks": {"owned-task": task}})):
+                saved._finalize_owns_task(bound_repo, "claude", "owned-task", bound_env["OMS_PANEL_MAIN_ATTEMPT"], [], {})
+        for body in ("malformed", "null", "0", "{}", '{"tasks": []}',
+                     '{"tasks":{"owned-task":{"id":"wrong"}}}',
+                     '{"tasks":{"owned-task":{"id":"owned-task","id":"owned-task"}}}'):
+            with patch.object(saved, "_read", return_value=body):
+                try:
+                    saved._finalize_owns_task(bound_repo, "claude", "owned-task", bound_env["OMS_PANEL_MAIN_ATTEMPT"], [], {})
+                except ValueError as error:
+                    assert "not owned by the calling main" in str(error), error
+                else:
+                    raise AssertionError("malformed plan ownership accepted: " + body)
+        for identities in ({"OMS_ROOM_PARTICIPANT": "other"}, {"OMS_ROOM_ID": ""}):
+            with patch.dict(os.environ, identities):
+                try:
+                    saved.finalize(bound_repo, "claude", "owned-task", str(summary), "completed")
+                except ValueError as error:
+                    assert "not owned by the calling main" in str(error), error
+                else:
+                    raise AssertionError("foreign or missing room caller accepted")
+    call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(bound_repo), "transition",
+          "--attempt", bound_env["OMS_PANEL_MAIN_ATTEMPT"], "--state", "cancelled"], bound_env)
+exercise_finalize_ownership_snapshot()
+# Finalize authorization follows participant lineage, including a resumed main.
+def exercise_finalize_task_ownership():
+    foreign_task = "finalize-read-task"
+    foreign_worker = settlement_worker(foreign_task, main_attempts["codex"], review=False)
+    bad_main = call(event_command + ["start", "--provider", "codex", "--tool", "panel-main",
+        "--ref", "panel_role=main", "--ref", "panel_room_participant=finalize-other",
+        "--then", "starting", "--then", "working"]).strip()
+    bad_env = dict(environment, OMS_AGENT="codex", OMS_PANEL_MAIN_ATTEMPT=bad_main,
+                   OMS_ROOM_PARTICIPANT="finalize-other")
+    with patch.dict(os.environ, bad_env, clear=True):
+        for outcome in ("completed", "failed", "rejected", "accepted"):
+            try:
+                saved.finalize(project, "codex", foreign_task, str(summary), outcome, "true", ["value.txt"])
+            except ValueError as error:
+                assert "calling main" in str(error), error
+            else:
+                raise AssertionError("different main finalized a task it does not own: " + outcome)
+    prior_main = call(event_command + ["start", "--provider", "codex", "--tool", "panel-main",
+        "--ref", "panel_role=main", "--ref", "panel_room_participant=finalize-resumed",
+        "--then", "starting", "--then", "working"]).strip()
+    task = "finalize-resumed-task"
+    resumed_worker = settlement_worker(task, prior_main, review=False)
+    call(event_command + ["transition", "--attempt", prior_main, "--state", "cancelled"])
+    resumed_main = call(event_command + ["start", "--provider", "codex", "--tool", "panel-main",
+        "--ref", "panel_role=main", "--ref", "panel_room_participant=" + "finalize-resumed",
+        "--then", "starting", "--then", "working"]).strip()
+    resumed_env = dict(environment, OMS_AGENT="codex", OMS_PANEL_MAIN_ATTEMPT=resumed_main,
+                       OMS_ROOM_PARTICIPANT="finalize-resumed")
+    with patch.dict(os.environ, resumed_env, clear=True):
+        result = saved.finalize(project, "codex", task, str(summary), "completed")
+        assert result["outcome"] == "completed" and result["main_attempt_id"] == resumed_main, result
+    swap_repo, swap_env, swap_task = finalize_plan_fixture("swapped-finalize", "claude")
+    swap_events = ["bash", str(panel.ENTRY), "agent-events", "--repo", str(swap_repo)]
+    prior = swap_env["OMS_PANEL_MAIN_ATTEMPT"]
+    prior_worker = call(swap_events + ["start", "--provider", "local", "--tool", "peer-delegate",
+        "--task-id", "owned-task", "--parent-attempt-id", prior, "--ref", "panel_role=worker",
+        "--then", "starting", "--then", "working"], swap_env).strip()
+    call(swap_events + ["transition", "--attempt", prior, "--state", "abandoned",
+                       "--actor", "panel-main", "--reason-code", "main_swapped"], swap_env)
+    with patch.dict(os.environ, swap_env, clear=True):
+        room.swap_main(swap_repo, swap_env["OMS_ROOM_ID"], swap_env["OMS_ROOM_PARTICIPANT"],
+                       "codex", "gpt-6.1-terra", prior, "codex")
+    swapped = call(swap_events + ["start", "--provider", "codex", "--tool", "panel-main",
+        "--ref", "panel_role=main", "--ref", "panel_room_id=" + swap_env["OMS_ROOM_ID"],
+        "--ref", "panel_room_participant=" + swap_env["OMS_ROOM_PARTICIPANT"],
+        "--ref", "panel_harness=codex", "--then", "starting", "--then", "working"], swap_env).strip()
+    swap_env.update(OMS_AGENT="codex", OMS_PANEL_MAIN_ATTEMPT=swapped)
+    with patch.dict(os.environ, swap_env, clear=True):
+        assert prior in panel.lineage_ids_from_rows(saved._records(swap_repo, full=True)[0],
+            "codex", swap_env["OMS_ROOM_PARTICIPANT"], swapped)
+        result = saved.finalize(swap_repo, "codex", "owned-task", str(summary), "completed")
+        assert result["owner"] == "codex" and result["main_attempt_id"] == swapped, result
+        stored = json.loads((swap_repo / ".oms/plan/tasks.json").read_text())["tasks"]["owned-task"]
+        assert stored["provider"] == "claude" and stored["lease_id"] == swap_task["lease_id"], stored
+    for ident in (swapped, prior_worker):
+        call(swap_events + ["transition", "--attempt", ident, "--state", "cancelled"], swap_env)
+    parentless_task = "finalize-parentless-task"
+    parentless = settlement_worker(parentless_task, review=False)
+    with patch.dict(os.environ, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]), clear=True):
+        try:
+            saved.finalize(project, "codex", parentless_task, str(summary), "completed")
+        except ValueError as error:
+            assert parentless in str(error) and "does not descend" in str(error) and "\n" not in str(error), error
+        else:
+            raise AssertionError("parentless attempt was finalized")
+    call(event_command + ["transition", "--attempt", parentless, "--state", "cancelled"])
+    for ident in (bad_main, resumed_main, foreign_worker, resumed_worker):
+        call(event_command + ["transition", "--attempt", ident, "--state", "cancelled"])
+exercise_finalize_task_ownership()
 # A proven-dead main uses its participant history, rather than the live-only
 # continuation helper. Keep a saved result whose first settlement was deferred.
 import panel_release
