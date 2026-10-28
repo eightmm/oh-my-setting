@@ -209,6 +209,7 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
             assert panel.main(['--repo', str(salvage_repo), '--salvage', 'scratch-task']) == 0
         assert 'recovered from indexed patch %s (worktree missing)' % scratch_patch in output.getvalue()
         assert ' -> ' not in output.getvalue()
+        gone_attempt, gone_record = dict(scratch_attempt, refs=dict(scratch_attempt['refs'])), dict(scratch_record)
         provenance_files = {path: path.read_bytes()
                             for path in (salvage_repo / '.oms/salvage-provenance').glob('*.json')}
         original_indexed_patch = (salvage_repo / scratch_patch).read_bytes()
@@ -783,6 +784,29 @@ finally:
         path.rename(path.with_suffix('.json'))
 assert 'already salvaged' not in plain_message and 'fresh dispatch' not in plain_message, plain_message
 assert plain_message.endswith('registered worktree: ' + str(committed_tree)), plain_message
+# A worktree-missing salvage from the indexed patch leaves no provenance; --continue still says it was salvaged.
+gone_sidecars = list((salvage_repo / '.oms/artifacts/delegate').glob('salvage-scratch-task-*.patch.json'))
+assert gone_sidecars, 'worktree-missing salvage published no sidecar'
+gone_provenance = list((salvage_repo / '.oms/salvage-provenance').glob('*.json'))
+for path in gone_provenance:
+    path.rename(path.with_suffix('.hidden'))
+try:
+    gone_message = continue_dirty(gone_attempt, gone_record)
+    for path in gone_sidecars:
+        path.rename(path.with_suffix('.hidden'))
+    try:
+        unsalvaged_message = continue_dirty(gone_attempt, gone_record)
+    finally:
+        for path in gone_sidecars:
+            path.with_suffix('.hidden').rename(path)
+finally:
+    for path in gone_provenance:
+        path.with_suffix('.hidden').rename(path)
+assert 'run oms panel --salvage scratch-task' in unsalvaged_message, unsalvaged_message
+assert 'already salvaged' not in unsalvaged_message and 'fresh dispatch' not in unsalvaged_message, unsalvaged_message
+assert 'registered worktree: ' not in gone_message, gone_message
+gone_patch = panel_dispatch._newest_salvage_patch(salvage_repo, 'scratch-task', gone_attempt['attempt_id'])
+assert gone_patch and 'already salvaged as ' + gone_patch in gone_message and 'fresh dispatch' in gone_message, gone_message
 # A salvage that died after its provenance but before its patch leaves evidence no patch backs: --continue
 # says so and points at a re-run, and names a fresh dispatch once the kept worktree is gone.
 cut_tree, cut_attempt = kept_fixture('cut')

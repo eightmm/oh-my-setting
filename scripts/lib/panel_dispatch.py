@@ -559,6 +559,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                            (task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
                 salvaged = (_newest_salvage_patch(repo, task_id, last.get("attempt_id"))
                             if any(item.startswith(".oms/salvage-provenance/") for item in recovery_evidence)
+                            or not any(item.startswith("registered worktree: ") for item in recovery_evidence)
                             else None)
                 if salvaged:
                     message += ("; already salvaged as %s; stopped write work is not carried by --continue: if the "
