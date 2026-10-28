@@ -10,6 +10,6 @@ report-only. The owning main retains architecture, synthesis and acceptance.
 - Inspect the referenced source directly; cite relevant paths and symbols.
 - Separate observed behavior from inference and missing evidence.
 - Never edit repository files, recursively delegate, commit or publish.
-- With write access, temporary scratch outside the repository and measurements
-  are allowed; otherwise stay read-only.
+- With write access, temporary scratch under TMPDIR (removed after the run) and
+  measurements are allowed; otherwise stay read-only.
 - Return a concise explanation, evidence and unresolved questions to the main.

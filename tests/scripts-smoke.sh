@@ -5665,6 +5665,7 @@ test_delegate_dry_run() {
     --prompt "Add a helper" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Create files only inside this worktree; put temporary files under TMPDIR'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'run the tests that use them'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'docs/, README files, and the changed command usage or --help text'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'update prose describing the change'
@@ -21017,13 +21018,15 @@ SH
 test_delegate_worker_does_not_receive_primary_state_env() {
   local project="$TMP/delegate-state-env"
   local bin_dir="$project/bin"
-  local home_dir="$project/home"
+  local home_dir="$TMP/delegate-state-env-home"
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > /dev/null
+printf '%s\n' "$TMPDIR" "$TMP" "$TEMP" "$(pwd -P)" > "$HOME/worker-temp-env"
+[ -d "$TMPDIR" ] || exit 1
 printf 'state_repo=%s agent=%s\n' "${OMS_STATE_REPO:-}" "${OMS_AGENT:-}" > worker-env.txt
 echo "worker done"
 EOF
@@ -21037,6 +21040,11 @@ EOF
     --no-verify \
     --prompt "Report harness env" >/dev/null 2>&1 ||
     fail "stub delegation should succeed"
+  local worker_tmp worker_tmp_alias worker_temp worker_tree
+  { IFS= read -r worker_tmp; IFS= read -r worker_tmp_alias; IFS= read -r worker_temp; IFS= read -r worker_tree; } < "$home_dir/worker-temp-env"
+  [ "$worker_tmp" = "${worker_tree%/*}/tmp" ] || fail "worker temporary directory is outside its worktree parent"
+  [ "$worker_tmp_alias" = "$worker_tmp" ] && [ "$worker_temp" = "$worker_tmp" ] || fail "temporary directory aliases differ"
+  [ ! -e "$worker_tmp" ] || fail "worker temporary directory survived cleanup"
   assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'agent=codex'
   assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'state_repo= agent=codex'
   if grep -Fq "$project" "$project"/artifacts/*.patch; then

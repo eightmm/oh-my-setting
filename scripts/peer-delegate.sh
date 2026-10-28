@@ -1187,7 +1187,7 @@ fi
   fi
   write_minimal_change_doctrine
   if [ "$REPORT_ONLY" = 1 ]; then
-    printf 'Return findings and measurement evidence. Never edit repository files; use temporary scratch outside the repository. A repository patch fails this report-only investigation.\n'
+    printf 'Return findings and measurement evidence. Never edit repository files; use temporary scratch under TMPDIR (removed after the run). A repository patch fails this report-only investigation.\n'
   fi
   printf '\n'
   if [ "$APPLY" = 1 ]; then
@@ -1222,6 +1222,7 @@ fi
       printf -- '- verify: `%s`\n' "$VERIFY_CMD"
       printf 'After you return, the harness runs `%s`. Run focused checks for the behavior you changed; do not run this full command just to confirm completion. Run broader checks only when needed to diagnose a failure. Report the checks you actually ran.\n' "$VERIFY_CMD"
     fi
+    printf '%s\n' '- Create files only inside this worktree; put temporary files under TMPDIR (removed after the run), delete any you created in the worktree, and never create directories next to or above the repository or copy it.'
     printf '%s\n' '- Admission also runs the checks restored from HEAD, so changing or deleting existing tests cannot make verify pass.'
     printf '%s\n' '- Keep secret-related key words and an equals sign off the same added line, including in variable names and fixtures; build fixtures at runtime (for example "pass" + "word"). Such a line makes the outbound scan refuse review and --continue.'
     printf '%s\n' '- Keep literal absolute home, Users or cluster-storage paths out of added lines too; the same scan refuses them. Write fixtures in a variable-prefixed or relative form, for example "$TMP/home/user".'
@@ -1963,7 +1964,14 @@ run_worker() {
   fi
   OMS_LAST_ATTEMPT_ID=""
   OMS_LAST_ATTEMPT_OWNED=0
+  if ! mkdir -p "$worktree_parent/tmp"; then
+    echo "error: could not create delegate temporary directory" >&2
+    worker_status=125
+    route_retry_terminal=1
+    return 0
+  fi
   worker_provider_launched=1
+  TMPDIR="$worktree_parent/tmp" TMP="$worktree_parent/tmp" TEMP="$worktree_parent/tmp" \
   ma_run_routed_provider "$TO" "$WORKER_ACCESS" "$prompt" "$artifact" "$worktree" \
     peer-delegate "$REPO" "$timestamp" || worker_status=$?
   if [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; then
