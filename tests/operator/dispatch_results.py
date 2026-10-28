@@ -3102,7 +3102,7 @@ whole = json.loads(call(whole_finalize, owner_env))
 assert whole["main_attempt_id"] == main_attempts["claude"] and not whole["admission_event_ids"]
 joined = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
                          "--task-id", "whole-main-result", "--json"]))["rows"][0]
-assert any(c.get("kind") == "delegate" for c in joined["calls"]), joined
+assert not joined["calls"], joined
 assert joined["title"] == whole["summary"].split("\n")[0]
 assert all(joined[key] is None for key in ("model", "role", "location", "process_state"))
 parent_task = {"task_id": "parent-read", "main_attempt_id": "main-parent", "revision": "a" * 24,
@@ -3112,16 +3112,20 @@ unrelated_child = {"task_id": "failed-child", "attempt_id": "att_failed_child", 
                    "state": "failed", "refs": {"panel_label": "Unrelated failed write", "panel_model": "gpt-test",
                    "panel_role": "worker", "panel_location": "remote"}}
 failed_call = {"kind": "delegate", "task_id": "failed-child", "attempt_id": "att_failed_child", "exit": 1}
+unassigned_child = {"attempt_id": "att_unassigned_child", "parent_attempt_id": "main-parent", "refs": {}}
+unassigned_call = {"kind": "delegate", "attempt_id": "att_unassigned_child", "exit": 0}
 parent_result_row = {"kind": "panel-result", "task_id": "parent-read"}
-with patch.object(saved, "_records", return_value=([unrelated_child], [parent_result_row, failed_call])), \
+with patch.object(saved, "_records", return_value=([unassigned_child, unrelated_child],
+        [parent_result_row, unassigned_call, failed_call])), \
         patch.object(saved, "_load_result", return_value=parent_task):
     parent = saved.results(project, "parent-read")["rows"][0]
     assert parent["title"] == "Owner summary for the parent read."
     assert parent["issue"] is None and parent["outcome"] == "completed"
     assert parent["verification"]["status"] == "passed"
     assert parent["model"] is None and parent["role"] is None and parent["location"] is None
-    assert parent["process_state"] is None and parent["calls"] == [{"kind": "delegate", "exit": 1,
-                                                                    "attempt_id": "att_failed_child"}]
+    assert parent["process_state"] is None and parent["calls"] == [{"kind": "delegate", "exit": 0,
+                                                                    "attempt_id": "att_unassigned_child"}]
+    assert parent["stages"]["implement"]["attempt_id"] == "att_unassigned_child"
 own_task_result = dict(parent_task, task_id="own-task", summary="Own task summary.")
 own_attempt = {"task_id": "own-task", "attempt_id": "att_own_task", "parent_attempt_id": "main-parent",
                "state": "done", "refs": {"panel_label": "Own task title", "panel_model": "own-model",

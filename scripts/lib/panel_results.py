@@ -1808,10 +1808,10 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             except (OSError, ValueError, KeyError, TypeError):
                 issue = 'result or delivery evidence unavailable'
         if result and result.get('main_attempt_id'):
-            # Only a whole-main result (no attempt of its own) adopts the main's
-            # children; otherwise every task of one main would share its calls.
-            matching = ([a for a in attempts if a.get('task_id') == ident] or
-                        [a for a in attempts if a.get('parent_attempt_id') == result['main_attempt_id']])
+            # A whole-main result adopts only unassigned children of its main.
+            matching = (metadata_attempts or
+                        [a for a in attempts if a.get('parent_attempt_id') == result['main_attempt_id']
+                         and not a.get('task_id')])
             linked = {a.get('attempt_id') for a in matching}
             indexed = [r for r in rows if r.get('task_id') == ident or r.get('attempt_id') in linked]
         if room_participant:
