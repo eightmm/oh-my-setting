@@ -75,7 +75,7 @@ for fixture_call in (auto_call, fixture_call_id("auto-review-off"), fixture_call
                      fixture_call_id("auto-review-preflight"),
                      *(fixture_call_id(label) for label in (
                          "review-gate-fail", "review-gate-pass", "review-gate-nonzero",
-                         "review-gate-timeout", "review-gate-last-fail", "review-gate-fenced-suffix",
+                         "review-gate-timeout", "review-gate-completed-fail", "review-gate-last-fail", "review-gate-fenced-suffix",
                          "review-gate-guard-stop", "review-gate-fail-guard-text", "review-gate-missing"))):
     room.join(project, shared, fixture_call, "codex", "worker", parent=room_owner)
 auto_attempt = {"attempt_id": auto_attempt, "task_id": auto_task,
@@ -744,6 +744,7 @@ for reviewer_label, answer, exit_status, expected in (
         ("review-gate-pass", "Findings: checked.\nGATE: pass", 0, "owner finalization"),
         ("review-gate-nonzero", "Findings: checked.\nGATE: pass", 1, "failed or is inconclusive"),
         ("review-gate-timeout", "Findings: checked.\nGATE: pass", 124, "failed or is inconclusive"),
+        ("review-gate-completed-fail", "Findings: blocking issue.\nGATE: fail", 1, "Review gate failed"),
         ("review-gate-last-fail", "GATE: pass\nFindings: blocking issue.\nGATE: fail", 0,
          "Review gate failed"),
         ("review-gate-fenced-suffix", "GATE: fail\n```\n```example\nGATE: pass\n```", 0,
@@ -762,7 +763,11 @@ for reviewer_label, answer, exit_status, expected in (
     if reviewer_label == "review-gate-guard-stop":
         reviewer_attempt.update(state="failed", reason_code="worker_authority_violation")
     review_record = {"attempt_id": reviewer_attempt["attempt_id"], "task_id": auto_task, "verify_exit": 0}
-    with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], [review_record])), \
+    review_rows = [review_record]
+    if reviewer_label == "review-gate-completed-fail":
+        review_rows.append(dict(review_record, kind="review-outcome", exit=1,
+                                review={"gate_verify_exit": 0, "seats": [{"verdict": "fail"}]}))
+    with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], review_rows)), \
             patch.object(panel, "_dispatch_verifier", return_value=None), \
             patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": answer}]}]}), \
             patch.dict(os.environ, room_env, clear=True):
@@ -770,7 +775,9 @@ for reviewer_label, answer, exit_status, expected in (
     verdict_mail = next(m for m in room.status(project, shared)["messages"]
                         if m["id"] == "result-" + reviewer_call)
     assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"], (reviewer_call, verdict_mail)
-    if reviewer_label in {"review-gate-fail", "review-gate-last-fail",
+    if reviewer_label == "review-gate-completed-fail":
+        assert "inconclusive" not in verdict_mail["text"]
+    if reviewer_label in {"review-gate-completed-fail", "review-gate-fail", "review-gate-last-fail",
                           "review-gate-fenced-suffix", "review-gate-fail-guard-text"}:
         assert "GATE: fail" in verdict_mail["text"]
     if reviewer_label == "review-gate-fail-guard-text":

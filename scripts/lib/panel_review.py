@@ -695,7 +695,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         outcome = result_record.get("review", {})
         seats = outcome.get("seats", []) if isinstance(outcome, dict) else []
         # peer-review returns 1 for a completed negative gate, while its provider seat exits 0.
-        completed_gate_fail = (bool(review_context) and status == 1
+        completed_gate_fail = (gate_required and status == 1
                                and result_record.get("kind") == "review-outcome"
                                and result_record.get("exit") == 1 and isinstance(outcome, dict)
                                and outcome.get("gate_verify_exit") == 0

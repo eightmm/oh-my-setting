@@ -41,6 +41,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A standalone gated reviewer whose seat answers `GATE: fail` now notifies the
+  main that the review gate failed, instead of the "failed or is inconclusive"
+  text a crashed or verdict-less review gets.
 - A passing `oms land` gate resolves its gate command's fail-ledger entry, as
   the post-command pass hook does for commands run in the agent's shell, when
   the passing commit contains the newest failed one. Session starts stop
