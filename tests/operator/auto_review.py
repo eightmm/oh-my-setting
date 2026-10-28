@@ -13,6 +13,8 @@ for owner in ("pi", "antigravity"):
             raise AssertionError("unknown model family established independence")
     assert allocate(owner, role="reviewer", installed={"claude", "codex"},
                     writer="codex")["provider"] == "claude"
+    assert allocate(owner, role="reviewer", installed={"claude", "codex"}, writer=owner,
+                    owner_model="anthropic/claude-opus-5-5")["provider"] == "codex"
 import panel_routing as family_routing
 with patch.object(family_routing, "model_family", side_effect=lambda provider, model:
                   {"pi": "anthropic", "claude": "anthropic", "codex": "openai"}[provider]) as family_lookup:

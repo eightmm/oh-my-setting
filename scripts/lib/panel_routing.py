@@ -219,7 +219,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             available = sorted(available, key=lambda c: c["provider"] == owner)
         usable = available
     if role in INDEPENDENT:
-        # An exact-model writer (Pi, OpenCode) is never a native judge, so ordering away from it keeps tier order.
+        # An exact-model writer (Pi, OpenCode) is never a native judge, so ordering away from it keeps tier order;
+        # a Pi main judging its own provider's work still needs its recorded family (unknown fails closed).
         judged = writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS else owner
         if judged == owner and judged in ("pi", "antigravity"):
             family = model_family(judged, owner_model)
