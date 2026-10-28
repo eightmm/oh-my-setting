@@ -171,14 +171,15 @@ def repository_public(repo):
                                     capture_output=True, text=True, timeout=5, check=True,
                                     stdin=subprocess.DEVNULL).stdout.strip()
         cache = Path(authoritative) / ".oms/panel-state/public-route-visibility.json"
-        # Every answer expires after 10 minutes, so a repository made private stops free routes soon.
-        def _cache_entry(public):
+        # Only a not-public answer is cached (10 minutes); public is re-verified on every check, so a
+        # repository made private never keeps free third-party routes.
+        def _cache_not_public():
             try:
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 fd, tmp = tempfile.mkstemp(prefix=".visibility-", dir=str(cache.parent))
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                        json.dump({"origin": normalized, "checked_at": time.time(), "public": public}, stream)
+                        json.dump({"origin": normalized, "checked_at": time.time(), "public": False}, stream)
                     os.replace(tmp, cache)
                 finally:
                     if os.path.exists(tmp):
@@ -188,10 +189,8 @@ def repository_public(repo):
         try:
             data = json.loads(cache.read_text(encoding="utf-8"))
             age = time.time() - data["checked_at"]
-            origin_match = data.get("origin") == normalized
-            is_bool = type(data.get("public")) is bool
-            if origin_match and is_bool and 0 <= age < 600:
-                return data["public"]
+            if data.get("origin") == normalized and data.get("public") is False and 0 <= age < 600:
+                return False
         except (OSError, ValueError, TypeError, KeyError):
             pass
         try:
@@ -201,12 +200,13 @@ def repository_public(repo):
             visibility = json.loads(result.stdout)["visibility"]
             if visibility not in ("PUBLIC", "PRIVATE", "INTERNAL"):
                 raise ValueError("unknown visibility: %s" % visibility)
-            public = visibility == "PUBLIC"
-            _cache_entry(public)
-            return public
+            if visibility == "PUBLIC":
+                return True
+            _cache_not_public()
+            return False
         except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
             # Blocked network or missing CLI: cache not-public.
-            _cache_entry(False)
+            _cache_not_public()
             return False
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return False

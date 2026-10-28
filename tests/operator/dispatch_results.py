@@ -188,18 +188,25 @@ def exercise_public_only_routing():
     with patch.dict(os.environ, env):
         chosen = allocate("codex", installed={"pi", "claude"}, repo=repo)
         assert chosen["provider"] == "pi", chosen
-        assert calls.read_text() == "x"
+        assert calls.read_text() == "x" and not cache.exists(), "a public answer was cached"
+        # A repository made private loses free routes on the next check.
         os.environ["ROUTE_VISIBILITY"] = "PRIVATE"
-        assert allocate("codex", installed={"pi", "claude"}, repo=repo)["provider"] == "pi"
-        assert calls.read_text() == "x"
+        assert allocate("codex", installed={"pi", "claude"}, repo=repo)["provider"] == "claude"
+        assert calls.read_text() == "xx"
         saved_cache = json.loads(cache.read_text())
+        assert saved_cache["public"] is False
         now = saved_cache["checked_at"]
+        os.environ["ROUTE_VISIBILITY"] = "PUBLIC"
         for age in (0, 599):
             with patch.object(panel_routing.time, "time", return_value=now + age):
-                assert panel_routing.repository_public(repo)
-        with patch.object(panel_routing.time, "time", return_value=now + 600):
-            assert not panel_routing.repository_public(repo)
+                assert not panel_routing.repository_public(repo)
         assert calls.read_text() == "xx"
+        with patch.object(panel_routing.time, "time", return_value=now + 600):
+            assert panel_routing.repository_public(repo)
+        assert calls.read_text() == "xxx"
+        os.environ["ROUTE_VISIBILITY"] = "PRIVATE"
+        cache.write_text(json.dumps(dict(saved_cache, public=True)))
+        assert not panel_routing.repository_public(repo), "a stored public answer was trusted"
         for bad in ("", "0", "malformed"):
             cache.write_text(bad)
             assert not panel_routing.repository_public(repo)
