@@ -987,21 +987,43 @@ dead="$($EVENTS --repo "$compact_repo" start --provider codex --tool agent-call)
 $EVENTS --repo "$compact_repo" transition --attempt "$dead" --state starting >/dev/null
 $EVENTS --repo "$compact_repo" transition --attempt "$dead" --state working >/dev/null
 $EVENTS --repo "$compact_repo" transition --attempt "$dead" --state failed >/dev/null
-live="$($EVENTS --repo "$compact_repo" start --provider codex --tool agent-call)" ||
+dead_child="$($EVENTS --repo "$compact_repo" start --provider codex --tool agent-call --parent-attempt-id "$dead")" ||
+  fail "compact fixture: could not create the terminal child"
+$EVENTS --repo "$compact_repo" transition --attempt "$dead_child" --state starting >/dev/null
+$EVENTS --repo "$compact_repo" transition --attempt "$dead_child" --state working >/dev/null
+$EVENTS --repo "$compact_repo" transition --attempt "$dead_child" --state failed >/dev/null
+grandparent="$($EVENTS --repo "$compact_repo" start --provider codex --tool agent-call)" ||
+  fail "compact fixture: could not create the grandparent"
+$EVENTS --repo "$compact_repo" transition --attempt "$grandparent" --state starting >/dev/null
+$EVENTS --repo "$compact_repo" transition --attempt "$grandparent" --state working >/dev/null
+$EVENTS --repo "$compact_repo" transition --attempt "$grandparent" --state failed >/dev/null
+parent="$($EVENTS --repo "$compact_repo" start --provider codex --tool agent-call --parent-attempt-id "$grandparent")" ||
+  fail "compact fixture: could not create the parent"
+$EVENTS --repo "$compact_repo" transition --attempt "$parent" --state starting >/dev/null
+$EVENTS --repo "$compact_repo" transition --attempt "$parent" --state working >/dev/null
+$EVENTS --repo "$compact_repo" transition --attempt "$parent" --state failed >/dev/null
+live="$($EVENTS --repo "$compact_repo" start --provider codex --tool agent-call --parent-attempt-id "$parent")" ||
   fail "compact fixture: could not create the live attempt"
 # The cutoff has one-second granularity: the terminal attempt must be
 # strictly older than "now" before --days 0 may see it.
 sleep 2
 out="$($EVENTS --repo "$compact_repo" compact --days 0)" || fail "compact dry-run failed"
-printf '%s' "$out" | grep >/dev/null -F 'would drop 4 event(s) across 1 terminal attempt(s)' ||
+printf '%s' "$out" | grep >/dev/null -F 'would drop 8 event(s) across 2 terminal attempt(s) older than 0d (keeping 9)' ||
   fail "compact dry-run should name the drop: $out"
-[ "$(wc -l < "$compact_repo/.oms/lifecycle/events.jsonl")" -eq 5 ] ||
+[ "$(wc -l < "$compact_repo/.oms/lifecycle/events.jsonl")" -eq 17 ] ||
   fail "a dry run must not touch the stream"
 out="$($EVENTS --repo "$compact_repo" compact --days 0 --apply)" || fail "compact apply failed"
-printf '%s' "$out" | grep >/dev/null -F 'dropped 4 event(s)' || fail "compact apply should report the drop: $out"
+printf '%s' "$out" | grep >/dev/null -F 'dropped 8 event(s) across 2 terminal attempt(s) older than 0d (kept 9)' || fail "compact apply should report the drop: $out"
 $EVENTS --repo "$compact_repo" validate >/dev/null || fail "the compacted stream must still validate"
+$EVENTS --repo "$compact_repo" show --attempt "$grandparent" >/dev/null 2>&1 ||
+  fail "the terminal grandparent of a live attempt must survive compaction"
+$EVENTS --repo "$compact_repo" show --attempt "$parent" >/dev/null 2>&1 ||
+  fail "the terminal parent of a live attempt must survive compaction"
 $EVENTS --repo "$compact_repo" show --attempt "$live" >/dev/null 2>&1 ||
   fail "the live attempt must survive compaction"
+if $EVENTS --repo "$compact_repo" show --attempt "$dead_child" >/dev/null 2>&1; then
+  fail "the terminal child without survivors must be gone after compaction"
+fi
 if $EVENTS --repo "$compact_repo" show --attempt "$dead" >/dev/null 2>&1; then
   fail "the terminal attempt must be gone after compaction"
 fi

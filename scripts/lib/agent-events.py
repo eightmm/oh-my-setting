@@ -1594,6 +1594,7 @@ def event_compact(args: argparse.Namespace) -> int:
     every reader consumes grows without bound. Compaction removes whole
     attempts only — an attempt's stream is valid from its first row or not
     at all — and only attempts that are terminal and quiet past the cutoff.
+    Parents of kept attempts are kept transitively.
     Kept rows keep their original bytes, the survivors must still project
     before the replace, and a stream that will not project refuses to
     compact at all (fail closed).
@@ -1634,6 +1635,13 @@ def event_compact(args: argparse.Namespace) -> int:
             for attempt_id, item in attempts.items()
             if item.get("terminal") and str(item.get("updated_at", "")) < cutoff
         }
+        pending = [item.get("parent_attempt_id") for attempt_id, item in attempts.items()
+                   if attempt_id not in drop]
+        while pending:
+            parent_id = pending.pop()
+            if parent_id in drop:
+                drop.remove(parent_id)
+                pending.append(attempts[parent_id].get("parent_attempt_id"))
         kept_raws = []
         kept_rows = []
         for raw, row in zip(raws, rows):
