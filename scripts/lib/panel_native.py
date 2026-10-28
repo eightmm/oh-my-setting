@@ -59,7 +59,7 @@ def native_adapter(provider):
 
 def native_binary(provider):
     from terminal_panel import MAIN_HARNESSES, native_adapter
-    if provider in MAIN_HARNESSES:
+    if provider in MAIN_HARNESSES or provider == "agy":
         return provider
     adapter = native_adapter(provider)
     if not adapter:
@@ -67,8 +67,36 @@ def native_binary(provider):
     return adapter
 
 
-def main_owner(harness):
-    return "codex" if harness == "pi" else harness
+def resolve_main(harness, model=None):
+    """Resolve durable ownership separately from the CLI and its inference transport."""
+    from terminal_panel import policy, provider_catalog
+    builtin = harness in ("claude", "codex", "pi", "agy")
+    if not builtin and not native_adapter(harness):
+        raise ValueError("unknown main harness")
+    explicit = model is not None
+    if explicit and (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9_./:][A-Za-z0-9_./:-]{0,159}", model)):
+        raise ValueError("invalid exact main model")
+    owner = {"pi": "codex", "agy": "antigravity"}.get(harness, harness)
+    preset = policy()["main"].get(owner, {"model": None if builtin else "provider-default",
+                                           "effort": "native-settings"})
+    model = model if explicit else preset["model"]
+    transport = "direct"
+    if harness == "pi":
+        catalog = provider_catalog("codex")[0] if explicit else {}
+        if not explicit or model in catalog.get("catalog_models", catalog.get("models", [])):
+            transport = "gateway"
+        else:
+            owner = "pi"
+    effort = preset["effort"] if not explicit or transport == "gateway" else "native-settings"
+    if harness == "pi" and transport == "direct":
+        effort = "native-settings"
+    return dict(harness=harness, owner=owner, model=model, transport=transport, effort=effort)
+
+
+def main_owner(harness, model=None):
+    if harness is None:
+        return None
+    return resolve_main(harness, model)["owner"]
 
 
 def caller_owner():
@@ -81,14 +109,16 @@ def caller_owner():
     return "codex"
 
 
-def main_installed(harness):
+def main_installed(harness, model=None):
     from terminal_panel import native_binary
-    return bool(shutil.which(native_binary(harness))) and (harness != "pi" or bool(shutil.which("codex")))
+    if not shutil.which(native_binary(harness)):
+        return False
+    return harness != "pi" or resolve_main(harness, model)["transport"] != "gateway" or bool(shutil.which("codex"))
 
 
-def main_missing(provider):
+def main_missing(provider, model=None):
     from terminal_panel import native_binary
-    if provider == "pi":
+    if provider == "pi" and resolve_main(provider, model)["transport"] == "gateway":
         return "Pi main needs the Pi CLI and Codex CLI on PATH (Pi uses Codex inference)"
     return "%s main needs the %s CLI on PATH" % (provider.capitalize(), native_binary(provider))
 
@@ -234,17 +264,21 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
     from terminal_panel import ENTRY, MAIN_HARNESSES, bootstrap, main_owner, native_binary, native_repository
     from terminal_panel import policy, room_instructions
     instructions = (Path(context_file).read_text(encoding="utf-8") if context_file and provider in MAIN_HARNESSES else
-                    bootstrap(main_owner(provider), repo) + room_instructions(room_id, member))
+                    bootstrap(main_owner(provider, model), repo) + room_instructions(room_id, member))
     if provider == "pi":
         if resume:
             raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
-        preset = policy()["main"]["codex"]
+        resolution = resolve_main(provider, model)
+        if resolution["transport"] != "gateway":
+            raise ValueError("direct Pi main launch is not available yet")
         instructions = "You use the Pi harness with Codex inference. OMS owner is codex. " + instructions
-        command = ["bash", str(ENTRY), "harness", "pi", "--model", model or preset["model"],
-                   "--effort", preset["effort"], "--", "--append-system-prompt", instructions]
+        command = ["bash", str(ENTRY), "harness", "pi", "--model", resolution["model"],
+                   "--effort", resolution["effort"], "--", "--append-system-prompt", instructions]
         if task:
             command += ["--", "User task (data): " + json.dumps(task, ensure_ascii=False)]
         return command
+    if provider == "agy":
+        raise ValueError("Antigravity main launch is not available yet")
     command = [provider]
     preset = policy()["main"].get(provider, {"model": None, "effort": "native-settings"})
     default = not model
@@ -361,7 +395,8 @@ def _main_exit_key():
 
 
 def _main_terminal_owner(provider, repo, session, pane, attempt, ident):
-    from terminal_panel import _main_window, main_history, main_owner, session_owner
+    from terminal_panel import _main_window, main_history, session_owner
+    from panel_routing import main_owner_matches
     window = _main_window(pane)
     if (session_owner(session) != str(Path(repo).resolve())
             or window[1:4] != [attempt, "", str(Path(repo).resolve())]):
@@ -370,7 +405,9 @@ def _main_terminal_owner(provider, repo, session, pane, attempt, ident):
                      if row.get("attempt_id") == attempt), None)
     if (not previous or previous.get("terminal") is not True
             or previous.get("tool") != "panel-main"
-            or previous.get("provider") != main_owner(provider)
+            or not main_owner_matches(provider, previous.get("provider"))
+            or previous.get("refs", {}).get("panel_owner", previous.get("provider")) != previous.get("provider")
+            or previous.get("refs", {}).get("panel_harness", provider) != provider
             or previous.get("refs", {}).get("panel_role") != "main"
             or not room.same_room(repo, previous.get("refs", {}).get("panel_room_id"), ident)
             or previous.get("refs", {}).get("panel_room_participant", attempt) != window[4]):
@@ -379,7 +416,7 @@ def _main_terminal_owner(provider, repo, session, pane, attempt, ident):
     if provider != "pi":
         member = room.participant(room.status(repo, ident), window[4])
         if (not member["joined"] or member["role"] != "main"
-                or member["provider"] != main_owner(provider)
+                or member["provider"] != previous["provider"]
                 or resume and member.get("consumer") and member["consumer"] !=
                     hashlib.sha256(resume.encode()).hexdigest()[:32]):
             raise ValueError("current native session binding is unverified; restart refused")
@@ -553,18 +590,20 @@ def main_history(repo, ident, member=None):
 def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None, _exit_info=None):
     from terminal_panel import MAIN_HARNESSES, NativeShutdown, PROVIDERS, _latest_swap, _lock, bootstrap
     from terminal_panel import child_environment, clean, ensure_room, events, launch_failed_without_child
-    from terminal_panel import lineage_ids, main_history, main_installed, main_missing, main_owner
-    from terminal_panel import managed_session, native_command, native_repository, pane_option, policy
+    from terminal_panel import lineage_ids, main_history, main_installed, main_missing
+    from terminal_panel import managed_session, native_command, native_repository, pane_option
     from terminal_panel import room_instructions, safe_label, tmux_command, update_activity
     harness = provider
     execution = native_repository(repo)
-    if not main_installed(harness):
-        raise ValueError(main_missing(harness))
+    if not main_installed(harness, model):
+        raise ValueError(main_missing(harness, model))
     if harness == "pi" and resume:
         raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
-    provider = main_owner(harness)
+    resolution = resolve_main(harness, model)
+    provider = resolution["owner"]
+    if harness == "agy" or harness == "pi" and resolution["transport"] == "direct":
+        raise ValueError("selected main transport launch is not available yet")
     native_session = resume or (str(uuid.uuid4()) if harness == "claude" else None)
-    preset = policy()["main"].get(provider, {"model": "provider-default", "effort": "native-settings"})
     room_id = room_id or ensure_room(repo)
     member = None
     if not resume and managed_session():
@@ -637,8 +676,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
                      "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
                      "--ref", "panel_harness=" + harness,
-                     "--ref", "panel_model=" + (model or preset["model"]),
-                     "--ref", "panel_effort=" + (preset["effort"] if not model or harness == "pi" else "native-settings"),
+                     "--ref", "panel_model=" + resolution["model"],
+                     "--ref", "panel_effort=" + resolution["effort"],
                      "--ref", "panel_label=" + label,
                      "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
                      *(["--ref", "native_session=" + native_session,
@@ -653,7 +692,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
             _exit_info.update(attempt=attempt, room=room_id)
         try:
             if not member:
-                room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, native_session)
+                room.join(repo, room_id, native_member, provider, "main", resolution["model"], label, native_session)
             elif not resume and native_session:
                 room.bind(repo, room_id, native_member, native_session)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
@@ -729,7 +768,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         import panel_dispatch
         panel_dispatch._prepare_panel_graph(repo, wait=False)
         # A Pi child must not register until its genuine launcher identity is durable.
-        with _lock(repo, "panel-pi-registration") if harness == "pi" else nullcontext():
+        with _lock(repo, "panel-pi-registration") if resolution["transport"] == "gateway" else nullcontext():
             launch_inflight = True
             try:
                 process = subprocess.Popen(command, cwd=str(execution), env=env)
@@ -738,7 +777,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                 reason = "native_launch_unconfirmed" if launch_inflight else "native_launch_failed"
                 raise
             launch_inflight = False
-            native_refs = panel_release.process_refs(process.pid, "launcher" if harness == "pi" else "native")
+            native_refs = panel_release.process_refs(process.pid, "launcher" if resolution["transport"] == "gateway" else "native")
             if native_refs:
                 update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
                                 *[arg for key, value in native_refs.items() for arg in ("--ref", key + "=" + value)])
@@ -768,7 +807,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                 print("Native context cleanup unavailable; lifecycle evidence is retained.", file=sys.stderr)
             native_exit = process.poll() if process is not None else None
             if not launch_inflight and type(native_exit) is int:
-                exit_kind = "launcher" if harness == "pi" else "native"
+                exit_kind = "launcher" if resolution["transport"] == "gateway" else "native"
                 update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
                                 "--ref", "panel_" + exit_kind + "_exit=confirmed",
                                 "--ref", "panel_" + exit_kind + "_exit_code=" + str(native_exit))
@@ -872,8 +911,8 @@ def add_main_window(repo, session, launch, view, attention_only, env, resume=Non
                                    "-n", launch, "-c", str(native_repository(repo)),
                                    launch_command(repo, session, launch, resume, model, task)),
                                    env=env, text=True).strip()
-    bind_window(pane, launch, view, attention_only)
-    board_split(pane, repo, watch_shell(repo, launch), main_watch=True)
+    bind_window(pane, launch, view, attention_only, model)
+    board_split(pane, repo, watch_shell(repo, launch, model=model), main_watch=True)
     return pane
 
 
@@ -1027,15 +1066,14 @@ def spawn_main(repo, provider, task=None, model=None):
 
 def swap_choices(repo, ident):
     """Installed main harnesses with exact configured models and recorded weekly readings."""
-    from terminal_panel import MAIN_HARNESSES, main_installed, main_owner, policy, routing_status
+    from terminal_panel import MAIN_HARNESSES, main_installed, routing_status
     readings = routing_status(repo, ident)
-    defaults = policy()["main"]
     choices = []
     for harness in MAIN_HARNESSES:
         if not main_installed(harness):
             continue
-        owner = main_owner(harness)
-        model = defaults[owner]["model"]
+        resolution = resolve_main(harness)
+        owner, model = resolution["owner"], resolution["model"]
         reading = readings.get(owner, {})
         used = reading.get("weekly_used")
         left = 100 - used if type(used) is int and 0 <= used <= 100 else None
@@ -1178,16 +1216,19 @@ def swap_main(repo, harness, model=None):
     """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
     from terminal_panel import ENTRY, MAIN_HARNESSES, _lock, _main_window, _swap_digest, _swap_handoff_file
     from terminal_panel import _swap_main_window, _swap_submit, launch_command, live_mains, main_history
-    from terminal_panel import main_installed, main_owner, native_repository, policy, provider_catalog
+    from terminal_panel import main_installed, native_repository, policy, provider_catalog
     from terminal_panel import resolve_session, tmux_command
-    if not shutil.which("tmux") or harness not in MAIN_HARNESSES or not main_installed(harness):
+    requested_model = model
+    execution = native_repository(repo)
+    timeout = min(300, max(0, int(os.environ.get("OMS_PANEL_SWAP_HANDOFF_SECONDS", "90"))))
+    if not shutil.which("tmux") or harness not in MAIN_HARNESSES or not main_installed(harness, model):
         raise ValueError("swap target is unknown or not installed")
-    owner = main_owner(harness)
-    configured = policy()["main"][owner]["model"]
-    model = model or configured
-    if not re.fullmatch(r"[A-Za-z0-9_./:-]{1,160}", model):
-        raise ValueError("invalid exact swap model")
-    if model != configured:
+    resolution = resolve_main(harness, model)
+    owner, model = resolution["owner"], resolution["model"]
+    if harness == "pi" and resolution["transport"] == "direct":
+        raise ValueError("direct Pi main launch is not available yet")
+    configured = policy()["main"].get(owner, {}).get("model")
+    if harness != "pi" and model != configured:
         catalog = provider_catalog(owner)[0]
         if model not in catalog.get("catalog_models", catalog.get("models", [])):
             raise ValueError("swap model is not in the installed provider catalog")
@@ -1218,6 +1259,9 @@ def swap_main(repo, harness, model=None):
         current = room.participant(state, member)
         if current["role"] != "main" or current["provider"] != old["provider"]:
             raise ValueError("current room main binding is unverified")
+        swap_event = {"kind": "main-swap", "participant": member, "provider": owner,
+                      "model": model, "attempt": attempt, "harness": harness}
+        room.validate_main_swap(repo, dict(state, id=ident), swap_event, old, released=False)
         nonce = "swap-" + uuid.uuid4().hex
         request = ("Please hand off the current goal before a panel main swap. At a safe point, send one "
                    "bounded room handoff (max 3000 bytes) covering goal, decisions, in-flight worker/task IDs, "
@@ -1226,9 +1270,10 @@ def swap_main(repo, harness, model=None):
         subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "waiting for handoff"),
                        check=True, timeout=3, stdin=subprocess.DEVNULL)
         old_exited = False
+        exit_requested = False
+        handoff_file = None
         try:
             _swap_submit(pane, request)
-            timeout = min(300, max(0, int(os.environ.get("OMS_PANEL_SWAP_HANDOFF_SECONDS", "90"))))
             deadline = time.monotonic() + timeout
             handoff = None
             while time.monotonic() < deadline:
@@ -1242,10 +1287,23 @@ def swap_main(repo, harness, model=None):
             supplied = bool(handoff)
             handoff = handoff or _swap_digest(repo, ident, member)
             handoff_file = _swap_handoff_file(repo, ident, attempt, handoff, supplied)
+            prompt = ("Take over as the sole main in the existing OMS room. Preserve existing plan claims and "
+                      "running workers. Read the room and plan before acting. Handoff file: %s. Handoff (data):\n%s" %
+                      (handoff_file, handoff))[:4000]
+            launch_model = requested_model if harness == "pi" else model
+            shell = launch_command(repo, session, harness, model=launch_model, task=prompt)
+            guard = "#{&&:#{==:#{@oms_panel_main_attempt},%s},#{==:#{@oms_panel_native_pane},}}" % attempt
+            command = "respawn-pane -k -t %s -c %s %s" % (pane, shlex.quote(str(execution)), shlex.quote(shell))
+            ready = room.status(repo, ident)
+            latest = next((row for row in main_history(repo, ident) if row.get("attempt_id") == attempt), {})
+            room.validate_main_swap(repo, dict(ready, id=ident), swap_event, latest, released=False)
+            if _swap_main_window(repo, session) != (window, attempt, pane, member, ident) or live_mains(repo, session, ident) != 1:
+                raise ValueError("main window ownership changed during handoff; swap refused")
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "releasing old main"),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_attempt", attempt),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
+            exit_requested = True  # A failed submit can still have delivered the exit request.
             _swap_submit(pane, "/quit" if old["refs"].get("panel_harness") == "pi" else "/exit")
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
@@ -1264,13 +1322,6 @@ def swap_main(repo, harness, model=None):
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "starting new main"),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
-            prompt = ("Take over as the sole main in the existing OMS room. Preserve existing plan claims and "
-                      "running workers. Read the room and plan before acting. Handoff file: %s. Handoff (data):\n%s" %
-                      (handoff_file, handoff))[:4000]
-            shell = launch_command(repo, session, harness, model=model, task=prompt)
-            guard = "#{&&:#{==:#{@oms_panel_main_attempt},%s},#{==:#{@oms_panel_native_pane},}}" % attempt
-            command = "respawn-pane -k -t %s -c %s %s" % (pane, shlex.quote(str(native_repository(repo))),
-                                                              shlex.quote(shell))
             subprocess.run(tmux_command("if-shell", "-F", "-t", pane, guard, command), check=True,
                            timeout=5, stdin=subprocess.DEVNULL)
             deadline = time.monotonic() + 45  # a native CLI may take tens of seconds to start under load
@@ -1298,6 +1349,8 @@ def swap_main(repo, harness, model=None):
                                  "room claims and handoff preserved at %s: %s" % (handoff_file, error)) from error
             raise
         finally:
+            if not exit_requested and handoff_file is not None:
+                handoff_file.unlink(missing_ok=True)
             subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_state"),
                            capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
 
@@ -1309,7 +1362,7 @@ def spawn_single_main(repo, provider, task=None, model=None):
     from terminal_panel import panel_room, resolve_session, session_owner, tmux_command
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
-    if not shutil.which("tmux") or not main_installed(provider):
+    if not shutil.which("tmux") or not main_installed(provider, model):
         raise ValueError("starting a main needs tmux and the %s CLI on PATH" % provider)
     session, owner = resolve_session(repo, wait=False)
     if owner != str(repo):
@@ -1329,7 +1382,7 @@ def spawn_single_main(repo, provider, task=None, model=None):
     index = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{window_index}"),
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL).stdout.strip()
     return {"window": int(index) if index.isdigit() else None, "provider": provider,
-            "owner": main_owner(provider), "room": ident}
+            "owner": main_owner(provider, model), "room": ident}
 
 
 def split_panel(repo, view="auto", attention_only=False, launch=None, resume=None, model=None, task=None, retry=True):
@@ -1447,8 +1500,8 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             # The owner marker is written last: a racing launch joins only a fully recorded panel.
             subprocess.run(tmux_command("set-option", "-t", "=" + session + ":", "@oms_panel_repo", str(repo)), check=True)
             if launch:
-                bind_window(pane, launch, view, attention_only)
-            board_split(pane, repo, watch_shell(repo, launch), main_watch=bool(launch))
+                bind_window(pane, launch, view, attention_only, model)
+            board_split(pane, repo, watch_shell(repo, launch, model=model), main_watch=bool(launch))
             subprocess.run(tmux_command("select-pane", "-t", pane), check=True)
             opened = []
             for index, provider in enumerate(mains):
@@ -1475,8 +1528,8 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
     from terminal_panel import check_legacy_main, ensure_room, live_main_refusal, live_mains, main_installed
     from terminal_panel import main_owner, native_repository, panel_room, run_native, tmux_command
     execution = native_repository(repo)
-    if not main_installed(provider):
-        raise ValueError("%s is not installed on PATH (Pi also needs Codex CLI)" % provider)
+    if not main_installed(provider, model):
+        raise ValueError(main_missing(provider, model))
     session = os.environ.get("OMS_PANEL_SESSION", "")
     if panel_host.herdr_active() and os.environ.get("OMS_PANEL_HOST") != "inline":
         with _lock(repo, "panel-main-session", timeout=.1):
@@ -1488,7 +1541,7 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
             if value:
                 native += [flag, value]
         watcher = ["bash", str(ENTRY), "panel", "--repo", str(execution), "--host", "herdr",
-                   "--watch", "--owner", main_owner(provider)]
+                   "--watch", "--owner", main_owner(provider, model)]
         if attention_only:
             watcher.append("--attention-only")
         panel_host.open_native(execution, provider, native, watcher)

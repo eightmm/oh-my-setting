@@ -1400,6 +1400,59 @@ def settlement_worker(task, parent=None, review=True, legacy=False, exit_proof=T
               str(root / "scripts/lib/peer-common.sh"), str(project), str(exit_artifact)],
              dict(environment, OMS_TASK_ID=task, OMS_ATTEMPT_ID=ident))
     return ident
+for new_owner, harness in (("pi", "pi"), ("antigravity", "agy"), ("codex", "pi")):
+    owner_task = "new-owner-" + new_owner
+    owner_room = room.create(project, owner_task, "Main owner result")
+    owner_main = call(event_command + ["start", "--provider", new_owner, "--tool", "panel-main",
+        "--ref", "panel_role=main", "--ref", "panel_owner=" + new_owner,
+        "--ref", "panel_harness=" + harness, "--ref", "panel_room_id=" + owner_room,
+        "--then", "starting", "--then", "working"]).strip()
+    room.join(project, owner_room, owner_main, new_owner)
+    owner_worker = settlement_worker(owner_task, owner_main)
+    owner_environment = dict(environment, OMS_AGENT=new_owner, OMS_PANEL_MAIN_ATTEMPT=owner_main,
+                             OMS_ROOM_PARTICIPANT=owner_main, OMS_ROOM_ID=owner_room)
+    owner_plan_task = dict(id=owner_task, claimed_by_participant=owner_main, provider=new_owner,
+                           lease_id="lease_" + "1" * 32)
+    with patch.dict(os.environ, owner_environment, clear=True), \
+            patch.object(saved, "_read", return_value=json.dumps({"plan_id": "plan_" + "2" * 32,
+                "tasks": {owner_task: owner_plan_task}})):
+        assert saved._owned_task(project, project, new_owner, owner_task)["provider"] == new_owner
+    owner_finalize = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize",
+        "--task-id", owner_task, "--owner", new_owner, "--summary-file", str(summary), "--outcome", "completed"]
+    # Settlement keeps same-second review and decision timestamps pending.
+    owner_review_at = json.loads(call(event_command + ["show", "--attempt", owner_worker, "--json"]))["updated_at"]
+    owner_clock_deadline = time.monotonic() + int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90"))
+    while time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) <= owner_review_at:
+        assert time.monotonic() < owner_clock_deadline, ("clock did not advance past review", owner_review_at)
+        time.sleep(.01)
+    owner_result = json.loads(call(owner_finalize, owner_environment))
+    assert owner_result["owner"] == new_owner, owner_result
+    assert json.loads(call(owner_finalize, owner_environment))["revision"] == owner_result["revision"]
+    owner_rows = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                 "--results", "--task-id", owner_task, "--json"], owner_environment))
+    assert not owner_rows["rows"][0]["missing_result"], owner_rows
+    assert json.loads((project / owner_rows["rows"][0]["artifact"]).read_text())["owner"] == new_owner
+    settled_owner = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+        "--settle-review", "--owner", new_owner, "--apply", "--json"], owner_environment))
+    assert not settled_owner["errors"], settled_owner
+    owner_worker_state = json.loads(call(event_command + ["show", "--attempt", owner_worker, "--json"]))
+    assert owner_worker_state["state"] == "done", (new_owner, owner_worker_state, owner_result["settlement"], settled_owner)
+    call(event_command + ["transition", "--attempt", owner_main, "--state", "cancelled"])
+    room.append(project, owner_room, {"kind": "leave", "participant": owner_main}, "Fixture main stopped")
+for invalid_owner in ("", "unknown", "agy", 0, None, []):
+    try:
+        saved.finalize(project, invalid_owner, "invalid-owner", str(summary), "completed")
+    except ValueError as error:
+        assert "owner" in str(error), error
+    else:
+        raise AssertionError("invalid result owner accepted")
+    with patch.object(saved, "_indexed", return_value=json.dumps(dict(owner_result, owner=invalid_owner))):
+        try:
+            saved._load_result(project, {"task_id": owner_task})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid stored result owner accepted")
 stopped = settlement_worker("elsewhere-task", main_attempts["codex"])
 running = settlement_worker("elsewhere-task", main_attempts["codex"], review=False)
 time.sleep(1.1)  # The lifecycle and artifact ledgers record whole seconds.

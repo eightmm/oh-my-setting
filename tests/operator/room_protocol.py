@@ -5,6 +5,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from contextlib import ExitStack
+from panel_routing import main_owner_matches
 import re
 import shlex
 import shutil
@@ -14,6 +16,69 @@ import tempfile
 import panel_native
 
 _operator_block("provider-and-routing")
+# Main ownership is independent of the worker-tier provider set.
+with patch.object(panel, "provider_catalog", return_value=[{"catalog_models": ["gpt-6.1-sol"]}]):
+    for harness, model, owner, transport in (
+            ("claude", "claude-opus-5-5", "claude", "direct"),
+            ("codex", "gpt-6.1-sol", "codex", "direct"),
+            ("pi", "gpt-6.1-sol", "codex", "gateway"),
+            ("pi", "openrouter/thinkingmachines/inkling:free", "pi", "direct"),
+            ("agy", "gemini-3-pro", "antigravity", "direct")):
+        resolved = panel.resolve_main(harness, model)
+        assert resolved == dict(harness=harness, owner=owner, model=model, transport=transport,
+                                effort=policy()["main"]["codex"]["effort"] if transport == "gateway"
+                                else "native-settings"), resolved
+    for invalid in ("", "bad model", "-option", "x" * 161, 0):
+        try:
+            panel.resolve_main("pi", invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid exact main model accepted: %r" % invalid)
+    assert panel.resolve_main("pi", "x" * 160)["owner"] == "pi"
+    assert panel.resolve_main("pi")["owner"] == "codex"
+    assert "--owner pi" in panel.watch_shell(project, "pi", model="exact-other-model")
+    assert "--owner antigravity" in panel.watch_shell(project, "agy", model="gemini-3-pro")
+    with patch.object(panel_native.shutil, "which", side_effect=lambda binary: binary if binary == "pi" else None):
+        assert panel.main_installed("pi", "exact-other-model")
+        assert not panel.main_installed("pi", "gpt-6.1-sol")
+    with patch.dict(os.environ, OMS_ROOM_ID="metadata-room"), patch.object(panel.subprocess, "run") as metadata:
+        panel.bind_window("%1", "pi", "graph", False, model="exact-other-model")
+        assert any(call.args[0][-2:] == ["@oms_panel_owner", "pi"] for call in metadata.call_args_list)
+    with patch.object(panel.shutil, "which", return_value="fixture-cli"), \
+            patch.object(panel, "main_installed", return_value=True), \
+            patch.object(panel, "_swap_submit", side_effect=AssertionError("main stopped before launch support")):
+        try:
+            panel.swap_main(project, "pi", "exact-other-model")
+        except ValueError as error:
+            assert "not available yet" in str(error), error
+        else:
+            raise AssertionError("unsupported direct Pi swap admitted")
+    for unknown in ("", "unknown", "antigravity"):
+        try:
+            panel.resolve_main(unknown, "exact-model")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unknown harness accepted")
+assert set(panel.MAIN_OWNERS) == {"claude", "codex", "pi", "antigravity"}
+assert set(panel.PROVIDERS) == set(panel.MODEL_IDS) == {"claude", "codex"}
+for window_name in ("pi", "agy", "antigravity", "unknown", ""):
+    with patch.object(panel, "managed_session", return_value=True), \
+            patch.dict(os.environ, TMUX_PANE="%1"), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, window_name + "\r\n", "")) as marker:
+        panel.mark_window(True)
+    assert marker.call_count == (2 if window_name in ("pi", "agy", "antigravity") else 1)
+    if marker.call_count == 2:
+        assert marker.call_args.args[0][-1] == "! " + window_name
+with patch.object(panel, "provider_catalog", side_effect=ValueError("catalog unavailable")):
+    try:
+        panel.resolve_main("pi", "gpt-6.1-sol")
+    except ValueError as error:
+        assert "catalog unavailable" in str(error), error
+    else:
+        raise AssertionError("catalog failure selected a different billing route")
 baseline = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
 report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))
 assert report["kind"] == "oms-panel" and report["schema"] == 1
@@ -21,6 +86,15 @@ assert all(report["providers"][p]["installed"] for p in panel.PROVIDERS)
 assert report["dashboard"]["kind"] == "oms-dashboard"
 assert not (project / ".oms").exists(), "panel query created a state store"
 assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == baseline
+assert report["main_harnesses"]["agy"]["owner"] == "antigravity", report
+for harness, model, owner in (("pi", "openrouter/thinkingmachines/inkling:free", "pi"),
+                              ("agy", "gemini-3-pro", "antigravity")):
+    planned_main = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                   "--launch", harness, "--model", model, "--dry-run"]))
+    assert planned_main["provider"] == owner and planned_main["harness"] == harness, planned_main
+    assert planned_main["argv"] is None and planned_main["executes"] is False, planned_main
+    with patch("sys.stdout", new=io.StringIO()):
+        assert panel.council(project, owner, "owner-council", "Owner council", "Compare", dry_run=True) == 0
 
 # Discovery is registry-driven and does not execute even marked adapters.
 inventory = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--providers", "--json"]))
@@ -433,6 +507,139 @@ call(["bash", "-c", heartbeat_probe, "verify-heartbeat", str(root),
 main_attempts = ended_mains()
 import panel_results as saved
 _operator_block("native-controls")
+for pair_harness, pair_owner, matches in (
+        ("pi", "codex", True), ("pi", "pi", True), ("agy", "antigravity", True),
+        ("claude", "claude", True), ("codex", "codex", True), ("roomtest", "roomtest", True),
+        ("a" * 64, "a" * 64, True), ("a" * 65, "a" * 65, False), ("", "", False),
+        (0, "codex", False), ([], "codex", False), ("pi", 0, False), ("pi", [], False),
+        ("pi", None, False), ("pi", "claude", False), ("agy", "agy", False),
+        ("antigravity", "antigravity", True), ("bad name", "bad name", False)):
+    assert main_owner_matches(pair_harness, pair_owner) is matches, (pair_harness, pair_owner)
+for preflight_failure in (None, "target", "command", "interrupt", "room", "window", "liveness", "status", "tmux", "exit", "existing"):
+    swap_attempt = "att_" + "c" * 32
+    swap_next = "att_" + "d" * 32
+    swap_old = {"attempt_id": swap_attempt, "provider": "claude", "tool": "panel-main", "terminal": False,
+                "state": "working", "refs": {"panel_role": "main", "panel_host": "tmux", "panel_harness": "claude",
+                    "panel_room_id": "preflight-room", "panel_room_participant": "preflight-main"}}
+    swap_ended = dict(swap_old, terminal=True, state="abandoned", reason_code="main_swapped")
+    selected_owner = "claude" if preflight_failure == "target" else "codex"
+    swap_new = {"attempt_id": swap_next, "provider": selected_owner, "terminal": False, "refs": {"panel_harness": "pi"}}
+    swap_state = {"id": "preflight-room", "participants": [{"participant": "preflight-main", "joined": True,
+        "role": "main", "provider": "claude", "model": "claude-opus-5-5"}], "messages": []}
+    swap_exited = []
+    swap_window = ("@1", swap_attempt, "%1", "preflight-main", "preflight-room")
+    swap_directory = temporary / ("preflight-" + str(preflight_failure))
+    (swap_directory / ".oms").mkdir(parents=True)
+    swap_handoff = swap_directory / ".oms/handoffs" / ("room-preflight-room-swap-" + swap_attempt + ".md")
+    if preflight_failure == "existing":
+        swap_handoff.parent.mkdir(parents=True)
+        swap_handoff.write_text("Existing recovery handoff\n")
+    swap_resolution = dict(harness="pi", owner=selected_owner, model="gpt-6.1-sol", transport="gateway", effort="high")
+    with ExitStack() as contexts:
+        for context in (patch.dict(os.environ, OMS_PANEL_SWAP_HANDOFF_SECONDS="0"),
+            patch.object(panel.shutil, "which", return_value="fixture-cli"),
+            patch.object(panel, "main_installed", return_value=True),
+            patch.object(panel_native, "resolve_main", return_value=swap_resolution),
+            patch.object(panel, "native_repository", return_value=project),
+            patch.object(panel, "resolve_session", return_value=("fixture", str(project))),
+            patch.object(panel, "main_history", side_effect=lambda *a: [swap_ended, swap_new] if swap_exited else [swap_old]),
+            patch.object(room, "same_room", return_value=True),
+            patch.object(panel, "_swap_submit", side_effect=lambda pane, text: swap_exited.append(text) if text == "/exit" else None),
+            patch.object(panel, "_swap_digest", return_value="Bounded handoff"),
+            patch.object(panel, "_main_window", return_value=["@1", swap_next, "%1", str(project), "preflight-main"])):
+            contexts.enter_context(context)
+        handoff_write = contexts.enter_context(patch.object(panel, "_swap_handoff_file",
+            side_effect=lambda repo, *args: panel_native._swap_handoff_file(swap_directory, *args)))
+        window_check = contexts.enter_context(patch.object(panel, "_swap_main_window", return_value=swap_window,
+            side_effect=[swap_window, ("@2", *swap_window[1:])] if preflight_failure == "window" else None))
+        liveness_check = contexts.enter_context(patch.object(panel, "live_mains", return_value=1,
+            side_effect=[1, 0] if preflight_failure == "liveness" else None))
+        room_check = contexts.enter_context(patch.object(room, "status", return_value=swap_state))
+        if preflight_failure == "room":
+            room_check.side_effect = [swap_state, dict(swap_state, participants=[])]
+        elif preflight_failure == "status":
+            room_check.side_effect = [swap_state, ValueError("room status unavailable")]
+        swap_process = contexts.enter_context(patch.object(panel.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, '{"active":false}', "")))
+        if preflight_failure == "tmux":
+            def fail_release_option(command, **kwargs):
+                if "@oms_panel_swap_attempt" in command:
+                    raise subprocess.TimeoutExpired(command, 3)
+                return subprocess.CompletedProcess(command, 0, '{"active":false}', "")
+            swap_process.side_effect = fail_release_option
+        if preflight_failure == "exit":
+            def fail_exit_submit(pane, text):
+                if text == "/exit":
+                    swap_exited.append(text)
+                    raise ValueError("exit delivery uncertain")
+            panel._swap_submit.side_effect = fail_exit_submit
+        swapped = contexts.enter_context(patch.object(room, "swap_main"))
+        launch = contexts.enter_context(patch.object(panel, "launch_command", return_value="replacement",
+            side_effect=ValueError("invalid command") if preflight_failure == "command" else
+                KeyboardInterrupt() if preflight_failure == "interrupt" else None))
+        if preflight_failure:
+            try:
+                panel.swap_main(project, "pi")
+            except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt):
+                swapped.assert_not_called()
+                if preflight_failure in ("exit", "existing"):
+                    assert swap_handoff.is_file(), preflight_failure
+                    if preflight_failure == "existing":
+                        assert not swap_exited
+                        assert swap_handoff.read_text() == "Existing recovery handoff\n"
+                    else:
+                        assert swap_exited == ["/exit"]
+                else:
+                    assert not swap_exited, (preflight_failure, swap_exited)
+                    assert not swap_handoff.exists(), (preflight_failure, "handoff blocks retry")
+                    swap_resolution["owner"] = swap_new["provider"] = "codex"
+                    launch.side_effect = window_check.side_effect = liveness_check.side_effect = None
+                    room_check.side_effect = swap_process.side_effect = None
+                    writes_before_retry = handoff_write.call_count
+                    assert panel.swap_main(project, "pi")["provider"] == "pi"
+                    assert handoff_write.call_count == writes_before_retry + 1
+                    assert swap_exited == ["/exit"]
+                    assert swap_handoff.is_file()
+                    swapped.assert_called_once()
+            else:
+                raise AssertionError("invalid swap stopped the current main")
+        else:
+            assert panel.swap_main(project, "pi")["provider"] == "pi"
+            assert launch.call_args.kwargs["model"] is None, "default Pi became an explicit uncached model"
+            assert swap_exited == ["/exit"]
+            assert swap_handoff.is_file()
+            swapped.assert_called_once_with(project, "preflight-room", "preflight-main", "codex", "gpt-6.1-sol", swap_attempt, "pi")
+for swap_model in ("x" * 160, "", 0, "x" * 161, "-option", "bad model"):
+    candidate_event = dict(kind="main-swap", participant="preflight-main", provider="codex", harness="pi",
+                           model=swap_model, attempt=swap_attempt)
+    with patch.object(room, "same_room", return_value=True):
+        if swap_model == "x" * 160:
+            room.validate_main_swap(project, swap_state, candidate_event, swap_old, released=False)
+        else:
+            try:
+                room.validate_main_swap(project, swap_state, candidate_event, swap_old, released=False)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid swap model passed preflight")
+for recorded_owner in ("codex", "pi"):
+    restart_row = {"attempt_id": "restart-cache", "terminal": True, "tool": "panel-main",
+                   "provider": recorded_owner, "refs": {"panel_role": "main", "panel_owner": recorded_owner,
+                       "panel_harness": "pi", "panel_model": "gpt-6.1-sol", "panel_room_id": "restart-room"}}
+    with patch.object(panel, "_main_window", return_value=["@1", "restart-cache", "", str(project.resolve()), "restart-cache"]), \
+            patch.object(panel, "session_owner", return_value=str(project.resolve())), \
+            patch.object(panel, "main_history", return_value=[restart_row]), \
+            patch.object(room, "same_room", return_value=True), \
+            patch.object(panel, "provider_catalog", return_value=[{"catalog_models": []}]) as cached_models:
+        assert panel._main_terminal_owner("pi", project, "session", "%1", "restart-cache", "restart-room") == restart_row
+        cached_models.assert_not_called()
+        restart_row["refs"]["panel_owner"] = "claude"
+        try:
+            panel._main_terminal_owner("pi", project, "session", "%1", "restart-cache", "restart-room")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("recorded owner mismatch authorized restart")
 
 # Task bodies keep native admission while only their shared display title is withheld.
 for task in ("/review", "../scripts inspect", "Explain " + "/" + "home" + "/fixture/private.py", "x" * 160):
@@ -1069,6 +1276,42 @@ room.swap_main(project, single_room, single_owner, "codex", "gpt-6.1-sol", singl
 swap_record = room.status(project, single_room)["swaps"][-1]
 assert swap_record["participant"] == single_owner and swap_record["attempt"] == single_owner
 assert swap_record["from"] == "claude" and swap_record["to"] == "codex"
+for new_owner, harness, model in (("codex", "pi", "gpt-6.1-sol"),
+                                  ("pi", "pi", "openrouter/thinkingmachines/inkling:free"),
+                                  ("antigravity", "agy", "gemini-3-pro")):
+    owner_room = room.create(project, "swap-" + new_owner, "Owner swap")
+    old_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main",
+        "--ref", "panel_role=main", "--ref", "panel_room_id=" + owner_room,
+        "--ref", "panel_harness=claude", "--then", "starting", "--then", "working", output=True)
+    room.join(project, owner_room, old_main, "claude", model="claude-opus-5-5")
+    panel.events(project, "transition", "--attempt", old_main, "--state", "blocked", "--then", "abandoned",
+                 "--reason-code", "main_swapped")
+    with patch.object(panel, "provider_catalog", return_value=[{"catalog_models": []}]):
+        room.swap_main(project, owner_room, old_main, new_owner, model, old_main, harness)
+    assert room.status(project, owner_room)["swaps"][-1]["to"] == new_owner
+    room.bind(project, owner_room, old_main, "native-" + new_owner)
+    assert room.participant(room.status(project, owner_room), old_main)["consumer"]
+    before_invalid = room.records(project, owner_room)
+    room.bind(project, owner_room, old_main, "native-" + new_owner)
+    assert room.records(project, owner_room) == before_invalid
+    try:
+        room.bind(project, owner_room, old_main, "another-native-identity")
+    except ValueError as error:
+        assert "already bound" in str(error), error
+    else:
+        raise AssertionError("blind native rebind accepted")
+    state = room.status(project, owner_room)
+    other_state = deepcopy(state)
+    other_state["participants"][0]["consumer"] = "0" * 32
+    carried, _ = room.carry_plan(state, other_state)
+    assert any(event["kind"] == "bind" for event, _, _ in carried), carried
+    try:
+        room.swap_main(project, owner_room, old_main, "unknown", model, old_main, harness)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown swap owner accepted")
+    assert room.records(project, owner_room) == before_invalid
 room.join(project, single_room, single_owner, "codex", model="gpt-6.1-sol")
 assert len(room.status(project, single_room)["participants"]) == 1
 room.join(project, single_room, "terminal-successor", "codex")

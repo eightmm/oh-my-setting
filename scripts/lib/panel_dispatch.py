@@ -209,10 +209,22 @@ def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candid
 
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
                    repo=None, room_id=None, main=None, task_id=None, candidate=None, routing_readings=None):
-    from terminal_panel import MODEL_IDS, PROVIDERS, allocate, policy, provider_catalog, routable_route_model
+    from terminal_panel import MAIN_OWNERS, MODEL_IDS, PROVIDERS, allocate, policy, provider_catalog, routable_route_model
     from terminal_panel import route_family, routing_status
-    if owner not in PROVIDERS:
+    if owner not in MAIN_OWNERS:
         owner = provider_catalog(owner)[0]["provider"]
+    owner_model = None
+    if owner in ("pi", "antigravity") and role in ("reviewer", "verifier", "security-auditor", "critic"):
+        from terminal_panel import active_mains, child_environment
+        repo = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
+        environment = child_environment(owner, repo)
+        ident = room_id or environment.get("OMS_ROOM_ID")
+        if ident:
+            state = room.status(repo, ident)
+            mains = active_mains(repo, ident, state, owner, caller=main or environment.get("OMS_ROOM_PARTICIPANT"),
+                                 attempt=environment.get("OMS_PANEL_MAIN_ATTEMPT"))
+            if len(mains) == 1:
+                owner_model = next(iter(mains.values())).get("refs", {}).get("panel_model")
     if effort not in (None, "low", "medium", "high") or role == "researcher" and effort not in (None, "low"):
         raise ValueError("invalid reasoning effort; researchers use low effort")
     if model and not target:
@@ -229,7 +241,8 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
                                         owner, repo, room_id, main, task_id, candidate))
         catalogs = {row["provider"]: row.get("catalog_models", row.get("models", [])) for row in rows}
         route = allocate(owner, role, workload, access, purpose,
-                         {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs)
+                         {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs,
+                         owner_model=owner_model)
         peer = next(row for row in rows if row["provider"] == route["provider"])
         route.update(binary=peer["binary"], model=routable_route_model(
             route["provider"], route["model"], catalogs[route["provider"]]))
@@ -237,7 +250,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
             raise ValueError("researchers require the newest configured/catalog Luna or Haiku model")
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
         return dict(route, effort=effort) if effort else route
-    route = allocate(owner, role, None, access, purpose)
+    route = allocate(owner, role, None, access, purpose, owner_model=owner_model)
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
     peer = provider_catalog(target)[0]
@@ -2677,10 +2690,10 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
 
 
 def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False, workload="deep"):
-    from terminal_panel import PROVIDERS, active_mains, child_environment, council_command, events, safe_label
+    from terminal_panel import MAIN_OWNERS, active_mains, child_environment, council_command, events, safe_label, provider_catalog
     from terminal_panel import update_activity
-    if owner not in PROVIDERS:
-        raise ValueError("choose a supported council owner")
+    if owner not in MAIN_OWNERS:
+        owner = provider_catalog(owner)[0]["provider"]
     argv = council_command(repo, prompt, task_id, label, thread, rounds, workload)
     # Advertise the seats actually launched: route tiers may hold fewer or more than two entries.
     seats = argv[argv.index("--providers") + 1].split(",")

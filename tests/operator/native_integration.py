@@ -839,6 +839,15 @@ native_adapter.write_text("#!/usr/bin/env python3\n" +
 native_adapter.chmod(0o755)
 with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=shared, OMS_OPEN_LOG=str(open_log), OMS_GRAPH_AUTOBUILD="0",
                                 OMS_OPEN_CONTEXT=str(open_context), OMS_PROVIDER_NATIVE_ADAPTERS="roomtest"), clear=True):
+    assert "--owner roomtest" in panel.watch_shell(project, "roomtest")
+    with patch.object(panel, "watch", return_value=0) as adapter_watch:
+        assert panel.main(["--repo", str(project), "--watch", "--owner", "roomtest", "--count", "1"]) == 0
+        assert adapter_watch.call_args.args[1] == "roomtest"
+    adapter_route = panel.selected_route("roomtest", "worker", None, "read", None,
+                                         target="codex", model="gpt-6-luna", repo=project)
+    assert adapter_route["owner"] == "roomtest" and adapter_route["provider"] == "codex", adapter_route
+    with patch("sys.stdout", new=io.StringIO()):
+        assert panel.council(project, "roomtest", "adapter-council", "Adapter council", "Compare", dry_run=True) == 0
     inventory = panel.provider_catalog("roomtest")[0]
     assert inventory["native_launch"] and not open_log.exists(), "discovery must not execute open"
     assert panel.run_native("roomtest", project, task="Inspect source; no unrelated work") == 0

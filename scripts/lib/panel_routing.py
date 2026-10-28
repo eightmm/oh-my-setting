@@ -3,9 +3,21 @@
 import json
 from datetime import datetime, timezone
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+MAIN_OWNERS = ("claude", "codex", "pi", "antigravity")
+
+
+def main_owner_matches(harness, owner):
+    """Match durable pairs; callers still prove adapter registration and lifecycle ownership."""
+    if not isinstance(harness, str) or not isinstance(owner, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", harness):
+        return False
+    pairs = {"claude": ("claude",), "codex": ("codex",), "pi": ("codex", "pi"), "agy": ("antigravity",)}
+    return owner in pairs.get(harness, (harness,))
+
+
 MODEL_IDS = {"codex": {"gpt-6.1-sol", "gpt-6-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-astra"},
              "claude": {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"}}
 EXACT_MODEL_PROVIDERS = {"opencode", "pi"}
@@ -132,7 +144,7 @@ def daily_capped(provider_status, candidate):
 
 
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
-             recent=None, writer=None, catalogs=None):
+             recent=None, writer=None, catalogs=None, owner_model=None):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
     recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task.
@@ -207,10 +219,28 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             available = sorted(available, key=lambda c: c["provider"] == owner)
         usable = available
     if role in INDEPENDENT:
-        usable = sorted(usable, key=lambda c: c["provider"] == (
-            writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS else owner))
+        # An exact-model writer (Pi, OpenCode) is never a native judge, so ordering away from it keeps tier order.
+        judged = writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS else owner
+        if judged == owner and judged in ("pi", "antigravity"):
+            family = model_family(judged, owner_model)
+            if family == "unknown":
+                raise ValueError("recorded main model family is unknown; independence is unverified")
+            # Validated worker tiers contain native Codex/Claude models only.
+            native_families = {"codex": "openai", "claude": "anthropic"}
+            usable = sorted(usable, key=lambda c: native_families[c["provider"]] == family)
+        else:
+            usable = sorted(usable, key=lambda c: c["provider"] == judged)
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])
     return dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
+
+
+def model_family(owner, model):
+    """Use the registry classification for aggregators as well as native providers."""
+    result = subprocess.run(["bash", "-c", '. "$1"; oms_provider_model_family "$2" "$3"',
+                             "panel-model-family", str(ROOT / "scripts/lib/provider-registry.sh"),
+                             owner, model or ""], capture_output=True, text=True, check=False,
+                            timeout=10, stdin=subprocess.DEVNULL)
+    return result.stdout.replace("\r", "").strip() if result.returncode == 0 else "unknown"
 
 
 def alternate_route(route, installed=None, provider_status=None):

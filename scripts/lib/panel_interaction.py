@@ -344,7 +344,7 @@ def interactive(repo, view="auto", attention_only=False):
     from terminal_panel import room_listing, room_open, run, safe_label, show_providers, snapshot, source_stamps
     from terminal_panel import stale_notice, swap_choices, swap_main, terminal_style, tmux_command
     harness = os.environ.get("OMS_PANEL_HARNESS") or (panel_mains() or ["claude"])[0]
-    provider = main_owner(harness)
+    provider = os.environ.get("OMS_PANEL_OWNER") or main_owner(harness)
     previous = "ready"
     navigation = {}
     held = {}

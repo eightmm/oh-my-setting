@@ -38,7 +38,7 @@ from dashboard_projection import clean
 from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
-                           TIERS, WRITERS, newest_route_model, routable_route_model, route_family)
+                           TIERS, WRITERS, MAIN_OWNERS, newest_route_model, routable_route_model, route_family)
 from panel_results import (DURABLE, _read, _write, _lock, accept, finalize, outcomes, results, results_snapshot,
                            retry_delivery, verified_patch, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
@@ -58,7 +58,7 @@ from panel_native import NativeShutdown
 from panel_layout import ReloadWatcher
 from panel_native import native_adapter
 from panel_native import native_binary
-from panel_native import main_owner
+from panel_native import main_owner, resolve_main
 from panel_native import caller_owner
 from panel_native import main_installed
 from panel_native import main_missing
@@ -362,7 +362,7 @@ def main(argv=None):
     parser.add_argument("--since", metavar="DURATION", help="limit --metrics to records within a duration (for example 7d)")
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
     parser.add_argument("--watch", action="store_true", help="read-only activity tree, refreshed every five seconds")
-    parser.add_argument("--owner", help="main identity for --watch or --dispatch")
+    parser.add_argument("--owner", help="main identity: claude, codex, pi or antigravity; registered adapters also support watch/dispatch/council")
     parser.add_argument("--count", type=int, help="stop after N watch snapshots")
     parser.add_argument("--no-animation", action="store_true", help="keep --watch motion-free")
     parser.add_argument("--view", choices=("auto", "summary", "compact", "detail", "graph", "tree"), help="activity density for the menu or --watch")
@@ -694,7 +694,7 @@ def main(argv=None):
                       panel_chats.open_chat(repo, ident, args.open_chat, args.chat_surface, args.dry_run))
             print(panel_chats.text(report) if args.chats and not args.json else json.dumps(report, ensure_ascii=False, indent=2))
             return 0
-        if args.launch and args.launch not in MAIN_HARNESSES:
+        if args.launch and args.launch not in MAIN_HARNESSES and not (args.dry_run and args.launch == "agy"):
             args.launch = provider_catalog(args.launch)[0]["provider"]
             native_binary(args.launch)
         if args.launch == "pi" and args.resume:
@@ -806,7 +806,7 @@ def main(argv=None):
             return status
         if args.watch:
             provider = args.owner or caller_owner()
-            if provider not in PROVIDERS:
+            if provider not in MAIN_OWNERS:
                 provider = provider_catalog(provider)[0]["provider"]
             return watch(repo, provider, args.count or 0, args.no_animation,
                          args.view, args.attention_only)
@@ -816,7 +816,7 @@ def main(argv=None):
                               "providers": {name: {"installed": bool(shutil.which(name))}
                                             for name in PROVIDERS},
                               "main_harnesses": {name: {"installed": main_installed(name), "owner": main_owner(name)}
-                                                 for name in MAIN_HARNESSES},
+                                                 for name in (*MAIN_HARNESSES, "agy")},
                               "max_live_mains": MAX_LIVE_MAINS,
                               "split_available": bool(shutil.which("tmux")),
                               "routing": policy(),
@@ -828,14 +828,17 @@ def main(argv=None):
             args.host == "tmux" or args.layout == "split" or (
                 args.layout == "auto" and shutil.which("tmux") and os.name != "nt"))
         if args.dry_run:
+            resolution = resolve_main(args.launch, args.model) if args.launch else None
+            launchable = resolution and args.launch != "agy" and not (
+                args.launch == "pi" and resolution["transport"] == "direct")
             print(json.dumps({"schema": 1, "kind": "oms-panel-launch",
                               "repo": str(repo), "layout": "split" if split else "inline",
                               "host": "tmux" if split else "herdr" if args.host == "herdr" or panel_host.herdr_active() else "inline",
-                              "provider": main_owner(args.launch),
+                              "provider": resolution["owner"] if resolution else None,
                               "harness": args.launch,
                               "max_live_mains": MAX_LIVE_MAINS,
                               "argv": native_command(args.launch, repo, args.resume, args.model, args.task)
-                              if args.launch else None,
+                              if launchable else None,
                               "room": os.environ.get("OMS_ROOM_ID") or "new on launch",
                               "environment_keys": ["OMS_AGENT", "OMS_PANEL_REPO", "OMS_PANEL_ENTRYPOINT", "PATH",
                                                    "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_ROOM_REPO"],

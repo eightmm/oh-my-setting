@@ -78,8 +78,12 @@ requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER
 [--model MODEL]` is the command form. It requires an existing tmux panel, one
 verified live main and an inactive landing operation. The current main is asked
 for a handoff of at most 3000 bytes (90 seconds by default via `OMS_PANEL_SWAP_HANDOFF_SECONDS`, capped at 300); if
-none arrives, OMS uses a recorded-state digest. OMS then exits the old main and
+none arrives, OMS uses a recorded-state digest. Before asking the main to exit,
+OMS validates the target's durable owner/harness pair, prepares the replacement
+command and rechecks the current room, attempt and window ownership. OMS then exits the old main and
 relaunches the replacement in the same pane and room without stopping workers.
+If preparation or a recheck fails before the exit request, OMS removes that swap's
+handoff file so the preserved main can be swapped again.
 If the old main does not exit, the panel preserves it and the room claims.
 A current Pi main can be swapped without a resume binding: the replacement
 starts fresh. If replacement startup fails or ownership cannot be verified,
@@ -224,10 +228,26 @@ Failed ownership queries preserve the window. SIGTERM/SIGHUP
 at the prompt restore terminal modes before exiting with 143/129.
 Without a terminal, native launch retains its existing exit behavior.
 
-Pi uses the existing `oms harness pi` bridge and requires both Pi 0.80.4 or newer (its `agent_settled` event marks the main idle) and Codex CLI on PATH.
-Its default model and effort come from the Codex main preset; `--model` selects an exact
-Codex catalog model. Pi owns its tools and UI, while OMS records the inference owner as
-`codex` and the harness as `pi`. Pi history is separate: this initial integration refuses
+Panel owner fields and `--owner` for dispatch, finalize and review settlement accept
+`claude`, `codex`, `pi` and `antigravity`. The resolver records Claude and Codex under
+their own identities. Pi's default model and effort come from the Codex main preset;
+an explicit model in the full Codex catalog resolves to the gateway with owner `codex`.
+Any other exact Pi model resolves to direct transport with owner `pi`. The `agy`
+harness resolves to registry owner `antigravity`. Worker tiers still use Claude and
+Codex only. Independent review of Pi or Antigravity uses the recorded main model's
+registry family; an unknown family cannot establish independence. Existing Pi rows
+with owner `codex` remain readable. Swap events and restart ownership validate the
+recorded owner/harness pair without consulting the current model cache; Pi permits
+recorded owners `codex` and `pi`, while `agy` uses `antigravity`. A default Pi swap
+retains the default gateway selection even when its cached catalog is empty.
+Registered native-adapter mains retain their registry identities for watchers,
+dispatch and council. Their registration fallback remains separate from worker tiers.
+
+Direct Pi and agy launch are deferred; this ownership phase enables their stored
+rows and consumers. Their launch dry runs report the resolved owner with `argv: null`.
+The available Pi launch uses the existing `oms harness pi`
+bridge and requires both Pi 0.80.4 or newer (its `agent_settled` event marks the main
+idle) and Codex CLI on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
 `--resume` until Pi session ownership can be verified. It has no Codex native hook or
 context/quota reading, but [`scripts/lib/pi-oms-extension.mjs`](../scripts/lib/pi-oms-extension.mjs)
 forwards Pi activity to `hook_state.py` and delivers room mail through its hook context.
@@ -546,7 +566,7 @@ seconds rather than animating.
 A native window binds children by its recorded main attempt ID. Earlier mains'
 calls stay in the room's tree. The control view shows
 repository-wide records. Control option `4 Main` chooses the main harness for
-subsequent manual dispatch; Pi uses the Codex dispatch owner. Main/child links come from explicit
+subsequent manual dispatch; gateway-backed Pi uses the Codex dispatch owner. Main/child links come from explicit
 lifecycle metadata, never matching a provider name. Legacy unlinked records stay
 repository-wide. A marker and its attempt are coalesced only by their exact
 execution location. Selected/served attribution uses exact attempt IDs; a model
@@ -589,7 +609,7 @@ such rows.
 | --- | --- |
 | 1 Claude / 2 Pi / 0 Codex | Start the sole main: native Opus / Pi with Codex inference / native Sol |
 | 3 Resume | Select Claude or Codex and an exact verified native session ID |
-| 4 Main | Choose the main harness; Pi uses the Codex dispatch owner |
+| 4 Main | Choose the main harness; gateway-backed Pi uses the Codex dispatch owner |
 | t Auto task | Enter a task and open the owning native main |
 | 5 Explain | Read-only worker; optional tier, else routine |
 | 6 Implement | Optional tier; scoped brief and verifier required |
@@ -627,7 +647,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Main harness | Exact model | Effort |
 | --- | --- | --- |
 | Claude main (default) | `claude-opus-5-5` | high |
-| Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
+| Codex main / gateway-backed Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
 Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 

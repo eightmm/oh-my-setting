@@ -35,11 +35,11 @@ def panel_shell(repo, session, view="auto", attention_only=False):
                          (["--attention-only"] if attention_only else []))
 
 
-def watch_shell(repo, provider=None, session=None):
+def watch_shell(repo, provider=None, session=None, model=None):
     from terminal_panel import ENTRY, main_owner, panel_environment, shell_command
     command = panel_environment() + (["OMS_PANEL_SESSION=" + session] if session else []) + ["bash", str(ENTRY), "panel", "--repo", str(repo), "--watch"]
     if provider:
-        command += ["--owner", main_owner(provider)]
+        command += ["--owner", main_owner(provider, model)]
     return shell_command(command)
 
 
@@ -645,9 +645,9 @@ def reopen_panel(repo):
             "window": base["window"], "input_pane": base["pane"], "native_restarted": False}
 
 
-def bind_window(pane, launch, view, attention_only):
+def bind_window(pane, launch, view, attention_only, model=None):
     from terminal_panel import board_view, main_owner, tmux_command
-    for key, value in (("owner", main_owner(launch)), ("harness", launch), ("view", board_view(view)), ("room", os.environ["OMS_ROOM_ID"]),
+    for key, value in (("owner", main_owner(launch, model)), ("harness", launch), ("view", board_view(view)), ("room", os.environ["OMS_ROOM_ID"]),
                        ("attention", "1" if attention_only else "0")):
         subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_" + key, value), check=True)
 

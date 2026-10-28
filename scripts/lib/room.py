@@ -18,6 +18,7 @@ import threading
 from collections import deque
 
 import thread_live
+from panel_routing import MAIN_OWNERS
 from dashboard_projection import clean
 from path_scope import normalize as normalize_scope
 from room_repository import state_repository
@@ -476,6 +477,35 @@ def _main_enrollment(rows, state, member, predecessors):
     return state["id"], member
 
 
+def validate_main_swap(repo, state, event, old, released=True):
+    """Preflight the same durable identities before exit and at the locked append."""
+    from panel_routing import main_owner_matches
+    member = participant(state, event["participant"])
+    if member["role"] != "main" or member.get("parent"):
+        raise ValueError("swap needs the current main")
+    if (event["harness"] not in ("claude", "codex", "pi", "agy")
+            or not main_owner_matches(event["harness"], event["provider"])
+            or not isinstance(event["model"], str)
+            or not re.fullmatch(r"[A-Za-z0-9_./:][A-Za-z0-9_./:-]{0,159}", event["model"])):
+        raise ValueError("invalid swap provider or model")
+    if not isinstance(event["attempt"], str) or not re.fullmatch(r"att_[0-9a-f]{32}", event["attempt"]):
+        raise ValueError("invalid swapped main attempt")
+    if not isinstance(old, dict) or not isinstance(old.get("refs", {}), dict):
+        raise ValueError("swapped main ownership is malformed")
+    refs = old.get("refs", {})
+    if (old.get("tool") != "panel-main" or old.get("provider") != member["provider"]
+            or refs.get("panel_owner", old.get("provider")) != old.get("provider")
+            or not main_owner_matches(refs.get("panel_harness", old.get("provider")), old.get("provider"))
+            or refs.get("panel_harness") == event["harness"] and member.get("model") == event["model"]
+            or old.get("state") != ("abandoned" if released else "working")
+            or old.get("terminal") is not released
+            or released and old.get("reason_code") != "main_swapped"
+            or refs.get("panel_room_participant", old.get("attempt_id")) != event["participant"]
+            or old.get("attempt_id") != event["attempt"]
+            or not same_room(repo, refs.get("panel_room_id"), state["id"])):
+        raise ValueError("swapped main release is unverified" if released else "current main ownership is unverified")
+
+
 def validate_event(rows, event, text, repo=None):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
     if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "main-swap", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried", "call-result", "review-dispatch", "review-dispatch-failed"}:
@@ -590,24 +620,14 @@ def validate_event(rows, event, text, repo=None):
         if repo is not None and _predecessor(repo, event["target"]) != rows[0]["thread"]:
             raise ValueError("successor room does not name this room as its predecessor")
     elif kind == "main-swap":
-        member = participant(state, event["participant"])
-        if member["role"] != "main" or member.get("parent"):
-            raise ValueError("swap needs the current main")
-        if (event["harness"] not in {"claude", "codex", "pi"}
-                or event["provider"] != ("codex" if event["harness"] == "pi" else event["harness"])
-                or not re.fullmatch(r"[A-Za-z0-9_./:-]{1,160}", event["model"])):
-            raise ValueError("invalid swap provider or model")
-        if not re.fullmatch(r"att_[0-9a-f]{32}", event["attempt"]):
+        if not isinstance(event["attempt"], str) or not re.fullmatch(r"att_[0-9a-f]{32}", event["attempt"]):
             raise ValueError("invalid swapped main attempt")
-        from terminal_panel import events
-        old = json.loads(events(repo, "show", "--attempt", event["attempt"], "--json", output=True))
-        refs = old.get("refs", {})
-        if (old.get("tool") != "panel-main" or old.get("provider") != member["provider"]
-                or refs.get("panel_harness") == event["harness"] and member.get("model") == event["model"]
-                or old.get("state") != "abandoned" or old.get("reason_code") != "main_swapped"
-                or refs.get("panel_room_participant", old.get("attempt_id")) != event["participant"]
-                or not same_room(repo, refs.get("panel_room_id"), state["id"])):
-            raise ValueError("swapped main release is unverified")
+        result = subprocess.run(["bash", str(ENTRY), "agent-events", "--repo", str(repo), "show",
+                                 "--attempt", event["attempt"], "--json"],
+                                capture_output=True, text=True, check=False, timeout=30, stdin=subprocess.DEVNULL)
+        if result.returncode:
+            raise ValueError("swapped main release is unavailable")
+        validate_main_swap(repo, state, event, json.loads(result.stdout))
     elif kind == "describe":
         member = participant(state, event["participant"])
         if member["role"] != "main":
@@ -622,8 +642,8 @@ def validate_event(rows, event, text, repo=None):
     elif kind == "bind":
         member = participant(state, event.get("participant"))
         consumer = event.get("consumer")
-        if member["role"] != "main" or member["provider"] not in {"codex", "claude"}:
-            raise ValueError("native binding is for an enrolled Codex/Claude main")
+        if member["role"] != "main" or member["provider"] not in MAIN_OWNERS:
+            raise ValueError("native binding is for an enrolled supported main")
         if not isinstance(consumer, str) or not re.fullmatch(r"[0-9a-f]{32}", consumer):
             raise ValueError("invalid native session binding")
         if member.get("consumer"):
@@ -1080,8 +1100,8 @@ def carry_plan(state, current=None, bounded=True):
     queue = []
     for p in order:
         who = p["participant"]
-        # Only a Codex/Claude main takes a native bind; any other member, or one left without a session, rejoins.
-        bindable = p["role"] == "main" and p["provider"] in {"codex", "claude"}
+        # Only a supported main takes a native bind; any other member, or one left without a session, rejoins.
+        bindable = p["role"] == "main" and p["provider"] in MAIN_OWNERS
         now = there.get(who) if who in present else None
         if now is not None and now.get("consumer") != p.get("consumer") and (not bindable or not p.get("consumer")):
             writes.append(({"kind": "leave", "participant": who}, "Participant left", None))

@@ -52,13 +52,14 @@ if os.name == "posix":
         pi_main = {"attempt_id": pi_attempt, "tool": "panel-main", "provider": "codex",
                    "terminal": False, "state": "working", "refs": {
                        "panel_room_participant": "pi-owner", "panel_host": "tmux",
-                       "panel_harness": "pi", "panel_model": "gpt-6.1-sol"}}
+                       "panel_room_id": "pi-room", "panel_harness": "pi", "panel_model": "gpt-6.1-sol"}}
         ended_pi = dict(pi_main, terminal=True, state="abandoned", reason_code="main_swapped")
         next_main = {"attempt_id": next_attempt, "provider": target, "terminal": False,
                      "refs": {"panel_harness": target}}
         handoff_file = temporary / ("pi-swap-" + target + "-" + outcome + ".md")
         handoff_file.write_text("Pi handoff fixture\n", encoding="utf-8")
         clock = [0]
+        pi_exit_requested = []
         def swap_tick():
             clock[0] += 10
             return clock[0]
@@ -66,7 +67,8 @@ if os.name == "posix":
             commands = swap_patches.enter_context(patch.object(panel.subprocess, "run",
                 return_value=subprocess.CompletedProcess([], 0, '{"active":false}', "")))
             transfer = swap_patches.enter_context(patch.object(panel.room, "swap_main"))
-            submit = swap_patches.enter_context(patch.object(panel, "_swap_submit"))
+            submit = swap_patches.enter_context(patch.object(panel, "_swap_submit",
+                side_effect=lambda pane, text: pi_exit_requested.append(text) if text == "/quit" else None))
             launch = swap_patches.enter_context(patch.object(panel, "launch_command", return_value="fresh replacement",
                 side_effect=ValueError("fixture launch failed") if outcome == "launch_error" else None))
             for context in (
@@ -77,9 +79,10 @@ if os.name == "posix":
                     patch.object(panel, "_swap_main_window", return_value=(
                         "@1", pi_attempt, "%1", "pi-owner", "pi-room")),
                     patch.object(panel, "live_mains", return_value=1),
-                    patch.object(panel, "main_history", side_effect=[
-                        [pi_main]] + [[pi_main if outcome == "old_stays" else ended_pi, next_main]] * 20),
+                    patch.object(panel, "main_history", side_effect=lambda *a: [ended_pi, next_main]
+                        if pi_exit_requested and outcome != "old_stays" else [pi_main]),
                     patch.object(panel.room, "status", return_value={}),
+                    patch.object(panel.room, "same_room", return_value=True),
                     patch.object(panel.room, "participant", return_value={"role": "main", "provider": "codex"}),
                     patch.object(panel, "_swap_digest", return_value="Pi handoff fixture"),
                     patch.object(panel, "_swap_handoff_file", return_value=handoff_file),
@@ -96,15 +99,19 @@ if os.name == "posix":
                 if outcome == "old_stays":
                     assert "old main did not exit" in str(error) and "will not be restored" not in str(error), error
                     transfer.assert_not_called()
-                    launch.assert_not_called()
+                    launch.assert_called_once()
                     assert not handoff_file.exists(), "preserved main cannot retry its handoff"
+                elif outcome == "launch_error":
+                    assert "fixture launch failed" in str(error) and "will not be restored" not in str(error), error
+                    transfer.assert_not_called()
+                    assert not pi_exit_requested, "command preparation stopped the old main"
                 else:
                     assert "Pi main exited and will not be restored; no verified replacement main" in str(error), error
                     assert str(handoff_file) in str(error) and handoff_file.exists(), error
             else:
                 assert outcome == "started" and pi_swap["participant"] == "pi-owner", pi_swap
                 assert pi_swap["room"] == "pi-room" and pi_swap["handoff"] == "automatic_digest", pi_swap
-            if outcome != "old_stays":
+            if outcome not in ("old_stays", "launch_error"):
                 transfer.assert_called_once_with(project, "pi-room", "pi-owner", target,
                                                  panel.policy()["main"][target]["model"], pi_attempt, target)
                 launch.assert_called_once()
@@ -112,7 +119,7 @@ if os.name == "posix":
                 assert "resume" not in launch.call_args.kwargs, launch.call_args
                 respawns = [call for call in commands.call_args_list if "if-shell" in call.args[0]]
                 assert len(respawns) == (0 if outcome == "launch_error" else 1), "swap attempted restoration"
-            assert [call.args[1] for call in submit.call_args_list][1:] == ["/quit"]
+            assert [call.args[1] for call in submit.call_args_list][1:] == ([] if outcome == "launch_error" else ["/quit"])
             assert "@oms_panel_swap_state" in commands.call_args.args[0], "swap status was not cleared"
     actual_tmux = shutil.which("tmux")
     if actual_tmux:

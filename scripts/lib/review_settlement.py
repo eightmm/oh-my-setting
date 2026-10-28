@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 import panel_results as saved
+from panel_routing import MAIN_OWNERS
 from dashboard_projection import clean, read_plan
 
 POLICY = {"completed": ("done", "owner_completed"), "accepted": ("done", "owner_accepted"),
@@ -17,7 +18,7 @@ POLICY = {"completed": ("done", "owner_completed"), "accepted": ("done", "owner_
 
 def _main(row):
     return (row.get("tool") == "panel-main" and row.get("refs", {}).get("panel_role") == "main"
-            and row.get("provider") in ("codex", "claude")
+            and row.get("provider") in MAIN_OWNERS
             and row.get("refs", {}).get("panel_owner", row.get("provider")) == row.get("provider"))
 
 
@@ -335,7 +336,7 @@ def cli_main(arguments):
     parser = argparse.ArgumentParser(description="Settle stopped review workers; dry run by default.")
     parser.add_argument("--repo", default=os.getcwd())
     parser.add_argument("--settle-review", action="store_true", required=True)
-    parser.add_argument("--owner", choices=("codex", "claude"))
+    parser.add_argument("--owner", choices=MAIN_OWNERS)
     parser.add_argument("--owner-attempt")
     parser.add_argument("--legacy", action="store_true")
     parser.add_argument("--legacy-older-than", type=float, metavar="HOURS")

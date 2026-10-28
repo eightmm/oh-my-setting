@@ -26,6 +26,7 @@ from peer_artifacts import artifact_sections_stream, debate_sections
 from work_journal import sanitize_multiline
 from path_scope import classify
 import room
+from panel_routing import MAIN_OWNERS
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / 'scripts/oms'
@@ -482,7 +483,7 @@ def _load_result(repo, row):
     result = json.loads(_indexed(repo, row))
     if (not isinstance(result, dict) or result.get('schema') != 1 or result.get('kind') != 'oms-panel-result'
             or result.get('task_id') != row.get('task_id') or not REVISION.fullmatch(str(result.get('revision', '')))
-            or result.get('owner') not in ('codex', 'claude') or result.get('outcome') not in ('completed', 'accepted', 'failed', 'rejected')
+            or result.get('owner') not in MAIN_OWNERS or result.get('outcome') not in ('completed', 'accepted', 'failed', 'rejected')
             or not isinstance(result.get('summary'), str) or not isinstance(result.get('evidence'), list)):
         raise ValueError('invalid result artifact')
     superseded = result.get('superseded_attempts', [])
@@ -821,7 +822,7 @@ def _owned_task(repo, execution, owner, task_id):
     from panel_state import active_mains
     from panel_dispatch import PlanBinding
     _owner()
-    if owner not in ('codex', 'claude') or not isinstance(task_id, str) or not ID.fullmatch(task_id):
+    if owner not in MAIN_OWNERS or not isinstance(task_id, str) or not ID.fullmatch(task_id):
         raise ValueError('invalid owner task')
     caller, main_id, ident = (os.environ.get(name) for name in
                              ('OMS_ROOM_PARTICIPANT', 'OMS_PANEL_MAIN_ATTEMPT', 'OMS_ROOM_ID'))
@@ -1592,7 +1593,7 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
 def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False,
              verify_timeout=1800, execution_repo=None, landed_commit=None):
     _owner()
-    if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed', 'rejected'):
+    if owner not in MAIN_OWNERS or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed', 'rejected'):
         raise ValueError('invalid owner result')
     if landed_commit is not None and outcome not in ('accepted', 'completed'):
         raise ValueError('--landed-commit requires --outcome accepted or completed')

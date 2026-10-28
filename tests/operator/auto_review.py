@@ -1,4 +1,24 @@
 # Settled results are structured room events, and review admission remains with the main.
+for owner in ("pi", "antigravity"):
+    for model, expected in (("anthropic/claude-opus-5-5", "codex"),
+                            ("openai/gpt-6.1-sol", "claude")):
+        assert allocate(owner, role="reviewer", installed={"claude", "codex"},
+                        owner_model=model)["provider"] == expected
+    for model in (None, "", "unclassified-model"):
+        try:
+            allocate(owner, role="reviewer", installed={"claude", "codex"}, owner_model=model)
+        except ValueError as error:
+            assert "family" in str(error), error
+        else:
+            raise AssertionError("unknown model family established independence")
+    assert allocate(owner, role="reviewer", installed={"claude", "codex"},
+                    writer="codex")["provider"] == "claude"
+import panel_routing as family_routing
+with patch.object(family_routing, "model_family", side_effect=lambda provider, model:
+                  {"pi": "anthropic", "claude": "anthropic", "codex": "openai"}[provider]) as family_lookup:
+    assert allocate("pi", role="reviewer", installed={"claude", "codex"},
+                    owner_model="anthropic/claude-opus-5-5")["provider"] == "codex"
+    family_lookup.assert_called_once_with("pi", "anthropic/claude-opus-5-5")
 # Keep automatic-review calls out of the shared room used by the existing layout assertions.
 shared_before_auto, room_env_before_auto = shared, room_env
 shared = room.create(project, "auto-review-room", "Automatic review fixtures")
@@ -75,6 +95,15 @@ from panel_routing import command as routed_command
 catalog_rows = [dict(provider=provider, installed=provider == "codex", binary=provider, access=["read", "write"],
                      catalog_models=[], models=[], exact_model_override=True)
                 for provider in ("codex", "claude")]
+for main_owner, main_model, expected in (("pi", "anthropic/claude-opus-5-5", "codex"),
+                                       ("pi", "openai/gpt-6.1-sol", "claude"),
+                                       ("antigravity", "claude-opus-5-5", "codex")):
+    with patch.object(panel, "provider_catalog", return_value=[dict(row, installed=True) for row in catalog_rows]), \
+            patch.object(panel, "active_mains", return_value={room_owner: {"refs": {"panel_model": main_model}}}), \
+            patch.dict(os.environ, room_env, clear=True):
+        selected = panel.selected_route(main_owner, "reviewer", None, "read", None,
+                                        repo=project, routing_readings={})
+    assert selected["owner"] == main_owner and selected["provider"] == expected, selected
 with patch.object(panel, "provider_catalog", return_value=catalog_rows):
     route = panel.selected_route("claude", "reviewer", None, "read", None, repo=project)
 review_prompt = "Review task auto-review-task. Read repo-relative patch .oms/artifacts/fixture/change.patch.\nDo not apply it."

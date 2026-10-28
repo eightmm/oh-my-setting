@@ -49,7 +49,7 @@ class BackgroundRead:
 def mark_window(attention, asked=False):
     """Prefix this watcher's own OMS window with "! " while its main needs attention, else "? " while a question
     to it is open; no-op when unchanged/unsafe."""
-    from terminal_panel import PROVIDERS, managed_session, tmux_command
+    from terminal_panel import MAIN_OWNERS, managed_session, tmux_command
     pane = os.environ.get("TMUX_PANE", "")
     if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
         return
@@ -57,9 +57,9 @@ def mark_window(attention, asked=False):
     try:
         result = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{window_name}"),
                                 capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
-        name = result.stdout.rstrip("\n") if result.returncode == 0 else ""
+        name = result.stdout.replace("\r", "").rstrip("\n") if result.returncode == 0 else ""
         base = name[2:] if name[:2] in ("! ", "? ") else name
-        if base not in PROVIDERS or name == mark + base:
+        if base not in MAIN_OWNERS + ("agy",) or name == mark + base:
             return
         subprocess.run(tmux_command("rename-window", "-t", pane, mark + base),
                        capture_output=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
