@@ -329,7 +329,7 @@ OMS_RS_UPSTREAM="$(git -C "$REPO" rev-parse --abbrev-ref '@{u}' 2>/dev/null || t
 OMS_RS_AHEAD="$(git -C "$REPO" rev-list --count '@{u}..HEAD' 2>/dev/null || true)" \
 OMS_RS_HAS_WORKFLOWS="$([ -d "$REPO/.github/workflows" ] && echo 1 || echo 0)" \
 PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
-import calendar, glob, json, math, os, runpy, sys, time
+import calendar, glob, json, math, os, re, runpy, sys, time
 
 sys.path.insert(0, os.path.dirname(sys.argv[1]))
 from inbox_projection import pending_room_mail
@@ -1027,6 +1027,14 @@ if os.path.isdir(tdir):
             continue
         tid = os.path.basename(path)[: -len(".jsonl")]
         closed = any(r.get("role") == "closed" for r in rows)
+        # A rolled-over room segment continues in its successor: not open.
+        for r in rows:
+            ev = r.get("room_event")
+            if (isinstance(ev, dict) and r.get("thread") == tid
+                    and ev.get("kind") == "successor"
+                    and isinstance(ev.get("target"), str)
+                    and re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,159}", ev["target"])):
+                closed = True
         providers = []
         for r in rows:
             p = r.get("provider")

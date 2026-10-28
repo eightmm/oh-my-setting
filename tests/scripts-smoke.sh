@@ -28367,7 +28367,23 @@ for tid, ts in (("abandoned", "2001-01-01T00:00:00Z"), ("undatable", "whenever")
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 PY
 
+  # Rolled-over room segments: a valid successor event retires the segment from
+  # the open set; one whose row names another thread changes nothing.
+  mkdir -p "$project/.oms/threads"
+  python3 - "$project/.oms/threads" <<'PY'
+import json, os, sys
+for seg, owner in (("room-aaaaaaaaaaaa", "room-aaaaaaaaaaaa"), ("room-bbbbbbbbbbbb", "room-other")):
+    with open(os.path.join(sys.argv[1], seg + ".jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"thread": owner, "role": "note", "text": "rolled", "ts": "2001-01-01T00:00:00Z",
+                            "room_event": {"kind": "successor", "target": "room-cccccccccccc"}}) + "\n")
+PY
+
   out="$("$ROOT/scripts/thread.sh" --repo "$project" list --stale)"
+  if contains "$out" 'room-aaaaaaaaaaaa'; then
+    fail "a rolled-over room segment must not be reported stale: $out"
+  fi
+  contains "$out" 'close --id room-bbbbbbbbbbbb' ||
+    fail "a malformed successor row must not retire the segment: $out"
   contains "$out" 'oms thread close --id abandoned' ||
     fail "--stale should print the exact close command per thread: $out"
   if contains "$out" 'undatable'; then
@@ -28381,14 +28397,14 @@ PY
     python3 -c '
 import json, sys
 threads = json.load(sys.stdin)["threads"]
-assert [t["id"] for t in threads] == ["abandoned"], threads
-assert threads[0]["staleness"] == "stale", threads
+assert sorted(t["id"] for t in threads) == ["abandoned", "room-bbbbbbbbbbbb"], threads
+assert all(t["staleness"] == "stale" for t in threads), threads
 ' || fail "list --stale --json should carry only the stale thread"
 
   "$ROOT/scripts/thread.sh" --repo "$project" stats --json | python3 -c '
 import json, sys
 s = json.load(sys.stdin)["stats"]
-assert s["open"] == 3 and s["stale_open"] == 1, s
+assert s["open"] == 4 and s["stale_open"] == 2 and s["closed"] == 1, s
 assert s["undatable_open"] == 1, s
 assert s["second_question"] == 1 and s["multi_provider"] == 1, s
 assert s["answers_rated"] == 2 and s["answers_ok"] == 1, s
@@ -28398,12 +28414,12 @@ assert s["answers_rated"] == 2 and s["answers_ok"] == 1, s
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
 t = json.load(sys.stdin)["threads"]
-assert t["open"] == 3 and t["stale_open"] == 1, t
+assert t["open"] == 4 and t["stale_open"] == 2, t
 ' || fail "repo-state should separate stale open threads from the total"
   out="$("$ROOT/scripts/inbox.sh" --repo "$project")"
   contains "$out" "oms thread --repo $project list --stale" ||
     fail "inbox should point at the stale triage: $out"
-  printf '%s' "$out" | grep >/dev/null -E '1 open cross-agent thread' ||
+  printf '%s' "$out" | grep >/dev/null -E '2 open cross-agent thread' ||
     fail "inbox should count only stale threads: $out"
   out="$(OMS_THREAD_ATTENTION=0 "$ROOT/scripts/inbox.sh" --repo "$project")"
   if contains "$out" 'cross-agent thread'; then
@@ -28415,7 +28431,7 @@ assert t["open"] == 3 and t["stale_open"] == 1, t
   "$ROOT/scripts/thread.sh" --repo "$project" list --json | python3 -c '
 import json, sys
 threads = json.load(sys.stdin)["threads"]
-assert len(threads) == 3, threads
+assert len(threads) == 4, threads
 assert not any(t["closed"] for t in threads), threads
 ' || fail "advisory triage must never close a thread"
 }

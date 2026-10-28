@@ -41,6 +41,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A room segment that rolled over to a successor no longer counts as an open
+  stale thread in `oms thread list --stale`, thread stats or the inbox.
 - An owner `oms panel --finalize` resolves the task's earlier failed artifact
   outcomes through `artifact-index resolve`, so decided tasks no longer keep
   the inbox `unresolved-artifacts` P1 count growing.

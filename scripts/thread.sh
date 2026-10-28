@@ -505,6 +505,18 @@ now = time.time()
 addressable = re.compile(r"\A[A-Za-z0-9_-][A-Za-z0-9._-]*\Z")
 
 
+def rolled_over(tid, rows):
+    """A room segment whose log names a successor continues there: not open."""
+    for r in rows:
+        ev = r.get("room_event") if isinstance(r, dict) else None
+        if (isinstance(ev, dict) and r.get("thread") == tid
+                and ev.get("kind") == "successor"
+                and isinstance(ev.get("target"), str)
+                and re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,159}", ev["target"])):
+            return True
+    return False
+
+
 def last_epoch(rows):
     """Age a thread by its newest turn whose timestamp actually parses."""
     for row in reversed(rows):
@@ -544,7 +556,8 @@ for path in sorted(glob.glob(os.path.join(d, "*.jsonl"))):
                 rows.append(json.loads(line))
             except Exception:
                 continue
-    closed = any(r.get("role") == "closed" for r in rows if isinstance(r, dict))
+    closed = (any(r.get("role") == "closed" for r in rows if isinstance(r, dict))
+              or rolled_over(tid, rows))
     if closed and not show_all:
         continue
     topic = ""
