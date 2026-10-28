@@ -12,7 +12,7 @@ def exercise_exact_model_routing():
     import panel_routing
     load_policy = panel_routing.policy
     original = load_policy()
-    assert original["tiers"]["light"][0] == {"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "low"}
+    assert original["tiers"]["light"][0] == {"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "low", "public_only": True}
     for owner in ("claude", "codex"):
         installed = {"pi", "claude", "codex"}
         assert allocate(owner, role="documenter", installed=installed)["provider"] == "pi"
@@ -53,7 +53,7 @@ def exercise_exact_model_routing():
         configured = {"provider": provider, "model": model, "effort": "medium"}
         assert valid_route(configured), configured
         if provider == "pi":
-            assert original["tiers"]["routine"][0] == configured
+            assert original["tiers"]["routine"][0] == dict(configured, public_only=True)
         routes = deepcopy(original)
         routes["tiers"]["routine"][0] = configured
         with patch.object(panel_routing, "policy", return_value=routes), \
@@ -165,7 +165,124 @@ def exercise_exact_model_routing():
                                                              role="worker", joined=True)]}}, "codex", width=150, height=40)
             assert isinstance(text, str)
 
-exercise_exact_model_routing()
+with patch.dict(os.environ, {"OMS_PANEL_PUBLIC_ROUTE_OPT_IN": "1"}):
+    exercise_exact_model_routing()
+
+# Third-party tier routing requires a public origin or an explicit opt-in.
+def exercise_public_only_routing():
+    import panel_routing
+    import subprocess
+    repo = temporary / "public-route-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/example/sample.git"], check=True)
+    binaries = temporary / "public-route-bin"
+    binaries.mkdir()
+    gh = binaries / "gh"
+    calls = temporary / "visibility-calls"
+    gh.write_text("#!/bin/sh\nprintf x >> \"$ROUTE_CALLS\"\nprintf '{\"visibility\":\"%s\"}' \"$ROUTE_VISIBILITY\"\n")
+    gh.chmod(0o755)
+    env = {"PATH": str(binaries) + os.pathsep + os.environ["PATH"], "ROUTE_CALLS": str(calls),
+           "ROUTE_VISIBILITY": "PUBLIC", "OMS_PANEL_PUBLIC_ROUTE_OPT_IN": ""}
+    cache = repo / ".oms/panel-state/public-route-visibility.json"
+    with patch.dict(os.environ, env):
+        chosen = allocate("codex", installed={"pi", "claude"}, repo=repo)
+        assert chosen["provider"] == "pi", chosen
+        assert calls.read_text() == "x"
+        os.environ["ROUTE_VISIBILITY"] = "PRIVATE"
+        assert allocate("codex", installed={"pi", "claude"}, repo=repo)["provider"] == "pi"
+        assert calls.read_text() == "x"
+        saved_cache = json.loads(cache.read_text())
+        now = saved_cache["checked_at"]
+        for age in (0, 86399):
+            with patch.object(panel_routing.time, "time", return_value=now + age):
+                assert panel_routing.repository_public(repo)
+        with patch.object(panel_routing.time, "time", return_value=now + 86400):
+            assert not panel_routing.repository_public(repo)
+        assert calls.read_text() == "xx"
+        for bad in ("", "0", "malformed"):
+            cache.write_text(bad)
+            assert not panel_routing.repository_public(repo)
+        cache.unlink()
+        notice = io.StringIO()
+        with patch.object(panel_routing, "_public_only_skip_printed", False), redirect_stderr(notice):
+            chosen = allocate("codex", installed={"pi", "claude"}, repo=repo)
+            assert chosen["provider"] == "claude", chosen
+            assert panel_routing.alternate_route(chosen, {"pi"}, repo=repo) is None
+            try:
+                allocate("codex", installed={"pi"}, repo=repo)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("private repository received its sole public-only route")
+        assert notice.getvalue().count("public-only route skipped") == 1
+        os.environ["OMS_PANEL_PUBLIC_ROUTE_OPT_IN"] = "1"
+        assert allocate("codex", installed={"pi", "claude"}, repo=repo)["provider"] == "pi"
+        assert panel_routing.alternate_route(chosen, {"pi"}, repo=repo)["provider"] == "pi"
+        os.environ["OMS_PANEL_PUBLIC_ROUTE_OPT_IN"] = ""
+        cache.unlink()
+        real_run = subprocess.run
+        for failure in (FileNotFoundError(), subprocess.TimeoutExpired("gh", 5)):
+            def failing_gh(args, **kwargs):
+                if args[0] == "gh":
+                    raise failure
+                return real_run(args, **kwargs)
+            with patch.object(panel_routing.subprocess, "run", side_effect=failing_gh):
+                assert not panel_routing.repository_public(repo)
+            negative = json.loads(cache.read_text())
+            assert negative["public"] is False
+            with patch.object(panel_routing.time, "time", return_value=negative["checked_at"] + 599):
+                assert not panel_routing.repository_public(repo)
+            os.environ["ROUTE_VISIBILITY"] = "PUBLIC"
+            with patch.object(panel_routing.time, "time", return_value=negative["checked_at"] + 600):
+                assert panel_routing.repository_public(repo)
+            cache.unlink()
+        for bad in ("", "0", "invalid"):
+            os.environ["OMS_PANEL_PUBLIC_ROUTE_OPT_IN"] = bad
+            assert not panel_routing.repository_public(None)
+        subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin", "https://example.org/owner/repo"], check=True)
+        assert not panel_routing.repository_public(repo)
+        assert not panel_routing.valid_route({"provider": "pi", "model": "p/m", "effort": "low", "public_only": 0})
+        assert not panel_routing.valid_route({"provider": "pi", "model": "p/m", "effort": "low", "unexpected": True})
+    # A public cache written in a work repo must not authorize a private state repo.
+    work_repo = temporary / "public-route-work"
+    work_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(work_repo)], check=True)
+    subprocess.run(["git", "-C", str(work_repo), "remote", "add", "origin", "https://github.com/example/sample.git"], check=True)
+    work_cache = work_repo / ".oms/panel-state/public-route-visibility.json"
+    work_cache.parent.mkdir(parents=True, exist_ok=True)
+    work_cache.write_text(json.dumps({"origin": "example/sample", "checked_at": time.time(), "public": True}))
+    # The authoritative (state) repo is private; visibility resolves against it.
+    state_repo = temporary / "public-route-state"
+    state_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(state_repo)], check=True)
+    subprocess.run(["git", "-C", str(state_repo), "remote", "add", "origin", "https://github.com/example/private.git"], check=True)
+    state_cache = state_repo / ".oms/panel-state/public-route-visibility.json"
+    state_cache.parent.mkdir(parents=True, exist_ok=True)
+    state_cache.write_text(json.dumps({"origin": "example/private", "checked_at": time.time(), "public": False}))
+    route = dict(provider="claude", model="claude-sonnet-5-5", effort="medium", role="worker",
+                 kind="worker", owner="codex", workload="routine", access="read", purpose="explain")
+    rows = [dict(provider=name, binary=name, installed=True, exact_model_override=True,
+                 access=["read", "write"], catalog_models=[]) for name in ("pi", "claude")]
+    def route_catalog(selection="all"):
+        return [row for row in rows if selection == "all" or row["provider"] in selection.split(",")]
+    with patch.dict(os.environ, {"OMS_PANEL_PUBLIC_ROUTE_OPT_IN": ""}), \
+            patch.object(panel, "provider_catalog", side_effect=route_catalog), \
+            patch.object(dispatch, "route_inputs", return_value=({}, None, None)):
+        chosen = panel.selected_route("codex", "worker", None, "read", "explain", repo=state_repo)
+        assert chosen["provider"] == "claude", chosen
+    with patch.dict(os.environ, {"OMS_PANEL_PUBLIC_ROUTE_OPT_IN": ""}), \
+            patch.object(panel, "selected_route", return_value=route), \
+            patch.object(panel, "routing_status", return_value={}), \
+            patch.object(panel, "provider_catalog", side_effect=route_catalog), \
+            patch.object(panel, "alternate_route", wraps=panel.alternate_route) as alternate, \
+            patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
+        fallback = panel.dispatch(state_repo, "codex", "worker", None, "read", "explain",
+                                  prompt="Inspect source.", work_repo=work_repo)
+        assert fallback is None, fallback
+        assert alternate.call_args.kwargs["repo"] == state_repo
+
+exercise_public_only_routing()
 
 # A finished write call keeps its declared scope in the advisory while its patch awaits a decision.
 finished_worker = {"participant": "W1", "joined": True, "parent": "main", "role": "worker",
@@ -1067,9 +1184,12 @@ try:
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
                "--owner", "codex", "--access", "write", "--purpose", "implement",
                "--brief-file", str(brief), "--verify", "test -f value.txt", "--task-id", "pi-write", "--label", "Implement with Pi"]
-    planned = json.loads(call(request + ["--dry-run"]))
+    private_plan = json.loads(call(request + ["--dry-run"]))
+    assert private_plan["route"]["provider"] != "pi", private_plan
+    pi_env = dict(environment, OMS_PANEL_PUBLIC_ROUTE_OPT_IN="1")
+    planned = json.loads(call(request + ["--dry-run"], pi_env))
     assert planned["route"]["provider"] == "pi" and "--reasoning-effort" in planned["argv"]
-    answer = call(request, dict(environment, PANEL_TEST_MODE="write",
+    answer = call(request, dict(pi_env, PANEL_TEST_MODE="write",
                                 OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
     assert "patch:" in answer, answer
     observed = json.loads(worker_log.read_text().splitlines()[-1])

@@ -13855,7 +13855,7 @@ else:
     assert not refs.get('provider_daily_model'), refs
 PYCASE
       if [ "$retry_case" = daily ]; then
-        OMS_ROOM_ID="" python3 - "$ROOT" "$retry_state" <<'PYROUTE' || fail 'daily cap did not reach allocation'
+        OMS_ROOM_ID="" OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1 python3 - "$ROOT" "$retry_state" <<'PYROUTE' || fail 'daily cap did not reach allocation'
 import sys
 sys.path.insert(0, sys.argv[1] + '/scripts/lib')
 from panel_dispatch import routing_status

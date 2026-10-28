@@ -240,9 +240,10 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
                                     ({}, None, None) if target else route_inputs(
                                         owner, repo, room_id, main, task_id, candidate))
         catalogs = {row["provider"]: row.get("catalog_models", row.get("models", [])) for row in rows}
+        visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs,
-                         owner_model=owner_model)
+                         owner_model=owner_model, repo=visibility_repo_resolved)
         peer = next(row for row in rows if row["provider"] == route["provider"])
         route.update(binary=peer["binary"], model=routable_route_model(
             route["provider"], route["model"], catalogs[route["provider"]]))
@@ -250,7 +251,8 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
             raise ValueError("researchers require the newest configured/catalog Luna or Haiku model")
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
         return dict(route, effort=effort) if effort else route
-    route = allocate(owner, role, None, access, purpose, owner_model=owner_model)
+    visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
+    route = allocate(owner, role, None, access, purpose, owner_model=owner_model, repo=visibility_repo_resolved)
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
     peer = provider_catalog(target)[0]
@@ -826,7 +828,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         if not target:
             remaining = {candidate["provider"] for candidate in policy()["tiers"][route["workload"]]}
             while remaining:
-                fallback = alternate_route(route, installed=remaining, provider_status=readings or {})
+                fallback = alternate_route(route, installed=remaining, provider_status=readings or {}, repo=repo)
                 if not fallback:
                     break
                 remaining.discard(fallback["provider"])

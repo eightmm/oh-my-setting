@@ -1,6 +1,10 @@
 """Role allocation for panel-owned tasks; authority is independent of workload."""
 
 import json
+import os
+import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 import re
 import subprocess
@@ -8,6 +12,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_OWNERS = ("claude", "codex", "pi", "antigravity")
+# Print the public-only skip notice at most once per process.
+_public_only_skip_printed = False
 
 
 def main_owner_matches(harness, owner):
@@ -80,7 +86,8 @@ def routable_route_model(provider, configured, catalog):
 
 def valid_route(route):
     # A Codex route names any version of a known family; the catalog picks the newest one at dispatch.
-    if (not isinstance(route, dict) or set(route) != {"provider", "model", "effort"}
+    if (not isinstance(route, dict) or not {"provider", "model", "effort"} <= set(route) <= {"provider", "model", "effort", "public_only"}
+            or ("public_only" in route and type(route["public_only"]) is not bool)
             or not all(isinstance(route[key], str) for key in ("provider", "model", "effort"))
             or route["effort"] not in {"low", "medium", "high"}):
         return False
@@ -143,8 +150,108 @@ def daily_capped(provider_status, candidate):
     return isinstance(day, str) and day == datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def repository_public(repo):
+    """Verify origin visibility against the state/room repository; never the worker checkout."""
+    if os.environ.get("OMS_PANEL_PUBLIC_ROUTE_OPT_IN") == "1":
+        return True
+    # Resolve the authoritative repository (state/room repo), never the work checkout.
+    authoritative = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
+    try:
+        top = subprocess.run(["git", "-C", str(authoritative), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5, check=True,
+                             stdin=subprocess.DEVNULL).stdout.strip()
+        authoritative = top or authoritative
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass
+    if not authoritative or not isinstance(authoritative, (str, Path)):
+        return False
+    try:
+        remote = subprocess.run(["git", "-C", str(authoritative), "remote", "get-url", "origin"],
+                                capture_output=True, text=True, timeout=5, check=True,
+                                stdin=subprocess.DEVNULL).stdout.strip()
+        normalized = subprocess.run([sys.executable, str(ROOT / "scripts/lib/github-remote.py"), remote],
+                                    capture_output=True, text=True, timeout=5, check=True,
+                                    stdin=subprocess.DEVNULL).stdout.strip()
+        cache = Path(authoritative) / ".oms/panel-state/public-route-visibility.json"
+        # Cache both successes (1 day) and failures/unknowns (10 minutes).
+        def _cache_entry(public, ttl=86400):
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix=".visibility-", dir=str(cache.parent))
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                        json.dump({"origin": normalized, "checked_at": time.time(), "public": public}, stream)
+                    os.replace(tmp, cache)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            except OSError:
+                pass
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            age = time.time() - data["checked_at"]
+            origin_match = data.get("origin") == normalized
+            is_bool = type(data.get("public")) is bool
+            if origin_match and is_bool and 0 <= age < (86400 if data["public"] else 600):
+                return data["public"]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        try:
+            result = subprocess.run(["gh", "repo", "view", "github.com/" + normalized, "--json", "visibility"],
+                                    capture_output=True, text=True, timeout=5, check=True,
+                                    stdin=subprocess.DEVNULL)
+            visibility = json.loads(result.stdout)["visibility"]
+            if visibility not in ("PUBLIC", "PRIVATE", "INTERNAL"):
+                raise ValueError("unknown visibility: %s" % visibility)
+            public = visibility == "PUBLIC"
+            _cache_entry(public, 86400)
+            return public
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+            # Blocked network or missing CLI: cache not-public for 10 minutes.
+            _cache_entry(False, 600)
+            return False
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        # Cannot resolve remote/normalized at all: treat as private and cache briefly.
+        try:
+            remote_fallback = subprocess.run(["git", "-C", str(authoritative), "remote", "get-url", "origin"],
+                                            capture_output=True, text=True, timeout=5, check=False,
+                                            stdin=subprocess.DEVNULL).stdout.strip() or ""
+            if remote_fallback:
+                normalized_fallback = subprocess.run([sys.executable, str(ROOT / "scripts/lib/github-remote.py"), remote_fallback],
+                                                     capture_output=True, text=True, timeout=5, check=False,
+                                                     stdin=subprocess.DEVNULL).stdout.strip() or remote_fallback
+            else:
+                normalized_fallback = ""
+            cache = Path(authoritative) / ".oms/panel-state/public-route-visibility.json"
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix=".visibility-", dir=str(cache.parent))
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                        json.dump({"origin": normalized_fallback, "checked_at": time.time(), "public": False}, stream)
+                    os.replace(tmp, cache)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            except OSError:
+                pass
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return False
+
+
+def public_candidates(candidates, repo):
+    global _public_only_skip_printed
+    if any(c.get("public_only") for c in candidates) and not repository_public(repo):
+        if not _public_only_skip_printed:
+            print("public-only route skipped: repository visibility unverified or private", file=sys.stderr)
+            _public_only_skip_printed = True
+        return [c for c in candidates if not c.get("public_only")]
+    return candidates
+
+
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
-             recent=None, writer=None, catalogs=None, owner_model=None):
+             recent=None, writer=None, catalogs=None, owner_model=None, repo=None):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
     recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task.
@@ -175,6 +282,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         candidates = [c for c in candidates if route_family(c["provider"], c["model"])
                       and route_family(c["provider"], c["model"])[0] in RESEARCH_FAMILIES]
     usable = [c for c in candidates if installed is None or c["provider"] in installed]
+    usable = public_candidates(usable, repo)
     if not usable:
         raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
             tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
@@ -244,7 +352,7 @@ def model_family(owner, model):
     return result.stdout.replace("\r", "").strip() if result.returncode == 0 else "unknown"
 
 
-def alternate_route(route, installed=None, provider_status=None):
+def alternate_route(route, installed=None, provider_status=None, repo=None):
     """Return the first eligible alternate provider from this exact tier, if any."""
     tier = route.get("workload")
     if tier not in TIERS:
@@ -260,6 +368,7 @@ def alternate_route(route, installed=None, provider_status=None):
         candidates = [candidate for candidate in candidates
                       if route_family(candidate["provider"], candidate["model"])
                       and route_family(candidate["provider"], candidate["model"])[0] in RESEARCH_FAMILIES]
+    candidates = public_candidates(candidates, repo)
     if not candidates:
         return None
     return dict(candidates[0], effort=route.get("effort"), role=route.get("role"),

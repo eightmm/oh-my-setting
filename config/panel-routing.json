@@ -7,10 +7,10 @@
     "claude": {"provider": "claude", "model": "claude-opus-5-5", "effort": "high"}
   },
   "tiers": {
-    "light": [{"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "low"},
+    "light": [{"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "low", "public_only": true},
               {"provider": "claude", "model": "claude-haiku-5-5", "effort": "low"},
               {"provider": "codex", "model": "gpt-6-luna", "effort": "low"}],
-    "routine": [{"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "medium"},
+    "routine": [{"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "medium", "public_only": true},
                 {"provider": "claude", "model": "claude-sonnet-5-5", "effort": "medium"},
                 {"provider": "codex", "model": "gpt-6.1-terra", "effort": "medium"}],
     "deep": [{"provider": "claude", "model": "claude-opus-5-5", "effort": "high"},
