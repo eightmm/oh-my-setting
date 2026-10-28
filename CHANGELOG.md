@@ -31,6 +31,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Work stays inside the project. The global rules and the worker preamble say to create project files only in the working checkout, never in sibling or parent directories or project copies, and to put temporary files in session scratch or `TMPDIR` and delete them after use. Delegated workers get `TMPDIR`, `TMP` and `TEMP` under their managed worktree parent. The directory is removed after the run, even when the checkout is kept for salvage, unless the worker replaced the parent directory.
 - A continued panel worker records the attempt it continues (`panel_continues`). Once the continuation is admitted, it supersedes the earlier unadmitted round of the same task.
 - A panel main with no registered goal is told to register the stated objective or ask once with 2-3 candidates. The previous plan's unfinished tasks appear as re-add suggestions and are never re-added automatically. A registered goal with no tasks gets its own sentence.
+- Free third-party tier routes (Pi with OpenRouter free models) are marked `public_only`. They serve only a repository whose GitHub visibility `gh` verifies as public (the answer is cached), or one that opts in with `OMS_PANEL_PUBLIC_ROUTE_OPT_IN`. An unknown answer falls back to native routes. The visibility cache never stores an origin URL that fails normalization, and an explicit `--to pi --model M` skips the check.
+- A carried prior finding that the outbound scan flags is replaced by an omission line naming its artifact. Before this, quoted reviewer text could block every later `--continue` or `--task-id` dispatch for that task.
 
 ### Fixed
 
