@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_IDS = {"codex": {"gpt-6.1-sol", "gpt-6-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-astra"},
              "claude": {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"}}
+EXACT_MODEL_PROVIDERS = {"opencode", "pi"}
 TIERS = ("light", "routine", "deep", "frontier")
 # The 5.x Codex generation is never used (user decision 2026-10-27).
 CODEX_MIN_MAJOR = 6
@@ -47,8 +48,14 @@ def newest_route_model(provider, configured, catalog):
 
 
 def routable_route_model(provider, configured, catalog):
-    """newest_route_model, refused when that model's major generation is behind the newest Codex family
-    model the catalog lists; oms_capability_routable_models drops the same family from the shell's routable set."""
+    """Resolve native families or exact provider IDs; an empty exact catalog defers to the CLI.
+
+    A Codex family behind the catalog's newest major generation is refused, matching the shell's routable set.
+    """
+    if provider in EXACT_MODEL_PROVIDERS:
+        if catalog and configured not in catalog:
+            raise ValueError("%s exact model %s is absent from the catalog" % (provider, configured))
+        return configured
     model = newest_route_model(provider, configured, catalog)
     if provider == "codex":
         majors = [family[1][0] for family in (route_family(provider, m) for m in catalog) if family]
@@ -60,12 +67,16 @@ def routable_route_model(provider, configured, catalog):
 
 def valid_route(route):
     # A Codex route names any version of a known family; the catalog picks the newest one at dispatch.
-    return (isinstance(route, dict) and set(route) == {"provider", "model", "effort"}
-            and isinstance(route.get("provider"), str) and route["provider"] in MODEL_IDS
-            and isinstance(route.get("model"), str)
-            and (route_family("codex", route["model"]) is not None if route["provider"] == "codex"
-                 else route["model"] in MODEL_IDS[route["provider"]])
-            and isinstance(route.get("effort"), str) and route["effort"] in {"low", "medium", "high"})
+    if (not isinstance(route, dict) or set(route) != {"provider", "model", "effort"}
+            or not all(isinstance(route[key], str) for key in ("provider", "model", "effort"))
+            or route["effort"] not in {"low", "medium", "high"}):
+        return False
+    provider, model = route["provider"], route["model"]
+    if provider in EXACT_MODEL_PROVIDERS:
+        return re.fullmatch(r"[^\s/\x00-][^\s/\x00]*/[^\s\x00]+", model) is not None
+    if provider == "codex":
+        return route_family(provider, model) is not None
+    return provider in MODEL_IDS and model in MODEL_IDS[provider]
 
 
 def policy():
@@ -136,10 +147,13 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     else:
         purpose = {"advisor": "advise", "reviewer": "review", "researcher": "research"}.get(role, role)
     candidates = routes["tiers"][tier]
+    if role in INDEPENDENT or KINDS[role] == "advisor":
+        candidates = [c for c in candidates if c["provider"] in MODEL_IDS]
     if role == "researcher":
         if tier != "light":
             raise ValueError("researchers use the light tier")
-        candidates = [c for c in candidates if route_family(c["provider"], c["model"])[0] in RESEARCH_FAMILIES]
+        candidates = [c for c in candidates if route_family(c["provider"], c["model"])
+                      and route_family(c["provider"], c["model"])[0] in RESEARCH_FAMILIES]
     usable = [c for c in candidates if installed is None or c["provider"] in installed]
     if not usable:
         raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
@@ -182,13 +196,14 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             available = sorted(available, key=lambda c: c["provider"] == owner)
         usable = available
     if role in INDEPENDENT:
-        usable = sorted(usable, key=lambda c: c["provider"] == (writer if writer in MODEL_IDS else owner))
+        usable = sorted(usable, key=lambda c: c["provider"] == (
+            writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS else owner))
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])
     return dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
 
 
 def alternate_route(route, installed=None, provider_status=None):
-    """Return the other provider route from this exact tier that allocate() would also accept, if any."""
+    """Return the first eligible alternate provider from this exact tier, if any."""
     tier = route.get("workload")
     if tier not in TIERS:
         return None
@@ -196,9 +211,12 @@ def alternate_route(route, installed=None, provider_status=None):
                   if candidate["provider"] != route.get("provider")
                   and (installed is None or candidate["provider"] in installed)
                   and (weekly_used(provider_status, candidate["provider"]) or 0) < 90]
+    if route.get("role") in INDEPENDENT or KINDS.get(route.get("role")) == "advisor":
+        candidates = [candidate for candidate in candidates if candidate["provider"] in MODEL_IDS]
     if route.get("role") == "researcher":
         candidates = [candidate for candidate in candidates
-                      if route_family(candidate["provider"], candidate["model"])[0] in RESEARCH_FAMILIES]
+                      if route_family(candidate["provider"], candidate["model"])
+                      and route_family(candidate["provider"], candidate["model"])[0] in RESEARCH_FAMILIES]
     if not candidates:
         return None
     return dict(candidates[0], effort=route.get("effort"), role=route.get("role"),
@@ -231,7 +249,7 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
             raise ValueError("brief contains a NUL character")
     prefix = ["bash", str(entry)]
     request = ["--prompt", prompt] if prompt else ["--prompt-file", str(brief)]
-    effort = ["--reasoning-effort", route["effort"]] if route["effort"] else []
+    effort = ["--reasoning-effort", route["effort"]] if route["effort"] and route["provider"] != "opencode" else []
     model = ([] if route["model"] == "provider-default" else ["--model", route["model"]]) + effort
     if route["role"] == "advisor":
         if verify:

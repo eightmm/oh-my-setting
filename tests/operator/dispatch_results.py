@@ -6,6 +6,131 @@ from unittest.mock import patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
+# Exact tier models keep main ownership and judgment on the native pair.
+def exercise_exact_model_routing():
+    from panel_routing import valid_route
+    import panel_routing
+    load_policy = panel_routing.policy
+    original = load_policy()
+    for provider, model in (("pi", "openrouter/thinkingmachines/inkling:free"),
+                            ("opencode", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free")):
+        configured = {"provider": provider, "model": model, "effort": "medium"}
+        assert valid_route(configured), configured
+        if provider == "pi":
+            assert original["tiers"]["routine"][0] == configured
+        routes = deepcopy(original)
+        routes["tiers"]["routine"][0] = configured
+        with patch.object(panel_routing, "policy", return_value=routes), \
+                patch.object(panel, "policy", return_value=routes):
+            assert valid_route(configured), configured
+            for malformed in (None, 0, "", "0", "openrouter/", "/model", "-openrouter/model",
+                              "openrouter/model name", "openrouter/model\n", "openrouter/\tmodel", "p/\0m"):
+                assert not valid_route(dict(configured, model=malformed)), malformed
+            assert valid_route(dict(configured, model="p/m"))
+            assert registered[provider]["installed"] and registered[provider]["exact_model_override"]
+            if provider == "opencode":
+                assert registered[provider]["effort_mechanism"] is None
+            assert registered[provider]["access"] == ["read", "write"]
+            assert panel.policy()["tiers"]["routine"][0] == configured
+            assert set(panel.policy()["main"]) == set(panel.PROVIDERS) == {"claude", "codex"}
+            invalid_main = deepcopy(panel.policy())
+            invalid_main["main"][provider] = configured
+            with patch.object(panel_routing.json, "loads", return_value=invalid_main):
+                try:
+                    load_policy()
+                except ValueError as error:
+                    assert "main routes" in str(error), error
+                else:
+                    raise AssertionError("Exact provider became a main route")
+            for catalog in ([], [model], ["other/model", model]):
+                assert panel.routable_route_model(provider, model, catalog) == model
+            try:
+                panel.routable_route_model(provider, model, ["other/model"])
+            except ValueError as error:
+                assert "catalog" in str(error), error
+            else:
+                raise AssertionError("an absent exact model passed a populated catalog")
+            providers = {provider, "claude", "codex"}
+            catalogs = {provider: [model], "claude": [], "codex": []}
+            earlier = ["other/model-%d" % n for n in range(20)]
+            rows = [dict(provider=name, binary=name, installed=True,
+                         models=earlier if name == provider else [],
+                         catalog_models=earlier + [model] if name == provider else [])
+                    for name in providers]
+            with patch.object(panel, "provider_catalog", return_value=rows), \
+                    patch("panel_dispatch.route_inputs", return_value=({}, None, None)):
+                selected = panel.selected_route("codex", "worker", None, "read", None)
+                assert selected["provider"] == provider and selected["model"] == model, selected
+            for owner in panel.PROVIDERS:
+                for used in (None, 0, 15, 89, 90, 100, "malformed"):
+                    readings = {name: {"weekly_used": used} for name in ("claude", "codex")}
+                    route = allocate(owner, installed=providers, provider_status=readings,
+                                     recent={provider: 1000}, catalogs=catalogs)
+                    assert route["provider"] == provider, (owner, used, route)
+                assert allocate(owner, installed={provider}, catalogs=catalogs)["provider"] == provider
+                assert allocate(owner, installed=providers - {provider})["provider"] != owner
+                assert allocate(owner, installed={"codex"})["provider"] == "codex"
+                assert allocate(owner, installed={"claude"})["provider"] == "claude"
+                assert allocate(owner, installed=providers, catalogs=dict(catalogs, **{provider: ["other/model"]}))["provider"] != provider
+                for role in ("reviewer", "verifier", "security-auditor", "critic", "advisor", "architect"):
+                    judge = allocate(owner, role=role, tier="routine", installed=providers, writer=provider)
+                    assert judge["provider"] in panel.PROVIDERS, judge
+            assert allocate("codex", role="reviewer", installed=providers, writer=provider,
+                            provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "codex"
+            with_exact_route_light = deepcopy(panel.policy())
+            with_exact_route_light["tiers"]["light"].insert(0, dict(configured, effort="low"))
+            with patch.object(panel_routing, "policy", return_value=with_exact_route_light):
+                researcher = allocate("codex", role="researcher", installed=providers)
+                assert researcher["provider"] == "claude", researcher
+                assert panel.alternate_route(researcher, providers)["provider"] == "codex"
+            for role in ("reviewer", "advisor"):
+                try:
+                    allocate("codex", role=role, tier="routine", installed={provider})
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("Exact provider was allocated as the only judge")
+            for installed in (set(), {provider}):
+                try:
+                    allocate("claude", installed=installed, catalogs=dict(catalogs, **{provider: ["other/model"]}))
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("no eligible route was accepted")
+            exact_route = dict(configured, role="worker", kind="worker", owner="codex", workload="routine",
+                               access="read", purpose="explain", binary=provider)
+            for effort in (None, "low", "medium", "high"):
+                argv = panel.routed_command(panel.ENTRY, project, dict(exact_route, effort=effort), prompt="Inspect source.")
+                assert ("--reasoning-effort" in argv) == (provider == "pi" and effort is not None), argv
+                assert argv[argv.index("--model") + 1] == model, argv
+            assert panel.alternate_route(exact_route, providers)["provider"] == "claude"
+            assert panel.alternate_route(exact_route, {provider, "codex"})["provider"] == "codex"
+            assert panel.alternate_route(exact_route, {provider}) is None
+            judge = dict(exact_route, provider="claude", role="reviewer")
+            assert panel.alternate_route(judge, {"claude", provider}) is None
+            for used, expected in ((0, "claude"), (89, "claude"), (90, "codex"), (100, "codex"),
+                                   (None, "claude"), ("malformed", "claude")):
+                assert panel.alternate_route(exact_route, providers, {"claude": {"weekly_used": used}})["provider"] == expected
+            for installed, expected in ((providers, "claude"), ({provider, "codex"}, "codex"), ({provider}, None)):
+                rows = [dict(provider=name, binary=name, installed=name in installed,
+                             exact_model_override=True, access=["read", "write"],
+                             catalog_models=catalogs[name], effort_mechanism=None if name == "opencode" else "flag")
+                        for name in providers]
+                with patch.object(panel, "provider_catalog", side_effect=lambda selection="all": [
+                        row for row in rows if row["provider"] in selection.split(",")]), \
+                        patch.object(panel, "selected_route", return_value=exact_route), \
+                        patch.object(panel, "routing_status", return_value={}), \
+                        patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
+                    fallback = panel.dispatch(project, "codex", "worker", None, "read", "explain", prompt="Inspect source.")
+                    assert (fallback["provider"] if fallback else None) == expected, fallback
+            # The board and discovery keep handling a third tier provider without promoting a main.
+            text = render({"repo": {"name": "routing"}, "collection": {"ok": True},
+                           "room": {"participants": [dict(participant="oc", provider=provider, model=model,
+                                                             role="worker", joined=True)]}}, "codex", width=150, height=40)
+            assert isinstance(text, str)
+
+exercise_exact_model_routing()
+
 # A finished write call keeps its declared scope in the advisory while its patch awaits a decision.
 finished_worker = {"participant": "W1", "joined": True, "parent": "main", "role": "worker",
                    "owns": ["src/shared.py"]}
@@ -704,10 +829,10 @@ assert alternate_route(automatic, {automatic["provider"]}) is None
 # The fallback obeys the weekly-quota rule allocate() enforces: 90% used or more is excluded,
 # unknown or stale readings stay eligible, and without an eligible alternate nothing falls back.
 other = alternate["provider"]
-assert alternate_route(automatic, provider_status={other: {"weekly_used": 89}})["provider"] == other
-assert alternate_route(automatic, provider_status={other: {"weekly_used": None}})["provider"] == other
-assert alternate_route(automatic, provider_status={}) ["provider"] == other
-assert alternate_route(automatic, provider_status={other: {"weekly_used": 90}}) is None
+assert alternate_route(automatic, both, provider_status={other: {"weekly_used": 89}})["provider"] == other
+assert alternate_route(automatic, both, provider_status={other: {"weekly_used": None}})["provider"] == other
+assert alternate_route(automatic, both, provider_status={}) ["provider"] == other
+assert alternate_route(automatic, both, provider_status={other: {"weekly_used": 90}}) is None
 assert alternate_route(automatic, {"codex", "claude"}, {other: {"weekly_used": 97.2}}) is None
 with patch.object(panel, "selected_route", return_value=explicit), \
         patch.object(panel, "provider_catalog", side_effect=AssertionError("explicit --to queried fallback")), \
@@ -893,6 +1018,27 @@ explicit = read_default + ["--purpose", "investigate", "--task-id", explicit_id]
 explicit_plan = json.loads(call(explicit + ["--dry-run"]))
 assert explicit_plan["task_id"] == explicit_id and explicit_plan["route"]["purpose"] == "investigate"
 assert explicit_plan["argv"][explicit_plan["argv"].index("--task-id") + 1] == explicit_id
+
+# The routine Pi route executes scoped edits through the declared transport.
+pi_model = "openrouter/thinkingmachines/inkling:free"
+catalog_file = capability_dir / "pi.models"
+previous = catalog_file.read_bytes()
+try:
+    catalog_file.write_text(pi_model + "\n")
+    request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
+               "--owner", "codex", "--access", "write", "--purpose", "implement",
+               "--brief-file", str(brief), "--verify", "test -f value.txt", "--task-id", "pi-write", "--label", "Implement with Pi"]
+    planned = json.loads(call(request + ["--dry-run"]))
+    assert planned["route"]["provider"] == "pi" and "--reasoning-effort" in planned["argv"]
+    answer = call(request, dict(environment, PANEL_TEST_MODE="write",
+                                OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
+    assert "patch:" in answer, answer
+    observed = json.loads(worker_log.read_text().splitlines()[-1])
+    assert pi_model in observed["argv"] and "--tools" in observed["argv"], observed
+    assert observed["argv"][observed["argv"].index("--thinking") + 1] == "medium", observed
+    assert (project / "value.txt").read_text() == "old\n"
+finally:
+    catalog_file.write_bytes(previous)
 
 # Registered transports join the same task tree without a native launcher or
 # changes to preset allocation. Lumen is a synthetic custom-adapter fixture.

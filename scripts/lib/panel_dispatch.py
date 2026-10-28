@@ -719,7 +719,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
              candidate=None, allow_stale_base=False, from_task=None):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
-    from terminal_panel import continuation, events, provider_catalog, routable_route_model, routing_status
+    from terminal_panel import continuation, events, policy, provider_catalog, routable_route_model, routing_status
     from terminal_panel import run_dispatch, safe_label, selected_route
     dispatch_env = child_environment(owner, repo)
     room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
@@ -790,8 +790,12 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 _validate_dry_run_inputs(prompt, brief)
         fallback = None
         if not target:
-            fallback = alternate_route(route, provider_status=readings or {})
-            if fallback:
+            remaining = {candidate["provider"] for candidate in policy()["tiers"][route["workload"]]}
+            while remaining:
+                fallback = alternate_route(route, installed=remaining, provider_status=readings or {})
+                if not fallback:
+                    break
+                remaining.discard(fallback["provider"])
                 try:
                     peer = provider_catalog(fallback["provider"])[0]
                     if (peer["installed"] and access in peer["access"] and peer["exact_model_override"]):
@@ -799,6 +803,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                         fallback["model"] = routable_route_model(
                             fallback["provider"], fallback["model"],
                             peer.get("catalog_models", peer.get("models", [])))
+                        break
                     else:
                         fallback = None
                 except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
@@ -2624,7 +2629,7 @@ def _print_dispatch_next_ready(repo, owner):
 
 
 def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workload="deep"):
-    from terminal_panel import ENTRY, MAX_PROMPT, policy, safe_label
+    from terminal_panel import ENTRY, MAX_PROMPT, PROVIDERS, policy, safe_label
     if not 1 <= rounds <= 2:
         raise ValueError("council rounds must be 1 or 2")
     if not task_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
@@ -2636,6 +2641,7 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
     routes = policy()
     # Four seats, two per family: deep plus a cheaper routine pair by default; frontier on request.
     seats = routes["tiers"]["deep"] + routes["tiers"]["frontier" if workload == "frontier" else "routine"]
+    seats = [item for item in seats if item["provider"] in PROVIDERS]
     if len({item["provider"] for item in seats}) < 2:
         raise ValueError("council tier must include two independent provider families")
     targets = ",".join(item["provider"] + ":model=" + item["model"] for item in seats)

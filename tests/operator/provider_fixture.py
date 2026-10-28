@@ -26,7 +26,7 @@ brief = temporary / "panel-brief.md"
 brief.write_text("Task: append new to value.txt. No primary edits or recursive workers.\n")
 log = temporary / "panel-native-log.jsonl"
 worker_log = temporary / "panel-worker-log.jsonl"
-for provider in (*panel.PROVIDERS, "grok", "agy", "vibe", "oms-agent-adapter-lumen"):
+for provider in (*panel.PROVIDERS, "pi", "opencode", "grok", "agy", "vibe", "oms-agent-adapter-lumen"):
     executable = binary / provider
     executable.write_text('''#!/usr/bin/env bash
 set -eu
@@ -134,6 +134,12 @@ fi
 ''')
     executable.chmod(0o755)
 
+capability_dir = temporary / "panel-capabilities"
+capability_dir.mkdir()
+# Legacy lifecycle fixtures keep their native routes; exact route tests supply matching catalogs.
+for provider in ("pi", "opencode"):
+    (capability_dir / (provider + ".models")).write_text("fixture/unrouted\n")
+os.environ["OMS_CAPABILITY_DIR"] = str(capability_dir)
 environment = dict(os.environ, HOME=str(home), NVM_DIR=str(home / ".nvm"),
                    CODEX_HOME=str(home / ".codex"), CLAUDE_CONFIG_DIR=str(home / ".claude"),
                    PATH=str(binary) + os.pathsep + os.environ["PATH"],

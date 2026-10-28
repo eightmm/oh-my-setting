@@ -39,7 +39,8 @@ from panel_metrics import collect, pane_reading
 
 
 def fixture_provider_catalog(providers=None):
-    rows = [{"provider": name, "binary": name, "installed": True, "models": []}
+    rows = [{"provider": name, "binary": name, "installed": True,
+             "models": ["fixture/unrouted"] if name == "pi" else []}
             for name in ("claude", "codex", "pi")]
     if providers:
         requested = set(providers.split(",")) if isinstance(providers, str) else set(providers)
