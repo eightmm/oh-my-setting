@@ -8698,6 +8698,16 @@ index_path.write_bytes(b''.join((json.dumps(r)+'\n').encode() for r in records))
 legacy_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
 legacy_core['satisfaction'](str(repo), satisfied, current['tasks'], current['plan_id'])
 index_path.write_bytes(index_raw)
+# Patch evidence defaults to the 16 MiB ceiling; other evidence keeps 4 MiB.
+big = b'x' * (5 * 1024 * 1024)
+for suffix in ('.patch', '.txt'):
+    (repo / ('.oms/artifacts/big' + suffix)).write_bytes(big)
+    try:
+        legacy_core['reference'](str(repo), {'path': '.oms/artifacts/big' + suffix, 'sha256': h(big)})
+        accepted = True
+    except BaseException:
+        accepted = False
+    assert accepted == (suffix == '.patch'), suffix
 # A fresh, truthful manifest of unrelated bytes still lacks product proof.
 (repo / 'file.txt').write_text('unproven replacement\n')
 invalid = copy.deepcopy(satisfied)
