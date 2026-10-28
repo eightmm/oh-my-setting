@@ -1650,6 +1650,63 @@ def panel_next_ready_hint(tasks: list[dict[str, Any]], provider: str) -> str:
                 task_id, plain_line(ready.get("title"), 40), task_id, provider, provider, task_id))
 
 
+def panel_previous_plan(repo: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read the newest bounded, content-addressed retirement archive as reference data."""
+    from dashboard_projection import DURABLE, PLAN_READER, safe_path
+    try:
+        if not (repo / ".oms" / "plan").exists():
+            return {}, []
+        directory = safe_path(repo, ".oms/plan/tasks.json").parent
+        ancestry = DURABLE["component_snapshot"](str(repo), str(directory / "tasks.json"), "plan")
+        candidates = []
+        with os.scandir(directory) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 1024:
+                    return {}, []
+                if re.fullmatch(r"tasks\.[0-9a-f]{64}\.archive\.json", entry.name):
+                    stat = entry.stat(follow_symlinks=False)
+                    candidates.append((stat.st_mtime_ns, entry.name))
+        if not candidates:
+            return {}, []
+        name = max(candidates)[1]
+        raw, _ = PLAN_READER(str(directory / name), "plan archive", 1024 * 1024)
+        DURABLE["components_unchanged"](ancestry, "plan")
+        if hashlib.sha256(raw).hexdigest() != name.split(".")[1]:
+            return {}, []
+        data = json.loads(raw)
+        if not isinstance(data, dict) or not isinstance(data.get("tasks", {}), (dict, list)):
+            return {}, []
+        rows = data.get("tasks", {})
+        rows = rows.values() if isinstance(rows, dict) else rows
+        return data, [row for row in rows if isinstance(row, dict)]
+    except (OSError, ValueError, RecursionError, SystemExit):
+        return {}, []
+
+
+def panel_no_goal_hint(repo: Path, data: dict[str, Any], tasks: list[dict[str, Any]]) -> str:
+    if not data:
+        data, tasks = panel_previous_plan(repo)
+    text = (" [oms plan] No active goal. If the request or session goal states the objective, "
+            "register it: oms agent-plan init --goal TEXT (init replaces the current plan and archives it). "
+            "Otherwise propose 2-3 candidates from prior work, ask one question and register the answer. "
+            "Manually re-add relevant unfinished tasks with oms agent-plan add; never re-add automatically.")
+    goal = plain_line(data.get("goal"), 80)
+    previous = []
+    id_regex = re.compile(r"[A-Za-z0-9._-]+")
+    for task in tasks:
+        ident = task.get("id")
+        if (task.get("state") not in ("done", "cancelled") and isinstance(ident, str)
+                and id_regex.fullmatch(ident) and len(ident) <= 64):
+            previous.append(plain_line(ident, 64) + ": " + plain_line(task.get("title"), 40))
+            if len(previous) == 3:
+                break
+    if goal or previous:
+        text += " Reference data: " + ("previous goal: " + goal if goal else "")
+        if previous:
+            text += ("; " if goal else "") + "unfinished: " + ", ".join(previous)
+    return text
+
+
 def panel_plan_hint(payload: dict[str, Any]) -> str:
     """The shared plan as one bounded sentence: progress, the task this main holds, the next ready one."""
     repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
@@ -1657,22 +1714,23 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
         return ""
     data, tasks = plan_tasks(repo)
     goal = plain_line(data.get("goal"), 80)
-    if not tasks:
-        return ""
     me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
     owned = [t for t in tasks if me and t.get("claimed_by_participant") == me
              and t.get("state") in ("claimed", "running", "review", "landing")]
     phases = {"review": 0, "claimed": 1, "running": 2, "landing": 2}
     mine = max(owned, key=lambda t: (phases[t["state"]], str(t.get("updated", ""))), default=None)
-    worker_holds = [t for t in tasks if me and t.get("claimed_by_participant") == me
-                    and t.get("state") in ("claimed", "running")]
+    worker_holds = [t for t in tasks if t.get("state") in ("claimed", "running", "review", "landing")]
     clock = time.time()
     stamps = []
     for t in tasks:
         with contextlib.suppress(ValueError, TypeError):
             stamps.append(datetime.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
-    if stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds:
-        return ""
+    # Registered goal awaiting tasks (non-empty goal, zero tasks) is not "no active goal".
+    if goal and not tasks:
+        return " [oms plan] Goal: %s · registered goal awaiting tasks — add tasks with oms agent-plan add; never use init (init replaces plan_id and clears the acceptance command)." % goal
+    all_closed = bool(tasks) and all(t.get("state") in ("done", "cancelled") for t in tasks)
+    if (not goal or all_closed or (stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds)):
+        return panel_no_goal_hint(repo, data, tasks)
     done = {t["id"] for t in tasks if t.get("state") == "done"}
     ready_hint = panel_next_ready_hint(tasks, payload_agent(payload))
     cancelled = sum(1 for task in tasks if task.get("state") == "cancelled")

@@ -1010,12 +1010,12 @@ assert "git checkout --no-track -b oms/<task>" in tower and "pushes the verified
 assert "worker exit or review handoff does not end your turn" in tower, tower
 assert "OMS_ROOM_REPO" in tower and "local completion does not grant publication authority" in tower, tower
 assert not hook_state.panel_main_hint(payload("tower")), "only prompts carry the reminder"
-# The shared plan rides on the same line: no plan, no plan sentence; then progress, the main's own task and the next ready one.
-assert "[oms plan]" not in tower, tower
+# The shared plan reports a missing goal and how to restore continuity.
+assert "[oms plan] No active goal" in tower, tower
 assert "set your status: oms room send" in tower and "--kind status" in tower, tower
 with patch.object(hook_state, "panel_status_hint", return_value=""):
     short = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
-assert len(short) < 160 and short.startswith("[oms panel] control-tower main:") and "your system prompt" in short, short
+assert "No active goal" in short and short.startswith("[oms panel] control-tower main:") and "your system prompt" in short, short
 assert all(phrase in tower for phrase in ("cause is known", "one or two files", "brief costs more than the edit", "failed the same bounded task twice", "larger multi-file or parallelisable work", "long verification", "authentication, permissions, secrets, install, deletion, hooks", "oms peer-review --gate --verify", "same landing path")), tower
 assert all(phrase in tower for phrase in ("Release bookkeeping (changelog, version, manifest, inventory files)",
                                           "paid compute needs the user's authority", "oms job-digest")), tower
@@ -1027,7 +1027,7 @@ plan_path = plan_dir / "tasks.json"
 def refused_plan():
     assert hook_state.plan_tasks(repo) == ({}, [])
     assert dashboard_tasks(str(repo)) == []
-    assert not hook_state.panel_plan_hint(payload("tower"))
+    assert "No active goal" in hook_state.panel_plan_hint(payload("tower"))
 
 for malformed in ({"tasks": 1}, {"tasks": "task"}, [],
                   {"tasks": [{"id": ["bad"], "state": "done"}]},
@@ -1079,6 +1079,61 @@ for reader, empty in ((hook_state.plan_tasks, ({}, [])), (dashboard_projection.p
 path.unlink()
 '''
     subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(repo)], check=True, timeout=5)
+# No active goal: current and archived continuity is reference data, bounded and read-only.
+empty = hook_state.panel_plan_hint(payload("tower"))
+assert "No active goal" in empty and "oms agent-plan init --goal TEXT" in empty, empty
+assert "2-3 candidates" in empty and "never re-add automatically" in empty, empty
+import hashlib
+archived = json.dumps({"goal": "Previous goal", "tasks": [
+    {"id": "old", "title": "Unfinished work", "state": "ready"}]}).encode()
+archive = plan_dir / ("tasks." + hashlib.sha256(archived).hexdigest() + ".archive.json")
+archive.write_bytes(archived)
+archive_hint = hook_state.panel_plan_hint(payload("tower"))
+assert "previous goal: Previous goal" in archive_hint and "old: Unfinished work" in archive_hint, archive_hint
+from contextlib import contextmanager
+from types import SimpleNamespace
+real_scandir = os.scandir
+@contextmanager
+def archive_entries(count):
+    with real_scandir(plan_dir) as entries:
+        actual = next(entry for entry in entries if entry.name == archive.name)
+        yield iter([actual] + [SimpleNamespace(name="unrelated")] * (count - 1))
+for count, found in ((1, True), (1024, True), (1025, False)):
+    with patch.object(hook_state.os, "scandir", side_effect=lambda _: archive_entries(count)):
+        assert bool(hook_state.panel_previous_plan(repo)[0]) == found, count
+archive.write_bytes(b"malformed")
+assert "previous goal:" not in hook_state.panel_plan_hint(payload("tower"))
+archive.unlink()
+many = [{"id": "t" + str(i), "title": "work", "state": "ready"} for i in range(4)]
+limited = hook_state.panel_no_goal_hint(repo, {"goal": "old"}, many)
+assert all("t" + str(i) + ": work" in limited for i in range(3)) and "t3: work" not in limited
+assert "unfinished:" not in hook_state.panel_no_goal_hint(repo, {"goal": "old"}, [])
+ids = [{"id": ident, "title": "work", "state": "ready"} for ident in ("a" * 64, "b" * 65, "bad id")]
+id_hint = hook_state.panel_no_goal_hint(repo, {"goal": "old"}, ids)
+assert "a" * 64 in id_hint and "b" * 65 not in id_hint and "bad id" not in id_hint
+# Worst case: ~340 base + 96 previous goal + 318 unfinished + separators ≈ 785; use 850.
+assert len(limited) < 850 and "\n" not in limited
+# Id longer than 8 chars printed whole (not truncated).
+long_id = hook_state.panel_no_goal_hint(repo, {"goal": "previous goal text"}, [
+    {"id": "autogoal-1028", "title": "A longer title for this unfinished task", "state": "ready"}])
+assert "autogoal-1028" in long_id and "…" not in long_id
+plan_path.write_text(json.dumps({"goal": "Closed goal", "tasks": [{"id": "closed", "state": "done"}]}))
+closed_hint = hook_state.panel_plan_hint(payload("tower"))
+assert "No active goal" in closed_hint and "previous goal: Closed goal" in closed_hint, closed_hint
+assert "unfinished:" not in closed_hint, closed_hint
+plan_path.write_text(json.dumps({"goal": "", "tasks": [{"id": "pending", "title": "Pending", "state": "ready"}]}))
+missing_goal = hook_state.panel_plan_hint(payload("tower"))
+assert "No active goal" in missing_goal and "pending: Pending" in missing_goal, missing_goal
+# Non-empty goal with zero tasks is a registered goal awaiting tasks, not "no active goal".
+plan_path.write_text(json.dumps({"goal": "Registered goal", "tasks": []}))
+awaiting_tasks = hook_state.panel_plan_hint(payload("tower"))
+assert "registered goal awaiting tasks" in awaiting_tasks and "Goal: Registered goal" in awaiting_tasks, awaiting_tasks
+assert "oms agent-plan add" in awaiting_tasks and "oms agent-plan init" not in awaiting_tasks, awaiting_tasks
+plan_path.write_text(json.dumps({"goal": "", "tasks": []}))
+assert "No active goal" in hook_state.panel_plan_hint(payload("tower"))
+# The canonical init archives the plan it replaces.
+assert "replaces the current plan and archives it" in empty, empty
+plan_path.unlink()
 stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 def plan_file(tasks):
     (plan_dir / "tasks.json").write_text(json.dumps({"goal": "Ship the shared plan board " * 5, "tasks": {
@@ -1130,7 +1185,19 @@ older = worker_row("older", state="running")
 message = heartbeat_hint([older, foreign])
 assert "yours: older (running)" in message and "claim age:" not in message and "refresh:" not in message, message
 assert "claim age:" not in heartbeat_hint([foreign])
-assert heartbeat_hint([foreign], dormant=True) == ""
+assert "No active goal" in heartbeat_hint([{"id": "idle", "state": "ready"}], dormant=True)
+assert "No active goal" not in heartbeat_hint([foreign], dormant=True)
+plan_file([{"id": "boundary", "state": "ready"}])
+data = json.loads(plan_path.read_text())
+data["tasks"]["boundary"]["updated"] = "2020-01-01T00:00:00Z"
+plan_path.write_text(json.dumps(data))
+boundary_time = 1577836800 + 7 * 86400
+for offset, inactive in ((-1, False), (0, True), (1, True)):
+    with patch.object(hook_state.time, "time", return_value=boundary_time + offset):
+        assert ("No active goal" in hook_state.panel_plan_hint(payload("tower"))) == inactive
+data["tasks"]["boundary"]["updated"] = "malformed"
+plan_path.write_text(json.dumps(data))
+assert "No active goal" not in hook_state.panel_plan_hint(payload("tower"))
 # Restore the task expected by the existing resume/status fixtures below.
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": owner},
            {"id": "t3", "state": "ready"}])

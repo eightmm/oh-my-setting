@@ -1196,6 +1196,12 @@ call, `N awaiting decision` those whose calls wait for the main's decision; task
 (with its age past 30 minutes and `(stale)` past an hour) or a dim `no status yet`. Every prompt of a panel main
 carries a `[oms plan]` sentence (goal, progress, the main's task, the next ready task and its claim
 command) and, when its declared status is missing or older than 20 minutes, a reminder to set it.
+When no goal is active (none, no goal, all-closed, or idle 7 days with no held work),
+the hint directs the main to register the stated objective with `oms agent-plan init --goal TEXT`
+(`init` archives and replaces the current canonical plan) or ask one
+question using prior-work candidates, then manually re-add relevant unfinished tasks; bounded
+previous-plan details are reference data. A registered goal with zero tasks awaits them:
+use `oms agent-plan add`, never `init`.
 
 What the numbers mean. Each word names one stage, and the same set carries the same word on the
 board group, the goal box, the main card's `Team:` line, Detail, the Attention queue and the Plan tab:

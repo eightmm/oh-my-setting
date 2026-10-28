@@ -254,6 +254,7 @@ def bootstrap(provider, repo):
         "Inspect oms panel --results before reporting completion. "
         "Keep exactly one live main in this panel. Parallel lines of work use bounded workers; "
         "do not start another main. Claude Code is the preferred main harness; Pi is an explicit alternative. "
+        "If a task is supplied and no shared-plan goal is active, register its objective first with oms agent-plan init --goal TEXT. "
         "If no task has been supplied, report "
         "readiness and wait."
     ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider)
