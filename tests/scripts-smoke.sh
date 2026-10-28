@@ -5665,7 +5665,7 @@ test_delegate_dry_run() {
     --prompt "Add a helper" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '## Done when'
-  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Create files only inside this worktree; put temporary files under TMPDIR'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Create project files only inside this worktree; put temporary files only under TMPDIR'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'run the tests that use them'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'docs/, README files, and the changed command usage or --help text'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'update prose describing the change'
@@ -33126,7 +33126,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
 
   make_guard_repo "$project"
   mkdir -p "$fake_bin"
-  printf '#!/usr/bin/env bash\ncat >/dev/null\necho done\n' > "$fake_bin/codex"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\n: > "$TMPDIR/scratch"\necho done\n' > "$fake_bin/codex"
   chmod +x "$fake_bin/codex"
   result="$(PATH="$fake_bin:/usr/bin:/bin" HOME="$fake_home" \
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
@@ -33135,6 +33135,8 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     fail "first kept delegate checkout failed: $result"
   first_artifact="$(printf '%s\n' "$result" | sed -n 's/^artifact: //p' | tail -n 1)"
   first_tree="$(sed -n 's/^- worktree: //p' "$first_artifact" | sed -n '1p')"
+  [ -d "$first_tree" ] && [ ! -e "${first_tree%/*}/tmp" ] ||
+    fail "a kept delegate checkout must not keep its worker temporary directory: $first_tree"
   result="$(PATH="$fake_bin:/usr/bin:/bin" HOME="$fake_home" \
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \

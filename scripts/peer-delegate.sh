@@ -955,6 +955,9 @@ oms_harness_mark_tmpdir "$worktree_parent" "$delegate_worktree_repo" "$worktree"
 cleanup_delegated_worktree() {
   local cleanup_identity_detail=""
 
+  # Worker temporaries never outlive the run, even when the checkout is kept for salvage.
+  [ -z "$worktree_parent" ] || rm -rf -- "$worktree_parent/tmp"
+
   if [ "$worktree_created" != 1 ]; then
     if [ "$KEEP_WORKTREE" = 0 ] && [ -n "$worktree_parent" ]; then
       rm -rf "$worktree_parent"
@@ -1222,7 +1225,7 @@ fi
       printf -- '- verify: `%s`\n' "$VERIFY_CMD"
       printf 'After you return, the harness runs `%s`. Run focused checks for the behavior you changed; do not run this full command just to confirm completion. Run broader checks only when needed to diagnose a failure. Report the checks you actually ran.\n' "$VERIFY_CMD"
     fi
-    printf '%s\n' '- Create files only inside this worktree; put temporary files under TMPDIR (removed after the run), delete any you created in the worktree, and never create directories next to or above the repository or copy it.'
+    printf '%s\n' '- Create project files only inside this worktree; put temporary files only under TMPDIR (removed after the run), delete any you created in the worktree, and never create directories next to or above the repository or copy it.'
     printf '%s\n' '- Admission also runs the checks restored from HEAD, so changing or deleting existing tests cannot make verify pass.'
     printf '%s\n' '- Keep secret-related key words and an equals sign off the same added line, including in variable names and fixtures; build fixtures at runtime (for example "pass" + "word"). Such a line makes the outbound scan refuse review and --continue.'
     printf '%s\n' '- Keep literal absolute home, Users or cluster-storage paths out of added lines too; the same scan refuses them. Write fixtures in a variable-prefixed or relative form, for example "$TMP/home/user".'

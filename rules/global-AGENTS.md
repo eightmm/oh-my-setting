@@ -22,9 +22,9 @@ Default: concise, scoped, evidence-driven.
 - For differing interfaces, name both and your choice; proceed within authority
   unless hard to reverse.
 - Preserve unrelated work; report failures, bound retries, continue safe work.
-- Write only inside the working project: no sibling/parent directories or
-  project copies (isolate with `oms scratch-worktree`). Keep temporary files in
-  session scratch or TMPDIR and delete them after use.
+- Create project files only inside the working project: no sibling/parent
+  directories or project copies (isolate with `oms scratch-worktree`). Temporary
+  files go only to session scratch or TMPDIR; delete them after use.
 - Trace code; choose the first sufficient option: no change, existing code,
   stdlib, portable native feature, declared dependency, smallest correct implementation.
 - Minimal never means incomplete: preserve requirements, trust-boundary
