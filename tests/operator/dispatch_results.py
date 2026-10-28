@@ -1431,6 +1431,32 @@ with patch.object(saved, "_records", return_value=(carry_attempts, carry_rows)),
 assert "critic" in same_task_carry and ".oms/artifacts/critic.md" in same_task_carry
 assert '"value.py:42"' in same_task_carry and "Details retained." in same_task_carry
 assert "source-task" in cross_task_carry
+assert "finding omitted (sensitive-looking content; read .oms/artifacts/security.md)" in secret_carry
+assert "fixture-secret-shaped-value" not in secret_carry
+assert saved._scan_finding_blocks([]) == []
+finding_line = carry_payloads[".oms/artifacts/security.md"].decode().splitlines()[2]
+with patch.object(saved.subprocess, "run", wraps=subprocess.run) as scan_call:
+    assert saved._scan_finding_blocks(["safe", finding_line, "x" * 2400, "x" * 2400 + "\n" + finding_line, "safe again"]) == [True, False, True, False, True]
+    assert scan_call.call_count == 1
+for result in (SimpleNamespace(returncode=1, stdout="0\n"),
+               SimpleNamespace(returncode=0, stdout="malformed\n"),
+               SimpleNamespace(returncode=0, stdout="")):
+    with patch.object(saved.subprocess, "run", return_value=result):
+        assert saved._scan_finding_blocks(["safe"]) == [False]
+with patch.object(saved.subprocess, "run", side_effect=OSError("unavailable")):
+    assert saved._scan_finding_blocks(["safe"]) == [False]
+    assert saved._contains_outbound_machine_path("safe")
+with patch.object(saved.subprocess, "run", side_effect=subprocess.TimeoutExpired("scanner", 30)):
+    assert saved._scan_finding_blocks(["safe"]) == [False]
+with patch.dict(os.environ, {"FIXTURE_" + "TO" + "KEN": "distinct-example-817263"}):
+    assert saved._scan_finding_blocks(["distinct-example-817263"]) == [False]
+with patch.object(saved, "_records", return_value=(carry_attempts, carry_rows)), \
+        patch.object(saved, "_indexed", side_effect=lambda repo, row, limit: carry_payloads[row["artifact"]]), \
+        patch.object(saved, "_contains_outbound_machine_path", return_value=False), \
+        patch.object(saved.subprocess, "run", side_effect=OSError("unavailable")):
+    failed_scan_carry = saved.prior_findings(carry_repo, carry_attempts[1]["task_id"], "")
+assert "finding omitted (sensitive-looking content; read .oms/artifacts/security.md)" in failed_scan_carry
+assert "fixture-secret-shaped-value" not in failed_scan_carry
 from panel_review import _relativize_quoted_paths
 escaped_path = str(carry_repo) + "/../../outside/private.txt:42"
 assert _relativize_quoted_paths('`%s`' % escaped_path, [str(carry_repo)]) == '`%s`' % escaped_path
@@ -1454,11 +1480,14 @@ with patch.object(saved, "_records", return_value=(carry_attempts[:1], [unc_row]
 assert "summary omitted (contains a machine path)" in unc_carry
 brief_path = temporary / "carry-secret-brief.md"
 brief_path.write_text("Initial scope.\n" + secret_carry, encoding="utf-8")
+dispatch._validate_dry_run_inputs(None, brief_path)
+brief_path.write_text("Initial scope.\n" + carry_payloads[".oms/artifacts/security.md"].decode().splitlines()[2] + "\n", encoding="utf-8")
 try:
     dispatch._validate_dry_run_inputs(None, brief_path)
-    raise AssertionError("secret-shaped carried finding passed outbound scan")
 except ValueError as error:
     assert "sensitive-looking" in str(error), error
+else:
+    raise AssertionError("main-written sensitive content passed outbound scan")
 
 for has_write_patch, expected in (
         (True, "after oms land run oms agent-plan finish --id hint-task --landed-commit SHA"),
