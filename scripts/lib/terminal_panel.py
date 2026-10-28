@@ -393,7 +393,7 @@ def main(argv=None):
     parser.add_argument("--owner-attempt", help="--settle-review for a named dead main's lineage")
     parser.add_argument("--legacy", action="store_true", help="allow aged terminal mains with no host/native ownership refs")
     parser.add_argument("--legacy-older-than", type=float, metavar="HOURS", help="legacy main lifecycle age (default: 24 hours)")
-    parser.add_argument("--standalone", action="store_true", help="settle aged parentless review workers")
+    parser.add_argument("--standalone", action="store_true", help="settle aged review workers with absent parents")
     parser.add_argument("--older-than", type=float, metavar="DAYS", help="minimum review age with exit proof for --standalone")
     parser.add_argument("--aged-days", type=float, metavar="DAYS", help="explicitly cancel aged review or blocked workers in the selected lineage (at least 7 days)")
     parser.add_argument("--attempt", action="append", help="--salvage: select one stopped attempt; --settle-review: supersede this worker")

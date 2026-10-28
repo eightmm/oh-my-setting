@@ -914,7 +914,7 @@ with any host/native ownership refs still require the normal absence proofs;
 age never substitutes for those proofs. Finalized-result and explicit `--attempt`
 selection otherwise remain unchanged.
 
-`oms panel --settle-review --standalone --older-than DAYS` selects parentless
+`oms panel --settle-review --standalone --older-than DAYS` selects parentless or absent-parent
 workers in review, without requiring a main. The finite positive threshold
 measures time since entering review. Only matching indexed legacy artifacts
 whose Exit section proves termination allow cancellation as `owner_superseded`,
@@ -933,7 +933,7 @@ workers are cancelled with `reason_code: owner_superseded` and reason
 `aged review without owner decision (N days)`. Unknown ages and recent workers
 remain pending. The calling-main scope never selects newer workers. Named-main
 recovery still requires its existing dead-main and host/native absence proofs.
-Parentless attempts with room ownership refs remain pending. Waiting-input and
+Parentless or absent-parent attempts with room ownership refs remain pending. Waiting-input and
 waiting-approval workers are not selected. This option cannot be combined with
 `--older-than`, `--attempt` or `--reason`. Preview first; `--apply` uses the same
 result lock and lifecycle-sequence compare-and-set transitions, without deleting artifacts.

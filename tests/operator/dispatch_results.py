@@ -1311,11 +1311,15 @@ assert not json.loads(call(legacy_args + ["--apply"]))["applied"], "legacy retry
 # Standalone legacy calls have no panel_role ref. Only aged reviews with a
 # matching indexed Exit proof may be cancelled, regardless of main environment.
 standalone_worker = settlement_worker("settlement-standalone-task", legacy=True)
+orphan_worker = settlement_worker("settlement-orphan-task", "att_missing_parent")
+owned_worker = settlement_worker("settlement-owned-task", main_attempts["codex"])
 unproven_worker = settlement_worker("settlement-no-exit-task", legacy=True, exit_proof=False)
 standalone_running = settlement_worker("settlement-running-task", review=False, legacy=True)
 standalone_args = recover[:recover.index("--owner-attempt")] + ["--standalone", "--older-than", "1", "--json"]
 young = json.loads(call(standalone_args))
 assert standalone_worker in {r["attempt"] for r in young["pending"] if r["pending_reason"] == "review_too_recent"}, young
+assert orphan_worker in {r["attempt"] for r in young["pending"] if r["pending_reason"] == "review_too_recent"}, young
+assert owned_worker not in {r["attempt"] for r in young["pending"] + young["candidates"]}, young
 with patch.object(review_settlement, "_age", return_value=None), \
         patch.dict(os.environ, environment, clear=True):
     unknown_age = review_settlement.settle_review(project, standalone=True, older_than=1)
@@ -1324,11 +1328,18 @@ time.sleep(1.1)
 standalone_args[standalone_args.index("--older-than") + 1] = "0.00000001"
 preview = json.loads(call(standalone_args))
 assert standalone_worker in {r["attempt"] for r in preview["candidates"]}, preview
+assert orphan_worker in {r["attempt"] for r in preview["candidates"] if r["selection_reason"] == "aged_standalone_review"}, preview
+assert owned_worker not in {r["attempt"] for r in preview["candidates"] + preview["pending"]}, preview
 assert not preview["executes"] and not preview["applied"], preview
 assert unproven_worker in {r["attempt"] for r in preview["pending"] if r["pending_reason"] == "exit_unknown"}, preview
 assert not {standalone_running, running} & {r["attempt"] for r in preview["candidates"]}, preview
 standalone_rows, standalone_artifacts = saved._records(project, full=True)
 standalone_attempt = next(a for a in standalone_rows if a["attempt_id"] == standalone_worker)
+orphan_attempt = next(a for a in standalone_rows if a["attempt_id"] == orphan_worker)
+with patch.object(review_settlement, "_age", return_value=86400):
+    boundary = review_settlement._settle(project, [orphan_attempt], standalone_artifacts, set(), {},
+                                         standalone_older_than=1)
+assert boundary["pending"][0]["pending_reason"] == "review_too_recent", boundary
 indexed_exit = next(r for r in standalone_artifacts if r.get("attempt_id") == standalone_worker)
 for artifact in (dict(indexed_exit, exit=1), dict(indexed_exit, artifact_sha256="0" * 64)):
     unproven = review_settlement._settle(project, [standalone_attempt], [artifact], set(), {},
@@ -1342,6 +1353,9 @@ with patch.object(review_settlement, "_stopped", side_effect=AssertionError("roo
 assert unproven["pending"][0]["pending_reason"] == "exit_unknown", unproven
 settlement = json.loads(call(standalone_args + ["--apply"]))
 assert standalone_worker in settlement["applied"] and unproven_worker not in settlement["applied"], settlement
+assert orphan_worker in settlement["applied"] and owned_worker not in settlement["applied"], settlement
+assert json.loads(call(event_command + ["show", "--attempt", orphan_worker, "--json"]))["state"] == "cancelled"
+assert json.loads(call(event_command + ["show", "--attempt", owned_worker, "--json"]))["state"] == "review"
 standalone_final = json.loads(call(event_command + ["show", "--attempt", standalone_worker, "--json"]))
 assert standalone_final["state"] == "cancelled" and standalone_final["reason_code"] == "owner_superseded", standalone_final
 assert standalone_final["refs"]["owner_superseded_reason"] == "aged standalone review", standalone_final

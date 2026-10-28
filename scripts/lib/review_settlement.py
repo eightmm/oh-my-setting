@@ -152,7 +152,8 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
     for attempt in attempts:
         ident, task = attempt["attempt_id"], attempt.get("task_id", "")
         refs = attempt.get("refs", {})
-        standalone = ((standalone_mode or standalone_older_than is not None) and not attempt.get("parent_attempt_id")
+        standalone = ((standalone_mode or standalone_older_than is not None)
+                      and attempt.get("parent_attempt_id") not in by_id
                       and attempt.get("tool") != "panel-main"
                       and refs.get("panel_role") in {None, "worker"}
                       and (refs.get("panel_role") == "worker"
