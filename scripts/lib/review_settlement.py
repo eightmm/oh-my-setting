@@ -105,6 +105,10 @@ def _stopped(repo, attempt, attempts, artifacts):
         parent = next((a for a in attempts if a.get("attempt_id") == attempt.get("parent_attempt_id")), {})
         return panel._dispatch_call_finished(repo, room_id, {"participant": member,
             "parent": parent.get("refs", {}).get("panel_room_participant", parent.get("attempt_id"))})
+    return _exit_proven(repo, attempt, artifacts)
+
+
+def _exit_proven(repo, attempt, artifacts):
     rows = [r for r in artifacts if r.get("attempt_id") == attempt.get("attempt_id")
             and r.get("task_id") == attempt.get("task_id") and r.get("kind") in {"delegate", "call", "ask"}]
     if not rows or type(rows[-1].get("exit")) is not int:
@@ -232,10 +236,23 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
                 continue
         stopped = False
         try:
-            # Review is entered after execution and verification. Only the
-            # explicit aged policy may replace missing exit evidence with age.
-            if ((standalone and (refs.get("panel_room_participant") or refs.get("panel_room_id")))
-                    or (not aged and not _stopped(repo, attempt, attempts, artifacts))):
+            if standalone and (refs.get("panel_room_participant") or refs.get("panel_room_id")):
+                member, room_id = refs.get("panel_room_participant"), refs.get("panel_room_id")
+                if aged or not member or not room_id or not _exit_proven(repo, attempt, artifacts):
+                    report["pending"].append(dict(item, pending_reason="exit_unknown"))
+                    continue
+                import dispatch_supervisor as dispatch_store
+                import terminal_panel as panel
+                try:
+                    anchor = dispatch_store.read(repo, member + "-launch.json")
+                except FileNotFoundError:
+                    pass
+                else:
+                    if not panel._dispatch_call_finished(repo, room_id,
+                            {"participant": member, "parent": anchor["call"]["parent"]}):
+                        report["pending"].append(dict(item, pending_reason="exit_unknown"))
+                        continue
+            elif not aged and not _stopped(repo, attempt, attempts, artifacts):
                 report["pending"].append(dict(item, pending_reason="exit_unknown"))
                 continue
             stopped = True

@@ -950,7 +950,10 @@ selection otherwise remain unchanged.
 workers in review, without requiring a main. The finite positive threshold
 measures time since entering review. Only matching indexed legacy artifacts
 whose Exit section proves termination allow cancellation as `owner_superseded`,
-with reason `aged standalone review`. Recent, unknown-age or unproven-exit
+with reason `aged standalone review`. Room-bound standalone attempts are eligible
+only with indexed exit proof and a finished call when its launch record exists.
+When the launch record is absent, the exit proof and review age suffice; an
+unreadable or invalid record leaves the attempt pending. Recent, unknown-age or unproven-exit
 attempts remain pending. This mode cannot be combined with owner or explicit
 attempt selection. Both recovery modes are dry runs until `--apply` is added
 and use the same result lock and expected-review-state transitions.
@@ -959,7 +962,7 @@ For an undecided backlog, explicitly use `--aged-days N` in the calling main's
 lineage, a named dead main's lineage, or with `--standalone`. There is no
 default; N must be finite and at least 7. This selects review workers, and in a
 main's lineage also blocked workers, whose last transition into their current
-state was more than N days ago (`--standalone` selects review workers only), even without a finalized result or indexed exit artifact. Blocked
+state was more than N days ago (`--standalone` selects review workers only), even without a finalized result or indexed exit artifact. Room-bound standalone attempts remain pending under this policy. Blocked
 workers are cancelled with `reason_code: owner_superseded` and reason
 `aged blocked without owner decision (N days)`; review workers use
 `aged review without owner decision (N days)`. Unknown ages and recent workers

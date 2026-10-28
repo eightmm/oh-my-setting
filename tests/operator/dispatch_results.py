@@ -1949,6 +1949,54 @@ standalone_final = json.loads(call(event_command + ["show", "--attempt", standal
 assert standalone_final["state"] == "cancelled" and standalone_final["reason_code"] == "owner_superseded", standalone_final
 assert standalone_final["refs"]["owner_superseded_reason"] == "aged standalone review", standalone_final
 assert standalone_worker not in json.loads(call(standalone_args + ["--apply"]))["applied"]
+def check_room_bound_standalone(project, standalone_attempt, indexed_exit):
+    import dispatch_supervisor as dispatch_store
+    participant = "call-settlement-fixture"
+    room_id = "settlement-room-bound"
+    bound = dict(standalone_attempt, refs={"panel_room_participant": participant, "panel_room_id": room_id})
+    args = (project, [bound], [indexed_exit], set(), {})
+    kwargs = {"standalone_older_than": 1}
+    with patch.object(review_settlement, "_age", return_value=86401):
+        with patch.object(dispatch_store, "read", side_effect=FileNotFoundError), \
+                patch.object(panel, "_dispatch_call_finished") as finished:
+            result = review_settlement._settle(*args, **kwargs)
+            assert [row["attempt"] for row in result["candidates"]] == [bound["attempt_id"]], result
+            finished.assert_not_called()
+        anchor = {"call": {"parent": "launch-parent"}}
+        for is_finished in (True, False):
+            with patch.object(dispatch_store, "read", return_value=anchor) as read, \
+                    patch.object(panel, "_dispatch_call_finished", return_value=is_finished) as finished:
+                result = review_settlement._settle(*args, **kwargs)
+                read.assert_called_once_with(project, participant + "-launch.json")
+                finished.assert_called_once_with(project, room_id,
+                    {"participant": participant, "parent": "launch-parent"})
+                if is_finished:
+                    assert result["candidates"] and not result["pending"], result
+                else:
+                    assert not result["candidates"] and result["pending"][0]["pending_reason"] == "exit_unknown", result
+        for error in (PermissionError("unreadable"), ValueError("malformed")):
+            with patch.object(dispatch_store, "read", side_effect=error):
+                result = review_settlement._settle(*args, **kwargs)
+                assert not result["candidates"] and result["pending"][0]["pending_reason"] == "exit_unknown", result
+        for anchor in (None, {}, {"call": {}}):
+            with patch.object(dispatch_store, "read", return_value=anchor):
+                result = review_settlement._settle(*args, **kwargs)
+                assert not result["candidates"] and result["pending"][0]["pending_reason"] == "exit_unknown", result
+        with patch.object(dispatch_store, "read", side_effect=AssertionError("unproven exit read launch")):
+            result = review_settlement._settle(project, [bound], [dict(indexed_exit, exit=99)], set(), {}, **kwargs)
+            assert not result["candidates"] and result["pending"][0]["pending_reason"] == "exit_unknown", result
+        for refs in ({"panel_room_participant": participant}, {"panel_room_id": room_id}):
+            partial = dict(bound, refs=refs)
+            result = review_settlement._settle(project, [partial], [indexed_exit], set(), {}, **kwargs)
+            assert not result["candidates"] and result["pending"][0]["pending_reason"] == "exit_unknown", result
+    for age in (None, 0, 86400):
+        with patch.object(review_settlement, "_age", return_value=age), \
+                patch.object(dispatch_store, "read", side_effect=AssertionError("too recent read launch")):
+            result = review_settlement._settle(*args, **kwargs)
+            expected = "review_age_unknown" if age is None else "review_too_recent"
+            assert not result["candidates"] and result["pending"][0]["pending_reason"] == expected, result
+
+check_room_bound_standalone(project, standalone_attempt, indexed_exit)
 # The explicit seven-day policy covers undecided legacy work and missing exits.
 # Append through the lifecycle API with a controlled event clock, never rewrite
 # the fixture ledger; a later review entry must replace the earlier review age.
