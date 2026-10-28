@@ -1,6 +1,7 @@
 """Role allocation for panel-owned tasks; authority is independent of workload."""
 
 import json
+from datetime import datetime, timezone
 import re
 from pathlib import Path
 
@@ -123,6 +124,13 @@ def weekly_used(provider_status, provider):
     return percent(row.get("weekly_used")) if isinstance(row, dict) else None
 
 
+def daily_capped(provider_status, candidate):
+    row = provider_status.get(candidate["provider"], {}) if isinstance(provider_status, dict) else {}
+    caps = row.get("daily_cap", {}) if isinstance(row, dict) else {}
+    day = caps.get(candidate["model"]) if isinstance(caps, dict) else None
+    return isinstance(day, str) and day == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
              recent=None, writer=None, catalogs=None):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
@@ -158,6 +166,9 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     if not usable:
         raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
             tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
+    usable = [c for c in usable if not daily_capped(provider_status, c)]
+    if not usable:
+        raise ValueError("all installed providers in the %s tier are in daily cooldown" % tier)
     # Quota guards any choice among installed providers, including the one family exclusion leaves.
     several = len(usable) > 1
     if catalogs is not None:
@@ -210,7 +221,8 @@ def alternate_route(route, installed=None, provider_status=None):
     candidates = [candidate for candidate in policy()["tiers"][tier]
                   if candidate["provider"] != route.get("provider")
                   and (installed is None or candidate["provider"] in installed)
-                  and (weekly_used(provider_status, candidate["provider"]) or 0) < 90]
+                  and (weekly_used(provider_status, candidate["provider"]) or 0) < 90
+                  and not daily_capped(provider_status, candidate)]
     if route.get("role") in INDEPENDENT or KINDS.get(route.get("role")) == "advisor":
         candidates = [candidate for candidate in candidates if candidate["provider"] in MODEL_IDS]
     if route.get("role") == "researcher":

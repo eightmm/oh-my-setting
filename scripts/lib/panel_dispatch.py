@@ -133,16 +133,36 @@ def provider_catalog(selection="all"):
 def routing_status(repo, room_id=None, main=None, snapshot_sink=None):
     """Reuse the board's recorded HUD/pane readings without a provider usage query."""
     from terminal_panel import repository, snapshot
-    if not (room_id or os.environ.get("OMS_ROOM_ID")):
-        return {}
+    from terminal_panel import events
     from panel_metrics import collect
+    readings = {}
+    try:
+        rows = json.loads(events(repo, "list", "--json", output=True))
+        daily = {}
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for row in rows:
+            refs = row.get("refs", {})
+            if refs.get("provider_error_provider") == "pi" and refs.get("provider_error") == "capacity":
+                model, day = refs.get("provider_daily_model"), refs.get("provider_daily_day")
+                if isinstance(model, str) and isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and day <= today:
+                    daily[model] = max(day, daily.get(model, ""))
+        readings["pi"] = {"daily_cap": daily}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        pass
+    if not (room_id or os.environ.get("OMS_ROOM_ID")):
+        return readings
     try:
         state, _ = snapshot(repository(repo), room_id=room_id)
         if snapshot_sink is not None:
             snapshot_sink.append(state)
-        return collect(state, main or os.environ.get("OMS_PANEL_MAIN_ATTEMPT"), repo=repository(repo))
+        collected = collect(state, main or os.environ.get("OMS_PANEL_MAIN_ATTEMPT"), repo=repository(repo))
+        if "pi" in readings:
+            collected.setdefault("pi", {}).update(readings["pi"])
+        readings.update(collected)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        return {}
+        pass
+    return readings
 
 
 def room_history(repo, owner, task_id=None, candidate=None, room_id=None):

@@ -12,6 +12,42 @@ def exercise_exact_model_routing():
     import panel_routing
     load_policy = panel_routing.policy
     original = load_policy()
+    assert original["tiers"]["light"][0] == {"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "low"}
+    for owner in ("claude", "codex"):
+        installed = {"pi", "claude", "codex"}
+        assert allocate(owner, role="documenter", installed=installed)["provider"] == "pi"
+        assert allocate(owner, role="researcher", installed=installed)["provider"] in {"claude", "codex"}
+    from datetime import datetime, timezone, timedelta
+    model = "openrouter/thinkingmachines/inkling:free"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    for day in ("", "0", "malformed", yesterday):
+        assert allocate("codex", installed={"pi", "claude"}, provider_status={"pi": {"daily_cap": {model: day}}})["provider"] == "pi"
+    ledger = [{"refs": {"provider_error_provider": "pi", "provider_error": "capacity",
+                        "provider_daily_model": model, "provider_daily_day": today}}]
+    with patch("terminal_panel.events", return_value=json.dumps(ledger)), patch.dict(os.environ, {"OMS_ROOM_ID": ""}):
+        readings = dispatch.routing_status(project)
+    assert allocate("codex", installed={"pi", "claude"}, provider_status=readings)["provider"] == "claude"
+    with patch.object(panel_routing, "datetime") as clock:
+        clock.now.return_value = datetime(2026, 10, 28, 23, 59, 59, tzinfo=timezone.utc)
+        boundary = {"pi": {"daily_cap": {model: "2026-10-28"}}}
+        assert allocate("codex", installed={"pi", "claude"}, provider_status=boundary)["provider"] == "claude"
+        clock.now.return_value = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
+        assert allocate("codex", installed={"pi", "claude"}, provider_status=boundary)["provider"] == "pi"
+    capped = {"pi": {"daily_cap": {model: today}}}
+    assert allocate("codex", installed={"pi", "claude"}, provider_status=capped)["provider"] == "claude"
+    assert allocate("codex", installed={"pi", "claude"}, provider_status={"pi": {"daily_cap": {"openrouter/other:free": today}}})["provider"] == "pi"
+    try:
+        allocate("codex", installed={"pi"}, provider_status=capped)
+    except ValueError as error:
+        assert "cooldown" in str(error)
+    else:
+        raise AssertionError("sole capped route was accepted")
+    for role in ("reviewer", "verifier", "critic", "security-auditor"):
+        for target in ("pi", "opencode"):
+            with patch.object(panel, "provider_catalog", return_value=[registered[target]]):
+                route = panel.selected_route("codex", role, None, "read", None, target=target, model="p/m")
+            assert route["provider"] == target and route["model"] == "p/m", route
     for provider, model in (("pi", "openrouter/thinkingmachines/inkling:free"),
                             ("opencode", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free")):
         configured = {"provider": provider, "model": model, "effort": "medium"}

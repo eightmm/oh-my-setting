@@ -13712,6 +13712,13 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     classified="$(classify_provider_error "$2" "$3" "$pe")"
     [ "$classified" = "$1" ] || fail "provider error case '$4': expected '$1', got '$classified'"
   }
+  printf '%s\n' '429: {"message":"Rate limit exceeded","code":429}' |
+    classify_case capacity pi 1 'pi HTTP 429'
+  printf '%s\n' '429: {"message":"Rate limit exceeded","code":429}' |
+    classify_case '' pi 0 'pi successful status'
+  printf '%s\n' '429:' | classify_case '' pi 1 'pi empty error'
+  printf '%s\n' '429 malformed' | classify_case '' pi 1 'pi malformed error'
+  printf '' | classify_case '' pi 1 'pi empty output'
   printf '%s\n' '{"type":"turn.failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}' |
     classify_case capacity codex 1 'codex turn.failed 429'
   printf '%s\n' 'ERROR: The model gpt-x does not exist or you do not have access to it' |
@@ -13795,6 +13802,81 @@ PY
     [ "$retry_status" -eq 7 ] && [ "$(cat "$fixture/provider-retry/runs")" = codex ] ||
       fail "answer text '$retry_case' triggered a same-tier provider retry (status $retry_status)"
   done
+
+  cat > "$fixture/bin/pi" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) exit 0 ;; esac
+printf '%s\n' pi >> "$PANEL_RUNS"
+[ "${PI_WRITE:-0}" != 1 ] || printf 'changed\n' >> file.txt
+printf '%s\n' "$PI_OUTPUT"
+exit "${PI_EXIT:-1}"
+EOF
+  chmod +x "$fixture/bin/pi"
+  for retry_case in plain daily success refusal; do
+    retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider pi \
+      --tool panel-dispatch --then starting:routed-starting --then working:routed-working)"
+    : > "$fixture/provider-retry/runs"
+    case "$retry_case" in
+      plain) PI_OUTPUT='429: {"message":"Rate limit exceeded","code":429}'; PI_EXIT=1 ;;
+      daily) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded","code":429}'; PI_EXIT=1 ;;
+      success) PI_OUTPUT='429'; PI_EXIT=0 ;;
+      refusal) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded; blocked by content filtering","code":429}'; PI_EXIT=1 ;;
+    esac
+    export PI_OUTPUT PI_EXIT
+    if PANEL_ARGV="$fixture/provider-retry/argv" PANEL_ENV="$fixture/provider-retry/env" \
+      PANEL_RUNS="$fixture/provider-retry/runs" PATH="$fixture/bin:$PATH" \
+      OMS_MODEL_EXPLICIT=openrouter/thinkingmachines/inkling:free OMS_PANEL_DISPATCH=1 \
+      OMS_PANEL_ROLE=worker OMS_PANEL_FALLBACK_PROVIDER=claude \
+      OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 OMS_PANEL_FALLBACK_EFFORT=medium \
+      OMS_ATTEMPT_ID="$retry_attempt" OMS_AGENT=codex \
+      bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$3"; ma_run_routed_provider pi read "$2/prompt" "$2/output" "$3" delegate "$4" "" ""' \
+      _ "$ROOT" "$fixture/provider-retry" "$retry_repo" "$retry_state" > "$fixture/provider-retry/log" 2>&1; then
+      retry_status=0
+    else
+      retry_status=$?
+    fi
+    if [ "$retry_case" = success ]; then
+      [ "$retry_status" -eq 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = pi ] || fail 'successful Pi response triggered fallback'
+    elif [ "$retry_case" = refusal ]; then
+      [ "$retry_status" -ne 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = pi ] || fail 'Pi refusal triggered fallback'
+    else
+      [ "$retry_status" -eq 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = $'pi\nclaude' ] || fail "Pi $retry_case fallback failed: $(cat "$fixture/provider-retry/log")"
+      "$ROOT/scripts/agent-events.sh" --repo "$retry_state" show --attempt "$retry_attempt" --json > "$fixture/provider-retry/record"
+      python3 - "$fixture/provider-retry/record" "$retry_case" <<'PYCASE' || fail 'Pi daily cap record mismatch'
+import datetime, json, sys
+refs = json.load(open(sys.argv[1]))['refs']
+if sys.argv[2] == 'daily':
+    assert refs['provider_daily_model'] == 'openrouter/thinkingmachines/inkling:free', refs
+    assert refs['provider_daily_day'] == datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d'), refs
+else:
+    assert not refs.get('provider_daily_model'), refs
+PYCASE
+      if [ "$retry_case" = daily ]; then
+        OMS_ROOM_ID="" python3 - "$ROOT" "$retry_state" <<'PYROUTE' || fail 'daily cap did not reach allocation'
+import sys
+sys.path.insert(0, sys.argv[1] + '/scripts/lib')
+from panel_dispatch import routing_status
+from panel_routing import allocate
+readings = routing_status(sys.argv[2])
+assert allocate('codex', installed={'pi', 'claude'}, provider_status=readings)['provider'] == 'claude', readings
+PYROUTE
+      fi
+    fi
+  done
+
+  : > "$fixture/provider-retry/runs"
+  if PI_OUTPUT=answer PI_EXIT=0 PI_WRITE=1 PANEL_RUNS="$fixture/provider-retry/runs" \
+    PANEL_ARGV="$fixture/provider-retry/argv" PANEL_ENV="$fixture/provider-retry/env" \
+    PATH="$fixture/bin:$PATH" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    OMS_PANEL_FALLBACK_PROVIDER=claude OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 \
+    OMS_PANEL_FALLBACK_EFFORT=medium OMS_AGENT=codex \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$retry_repo" --to pi \
+    --model openrouter/thinkingmachines/inkling:free --prompt 'change file' --verify false \
+    > "$fixture/provider-retry/verify-log" 2>&1; then
+    fail 'failed verify succeeded'
+  fi
+  [ "$(cat "$fixture/provider-retry/runs")" = pi ] || fail 'verify failure triggered provider fallback'
+  grep -Fq 'verify: exit' "$fixture/provider-retry/verify-log" || fail 'verification did not run'
 
   local read_root="$fixture/read"
   mkdir -p "$read_root/parent/worktree"

@@ -2860,7 +2860,7 @@ ma_room_relay_stop() {  # PID [TICKS]
 # ride item/assistant events, so a quoted "429" or "model not found" in the
 # agent's own work classifies as nothing. Unsure means no fallback.
 oms_panel_provider_error_scan() { # OUTPUT_FILE
-  python3 - "$1" <<'PY' 2>/dev/null || true
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
 import json, re, sys
 try:
     raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
@@ -2907,9 +2907,13 @@ for line in raw.splitlines():
                 if isinstance(result, str) and ENVELOPE.match(result):
                     messages.append(result)
             continue
-    match = PREFIX.match(candidate)
+    match = re.match(r"^(\d{3}):\s*(\S.*)$", candidate) if sys.argv[2] == "pi" else None
     if match:
-        messages.append(match.group(1))
+        messages.append("status " + match.group(1) + " " + match.group(2))
+    else:
+        match = PREFIX.match(candidate)
+        if match:
+            messages.append(match.group(1))
 # A reconnect error the turn finished after is not the failure.
 if not completed:
     messages.extend(pending)
@@ -2931,9 +2935,9 @@ PY
 oms_panel_provider_error_classify() { # PROVIDER EXIT OUTPUT_FILE
   local provider="$1" status="$2" file="$3"
   [ "$status" -ne 0 ] || return 0
-  case "$provider" in codex|claude) ;; *) return 0 ;; esac
+  case "$provider" in codex|claude|pi) ;; *) return 0 ;; esac
   [ -f "$file" ] && [ -s "$file" ] || return 0
-  oms_panel_provider_error_scan "$file" | tr -d '\r'
+  oms_panel_provider_error_scan "$file" "$provider" | tr -d '\r'
 }
 
 ma_provider_attempt() {
@@ -3970,11 +3974,20 @@ ma_run_routed_provider_inner() {
     if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ]; then
       local panel_events panel_error_record persisted_error
       panel_events="$(ma_scripts_dir)/agent-events.sh"
+      local daily_model="" daily_day=""
+      if [ "$primary_error_provider" = pi ] && [ "$primary_error_class" = capacity ] &&
+        ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" &&
+        grep -iq "free-models-per-day" "$attempt_file"; then
+        case "$OMS_MODEL_PRIMARY" in openrouter/*:free)
+          daily_model="$OMS_MODEL_PRIMARY"
+          daily_day="$(date -u +%Y-%m-%d)" ;; esac
+      fi
       if [ -x "$panel_events" ] &&
         "$panel_events" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" --actor provider-router \
           --ref "provider_error=$primary_error_class" \
           --ref "provider_error_provider=$primary_error_provider" \
-          --ref "provider_error_exit=$primary_error_exit" >/dev/null; then
+          --ref "provider_error_exit=$primary_error_exit" \
+          --ref "provider_daily_model=$daily_model" --ref "provider_daily_day=$daily_day" >/dev/null; then
         panel_error_record="$("$panel_events" --repo "$state_repo" show --attempt "$OMS_ATTEMPT_ID" --json 2>/dev/null)" || panel_error_record=""
         if [ -n "$panel_error_record" ]; then
           persisted_error="$(printf "%s\\n" "$panel_error_record" | python3 -c "import json,sys; refs=json.load(sys.stdin).get(\"refs\",{}); value=refs.get(\"provider_error\",\"\"); print(value if refs.get(\"provider_error_provider\")==sys.argv[1] and refs.get(\"provider_error_exit\")==sys.argv[2] and value in (\"model_unavailable\",\"capacity\",\"provider_down\") else \"\")" "$primary_error_provider" "$primary_error_exit" | tr -d '\r')"

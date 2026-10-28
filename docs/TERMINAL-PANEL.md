@@ -631,11 +631,11 @@ The launcher does not autonomously fan out before the main has a task.
 
 Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 
-Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. Provider-error failover requires a recorded CLI failure and, for writes, an unchanged worktree; policy refusals and verifier failures do not trigger it, while judges and council seats remain on Claude/Codex.
+Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. A recorded Pi provider failure can fall back once to an eligible tier candidate, provided a write leaves the worktree unchanged; policy refusals and verification failures do not trigger fallback. An OpenRouter free-model daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only trigger the one-time fallback. Judge tier allocation stays on Claude or Codex; an explicit `--to` may select another provider.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
-| light | `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
+| light | Pi `openrouter/thinkingmachines/inkling:free` (low), `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
 | routine | Pi `openrouter/thinkingmachines/inkling:free` (medium), `claude-sonnet-5-5` (medium), `gpt-6.1-terra` (medium) |
 | deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
 | frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
@@ -1619,7 +1619,7 @@ it. Other transports supporting per-call model selection require an exact
 provider capability checks. With an explicit model or custom route, omitting
 effort retains the front door's native settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
-Preset roles use a capability tier ordered by weekly quota left, with readings within the 15-point tie band going to fewer room dispatches, then away from the main (see Roles below).
+Preset roles use a capability tier ordered by weekly quota left, with readings within the 15-point tie band going to fewer room dispatches, then away from the main (see Roles below). The light tier starts with Pi’s Inkling route when available; researchers remain on Haiku or Luna.
 Codex delegated routes accept a versioned model of the Astra, Sol, Terra and Luna
 families (cost order, highest first). Model-family versions are distinct from roles. Preset dispatch chooses the newest
 configured/catalog numeric version within its existing family and pins the exact ID;
