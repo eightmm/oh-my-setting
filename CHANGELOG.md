@@ -27,6 +27,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `oms panel --metrics` reports retained owner decisions per provider and model through `decisions_by_model`, making each model's acceptance rate visible.
 - Any supported CLI (Claude, Codex, Pi, Antigravity) can own the panel main. Ownership follows the recorded main harness and model family. Judge seats prefer a family other than the main's, and an unknown family fails closed. A main swap hands the room over without exiting before validation.
 - Pi write workers get Pi's `bash` tool so they can run the checks their brief requires; read workers stay without it. Pi has no sandbox: patch admission governs returned changes and worker guards check afterwards.
+- Owner finalize refuses a main that does not own the task's workers. Ownership binds to the claimant participant and the active main, not to the provider name.
+- Work stays inside the project. The global rules and the worker preamble say to create project files only in the working checkout, never in sibling or parent directories or project copies, and to put temporary files in session scratch or `TMPDIR` and delete them after use. Delegated workers get `TMPDIR`, `TMP` and `TEMP` under their managed worktree parent. The directory is removed after the run, even when the checkout is kept for salvage, unless the worker replaced the parent directory.
+- A continued panel worker records the attempt it continues (`panel_continues`). Once the continuation is admitted, it supersedes the earlier unadmitted round of the same task.
+- A panel main with no registered goal is told to register the stated objective or ask once with 2-3 candidates. The previous plan's unfinished tasks appear as re-add suggestions and are never re-added automatically. A registered goal with no tasks gets its own sentence.
 
 ### Fixed
 
