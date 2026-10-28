@@ -240,8 +240,16 @@ def exercise_public_only_routing():
         for bad in ("", "0", "invalid"):
             os.environ["OMS_PANEL_PUBLIC_ROUTE_OPT_IN"] = bad
             assert not panel_routing.repository_public(None)
+        sample_value = "fixture-" + "pass" + "word"
+        remote = "https://user:" + sample_value + "@github.com/example/sample.git"
+        subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin", remote], check=True)
+        assert not panel_routing.repository_public(repo)
+        assert not cache.exists() or sample_value not in cache.read_text(), "rejected origin was cached"
+        if cache.exists():
+            cache.unlink()
         subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin", "https://example.org/owner/repo"], check=True)
         assert not panel_routing.repository_public(repo)
+        assert not cache.exists(), "non-GitHub origin was cached"
         assert not panel_routing.valid_route({"provider": "pi", "model": "p/m", "effort": "low", "public_only": 0})
         assert not panel_routing.valid_route({"provider": "pi", "model": "p/m", "effort": "low", "unexpected": True})
     # A public cache written in a work repo must not authorize a private state repo.
@@ -266,6 +274,26 @@ def exercise_public_only_routing():
                  access=["read", "write"], catalog_models=[]) for name in ("pi", "claude")]
     def route_catalog(selection="all"):
         return [row for row in rows if selection == "all" or row["provider"] in selection.split(",")]
+    cache.unlink(missing_ok=True)
+    calls.unlink(missing_ok=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin", "https://github.com/example/sample.git"], check=True)
+    notice = io.StringIO()
+    with patch.dict(os.environ, env), patch.object(panel, "provider_catalog", side_effect=route_catalog), \
+            patch.object(panel_routing, "_public_only_skip_printed", False), redirect_stderr(notice):
+        chosen = panel.selected_route("codex", "worker", None, "read", "explain", target="pi", model="p/m", repo=repo)
+        assert chosen["provider"] == "pi" and chosen["model"] == "p/m"
+        assert not calls.exists() or not calls.read_text(), "explicit model checked visibility"
+        assert not cache.exists(), "explicit model wrote visibility cache"
+        assert not notice.getvalue()
+        os.environ["ROUTE_VISIBILITY"] = "PRIVATE"
+        try:
+            panel.selected_route("codex", "worker", None, "read", "explain", target="pi", repo=repo)
+        except ValueError as error:
+            assert "requires an explicit valid --model" in str(error)
+        else:
+            raise AssertionError("private tier route was accepted")
+        assert calls.read_text() == "x"
+        assert "public-only route skipped" in notice.getvalue()
     with patch.dict(os.environ, {"OMS_PANEL_PUBLIC_ROUTE_OPT_IN": ""}), \
             patch.object(panel, "provider_catalog", side_effect=route_catalog), \
             patch.object(dispatch, "route_inputs", return_value=({}, None, None)):

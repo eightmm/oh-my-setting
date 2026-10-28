@@ -252,7 +252,8 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
         return dict(route, effort=effort) if effort else route
     visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
-    route = allocate(owner, role, None, access, purpose, owner_model=owner_model, repo=visibility_repo_resolved)
+    route = allocate(owner, role, None, access, purpose, owner_model=owner_model, repo=visibility_repo_resolved,
+                     check_visibility=not bool(model))
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
     peer = provider_catalog(target)[0]

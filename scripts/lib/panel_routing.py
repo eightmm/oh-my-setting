@@ -211,32 +211,6 @@ def repository_public(repo):
             _cache_entry(False, 600)
             return False
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-        # Cannot resolve remote/normalized at all: treat as private and cache briefly.
-        try:
-            remote_fallback = subprocess.run(["git", "-C", str(authoritative), "remote", "get-url", "origin"],
-                                            capture_output=True, text=True, timeout=5, check=False,
-                                            stdin=subprocess.DEVNULL).stdout.strip() or ""
-            if remote_fallback:
-                normalized_fallback = subprocess.run([sys.executable, str(ROOT / "scripts/lib/github-remote.py"), remote_fallback],
-                                                     capture_output=True, text=True, timeout=5, check=False,
-                                                     stdin=subprocess.DEVNULL).stdout.strip() or remote_fallback
-            else:
-                normalized_fallback = ""
-            cache = Path(authoritative) / ".oms/panel-state/public-route-visibility.json"
-            try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                fd, tmp = tempfile.mkstemp(prefix=".visibility-", dir=str(cache.parent))
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                        json.dump({"origin": normalized_fallback, "checked_at": time.time(), "public": False}, stream)
-                    os.replace(tmp, cache)
-                finally:
-                    if os.path.exists(tmp):
-                        os.unlink(tmp)
-            except OSError:
-                pass
-        except (OSError, subprocess.SubprocessError):
-            pass
         return False
 
 
@@ -251,7 +225,7 @@ def public_candidates(candidates, repo):
 
 
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
-             recent=None, writer=None, catalogs=None, owner_model=None, repo=None):
+             recent=None, writer=None, catalogs=None, owner_model=None, repo=None, check_visibility=True):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
     recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task.
@@ -282,7 +256,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         candidates = [c for c in candidates if route_family(c["provider"], c["model"])
                       and route_family(c["provider"], c["model"])[0] in RESEARCH_FAMILIES]
     usable = [c for c in candidates if installed is None or c["provider"] in installed]
-    usable = public_candidates(usable, repo)
+    if check_visibility:
+        usable = public_candidates(usable, repo)
     if not usable:
         raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
             tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
