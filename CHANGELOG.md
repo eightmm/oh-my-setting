@@ -41,6 +41,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- An owner `oms panel --finalize` resolves the task's earlier failed artifact
+  outcomes through `artifact-index resolve`, so decided tasks no longer keep
+  the inbox `unresolved-artifacts` P1 count growing.
 - Accepted panel finalize reads delegate and landed patches up to the 16 MiB
   landing-capture ceiling instead of the 1 MiB evidence ceiling, so a task
   whose patch exceeds 1 MiB can be accepted and still gets the check that the

@@ -1611,6 +1611,32 @@ def accept(repo, owner, task_id, message, verify, expected_patch_sha256=None, ex
         return {'sha': committed, 'task_id': task_id, 'patch_sha256': candidate['patch_sha256']}
 
 
+def _resolve_failed_outcomes(repo, owner, task_id, relative, outcome, revision):
+    """Settle this task's failed outcome rows recorded before its result row."""
+    _, index = _records(repo, task_id=task_id)
+    boundary = max((i for i, r in enumerate(index) if r.get('kind') == 'panel-result'
+                    and r.get('task_id') == task_id and r.get('artifact') == relative), default=None)
+    if boundary is None:
+        return
+    attempts = _query(repo, 'agent-events', 'list')
+    linked = {a.get('attempt_id') for a in attempts if a.get('task_id') == task_id}
+    resolved = {r.get('resolves_event_id') for r in index if r.get('kind') == 'artifact-resolution'}
+    ids = [r['event_id'] for r in index[:boundary]
+           if isinstance(r.get('event_id'), str) and r['event_id'] not in resolved
+           and (r.get('task_id') == task_id or (not r.get('task_id') and r.get('attempt_id') in linked))
+           and r.get('kind') not in ('artifact-resolution', 'panel-result')
+           and type(r.get('exit')) is int and r['exit'] != 0]
+    reason = 'owner finalize %s: result revision %s' % (outcome, revision)
+    for start in range(0, len(ids), 100):
+        command = ['bash', str(ROOT / 'scripts/artifact-index.sh'), '--repo', str(repo), 'resolve', '--reason', reason]
+        for event_id in ids[start:start + 100]:
+            command += ['--event-id', event_id]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False,
+                                stdin=subprocess.DEVNULL, env=dict(os.environ, OMS_AGENT=owner))
+        if result.returncode:
+            raise ValueError('artifact-index resolve failed (exit %s): %s' % (result.returncode, result.stderr.strip()))
+
+
 def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify, verify_timeout, execution):
     main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
     with _lock(repo):
@@ -1706,6 +1732,10 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
             print('OMS review settlement error: ' + clean(str(error), 300), file=sys.stderr)
         if settlement.get('pending'):
             print('OMS review settlement: %d worker(s) remain pending' % len(settlement['pending']), file=sys.stderr)
+        try:
+            _resolve_failed_outcomes(repo, owner, task_id, relative, outcome, payload['revision'])
+        except Exception as error:
+            print('OMS finalize artifact resolution error: ' + clean(str(error), 300), file=sys.stderr)
         delivery = _deliver(repo, payload, relative, rows) if notify else _last_delivery(repo, rows, task_id, payload['revision'])
         if outcome == 'accepted':
             _plan_hint(repo, task_id, any(current['admissions']))

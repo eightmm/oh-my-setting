@@ -1588,6 +1588,9 @@ def settlement_worker(task, parent=None, review=True, legacy=False, exit_proof=T
     return ident
 for new_owner, harness in (("pi", "pi"), ("antigravity", "agy"), ("codex", "pi")):
     owner_task = "new-owner-" + new_owner
+    if new_owner == "codex":  # maximum panel id length keeps the bounded resolve reason valid
+        owner_task = owner_task + "x" * (160 - len(owner_task))
+        assert len(owner_task) == 160
     owner_room = room.create(project, owner_task, "Main owner result")
     owner_main = call(event_command + ["start", "--provider", new_owner, "--tool", "panel-main",
         "--ref", "panel_role=main", "--ref", "panel_owner=" + new_owner,
@@ -1611,8 +1614,29 @@ for new_owner, harness in (("pi", "pi"), ("antigravity", "agy"), ("codex", "pi")
     while time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) <= owner_review_at:
         assert time.monotonic() < owner_clock_deadline, ("clock did not advance past review", owner_review_at)
         time.sleep(.01)
+    def seed_failure(task, kind, code="1"):
+        call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" "$3" local "$4" "$5"', "settlement-fixture",
+              str(root / "scripts/lib/peer-common.sh"), str(project), kind, code, str(exit_artifact)],
+             dict(environment, OMS_TASK_ID=task))
+    def unresolved_events():
+        listed = json.loads(call(["bash", str(root / "scripts/artifact-index.sh"), "--repo", str(project),
+                                  "--json", "unresolved"]))
+        return {(r.get("task_id"), r.get("kind")) for r in listed["rows"]}
+    seed_failure(owner_task, "delegate")
+    seed_failure(owner_task, "review-outcome", "3")
+    other_task = owner_task[:-6] + "-other"
+    seed_failure(other_task, "delegate")
+    assert {(owner_task, "delegate"), (owner_task, "review-outcome")} <= unresolved_events()
     owner_result = json.loads(call(owner_finalize, owner_environment))
     assert owner_result["owner"] == new_owner, owner_result
+    left = unresolved_events()
+    assert not {t for t, _ in left} & {owner_task} and (other_task, "delegate") in left, left
+    owner_state = json.loads(call(["bash", str(root / "scripts/state.sh"), "--repo", str(project), "--json"]))
+    assert owner_state["artifacts"]["counts"]["unresolved"] == len(
+        json.loads(call(["bash", str(root / "scripts/artifact-index.sh"), "--repo", str(project),
+                         "--json", "unresolved"]))["rows"]), owner_state["artifacts"]["counts"]
+    seed_failure(owner_task, "delegate")
+    assert (owner_task, "delegate") in unresolved_events()
     assert json.loads(call(owner_finalize, owner_environment))["revision"] == owner_result["revision"]
     owner_rows = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                  "--results", "--task-id", owner_task, "--json"], owner_environment))
