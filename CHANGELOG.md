@@ -21,7 +21,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   cancellation requirements when unfinished plan work remains. Unreadable
   plans also receive guidance; abandonment still succeeds without editing them.
 - A worker-guard stop caused by an index or branch-ref change now says the usual cause is a commit, checkout or fast-forward in the canonical or source-clone main checkout during the run, and points to `oms sync-shared` or a linked worktree. `oms autopilot` defers with exit 75 instead of switching the canonical checkout to its work branch while guarded calls are live, leaving their registry entries untouched.
-- The panel main's launch instructions now count the two-line direct-edit allowance per task instead of per edit, send release bookkeeping (changelog, version, manifest, inventory) to the worker whose change needs it or one documenter per landing batch, and assign experiments: the main authorizes launches, builders edit run scripts and configs, an investigate worker reads outputs, and jobs get one background wait instead of polling. An audit of three panel mains found these gaps behind most direct work.
+- The panel main edits directly when the cause is known, the change is local to one or two files and a brief would cost more than the edit, or when a worker has failed the same bounded task twice. It still delegates investigation, multi-file or parallel work, long verification and trust-boundary changes; direct edits use the same review gate and landing path. Release bookkeeping (changelog, version, manifest, inventory) goes to the worker whose change needs it or one documenter per landing batch.
+- Tier routes accept exact Pi and OpenCode models. The routine and light tiers try Pi with `openrouter/thinkingmachines/inkling:free` first, while judge roles stay on native routes unless explicitly sent elsewhere. Pi provider errors fall back once to the next tier candidate; the OpenRouter daily free-model cap cools that route until 00:00 UTC. The provider-error scanner documents Pi's status-line exception, and the cap check reads only Pi status lines so answer text cannot cool a route down.
+- Provider refresh in `oms update` also updates installed optional npm CLIs to their newest release at least 14 days old, applying `npm --before` to the whole dependency tree and restoring a local backup on failure. Lifecycle scripts remain enabled; Git and URL dependencies are not age-filtered by npm.
+- `oms panel --metrics` reports retained owner decisions per provider and model through `decisions_by_model`, making each model's acceptance rate visible.
+
+### Fixed
+
+- Explicit standalone review settlement now selects workers whose parent attempt record was compacted away, so already-orphaned review workers can be closed. Lifecycle compaction also keeps a terminal attempt while a retained attempt names it as parent, preventing a compacted main from orphaning its review workers.
 
 ### Removed
 
