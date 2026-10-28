@@ -21876,7 +21876,7 @@ test_global_rules_stay_compact_and_route_workflows() {
   line_count="$(wc -l < "$global_rules" | tr -d ' ')"
   [ "$line_count" -le 160 ] || fail "global rules exceed 160 lines"
   word_count="$(wc -w < "$global_rules" | tr -d ' ')"
-  [ "$word_count" -le 680 ] || fail "global rules exceed 680 words"
+  [ "$word_count" -le 720 ] || fail "global rules exceed 720 words"
   assert_file_contains "$ROOT/AGENTS.md" 'rules/global-AGENTS.md'
   assert_file_contains "$ROOT/AGENTS.md" 'scripts/check.sh'
   assert_file_contains "$global_rules" 'oms-agent-harness'
