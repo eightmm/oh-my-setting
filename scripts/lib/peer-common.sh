@@ -2858,7 +2858,10 @@ ma_room_relay_stop() {  # PID [TICKS]
 # (codex error/turn.failed, a claude result envelope that is an API error) and
 # its fixed "ERROR:"/"Error:"/"API Error:" line prefixes are read. Agent answers
 # ride item/assistant events, so a quoted "429" or "model not found" in the
-# agent's own work classifies as nothing. Unsure means no fallback.
+# agent's own work classifies as nothing. Pi's text mode has no event channel,
+# so its anchored "NNN:" status lines are read too; on a failed exit pi 1.1.0
+# prints only the provider error, never the answer (print-mode.js). Unsure
+# means no fallback.
 oms_panel_provider_error_scan() { # OUTPUT_FILE
   python3 - "$1" "$2" <<'PY' 2>/dev/null || true
 import json, re, sys
@@ -3977,7 +3980,7 @@ ma_run_routed_provider_inner() {
       local daily_model="" daily_day=""
       if [ "$primary_error_provider" = pi ] && [ "$primary_error_class" = capacity ] &&
         ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" &&
-        grep -iq "free-models-per-day" "$attempt_file"; then
+        grep -Eiq '^[0-9]{3}:.*free-models-per-day' "$attempt_file"; then
         case "$OMS_MODEL_PRIMARY" in openrouter/*:free)
           daily_model="$OMS_MODEL_PRIMARY"
           daily_day="$(date -u +%Y-%m-%d)" ;; esac
