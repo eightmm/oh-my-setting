@@ -775,14 +775,16 @@ for number in range(1005):
                 -999-number*4, 'done')
 # Same-task continuation may have a different owning main attempt. Its recent
 # timeout and successor belong to --since even though the task started earlier.
-add_attempt('write-one', 'continued', 'worker', 'write', -600, -50, 'timed_out')
-add_attempt('write-two', 'continued', 'worker', 'write', -45, -40, 'done', parent='main-later')
+add_attempt('write-one', 'continued', 'worker', 'write', -600, -50, 'timed_out', extra_refs={'panel_model': 'model-a'})
+add_attempt('write-two', 'continued', 'worker', 'write', -45, -40, 'done', parent='main-later', extra_refs={'panel_model': 'model-c'})
 add_attempt('review-two', 'continued', 'reviewer', 'read', -35, -30, 'done', parent='main-later')
-add_attempt('write-recent', 'recent', 'worker', 'write', -55, -40, 'done')
+add_attempt('write-recent', 'recent', 'worker', 'write', -55, -40, 'done',
+            extra_refs={'panel_provider': 'claude', 'panel_model': 'claude-model'})
 add_attempt('review-recent', 'recent', 'reviewer', 'read', -35, -30, 'done')
 add_attempt('write-abandoned', 'abandoned', 'worker', 'write', -25, -15, 'timed_out')
 add_attempt('clear-call', 'recent', 'worker', 'write', -35, -30, 'cancelled', 'manual_clear')
-add_attempt('write-followup', 'followup', 'worker', 'write', -45, -40, 'done')
+add_attempt('write-followup', 'followup', 'worker', 'write', -45, -40, 'done',
+            extra_refs={'panel_provider': '', 'panel_model': 'empty-route'})
 add_attempt('delegate-done', 'metric-write-done', 'worker', 'write', -12, -10, 'done', tool='peer-delegate')
 add_attempt('delegate-failed', 'metric-write-failed', 'worker', 'write', -11, -9, 'failed',
             'verification_failed', extra_refs={'provider_error': 'capacity', 'provider_error_exit': 125},
@@ -796,9 +798,12 @@ add_attempt('delegate-typed-verify', 'metric-write-typed-verify', 'worker', 'wri
 add_attempt('delegate-provider-verify', 'metric-write-provider-verify', 'worker', 'write', -5, -4,
             'failed', tool='peer-delegate')
 add_attempt('delegate-review', 'metric-write-review', 'worker', 'write', -8, -7, 'review', '', tool='peer-delegate')
-add_attempt('delegate-other', 'metric-write-other', 'worker', 'write', -6, -5, 'queued', '', tool='peer-delegate')
-add_attempt('token-accepted', 'token-accepted-task', 'worker', 'write', -4, -3, 'done')
-add_attempt('token-rejected', 'token-rejected-task', 'worker', 'read', -4, -3, 'done')
+add_attempt('delegate-other', 'metric-write-other', 'worker', 'write', -6, -5, 'queued', '',
+            extra_refs={'panel_provider': 42, 'panel_model': 'malformed-route'}, tool='peer-delegate')
+add_attempt('token-accepted', 'token-accepted-task', 'worker', 'write', -4, -3, 'done',
+            extra_refs={'panel_model': 'model-a'})
+add_attempt('token-rejected', 'token-rejected-task', 'worker', 'write', -4, -3, 'done',
+            extra_refs={'panel_model': 'model-b'})
 add_attempt('token-undecided', 'token-undecided-task', 'worker', 'write', -4, -3, 'done')
 add_attempt('token-untasked', '', 'worker', 'read', -4, -3, 'done')
 add_attempt('token-replaced', 'token-replaced-task', 'worker', 'read', -4, -3, 'done')
@@ -898,6 +903,15 @@ assert expected_metrics['pending']['awaiting_review']['count'] == 1, expected_me
 assert expected_metrics['pending']['awaiting_review']['oldest_seconds'] == 80.0, expected_metrics
 assert expected_metrics['pending']['awaiting_admission']['count'] >= 0, expected_metrics
 assert expected_metrics['preflight']['tasks'] == 1, expected_metrics
+assert {key: expected_metrics['decisions_by_model']['codex'][key] for key in ('model-a', 'model-b', 'model-c')} == {
+    'model-a': {'accepted': 1, 'completed': 0, 'rejected': 0, 'failed': 0, 'undecided': 1, 'tasks': 2},
+    'model-b': {'accepted': 0, 'completed': 0, 'rejected': 1, 'failed': 0, 'undecided': 0, 'tasks': 1},
+    'model-c': {'accepted': 0, 'completed': 0, 'rejected': 0, 'failed': 0, 'undecided': 1, 'tasks': 1}}, expected_metrics['decisions_by_model']
+assert expected_metrics['decisions_by_model']['claude']['claude-model'] == {
+    'accepted': 0, 'completed': 0, 'rejected': 0, 'failed': 0, 'undecided': 1, 'tasks': 1}
+assert 'claude-model' not in expected_metrics['decisions_by_model']['codex']
+assert expected_metrics['decisions_by_model']['codex']['empty-route']['tasks'] == 1
+assert expected_metrics['decisions_by_model']['unknown']['malformed-route']['tasks'] == 1
 assert expected_metrics['tokens_by_decision']['accepted'] == {'tokens': 1200, 'tasks': 1, 'attempts': 1}, expected_metrics['tokens_by_decision']
 assert expected_metrics['tokens_by_decision']['rejected'] == {'tokens': 300, 'tasks': 1, 'attempts': 1}, expected_metrics['tokens_by_decision']
 assert expected_metrics['tokens_by_decision']['failed'] == {'tokens': 0, 'tasks': 0, 'attempts': 0}, expected_metrics['tokens_by_decision']
@@ -978,6 +992,17 @@ lifecycle.write_bytes(baseline_lifecycle)
 idle_report = deepcopy(expected_metrics)
 idle_report['completion'] = {'finished': 0, 'started': 0, 'rate': None}
 assert 'completion:' not in panel_metrics.metrics_text(idle_report), panel_metrics.metrics_text(idle_report)
+assert 'codex/model-a 2 tasks (accepted 1, rejected 0)' in panel_metrics.metrics_text(expected_metrics), panel_metrics.metrics_text(expected_metrics)
+assert 'codex/model-b 1 task (accepted 0, rejected 1)' in panel_metrics.metrics_text(expected_metrics), panel_metrics.metrics_text(expected_metrics)
+model_report = dict(expected_metrics)
+model_report['decisions_by_model'] = {}
+assert 'decisions by model: none' in panel_metrics.metrics_text(model_report)
+model_report['decisions_by_model'] = {'p': {'m%d' % n: {'tasks': n, 'accepted': 0, 'rejected': 0} for n in range(9)}}
+model_line = next(line for line in panel_metrics.metrics_text(model_report).splitlines() if line.startswith('decisions by model:'))
+assert 'p/m8 8 tasks' in model_line and 'p/m0 0 tasks' not in model_line and '+1 more' in model_line, model_line
+model_report['decisions_by_model']['p'].pop('m1')
+assert '+1 more' not in panel_metrics.metrics_text(model_report)
+assert 'p/m0 0 tasks' in panel_metrics.metrics_text(model_report)
 assert 'completion: 2/6' in panel_metrics.metrics_text(expected_metrics), panel_metrics.metrics_text(expected_metrics)
 # A finalized task leaves the metrics admission queue as it leaves the board hint, with no admission row.
 for decided, waiting in (('completed', 0), ('pending', None)):
@@ -1014,6 +1039,7 @@ assert json.loads(metric_json.getvalue())['completion'] == expected_metrics['com
 metric_payload = json.loads(metric_json.getvalue())
 assert metric_payload['write_attempts'] == write_metrics
 assert metric_payload['tokens_by_decision'] == expected_metrics['tokens_by_decision']
+assert metric_payload['decisions_by_model'] == expected_metrics['decisions_by_model']
 assert metric_payload['window']['since'] is None
 assert metric_payload['window']['until'] == metric_payload['until']
 metric_help = io.StringIO()
@@ -1031,8 +1057,8 @@ assert outside_window_metrics['write_attempts']['total'] == 0, outside_window_me
 assert recent_metrics['completion'] == {'finished': 1, 'started': 3, 'rate': 0.3333}, recent_metrics
 assert recent_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, recent_metrics
 # 'continued' first wrote before the window, so its in-window rework is outside the cohort; the cohort is the
-# 13 tasks whose first write attempt is in the window, not the 3 plan tasks that started.
-assert recent_metrics['rework'] == {'tasks': 0, 'started': 13, 'rate': 0.0}, recent_metrics
+# 14 tasks whose first write attempt is in the window, not the 3 plan tasks that started.
+assert recent_metrics['rework'] == {'tasks': 0, 'started': 14, 'rate': 0.0}, recent_metrics
 assert recent_metrics['abandoned_calls'] == 1, recent_metrics
 assert recent_metrics['interventions'] == {'manual_clears': 1, 'cancels': 0,
                                             'owner_finalized_failures': 1, 'total': 2}, recent_metrics

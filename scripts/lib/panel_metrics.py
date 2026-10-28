@@ -762,6 +762,7 @@ def aggregate(repo, since=None, now=None):
                        for name in ("accepted", "completed", "rejected", "failed", "undecided", "untasked")}
     task_sets = {name: set() for name in token_decisions}
     unreported_tokens = 0
+    model_tasks = {}
     # outcomes() reads only retained panel-result rows, so a task last active before the earliest one
     # may have been decided without a retained record; it is not undecided.
     result_stamps = [_stamp(row.get("ts")) for row in retained_artifacts
@@ -787,6 +788,13 @@ def aggregate(repo, since=None, now=None):
                 if updated is not None and updated < decision_floor:
                     predating.add(task_id)
                     continue
+        if refs.get("panel_access") == "write" and task_key is not None:
+            provider = refs.get("panel_provider") or attempt.get("provider")
+            model = refs.get("panel_model")
+            provider = provider if isinstance(provider, str) and provider else "unknown"
+            model = model if isinstance(model, str) and model else "unknown"
+            buckets = model_tasks.setdefault(provider, {}).setdefault(model, {})
+            buckets.setdefault(bucket, set()).add(task_key)
         entry = token_decisions[bucket]
         entry["attempts"] += 1
         if task_key is not None:
@@ -805,6 +813,14 @@ def aggregate(repo, since=None, now=None):
         incomplete_reasons.append("%d tasks predate retained decisions (before %s); their tokens are excluded" % (
             len(predating), datetime.fromtimestamp(decision_floor, timezone.utc).isoformat().replace("+00:00", "Z")))
     token_decisions["unreported_attempts"] = unreported_tokens
+    decisions_by_model = {}
+    for provider, models in model_tasks.items():
+        decisions_by_model[provider] = {}
+        for model, buckets in models.items():
+            counts = {name: len(buckets.get(name, set())) for name in
+                      ("accepted", "completed", "rejected", "failed", "undecided")}
+            counts["tasks"] = len(set().union(*buckets.values()))
+            decisions_by_model[provider][model] = counts
     def has_claim_evidence(task):
         history = task.get("history") if isinstance(task.get("history"), list) else []
         has_history = any(isinstance(item, dict) and item.get("kind") in {"claim", "start", "started"}
@@ -841,6 +857,7 @@ def aggregate(repo, since=None, now=None):
             "abandoned_calls": abandoned,
             "endings": ending_counts,
             "tokens_by_decision": token_decisions,
+            "decisions_by_model": decisions_by_model,
             "write_attempts": {"total": len(delegate_writes), "states": state_totals,
                                "state_counts": delegate_states,
                                "reconciles": (state_totals["done"] + state_totals["failed"]
@@ -878,6 +895,16 @@ def metrics_text(report):
         return "none" if value is None else "%.1f%%" % (value * 100)
     def seconds(value):
         return "none" if value is None else "%ss" % value
+    models = sorted(((provider, model, counts)
+                     for provider, entries in report.get("decisions_by_model", {}).items()
+                     for model, counts in entries.items()),
+                    key=lambda item: (-item[2]["tasks"], item[0], item[1]))
+    model_parts = ["%s/%s %d task%s (accepted %d, rejected %d)" %
+                   (provider, model, counts["tasks"], "" if counts["tasks"] == 1 else "s",
+                    counts["accepted"], counts["rejected"])
+                   for provider, model, counts in models[:8]]
+    if len(models) > 8:
+        model_parts.append("+%d more" % (len(models) - 8))
     return "\n".join(line for line in (
         "Panel metrics (since %s; until %s)" % (report.get("since") or "all retained", report.get("until", "unknown")),
         "coverage: %s attempts, %s artifact events (limits %s/%s); plan tasks without an observed write attempt=%d%s" % (
@@ -916,6 +943,7 @@ def metrics_text(report):
                 for name, entry in report.get("tokens_by_decision", {}).items()
                 if name != "unreported_attempts"),
             report.get("tokens_by_decision", {}).get("unreported_attempts", 0)),
+        "decisions by model: " + ("; ".join(model_parts) or "none"),
         "failed/undecided write reasons/stages: %s / %s; undecided ages=%s" % (
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("reason_code", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("first_failing_stage", {}), sort_keys=True),

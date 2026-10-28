@@ -510,6 +510,7 @@ added again. These are provider-reported partial observations, not account
 totals or remaining quota; they do not supply the provider header. Provider token definitions can
 differ, particularly for cache input; no cross-model total is shown. The window
 can change or shrink as new artifact records arrive.
+`oms panel --metrics` reports retained owner decisions for write tasks by provider and model, counting a task once per model it touched and grouping attempts without a recorded model as `unknown`.
 
 On a capable terminal the sidebar animates live-state indicators
 at four frames per second using the cached snapshot. Borders and role dividers
