@@ -13816,12 +13816,14 @@ EOF
     retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider pi \
       --tool panel-dispatch --then starting:routed-starting --then working:routed-working)"
     : > "$fixture/provider-retry/runs"
+    # shellcheck disable=SC2089,SC2090 # the stub prints PI_OUTPUT verbatim; quotes are data
     case "$retry_case" in
       plain) PI_OUTPUT='429: {"message":"Rate limit exceeded","code":429}'; PI_EXIT=1 ;;
       daily) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded","code":429}'; PI_EXIT=1 ;;
       success) PI_OUTPUT='429'; PI_EXIT=0 ;;
       refusal) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded; blocked by content filtering","code":429}'; PI_EXIT=1 ;;
     esac
+    # shellcheck disable=SC2090
     export PI_OUTPUT PI_EXIT
     if PANEL_ARGV="$fixture/provider-retry/argv" PANEL_ENV="$fixture/provider-retry/env" \
       PANEL_RUNS="$fixture/provider-retry/runs" PATH="$fixture/bin:$PATH" \
