@@ -27,7 +27,10 @@ installing a missing Git, tar, gzip or find; managed tool
 bootstrap versions, platform URLs, and integrity values are pinned in `tools.lock.json`.
 Codex, Claude, and agy resolve current stable releases during install/update,
 then verify downloaded bytes against their official release checksums. Scheduled
-apply refreshes installed providers even when OMS itself is unchanged. Manual
+apply refreshes installed providers even when OMS itself is unchanged. Optional
+npm-installed provider CLIs refresh to stable releases at least 14 days old.
+Their npm lifecycle scripts remain enabled and can execute package code. The
+release-age limit does not constrain git or URL dependencies. Manual
 `--no-tools` skips tool refresh; an explicit `OH_MY_SETTING_TOOL_LOCK` retains
 reproducible pinned installs. The private `provider-tools.lock.json` snapshot
 records resolved versions, not a permanent version policy or proof of installation.

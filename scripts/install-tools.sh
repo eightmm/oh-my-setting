@@ -32,7 +32,8 @@ Usage: install-tools.sh [--upgrade|--providers] [-h|--help]
 
 Install Node (via nvm), uv, gh, and ntn from tools.lock.json.
 The three provider CLIs (claude, codex, agy) follow stable releases with verified
-checksums; --providers refreshes only already-installed provider CLIs.
+checksums; --providers refreshes installed optional npm CLIs to stable releases
+at least 14 days old, alongside already-installed core provider CLIs.
 An explicit OH_MY_SETTING_TOOL_LOCK retains reproducible pinned installs.
 
 Nothing here needs root: npm globals use the active writable prefix or
@@ -556,15 +557,29 @@ npm_package_is_current() {  # NAME
 }
 
 npm_transaction_write() {  # MARKER PHASE HAD_PACKAGE BINARY
-  local marker="$1" phase="$2" had_package="$3" binary="$4" staged
+  local marker="$1" phase="$2" had_package="$3" binary="$4" staged extra
+  shift 4
   staged="$marker.stage.$$"
   {
     printf 'schema=1\n'
     printf 'phase=%s\n' "$phase"
     printf 'had_package=%s\n' "$had_package"
     printf 'binary=%s\n' "$binary"
+    printf 'sentinels=1\n'
+    for extra in "$@"; do printf 'extra_bin=%s\n' "$extra"; done
   } > "$staged"
   mv "$staged" "$marker"
+}
+
+npm_legacy_package_link() { # LINK PACKAGE_ROOT
+  [ -L "$1" ] || return 1
+  python3 - "$1" "$2" <<'PY_LINK'
+import pathlib, sys
+try:
+    pathlib.Path(sys.argv[1]).resolve().relative_to(pathlib.Path(sys.argv[2]).resolve())
+except (OSError, RuntimeError, ValueError):
+    sys.exit(1)
+PY_LINK
 }
 
 npm_transaction_restore() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
@@ -572,7 +587,7 @@ npm_transaction_restore() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
   local marker="$1.oh-my-setting-transaction"
   local package_backup="$1.oh-my-setting-backup"
   local bin_backup="$2/.$3.oh-my-setting-backup"
-  local phase had_package candidate saved
+  local phase had_package candidate saved extra extras legacy sentinel removed_package=0
 
   [ -f "$marker" ] || return 0
   [ "$(sed -n '1p' "$marker")" = schema=1 ] || {
@@ -582,16 +597,38 @@ npm_transaction_restore() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
   phase="$(sed -n 's/^phase=//p' "$marker")"
   had_package="$(sed -n 's/^had_package=//p' "$marker")"
   [ "$(sed -n 's/^binary=//p' "$marker")" = "$binary" ] || return 1
+  case "$binary" in ''|*[!a-zA-Z0-9._-]*|.*|-*) return 1 ;; esac
   case "$phase:$had_package" in
     prepared:0|prepared:1|backed_up:0|backed_up:1) ;;
     *) echo "error: invalid npm transaction state: $marker" >&2; return 1 ;;
   esac
 
+  extras="$(sed -n 's/^extra_bin=//p' "$marker")"
+  for extra in $extras; do
+    case "$extra" in ''|*[!a-zA-Z0-9._-]*|.*|-*) echo "error: invalid npm transaction binary" >&2; return 1 ;; esac
+  done
+  legacy=0
+  if ! grep -Fxq 'sentinels=1' "$marker"; then
+    legacy=1
+    for sentinel in "$bin_backup"/.absent.*; do
+      [ ! -e "$sentinel" ] || legacy=0
+    done
+  fi
   if [ "$phase" = backed_up ]; then
-    rm -rf "$package_root"
-    for candidate in "$global_bin/$binary" "$global_bin/$binary.exe" \
-        "$global_bin/$binary.cmd" "$global_bin/$binary.ps1"; do
-      [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || rm -f "$candidate"
+    if [ "$had_package" = 0 ] || [ -e "$package_backup" ] || [ -L "$package_backup" ]; then
+      rm -rf "$package_root" || return 1
+      removed_package=1
+    fi
+    for extra in "$binary" $extras; do
+      for candidate in "$global_bin/$extra" "$global_bin/$extra.exe" \
+          "$global_bin/$extra.cmd" "$global_bin/$extra.ps1"; do
+        saved="$bin_backup/$(basename "$candidate")"
+        if [ -e "$saved" ] || [ -L "$saved" ] || [ -e "$bin_backup/.absent.$(basename "$candidate")" ]; then
+          [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || rm -f "$candidate" || return 1
+        elif [ "$legacy" = 1 ] && [ "$removed_package" = 1 ] && npm_legacy_package_link "$candidate" "$package_root"; then
+          rm -f "$candidate" || return 1
+        fi
+      done
     done
   fi
 
@@ -600,8 +637,8 @@ npm_transaction_restore() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
       echo "error: npm package and recovery backup both exist: $package_root" >&2
       return 1
     }
-    mv "$package_backup" "$package_root"
-  elif [ "$phase" = backed_up ] && [ "$had_package" = 1 ]; then
+    mv "$package_backup" "$package_root" || return 1
+  elif [ "$phase" = backed_up ] && [ "$had_package" = 1 ] && [ ! -d "$package_root" ]; then
     echo "error: npm package recovery backup is missing: $package_backup" >&2
     return 1
   fi
@@ -614,18 +651,30 @@ npm_transaction_restore() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
         echo "error: npm binary and recovery backup both exist: $candidate" >&2
         return 1
       }
-      mv "$saved" "$candidate"
+      mv "$saved" "$candidate" || return 1
     done
-    rmdir "$bin_backup"
+    rm -f "$bin_backup"/.absent.* || return 1
+    rmdir "$bin_backup" || return 1
   fi
-  rm -f "$marker"
+  rm -f "$marker" || return 1
 }
 
 npm_transaction_commit() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
   local package_root="$1" global_bin="$2" binary="$3"
-  rm -rf "$package_root.oh-my-setting-backup"
-  rm -rf "$global_bin/.$binary.oh-my-setting-backup"
-  rm -f "$package_root.oh-my-setting-transaction"
+  local marker="$package_root.oh-my-setting-transaction" staged="$package_root.oh-my-setting-transaction.stage.$$" phase
+  case "$binary" in ''|*[!a-zA-Z0-9._-]*|.*|-*) return 1 ;; esac
+  # Once committed, recovery must finish cleanup and never restore the old package.
+  if [ -f "$marker" ]; then
+    [ "$(sed -n '1p' "$marker")" = schema=1 ] || return 1
+    [ "$(sed -n 's/^binary=//p' "$marker")" = "$binary" ] || return 1
+    phase="$(sed -n 's/^phase=//p' "$marker")"
+    case "$phase" in backed_up|committed) ;; *) return 1 ;; esac
+    sed 's/^phase=.*/phase=committed/' "$marker" > "$staged" || return 1
+    mv "$staged" "$marker" || return 1
+  fi
+  rm -rf "$package_root.oh-my-setting-backup" || return 1
+  rm -rf "$global_bin/.$binary.oh-my-setting-backup" || return 1
+  rm -f "$marker" || return 1
 }
 
 npm_transaction_recover() {  # NAME PACKAGE_ROOT GLOBAL_BIN BINARY
@@ -633,7 +682,7 @@ npm_transaction_recover() {  # NAME PACKAGE_ROOT GLOBAL_BIN BINARY
   local marker="$2.oh-my-setting-transaction" phase
   [ -f "$marker" ] || return 0
   phase="$(sed -n 's/^phase=//p' "$marker")"
-  if [ "$phase" = backed_up ] && npm_package_is_current "$name"; then
+  if [ "$phase" = committed ] || { [ "$phase" = backed_up ] && npm_package_is_current "$name"; }; then
     npm_transaction_commit "$package_root" "$global_bin" "$binary"
   else
     npm_transaction_restore "$package_root" "$global_bin" "$binary"
@@ -645,7 +694,8 @@ npm_transaction_begin() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
   local marker="$1.oh-my-setting-transaction"
   local package_backup="$1.oh-my-setting-backup"
   local bin_backup="$2/.$3.oh-my-setting-backup"
-  local had_package=0 candidate
+  local had_package=0 candidate extra saved
+  shift 3
 
   [ ! -e "$marker" ] && [ ! -e "$package_backup" ] && [ ! -e "$bin_backup" ] || {
     echo "error: stale npm transaction state requires recovery before install" >&2
@@ -653,16 +703,25 @@ npm_transaction_begin() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
   }
   mkdir -p "$(dirname "$package_root")" "$global_bin"
   if [ -e "$package_root" ] || [ -L "$package_root" ]; then had_package=1; fi
-  npm_transaction_write "$marker" prepared "$had_package" "$binary" || return 1
+  npm_transaction_write "$marker" prepared "$had_package" "$binary" "$@" || return 1
 
-  [ "$had_package" = 0 ] || mv "$package_root" "$package_backup"
-  mkdir "$bin_backup"
-  for candidate in "$global_bin/$binary" "$global_bin/$binary.exe" \
-      "$global_bin/$binary.cmd" "$global_bin/$binary.ps1"; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] ||
-      mv "$candidate" "$bin_backup/$(basename "$candidate")"
+  [ "$had_package" = 0 ] || mv "$package_root" "$package_backup" || return 1
+  mkdir "$bin_backup" || return 1
+  for extra in "$binary" "$@"; do
+    for candidate in "$global_bin/$extra" "$global_bin/$extra.exe" \
+        "$global_bin/$extra.cmd" "$global_bin/$extra.ps1"; do
+      saved="$bin_backup/$(basename "$candidate")"
+      if [ -e "$saved" ] || [ -L "$saved" ] || [ -e "$bin_backup/.absent.$(basename "$candidate")" ]; then
+        continue
+      fi
+      if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+        mv "$candidate" "$saved" || return 1
+      else
+        : > "$bin_backup/.absent.$(basename "$candidate")" || return 1
+      fi
+    done
   done
-  npm_transaction_write "$marker" backed_up "$had_package" "$binary" || {
+  npm_transaction_write "$marker" backed_up "$had_package" "$binary" "$@" || {
     npm_transaction_restore "$package_root" "$global_bin" "$binary"
     return 1
   }
@@ -1322,6 +1381,246 @@ ensure_uv() {
   echo "ok: uv $(uv --version)"
 }
 
+# Resolve the actual executable and require its package identity to match its
+# physical location directly under the global root, including scoped names.
+optional_npm_identity() { # ROOT BINARY
+  local prefix="" windows=0
+  if oms_platform_is_windows; then
+    windows=1
+    prefix="$(npm_global_prefix)" || return 1
+  fi
+  python3 - "$1" "$2" "${3:-}" "$windows" "$prefix" <<'PY_ID' | tr -d '\r'
+import json, pathlib, re, sys
+try:
+    root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    binary = pathlib.Path(sys.argv[2]).resolve(strict=True)
+    is_shim = False
+    try:
+        parts = binary.relative_to(root).parts
+        count = 2 if parts and parts[0].startswith('@') else 1
+        if len(parts) <= count:
+            raise ValueError('binary is outside a package')
+        package = root.joinpath(*parts[:count])
+    except ValueError:
+        is_shim = True
+        if sys.argv[4] != '1' or binary.parent != pathlib.Path(sys.argv[5]).resolve(strict=True):
+            raise
+        if binary.name.lower() not in (sys.argv[3].lower(), sys.argv[3].lower() + '.cmd'):
+            raise ValueError('not the requested shim')
+        shim = binary.read_text(encoding='utf-8').replace('\\', '/').lower()
+        candidates = list(root.glob('*/package.json')) + list(root.glob('@*/*/package.json'))
+        matches = []
+        for manifest in candidates:
+            try:
+                data = json.loads(manifest.read_text(encoding='utf-8'))
+                name = data['name']
+                bins = data.get('bin', {})
+                if isinstance(bins, str):
+                    bins = {name.split('/')[-1]: bins}
+                target = bins.get(sys.argv[3])
+                if not isinstance(target, str):
+                    continue
+                pkg = manifest.parent
+                target_path = (pkg / target).resolve(strict=True)
+                target_path.relative_to(pkg.resolve(strict=True))
+                rel = target_path.relative_to(root).as_posix().lower()
+                needle = '"$basedir/node_modules/' + rel + '"'
+                cmd_needle = '"%dp0%/node_modules/' + rel + '"'
+                lines = [line.strip() for line in shim.splitlines()]
+                shell_line = re.compile(r'^exec (?:"\$basedir/node(?:\.exe)?"|node)\s+' + re.escape(needle) + r'\s+"\$@"$')
+                cmd_line = re.compile(r'^endlocal & goto #_undefined_# 2>nul \|\| title %comspec% & "%_prog%"\s+' + re.escape(cmd_needle) + r'\s+%\*$')
+                if any(shell_line.fullmatch(line) or cmd_line.fullmatch(line) for line in lines):
+                    matches.append(pkg)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+        if len(matches) != 1:
+            raise ValueError('shim does not identify one package')
+        package = matches[0]
+        parts = package.relative_to(root).parts
+        count = len(parts)
+    if package.resolve(strict=True) != package:
+        raise ValueError('package is not physically under root')
+    row = json.loads((package / 'package.json').read_text(encoding='utf-8'))
+    name, version = row['name'], row['version']
+    if (name != '/'.join(parts[:count]) or len(name) > 214 or name in ('node_modules', 'favicon.ico')
+            or not re.fullmatch(r'(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*', name)):
+        raise ValueError('invalid package identity')
+    bins = row.get('bin', {})
+    if isinstance(bins, str):
+        bins = {name.split('/')[-1]: bins}
+    target = bins.get(sys.argv[3])
+    if not isinstance(target, str):
+        raise ValueError('missing declared binary')
+    target_path = (package / target).resolve(strict=True)
+    target_path.relative_to(package)
+    if not is_shim and binary != target_path:
+        raise ValueError('binary does not match package declaration')
+    if not isinstance(version, str) or not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version):
+        raise ValueError('invalid installed version')
+    print(name + '\t' + version)
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    sys.exit(1)
+PY_ID
+}
+
+optional_npm_target() { # PACKAGE INSTALLED
+  local versions
+  versions="$(npm view --json -- "$1" versions)" || return 1
+  npm view --json -- "$1" time | python3 -c '
+import datetime, json, re, sys
+try:
+    rows = json.load(sys.stdin)
+    published_versions = json.loads(sys.argv[2])
+    if not isinstance(published_versions, list):
+        published_versions = [published_versions]
+    installed_text = sys.argv[1].split("+", 1)[0]
+    installed = tuple(map(int, installed_text.split("-", 1)[0].split(".")))
+    installed_prerelease = "-" in installed_text
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
+    versions = []
+    for version, date in rows.items():
+        if version not in published_versions:
+            continue
+        if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+[0-9A-Za-z.-]+)?", version):
+            continue
+        try:
+            published = datetime.datetime.fromisoformat(date.replace("Z", "+00:00"))
+            number = tuple(map(int, version.split("+", 1)[0].split(".")))
+            if published.tzinfo and published <= cutoff and (number > installed or (number == installed and installed_prerelease)):
+                versions.append((number, version))
+        except (ValueError, TypeError, OverflowError):
+            continue
+    if versions:
+        print(max(versions)[1])
+except (ValueError, TypeError, AttributeError):
+    sys.exit(1)
+' "$2" "$versions" | tr -d '\r'
+}
+
+optional_npm_extra_bins() { # PACKAGE_ROOT PRIMARY_BINARY
+  python3 - "$1" "$2" <<'PY_BINS' | tr -d '\r'
+import json, pathlib, re, sys
+try:
+    row = json.loads((pathlib.Path(sys.argv[1]) / 'package.json').read_text(encoding='utf-8'))
+    bins = row.get('bin', {})
+    if isinstance(bins, str):
+        bins = {row['name'].split('/')[-1]: bins}
+    if not isinstance(bins, dict) or sys.argv[2] not in bins:
+        raise ValueError
+    for name in bins:
+        if not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]*', name):
+            raise ValueError
+    for name in bins:
+        if name != sys.argv[2]:
+            print(name)
+except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    sys.exit(1)
+PY_BINS
+}
+
+optional_npm_recover() { # ROOT GLOBAL_BIN
+  local root="$1" global_bin="$2" marker package_root binary phase
+  for marker in "$root"/*.oh-my-setting-transaction "$root"/@*/*.oh-my-setting-transaction; do
+    [ -f "$marker" ] || continue
+    grep -q '^extra_bin=' "$marker" || continue
+    package_root="${marker%.oh-my-setting-transaction}"
+    binary="$(sed -n 's/^binary=//p' "$marker")"
+    phase="$(sed -n 's/^phase=//p' "$marker")"
+    if [ "$phase" = committed ]; then
+      npm_transaction_commit "$package_root" "$global_bin" "$binary" || return 1
+      continue
+    fi
+    if ! npm_transaction_restore "$package_root" "$global_bin" "$binary"; then
+      echo "warning: $binary: interrupted npm restoration failed" >&2
+      return 1
+    fi
+    hash -r
+    if ! optional_npm_identity "$root" "$(command -v "$binary" 2>/dev/null)" "$binary" >/dev/null; then
+      echo "warning: $binary: restored CLI could not be verified" >&2
+      return 1
+    fi
+  done
+}
+
+refresh_optional_providers() {
+  local provider binary resolved root prefix identity package previous target current before
+  local global_bin package_root extra_bins
+  [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || return 0
+  # shellcheck source=scripts/lib/provider-registry.sh
+  . "$ROOT/scripts/lib/provider-registry.sh"
+  if has_cmd npm && [ "$(id -u)" != 0 ]; then
+    root="$(npm_global_root)" || root=""
+    global_bin="$(npm_global_bin_dir)" || global_bin=""
+    if [ -n "$root" ] && [ -n "$global_bin" ]; then
+      optional_npm_recover "$root" "$global_bin" || return 1
+    fi
+  fi
+  for provider in $(oms_provider_supported_names); do
+    case "$provider" in codex|claude|antigravity) continue ;; esac
+    binary="$(oms_provider_binary "$provider")" || continue
+    resolved="$(command -v "$binary" 2>/dev/null)" || continue
+    if ! has_cmd npm || [ "$(id -u)" = 0 ]; then
+      echo "$provider: skipped (npm unavailable or running as root)"
+      continue
+    fi
+    root="$(npm_global_root)" || root=""
+    prefix="$(npm_global_prefix)" || prefix=""
+    if [ -z "$root" ] || [ -z "$prefix" ]; then
+      echo "warning: $provider: npm global paths unavailable" >&2
+      continue
+    fi
+    identity="$(optional_npm_identity "$root" "$resolved" "$binary")" || {
+      echo "$provider: skipped (binary is not in a global npm package)"
+      continue
+    }
+    if [ ! -w "$prefix" ] || [ ! -w "$root" ]; then
+      echo "warning: $provider: npm global prefix or root is not writable" >&2
+      continue
+    fi
+    package="${identity%%$'\t'*}"
+    previous="${identity#*$'\t'}"
+    target="$(optional_npm_target "$package" "$previous")" || {
+      echo "warning: $provider: npm release lookup failed" >&2
+      continue
+    }
+    [ -n "$target" ] || { echo "$provider: no eligible newer release"; continue; }
+    before="$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ"))' | tr -d '\r')" || continue
+    global_bin="$(npm_global_bin_dir)" || { echo "warning: $provider: npm bin path unavailable" >&2; continue; }
+    package_root="$root/$package"
+    extra_bins="$(optional_npm_extra_bins "$package_root" "$binary")" || {
+      echo "warning: $provider: invalid package bin declarations" >&2; continue;
+    }
+    if [ -e "$package_root.oh-my-setting-transaction" ] || [ -e "$package_root.oh-my-setting-backup" ] ||
+       [ -e "$global_bin/.$binary.oh-my-setting-backup" ]; then
+      echo "warning: $provider: stale npm backup requires recovery" >&2
+      return 1
+    fi
+    if ! npm_transaction_begin "$package_root" "$global_bin" "$binary" "$binary" $extra_bins; then
+      npm_transaction_restore "$package_root" "$global_bin" "$binary" || return 1
+      echo "warning: $provider: could not back up package" >&2
+      continue
+    fi
+    if npm install -g --no-fund --no-audit "--before=$before" -- "$package@$target" &&
+       current="$(optional_npm_identity "$root" "$(command -v "$binary")" "$binary")" &&
+       [ "$current" = "$(printf '%s\t%s' "$package" "$target")" ]; then
+      npm_transaction_commit "$package_root" "$global_bin" "$binary" || return 1
+      echo "$provider: updated to $target"
+    else
+      if ! npm_transaction_restore "$package_root" "$global_bin" "$binary"; then
+        echo "warning: $provider: restoration failed" >&2
+        return 1
+      fi
+      hash -r
+      current="$(optional_npm_identity "$root" "$(command -v "$binary" 2>/dev/null)" "$binary")" || current=""
+      if [ "$current" != "$(printf '%s\t%s' "$package" "$previous")" ]; then
+        echo "warning: $provider: restored CLI could not be verified" >&2
+        return 1
+      fi
+      echo "warning: $provider: refresh failed; previous package restored" >&2
+    fi
+  done
+}
+
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -1340,9 +1639,11 @@ if [ "$PROVIDERS_ONLY" = 1 ]; then
   for item in codex claude agy; do
     has_cmd "$item" && providers+=("$item")
   done
-  [ "${#providers[@]}" -gt 0 ] || { echo "providers: none installed"; exit 0; }
-  prepare_provider_versions "${providers[@]}"
-  for item in "${providers[@]}"; do
+  [ "${#providers[@]}" -gt 0 ] || echo "providers: none installed"
+  if [ "${#providers[@]}" -gt 0 ]; then
+    prepare_provider_versions ${providers[@]+"${providers[@]}"}
+  fi
+  for item in ${providers[@]+"${providers[@]}"}; do
     if [ "$item" = agy ]; then
       install_antigravity
     elif [ "$item" = codex ] && standalone_codex; then
@@ -1356,6 +1657,7 @@ if [ "$PROVIDERS_ONLY" = 1 ]; then
       verify_resolved_npm_binary "$item"
     fi
   done
+  refresh_optional_providers
   echo "providers: ok"
   exit 0
 fi

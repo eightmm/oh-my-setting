@@ -472,6 +472,215 @@ EOF
     [ ! -e "$npm_package.oh-my-setting-transaction" ] &&
     [ ! -e "$npm_package.oh-my-setting-backup" ] ||
     fail "failed npm install did not restore its previous package and shim"
+
+  # A verified install must survive an interruption during backup cleanup.
+  npm_transaction_begin "$npm_package" "$npm_bin" fixture || fail "commit fixture could not begin"
+  mkdir -p "$npm_package"
+  printf 'new package\n' > "$npm_package/state"
+  ln -s ../root/@fixture/tool/state "$npm_bin/fixture"
+  rm() {
+    case "$*" in
+      *"$npm_package.oh-my-setting-backup"*)
+        command rm -f "$npm_package.oh-my-setting-backup/state"
+        return 1 ;;
+    esac
+    command rm "$@"
+  }
+  if npm_transaction_commit "$npm_package" "$npm_bin" fixture; then fail "commit cleanup failure was ignored"; fi
+  unset -f rm
+  npm_package_is_current() { return 1; }
+  npm_transaction_recover fixture "$npm_package" "$npm_bin" fixture || fail "committed transaction could not recover"
+  [ "$(cat "$npm_package/state")" = 'new package' ] && [ -L "$npm_bin/fixture" ] &&
+    [ ! -e "$npm_package.oh-my-setting-backup" ] || fail "interrupted commit lost the new package or left backup"
+  npm_transaction_begin "$npm_package" "$npm_bin" fixture fixture || fail "optional commit fixture could not begin"
+  mkdir -p "$npm_package"
+  printf 'newer package\n' > "$npm_package/state"
+  ln -s ../root/@fixture/tool/state "$npm_bin/fixture"
+  rm() {
+    case "$*" in *"$npm_package.oh-my-setting-backup"*) return 1 ;; esac
+    command rm "$@"
+  }
+  if npm_transaction_commit "$npm_package" "$npm_bin" fixture; then fail "optional commit cleanup failure was ignored"; fi
+  unset -f rm
+  optional_npm_recover "$npm_root" "$npm_bin" || fail "optional committed cleanup did not recover"
+  [ "$(cat "$npm_package/state")" = 'newer package' ] && [ -L "$npm_bin/fixture" ] &&
+    [ ! -e "$npm_package.oh-my-setting-backup" ] || fail "optional committed recovery rolled back"
+
+  # Old markers have no absent sentinels; a new dangling link belongs to the failed install.
+  legacy="$npm_root/legacy"
+  mkdir -p "$legacy" "$npm_bin/.legacy.oh-my-setting-backup"
+  printf 'schema=1\nphase=backed_up\nhad_package=0\nbinary=legacy\n' > "$legacy.oh-my-setting-transaction"
+  printf 'partial\n' > "$legacy/cli"
+  ln -s ../root/legacy/cli "$npm_bin/legacy"
+  ln -s ../unrelated "$npm_bin/legacy.cmd"
+  npm_transaction_restore "$legacy" "$npm_bin" legacy || fail "legacy transaction could not restore"
+  [ ! -e "$npm_bin/legacy" ] && [ ! -L "$npm_bin/legacy" ] || fail "legacy rollback left dangling shim"
+  [ -L "$npm_bin/legacy.cmd" ] || fail "legacy rollback removed an unrelated link"
+  mkdir -p "$legacy" "$npm_bin/.legacy.oh-my-setting-backup"
+  printf 'schema=1\nphase=backed_up\nhad_package=1\nbinary=legacy\n' > "$legacy.oh-my-setting-transaction"
+  printf 'restored\n' > "$legacy/cli"
+  ln -s ../root/legacy/cli "$npm_bin/legacy"
+  npm_transaction_restore "$legacy" "$npm_bin" legacy || fail "resumed legacy restoration failed"
+  [ -L "$npm_bin/legacy" ] || fail "resumed legacy restoration removed a recovered link"
+)
+
+# Optional provider refresh uses package metadata, not provider execution.
+(
+  export HOME="$TMP/optional-home"
+  mkdir -p "$HOME" "$TMP/optional-bin" "$TMP/optional-root/cursor-pkg"
+  printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"cli"}}' > "$TMP/optional-root/cursor-pkg/package.json"
+  printf '#!/bin/sh\nexit 99\n' > "$TMP/optional-root/cursor-pkg/cli"
+  chmod +x "$TMP/optional-root/cursor-pkg/cli"
+  ln -s "$TMP/optional-root/cursor-pkg/cli" "$TMP/optional-bin/cursor-agent"
+  export PATH="$TMP/optional-bin:$PATH"
+  set --
+  . "$ROOT/scripts/install-tools.sh"
+  # A binary inside a package is not necessarily its declared CLI.
+  printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"other"}}' > "$TMP/optional-root/cursor-pkg/package.json"
+  if optional_npm_identity "$TMP/optional-root" "$TMP/optional-bin/cursor-agent" cursor-agent >/dev/null; then fail "undeclared package executable accepted"; fi
+  printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"cli"}}' > "$TMP/optional-root/cursor-pkg/package.json"
+  for bad_name in -bad .bad _bad; do
+    mkdir -p "$TMP/optional-root/$bad_name"
+    printf '{"name":"%s","version":"1.0.0","bin":{"cursor-agent":"cli"}}\n' "$bad_name" > "$TMP/optional-root/$bad_name/package.json"
+    touch "$TMP/optional-root/$bad_name/cli"
+    if optional_npm_identity "$TMP/optional-root" "$TMP/optional-root/$bad_name/cli" cursor-agent >/dev/null; then fail "invalid npm name accepted"; fi
+  done
+  npm_global_root() { printf '%s\n' "$TMP/optional-root"; }
+  npm_global_prefix() { printf '%s\n' "$TMP/optional-root"; }
+  npm_global_bin_dir() { printf '%s\n' "$TMP/optional-bin"; }
+  npm() {
+    case "$1" in
+      view)
+        case "$*" in *versions) printf '%s\n' '["1.0.0","2.0.0","3.0.0"]' ;; *) printf '%s\n' '{"1.0.0":"2020-01-01T00:00:00Z","2.0.0":"2020-01-02T00:00:00Z","3.0.0":"2999-01-01T00:00:00Z"}' ;; esac
+        ;;
+      install)
+        printf '%s\n' "$*" >> "$TMP/optional-log"
+        case "$*" in *cursor-pkg@2.0.0)
+          if [ "${optional_fail:-0}" = 1 ]; then
+            rm -rf "$TMP/optional-root/cursor-pkg"
+            rm -f "$TMP/optional-bin/cursor-agent" "$TMP/optional-bin/cursor-extra" \
+              "$TMP/optional-bin/cursor-extra.cmd" "$TMP/optional-bin/cursor-extra.ps1"
+            mkdir -p "$TMP/optional-root/cursor-pkg"
+            return 1
+          fi ;;
+        esac
+        case "$*" in *cursor-pkg@1.0.0) version=1.0.0 ;; *) version=2.0.0 ;; esac
+        mkdir -p "$TMP/optional-root/cursor-pkg"
+        printf '#!/bin/sh\nexit 99\n' > "$TMP/optional-root/cursor-pkg/cli"
+        chmod +x "$TMP/optional-root/cursor-pkg/cli"
+        ln -sf "$TMP/optional-root/cursor-pkg/cli" "$TMP/optional-bin/cursor-agent"
+        printf '{"name":"cursor-pkg","version":"%s","bin":{"cursor-agent":"cli"}}\n' "$version" > "$TMP/optional-root/cursor-pkg/package.json"
+        ;;
+      config) printf '%s\n' "$*" >> "$TMP/optional-config"; return 1 ;;
+      *) return 1 ;;
+    esac
+  }
+  if [ "$(id -u)" != 0 ]; then
+  mkdir -p "$TMP/readonly-prefix"
+  chmod a-w "$TMP/readonly-prefix"
+  npm_global_prefix() { printf '%s\n' "$TMP/readonly-prefix"; }
+  refresh_optional_providers > "$TMP/optional-out" 2>&1 || fail "unwritable prefix failed"
+  grep -Fq 'not writable' "$TMP/optional-out" || fail "unwritable prefix not reported"
+  [ ! -e "$TMP/optional-log" ] && [ ! -e "$TMP/optional-config" ] || fail "unwritable prefix changed npm state"
+  chmod u+w "$TMP/readonly-prefix"
+  fi
+  npm_global_prefix() { printf '%s\n' "$TMP/optional-root"; }
+  refresh_optional_providers > "$TMP/optional-out" 2>&1 || fail "optional refresh failed"
+  grep -Fq 'cursor-pkg@2.0.0' "$TMP/optional-log" || fail "optional stable release not refreshed"
+  grep -Fq -- '--before=' "$TMP/optional-log" || fail "dependency age floor missing"
+  : > "$TMP/optional-log"
+  refresh_optional_providers > "$TMP/optional-out" 2>&1 || fail "current optional refresh failed"
+  [ ! -s "$TMP/optional-log" ] || fail "too-new release was installed"
+  printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"cli"}}' > "$TMP/optional-root/cursor-pkg/package.json"
+  printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"cli","cursor-extra":"cli"}}' > "$TMP/optional-root/cursor-pkg/package.json"
+  printf 'original\n' > "$TMP/optional-root/cursor-pkg/retained"
+  ln -s "$TMP/optional-root/cursor-pkg/cli" "$TMP/optional-bin/cursor-extra"
+  printf 'old cmd\n' > "$TMP/optional-bin/cursor-extra.cmd"
+  printf 'old ps1\n' > "$TMP/optional-bin/cursor-extra.ps1"
+  optional_fail=1
+  refresh_optional_providers > "$TMP/optional-out" 2>&1 || fail "optional failure escaped"
+  grep -Fq 'warning: cursor:' "$TMP/optional-out" || fail "optional failure did not warn"
+  [ "$(cat "$TMP/optional-root/cursor-pkg/retained")" = original ] || fail "optional package backup was not restored"
+  [ -L "$TMP/optional-bin/cursor-agent" ] && [ -L "$TMP/optional-bin/cursor-extra" ] || fail "optional bin links were not restored"
+  [ "$(cat "$TMP/optional-bin/cursor-extra.cmd")" = 'old cmd' ] &&
+    [ "$(cat "$TMP/optional-bin/cursor-extra.ps1")" = 'old ps1' ] || fail "optional Windows shims were not restored"
+  if grep -Fq 'cursor-pkg@1.0.0' "$TMP/optional-log"; then fail "optional restoration used npm"; fi
+  npm_transaction_restore() { return 1; }
+  if refresh_optional_providers > "$TMP/optional-out" 2>&1; then fail "failed restoration returned success"; fi
+  grep -Fq 'restoration failed' "$TMP/optional-out" || fail "failed restoration did not warn"
+  unset -f npm_transaction_restore
+  eval "$(sed -n '/^npm_transaction_restore()/,/^}/p' "$ROOT/scripts/install-tools.sh")"
+  npm_transaction_restore "$TMP/optional-root/cursor-pkg" "$TMP/optional-bin" cursor-agent || fail "fixture recovery failed"
+  optional_fail=0
+  npm_transaction_begin "$TMP/optional-root/cursor-pkg" "$TMP/optional-bin" cursor-agent cursor-agent cursor-extra || fail "interruption fixture could not back up"
+  optional_npm_recover "$TMP/optional-root" "$TMP/optional-bin" || fail "interrupted backup did not recover"
+  [ -L "$TMP/optional-bin/cursor-agent" ] && [ -L "$TMP/optional-bin/cursor-extra" ] || fail "interrupted backup lost links"
+  : > "$TMP/optional-log"
+  OH_MY_SETTING_TOOL_LOCK="$LOCK" refresh_optional_providers > "$TMP/optional-out" 2>&1
+  [ ! -s "$TMP/optional-log" ] || fail "explicit lock refreshed optional provider"
+  rm "$TMP/optional-bin/cursor-agent"
+  printf '#!/bin/sh\nexit 99\n' > "$TMP/optional-bin/cursor-agent"
+  chmod +x "$TMP/optional-bin/cursor-agent"
+  refresh_optional_providers > "$TMP/optional-out" 2>&1
+  grep -Fq 'cursor: skipped' "$TMP/optional-out" || fail "non-npm provider was not skipped"
+  [ ! -s "$TMP/optional-log" ] || fail "non-npm provider was installed"
+  # A Windows npm shim lives in the prefix, while its target is in node_modules.
+  mkdir -p "$TMP/win-prefix/node_modules/cursor-pkg"
+  printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"cli.js"}}' > "$TMP/win-prefix/node_modules/cursor-pkg/package.json"
+  printf '%s\n' '#!/bin/sh' 'exec node "$basedir/node_modules/cursor-pkg/cli.js" "$@"' > "$TMP/win-prefix/cursor-agent"
+  chmod +x "$TMP/win-prefix/cursor-agent"
+  touch "$TMP/win-prefix/node_modules/cursor-pkg/cli.js"
+  oms_platform_is_windows() { return 0; }
+  npm_global_prefix() { printf '%s\n' "$TMP/win-prefix"; }
+  identity="$(optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent" cursor-agent)" || fail "Windows npm shim not recognized"
+  [ "$identity" = "$(printf 'cursor-pkg\t1.0.0')" ] || fail "Windows shim identity incorrect"
+  printf '%s\n' '@ECHO off' 'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" "%dp0%\node_modules\cursor-pkg\cli.js" %*' > "$TMP/win-prefix/cursor-agent.cmd"
+  optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent.cmd" cursor-agent >/dev/null || fail "Windows cmd shim not recognized"
+  printf '%s\n' '#!/bin/sh' '# exec node "$basedir/node_modules/cursor-pkg/cli.js"' 'exit 0' > "$TMP/win-prefix/cursor-agent"
+  if optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent" cursor-agent >/dev/null; then fail "comment-only Windows shim accepted"; fi
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$TMP/win-prefix/cursor-agent"
+  if optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent" cursor-agent >/dev/null; then fail "unrelated Windows shim accepted"; fi
+  npm() { case "$*" in *versions) printf '%s\n' '[]' ;; *) printf '%s\n' '{}' ;; esac; }
+  [ -z "$(optional_npm_target fixture 0.0.0)" ] || fail "empty release list selected a version"
+  npm() { case "$*" in *versions) printf '%s\n' '["bad","0.0.0"]' ;; *) printf '%s\n' '{"bad":"2020-01-01T00:00:00Z","0.0.0":"2020-01-01T00:00:00Z"}' ;; esac; }
+  [ -z "$(optional_npm_target fixture 0.0.0)" ] || fail "malformed or equal version selected"
+  npm() { case "$*" in *versions) printf '%s\n' '["1.0.0","1.0.0-rc.1"]' ;; *) printf '%s\n' '{"1.0.0":"2020-01-01T00:00:00Z","1.0.0-rc.1":"2020-01-01T00:00:00Z"}' ;; esac; }
+  [ "$(optional_npm_target fixture 1.0.0-rc.1)" = 1.0.0 ] || fail "stable release did not supersede prerelease"
+  npm() { case "$*" in *versions) printf '%s\n' '["1.0.1+build"]' ;; *) printf '%s\n' '{"1.0.1+build":"2020-01-01T00:00:00Z"}' ;; esac; }
+  [ "$(optional_npm_target fixture 1.0.0)" = 1.0.1+build ] || fail "stable build metadata was excluded"
+  npm() { case "$*" in *versions) printf '%s\n' '["1.0.0"]' ;; *) printf '%s\n' '{"1.0.0":"2020-01-01T00:00:00Z","2.0.0":"2020-01-01T00:00:00Z"}' ;; esac; }
+  [ -z "$(optional_npm_target fixture 1.0.0)" ] || fail "unpublished release selected"
+  npm() { printf '%s\n' 'invalid'; }
+  if optional_npm_target fixture 0.0.0 >/dev/null; then fail "malformed release metadata accepted"; fi
+)
+
+# Exercise the real --providers entry point with only an optional provider.
+(
+  home="$TMP/optional-only-home"
+  bin="$TMP/optional-only-bin"
+  prefix="$TMP/optional-only-prefix"
+  mkdir -p "$home" "$bin" "$prefix/bin" "$prefix/node_modules/cursor-pkg"
+  printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"cli"}}' > "$prefix/node_modules/cursor-pkg/package.json"
+  printf '#!/bin/sh\nexit 99\n' > "$prefix/node_modules/cursor-pkg/cli"
+  chmod +x "$prefix/node_modules/cursor-pkg/cli"
+  ln -s "$prefix/node_modules/cursor-pkg/cli" "$bin/cursor-agent"
+  cat > "$bin/npm" <<'EOF_OPTIONAL_NPM'
+#!/usr/bin/env bash
+case "$1" in
+  root) printf '%s\n' "$OMS_TEST_NPM_PREFIX/node_modules" ;;
+  prefix) printf '%s\n' "$OMS_TEST_NPM_PREFIX" ;;
+  view) case "$*" in *versions) printf '%s\n' '["2.0.0"]' ;; *) printf '%s\n' '{"2.0.0":"2020-01-01T00:00:00Z"}' ;; esac ;;
+  install) printf '%s\n' "$*" >> "$OMS_TEST_NPM_PREFIX/calls"; mkdir -p "$OMS_TEST_NPM_PREFIX/node_modules/cursor-pkg"; printf '#!/bin/sh\nexit 99\n' > "$OMS_TEST_NPM_PREFIX/node_modules/cursor-pkg/cli"; chmod +x "$OMS_TEST_NPM_PREFIX/node_modules/cursor-pkg/cli"; printf '%s\n' '{"name":"cursor-pkg","version":"2.0.0","bin":{"cursor-agent":"cli"}}' > "$OMS_TEST_NPM_PREFIX/node_modules/cursor-pkg/package.json" ;;
+  config) printf '%s\n' "$*" >> "$OMS_TEST_NPM_PREFIX/config-calls"; exit 1 ;;
+  *) exit 1 ;;
+esac
+EOF_OPTIONAL_NPM
+  chmod +x "$bin/npm"
+  env -u OH_MY_SETTING_TOOL_LOCK -u NVM_DIR HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    OMS_TEST_NPM_PREFIX="$prefix" bash "$ROOT/scripts/install-tools.sh" --providers > "$TMP/optional-only.out" 2>&1 || fail "optional-only provider run failed"
+  grep -Fq 'providers: none installed' "$TMP/optional-only.out" || fail "optional-only run detected a core provider"
+  grep -Fq 'cursor-pkg@2.0.0' "$prefix/calls" || fail "optional-only run did not refresh"
+  [ ! -e "$prefix/config-calls" ] || fail "optional-only run changed npm configuration"
 )
 
 # Doctor must surface a damaged repository lock before an install/repair tries
