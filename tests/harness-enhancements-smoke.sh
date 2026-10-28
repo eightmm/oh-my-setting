@@ -1229,6 +1229,25 @@ PYTEST
     fail "CI selector tried to execute full lanes inline"
   grep -Fxq 'mode=full' "$TMP/ci-full" || fail "CI full mode was not recorded"
   grep -Fq 'unmatched:lib/leaf.py' "$TMP/full-summary.md" || fail "CI summary omitted full fallback reason"
+  # Plan-only CI selection: same keys as the executing run, no stage runs.
+  : > "$log"
+  out="$(cd "$gate" && OMS_TEST_AFFECTED_LOG="$log" bash scripts/check.sh --affected \
+    --print-affected-mode --changed-from "$base" --changed-to "$head" \
+    --ci-output "$TMP/ci-plan" 2>"$TMP/ci-plan-err")" ||
+    fail "plan-only CI selection failed"
+  [ "$out" = affected ] || fail "plan-only CI selection printed the wrong mode: $out"
+  [ "$(cat "$TMP/ci-plan")" = "$(cat "$TMP/ci-mode")" ] ||
+    fail "plan-only CI keys differ from the executing run"
+  [ ! -s "$log" ] && ! grep -Eq '^(ok|check):' "$TMP/ci-plan-err" ||
+    fail "plan-only CI selection ran a stage"
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full bash scripts/check.sh --affected \
+    --print-affected-mode --changed-from "$base" --changed-to "$head" \
+    --ci-output "$TMP/ci-plan-full")" || fail "plan-only full CI selection failed"
+  [ "$out" = full ] && [ "$(cat "$TMP/ci-plan-full")" = "$(cat "$TMP/ci-full")" ] ||
+    fail "plan-only full CI selection differs from the executing run"
+  (cd "$gate" && bash scripts/check.sh --affected --list-stages --ci-output "$TMP/ci-bad" \
+    --changed-from "$base" --changed-to "$head" >/dev/null 2>&1) &&
+    fail "--ci-output accepted --list-stages"
 
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages)" ||

@@ -187,7 +187,8 @@ manifest) then the test suites. With no arguments it runs both.
                         Graph for affected tests. Critical or uncertain changes
                         fall back to the complete gate, including lint.
   --print-affected-mode With --affected, print affected or full after planning
-                        and exit without running test stages.
+                        and exit without running test stages (with --ci-output
+                        FILE, the plan keys are appended to FILE first).
   --ci-output FILE      With --affected, append mode=affected|full and
                         native=true|false to FILE; an affected plan also
                         appends operator=SECTIONS|all|(empty) and leaves
@@ -285,8 +286,8 @@ if [ "$PRINT_AFFECTED_MODE" = 1 ] && { [ "$MODE" != affected ] || [ "$LIST_STAGE
   echo "error: --print-affected-mode requires --affected and cannot combine with --list-stages" >&2
   exit 2
 fi
-if [ -n "$CI_OUTPUT" ] && { [ "$MODE" != affected ] || [ "$LIST_STAGES" = 1 ] || [ "$PRINT_AFFECTED_MODE" = 1 ]; }; then
-  echo "error: --ci-output requires --affected without listing/print-only flags" >&2
+if [ -n "$CI_OUTPUT" ] && { [ "$MODE" != affected ] || [ "$LIST_STAGES" = 1 ]; }; then
+  echo "error: --ci-output requires --affected without --list-stages" >&2
   exit 2
 fi
 if [ "$CI_PARITY" = 1 ] && { [ "$MODE" != affected ] || [ -n "$CI_OUTPUT" ] || [ "$PRINT_AFFECTED_MODE" = 1 ]; }; then
@@ -975,16 +976,62 @@ fi
 if [ "$CI_PARITY" = 1 ] && [ "$LIST_STAGES" != 1 ]; then
   hide_provider_clis
 fi
+# Which operator-tools sections an affected plan needs (CI runs them in its own job).
+plan_affected_operator() {
+  affected_operator_paths=()
+  affected_operator_sections=""
+  affected_operator_has_suite=0
+  for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
+    case "$affected_test" in
+      tests/operator/*) affected_operator_paths[${#affected_operator_paths[@]}]="$affected_test" ;;
+      tests/operator-tools-smoke.sh) affected_operator_has_suite=1 ;;
+    esac
+  done
+  if [ "${#affected_operator_paths[@]}" -gt 0 ] && [ "$affected_operator_has_suite" = 0 ]; then
+    affected_operator_sections="$(python3 - "$ROOT/tests/operator/runner.py" "${affected_operator_paths[@]}" <<'PY'
+import re
+import sys
+
+manifest = open(sys.argv[1], encoding="utf-8").read()
+sections = re.findall(
+    r'^\s*\("([^\"]+)",\s*[0-9]+,\s*(?:"([^\"]+)"|None)\),?\s*$',
+    manifest, re.M)
+files = {path: [] for path in sys.argv[2:]}
+for name, filename in sections:
+    if filename is not None:
+        path = "tests/operator/" + filename
+        if path in files:
+            files[path].append(name)
+if any(not names for names in files.values()):
+    sys.exit(1)
+print(",".join(name for name, filename in sections
+                 if filename is not None and "tests/operator/" + filename in files))
+PY
+)" || affected_operator_sections=""
+    affected_operator_sections="${affected_operator_sections//$'\r'/}"
+  fi
+  affected_operator_value=""
+  if [ -n "$affected_operator_sections" ]; then
+    affected_operator_value="$affected_operator_sections"
+  elif [ "${#affected_operator_paths[@]}" -gt 0 ] || [ "$affected_operator_has_suite" = 1 ]; then
+    affected_operator_value=all
+  fi
+}
+
 if [ "$RUN_AFFECTED" = 1 ]; then
   prepare_affected_gate
   if [ -n "$CI_OUTPUT" ]; then
     printf 'mode=%s\nnative=%s\n' "$AFFECTED_MODE" "$AFFECTED_NATIVE" >> "$CI_OUTPUT"
-    if [ "$AFFECTED_MODE" = full ]; then
+    if [ "$AFFECTED_MODE" = full ] && [ "$PRINT_AFFECTED_MODE" != 1 ]; then
       verify_oms_state
       exit 0
     fi
   fi
   if [ "$PRINT_AFFECTED_MODE" = 1 ]; then
+    if [ -n "$CI_OUTPUT" ] && [ "$AFFECTED_MODE" = affected ]; then
+      plan_affected_operator
+      printf 'operator=%s\n' "$affected_operator_value" >> "$CI_OUTPUT"
+    fi
     printf '%s\n' "$AFFECTED_MODE"
     verify_oms_state
     exit 0
@@ -1213,47 +1260,10 @@ repo_invariants_selected=" "
 if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
   affected_operator_staged=0
   affected_gdr_staged=0
-  affected_operator_paths=()
-  affected_operator_sections=""
-  affected_operator_has_suite=0
-  for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
-    case "$affected_test" in
-      tests/operator/*) affected_operator_paths[${#affected_operator_paths[@]}]="$affected_test" ;;
-      tests/operator-tools-smoke.sh) affected_operator_has_suite=1 ;;
-    esac
-  done
-  if [ "${#affected_operator_paths[@]}" -gt 0 ] && [ "$affected_operator_has_suite" = 0 ]; then
-    affected_operator_sections="$(python3 - "$ROOT/tests/operator/runner.py" "${affected_operator_paths[@]}" <<'PY'
-import re
-import sys
-
-manifest = open(sys.argv[1], encoding="utf-8").read()
-sections = re.findall(
-    r'^\s*\("([^\"]+)",\s*[0-9]+,\s*(?:"([^\"]+)"|None)\),?\s*$',
-    manifest, re.M)
-files = {path: [] for path in sys.argv[2:]}
-for name, filename in sections:
-    if filename is not None:
-        path = "tests/operator/" + filename
-        if path in files:
-            files[path].append(name)
-if any(not names for names in files.values()):
-    sys.exit(1)
-print(",".join(name for name, filename in sections
-                 if filename is not None and "tests/operator/" + filename in files))
-PY
-)" || affected_operator_sections=""
-    affected_operator_sections="${affected_operator_sections//$'\r'/}"
-  fi
+  plan_affected_operator
   # CI runs operator-tools in its own job so the suite does not share one
   # runner with the other selected stages. Local runs keep it in place.
   if [ -n "$CI_OUTPUT" ]; then
-    affected_operator_value=""
-    if [ -n "$affected_operator_sections" ]; then
-      affected_operator_value="$affected_operator_sections"
-    elif [ "${#affected_operator_paths[@]}" -gt 0 ] || [ "$affected_operator_has_suite" = 1 ]; then
-      affected_operator_value=all
-    fi
     printf 'operator=%s\n' "$affected_operator_value" >> "$CI_OUTPUT"
     if [ -n "$affected_operator_value" ]; then
       echo "operator-tools: deferred to the affected_operator CI job (operator=$affected_operator_value)" >&2

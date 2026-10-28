@@ -459,7 +459,7 @@ import os
 import subprocess
 script = body.split("        run: |\n", 1)[1]
 script = "\n".join(line[10:] for line in script.splitlines())
-full_jobs = required - {"affected_plan", "affected_operator"}
+full_jobs = required - {"affected_plan", "affected_verify", "affected_operator"}
 operator_job = workflow_text.split("\n  affected_operator:\n", 1)[1].split("\n  #", 1)[0]
 operator_job = re.split(r"\n  [A-Za-z0-9_-]+:\n", operator_job, maxsplit=1)[0]
 assert "    needs: affected_plan\n" in operator_job
@@ -475,6 +475,7 @@ for mode in ("full", "affected"):
         env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_NATIVE=native, AFFECTED_PLAN_RESULT="success",
                    AFFECTED_OPERATOR=operator)
         env["AFFECTED_OPERATOR_RESULT"] = "success" if mode == "affected" and operator else "skipped"
+        env["AFFECTED_VERIFY_RESULT"] = "success" if mode == "affected" else "skipped"
         env.update({name.upper() + "_RESULT": "success" if mode == "full" else "skipped"
                     for name in full_jobs})
         env["PYTHON39_RESULT"] = "success" if native == "true" else "skipped"
@@ -516,10 +517,15 @@ for name in full_jobs:
                  "python39": "needs.affected_plan.outputs.native == 'true'"}.get(name, "needs.affected_plan.outputs.mode == 'full'")
     assert "    if: %s\n" % condition in job, name
 plan_body = workflow_text.split("\n  affected_plan:\n", 1)[1].split("\n  install_e2e:\n", 1)[0]
-plan_script = plan_body.split("      - name: select and verify affected changes\n", 1)[1].split("        run: |\n", 1)[1]
+plan_body, verify_body = plan_body.split("\n  affected_verify:\n", 1)
+assert "    needs: affected_plan\n" in verify_body
+assert "    if: needs.affected_plan.outputs.mode == 'affected'\n" in verify_body
+assert "    name: affected checks\n" in verify_body
+assert "--print-affected-mode" in plan_body and "--ci-output \"$GITHUB_OUTPUT\"" in plan_body
+plan_script = plan_body.split("      - name: select affected changes\n", 1)[1].split("        run: |\n", 1)[1]
 plan_script = "\n".join(line[10:] for line in plan_script.splitlines()
                         if line.startswith("          "))
-setup_script = plan_body.split('      - name: prepare lazy shellcheck\n', 1)[1].split('      - name: select and verify affected changes\n', 1)[0].split('        run: |\n', 1)[1]
+setup_script = verify_body.split('      - name: prepare lazy shellcheck\n', 1)[1].split('      - name: verify affected changes\n', 1)[0].split('        run: |\n', 1)[1]
 setup_script = '\n'.join(line[10:] for line in setup_script.splitlines() if line.startswith('          '))
 subprocess.run(['bash', '-n'], input=setup_script, text=True, check=True)
 # The launcher is Linux CI only; no network or package install in this test.
@@ -581,6 +587,28 @@ with tempfile.TemporaryDirectory(prefix="oms-ci-plan-") as tmp:
             assert "mode=" + expected in output.read_text(), (event, base)
             assert "native=" + ("false" if invoked else "true") in output.read_text(), (event, base)
         assert log.read_text().splitlines() == (["invoked"] if invoked else []), (event, base, "repeated or missing selection")
+verify_script = verify_body.split("      - name: verify affected changes\n", 1)[1].split("        run: |\n", 1)[1]
+verify_script = "\n".join(line[10:] for line in verify_script.splitlines() if line.startswith("          "))
+with tempfile.TemporaryDirectory(prefix="oms-ci-verify-") as tmp:
+    root = pathlib.Path(tmp)
+    (root / "scripts").mkdir()
+    (root / "scripts/check.sh").write_text(
+        'printf "%s" "$PROBE_OUT" >> "${@: -1}"\n', encoding="utf-8")
+    planned = "mode=affected\nnative=false\noperator=section-shell\n"
+    for written, ok in ((planned, True),
+                        ("mode=full\nnative=true\n", False),
+                        ("mode=affected\nnative=false\noperator=all\n", False),
+                        ("mode=affected\nnative=false\noperator=\n", False),
+                        ("", False)):
+        (root / "verify-output").unlink(missing_ok=True)
+        env = dict(os.environ, RUNNER_TEMP=tmp, DIFF_BASE="base", PLAN_MODE="affected",
+                   PLAN_NATIVE="false", PLAN_OPERATOR="section-shell", PROBE_OUT=written)
+        result = subprocess.run(["bash", "-eu", "-c", verify_script], cwd=tmp, env=env, capture_output=True)
+        assert (result.returncode == 0) == ok, (written, result.stderr)
+    # An empty operator plan must still match the empty operator line.
+    (root / "verify-output").unlink(missing_ok=True)
+    env.update(PLAN_OPERATOR="", PROBE_OUT="mode=affected\nnative=false\noperator=\n")
+    assert subprocess.run(["bash", "-eu", "-c", verify_script], cwd=tmp, env=env, capture_output=True).returncode == 0
 checker = (pathlib.Path(sys.argv[1]).parents[2] / "scripts/check.sh").read_text()
 selector = checker.split("prepare_affected_gate() {", 1)[1].split("\nif [ \"$RUN_QUICK\"", 1)[0]
 selector = "prepare_affected_gate() {" + selector

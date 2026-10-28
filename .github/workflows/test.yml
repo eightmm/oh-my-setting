@@ -100,15 +100,47 @@ jobs:
           OMS_SMOKE_TIMING_LIMIT: "25"
         run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
 
-  # Select once and run narrow checks in this job. Full selections fan out to
-  # the existing lanes; no graph artifact/cache or second selection is needed.
+  # Select once here and publish the plan; GitHub exposes job outputs only when
+  # a job ends, so narrow verification runs in affected_verify while
+  # affected_operator starts right after this selection.
   affected_plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 105
+    timeout-minutes: 15
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       native: ${{ steps.plan.outputs.native }}
       operator: ${{ steps.plan.outputs.operator }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: select affected changes
+        id: plan
+        timeout-minutes: 10
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if { [ "$EVENT_NAME" = pull_request ] || [ "$EVENT_NAME" = push ]; } && \
+              git rev-parse --verify "$DIFF_BASE^{tree}" >/dev/null 2>&1; then
+            bash scripts/check.sh --affected --print-affected-mode \
+              --changed-from "$DIFF_BASE" --changed-to HEAD \
+              --ci-output "$GITHUB_OUTPUT"
+          else
+            printf 'mode=full\nnative=true\n' >> "$GITHUB_OUTPUT"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '\n### OMS verification selection\n\nFull check: scheduled/manual run or unavailable base revision.\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+  # Narrow verification of an affected plan, in parallel with affected_operator.
+  # Re-selecting must reproduce the published plan, or the run fails closed.
+  affected_verify:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'affected'
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    name: affected checks
     steps:
       - uses: actions/checkout@v7
         with:
@@ -143,23 +175,23 @@ jobs:
           SH
           chmod +x "$RUNNER_TEMP/oms-shellcheck"
           echo "OMS_SHELLCHECK_BIN=$RUNNER_TEMP/oms-shellcheck" >> "$GITHUB_ENV"
-      - name: select and verify affected changes
-        id: plan
+      - name: verify affected changes
         timeout-minutes: 90
         env:
-          EVENT_NAME: ${{ github.event_name }}
           DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PLAN_MODE: ${{ needs.affected_plan.outputs.mode }}
+          PLAN_NATIVE: ${{ needs.affected_plan.outputs.native }}
+          PLAN_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
           OMS_TEST_CALL_TIMEOUT: "240"
         run: |
-          if { [ "$EVENT_NAME" = pull_request ] || [ "$EVENT_NAME" = push ]; } && \
-              git rev-parse --verify "$DIFF_BASE^{tree}" >/dev/null 2>&1; then
-            bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD \
-              --ci-output "$GITHUB_OUTPUT"
-          else
-            printf 'mode=full\nnative=true\n' >> "$GITHUB_OUTPUT"
-            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-              printf '\n### OMS verification selection\n\nFull check: scheduled/manual run or unavailable base revision.\n' >> "$GITHUB_STEP_SUMMARY"
-            fi
+          bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD \
+            --ci-output "$RUNNER_TEMP/verify-output"
+          expected="$(printf 'mode=%s\nnative=%s\noperator=%s\n' "$PLAN_MODE" "$PLAN_NATIVE" "$PLAN_OPERATOR")"
+          if [ "$(cat "$RUNNER_TEMP/verify-output")" != "$expected" ]; then
+            echo "affected selection changed between plan and verification" >&2
+            echo "planned:" >&2; printf '%s\n' "$expected" >&2
+            echo "verified:" >&2; cat "$RUNNER_TEMP/verify-output" >&2
+            exit 1
           fi
 
   # Exercise the same install -> update -> uninstall contract on every
@@ -279,7 +311,7 @@ jobs:
   # are accepted; missing, failed, and cancelled required jobs fail closed.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, affected_plan, affected_operator, install_e2e, python39]
+    needs: [lint, focused, smoke_shard, affected_plan, affected_verify, affected_operator, install_e2e, python39]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -290,6 +322,7 @@ jobs:
           FOCUSED_RESULT: ${{ needs.focused.result }}
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
           AFFECTED_PLAN_RESULT: ${{ needs.affected_plan.result }}
+          AFFECTED_VERIFY_RESULT: ${{ needs.affected_verify.result }}
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
           AFFECTED_NATIVE: ${{ needs.affected_plan.outputs.native }}
           AFFECTED_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
@@ -317,6 +350,9 @@ jobs:
               status=1
             fi
           done
+          verify_expected=skipped
+          [ "$AFFECTED_MODE" != affected ] || verify_expected=success
+          [ "$AFFECTED_VERIFY_RESULT" = "$verify_expected" ] || status=1
           operator_expected=skipped
           if [ "$AFFECTED_MODE" = affected ] && [ -n "$AFFECTED_OPERATOR" ]; then
             operator_expected=success
@@ -333,6 +369,6 @@ jobs:
           [ "$INSTALL_E2E_RESULT" = "$install_expected" ] || status=1
           [ "$PYTHON39_RESULT" = "$native_expected" ] || status=1
           if [ "$status" -ne 0 ]; then
-            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
+            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
           fi
           exit "$status"

@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- CI's affected path selects in `affected_plan` (`check.sh --affected
+  --print-affected-mode --ci-output`) and runs the narrow checks in a separate
+  `affected_verify` job, so operator-tools starts right after selection instead
+  of after the narrow checks. The verify job fails closed when its re-selection
+  differs from the published plan, and `gate` requires it for affected plans.
 - A panel main's prompt hook now appends the cached project-graph orientation
   once per graph revision and context generation, marked as reference data and
   capped at 4096 UTF-8 bytes. It reads only the cache; refresh remains on the
