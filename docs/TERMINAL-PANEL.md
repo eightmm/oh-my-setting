@@ -905,6 +905,7 @@ evidence for every recorded write worker of that task and every write worker
 without a task ID under the finalizing native main; workers assigned to other
 tasks are checked when their own task is accepted. A plan-bound patch retains its
 exact plan lineage; a standalone patch matches its successful landing by digest.
+If a digest-matching landing patch still applies cleanly to the verifier checkout, `accepted` refuses before verification; finalize with `--repo WORKTREE` containing the landing, or after landing and syncing.
 Verifier output stays local. Evidence references bind repository-relative files
 of at most 1 MiB each to SHA-256. The summary is
 bounded to 8 KiB, rejects sensitive-looking text and private absolute paths,

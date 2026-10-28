@@ -3526,6 +3526,65 @@ with patch.dict(os.environ, environment, clear=True), \
         patch.object(saved, "_register"), patch.object(saved, "_plan_hint"), \
         patch.object(saved.room, "status", return_value=scope_member):
     simple_patch = extra_patch.split(b"diff --git a/other.txt")[0]
+    # A digest-bound landing in the state repo must be present in the verifier tree.
+    landing = project / ".oms/landing-patches/land-scope.patch"
+    landing.parent.mkdir(parents=True, exist_ok=True)
+    landing.write_bytes(simple_patch)
+    landed_rows = scope_evidence(simple_patch)
+    landed_rows[1]["patch"] = ".oms/landing-patches/land-scope.patch"
+    landing_execution = temporary / "landing-verifier-checkout"
+    subprocess.run(["git", "clone", "-q", str(project), str(landing_execution)], check=True)
+    with patch.object(saved, "_records", return_value=([scope_worker], landed_rows)), \
+            patch.object(saved, "_execution_repo", return_value=landing_execution), \
+            patch.object(saved, "_run_verifier", return_value={"exit": 0}) as verifier, \
+            patch.object(saved, "_write") as write:
+        for path in ("", "0", "../outside.patch", str(landing), ".oms/landing-patches/missing.patch"):
+            landed_rows[1]["patch"] = path
+            assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
+                                  ["value.txt"])["outcome"] == "accepted", path
+        landed_rows[1]["patch"] = ".oms/landing-patches/land-scope.patch"
+        landing.write_bytes(b"different bytes\n")
+        assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
+                              ["value.txt"])["outcome"] == "accepted"
+        landing.write_bytes(simple_patch)
+        verifier.reset_mock()
+        write.reset_mock()
+        try:
+            saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+            raise AssertionError("accepted a verifier tree missing the landing")
+        except ValueError as error:
+            assert landed_rows[1]["patch"] in str(error) and "--repo WORKTREE" in str(error), error
+        verifier.assert_not_called()
+        write.assert_not_called()
+        run_command = subprocess.run
+        def unavailable_check(args, **kwargs):
+            if args == ["git", "apply", "--check"]:
+                raise subprocess.TimeoutExpired(args, 60)
+            return run_command(args, **kwargs)
+        with patch.object(subprocess, "run", side_effect=unavailable_check):
+            assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
+                                  ["value.txt"])["outcome"] == "accepted"
+        for invalid in (b"", b"malformed patch\n"):
+            landing.write_bytes(invalid)
+            invalid_rows = scope_evidence(invalid)
+            invalid_rows[1]["patch"] = landed_rows[1]["patch"]
+            with patch.object(saved, "_records", return_value=([scope_worker], invalid_rows)):
+                assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
+                                      ["value.txt"])["outcome"] == "accepted"
+        scope_evidence(simple_patch)
+        landing.write_bytes(simple_patch)
+        (landing_execution / "value.txt").write_text("conflict\n")
+        assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
+                              ["value.txt"])["outcome"] == "accepted"
+        (landing_execution / "value.txt").write_text("old\n")
+        verifier.reset_mock()
+        subprocess.run(["git", "apply"], cwd=landing_execution, input=simple_patch, check=True)
+        try:
+            assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true",
+                                  ["value.txt"])["outcome"] == "accepted"
+            verifier.assert_called_once_with(landing_execution, "true", 1800, evidence_repo=project)
+        finally:
+            subprocess.run(["git", "apply", "--reverse"], cwd=landing_execution, input=simple_patch, check=True)
     # BEGIN missing-admission diagnostic regression.
     diagnostic_workers = [dict(scope_worker, attempt_id=name) for name in ("att_missing_1", "att_landed", "att_missing_2")]
     with patch.object(saved, "_worker_owns", return_value=[]):

@@ -1621,6 +1621,26 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
         if outcome == 'accepted' and (not verify or not refs):
             raise ValueError('accepted requires an evidence reference and a passing verifier')
         _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding)
+        if outcome == 'accepted':
+            for admission in admissions:
+                if not admission:
+                    continue
+                path = admission.get('patch')
+                try:
+                    if _relative(repo, path)['sha256'] != admission.get('patch_sha256'):
+                        continue
+                    data = _read(repo, path, 1024 * 1024)
+                    if hashlib.sha256(data).hexdigest() != admission.get('patch_sha256'):
+                        continue
+                    check = subprocess.run(['git', 'apply', '--check'], cwd=str(execution), input=data,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                           check=False, timeout=60)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    continue
+                if check.returncode == 0:
+                    raise ValueError('landed patch %s applies cleanly to the verifier checkout; finalize from '
+                                     'the checkout containing the landing (--repo WORKTREE) or after landing and syncing'
+                                     % path)
     verification = {'status': 'not_run'}
     if verify:
         # Output remains local; a verifier transcript is never exported as a summary.
