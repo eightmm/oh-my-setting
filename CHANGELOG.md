@@ -25,9 +25,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Tier routes accept exact Pi and OpenCode models. The routine and light tiers try Pi with `openrouter/thinkingmachines/inkling:free` first, while judge roles stay on native routes unless explicitly sent elsewhere. Pi provider errors fall back once to the next tier candidate; the OpenRouter daily free-model cap cools that route until 00:00 UTC. The provider-error scanner documents Pi's status-line exception, and the cap check reads only Pi status lines so answer text cannot cool a route down.
 - Provider refresh in `oms update` also updates installed optional npm CLIs to their newest release at least 14 days old, applying `npm --before` to the whole dependency tree and restoring a local backup on failure. Lifecycle scripts remain enabled; Git and URL dependencies are not age-filtered by npm.
 - `oms panel --metrics` reports retained owner decisions per provider and model through `decisions_by_model`, making each model's acceptance rate visible.
+- Any supported CLI (Claude, Codex, Pi, Antigravity) can own the panel main. Ownership follows the recorded main harness and model family. Judge seats prefer a family other than the main's, and an unknown family fails closed. A main swap hands the room over without exiting before validation.
+- Pi write workers get Pi's `bash` tool so they can run the checks their brief requires; read workers stay without it. Pi has no sandbox: patch admission governs returned changes and worker guards check afterwards.
 
 ### Fixed
 
+- A consumed main-swap release can no longer be replayed. An identical retry is a no-op, and any other event naming a consumed or superseded main attempt is refused, so a replay cannot clear the successor main's binding.
 - Explicit standalone review settlement now selects workers whose parent attempt record was compacted away, so already-orphaned review workers can be closed. Lifecycle compaction also keeps a terminal attempt while a retained attempt names it as parent, preventing a compacted main from orphaning its review workers.
 
 ### Removed
