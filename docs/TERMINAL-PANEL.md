@@ -749,7 +749,7 @@ and admission; the panel does not apply it. Reviewers require a verifier and
 record a review gate. Among read roles only reviewers run `--verify`; the others refuse one (dispatch a reviewer to run checks). Workers cannot recursively dispatch or open owner sessions.
 An empty write patch from a panel dispatch or plan task exits 6 (`no changes`).
 Normal native permissions, harness policy and account consent remain in effect.
-Pi write workers run an unsandboxed shell limited by the worktree, worker guard and patch admission.
+Pi write workers have an unsandboxed shell. Worktree isolation and patch admission govern returned changes; worker guards provide retrospective checks.
 
 ```bash
 oms panel --repo . --dispatch worker --owner claude \
