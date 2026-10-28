@@ -31242,6 +31242,25 @@ EOF
     contains "$out" 'preserved for inspection' ||
       fail "a registration that could not be removed safely was left without recovery guidance: $out"
   fi
+
+  # Temporary cleanup never follows a worker-replaced worktree parent.
+  local victim="$TMP/worker-guard-own-path-victim"
+  mkdir -p "$victim/tmp"
+  : > "$victim/tmp/sentinel"
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+case "\$PWD" in */oh-my-setting-delegate.*/wt-*) ;; *) exit 0 ;; esac
+parent="\$(dirname "\$PWD")"
+cd /
+mv "\$parent" "\$parent.moved"
+ln -s "$victim" "\$parent"
+echo "replaced the managed worktree parent"
+EOF
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_GUARD_OFF=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --allow-no-change --no-verify --keep-worktree >/dev/null 2>&1 || true
+  [ -e "$victim/tmp/sentinel" ] || fail "temporary cleanup followed a replaced worktree parent"
 }
 
 test_delegate_rejects_recreated_managed_worktree_inode() {

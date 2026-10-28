@@ -940,6 +940,7 @@ fi
 worktree_parent="$(mktemp -d "$delegate_worktree_root/oh-my-setting-delegate.XXXXXX")" ||
   fail "mktemp failed in delegate worktree root: $delegate_worktree_root"
 worktree="$worktree_parent/wt-${worktree_parent##*.}"
+worktree_parent_physical="$(cd "$worktree_parent" && pwd -P)" || fail "delegate worktree parent could not be resolved"
 worktree_created=0
 cleanup_done=0
 worker_identity_physical=""
@@ -955,8 +956,12 @@ oms_harness_mark_tmpdir "$worktree_parent" "$delegate_worktree_repo" "$worktree"
 cleanup_delegated_worktree() {
   local cleanup_identity_detail=""
 
-  # Worker temporaries never outlive the run, even when the checkout is kept for salvage.
-  [ -z "$worktree_parent" ] || rm -rf -- "$worktree_parent/tmp"
+  # Worker temporaries never outlive the run, even when the checkout is kept for salvage;
+  # a parent the worker replaced (for example with a symlink) is left untouched.
+  if [ -n "$worktree_parent" ] && [ ! -L "$worktree_parent" ] &&
+    [ "$(cd "$worktree_parent" 2>/dev/null && pwd -P)" = "$worktree_parent_physical" ]; then
+    rm -rf -- "$worktree_parent/tmp"
+  fi
 
   if [ "$worktree_created" != 1 ]; then
     if [ "$KEEP_WORKTREE" = 0 ] && [ -n "$worktree_parent" ]; then
