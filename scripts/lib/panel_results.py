@@ -35,6 +35,8 @@ ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z')
 REVISION = re.compile(r'[0-9a-f]{24}\Z')
 MAX_SUMMARY, MAX_RESULT = 8192, 32768
 MAX_DRAFT = 4096
+# Landing capture objects and delegate patches go up to 16 MiB; evidence files stay at 1 MiB.
+PATCH_MAX = 16 * 1024 * 1024
 TERMINAL_FAILURE_STATES = TERMINAL_STATES - {'done'}
 
 
@@ -189,12 +191,12 @@ def _read(repo, relative, maximum=MAX_RESULT, missing=False):
         raise ValueError('panel evidence unavailable or unsafe') from error
 
 
-def _relative(repo, value):
+def _relative(repo, value, maximum=1024 * 1024):
     if (not isinstance(value, str) or not value or len(value) > 300 or
             value.startswith(('/', '\\')) or '\\' in value or ':' in value or
             any(part in ('', '.', '..') for part in value.split('/'))):
         raise ValueError('evidence must be a safe repository-relative path')
-    return {'path': value, 'sha256': hashlib.sha256(_read(repo, value, 1024 * 1024)).hexdigest()}
+    return {'path': value, 'sha256': hashlib.sha256(_read(repo, value, maximum)).hexdigest()}
 
 
 def _safe_summary(path, repo):
@@ -387,7 +389,7 @@ def _admission(repo, rows, task_id, worker):
         return None
     # Landing evidence and the delegated patch must still name the same bytes.
     try:
-        if _relative(repo, patch['patch'])['sha256'] != patch['patch_sha256']:
+        if _relative(repo, patch['patch'], PATCH_MAX)['sha256'] != patch['patch_sha256']:
             return None
     except (KeyError, ValueError):
         return None
@@ -1282,7 +1284,7 @@ def _accepted_prefix(repo, execution, landings):
             if not isinstance(verify, str) or not verify or '\0' in verify:
                 raise ValueError('invalid panel prefix verifier for task ' + ident)
             try:
-                patch = _read(repo, record.get('patch'), 16 * 1024 * 1024)
+                patch = _read(repo, record.get('patch'), PATCH_MAX)
                 if hashlib.sha256(patch).hexdigest() != record.get('patch_sha256'):
                     raise ValueError('patch digest changed')
                 _ensure_accept_tree(execution, record, patch)
@@ -1631,11 +1633,11 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
                             and path.count('/') == 2 and path.endswith('.patch')):
                         # Landing publications are hard links owned by the capture store.
                         data = runpy.run_path(str(ROOT / 'scripts/lib/landing-capture.py'))['read_patch'](
-                            str(repo), path, 1024 * 1024)
+                            str(repo), path, PATCH_MAX)
                     else:
-                        if _relative(repo, path)['sha256'] != admission.get('patch_sha256'):
+                        if _relative(repo, path, PATCH_MAX)['sha256'] != admission.get('patch_sha256'):
                             continue
-                        data = _read(repo, path, 1024 * 1024)
+                        data = _read(repo, path, PATCH_MAX)
                     if hashlib.sha256(data).hexdigest() != admission.get('patch_sha256'):
                         continue
                     check = subprocess.run(['git', 'apply', '--check'], cwd=str(execution), input=data,

@@ -3565,6 +3565,23 @@ with patch.dict(os.environ, environment, clear=True), \
         assert landing_stderr.getvalue() == "", landing_stderr.getvalue()
         verifier.assert_not_called()
         write.assert_not_called()
+        # Patches over the 1 MiB evidence ceiling still bind admission and run the check.
+        big_patch = (b"diff --git a/value.txt b/value.txt\n--- a/value.txt\n+++ b/value.txt\n@@ -1 +1,2 @@\n"
+                     b"-old\n+new\n+" + b"x" * (1 << 20) + b"\n")
+        big_rows = scope_evidence(big_patch)
+        capture_source.write_bytes(big_patch)
+        capture_store["publish"](str(project), capture_store["allocate"](
+            str(project), str(capture_source), "land-big", hashlib.sha256(big_patch).hexdigest()),
+            str(project / ".oms/landing-patches/land-big.patch"))
+        big_rows[1]["patch"] = ".oms/landing-patches/land-big.patch"
+        with patch.object(saved, "_records", return_value=([scope_worker], big_rows)):
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("accepted a verifier tree missing a landing over 1 MiB")
+            except ValueError as error:
+                assert "land-big.patch" in str(error), error
+        scope_evidence(simple_patch)
+        write.assert_not_called()
         run_command = subprocess.run
         def unavailable_check(args, **kwargs):
             if args == ["git", "apply", "--check"]:
