@@ -280,28 +280,34 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             raise refused
         usable = eligible
     if several:
-        # Use the board's rounded reading; stale, malformed and missing readings remain available.
+        # Exact-model providers have no weekly quota; retain their tier positions for reads.
         available, used_by = [], {}
         for candidate in usable:
-            used = weekly_used(provider_status, candidate["provider"])
+            provider = candidate["provider"]
+            if provider in EXACT_MODEL_PROVIDERS:
+                available.append(candidate)
+                continue
+            used = weekly_used(provider_status, provider)
             if used is None or used < 90:
                 available.append(candidate)
-                used_by[candidate["provider"]] = used
+                used_by[provider] = used
         if not available:
             raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
-        # With a reading for every remaining provider, the one with more weekly quota left goes first,
-        # unless the readings sit in the tie band: then fewer recent dispatches, else away from the main.
-        # Without a full set of readings, spread load away from the provider the main itself consumes.
-        if None not in used_by.values():
+        natives = [c for c in available if c["provider"] not in EXACT_MODEL_PROVIDERS]
+        if used_by and None not in used_by.values():
             band = routes["tie_band"]
             tied = max(used_by.values()) - min(used_by.values()) < band["gap"]
             if tied:
-                available = sorted(available, key=lambda c: ((recent or {}).get(c["provider"], 0),
-                                                              c["provider"] == owner))
+                natives = sorted(natives, key=lambda c: ((recent or {}).get(c["provider"], 0),
+                                                         c["provider"] == owner))
             else:
-                available = sorted(available, key=lambda c: used_by[c["provider"]])
+                natives = sorted(natives, key=lambda c: used_by[c["provider"]])
         else:
-            available = sorted(available, key=lambda c: c["provider"] == owner)
+            natives = sorted(natives, key=lambda c: c["provider"] == owner)
+        native_iter = iter(natives)
+        available = [c if c["provider"] in EXACT_MODEL_PROVIDERS else next(native_iter) for c in available]
+        if access == "write":
+            available = sorted(available, key=lambda c: c["provider"] in EXACT_MODEL_PROVIDERS)
         usable = available
     # Read-only investigate workers prefer non-Pi; apply after catalog/quota ordering.
     if role == "worker" and access == "read" and purpose == "investigate":

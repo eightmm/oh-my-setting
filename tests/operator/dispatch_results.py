@@ -99,6 +99,29 @@ def exercise_exact_model_routing():
     else:
         raise AssertionError("sole capped route was accepted")
     exercise_pi_cooldown_routing()
+    # Free routes preserve read order but serve writes only after usable native routes.
+    providers = {"pi", "claude", "codex"}
+    for claude_used, codex_used, expected in ((10, 60, "claude"), (60, 10, "codex")):
+        readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
+        assert allocate("codex", access="write", installed=providers, provider_status=readings,
+                        check_visibility=False)["provider"] == expected
+        assert allocate("codex", access="read", installed=providers, provider_status=readings,
+                        check_visibility=False)["provider"] == "pi"
+    assert allocate("codex", access="write", installed={"pi"}, check_visibility=False)["provider"] == "pi"
+    for missing in (None, "", "malformed"):
+        readings = {"claude": {"weekly_used": missing}, "codex": {"weekly_used": 0}}
+        assert allocate("codex", access="write", installed=providers, provider_status=readings,
+                        check_visibility=False)["provider"] == "claude"
+    for used in (0, 89, 90):
+        readings = {"claude": {"weekly_used": used}, "codex": {"weekly_used": 90}}
+        expected = "claude" if used < 90 else "pi"
+        assert allocate("codex", access="write", installed=providers, provider_status=readings,
+                        check_visibility=False)["provider"] == expected
+    for used in (0, 14, 15):
+        readings = {"claude": {"weekly_used": 0}, "codex": {"weekly_used": used}}
+        expected = "claude" if used == 15 else "codex"
+        assert allocate("claude", access="write", installed=providers, provider_status=readings,
+                        check_visibility=False)["provider"] == expected
     # Read-only investigate workers must avoid Pi when another provider is available.
     assert allocate("codex", role="worker", access="read", purpose="investigate", installed={"pi", "claude"})["provider"] == "claude"
     assert allocate("codex", role="worker", access="read", purpose="investigate", installed={"pi"})["provider"] == "pi"
@@ -1357,9 +1380,12 @@ try:
     private_plan = json.loads(call(request + ["--dry-run"]))
     assert private_plan["route"]["provider"] != "pi", private_plan
     pi_env = dict(environment, OMS_PANEL_PUBLIC_ROUTE_OPT_IN="1")
-    planned = json.loads(call(request + ["--dry-run"], pi_env))
+    native_plan = json.loads(call(request + ["--dry-run"], pi_env))
+    assert native_plan["route"]["provider"] in {"claude", "codex"}, native_plan
+    pi_request = request + ["--to", "pi", "--model", pi_model, "--reasoning-effort", "medium"]
+    planned = json.loads(call(pi_request + ["--dry-run"], pi_env))
     assert planned["route"]["provider"] == "pi" and "--reasoning-effort" in planned["argv"]
-    answer = call(request, dict(pi_env, PANEL_TEST_MODE="write",
+    answer = call(pi_request, dict(pi_env, PANEL_TEST_MODE="write",
                                 OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
     assert "patch:" in answer, answer
     observed = json.loads(worker_log.read_text().splitlines()[-1])
