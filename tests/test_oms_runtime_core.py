@@ -751,13 +751,13 @@ class RuntimeFixture(RuntimeFixtureBase):
     def test_near_limit_capsule_import_remains_readable(self) -> None:
         row = capsule.build(self.repo)
         target_size = capsule.MAX_CAPSULE_BYTES - 256
-        row['payload']['padding'] = 'x' * max(
+        row['payload']['continuity']['next_step'] = 'x' * max(
             0, target_size - len(canonical_json(row)) - 128)
         row['digest'] = sha256_bytes(canonical_json(row['payload']))
         row['capsule_id'] = 'capsule-' + row['digest'][:32]
         encoded = canonical_json(row)
         delta = capsule.MAX_CAPSULE_BYTES - 1 - len(encoded)
-        row['payload']['padding'] += 'x' * delta
+        row['payload']['continuity']['next_step'] += 'x' * delta
         row['digest'] = sha256_bytes(canonical_json(row['payload']))
         row['capsule_id'] = 'capsule-' + row['digest'][:32]
         encoded = canonical_json(row)

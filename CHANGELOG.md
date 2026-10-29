@@ -8,6 +8,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Portable capsule verify and import refuse any envelope, payload or nested
+  field the exporter does not emit, so a digest-valid capsule carrying an
+  extra field such as an approval or command no longer imports.
 - The autopilot remainder planner sees why the frozen acceptance failed: the
   latest acceptance command, status and a bounded, redacted log tail go into
   the decompose prompt as fenced data, and a parked plan's hints name the
@@ -184,6 +187,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms runtime backend target add|list|remove` keeps local SSH target
+  metadata (alias and absolute workdir only) in `.oms/runtime/targets.json`,
+  never in capsules. `backend check remote --target NAME` is an offline report
+  (not ready, isolation unenforced, no connection); `backend run --target` is
+  refused until SSH execution exists; `--target` and `--adapter` are mutually
+  exclusive; harness children may only list targets.
 - Panel control `d` (Drive goal) sends the shared plan goal, with `oms agent-plan accept` as the acceptance check, to the Claude main as a Claude Code `/goal` after a confirmation, or starts a Claude main with it; it refuses without an active plan goal, on a finished plan, and for non-Claude mains.
 - `oms` in a terminal opens a control panel: the native Claude Code or Codex
   conversation keeps its pane beside a read-only OMS sidebar (connected tree,
