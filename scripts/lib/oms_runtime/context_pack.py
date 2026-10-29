@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
-    from .common import ABSOLUTE_PATH_RE, CoreError, sensitive_text, sha256_bytes
+    from .common import ABSOLUTE_PATH_RE, SECRET_VALUE_RE, CoreError, sensitive_text, sha256_bytes
 except ImportError:  # direct execution: python3 .../oms_runtime/context_pack.py
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from oms_runtime.common import ABSOLUTE_PATH_RE, CoreError, sensitive_text, sha256_bytes
+    from oms_runtime.common import ABSOLUTE_PATH_RE, SECRET_VALUE_RE, CoreError, sensitive_text, sha256_bytes
 
 MAX_PACK_BYTES = 262144
 MAX_ENTRIES = 200
@@ -121,6 +121,61 @@ def _read_pack_bytes(path: Path, max_bytes: int) -> Tuple[bytes, str]:
     return raw, text
 
 
+def _sensitive_kind(text: str) -> str:
+    if SECRET_VALUE_RE.search(text):
+        return "secret-shaped"
+    if ABSOLUTE_PATH_RE.search(text):
+        return "absolute path"
+    return ""
+
+
+def _sensitive_field(value: Any, label: str = "pack") -> Optional[Tuple[str, str]]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            # Unknown keys may themselves contain private data; never echo them.
+            safe = isinstance(key, str) and key in {
+                "task", "entries", "files", "tests", "test_cases", "evidence",
+                "hubs", "blast", "assurance", "change", "coverage", "retrieval",
+                "path", "reason", "id", "name", "language", "project_graph_revision",
+            }
+            child = (label + "." + key if label != "pack" else key) if safe else label
+            found = _sensitive_kind(json.dumps(key, ensure_ascii=False))
+            if found:
+                return label, found
+            result = _sensitive_field(item, child)
+            if result:
+                return result
+    elif isinstance(value, list):
+        for item in value:
+            result = _sensitive_field(item, label)
+            if result:
+                return result
+    else:
+        kind = _sensitive_kind(json.dumps(value, ensure_ascii=False))
+        if kind:
+            return label, kind
+    return None
+
+
+def _sanitize_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value
+                if not sensitive_text(json.dumps(item, ensure_ascii=False))]
+    if isinstance(value, dict):
+        return {key: _sanitize_value(item) for key, item in value.items()
+                if not sensitive_text(json.dumps(key, ensure_ascii=False))}
+    if sensitive_text(json.dumps(value, ensure_ascii=False)):
+        return "[sensitive-content-omitted]"
+    return value
+
+
+def _sanitize_automatic(pack: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = _sanitize_value(pack)
+    if sensitive_text(json.dumps(cleaned, ensure_ascii=False)):
+        raise CoreError("automatic pack contains sensitive content")
+    return cleaned
+
+
 def validate_context_pack(path: Path, repo: Path, *, max_bytes: int = MAX_PACK_BYTES) -> Dict[str, Any]:
     """Return a bounded summary of PATH, or raise CoreError with a one-line reason.
 
@@ -132,12 +187,19 @@ def validate_context_pack(path: Path, repo: Path, *, max_bytes: int = MAX_PACK_B
     raw, text = _read_pack_bytes(path, max_bytes)
     # Before any structural trust: a pack carrying secret-shaped or
     # absolute-path content must not reach a provider prompt at all.
-    if sensitive_text(text):
-        raise CoreError("pack contains secret-shaped or absolute-path content")
     try:
         pack = json.loads(text)
     except ValueError as exc:
+        kind = _sensitive_kind(text)
+        if kind:
+            raise CoreError("pack contains %s content" % kind)
         raise CoreError("pack is not valid JSON: %s" % exc)
+    found = _sensitive_field(pack)
+    if found:
+        raise CoreError("%s contains %s content" % found)
+    kind = _sensitive_kind(text)
+    if kind:
+        raise CoreError("pack contains %s content" % kind)
     if not isinstance(pack, dict):
         raise CoreError("pack must be a JSON object")
 
@@ -241,7 +303,8 @@ def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> 
     # Continuation prompts quote findings linking into another checkout; the
     # pack validator refuses absolute paths, so drop them from the task text.
     task = ABSOLUTE_PATH_RE.sub("[absolute-path-omitted]", task)
-    return context_pack(repo, checked[0], task=task[:2000], max_files=8, state=state)
+    return context_pack(repo, checked[0], task=task[:2000], max_files=8, state=state,
+                        _transform=_sanitize_automatic)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -314,10 +314,12 @@ def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, ma
     return pack
 
 
-def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None, entry_paths: Sequence[str] = ()) -> Dict[str, Any]:
+def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None, entry_paths: Sequence[str] = (), _transform=None) -> Dict[str, Any]:
     """Write .oms/project-graph/context/<digest>.json and return the pack."""
     pack = select_context(repo, graph, task=task, max_files=max_files,
                           max_nodes=max_nodes, depth=depth, base=base, state=state, entry_paths=entry_paths)
+    if _transform is not None:
+        pack = _transform(pack)
     directory = ensure_private_dir(state_dir(Path(repo).resolve(), state) / "context")
     digest = sha256_bytes(canonical_json(pack))
     path = directory / (digest + ".json")

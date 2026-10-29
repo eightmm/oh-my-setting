@@ -60,6 +60,60 @@ class ContextPackValidatorTest(unittest.TestCase):
         self.assertIn('lease.py', pack['files'])
         validate_context_pack(self.write(pack), self.repo)
 
+    def test_automatic_pack_omits_sensitive_graph_entries(self) -> None:
+        from oms_graph.project import context
+        (self.repo / 'lease.py').write_text('def recover_lease(): return 1\n', encoding='utf-8')
+        parent = Path(self.tmp.name) / 'parent'
+        parent.mkdir()
+        unsafe = '/tmp/private/example.txt'
+        generated = _pack(pack_bytes=0, files=['lease.py', 'bad ' + unsafe],
+                          test_cases=[{'id': 'test:' + unsafe, 'language': 'shell',
+                                       'name': 'test ' + unsafe, 'path': 'lease.py'}],
+                          evidence=[{'path': 'lease.py', 'reason': 'see ' + unsafe}])
+        with mock.patch.object(context, 'select_context', return_value=generated):
+            pack = automatic_context_pack(self.repo, parent, Path(self.tmp.name) / 'state', 'recover lease')
+        self.assertEqual(pack['files'], ['lease.py'])
+        self.assertEqual(pack['test_cases'], [])
+        self.assertEqual(pack['evidence'], [])
+        validate_context_pack(self.write(pack), self.repo)
+        saved = list((Path(self.tmp.name) / 'state' / 'context').glob('*.json'))
+        self.assertEqual(len(saved), 1)
+        self.assertNotIn(unsafe, saved[0].read_text(encoding='utf-8'))
+
+    def test_automatic_pack_filters_repository_file_names(self) -> None:
+        from oms_graph.project import context
+        unsafe_name = 'recover_lease ' + 'api' + '_key: fixture.py'
+        (self.repo / unsafe_name).write_text('def test_recover_lease(): pass\n', encoding='utf-8')
+        (self.repo / 'lease.py').write_text('def recover_lease(): pass\n', encoding='utf-8')
+        parent = Path(self.tmp.name) / 'parent'
+        parent.mkdir()
+        state = Path(self.tmp.name) / 'state'
+        with mock.patch.object(context, 'select_context', wraps=context.select_context) as select:
+            pack = automatic_context_pack(self.repo, parent, state, 'recover lease')
+        graph = json.loads((state / 'graph.json').read_text(encoding='utf-8'))
+        raw = context.select_context(self.repo, graph, task='recover lease', max_files=8, state=state)
+        self.assertIn(unsafe_name, raw['files'])
+        self.assertNotIn(unsafe_name, pack['files'])
+        self.assertIn('lease.py', pack['files'])
+        validate_context_pack(self.write(pack), self.repo)
+
+    def test_refusal_identifies_field_and_kind_without_value(self) -> None:
+        for field, value, kind in [('task', 'see /tmp/private/example.txt', 'absolute path'),
+                                   ('task', 'api' '_key: fixture', 'secret-shaped')]:
+            self.write(_pack(**{field: value}))
+            with self.assertRaises(CoreError) as caught:
+                validate_context_pack(self.path, self.repo)
+            self.assertIn(field, str(caught.exception))
+            self.assertIn(kind, str(caught.exception))
+            self.assertNotIn(value, str(caught.exception))
+        unsafe = '/tmp/private/example.txt'
+        self.write(_pack(test_cases=[{'id': 'x', 'language': 'shell',
+                                     'name': unsafe, 'path': 'test.sh'}]))
+        with self.assertRaisesRegex(CoreError, 'test_cases.name contains absolute path'):
+            validate_context_pack(self.path, self.repo)
+        self.refuses(None, 'absolute path', text='{broken "' + unsafe + '"')
+        validate_context_pack(self.write(_pack(files=[], tests=[], test_cases=[])), self.repo)
+
     def test_automatic_pack_cold_warm_and_mixed_cache_generations(self) -> None:
         from oms_graph.project import build
 
@@ -154,7 +208,7 @@ class ContextPackValidatorTest(unittest.TestCase):
         pem = "-----BE" "GIN RSA PRIVATE " "KEY-----"
         self.refuses(_pack(task="rotate the %s material" % pem), "secret-shaped")
         self.refuses(_pack(task="api" "_key: fixture"), "secret-shaped")
-        self.refuses(_pack(task="see /etc/hosts for the mapping"), "secret-shaped")
+        self.refuses(_pack(task="see /etc/hosts for the mapping"), "absolute path")
 
     def test_oversized_pack_is_refused(self) -> None:
         pack = _pack(task="x" * (MAX_PACK_BYTES + 10))
