@@ -7,6 +7,33 @@ import io
 from concurrent.futures import ThreadPoolExecutor
 
 
+def exercise_continued_stage_rollup(repo):
+    task = "continued-stage"
+    attempts = [dict(task_id=task, attempt_id="round-%s" % n, state="done",
+                     refs=({"panel_continues": "round-%s" % (n - 1)} if n > 1 else {}))
+                for n in range(1, 4)]
+    calls = [dict(task_id=task, kind="delegate", attempt_id="round-%s" % n,
+                  exit=1 if n == 1 else 0, verify_exit=1 if n == 1 else 0)
+             for n in range(1, 4)]
+    with patch.object(saved, "_records", return_value=(attempts, calls)):
+        row = saved.results(repo, task_id=task)["rows"][0]
+    assert row["stages"]["implement"]["state"] == "passed", row
+    assert row["stages"]["verify"]["state"] == "passed", row
+    assert row["next_action"] == "record main decision", row
+    assert len(row["calls"]) == 3 and not any(c.get("superseded") for c in row["calls"]), row
+    for ref in (None, "", "0", "malformed"):
+        independent = [attempts[0], dict(attempts[1], refs={"panel_continues": ref})]
+        with patch.object(saved, "_records", return_value=(independent, calls[:2])):
+            row = saved.results(repo, task_id=task)["rows"][0]
+        assert row["stages"]["implement"]["state"] == "failed", row
+        assert row["stages"]["verify"]["state"] == "failed", row
+        assert row["next_action"] == "retry implement", row
+    verify_calls = [dict(calls[0], exit=0), calls[1]]
+    with patch.object(saved, "_records", return_value=(attempts[:2], verify_calls)):
+        row = saved.results(repo, task_id=task)["rows"][0]
+    assert row["stages"]["verify"]["state"] == "passed", row
+
+
 def exercise_pi_cooldown_routing():
     import panel_routing
     from datetime import datetime, timezone, timedelta
@@ -4222,6 +4249,7 @@ with patch.dict(os.environ, environment, clear=True):
         assert staged["representative_state"] == "review failed" and staged["next_action"] == "retry review"
         page = saved.results(project, offset=0, limit=1)
         assert page["offset"] == 0 and page["omitted"] == 0 and page["omitted_range"] is None
+    exercise_continued_stage_rollup(project)
     review_fixture_repo = temporary / "review-stage-verdict"
     review_fixture_repo.mkdir()
 

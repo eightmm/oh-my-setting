@@ -769,6 +769,21 @@ def _run_verifier_slotted(repo, verify, timeout, evidence_repo, slot):
     return result
 
 
+def _continues(workers, index, end):
+    task = workers[index].get('task_id')
+    if not task or workers[end].get('task_id') != task:
+        return False
+    cursor = end
+    while cursor > index:
+        previous = workers[cursor].get('refs', {}).get('panel_continues')
+        if not previous:
+            return False
+        cursor = next((pos for pos in range(cursor - 1, index - 1, -1)
+                       if workers[pos].get('attempt_id') == previous
+                       and workers[pos].get('task_id') == task), -1)
+    return cursor == index
+
+
 def _write_candidates(workers, admissions, attempts, owner, main_id=None):
     """Account for discarded retries without treating failure as admission."""
     from review_settlement import _participant_parents
@@ -779,15 +794,7 @@ def _write_candidates(workers, admissions, attempts, owner, main_id=None):
         reason = None
         if not admissions[index] and worker.get('task_id'):
             for end in range(index + 1, len(workers)):
-                if not admissions[end] or workers[end].get('task_id') != worker['task_id']:
-                    continue
-                cursor = end
-                while cursor > index:
-                    previous = workers[cursor].get('refs', {}).get('panel_continues')
-                    cursor = next((pos for pos in range(cursor - 1, index - 1, -1)
-                                   if workers[pos].get('attempt_id') == previous
-                                   and workers[pos].get('task_id') == worker['task_id']), -1)
-                if cursor == index:
+                if admissions[end] and _continues(workers, index, end):
                     replacement, reason = workers[end], 'continued'
                     break
         # Unassigned writes and distinct aliases cannot be assumed to be retries.
@@ -2114,16 +2121,23 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                     call['changes'] = {'issue': 'patch evidence unavailable'}
             calls.append(call)
         superseded_ids = {item['attempt_id'] for item in (result or {}).get('superseded_attempts', [])}
+        call_ids = {c.get('attempt_id') for c in calls if c.get('attempt_id')}
+        continued_ids = {worker.get('attempt_id') for index, worker in enumerate(matching)
+                         if worker.get('attempt_id') and any(
+                             later.get('attempt_id') in call_ids and _continues(matching, index, end)
+                             for end, later in enumerate(matching) if end > index)}
         calls_by_stage = {'implement': [], 'verify': [], 'review': [], 'main_decision': []}
         for call in calls:
             if call.get('attempt_id') in superseded_ids:
                 call['superseded'] = True
                 continue
             if call.get('verify_exit') is not None:
-                calls_by_stage['verify'].append(dict(call, stage_exit=call.get('verify_exit')))
+                if call.get('verify_exit') == 0 or call.get('attempt_id') not in continued_ids:
+                    calls_by_stage['verify'].append(dict(call, stage_exit=call.get('verify_exit')))
             stage = ('review' if call.get('kind') == 'review' else
                      'implement' if call.get('kind') in ('delegate', 'call', 'ask', 'consult') else None)
-            if stage:
+            if stage and (stage == 'review' or call.get('exit') in (None, 0)
+                          or call.get('attempt_id') not in continued_ids):
                 calls_by_stage[stage].append(call)
         review_records = [(position, row) for position, row in enumerate(indexed)
                           if row.get('kind') in ('review', 'review-outcome')
