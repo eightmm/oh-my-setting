@@ -4077,14 +4077,15 @@ with patch.dict(os.environ, environment, clear=True), \
 retry_patch = extra_patch.split(b"diff --git a/other.txt")[0]
 retry_rows = scope_evidence(retry_patch)
 retry_rows[1]["event_id"] = "evt_retry_landed"
-retry_worker = dict(scope_worker, created_at="2026-10-16T00:00:02Z", state="review")
+retry_worker = dict(scope_worker, created_at="2026-10-16T00:00:02Z", state="review",
+                    refs=dict(scope_worker["refs"], panel_purpose="implement"))
 failed_worker = dict(retry_worker, attempt_id="att_retry_failed", state="failed",
                      created_at="2026-10-16T00:00:01Z")
 failed_row = {"kind": "delegate", "task_id": "scope-result", "attempt_id": failed_worker["attempt_id"], "exit": 7}
 with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_register"), \
         patch.object(saved, "_plan_hint"), patch.object(saved, "_worker_owns", return_value=["value.txt"]):
     for state in ("failed", "timed_out", "cancelled", "abandoned"):
-        previous = dict(failed_worker, state=state)
+        previous = dict(failed_worker, state=state, refs=dict(failed_worker["refs"], panel_alias="W2"))
         with patch.object(saved, "_records", return_value=([previous, retry_worker], [failed_row] + retry_rows)):
             accepted_retry = saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
             assert accepted_retry["admission_event_ids"] == ["evt_retry_landed"], accepted_retry
@@ -4106,11 +4107,11 @@ with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_regi
             "superseded_by": continued["attempt_id"], "reason": "continued"}], result
     middle = dict(continued, attempt_id="att_middle", created_at="2026-10-16T00:00:01.5Z")
     last = dict(continued, refs=dict(continued["refs"], panel_continues=middle["attempt_id"]))
-    selected, landed, superseded = saved._write_candidates([previous, middle, last], [None, None, {"event_id": "landed"}], [], "codex")
+    selected, landed, superseded = saved._write_candidates(project, [previous, middle, last], [None, None, {"event_id": "landed"}], [], "codex")
     assert selected == [last] and len(superseded) == 2 and all(item["reason"] == "continued" for item in superseded)
     for ref in (None, "", "malformed", "att_missing"):
         candidate = dict(continued, refs=dict(continued["refs"], panel_continues=ref))
-        selected, _, superseded = saved._write_candidates([previous, candidate], [None, {"event_id": "landed"}], [], "codex")
+        selected, _, superseded = saved._write_candidates(project, [previous, candidate], [None, {"event_id": "landed"}], [], "codex")
         assert selected == [previous, candidate] and not superseded
     # A -> B -> C retains one participant even after both write parents stop.
     gone = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
@@ -4163,12 +4164,61 @@ with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_regi
             (dict(failed_worker, state="review"), retry_worker, retry_rows),
             (dict(failed_worker, created_at=retry_worker["created_at"]), retry_worker, retry_rows),
             (dict(failed_worker, parent_attempt_id="other-main"), retry_worker, retry_rows),
-            (dict(failed_worker, refs=dict(failed_worker["refs"], panel_alias="W2")), retry_worker, retry_rows),
+            (dict(failed_worker, refs=dict(failed_worker["refs"], panel_purpose="different")), retry_worker, retry_rows),
             (failed_worker, retry_worker, retry_rows[:1])):
         with patch.object(saved, "_records", return_value=([previous, candidate], [failed_row] + rows)):
             try:
                 saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
                 raise AssertionError("unaccounted attempt escaped admission")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+    for old_purpose, new_purpose, matches in ((None, None, True), (None, "implement", False),
+            ("implement", None, False), ("", "", True), ("", "implement", False)):
+        previous = dict(failed_worker, refs=dict(failed_worker["refs"], panel_purpose=old_purpose, panel_alias="W2"))
+        candidate = dict(retry_worker, refs=dict(retry_worker["refs"], panel_purpose=new_purpose))
+        selected, _, superseded = saved._write_candidates(project, [previous, candidate], [None, {"event_id": "landed"}], [], "codex")
+        assert (selected == [candidate] and len(superseded) == 1) if matches else (selected == [previous, candidate] and not superseded)
+    for old_scope, new_scope, matches in ((["parser.py"], ["ui.py"], False),
+            (["value.txt"], ["value.txt"], True), (["value.txt"], ["value.txt", "other.txt"], True),
+            (["value.txt"], ["."], False), (["src/parser.py"], ["src"], False),
+            (["src"], ["[s]rc"], False),
+            (["src/[ab]/parser.py"], ["src/[ab]"], False),
+            (["src/[ab]"], ["src/[ab]"], True), (["src/[ab]/parser.py"], ["src"], False),
+            (["./value.txt"], ["value.txt"], False),
+            ([str(n) for n in range(16)], [str(n) for n in range(16)], True),
+            ([str(n) for n in range(17)], [str(n) for n in range(17)], False),
+            (["src/[z-a]/parser.py"], ["src"], False), (["value.txt"], ["[z-a]"], False),
+            (["src2/parser.py"], ["src"], False), ([], ["value.txt"], False),
+            (["value.txt"], [], False), ([""], ["value.txt"], False),
+            ([" "], ["value.txt"], False), ([0], ["value.txt"], False),
+            (["../bad"], ["."], False), (["value.txt"], ["../bad"], False),
+            (ValueError("unavailable"), ["value.txt"], False),
+            (["value.txt"], ValueError("unavailable"), False)):
+        def scope_for_attempt(repo, worker):
+            scope = old_scope if worker["attempt_id"] == failed_worker["attempt_id"] else new_scope
+            if isinstance(scope, Exception):
+                raise scope
+            return scope
+        with patch.object(saved, "_worker_owns", side_effect=scope_for_attempt):
+            selected, _, superseded = saved._write_candidates(project, [failed_worker, retry_worker],
+                [None, {"event_id": "landed"}], [], "codex")
+            assert (selected == [retry_worker] and len(superseded) == 1) if matches else (selected == [failed_worker, retry_worker] and not superseded)
+            if not matches and old_scope in (["parser.py"], [], ["value.txt"]) and new_scope in (["ui.py"], [], ["value.txt"]):
+                with patch.object(saved, "_records", return_value=([failed_worker, retry_worker], [failed_row] + retry_rows)):
+                    try:
+                        saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                        raise AssertionError("uncovered attempt escaped admission")
+                    except ValueError as error:
+                        assert str(error), error
+    for old_scope, new_scope in ((["src/[ab]/parser.py"], ["src/[ab]", "value.txt"]),
+                                 (["src"], ["[s]rc", "value.txt"])):
+        def glob_scope(repo, worker):
+            return old_scope if worker["attempt_id"] == failed_worker["attempt_id"] else new_scope
+        with patch.object(saved, "_worker_owns", side_effect=glob_scope), \
+                patch.object(saved, "_records", return_value=([failed_worker, retry_worker], [failed_row] + retry_rows)):
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("distinct scope escaped admission")
             except ValueError as error:
                 assert "matching landed patch" in str(error), error
 # END patch-scope finalize regression.

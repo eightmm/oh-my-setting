@@ -784,7 +784,7 @@ def _continues(workers, index, end):
     return cursor == index
 
 
-def _write_candidates(workers, admissions, attempts, owner, main_id=None):
+def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None):
     """Account for discarded retries without treating failure as admission."""
     from review_settlement import _participant_parents
 
@@ -797,7 +797,7 @@ def _write_candidates(workers, admissions, attempts, owner, main_id=None):
                 if admissions[end] and _continues(workers, index, end):
                     replacement, reason = workers[end], 'continued'
                     break
-        # Unassigned writes and distinct aliases cannot be assumed to be retries.
+        # Fresh retries need every failed scope entry verbatim in the later scope.
         if (not replacement and not admissions[index] and worker.get('task_id') and worker.get('parent_attempt_id')
                 and worker.get('state') in {'failed', 'timed_out', 'cancelled', 'abandoned'}):
             for later, admission in zip(workers[index + 1:], admissions[index + 1:]):
@@ -813,10 +813,19 @@ def _write_candidates(workers, admissions, attempts, owner, main_id=None):
                 if (admission and later.get('task_id') == worker['task_id']
                         and ((parent == worker.get('parent_attempt_id') and (not main_id or parent == main_id))
                              or {parent, worker.get('parent_attempt_id')} <= lineages[anchor])
-                        and later.get('refs', {}).get('panel_alias') == worker.get('refs', {}).get('panel_alias')
+                        and later.get('refs', {}).get('panel_purpose') == worker.get('refs', {}).get('panel_purpose')
                         and later.get('created_at', '') > worker.get('created_at', '')):
-                    replacement = later
-                    break
+                    try:
+                        old_scope, new_scope = _worker_owns(repo, worker), _worker_owns(repo, later)
+                        if not old_scope or not new_scope:
+                            continue
+                        room.declared_scopes('worker', old_scope)
+                        room.declared_scopes('worker', new_scope)
+                        if all(path in new_scope for path in old_scope):
+                            replacement = later
+                            break
+                    except (OSError, ValueError, TypeError):
+                        continue
         if replacement:
             superseded.append({'attempt_id': worker['attempt_id'],
                                'superseded_by': replacement['attempt_id'],
@@ -888,7 +897,7 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
                       and a.get('refs', {}).get('panel_role') == 'worker'],
                      key=lambda a: (a.get('created_at', ''), a['attempt_id']))
     admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
-    selected, admissions, superseded = _write_candidates(workers, admissions, attempts, owner, main_id)
+    selected, admissions, superseded = _write_candidates(repo, workers, admissions, attempts, owner, main_id)
     # Fence this task and its unassigned write workers while other tasks keep moving.
     worker_ids = {a.get('attempt_id') for a in workers}
     task_attempts = [a for a in related if a.get('task_id') == task_id or a.get('attempt_id') in worker_ids]
