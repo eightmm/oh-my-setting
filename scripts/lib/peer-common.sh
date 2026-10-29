@@ -868,7 +868,7 @@ oms_verify_slot_acquire() {
     for e in $entries; do
       case "$e" in [0-9]*-[0-9]*-*) ;; *) continue ;; esac
       if [ "$e" != "$name" ] && ! oms_verify_entry_alive "$root/$e"; then
-        rm -rf "$root/$e" 2>/dev/null || true
+        rm -rf "${root:?}/$e" 2>/dev/null || true
         continue
       fi
       alive=$((alive + 1))
@@ -915,6 +915,7 @@ oms_verify_traps_save() {
 oms_verify_traps_restore() {
   local PATH="${PATH:-/usr/bin:/bin}"
   trap - INT TERM
+  # shellcheck source=/dev/null
   [ -z "${OMS_VERIFY_TRAPS:-}" ] || { . "$OMS_VERIFY_TRAPS"; rm -f "$OMS_VERIFY_TRAPS"; }
   OMS_VERIFY_TRAPS=""
 }
