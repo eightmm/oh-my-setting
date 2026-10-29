@@ -655,9 +655,9 @@ def read_plan_list(repo, collect):
                                         'XDG_STATE_HOME', 'PATH')}))
         return hashlib.sha256(_body(entries)).hexdigest()
 
-    def refreshed(value):
+    def refreshed(value, allowed_expired=(), record_expired=None, observed_at=None):
         value = copy.deepcopy(value)
-        now = int(time.time())
+        now = int(time.time() if observed_at is None else observed_at)
         for task in value['tasks']:
             state = task.get('state')
             if state not in ('claimed', 'running', 'review'):
@@ -676,7 +676,11 @@ def read_plan_list(repo, collect):
             age = now - anchor
             ttl = _plan_claim_ttl(task)
             if state == 'claimed' and age >= ttl:
-                return None
+                key = [task.get('id'), anchor]
+                if record_expired is not None:
+                    record_expired.append(key)
+                elif key not in allowed_expired:
+                    return None
             task['claim_age_s'] = age
         return value
 
@@ -688,13 +692,17 @@ def read_plan_list(repo, collect):
             return collect()
         cached = _load(repo, relative, identity, generation)
         if cached and _plan_inputs_current(cached['value']):
-            value = refreshed(cached['value']['result'])
+            allowed = (cached['value'].get('expired_checked', [])
+                       if 0 <= time.time() - cached['created'] < INTERVAL else [])
+            value = refreshed(cached['value']['result'], allowed)
             if value is not None and stamp() == generation and _plan_inputs_current(cached['value']):
                 return value
         with _lock(repo, 'panel-cache-plan-list', timeout=0):
             cached = _load(repo, relative, identity, generation)
             if cached and _plan_inputs_current(cached['value']):
-                value = refreshed(cached['value']['result'])
+                allowed = (cached['value'].get('expired_checked', [])
+                           if 0 <= time.time() - cached['created'] < INTERVAL else [])
+                value = refreshed(cached['value']['result'], allowed)
                 if value is not None and stamp() == generation and _plan_inputs_current(cached['value']):
                     return value
             try:
@@ -702,10 +710,13 @@ def read_plan_list(repo, collect):
             except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError,
                     subprocess.SubprocessError, SystemExit):
                 return collect()
+            observed_at = time.time()
             value = collect()
-            envelope = {'result': value, 'inputs': inputs}
-            if (stamp() == generation and refreshed(value) is not None
-                    and _plan_inputs_current(envelope)):
+            # Only claims checked by this collection may use its bounded liveness result.
+            expired_checked = []
+            refreshed(value, record_expired=expired_checked, observed_at=observed_at)
+            envelope = {'result': value, 'inputs': inputs, 'expired_checked': expired_checked}
+            if stamp() == generation and _plan_inputs_current(envelope):
                 data = {'schema': 1, 'repo': identity, 'fingerprint': generation,
                         'created': time.time(), 'value': envelope,
                         'sha256': hashlib.sha256(_body(envelope)).hexdigest()}

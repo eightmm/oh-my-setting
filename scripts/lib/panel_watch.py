@@ -230,6 +230,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             layout_mode = "work"
             next_read, next_frame, revision = 0, 0, 0
             snapshots, animated = 0, (None, False)
+            size = None
             held = {}
             next_focus, splits, modes = 0, SplitSync(), PanelModeSync()
             while True:
@@ -324,7 +325,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     last = draw_frame(drawn, size, terminal, last)
                     return size
 
-                size = redraw(discard_stale_clicks=collected)
+                if collected or size is None or not capable:
+                    size = redraw(discard_stale_clicks=collected)
                 if count and n >= count:
                     return status
                 deadline = time.monotonic() + .05 if background and background.pending else next_read
@@ -343,6 +345,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         resized = os.get_terminal_size(sys.stdout.fileno()) != size
                     except (OSError, ValueError):
                         resized = False
+                    mode_changed = False
                     if managed_session() and inputs.fd is not None and time.monotonic() >= next_focus:
                         next_focus = time.monotonic() + 1
                         geometry = panel_geometry()
@@ -351,6 +354,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         modes.tick(geometry)
                         current_mode = geometry[6] if geometry and len(geometry) > 6 else "work"
                         if current_mode != layout_mode:
+                            mode_changed = True
+                            revision += 1
                             layout_mode = current_mode
                             density = "graph" if layout_mode == "overview" else board_view("auto")
                             navigation["layout_mode"] = layout_mode
@@ -358,8 +363,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                                         "@oms_panel_view", density), check=False, timeout=2,
                                            stdin=subprocess.DEVNULL)
-                    if resized:
-                        size = redraw()
+                    if resized or mode_changed:
+                        size = redraw(discard_stale_clicks=mode_changed)
                     batch_hits = navigation.get("hits")
                     changed_from = None
                     discard_batch = False
@@ -379,7 +384,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             continue
                         publish_bottom(navigation, changed_from)
                         changed_from = bottom_state(navigation)
-                        if event[0] == "click" and navigation.get("hits") != batch_hits:
+                        if event[0] == "click" and (mode_changed or navigation.get("hits") != batch_hits):
                             continue  # The board was redrawn after this batch was read; the click names the old map.
                         if navigation.get("health_view") and event[0] not in {"k", "escape", "u", "repaint", "q", "eof"}:
                             continue

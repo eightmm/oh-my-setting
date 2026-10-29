@@ -388,6 +388,36 @@ with patch.object(cache.time, 'time', return_value=anchor + 10):
         assert status == 0 and state['room']['repo_tasks'][0]['claim_expired'] is True
         assert command.call_count == 2, 'expired claim did not reach agent-plan'
 
+# A claim that expires while the engine is collecting must be checked again.
+plan_cache.unlink(missing_ok=True)
+collection_clock = [anchor + 9]
+def crossing_collection():
+    collection_clock[0] = anchor + 10
+    return {'tasks': [claim]}
+with patch.object(cache.time, 'time', side_effect=lambda: collection_clock[0]):
+    assert not cache.read_plan_list(project, crossing_collection)['tasks'][0]['claim_expired']
+    assert cache.read_plan_list(project, lambda: {'tasks': []}) == {'tasks': []}
+
+# An expired claim is rechecked once per interval, with plan edits invalidating it.
+plan_cache.unlink(missing_ok=True)
+expired = dict(claim, claim_expired=True)
+with patch.object(cache.time, 'time', return_value=anchor + 10):
+    assert cache.read_plan_list(project, lambda: {'tasks': [expired]})['tasks'][0]['claim_expired']
+with patch.object(cache.time, 'time', return_value=anchor + 11):
+    assert cache.read_plan_list(project, lambda: (_ for _ in ()).throw(AssertionError('relisted')))['tasks'][0]['claim_expired']
+with patch.object(cache.time, 'time', return_value=anchor + 10 + cache.INTERVAL):
+    assert cache.read_plan_list(project, lambda: {'tasks': [claim]})['tasks'][0]['claim_expired'] is False
+# A second claim crossing its TTL must trigger a new liveness read immediately.
+plan_cache.unlink(missing_ok=True)
+fresh = dict(claim, id='fresh', claimed_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(anchor + 5)))
+with patch.object(cache.time, 'time', return_value=anchor + 10):
+    cache.read_plan_list(project, lambda: {'tasks': [expired, fresh]})
+with patch.object(cache.time, 'time', return_value=anchor + 15):
+    assert cache.read_plan_list(project, lambda: {'tasks': []}) == {'tasks': []}
+plan.write_text(json.dumps({'schema': 3, 'tasks': {'claim': dict(stored_claim, claimed_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(anchor + 12)))}}), encoding='utf-8')
+with patch.object(cache.time, 'time', return_value=anchor + 12):
+    assert cache.read_plan_list(project, lambda: {'tasks': []}) == {'tasks': []}
+
 # Failed reads leave the room drawn and retry on the following tick.
 plan_cache.unlink()
 with patch.object(panel, 'dashboard', return_value=({'plan': {'present': True}}, 0)), \

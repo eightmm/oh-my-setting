@@ -76,6 +76,108 @@ with patch.dict(os.environ), \
     assert panel.watch(project, "codex", count=1, view="tree", no_animation=True) == 0
 assert pending_clicks == ["new layout"], pending_clicks
 
+# A stalled read must not redraw on every completion poll.
+import panel_watch
+from types import SimpleNamespace
+clock = [0.0]
+class StalledRead:
+    pending = False
+    def start(self, reader): self.pending = True
+    def take(self): return False, None
+class TimedInput(BatchInput):
+    def wait(self, seconds):
+        clock[0] += seconds
+        return [("q",)] if clock[0] >= 0.5 else []
+with patch.dict(os.environ), \
+        patch.object(panel_watch, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+        patch.object(panel, "BackgroundRead", StalledRead), \
+        patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "main_installed", return_value=False), \
+        patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((110, 28))), \
+        patch.object(panel, "draw_frame") as frames, \
+        patch("panel_input.TerminalInput", return_value=TimedInput([])):
+    assert panel.watch(project, "codex", view="tree", no_animation=True) == 0
+    assert frames.call_count <= 2, frames.call_count
+
+# External layout changes redraw even while the background read is stalled.
+clock[0] = 0.0
+class ModeInput(BatchInput):
+    def wait(self, seconds):
+        clock[0] += seconds
+        return [("eof",)] if clock[0] >= 0.5 else []
+views = []
+real_frame_view = panel.frame_view
+def record_view(*args, **kwargs):
+    views.append(kwargs.get("view"))
+    return real_frame_view(*args, **kwargs)
+with patch.dict(os.environ), \
+        patch.object(panel_watch, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+        patch.object(panel, "BackgroundRead", StalledRead), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "main_installed", return_value=False), \
+        patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+        patch.object(panel, "panel_geometry", side_effect=lambda: (0, 0, 0, 0, 0, 0, "overview")), \
+        patch.object(panel, "SplitSync"), patch.object(panel, "PanelModeSync"), \
+        patch.object(panel.subprocess, "run"), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((110, 28))), \
+        patch.object(panel, "frame_view", side_effect=record_view), \
+        patch.object(panel, "draw_frame"), \
+        patch("panel_input.TerminalInput", return_value=ModeInput([])):
+    assert panel.watch(project, "codex", view="tree", no_animation=True) == 0
+assert "graph" in views, views
+
+# Clicks read or queued before an external mode redraw name the old layout.
+clock[0] = 0.0
+class ModeClickInput(BatchInput):
+    def __init__(self):
+        super().__init__([])
+        self.phase = 0
+        self.queued = []
+    def discard_clicks(self):
+        self.queued.clear()
+    def wait(self, seconds):
+        clock[0] += seconds
+        self.phase += 1
+        if self.phase == 1:
+            return [("click", 3, 2)]
+        if self.phase == 2:
+            events, self.queued = self.queued, []
+            return events
+        if self.phase == 3:
+            assert not spawned, spawned
+            return [("click", 3, 2)]
+        return [("eof",)]
+mode_input = ModeClickInput()
+def mode_geometry():
+    mode_input.queued.append(("click", 3, 2))
+    return (0, 0, 0, 0, 0, 0, "overview")
+def spawn_hit_view(*args, **kwargs):
+    result = real_frame_view(*args, **kwargs)
+    kwargs["navigation"]["hits"] = ([{"x1": 1, "x2": 9, "y": 2, "action": ("spawn", "codex")}]
+                                     if kwargs.get("view") == "graph" else [])
+    return result
+spawned = []
+with patch.dict(os.environ), \
+        patch.object(panel_watch, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+        patch.object(panel, "BackgroundRead", StalledRead), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "main_installed", return_value=True), \
+        patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+        patch.object(panel, "panel_geometry", side_effect=mode_geometry), \
+        patch.object(panel, "SplitSync"), patch.object(panel, "PanelModeSync"), \
+        patch.object(panel, "start_spawn", side_effect=lambda *a, **k: spawned.append(a[1])), \
+        patch.object(panel.subprocess, "run"), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((110, 28))), \
+        patch.object(panel, "frame_view", side_effect=spawn_hit_view), \
+        patch.object(panel, "draw_frame"), \
+        patch("panel_input.TerminalInput", return_value=mode_input):
+    assert panel.watch(project, "codex", view="tree", no_animation=True) == 0
+assert spawned == ["codex"], spawned
+
 # Exercise the real bounded JSON socket client without installing a host or
 # running agents; lifecycle and room admission use the canonical OMS tools.
 if os.name == "posix" and os.environ.get("OMS_OPERATOR_SOCKET_DENIED") != "1":
