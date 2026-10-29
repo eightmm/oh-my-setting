@@ -38428,6 +38428,47 @@ else:
     (state/"progress.jsonl").write_text(original)
     result=run("recover")
     assert result.returncode == 0 and result.stdout.strip() == "batch-probe",result.stderr
+    if kind == "refreeze":
+        old="a"*64; new="b"*64
+        contract={"acceptance_files":["first.txt","second.txt"],
+                  "acceptance_manifest":[{"path":"first.txt","sha256":old},{"path":"second.txt","sha256":old}],
+                  "allowed_envelope":["first.txt"],"spec":"unchanged"}
+        plan_path=state/"tasks.json"
+        progress_path=state/"progress.jsonl"
+        def save_contract():
+            plan_path.write_text(json.dumps({"tasks":tasks,"project_contract":contract}))
+        def write_batch():
+            progress_path.write_text(json.dumps(prepared)+"\n"+json.dumps(committed)+"\n")
+        def check(ok):
+            save_contract()
+            for result in (run("recover"), subprocess.run(["python3",capture,"batch-prefix",repo,repo,"t2"],capture_output=True,text=True)):
+                assert (result.returncode == 0) == ok,(result.stdout,result.stderr)
+                if not ok: assert "batch contract changed" in result.stderr,result.stderr
+        # Exercise the real preparation path before the first task lands.
+        tasks["t1"]["state"]="claimed"; save_contract(); progress_path.write_text("")
+        result=run("prepare","projection-probe","fixture","t1","t2")
+        assert result.returncode == 0,result.stderr
+        prepared["plan_contract"]=json.loads(result.stdout)["plan_contract"]
+        tasks["t1"]["state"]="done"; write_batch(); check(True)
+        contract["acceptance_manifest"][0]["sha256"]=new; check(True)
+        contract["spec"]="changed"; check(False); contract["spec"]="unchanged"
+        contract["acceptance_files"].reverse(); check(False); contract["acceptance_files"].reverse()
+        contract["allowed_envelope"].append("extra"); check(False); contract["allowed_envelope"].pop()
+        contract["acceptance_manifest"].reverse(); check(False); contract["acceptance_manifest"].reverse()
+        contract["acceptance_manifest"][0]["path"]="other"; check(False)
+        contract["acceptance_manifest"][0]["path"]="first.txt"
+        # Legacy batches retain full-contract validation when unchanged.
+        prepared["plan_contract"]=digest(contract); write_batch(); check(True)
+        contract["acceptance_manifest"][0]["sha256"]=old; check(False)
+        # Empty and malformed manifests remain bound as stored.
+        tasks["t1"]["state"]="claimed"; progress_path.write_text("")
+        for manifest in ([], None, "bad", 0, [{"sha256":old}], ["bad"]):
+            contract["acceptance_manifest"]=manifest
+            save_contract()
+            result=run("prepare","edge-probe","fixture","t1","t2")
+            assert result.returncode == 0,result.stderr
+            assert json.loads(result.stdout)["plan_contract"] == digest(contract),manifest
+        sys.exit(0)
     (p/"first.txt").write_text("amended bytes\n")
     git("add","first.txt");git("commit","--amend","-qm","amended")
     result=run("recover")
@@ -38448,6 +38489,7 @@ test_goal_drive_batch_prefix_tree_identity() {
 }
 
 test_goal_drive_batch_reservation_and_signals() {
+  goal_drive_batch_review_probe refreeze || fail "batch refreeze validation failed"
   local helper="$TMP/goal-batch-functions.sh" child="$TMP/goal-batch-child.py" early="$TMP/goal-batch-early.py"
   local killbin="$TMP/goal-batch-kill-bin" cancel="$TMP/goal-batch-cancel.sh" rc=0
   sed -n '/^GOAL_BATCH_PIDS=()/,/^goal_batch_dispatch() {/p' "$ROOT/scripts/goal-drive.sh" |

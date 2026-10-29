@@ -80,6 +80,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A parallel autopilot batch no longer parks with `batch contract changed`
+  after a task that edits an acceptance file lands with verifier-change
+  consent: the batch binds the project contract with acceptance-manifest
+  paths only, since acceptance itself checks the file hashes and a consented
+  finish refreezes them.
 - An accepted finalize no longer refuses a task whose first write round failed
   (for example on a provider capacity error) and was redone by a fresh
   dispatch: the failed round counts as superseded when the landed retry has the

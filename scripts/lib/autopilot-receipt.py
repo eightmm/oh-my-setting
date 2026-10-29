@@ -1693,6 +1693,15 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
     tasks = plan["tasks"]
     def digest(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    def batch_contract(contract):
+        if not isinstance(contract, dict) or not isinstance(contract.get("acceptance_manifest"), list):
+            return contract
+        # Manifest hashes are guarded by agent-plan accept and may be refrozen at finish.
+        projected = dict(contract)
+        projected["acceptance_manifest"] = [
+            {"path": entry["path"]} if isinstance(entry, dict) and "path" in entry else entry
+            for entry in contract["acceptance_manifest"]]
+        return projected
     def binding(task):
         return digest({key: task.get(key) for key in
                        ("id", "created", "title", "allowed_paths", "verify", "depends", "assignment")})
@@ -1750,7 +1759,8 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
         return next(iter(pending.values()), None)
     def validate(row, *, historical_prefix=False):
         if (not same_checkout(row["worktree"]) or row["contract_id"] != owner or row["width"] != width or row["accept_sha256"] != accept
-                or row["plan_contract"] != digest(plan.get("project_contract"))
+                or (row["plan_contract"] != digest(plan.get("project_contract"))
+                    and row["plan_contract"] != digest(batch_contract(plan.get("project_contract"))))
                 or row["head_ref"] != git("symbolic-ref", "-q", "HEAD")
                 or not 1 <= len(row["tasks"]) <= width):
             raise ValueError("batch contract changed")
@@ -1920,7 +1930,7 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
         print(json.dumps({"schema": 1, "kind": "goal-batch", "phase": "prepared",
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "batch_id": batch_id,
             "run_id": run_id, "worktree": repo, "contract_id": owner, "width": width, "accept_sha256": accept,
-            "plan_contract": digest(plan.get("project_contract")), "base_sha": git("rev-parse", "HEAD"),
+            "plan_contract": digest(batch_contract(plan.get("project_contract"))), "base_sha": git("rev-parse", "HEAD"),
             "head_ref": git("symbolic-ref", "-q", "HEAD"), "tasks": items}))
     elif mode in ("recover", "collect", "next", "complete", "retire", "abandon"):
         row = active()
