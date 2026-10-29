@@ -856,8 +856,8 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
             'finalized': finalized, 'superseded_attempts': superseded}, attempts, rows, related, selected, admissions
 
 
-def _live_review_read_passes(repo):
-    """Return canonical call IDs whose live owner is running peer-review."""
+def _live_review_read_passes(repo, execution_checkout=None):
+    """Return live reviews reading the execution checkout, including uncertain sources."""
     entries = Path(repo) / '.oms/locks/canonical-sync.d'
     if not entries.exists() and not entries.is_symlink():
         if entries.parent.exists() and not os.access(str(entries.parent), os.R_OK | os.X_OK):
@@ -866,9 +866,12 @@ def _live_review_read_passes(repo):
     if entries.is_symlink() or not entries.is_dir() or not os.access(str(entries), os.R_OK | os.X_OK):
         return ['canonical-sync-registry']
     try:
+        command = ['bash', '-c', '. "$1"; shift; oms_canonical_sync_live_review_entries "$@"',
+                   'panel-live-reviews', str(ROOT / 'scripts/lib/canonical-sync.sh'), str(repo)]
+        if execution_checkout is not None:
+            command.append(str(execution_checkout))
         live = subprocess.check_output(
-            ['bash', '-c', '. "$1"; oms_canonical_sync_live_review_entries "$2"',
-             'panel-live-reviews', str(ROOT / 'scripts/lib/canonical-sync.sh'), str(repo)],
+            command,
             stderr=subprocess.DEVNULL, text=True, timeout=30).replace('\r', '')
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return ['canonical-sync-registry']
@@ -1786,16 +1789,21 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         raise ValueError('--landed-commit requires --outcome accepted or completed')
     if isinstance(verify_timeout, bool) or not isinstance(verify_timeout, int) or not 1 <= verify_timeout <= 86400:
         raise ValueError('verify timeout must be between 1 and 86400 seconds')
-    live_reviews = _live_review_read_passes(repo)
+    execution_error = None
+    try:
+        execution = _execution_repo(repo, execution_repo)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        execution, execution_error = None, error
+    live_reviews = _live_review_read_passes(repo, execution)
     if live_reviews:
-        # Overlapping automatic reviews rarely leave a gap shorter than a caller's retry
-        # interval, so wait for one here, before any side effect.
+        # The verifier may write its checkout; wait for conflicting readers
+        # here, before any side effect.
         print('waiting up to %ds for %d review read passes (%s)'
               % (REVIEW_WAIT_SECONDS, len(live_reviews), ', '.join(live_reviews)), file=sys.stderr)
         deadline = time.monotonic() + REVIEW_WAIT_SECONDS
         while live_reviews and time.monotonic() < deadline:
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
-            live_reviews = _live_review_read_passes(repo)
+            live_reviews = _live_review_read_passes(repo, execution)
     if live_reviews:
         print('deferred: %d review read passes running (%s); finalize again after they finish'
               % (len(live_reviews), ', '.join(live_reviews)), file=sys.stderr)
@@ -1804,7 +1812,8 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
     refs = [_relative(repo, value) for value in (evidence or [])] if not isinstance(evidence, str) else [_relative(repo, evidence)]
     if len(refs) > 8:
         raise ValueError('use at most eight evidence references')
-    execution = _execution_repo(repo, execution_repo)
+    if execution_error is not None:
+        raise execution_error
     if landed_commit is not None:
         if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', landed_commit):
             raise ValueError('--landed-commit must be a full lowercase commit SHA')

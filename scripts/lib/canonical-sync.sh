@@ -59,6 +59,20 @@ oms_canonical_call_release() {
   OMS_CANONICAL_CALL_ENTRY=""
 }
 
+oms_canonical_call_source() {  # SOURCE_CHECKOUT (after candidate selection)
+  local entry="$OMS_CANONICAL_CALL_ENTRY" source pending
+  [ -n "$entry" ] && [ -d "$entry" ] && [ ! -L "$entry" ] || return 2
+  [ ! -L "$entry/source" ] || return 2
+  [ ! -e "$entry/source" ] || [ -f "$entry/source" ] || return 2
+  [ -n "$1" ] || return 2
+  source="$(cd "$1" && pwd -P)" || return 2
+  pending="$(mktemp "$entry/.source.XXXXXX")" || return 2
+  if ! { printf '%s\n' "$source" > "$pending" && mv -f "$pending" "$entry/source"; }; then
+    rm -f -- "$pending"
+    return 2
+  fi
+}
+
 oms_canonical_sync_live_entries() {  # REPO (read-only; malformed entries stay live)
   local repo="$1" entry pid saved current
   for entry in "$repo/.oms/locks/canonical-sync.d/"*; do
@@ -88,11 +102,13 @@ oms_canonical_sync_live_entries() {  # REPO (read-only; malformed entries stay l
   done
 }
 
-oms_canonical_sync_live_review_entries() {  # REPO (uncertain owners stay live)
-  local repo="$1" name entry pid command
+oms_canonical_sync_live_review_entries() {  # REPO [EXECUTION_CHECKOUT] (uncertainty stays live)
+  local repo="$1" name entry pid command execution="" source
+  if [ "$#" -gt 1 ] && [ -n "$2" ]; then
+    execution="$(cd "$2" 2>/dev/null && pwd -P)" || execution=""
+  fi
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    case "$name" in review-*) printf '%s\n' "$name"; continue ;; esac
     entry="$repo/.oms/locks/canonical-sync.d/$name"
     if [ ! -d "$entry" ] || [ -L "$entry" ] ||
       [ ! -f "$entry/pid" ] || [ -L "$entry/pid" ] || [ ! -r "$entry/pid" ]; then
@@ -105,10 +121,24 @@ oms_canonical_sync_live_review_entries() {  # REPO (uncertain owners stay live)
     case "$pid" in
       ""|0|*[!0-9]*) printf '%s\n' "$name"; continue ;;
     esac
-    command="$(ps -p "$pid" -o command= 2>/dev/null | tr -d '\r' || true)"
-    case "$command" in
-      *peer-review.sh*|"") printf '%s\n' "$name" ;;
+    case "$name" in
+      review-*) ;;
+      *)
+        command="$(ps -p "$pid" -o command= 2>/dev/null | tr -d '\r' || true)"
+        case "$command" in *peer-review.sh*|"") ;; *) continue ;; esac
+        ;;
     esac
+    if [ -n "$execution" ] && [ -f "$entry/source" ] &&
+      [ ! -L "$entry/source" ] && [ -r "$entry/source" ]; then
+      source=""
+      IFS= read -r source < "$entry/source" || true
+      source="${source//$'\r'/}"
+      if [ -n "$source" ]; then
+        source="$(cd "$source" 2>/dev/null && pwd -P)" || source=""
+        [ -z "$source" ] || [ "$source" = "$execution" ] || continue
+      fi
+    fi
+    printf '%s\n' "$name"
   done <<EOF
 $(oms_canonical_sync_live_entries "$repo")
 EOF

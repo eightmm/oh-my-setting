@@ -30553,6 +30553,120 @@ ready, release = temporary / 'canonical-ready', temporary / 'canonical-release'
 def git(where, *args):
     return subprocess.check_output(['git', '-C', str(where), *args], text=True).strip()
 
+# Review sources filter finalize admission without changing sync admission.
+registry_command = ['bash', '-c', '. "$1/scripts/lib/canonical-sync.sh"; shift; '
+                    'oms_canonical_sync_live_review_entries "$@"', 'review-registry', str(root), str(repo)]
+review_entry = repo / '.oms/locks/canonical-sync.d/review-source-fixture'
+review_entry.mkdir(parents=True)
+(review_entry / 'pid').write_text(str(os.getpid()) + '\n')
+review_start = subprocess.check_output(
+    ['bash', '-c', '. "$1/scripts/lib/file-lock.sh"; oms_file_lock_process_start_token "$2"',
+     'review-identity', str(root), str(os.getpid())], text=True).strip()
+(review_entry / 'process-start').write_text(review_start + '\n')
+other_checkout = temporary / 'other review checkout'
+other_checkout.mkdir()
+source_file = review_entry / 'source'
+source_file.write_text(str(other_checkout.resolve()) + '\r\n')
+assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == '', \
+    'another checkout review blocked finalize'
+assert subprocess.check_output(registry_command, text=True).strip() == review_entry.name
+for execution_path in (str(other_checkout), str(other_checkout / '..' / other_checkout.name), '', '0',
+                       str(temporary / 'missing checkout')):
+    assert subprocess.check_output(registry_command + [execution_path], text=True).strip() == review_entry.name
+for source_text in ('', '\n', '0\n', 'missing checkout\n', str(repo.resolve()) + '\r\n'):
+    source_file.write_text(source_text)
+    assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == review_entry.name
+source_file.unlink()
+assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == review_entry.name
+source_file.mkdir()
+assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == review_entry.name
+source_file.rmdir()
+source_file.write_text(str(other_checkout.resolve()) + '\n')
+source_file.chmod(0)
+if not os.access(source_file, os.R_OK):
+    assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == review_entry.name
+source_file.chmod(0o600)
+(review_entry / 'pid').unlink()
+assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == review_entry.name
+(review_entry / 'pid').write_text(str(os.getpid()) + '\n')
+for malformed_pid in ('', '0\n', 'not-a-pid\n'):
+    (review_entry / 'pid').write_text(malformed_pid)
+    assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == review_entry.name
+(review_entry / 'pid').write_text(str(os.getpid()) + '\n')
+source_file.unlink()
+source_writer = ['bash', '-c', '. "$1/scripts/lib/canonical-sync.sh"; '
+                 'OMS_CANONICAL_CALL_ENTRY="$2"; oms_canonical_call_source "$3"',
+                 'review-source', str(root), str(review_entry)]
+missing_entry_writer = source_writer.copy()
+missing_entry_writer[-1] = str(review_entry / 'missing entry')
+assert subprocess.run(missing_entry_writer + [str(repo)], capture_output=True).returncode == 2
+for invalid_source in ('', '0', str(temporary / 'missing checkout')):
+    assert subprocess.run(source_writer + [invalid_source], capture_output=True).returncode == 2
+    assert not source_file.exists() and not list(review_entry.glob('.source.*'))
+for checkout in (repo, other_checkout, other_checkout):
+    subprocess.run(source_writer + [str(checkout)], check=True)
+    assert source_file.read_text().strip() == str(checkout.resolve())
+    assert not list(review_entry.glob('.source.*'))
+failed_writer = source_writer.copy()
+failed_writer[2] = failed_writer[2].replace('oms_canonical_call_source "$3"',
+                                          'mv() { return 1; }; oms_canonical_call_source "$3"')
+assert subprocess.run(failed_writer + [str(repo)], capture_output=True).returncode == 2
+assert source_file.read_text().strip() == str(other_checkout.resolve())
+assert not list(review_entry.glob('.source.*'))
+# Interrupted replacement retains the previous complete source; staging stays private.
+interrupted_writer = source_writer.copy()
+interrupted_writer[2] = interrupted_writer[2].replace('oms_canonical_call_source "$3"',
+                                                      'mv() { kill -KILL "$$"; }; oms_canonical_call_source "$3"')
+assert subprocess.run(interrupted_writer + [str(repo)], capture_output=True).returncode != 0
+assert source_file.read_text().strip() == str(other_checkout.resolve())
+for staged_source in review_entry.glob('.source.*'):
+    staged_source.unlink()
+try:
+    source_alias = temporary / 'review checkout alias'
+    source_alias.symlink_to(other_checkout, target_is_directory=True)
+    source_file.unlink()
+    source_file.symlink_to(other_checkout / 'source-target')
+except (OSError, NotImplementedError):
+    if os.name != 'nt':
+        raise
+else:
+    assert subprocess.check_output(registry_command + [str(repo)], text=True).strip() == review_entry.name
+    assert subprocess.run(source_writer + [str(repo)], capture_output=True).returncode == 2
+    assert not (other_checkout / 'source-target').exists()
+    source_file.unlink()
+    subprocess.run(source_writer + [str(source_alias)], check=True)
+    assert source_file.read_text().strip() == str(other_checkout.resolve())
+    assert subprocess.check_output(registry_command + [str(source_alias)], text=True).strip() == review_entry.name
+    source_alias.unlink()
+    source_alias.symlink_to(review_entry, target_is_directory=True)
+    linked_entry_writer = source_writer.copy()
+    linked_entry_writer[-1] = str(source_alias)
+    assert subprocess.run(linked_entry_writer + [str(repo)], capture_output=True).returncode == 2
+    assert source_file.read_text().strip() == str(other_checkout.resolve())
+    source_alias.unlink()
+if source_file.is_symlink() or source_file.exists():
+    source_file.unlink()
+source_file.mkdir()
+assert subprocess.run(source_writer + [str(repo)], capture_output=True).returncode == 2
+source_file.rmdir()
+for child in review_entry.iterdir():
+    child.unlink()
+review_entry.rmdir()
+other_checkout.rmdir()
+# The real review entry records its final source before the mechanical verifier runs.
+with (repo / '.git/info/exclude').open('a') as excludes:
+    excludes.write('\n.oms/\n')
+review_verify = ('test "$(cat .oms/locks/canonical-sync.d/review-source-export-fixture/source)" '
+                 '= "$(pwd -P)"')
+exported_review = subprocess.run(
+    ['bash', str(root / 'scripts/peer-review.sh'), '--repo', str(repo), '--providers', 'codex',
+     '--no-diff', '--export-only', '--gate', '--verify', review_verify, '--prompt', 'Source registry fixture',
+     '--artifact-dir', str(temporary / 'source-review-artifacts')],
+    env=dict(os.environ, OMS_HARNESS_CALL_ID='review-source-export-fixture'),
+    capture_output=True, text=True, timeout=int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '90')))
+assert exported_review.returncode == 0, (exported_review.stdout, exported_review.stderr)
+assert not (review_entry.parent / 'review-source-export-fixture').exists()
+
 subprocess.run(['git', 'clone', '--bare', str(repo), str(remote)], check=True, stdout=subprocess.DEVNULL)
 git(repo, 'remote', 'add', 'origin', str(remote))
 subprocess.run(['git', 'clone', str(remote), str(source)], check=True, stdout=subprocess.DEVNULL)

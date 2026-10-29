@@ -45,6 +45,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `oms panel --finalize` waits only for review read passes running in its own execution checkout (or with no recorded checkout), so reviews in other checkouts no longer defer finalize with exit 75 indefinitely.
 - When a write worker's primary provider failed and the provider fallback
   answered, `oms panel --results` and continuation summaries show the
   fallback's final answer from the attempt sidecars instead of the primary's

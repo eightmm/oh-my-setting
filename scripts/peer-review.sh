@@ -827,6 +827,9 @@ PYCANDIDATE
   BASE_REF="$CANDIDATE_BASE"
   candidate_before="$(oms_git_tracked_state_fingerprint "$MA_READ_SOURCE_REPO")" || fail "cannot freeze candidate"
 fi
+if [ -n "$OMS_CANONICAL_CALL_ENTRY" ]; then
+  oms_canonical_call_source "$MA_READ_SOURCE_REPO" || fail "cannot record review source checkout"
+fi
 ma_read_guard_begin "$read_guard_temp" || fail "cannot freeze review repositories"
 
 # Run the mechanical backstop before creating any repository-local review

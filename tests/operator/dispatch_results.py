@@ -2739,7 +2739,7 @@ call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 
      dict(environment, OMS_TASK_ID="panel-route-3", OMS_ATTEMPT_ID="att_panel_route_3_review",
           OMS_INDEX_REVIEW_OUTCOME_JSON=review_payload))
 assert json.loads(call(write_finalize))["outcome"] == "accepted"
-# A live canonical review call defers finalize before its result artifact is written.
+# Finalize waits only for review sources that overlap its verifier checkout.
 review_pass = project / ".oms/locks/canonical-sync.d/review-read-pass-fixture"
 review_pass.parent.mkdir(parents=True, exist_ok=True)
 review_owner_script = ('. "$1/scripts/lib/canonical-sync.sh"; '
@@ -2750,20 +2750,39 @@ review_owner = subprocess.Popen(
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 assert review_owner.stdout.readline().strip() == "ready"
 malformed_review = project / ".oms/locks/canonical-sync.d/review-malformed-fixture"
-malformed_review.mkdir()
 deferred_args = list(final_args)
 deferred_args[deferred_args.index("--task-id") + 1] = "finalize-review-read-pass"
 deferred_args[deferred_args.index("--outcome") + 1] = "completed"
 try:
+    (review_pass / "source").write_text(str(execution_repo.resolve()) + "\n")
+    unrelated = panel_with_review_wait(deferred_args[3:], 0, cwd=project, env=environment)
+    assert unrelated.returncode == 0 and "waiting up to" not in unrelated.stderr, unrelated.stderr
+    assert json.loads(unrelated.stdout)["verification"]["status"] == "passed"
+    # Same-checkout and legacy entries both defer before any durable side effect.
+    deferred_args[deferred_args.index("--task-id") + 1] = "finalize-review-conflict"
+    protected_result_dirs = [project / ".oms" / name for name in ("artifacts", "lifecycle", "plan")]
+    for source in (str(project.resolve()), None):
+        if source is None:
+            (review_pass / "source").unlink()
+        else:
+            (review_pass / "source").write_text(source + "\n")
+        before_conflict = {path.relative_to(project): path.read_bytes()
+                           for directory in protected_result_dirs for path in directory.rglob("*") if path.is_file()}
+        conflict = panel_with_review_wait(deferred_args[3:], 0, cwd=project, env=environment)
+        assert conflict.returncode == 75 and review_pass.name in conflict.stderr, conflict.stderr
+        assert {path.relative_to(project): path.read_bytes()
+                for directory in protected_result_dirs for path in directory.rglob("*")
+                if path.is_file()} == before_conflict
+    malformed_review.mkdir()
     deferred = panel_with_review_wait(deferred_args[3:], 2, cwd=project, env=environment)
     assert deferred.returncode == 75 and \
         "review-read-pass-fixture" in deferred.stderr and "review-malformed-fixture" in deferred.stderr, deferred.stderr
     assert deferred.stderr.count("waiting up to") == 1, deferred.stderr
-    assert not any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-review-read-pass"
+    assert not any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-review-conflict"
                    for row in saved._records(project)[1]), "deferred finalize wrote a result"
 finally:
     review_owner.communicate("release\n", timeout=10)
-    shutil.rmtree(malformed_review)
+    shutil.rmtree(malformed_review, ignore_errors=True)
 # A review pass that ends during the bounded wait lets finalize proceed instead of exiting 75.
 gap_owner = subprocess.Popen(
     ["bash", "-c", review_owner_script, "canonical-review-owner", str(root), str(project), review_pass.name],
@@ -3486,6 +3505,7 @@ landed_owner = subprocess.Popen(
     ["bash", "-c", review_owner_script, "canonical-review-owner", str(root), str(accept_repo), landed_review.name],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 assert landed_owner.stdout.readline().strip() == "ready"
+(landed_review / "source").write_text(str(accept_execution.resolve()) + "\n")
 plan_before_deferred = json.loads(accept_call("agent-plan", "show", "--id", "accept-task",
                                                execution=accept_execution).stdout)
 plan_bytes_before_deferred = (accept_repo / ".oms/plan/tasks.json").read_bytes()
