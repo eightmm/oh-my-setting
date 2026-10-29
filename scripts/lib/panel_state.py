@@ -525,9 +525,11 @@ def snapshot(repo, room_id=None, _tick=None):
         ident = room.resolve(repo, os.environ.get("OMS_ROOM_ID") if room_id is None else room_id)
         state.pop("room", None)
         state.pop("land", None)
+        state.pop("background", None)
         state.pop("completed_tasks", None)
         state.pop("message_successors", None)
         state.pop("awaiting_admission", None)
+        land_receipt = None
         try:
             # A receipt that says running proves nothing; only the probed lock (active) does. A land runs
             # minutes, so every panel process of the repository shares one probe per cache interval.
@@ -538,11 +540,18 @@ def snapshot(repo, room_id=None, _tick=None):
                 found = json.loads(run.stdout) if run.returncode in (0, 3, 4) else None
                 if not isinstance(found, dict):
                     raise ValueError("invalid land status")
-                return {key: found.get(key) for key in ("active", "sha", "step", "minutes")}
+                return {key: found.get(key) for key in
+                        ("active", "sha", "step", "minutes", "log", "push", "update")}
             found = read_shared(repo, 'land-status', collect_land, _tick=_tick)
+            land_receipt = found
             if found.get("active") is True:
-                state["land"] = found
+                state["land"] = {key: found.get(key) for key in ("active", "sha", "step", "minutes")}
         except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+            pass
+        try:
+            from panel_background import collect
+            state["background"] = collect(repo, land_receipt)
+        except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
             pass
         if ident:
             try:

@@ -25,7 +25,7 @@ export OMS_TSP_ALLOW_FALLBACK=1
 export OMS_TSP_FALLBACK_DIR="$TMP/fb"
 mkdir -p "$HOME" "$XDG_STATE_HOME" "$OMS_LOCK_DIR"
 
-repo="$TMP/repo"
+repo="$TMP/repo with spaces"
 mkdir -p "$repo"
 git -C "$repo" init -q
 git -C "$repo" config user.email test@example.com
@@ -34,6 +34,50 @@ printf 'base\n' > "$repo/file.txt"
 git -C "$repo" add file.txt
 git -C "$repo" commit -qm base
 cd "$repo"
+
+# Enqueue attribution is data, shared by real queues and the fallback reader.
+export OMS_TSP_STATE_DIR="$TMP/queue"
+python3 - "$TSP" "$repo" "$TMP" <<'PY'
+import json, os, pathlib, subprocess, sys
+tsp, repo, scratch = sys.argv[1:]
+root = pathlib.Path(scratch)
+alias = root / "repo alias"
+try:
+    alias.symlink_to(repo, target_is_directory=True)
+except (OSError, NotImplementedError):
+    alias = pathlib.Path(repo)
+binary = root / "bin"
+binary.mkdir()
+stub = binary / "tsp"
+stub.write_text('#!/usr/bin/env bash\ncase "$1" in -S) exit 0;; *) printf "%s\\n" "${TSP_FIXTURE_JOB-42}";; esac\n')
+stub.chmod(0o755)
+env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"])
+label = "attributed job"
+for fallback in (False, True):
+    env["OMS_TSP_FORCE_FALLBACK"] = "1" if fallback else "0"
+    result = subprocess.run([tsp, "enqueue", "--label", label, "--", "true"],
+                            cwd=alias, env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    job = result.stdout.strip()
+    assert job.isdigit(), result.stdout
+    directory = pathlib.Path(env["OMS_TSP_FALLBACK_DIR"] if fallback else env["OMS_TSP_STATE_DIR"])
+    path = directory / (job + ".meta" if fallback else job)
+    lines = path.read_text().splitlines()
+    record = json.loads(next(line[len("# oms-panel "):] for line in lines if line.startswith("# oms-panel ")))
+    assert record["project"] == str(pathlib.Path(repo).resolve()), record
+    assert record["label"] == label, record
+    assert result.stdout == job + "\n", result.stdout
+env["OMS_TSP_FORCE_FALLBACK"] = "0"
+for job, code in (("43\r", 0), ("0", 0), ("", 2), ("bad", 2)):
+    env["TSP_FIXTURE_JOB"] = job
+    result = subprocess.run([tsp, "enqueue", "--", "true"], cwd=root, env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == code, (job, result.stderr)
+    if code == 0:
+        lines = (pathlib.Path(env["OMS_TSP_STATE_DIR"]) / job.strip()).read_text().splitlines()
+        row = json.loads(next(line[len("# oms-panel "):] for line in lines if line.startswith("# oms-panel ")))
+        assert row["project"] == "" and row["label"] == "", row
+PY
 
 if [ "$(uname -s)" = Linux ]; then
   python3 - "$TSP" "$OMS_TSP_FALLBACK_DIR" <<'PY' || fail "wait or list misjudged a subreaper-held zombie monitor"

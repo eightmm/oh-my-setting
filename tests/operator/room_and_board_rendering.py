@@ -6205,3 +6205,156 @@ assert "room show --id current-room" in binding and "--room current-room" in bin
 assert "room updates --id current-room --participant stable-main" in binding
 assert "unacknowledged addressed messages" in binding and "--after CURSOR" in binding
 assert "--id current-room --participant stable-main --message MESSAGE_ID" in binding
+
+# Background evidence is project-scoped data, never execution or liveness authority.
+import panel_background as bg
+bg_root = temporary / "background project"
+bg_root.mkdir()
+plan_dir = bg_root / ".oms/plan"
+plan_dir.mkdir(parents=True)
+pilot = plan_dir / "autopilot-run.json"
+clock = 1800000000
+bg_stamp = lambda age: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock - age))
+assert bg.collect(bg_root, now=clock) == []
+for count in (0, 1, 3, 4):
+    summary = bg._summary("Queue: ", ["item%d" % index for index in range(count)])
+    assert bool(summary) == bool(count), summary
+    if count:
+        assert ("+1 more" in summary[0]) == (count == 4), summary
+for stage in ("", "done", "parked", [], "unknown"):
+    pilot.write_text(json.dumps({"stage": stage, "updated": bg_stamp(0)}))
+    assert bg._autopilot(bg_root, clock) == []
+pilot.write_text(json.dumps({"stage": "driving", "updated": bg_stamp(0)}))
+assert "recorded driving" in bg._autopilot(bg_root, clock)[0]
+pilot.write_text(json.dumps({"stage": "reviewing", "updated": "bad"}))
+assert bg._autopilot(bg_root, clock) == []
+pilot.write_text(json.dumps({"stage": "reviewing", "updated": bg_stamp(120)}))
+assert "2m ago" in bg._autopilot(bg_root, clock)[0]
+
+graph_dir = bg_root / ".oms/graph/runs/run-20261029T100000Z-abcdef01"
+graph_dir.mkdir(parents=True)
+events_path = graph_dir / "events.jsonl"
+for age, visible in ((0, True), (86399, True), (86400, False), (86401, False), (-1, False)):
+    events_path.write_text(json.dumps({"event": "run_started", "ts": bg_stamp(age), "spec_id": "flow"}) + "\n")
+    assert bool(bg._graphs(bg_root, clock)) == visible, age
+events_path.write_text('{"event":"run_started","ts":"bad"}\n')
+assert bg._graphs(bg_root, clock) == []
+events_path.write_text(json.dumps({"event": "run_started", "ts": bg_stamp(2), "spec_id": "flow"}) + "\n")
+assert "unconfirmed" in bg._graphs(bg_root, clock)[0]
+with events_path.open("a") as stream:
+    stream.write('{"event":"run_finished"}\n')
+assert bg._graphs(bg_root, clock) == []
+events_path.write_text("{broken\n")
+assert bg._graphs(bg_root, clock) == []
+for size, accepted in ((0, True), (8, True), (9, False)):
+    pilot.write_bytes(b" " * size)
+    try:
+        bg._read(pilot, limit=8)
+        read_ok = True
+    except ValueError:
+        read_ok = False
+    assert read_ok == accepted, size
+pilot.write_text("[]")
+assert bg._autopilot(bg_root, clock) == []
+pilot.unlink()
+try:
+    pilot.symlink_to(events_path)
+except (OSError, NotImplementedError):
+    pass
+else:
+    assert bg._autopilot(bg_root, clock) == []
+    pilot.unlink()
+
+queue_dir = temporary / "background queue"
+queue_dir.mkdir()
+fallback_dir = temporary / "background fallback"
+fallback_dir.mkdir()
+queue_env = {"OMS_TSP_STATE_DIR": str(queue_dir), "OMS_TSP_FALLBACK_DIR": str(fallback_dir),
+             "OMS_TSP_FORCE_FALLBACK": "0"}
+for job, identity in (("1", str(bg_root.resolve())), ("2", ""), ("3", str(project.resolve()))):
+    (queue_dir / job).write_text("# oms-panel " + json.dumps({"project": identity, "label": "safe\x1b[31m\n" + "x" * 300}) + "\n")
+(queue_dir / "4").write_text("meta_note=$(touch should-never-exist)\n")
+(queue_dir / "5").write_text("# oms-panel {bad}\n")
+queue_table = "ID State Output\n1 running /tmp/log\n2 queued x\n3 queued x\n4 queued x\n5 queued x\n"
+with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
+        patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, queue_table, "")):
+    rows = bg._queue(bg_root, clock)
+    assert len(rows) == 1 and "#1 running" in rows[0] and "#2" not in rows[0] and "#3" not in rows[0], rows
+    assert "\x1b" not in rows[0] and "\n" not in rows[0] and len(rows[0]) < 220, rows
+    assert not (temporary / "should-never-exist").exists()
+with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value=None):
+    assert bg._queue(bg_root, clock) == []
+with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
+        patch.object(bg.subprocess, "run", side_effect=subprocess.TimeoutExpired("tsp", 2)):
+    assert bg._queue(bg_root, clock) == []
+for table in ("", "0 finished x\n", "bad running x\n", "1 queued x\r\n"):
+    with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
+            patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, table, "")):
+        assert bool(bg._queue(bg_root, clock)) == ("queued" in table), table
+for process, visible in (("S", True), ("Z", False), ("", False)):
+    (fallback_dir / "99.meta").write_text("# oms-panel " + json.dumps({"project": str(bg_root.resolve()),
+        "label": "fallback work", "status": "99.status"}) + "\n")
+    with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+            patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, process, "")):
+        assert bool(bg._queue(bg_root, clock)) == visible, process
+(fallback_dir / "99.status").write_text("0\n")
+with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+        patch.object(bg.subprocess, "run", side_effect=AssertionError("completed jobs need no process probe")):
+    assert bg._queue(bg_root, clock) == []
+(fallback_dir / "99.status").unlink()
+for identity, status_name in (("", "99.status"), (str(bg_root.resolve()), "../outside"),
+                              (str(bg_root.resolve()), ""), (str(bg_root.resolve()), None)):
+    (fallback_dir / "99.meta").write_text("# oms-panel " + json.dumps({"project": identity, "status": status_name}) + "\n")
+    with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+            patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+        assert bg._queue(bg_root, clock) == []
+
+land_record = {"sha": "a" * 40, "push": {"rc": 0}, "update": {"rc": "skipped", "reason": "partial-gate"}}
+with patch.dict(os.environ, {"OMS_INSTALL_RECEIPT": str(temporary / "absent-install.json")}):
+    assert "aaaaaaa partial-gate" in bg._uninstalled(land_record)[0]
+    assert bg._uninstalled(dict(land_record, push={"rc": 1})) == []
+    assert bg._uninstalled(dict(land_record, sha="bad")) == []
+    assert bg._uninstalled(dict(land_record, update={"rc": 0})) == []
+    assert bg._uninstalled(dict(land_record, active=True)) == []
+    assert bg._uninstalled(dict(land_record, state="running", active=False))
+    with patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+        assert bg._uninstalled(dict(land_record, update={"rc": "skipped", "root": str(project)})) == []
+    with patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 128, "", "")):
+        assert bg._uninstalled(dict(land_record, update={"rc": "skipped", "root": str(project)}))
+    install_receipt = temporary / "test-install.json"
+    install_receipt.write_text(json.dumps({"source_root": str(project)}))
+    installed_sha = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
+    with patch.dict(os.environ, {"OMS_INSTALL_RECEIPT": str(install_receipt)}):
+        assert bg._uninstalled(dict(land_record, sha=installed_sha)) == []
+    land_dir = temporary / "land receipts"
+    land_dir.mkdir()
+    for index, reason in enumerate(("partial-gate", "ci-scope-unknown")):
+        land_path = land_dir / (("a" if index == 0 else "b") * 40 + "-request.json")
+        land_path.write_text(json.dumps(dict(land_record, sha=("a" if index == 0 else "b") * 40,
+                                              update={"rc": "skipped", "reason": reason})))
+        os.utime(land_path, (clock + index, clock + index))
+    newest = bg._uninstalled(dict(land_record, log=str(land_dir / "old.log")))
+    assert "bbbbbbb ci-scope-unknown" in newest[0], newest
+with patch.object(bg, "_autopilot", side_effect=ValueError("bad source")), \
+        patch.object(bg, "_graphs", return_value=["Graph: flow (unconfirmed)"]), \
+        patch.object(bg, "_queue", return_value=[]):
+    background_rows = bg.collect(bg_root, land_record, now=clock)
+    assert any("Graph:" in row for row in background_rows), background_rows
+with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}, "background": ["stale"]}, 0)), \
+        patch.object(room_module, "resolve", return_value=None), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '{"active":false}', "")), \
+        patch.object(bg, "collect", return_value=["Autopilot: recorded driving (2m ago)"]):
+    background_state, status = panel.snapshot(bg_root)
+    assert status == 0 and background_state["background"] == ["Autopilot: recorded driving (2m ago)"], background_state
+for width, height in ((157, 34), (76, 20), (35, 16), (20, 8), (1, 1)):
+    bg_view = dict(room_view, background=["Autopilot: recorded driving (2m ago)", "Graph: flow (unconfirmed)"])
+    with patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((width, height))), \
+            patch.object(panel, "terminal_style", return_value=(False, False, True)):
+        frame_text, _, _ = panel.frame_view(bg_root, "codex", bg_view, view="graph", menu=False, navigation={"dismissed": True})
+    assert len(frame_text.splitlines()) <= height and all(display_width(line) <= width for line in frame_text.splitlines()), frame_text
+    if width >= 76:
+        assert "Autopilot: recorded driving" in frame_text and "Graph: flow (unconfirmed)" in frame_text, frame_text
+for rows in (None, "malformed", {}, [], [None, ""]):
+    with patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((76, 20))):
+        frame_text, _, _ = panel.frame_view(bg_root, "codex", dict(room_view, background=rows), menu=False)
+    assert "Autopilot:" not in frame_text and len(frame_text.splitlines()) <= 20, frame_text

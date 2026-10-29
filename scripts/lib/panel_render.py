@@ -135,10 +135,20 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
         from panel_tree import render_detail
         text = render_detail(state, navigation["detail"], size.columns, size.lines, navigation, managed_session())
     else:
-        text = render(state, provider, size.columns, size.lines, color=color, unicode=unicode,
+        from panel_view import clipped
+        # Reserve rows before laying out cards and hit targets; their coordinates stay unchanged.
+        from dashboard_projection import clean
+        rows = state.get("background")
+        rows = rows if isinstance(rows, list) else []
+        background = [clipped(clean(row, 400), size.columns) for row in
+                      rows[:max(0, min(4, size.lines - 8))]
+                      if isinstance(row, str) and row.strip()]
+        text = render(state, provider, size.columns, size.lines - len(background), color=color, unicode=unicode,
                       previous=previous, availability=provider_availability(state),
                       menu=menu, managed=managed_session(), main_attempt=main_attempt, frame=frame,
                       view=view, attention_only=attention_only, navigation=navigation)
+        if background:
+            text += "\n" + "\n".join(background)
     return text, size, capable
 
 

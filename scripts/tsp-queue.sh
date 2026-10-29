@@ -24,6 +24,7 @@ Single-machine job queue wrapper for tsp (task-spooler).
 Subcommands:
   enqueue [--label L] [--slots N] [--ledger-note NOTE] [--allow-noqueue] -- CMD...
       Set tsp slots (default 1), enqueue CMD, print the tsp job id.
+      Record the physical Git project and label for read-only panel attribution.
   list
       Show the tsp queue table.
   cancel <id>
@@ -95,14 +96,19 @@ quote_words() {
 write_meta() {
   local file="$1"
   local meta_note="$2"
-  shift 2
+  local record="$3"
+  local temporary
+  shift 3
 
+  temporary="$(mktemp "$file.XXXXXX")" || return 1
   {
+    printf '# oms-panel %s\n' "$record"
     printf 'meta_note=%q\n' "$meta_note"
     printf 'meta_cmd=('
     quote_words "$@"
     printf ' )\n'
-  } > "$file"
+  } > "$temporary"
+  mv -f "$temporary" "$file"
 }
 
 write_fallback_meta() {
@@ -112,9 +118,13 @@ write_fallback_meta() {
   local f_note="$4"
   local f_status="$5"
   local f_child="$6"
-  shift 6
+  local record="$7"
+  local temporary
+  shift 7
 
+  temporary="$(mktemp "$file.XXXXXX")" || return 1
   {
+    printf '# oms-panel %s\n' "$record"
     printf 'f_pid=%q\n' "$f_pid"
     printf 'f_log=%q\n' "$f_log"
     printf 'f_note=%q\n' "$f_note"
@@ -123,7 +133,23 @@ write_fallback_meta() {
     printf 'f_cmd=('
     quote_words "$@"
     printf ' )\n'
-  } > "$file"
+  } > "$temporary"
+  mv -f "$temporary" "$file"
+}
+
+project_metadata() {
+  python3 - "$1" "${2:-}" <<'PY'
+import json, pathlib, subprocess, sys
+project = ""
+try:
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
+                            text=True, timeout=3, check=False)
+    if result.returncode == 0:
+        project = str(pathlib.Path(result.stdout.replace("\r", "").rstrip("\n")).resolve(strict=True))
+except (OSError, ValueError, subprocess.SubprocessError):
+    pass
+print(json.dumps({"project": project, "label": sys.argv[1], "status": pathlib.Path(sys.argv[2]).name}))
+PY
 }
 
 load_meta() {
@@ -199,6 +225,7 @@ cmd_enqueue() {
   local slots=1
   local note=""
   local job_id
+  local record
   local allow_noqueue="${OMS_TSP_ALLOW_FALLBACK:-0}"
 
   while [ "$#" -gt 0 ]; do
@@ -238,7 +265,7 @@ cmd_enqueue() {
 
   if ! tsp_available; then
     [ "$allow_noqueue" = 1 ] || fail "tsp is unavailable; install task-spooler or pass --allow-noqueue to accept unqueued execution"
-    fallback_enqueue "$note" "$@"
+    fallback_enqueue "$note" "$label" "$@"
     return
   fi
 
@@ -249,8 +276,11 @@ cmd_enqueue() {
   else
     job_id="$(tsp -- "$@")"
   fi
+  job_id="${job_id//$'\r'/}"
   require_id "$job_id"
-  write_meta "$STATE_DIR/$job_id" "$note" "$@"
+  record="$(project_metadata "$label")"
+  record="${record//$'\r'/}"
+  write_meta "$STATE_DIR/$job_id" "$note" "$record" "$@"
   printf '%s\n' "$job_id" > "$STATE_DIR/last"
   printf '%s\n' "$job_id"
 }
@@ -348,13 +378,15 @@ cmd_logs() {
 
 fallback_enqueue() {
   local note="$1"
+  local label="$2"
+  local record
   local run_id
   local log_file
   local status_file
   local child_file
   local monitor_pid
   local tag
-  shift
+  shift 2
 
   warn_fallback
   mkdir -p "$FALLBACK_DIR"
@@ -362,6 +394,8 @@ fallback_enqueue() {
   log_file="$FALLBACK_DIR/job.$tag.log"
   status_file="$FALLBACK_DIR/$tag.status"
   child_file="$FALLBACK_DIR/$tag.child"
+  record="$(project_metadata "$label" "$status_file")"
+  record="${record//$'\r'/}"
   (
     set +e
     nohup "$@" > "$log_file" 2>&1 &
@@ -374,7 +408,7 @@ fallback_enqueue() {
   ) &
   monitor_pid=$!
   run_id="$monitor_pid"
-  write_fallback_meta "$FALLBACK_DIR/$run_id.meta" "$run_id" "$log_file" "$note" "$status_file" "$child_file" "$@"
+  write_fallback_meta "$FALLBACK_DIR/$run_id.meta" "$run_id" "$log_file" "$note" "$status_file" "$child_file" "$record" "$@"
   printf '%s\n' "$run_id" > "$FALLBACK_DIR/last"
   printf '%s\n' "$run_id"
 }
