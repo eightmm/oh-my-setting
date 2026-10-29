@@ -994,8 +994,12 @@ with patch.dict(os.environ, OMS_HOOK_AGENT="codex"):
     tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 assert "control-tower main" in tower and "--owner codex --room binding-room" in tower, tower
 assert "trust boundaries" in tower, tower
-assert all(token in tower for token in ("one notification per call", "a new write dispatch is refused", "same turn",
-                                       "--continue")), tower
+assert all(token in tower for token in ("Dispatch blocks until its worker ends:",
+                                       "start every independent ready task (non-overlapping scope)",
+                                       "in its own concurrent or background call before waiting",
+                                       "review, admit or re-dispatch each completion as it arrives",
+                                       "refill with the next ready task without a wave barrier",
+                                       "a new write dispatch is refused", "--continue")), tower
 for trigger in ("security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, install)",
                 "verifier before declaring completion (original request against final result)",
                 "integrator when merging or resolving conflicts", "performance-engineer when performance needs measurement",

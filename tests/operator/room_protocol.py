@@ -325,6 +325,7 @@ for owner in panel.PROVIDERS:
     assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
     assert "preferred installed provider" not in panel.bootstrap(owner, project) and \
         "ordered by more weekly quota left" in panel.bootstrap(owner, project)
+    assert "a free Pi route with no weekly quota is overflow for write work after native providers" in panel.bootstrap(owner, project)
     assert all(trigger in panel.bootstrap(owner, project) for trigger in (
         "authentication, permissions, secrets, signals, install", "architect for structural decisions",
         "one at a time when the trigger applies"))
@@ -334,7 +335,11 @@ for owner in panel.PROVIDERS:
         "oms graph project api PATH before reading a large file whole", "oms inbox",
         "oms panel --results", "oms room updates", "oms session-handoff", "oms agent-memory recall"))
     assert all(token in panel.bootstrap(owner, project) for token in (
-        "one notification per call", "a new write dispatch is refused", "same turn", "--continue"))
+        "Dispatch blocks until its worker ends:", "start every independent ready task (non-overlapping scope)",
+        "in its own concurrent or background call before waiting",
+        "review, admit or re-dispatch each completion as it arrives",
+        "refill with the next ready task without a wave barrier",
+        "a new write dispatch is refused", "--continue"))
     assert all(phrase in panel.bootstrap(owner, project) for phrase in (
         "consumers in the worker brief", "drives the public entry point"))
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
