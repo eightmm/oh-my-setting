@@ -67,6 +67,9 @@ def exercise_exact_model_routing():
     import panel_routing
     load_policy = panel_routing.policy
     original = load_policy()
+    for role in ("reviewer", "verifier"):
+        assert allocate("claude", role=role, installed={"claude", "codex"})["workload"] == "deep"
+        assert allocate("claude", role=role, tier="frontier", installed={"claude", "codex"})["workload"] == "frontier"
     assert original["tiers"]["light"][0] == {"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "low", "public_only": True}
     for owner in ("claude", "codex"):
         installed = {"pi", "claude", "codex"}
@@ -968,7 +971,7 @@ cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
          ("claude", "builder", None, "write", None, "gpt-6.1-terra"),
          ("claude", "advisor", None, "read", None, "gpt-6-astra"),
          ("codex", "advisor", "deep", "read", None, "claude-opus-5-5"),
-         ("claude", "reviewer", None, "read", None, "gpt-6-astra"),
+         ("claude", "reviewer", None, "read", None, "gpt-6.1-sol"),
          ("claude", "security-auditor", None, "read", None, "gpt-6-astra"),
          ("codex", "researcher", None, "read", None, "claude-haiku-5-5"),
          ("claude", "researcher", None, "read", None, "gpt-6-luna")]

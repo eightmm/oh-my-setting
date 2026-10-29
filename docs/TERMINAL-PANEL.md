@@ -143,7 +143,7 @@ of the worker's recorded base plus its digest-verified patch; both the complete 
 and mechanical gate use that candidate. Missing base objects, digest mismatches or
 patch-application failures require manual review; they never fall back to testing
 the unpatched source. The gate rejects candidate changes by the verifier.
-The automatic review dispatches the reviewer at the deep tier, or at frontier when the patch's changed files are unknown or match a trust-boundary pattern (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins, hooks, install/uninstall, land and patch scripts, workflows, rules, permission/settings/policy files).
+Automatic review uses routine for patches containing only `.md` or `.rst` files under `docs/` or top-level `README.md` and `CHANGELOG.md`, excluding `AGENTS.md` and `CLAUDE.md`; otherwise it uses deep. Unknown or unsafe paths and trust-boundary patterns use frontier (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins, hooks, install/uninstall, land and patch scripts, workflows, rules, permission/settings/policy files).
 Patch admission reports `security: ADVISE` with risk paths and auditor guidance, or `SKIP` when none are found; this advisory does not change the `ADMIT`/`REJECT` verdict.
 A write call that exits 0 with a digest-verified patch, no failed verify and no guard stop starts this review automatically (`auto_review` in config/panel-routing.json, default true). It reuses the call's `--verify`, else the plan task's, and mails the main for manual review when neither exists. A FAIL verdict drafts a `--continue` fix brief and prints its command without launching it.
 `--room` selects a room without
@@ -675,8 +675,8 @@ Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium 
 | `release-engineer` | routine | read | `oms panel --dispatch release-engineer` | `peer-delegate --role release-engineer` |
 | `integrator` | deep | read or scoped write | `oms panel --dispatch integrator` | `peer-delegate --role` |
 | `performance-engineer` | deep | read or scoped write | `oms panel --dispatch performance-engineer` | `peer-delegate --role` |
-| `reviewer` | frontier | read | `oms panel --dispatch reviewer` | `peer-review` |
-| `verifier` | frontier | read | `oms panel --dispatch verifier` | `peer-delegate --role --read-only` |
+| `reviewer` | deep | read | `oms panel --dispatch reviewer` | `peer-review` |
+| `verifier` | deep | read | `oms panel --dispatch verifier` | `peer-delegate --role --read-only` |
 | `security-auditor` | frontier | read | `oms panel --dispatch security-auditor` | `peer-delegate --role --read-only` |
 | `advisor` | frontier | read | `oms panel --dispatch advisor` | `advise` |
 | `architect` | frontier | read | `oms panel --dispatch architect` | `peer-delegate --role --read-only` |

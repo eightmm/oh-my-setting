@@ -126,7 +126,7 @@ assert allocate("codex", role="documenter", installed=both)["model"] == "claude-
 assert allocate("claude", role="documenter", installed={"codex"})["model"] == "gpt-6-luna"
 assert allocate("claude", role="advisor", installed=both)["model"] == "gpt-6-astra"
 assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
-assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-fable-5-1"
+assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-opus-5-5"
 assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6-astra"
 for role in ("reviewer", "verifier", "security-auditor", "critic"):
     assert allocate("claude", role=role, installed=both)["provider"] == "codex"
@@ -187,7 +187,7 @@ routing_roles = {
     "researcher": "light",
     "worker": "routine", "builder": "routine", "documenter": "light",
     "integrator": "deep", "performance-engineer": "deep",
-    "reviewer": "frontier", "verifier": "frontier", "security-auditor": "frontier",
+    "reviewer": "deep", "verifier": "deep", "security-auditor": "frontier",
     "critic": "frontier",
     "advisor": "frontier", "architect": "frontier",
 }
@@ -287,7 +287,7 @@ for target in ("grok", "muse"):
     assert rejected.returncode != 0 and "requires an explicit valid --model" in rejected.stderr
 for role, kind, tier in (("builder", "worker", "routine"), ("integrator", "worker", "deep"),
                          ("release-engineer", "worker", "routine"), ("critic", "advisor", "frontier"),
-                         ("verifier", "reviewer", "frontier"), ("reviewer", "reviewer", "frontier"),
+                         ("verifier", "reviewer", "deep"), ("reviewer", "reviewer", "deep"),
                          ("researcher", "researcher", "light")):
     allocated = allocate("claude", role=role, installed=both)
     assert (allocated["kind"], allocated["workload"]) == (kind, tier), allocated
