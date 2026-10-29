@@ -37375,7 +37375,10 @@ test_landing_refuses_while_another_landing_holds_the_repo() {
   local holder_pid
   local waited=0
   local rc=0
+  local recovery_rc=0
   local out
+  local recovery_out
+  local failure=""
 
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
@@ -37403,12 +37406,18 @@ test_landing_refuses_while_another_landing_holds_the_repo() {
   done
 
   out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  recovery_out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)" || recovery_rc=$?
   rm -f "$project/held"
   wait "$holder_pid" 2>/dev/null || true
 
-  [ "$rc" != 0 ] || fail "a concurrent landing should be refused: $out"
+  [ "$rc" = 75 ] || failure="landing exit=$rc (expected 75): $out"
   contains "$out" 'another landing or recovery is in progress' ||
-    fail "the refusal should name the reason: $out"
+    failure="${failure:+$failure; }landing refusal did not name the reason: $out"
+  [ "$recovery_rc" = 75 ] ||
+    failure="${failure:+$failure; }recovery exit=$recovery_rc (expected 75): $recovery_out"
+  contains "$recovery_out" 'another landing or recovery is in progress' ||
+    failure="${failure:+$failure; }recovery refusal did not name the reason: $recovery_out"
+  [ -z "$failure" ] || fail "$failure"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "the refused landing must not have applied anything"
 

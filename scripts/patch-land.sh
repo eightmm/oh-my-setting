@@ -823,7 +823,8 @@ if [ "$RECOVER" = 1 ]; then
   # a live landing. It must never decide that a not-yet-applied live intent was
   # abandoned, and two recoveries must not write duplicate receipts.
   if ! oms_hold_file_lock "$LANDINGS"; then
-    fail "another landing or recovery is in progress in $REPO; retry when it finishes"
+    echo "error: another landing or recovery is in progress in $REPO; retry when it finishes" >&2
+    exit 75
   fi
   trap 'oms_release_held_file_lock' EXIT
   recovered=0
@@ -1291,7 +1292,8 @@ fi
 # not publish a file that cleanup could remove during another worker's guard.
 # Admission and publication use these bytes, never a later copy of the caller.
 if ! oms_hold_file_lock "$LANDINGS"; then
-  fail "another landing or recovery is in progress in $REPO; retry when it finishes"
+  echo "error: another landing or recovery is in progress in $REPO; retry when it finishes" >&2
+  exit 75
 fi
 patch_land_cleanup() {
   if [ -n "$CAPTURE_PATCH" ] && [ "$CAPTURE_PERSIST" = 0 ]; then
