@@ -10801,7 +10801,7 @@ test_plan_from_spec_proposes_then_applies() {
 EOF
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
-cat >/dev/null
+cat > "$HOME/planner-prompt"
 printf 'plan follows.\n{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","assignment":{"provider":"claude","workload":"routine"}},{"id":"t2","title":"test: greeting covered","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}\n'
 EOF
   chmod +x "$bin_dir/codex"
@@ -10811,6 +10811,7 @@ EOF
     "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/out" 2>&1 ||
     fail "propose should succeed: $(tail -4 "$project/out")"
   assert_file_contains "$project/out" "proposed 2 task(s)"
+  assert_file_contains "$home_dir/planner-prompt" "changed verification files (tests, verifier scripts) restored from HEAD"
   assert_file_contains "$project/out" "review the list"
   # t2 verifies with `bash tests/run.sh` and may change tests/ -- patch-admit
   # refuses a patch that rewrites the test judging it, so that task is
@@ -11164,7 +11165,7 @@ test_intent_draft_writes_reviewed_candidate() {
   # must not be mistaken for the answer (the answer follows the echo).
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
-cat
+tee "$HOME/intent-prompt"
 printf '## Status\n\n- State: draft\n- Open decisions: none\n\n'
 printf '## Project\n\n- Goal: ship a greeting command\n- Scope: src/\n- Non-goals: packaging\n\n'
 printf '## Commands\n\n- Test: bash tests/run.sh\n\n'
@@ -11179,6 +11180,7 @@ EOF
     --goal "인사 명령을 만들어줘" > "$project/draft-out" 2>&1 ||
     fail "intent draft should succeed: $(tail -5 "$project/draft-out")"
   assert_file_contains "$project/draft-out" "review it (editing is expected)"
+  assert_file_contains "$home_dir/intent-prompt" "find existing tests outside the new work"
   candidate="$(find "$project/.oms/intents" -name 'intent-*.md' | sed -n '1p')"
   [ -n "$candidate" ] || fail "intent candidate missing"
   assert_file_contains "$candidate" "- State: draft"

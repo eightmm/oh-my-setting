@@ -627,6 +627,13 @@ Rules: every bullet shown above must be present and non-empty; Goal, Scope,
 Non-goals and Required checks each stay on one line; Required checks is a
 real command against this repository, not a placeholder; Scope names real
 path prefixes from the repository listing below.
+Before writing Scope and Verification, find existing tests outside the new work
+that exercise interfaces or modules the goal changes, including callers,
+importers and fixtures. Required checks must prove the new behavior AND run
+bounded consumer checks, composed with && using this repository's native runner;
+list their files in Required check files. Add consumer test paths that may need
+edits to Scope, or name them under Open decisions when unsure. Do not suggest
+whole-suite runs.
 
 --- goal sentence ---
 $GOAL_TEXT

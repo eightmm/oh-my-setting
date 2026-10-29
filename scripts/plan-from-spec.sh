@@ -988,17 +988,20 @@ Return ONLY one JSON object, no prose, with this shape (tasks may also include a
 
 Rules: $prefix_rule; titles are conventional-commit
 shaped (they become commit subjects); allowed is a non-empty list of
-repo-relative path prefixes the task may touch; verify is one runnable command
-that fails while the task is unfinished; depends names only earlier tasks in
+repo-relative path prefixes the task may touch; verify is one runnable command;
+depends names only earlier tasks in
 the list or an existing DONE task; $scope_rule; never repeat or modify an
 existing task; prefer few, landable, independently verifiable tasks.
 Verify floor rule: the admission gate re-runs each verify with the task's
-own modified files restored from HEAD, so a verify must EXECUTE a suite or
-tool (bash tests/x.sh, pytest, a linter) and must still pass under that
-restoration. Never write a verify that reads or asserts content that only
+changed verification files (tests, verifier scripts) restored from HEAD while
+keeping its product changes. A verify must EXECUTE a bounded suite or selector
+that exists at HEAD and meaningfully exercises the touched module or its
+regressions. When adding tests to an existing file, use an existing selector of
+that module, not a newly named test; never pick an unrelated test just because
+it passes. Never write a verify that reads or asserts content that only
 exists in the task's patch (grep/sed/cat of an allowed path, inline asserts
-of new behavior) — those can never pass the floor; new-behavior proof
-belongs in the plan-level acceptance, which runs on the finished tree.
+of new behavior) — those can never pass the floor; new-behavior and consumer
+proof belong in the plan-level acceptance, which runs on the finished tree.
 Delegation rule: task verifies run inside a worker, so never run a delegating
 suite or a whole-suite verifier. Prefer bash tests/run-smoke-shard.sh --only
 test_NAME only when that named smoke test does not invoke plan-run.sh,

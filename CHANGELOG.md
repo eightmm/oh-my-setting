@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms intent draft` asks the drafter to find existing tests that exercise the
+  modules a goal changes and to add bounded consumer checks to the required
+  checks, and the plan-from-spec planner describes the admission floor as it
+  runs (verification files restored, product changes kept) and picks an
+  existing relevant selector instead of a verify that must fail beforehand.
 - Portable capsule verify and import refuse any envelope, payload or nested
   field the exporter does not emit, so a digest-valid capsule carrying an
   extra field such as an approval or command no longer imports.
