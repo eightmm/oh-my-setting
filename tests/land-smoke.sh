@@ -138,7 +138,7 @@ case "$receipt_dir" in "$state_land"/*) ;; *) fail "receipt must live under XDG 
 slug="${receipt_dir#"$state_land"/}"
 case "$slug" in ''|.|..|*/*|*..*|*[!A-Za-z0-9._-]*) fail "unsafe receipt slug: $slug" ;; esac
 python3 - "$receipt" "$head" <<'PY' || fail "passed receipt is wrong: $(cat "$receipt")"
-import json, sys
+import json, os, sys
 r = json.load(open(sys.argv[1]))
 assert r["state"] == "passed" and r["sha"] == sys.argv[2], r
 assert r["gate"]["rc"] == 0 and r["push"]["rc"] == 0, r
@@ -146,6 +146,14 @@ assert r["update"]["rc"] == "skipped" and r["ci"]["conclusion"] == "skipped", r
 assert r["update"].get("reason") == "no-install-for-remote", r
 assert "siblings" not in r, r
 assert r["gate"]["command"] == "bash scripts/check.sh", r
+assert isinstance(r["gate"].get("cpus"), int) and r["gate"]["cpus"] > 0, r
+try:
+    os.getloadavg()
+except (AttributeError, OSError):
+    assert "load_start" not in r["gate"] and "load_end" not in r["gate"], r
+else:
+    for key in ("load_start", "load_end"):
+        assert isinstance(r["gate"][key], str) and float(r["gate"][key]) >= 0, r
 PY
 grep -q 'gate ok' "$(log_of "$receipt")" || fail "gate output must land in the receipt log"
 case "$(log_of "$receipt")" in "$state_land"/*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
@@ -407,6 +415,19 @@ grep -q 'gate exit 3' "$TMP/fail.out" || fail "the failure reason must be shown:
 gate_tree_left && fail "a red gate must remove its gate clone"
 grep -Fq 'in affected:tests/demo-smoke.sh scripts-smoke.test_demo' "$repo/.oms/failures.jsonl" ||
   fail "a red gate must be recorded in the fail ledger with its failing stages"
+python3 - "$repo/.oms/failures.jsonl" <<'PY' || fail "gate failure summary is wrong"
+import json, os, re, sys
+summary = [r["summary"] for r in map(json.loads, open(sys.argv[1]))
+           if "affected:tests/demo-smoke.sh" in r.get("summary", "")][-1]
+assert summary.startswith("land: gate failed for "), summary
+try:
+    os.getloadavg()
+except (AttributeError, OSError):
+    assert " on " not in summary, summary
+else:
+    assert re.search(r" \(load \d+\.\d{2}->\d+\.\d{2} on [1-9]\d* CPUs\)", summary), summary
+print("ledger summary:", summary)
+PY
 
 # A same-request retry keeps both log attempts while summarizing only the pass.
 retry_count="$TMP/retry-count"
@@ -1668,6 +1689,7 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   collect_live_siblings() { export SIBLING_LIVE=''; }
   clean_tree() { return 0; }
   run_gate() { return 0; }
+  eval "$(sed -n '/^host_load() {/,/^}/p' "$LAND")"
   finish() { printf '%s\n' "$1" > "$TMP/race-result"; }
   wait_for_live_siblings() { probe_head=unverified; }
   git() {

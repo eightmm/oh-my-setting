@@ -183,6 +183,20 @@ PY
 }
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+host_load() {
+  python3 -c '
+import os
+try:
+    load = "%.2f" % os.getloadavg()[0]
+except (AttributeError, OSError):
+    load = ""
+try:
+    cpus = os.cpu_count() or ""
+except (AttributeError, OSError):
+    cpus = ""
+print("%s:%s" % (load, cpus))' 2>/dev/null | tr -d '\r'
+}
 clean_tree() { git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; }
 
 SIBLING_LIVE="" SIBLING_FIRST_PATH="" SIBLING_FIRST_STAGE=""
@@ -545,7 +559,7 @@ run_job() {
   # Detached startup is confirmed only after lock acquisition and the exact
   # SHA/tracked-tree admission checks above have written a running receipt.
   [ -z "$READY_FILE" ] || printf '0\n' > "$READY_FILE"
-  local t0 rc=0
+  local t0 rc=0 sample load_start load_end cpus load_note
   if [ "$resume" -eq 0 ]; then
     rset gate.rc=pending push.rc=pending ci.conclusion=skipped update.rc=skipped update.reason=not-reached
     if [ "$IGNORE_SIBLINGS" -eq 1 ]; then
@@ -555,7 +569,14 @@ run_job() {
       [ -z "$SIBLING_LIVE" ] || rset siblings.live="$SIBLING_LIVE"
     fi
     t0="$(date +%s)"
+    sample="$(host_load)"
+    load_start="${sample%%:*}" cpus="${sample#*:}"
+    [ -z "$cpus" ] || rset gate.cpus="$cpus"
+    [ -z "$load_start" ] || rset gate.load_start="$load_start"
     run_gate || rc=$?
+    sample="$(host_load)"
+    load_end="${sample%%:*}"
+    [ -z "$load_end" ] || rset gate.load_end="$load_end"
     rset gate.rc="$rc" gate.seconds="$(( $(date +%s) - t0 ))"
     if [ "$rc" -ne 0 ]; then
       # Name the failing stages and smoke tests: which tests ever catch
@@ -563,8 +584,12 @@ run_job() {
       # ledger is queryable where scattered gate logs are not.
       failed_stages="$(awk -v marker="$marker" 'index($0, marker) { current=1; next } current { print }' "$LOG" |
         sed -n 's/^check: \([^ ]*\) FAILED.*/\1/p' | sort -u | tr '\n' ' ')"
+      load_note=''
+      if [ -n "$load_start" ] && [ -n "$load_end" ] && [ -n "$cpus" ]; then
+        load_note=" (load $load_start->$load_end on $cpus CPUs)"
+      fi
       "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" record --kind verify --cmd "$GATE" \
-        --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }} (see $LOG)" >/dev/null 2>&1 || true
+        --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }}$load_note (see $LOG)" >/dev/null 2>&1 || true
       finish failed "gate exit $rc"; return 1
     fi
     # The gate runs outside the agent's shell, so the pass hook never clears its

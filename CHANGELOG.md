@@ -8,6 +8,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms land` records the host 1-minute load before and after the gate and the
+  CPU count in its receipt, and a failed gate's fail-ledger summary names them,
+  so gate failures under foreign load can be told apart from real ones.
 - `oms autopilot` role timeouts default to planner 15m, worker 30m and
   reviewer 20m instead of 5m each, so an implementation-sized worker no longer
   times out in a contract frozen at propose; an explicit `--provider-timeout`
