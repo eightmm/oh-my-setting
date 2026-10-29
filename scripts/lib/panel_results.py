@@ -259,7 +259,7 @@ def _final_attempt_output(repo, artifact):
         name = attempt.get('output') if isinstance(attempt, dict) else None
         if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*\.out', name):
             continue
-        output = str(Path(sidecar).parent / name)
+        output = (Path(sidecar).parent / name).as_posix()
         if stat.S_ISLNK((Path(repo) / output).lstat().st_mode):
             raise ValueError('attempt output is a symlink')
         _artifact_path(repo, output)
