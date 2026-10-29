@@ -41,6 +41,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A read-only `worker --purpose investigate` dispatch is no longer routed to Pi
+  while another provider serves the tier after the catalog and quota checks: Pi
+  read workers have no shell, so they cannot run git or tests. Pi alone still serves.
 - A room segment that rolled over to a successor no longer counts as an open
   stale thread in `oms thread list --stale`, thread stats or the inbox.
 - An owner `oms panel --finalize` resolves the task's earlier failed artifact

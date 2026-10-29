@@ -295,6 +295,12 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         else:
             available = sorted(available, key=lambda c: c["provider"] == owner)
         usable = available
+    # Read-only investigate workers prefer non-Pi; apply after catalog/quota ordering.
+    if role == "worker" and access == "read" and purpose == "investigate":
+        non_pi = [c for c in usable if c["provider"] != "pi"]
+        if non_pi:
+            usable = non_pi
+        # else: keep list as is (degraded beats refused)
     if role in INDEPENDENT:
         # An exact-model writer (Pi, OpenCode) is never a native judge, so ordering away from it keeps tier order;
         # a Pi main judging its own provider's work still needs its recorded family (unknown fails closed).

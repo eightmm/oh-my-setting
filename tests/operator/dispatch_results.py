@@ -43,6 +43,18 @@ def exercise_exact_model_routing():
         assert "cooldown" in str(error)
     else:
         raise AssertionError("sole capped route was accepted")
+    # Read-only investigate workers must avoid Pi when another provider is available.
+    assert allocate("codex", role="worker", access="read", purpose="investigate", installed={"pi", "claude"})["provider"] == "claude"
+    assert allocate("codex", role="worker", access="read", purpose="investigate", installed={"pi"})["provider"] == "pi"
+    assert allocate("codex", role="worker", access="read", purpose="explain", installed={"pi", "claude"})["provider"] == "pi"
+    # (a) Catalog refusal for the only non-Pi candidate keeps pi (degraded beats refused).
+    assert allocate("codex", role="worker", access="read", purpose="investigate",
+                    installed={"pi", "codex"},
+                    catalogs={"codex": ["gpt-7-sol"]})["provider"] == "pi"
+    # (b) Weekly quota >=90 for the only non-Pi candidate keeps pi.
+    assert allocate("codex", role="worker", access="read", purpose="investigate",
+                    installed={"pi", "claude"},
+                    provider_status={"claude": {"weekly_used": 95}, "pi": {"weekly_used": 0}})["provider"] == "pi"
     for role in ("reviewer", "verifier", "critic", "security-auditor"):
         for target in ("pi", "opencode"):
             with patch.object(panel, "provider_catalog", return_value=[registered[target]]):
