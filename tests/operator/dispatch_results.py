@@ -802,6 +802,83 @@ try:
     raise AssertionError("tab-separated smoke tests were accepted")
 except ValueError as error:
     assert str(error).startswith("unknown --only value(s): "), error
+
+
+def exercise_continuation_verifier(temporary):
+    execution = temporary / "carried-verifier-execution"
+    artifacts = temporary / "carried-verifier-artifacts"
+    (execution / "tests").mkdir(parents=True)
+    (artifacts / ".oms/artifacts").mkdir(parents=True)
+    for suite in ("scripts-smoke.sh", "autonomy-plan-run-smoke.sh", "run-smoke-shard.sh"):
+        (execution / "tests" / suite).write_text("# run-smoke-shard.sh\ntest_base() {\n}\n")
+    body = (
+        "diff --git a/tests/scripts-smoke.sh b/tests/scripts-smoke.sh\n"
+        "--- a/tests/scripts-smoke.sh\n+++ b/tests/scripts-smoke.sh\n"
+        "@@ -1,2 +1,3 @@\n test_context_only() {\n-test_removed_only() {\n"
+        "+test_carried_one() {\n+test_carried_two() {\n"
+        "diff --git a/tests/autonomy-plan-run-smoke.sh b/tests/autonomy-plan-run-smoke.sh\n"
+        '--- "a/tests/autonomy-plan-run-smoke.sh"\n+++ "b/tests/autonomy-plan-run-smoke.sh"\n'
+        "@@ -0,0 +1 @@\n+test_other_suite() {\n"
+        "diff --git a/docs/example.sh b/docs/example.sh\n"
+        "--- a/docs/example.sh\n+++ b/docs/example.sh\n"
+        "@@ -0,0 +1 @@\n+test_unrelated() {\n"
+    ).encode()
+    patch_file = artifacts / ".oms/artifacts/carried.patch"
+    patch_file.write_bytes(body)
+    reference = {"patch": ".oms/artifacts/carried.patch", "sha256": hashlib.sha256(body).hexdigest(),
+                 "base": "a" * 40, "attempt": "previous-worker"}
+    before = {path: path.read_bytes() for parent in (execution, artifacts)
+              for path in parent.rglob("*") if path.is_file()}
+    # The evidence lives in the room repo; suite names come from the execution repo.
+    with patch.dict(os.environ, {}, clear=True), \
+            patch.object(panel, "work_repository", return_value=execution), \
+            patch.object(panel, "routed_command", return_value=["fixture", "--repo", str(artifacts)]), \
+            patch.object(panel, "_validate_dry_run_inputs"), redirect_stdout(io.StringIO()):
+        assert panel.run_dispatch(artifacts, "codex", "builder", "write", "x", None,
+                                  "bash tests/run-smoke-shard.sh --only test_carried_one", None, True, None,
+                                  {"kind": "worker", "purpose": "implement"}, None, None, None,
+                                  work_repo=execution, continuation_patch=reference) == 0
+    for suite, selected in (("scripts-smoke.sh", "test_carried_one"),
+                            ("run-smoke-shard.sh", "test_carried_two"),
+                            ("autonomy-plan-run-smoke.sh", "test_other_suite"),
+                            ("scripts-smoke.sh", "test_base test_carried_one test_carried_two")):
+        panel._validate_dispatch_verifier(execution, "bash tests/%s --only '%s'" % (suite, selected),
+                                          continuation_patch=reference, patch_repo=artifacts)
+    for selected in ("test_context_only", "test_removed_only", "test_unrelated", "test_other_suite",
+                     "test_outside_hunk", "test_carried_one,test_carried_two",
+                     "test_carried_one\ttest_carried_two", "", "0"):
+        try:
+            panel._validate_dispatch_verifier(execution, "bash tests/scripts-smoke.sh --only '%s'" % selected,
+                                              continuation_patch=reference, patch_repo=artifacts)
+            raise AssertionError("invalid carried selector was accepted: " + repr(selected))
+        except ValueError as error:
+            assert str(error).startswith("unknown --only value(s): "), error
+    for candidate in (None, {}, dict(reference, sha256="0" * 64)):
+        try:
+            panel._validate_dispatch_verifier(execution, "bash tests/scripts-smoke.sh --only test_carried_one",
+                                              continuation_patch=candidate, patch_repo=artifacts)
+            raise AssertionError("unverified carried test was accepted")
+        except ValueError:
+            pass
+    for candidate_body in (b"", body.replace(b"@@ -1,2 +1,3 @@", b"@@ invalid @@"),
+                           b"+++ b/tests/scripts-smoke.sh\n@@ -0,0 +0,0 @@\n+test_carried_one() {\n",
+                           b"+++ b/tests/scripts-smoke.sh\n@@ -0,0 +1 @@\n+# end\n+test_carried_one() {\n",
+                           b"+++ b/docs/example.sh\n@@ -0,0 +1,2 @@\n+++ b/tests/scripts-smoke.sh\n+test_carried_one() {\n"):
+        patch_file.write_bytes(candidate_body)
+        candidate = dict(reference, sha256=hashlib.sha256(candidate_body).hexdigest())
+        try:
+            panel._validate_dispatch_verifier(execution, "bash tests/scripts-smoke.sh --only test_carried_one",
+                                              continuation_patch=candidate, patch_repo=artifacts)
+            raise AssertionError("empty or malformed patch authorized a carried test")
+        except ValueError:
+            pass
+    patch_file.write_bytes(body)
+    assert before == {path: path.read_bytes() for parent in (execution, artifacts)
+                      for path in parent.rglob("*") if path.is_file()}, "validation changed repository files"
+
+
+exercise_continuation_verifier(temporary)
+
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
     peer = "claude" if owner == "codex" else "codex"

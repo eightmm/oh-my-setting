@@ -1012,8 +1012,12 @@ def _warn_missing_module(repo, verify):
         print("warning: verify may fail: %s cannot find module %s" % (first[0], top), file=sys.stderr)
 
 
-def _validate_dispatch_verifier(repo, verify):
-    """Refuse missing suite files and unknown selectors before launching a worker."""
+def _validate_dispatch_verifier(repo, verify, continuation_patch=None, patch_repo=None):
+    """Refuse missing suite files and unknown selectors without running repository code.
+
+    A continuation may also select smoke tests defined on added hunk lines of
+    its digest-verified carried patch, only in the corresponding suite.
+    """
     from terminal_panel import _read_suite, _uses_smoke_runner
     if not isinstance(verify, str) or not verify.strip():
         return
@@ -1023,6 +1027,26 @@ def _validate_dispatch_verifier(repo, verify):
         tokens = list(lexer)
     except ValueError:
         return
+    added = {}
+    if continuation_patch:
+        from panel_results import _patch_name, verified_patch
+        body = verified_patch(patch_repo or repo, {"patch": continuation_patch.get("patch"),
+                                                  "patch_sha256": continuation_patch.get("sha256")})
+        current, remaining = None, 0
+        for line in body.decode("utf-8", "surrogateescape").split("\n"):
+            if line.startswith("diff --git "):
+                current, remaining = None, 0
+            elif line.startswith("@@ "):
+                hunk = re.match(r"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@", line)
+                remaining = sum(int(count) if count is not None else 1 for count in hunk.groups()) if hunk else 0
+            elif remaining:
+                definition = re.match(r"\+(test_[A-Za-z0-9_]+)\(\) *\{", line)
+                if current and definition:
+                    added.setdefault(current, []).append(definition.group(1))
+                remaining = max(0, remaining - (2 if line.startswith(" ") else 1
+                                                if line.startswith(("+", "-")) else 0))
+            elif line.startswith("+++ "):
+                current = _patch_name(line[4:].split("\t", 1)[0])
     separators = {"&&", "||", ";", "|", "&", ";;", "(", ")"}
     repo = Path(repo)
     for index, token in enumerate(tokens[:-1]):
@@ -1063,6 +1087,7 @@ def _validate_dispatch_verifier(repo, verify):
                 selected_suite = (repo / "tests/scripts-smoke.sh" if suite == "tests/run-smoke-shard.sh"
                                   else target)
                 valid = re.findall(r"^(test_[A-Za-z0-9_]+)\(\) *\{", _read_suite(selected_suite), re.M)
+                valid += added.get(selected_suite.relative_to(repo).as_posix(), [])
             else:
                 cursor += 2
                 continue
@@ -2301,7 +2326,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     elif route["kind"] in {"worker", "researcher"}:
         execution = native_repository(repo)
     if candidate is None:
-        _validate_dispatch_verifier(execution, verify)
+        _validate_dispatch_verifier(execution, verify, continuation_patch=continuation_patch, patch_repo=repo)
         if access == "write":
             _warn_missing_module(execution, verify)
     # Candidate suite/selector validation runs after materialization in peer-review.
