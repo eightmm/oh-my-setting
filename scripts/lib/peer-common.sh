@@ -2600,6 +2600,81 @@ record_native_session(session)
 PY
 }
 
+# Convert complete Pi event streams while preserving unparseable output verbatim.
+ma_pi_jsonl_to_text() {
+  local file="$1"
+  [ -s "$file" ] || return 0
+  local pi_status=0
+  python3 - "$file" "$(ma_scripts_dir)/lib" <<'PYPI' 2>/dev/null || pi_status=$?
+import json, os, sys, tempfile
+sys.path.insert(0, sys.argv[2])
+from peer_artifacts import usage_footer
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        raw = handle.read()
+    events = []
+    for line in raw.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    messages = [event.get("message") for event in events if event.get("type") == "message_end"
+                and isinstance(event.get("message"), dict) and event["message"].get("role") == "assistant"]
+    ends = [event for event in events if event.get("type") == "agent_end"]
+    assistants = []
+    if ends and isinstance(ends[-1].get("messages"), list):
+        assistants = [m for m in ends[-1]["messages"] if isinstance(m, dict) and m.get("role") == "assistant"]
+    if not ends:
+        assistants = messages
+    if not assistants or not isinstance(assistants[-1].get("content"), list):
+        raise ValueError("missing answer")
+    last = assistants[-1]
+    answer = "".join(part.get("text", "") for part in last["content"]
+                     if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str))
+    error = last.get("errorMessage") if last.get("stopReason") in ("error", "aborted") else None
+    if isinstance(error, str) and error:
+        answer += ("\n" if answer and not answer.endswith("\n") else "") + error
+    rows = []
+    calls = 0
+    for message in messages:
+        usage, content = message.get("usage"), message.get("content")
+        if not isinstance(usage, dict) or not isinstance(content, list):
+            rows = []
+            break
+        values = [usage.get(key) for key in ("input", "output", "cacheRead", "cacheWrite")]
+        if any(type(value) is not int or value < 0 for value in values):
+            rows = []
+            break
+        rows.append(dict(zip(("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"), values)))
+        calls += sum(isinstance(part, dict) and part.get("type") == "toolCall" for part in content)
+    footer = []
+    if rows:
+        footer = usage_footer("pi", rows, tool_calls=calls)
+        detail = json.loads(footer[-1].split(": ", 1)[1])
+        detail.update({"cache_write_tokens": sum(row["cache_creation_input_tokens"] for row in rows)})
+        footer[-1] = "usage detail: " + json.dumps(detail, sort_keys=True)
+    output = answer + ("\n" if answer and not answer.endswith("\n") else "")
+    if footer:
+        output += "\n".join(footer) + "\n"
+    fd, tmp = tempfile.mkstemp(prefix=".pi-output-", dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(output)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    if last.get("stopReason") in ("error", "aborted"):
+        raise SystemExit(10)
+except (OSError, UnicodeError, ValueError, TypeError):
+    pass
+PYPI
+  [ "$pi_status" -ne 10 ]
+}
+
 # Parse codex's --json JSONL event stream back to plain text, keeping what
 # plain text cannot carry: whether the turn actually closed. item.completed
 # agent_message events are the answer; turn.completed carries authoritative
@@ -2863,10 +2938,9 @@ ma_room_relay_stop() {  # PID [TICKS]
 # (codex error/turn.failed, a claude result envelope that is an API error) and
 # its fixed "ERROR:"/"Error:"/"API Error:" line prefixes are read. Agent answers
 # ride item/assistant events, so a quoted "429" or "model not found" in the
-# agent's own work classifies as nothing. Pi's text mode has no event channel,
-# so its anchored "NNN:" status lines are read too; on a failed exit pi 1.1.0
-# prints only the provider error, never the answer (print-mode.js). Unsure
-# means no fallback.
+# agent's own work classifies as nothing. Pi appends errorMessage verbatim;
+# its derived nonzero status enables this scan, including an NNN: prefix if
+# present in the message. Unsure means no fallback.
 oms_panel_provider_error_scan() { # OUTPUT_FILE
   python3 - "$1" "$2" <<'PY' 2>/dev/null || true
 import json, re, sys
@@ -3335,7 +3409,7 @@ ma_provider_attempt_run() {
       fi
       prompt_arg="$(cat "$prompt_file")"
       cmd=(env PI_SKIP_VERSION_CHECK=1 "$binary" --no-session --no-approve
-        --no-extensions --no-skills --no-prompt-templates --mode text)
+        --no-extensions --no-skills --no-prompt-templates --mode json)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
       [ -z "$effort" ] || cmd+=(--thinking "$effort")
       cmd+=(--tools)
@@ -3679,6 +3753,9 @@ PY
     fi
     [ -z "$room_relay_dir" ] || rm -rf "$room_relay_dir"
   fi
+  if [ "$provider" = pi ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+    ma_pi_jsonl_to_text "$output_file" || { [ "$status" -ne 0 ] || status=1; }
+  fi
   if [ "$status" -ne 0 ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
     OMS_PROVIDER_ERROR_CLASSIFICATION="$(oms_panel_provider_error_classify "$provider" "$status" "$output_file")"
     if [ -n "$OMS_PROVIDER_ERROR_CLASSIFICATION" ]; then
@@ -3987,7 +4064,7 @@ ma_run_routed_provider_inner() {
       if [ "$primary_error_provider" = pi ] && [ "$primary_error_class" = capacity ] &&
         ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file"; then
         case "$OMS_MODEL_PRIMARY" in openrouter/*:free)
-          if grep -Eiq '^[0-9]{3}:.*free-models-per-day' "$attempt_file"; then
+          if grep -Eiq '^[0-9]{3}:.*(free-models-per-day|limit_rpd/|Daily limit reached)' "$attempt_file"; then
             daily_model="$OMS_MODEL_PRIMARY"
             daily_day="$(date -u +%Y-%m-%d)"
           else

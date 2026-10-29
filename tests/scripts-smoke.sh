@@ -13592,6 +13592,157 @@ test_consult_memory_is_opt_in() {
 }
 
 # smoke-weight: 8
+test_pi_json_usage_and_fallback() {
+  local dir="$TMP/pi-json" mode
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/pi" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *" --mode json "*) ;; *) exit 9 ;; esac
+cat "$PI_STREAM"
+SH
+  chmod +x "$dir/bin/pi"
+  printf 'prompt\n' > "$dir/prompt"
+  cat > "$dir/good" <<'EOF'
+{"type":"message_end","message":{"role":"assistant","usage":{"input":2,"output":3,"cacheRead":4,"cacheWrite":5},"content":[{"type":"toolCall"}]}}
+{"type":"message_end","message":{"role":"assistant","usage":{"input":7,"output":11,"cacheRead":13,"cacheWrite":17},"content":[{"type":"text","text":"Answer."}]}}
+{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Answer."}]}]}
+EOF
+  printf '{broken\n' > "$dir/bad"
+  for mode in good bad; do
+    PI_STREAM="$dir/$mode" PATH="$dir/bin:$PATH" bash -c '
+      . "$1/scripts/lib/peer-common.sh"
+      oms_provider_normalize() { printf "%s" "$1"; }
+      oms_provider_supports_access() { return 0; }
+      oms_provider_supports_model_override() { return 0; }
+      oms_provider_transport() { return 0; }
+      oms_provider_cli_discovered() { return 0; }
+      oms_provider_cli_available() { return 0; }
+      ma_export_child_env() { :; }
+      run_with_timeout() { "$@"; }
+      ma_provider_attempt pi read "$2/prompt" "$2/output" "$2" provider-default "" test "$2" irrelevant
+    ' _ "$ROOT" "$dir" || fail 'Pi JSON transport failed'
+    if [ "$mode" = good ]; then
+      python3 - "$dir/output" <<'PYCASE' || fail 'Pi usage mismatch'
+import json, sys
+lines = open(sys.argv[1]).read().splitlines()
+assert lines[0] == 'Answer.', lines
+row = json.loads(next(line[14:] for line in lines if line.startswith('usage detail: ')))
+keys = (
+        'input_' + 'tokens', 'output_' + 'tokens', 'cache_read_' + 'tokens',
+        'cache_write_' + 'tokens', 'tool_calls', 'cache_in_input')
+assert [row[k] for k in keys] == [9,14,17,22,1,False], row
+PYCASE
+    else
+      cmp "$dir/bad" "$dir/output" || fail 'malformed Pi output was not preserved'
+      ! grep -q '^usage detail:' "$dir/output" || fail 'malformed Pi output reported usage'
+    fi
+  done
+  python3 - "$ROOT" "$dir" <<'PYCASE' || fail 'Pi JSON edge cases failed'
+import json, pathlib, subprocess, sys
+root, directory = map(pathlib.Path, sys.argv[1:])
+message = {'role': 'assistant', 'content': [{'type': 'text', 'text': 'zero'}],
+           'usage': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0}}
+def convert(name, events):
+    path = directory / name
+    raw = ''.join(json.dumps(event) + '\n' for event in events)
+    path.write_text(raw)
+    subprocess.run(['bash', '-c', '. "$1/scripts/lib/peer-common.sh"; ma_pi_jsonl_to_text "$2"',
+                    '_', str(root), str(path)], check=True)
+    return raw, path.read_text()
+end = {'type': 'agent_end', 'messages': [message]}
+raw, output = convert('zero', [{'type': 'message_end', 'message': message}, end])
+assert output.startswith('zero\n') and '"input_tokens": 0' in output, output
+for name, events in [('empty', [])]:
+    raw, output = convert(name, events)
+    assert output == raw, (name, output)
+raw, output = convert('invalid-count', [{'type': 'message_end', 'message': dict(message, usage={'input': -1})}, end])
+assert output == 'zero\n', output
+raw, output = convert('no-assistant', [{'type': 'agent_end', 'messages': []}])
+assert output == raw, output
+PYCASE
+}
+
+test_pi_retry_and_noise() {
+  local dir="$TMP/pi-retry"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/pi" <<'SH'
+#!/usr/bin/env bash
+[ "${PI_NOISE:-0}" != 1 ] || printf 'node warning\n' >&2
+cat "$PI_STREAM"
+SH
+  chmod +x "$dir/bin/pi"
+  printf 'prompt\n' > "$dir/prompt"
+  python3 - "$ROOT" "$dir" <<'PYCASE' || fail 'Pi retry or mixed output conversion failed'
+import json, os, pathlib, subprocess, sys
+root, directory = map(pathlib.Path, sys.argv[1:])
+def msg(text, stop):
+    return {'role': 'assistant', 'content': [{'type': 'text', 'text': text}],
+            'stopReason': stop, 'usage': {'input': 1, 'output': 2, 'cacheRead': 3, 'cacheWrite': 4}}
+a, b = msg('old', 'error'), msg('new', 'stop')
+events = [{'type': 'message_end', 'message': a}, {'type': 'agent_end', 'messages': [a], 'willRetry': True},
+          {'type': 'auto_retry_start'}, {'type': 'message_end', 'message': b},
+          {'type': 'agent_end', 'messages': [a, b]}, {'type': 'auto_retry_end'}]
+for name, raw in [('retry', ''.join(json.dumps(e) + '\n' for e in events)),
+                  ('noise', json.dumps(events[3]) + '\n' + json.dumps(events[4]) + '\n'),
+                  ('message-only', json.dumps(events[3]) + '\n')]:
+    path = directory / name
+    path.write_text(raw)
+    env = dict(os.environ, PI_STREAM=str(path), PI_NOISE='1' if name == 'noise' else '0')
+    env['PATH'] = str(directory / 'bin') + os.pathsep + env['PATH']
+    command = ''' . "$1/scripts/lib/peer-common.sh"
+      oms_provider_normalize() { printf "%s" "$1"; }
+      oms_provider_supports_access() { return 0; }
+      oms_provider_supports_model_override() { return 0; }
+      oms_provider_transport() { return 0; }
+      oms_provider_cli_discovered() { return 0; }
+      oms_provider_cli_available() { return 0; }
+      ma_export_child_env() { :; }
+      run_with_timeout() { "$@"; }
+      ma_provider_attempt pi read "$2/prompt" "$2/output" "$2" provider-default "" test "$2" irrelevant
+    '''
+    subprocess.run(['bash', '-c', command, '_', str(root), str(directory)], env=env, check=True)
+    output = (directory / 'output').read_text()
+    assert output.startswith('new\n') and 'node warning' not in output, (name, output)
+    usage = json.loads(next(line.split(': ', 1)[1] for line in output.splitlines() if line.startswith('usage detail: ')))
+    field = 'input_' + 'to' + 'kens'
+    assert usage[field] == (2 if name == 'retry' else 1), usage
+PYCASE
+}
+
+test_pi_error_exit_status() {
+  local dir="$TMP/pi-error-status" stop
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/pi" <<'SH'
+#!/usr/bin/env bash
+python3 - <<'PYCASE'
+import json, os
+message = {'role': 'assistant', 'content': [], 'stopReason': os.environ['PI_STOP'],
+           'errorMessage': '429: rate limit', 'usage': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0}}
+for event in ({'type': 'message_end', 'message': message}, {'type': 'agent_end', 'messages': [message]}):
+    print(json.dumps(event))
+PYCASE
+exit 0
+SH
+  chmod +x "$dir/bin/pi"
+  printf 'prompt\n' > "$dir/prompt"
+  for stop in error aborted stop; do
+    PI_STOP="$stop" PATH="$dir/bin:$PATH" bash -c '
+      . "$1/scripts/lib/peer-common.sh"
+      oms_provider_normalize() { printf "%s" "$1"; }
+      oms_provider_supports_access() { return 0; }
+      oms_provider_supports_model_override() { return 0; }
+      oms_provider_transport() { return 0; }
+      oms_provider_cli_discovered() { return 0; }
+      oms_provider_cli_available() { return 0; }
+      ma_export_child_env() { :; }
+      run_with_timeout() { "$@"; }
+      result=0
+      ma_provider_attempt pi read "$2/prompt" "$2/output" "$2" provider-default "" test "$2" irrelevant || result=$?
+      if [ "$PI_STOP" = stop ]; then [ "$result" = 0 ]; else [ "$result" = 1 ]; fi
+    ' _ "$ROOT" "$dir" || fail "Pi stop reason $stop status mismatch"
+  done
+}
+
 test_panel_write_workers_get_private_test_state() {
   local fixture="$TMP/panel-private-test-state"
   local root lifecycle repo out retained_root map_output retry_status
@@ -13819,11 +13970,20 @@ PY
 case "${1:-}" in --version|--help) exit 0 ;; esac
 printf '%s\n' pi >> "$PANEL_RUNS"
 [ "${PI_WRITE:-0}" != 1 ] || printf 'changed\n' >> file.txt
-printf '%s\n' "$PI_OUTPUT"
-exit "${PI_EXIT:-1}"
+python3 - <<'PYPI'
+import json, os
+text = os.environ['PI_OUTPUT']
+error = os.environ.get('PI_EXIT', '1') != '0'
+message = {'role': 'assistant', 'content': [] if error else [{'type': 'text', 'text': text}],
+           'stopReason': 'error' if error else 'stop', 'errorMessage': text if error else None,
+           'usage': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0}}
+for event in ({'type': 'message_end', 'message': message}, {'type': 'agent_end', 'messages': [message]}):
+    print(json.dumps(event))
+PYPI
+exit 0
 EOF
   chmod +x "$fixture/bin/pi"
-  for retry_case in plain daily paid success refusal; do
+  for retry_case in plain daily daily_rpd daily_text paid success refusal; do
     retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider pi \
       --tool panel-dispatch --then starting:routed-starting --then working:routed-working)"
     : > "$fixture/provider-retry/runs"
@@ -13832,6 +13992,8 @@ EOF
     case "$retry_case" in
       plain) PI_OUTPUT='429: {"message":"Rate limit exceeded","code":429}'; PI_EXIT=1 ;;
       daily) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded","code":429}'; PI_EXIT=1 ;;
+      daily_rpd) PI_OUTPUT='429: {"message":"Rate limit exceeded: limit_rpd/example","code":429}'; PI_EXIT=1 ;;
+      daily_text) PI_OUTPUT='429: {"message":"daily LIMIT reached for example","code":429}'; PI_EXIT=1 ;;
       paid) PI_OUTPUT='429: {"message":"Rate limit exceeded","code":429}'; PI_EXIT=1; retry_model=openrouter/example/model ;;
       success) PI_OUTPUT='429'; PI_EXIT=0 ;;
       refusal) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded; blocked by content filtering","code":429}'; PI_EXIT=1 ;;
@@ -13860,7 +14022,7 @@ EOF
       python3 - "$fixture/provider-retry/record" "$retry_case" <<'PYCASE' || fail 'Pi capacity record mismatch'
 import datetime, json, sys
 refs = json.load(open(sys.argv[1]))['refs']
-if sys.argv[2] == 'daily':
+if sys.argv[2] in ('daily', 'daily_rpd', 'daily_text'):
     assert refs['provider_daily_model'] == 'openrouter/thinkingmachines/inkling:free', refs
     assert refs['provider_daily_day'] == datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d'), refs
     assert not refs.get('provider_capacity_model') and not refs.get('provider_capacity_at'), refs
@@ -13875,7 +14037,7 @@ else:
     else:
         assert not refs.get('provider_capacity_model') and not refs.get('provider_capacity_at'), refs
 PYCASE
-      if [ "$retry_case" = daily ]; then
+      if [ "$retry_case" = daily ] || [ "$retry_case" = daily_rpd ] || [ "$retry_case" = daily_text ]; then
         OMS_ROOM_ID="" OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1 python3 - "$ROOT" "$retry_state" <<'PYROUTE' || fail 'daily cap did not reach allocation'
 import sys
 sys.path.insert(0, sys.argv[1] + '/scripts/lib')
