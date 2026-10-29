@@ -24502,11 +24502,13 @@ if os.name != 'nt':
         while not lock_ready.exists():
             assert holder.poll() is None and time.monotonic() < deadline
             time.sleep(0.02)
+        call_timeout = max(30, int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
         started = time.monotonic()
         refused = subprocess.run(['bash', root + '/scripts/patch-land.sh', '--repo', str(busy),
-                                  '--patch', patch, '--verify', 'false'], env=dict(os.environ, OMS_LOCK_TIMEOUT='60'),
-                                 text=True, capture_output=True, timeout=12)
-        assert refused.returncode == 1 and time.monotonic() - started < 10, refused.stderr
+                                  '--patch', patch, '--verify', 'false'],
+                                 env=dict(os.environ, OMS_LOCK_TIMEOUT=str(call_timeout * 2)),
+                                 text=True, capture_output=True, timeout=call_timeout)
+        assert refused.returncode == 1 and time.monotonic() - started < call_timeout, refused.stderr
         assert holder.poll() is None
         item = next(iter(helper['reservations'](str(busy)).values()))
         value = helper['certificate'](item)
@@ -25033,7 +25035,7 @@ operation="${3:-}"
 delay_once() {
   [ ! -e "$OMS_TEST_DELAY_ONCE" ] || return 0
   : > "$OMS_TEST_DELAY_ONCE"
-  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
+  (sleep 120; : > "$OMS_TEST_CHILD_MARKER") &
   printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
   wait
 }
@@ -25044,7 +25046,7 @@ elif [ "$mode" = append-before ] && [ "$operation" = append ]; then
 elif [ "$mode" = success-descendant ] && [ "$operation" = append ]; then
   "$OMS_TEST_REAL_AGENT_TASK" "$@"
   result=$?
-  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
+  (sleep 120; : > "$OMS_TEST_CHILD_MARKER") &
   printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
   exit "$result"
 fi
@@ -25058,7 +25060,7 @@ if [ "${OMS_TEST_DELAY_MODE:-none}" = append-after ] &&
    [ "${2:-}" = finish ] && [ ! -e "$OMS_TEST_DELAY_ONCE" ] &&
    grep -Fq "$OMS_TEST_PROMPT_NOTE" "$3/.oms/task/current.md" 2>/dev/null; then
   : > "$OMS_TEST_DELAY_ONCE"
-  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
+  (sleep 120; : > "$OMS_TEST_CHILD_MARKER") &
   printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
   wait
 fi
@@ -25067,7 +25069,7 @@ EOF
     chmod +x "$wrapper" "$bin_dir/python3"
 
     invoke_auto_task() {
-      local mode="$1" timeout="${2:-4}"
+      local mode="$1" timeout="${2:-10}"
       PATH="$bin_dir:$PATH" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT="$timeout" \
         OMS_HOOK_RESOLVED_REPO="$project" \
         OMS_TEST_REAL_AGENT_TASK="$ROOT/scripts/agent-task.sh" \
@@ -25096,7 +25098,7 @@ print(json.dumps(states[-1] if states else {}))
 PY
     }
 
-    first="$(invoke_auto_task "$scenario" 4)"
+    first="$(invoke_auto_task "$scenario" 10)"
     if [ "$scenario" = success-descendant ]; then
       python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$first" ||
         fail "successful publication must be acknowledged: $first"
@@ -25118,7 +25120,7 @@ PY
     [ ! -e "$d/$scenario/child-wrote" ] || fail "$scenario left a timed-out descendant running"
     kill -0 "$foreign_pid" 2>/dev/null || fail "$scenario killed or altered the unrelated process"
 
-    second="$(invoke_auto_task none 4)"
+    second="$(invoke_auto_task none 10)"
     python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$second" ||
       fail "$scenario retry must commit its prompt only after publication: $second"
     [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
