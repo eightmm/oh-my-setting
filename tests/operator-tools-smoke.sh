@@ -85,6 +85,8 @@ if [ -z "${OMS_FIXTURE_ROOT:-}" ]; then
 fi
 oms_smoke_use_fixture_root
 export OMS_LOCK_DIR="$TMP/locks"
+# Panel snapshots must not read the host tsp queue or its fallback jobs.
+export OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$TMP/tsp-fallback"
 mkdir -p "$OMS_LOCK_DIR"
 OPERATOR_STARTED=$SECONDS
 OPERATOR_SHARD_STARTED=$SECONDS
