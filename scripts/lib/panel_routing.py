@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_OWNERS = ("claude", "codex", "pi", "antigravity")
+PI_COOLDOWN_SECONDS = 1200
 
 
 def main_owner_matches(harness, owner):
@@ -258,6 +259,13 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     usable = [c for c in usable if not daily_capped(provider_status, c)]
     if not usable:
         raise ValueError("all installed providers in the %s tier are in daily cooldown" % tier)
+    # routing_status supplies only active cooldowns; keep Pi if every candidate is cooling.
+    pi_status = provider_status.get("pi", {}) if isinstance(provider_status, dict) else {}
+    cooldowns = pi_status.get("cooldown", {}) if isinstance(pi_status, dict) else {}
+    kept = [c for c in usable if not (c["provider"] == "pi" and isinstance(cooldowns, dict)
+                                     and c["model"] in cooldowns)]
+    if kept:
+        usable = kept
     # Quota guards any choice among installed providers, including the one family exclusion leaves.
     several = len(usable) > 1
     if catalogs is not None:

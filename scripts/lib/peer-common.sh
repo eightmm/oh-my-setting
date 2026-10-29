@@ -3983,20 +3983,25 @@ ma_run_routed_provider_inner() {
     if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ]; then
       local panel_events panel_error_record persisted_error
       panel_events="$(ma_scripts_dir)/agent-events.sh"
-      local daily_model="" daily_day=""
+      local daily_model="" daily_day="" capacity_model="" capacity_at=""
       if [ "$primary_error_provider" = pi ] && [ "$primary_error_class" = capacity ] &&
-        ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" &&
-        grep -Eiq '^[0-9]{3}:.*free-models-per-day' "$attempt_file"; then
+        ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file"; then
         case "$OMS_MODEL_PRIMARY" in openrouter/*:free)
-          daily_model="$OMS_MODEL_PRIMARY"
-          daily_day="$(date -u +%Y-%m-%d)" ;; esac
+          if grep -Eiq '^[0-9]{3}:.*free-models-per-day' "$attempt_file"; then
+            daily_model="$OMS_MODEL_PRIMARY"
+            daily_day="$(date -u +%Y-%m-%d)"
+          else
+            capacity_model="$OMS_MODEL_PRIMARY"
+            capacity_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi ;; esac
       fi
       if [ -x "$panel_events" ] &&
         "$panel_events" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" --actor provider-router \
           --ref "provider_error=$primary_error_class" \
           --ref "provider_error_provider=$primary_error_provider" \
           --ref "provider_error_exit=$primary_error_exit" \
-          --ref "provider_daily_model=$daily_model" --ref "provider_daily_day=$daily_day" >/dev/null; then
+          --ref "provider_daily_model=$daily_model" --ref "provider_daily_day=$daily_day" \
+          --ref "provider_capacity_model=$capacity_model" --ref "provider_capacity_at=$capacity_at" >/dev/null; then
         panel_error_record="$("$panel_events" --repo "$state_repo" show --attempt "$OMS_ATTEMPT_ID" --json 2>/dev/null)" || panel_error_record=""
         if [ -n "$panel_error_record" ]; then
           persisted_error="$(printf "%s\\n" "$panel_error_record" | python3 -c "import json,sys; refs=json.load(sys.stdin).get(\"refs\",{}); value=refs.get(\"provider_error\",\"\"); print(value if refs.get(\"provider_error_provider\")==sys.argv[1] and refs.get(\"provider_error_exit\")==sys.argv[2] and value in (\"model_unavailable\",\"capacity\",\"provider_down\") else \"\")" "$primary_error_provider" "$primary_error_exit" | tr -d '\r')"

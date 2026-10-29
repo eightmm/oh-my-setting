@@ -45,6 +45,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- After a transient upstream 429 on a free Pi model, panel routing skips that
+  model for 20 minutes when another provider serves the tier, instead of
+  sending the next worker into the same limit. Pi alone still serves; the
+  daily cap is unchanged.
 - A write worker's in-run guard judges sibling worktrees against the
   caller's temp directory, as its snapshot did, instead of the worker's private
   TMPDIR. Before this, every `oms patch-land` admit or land worktree under the

@@ -6,6 +6,61 @@ from unittest.mock import patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
+
+def exercise_pi_cooldown_routing():
+    import panel_routing
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    model = "openrouter/thinkingmachines/inkling:free"
+    five_min_ago = (now - timedelta(seconds=300)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    thirty_min_ago = (now - timedelta(seconds=1800)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cooling = {"pi": {"cooldown": {model: five_min_ago}}}
+    assert allocate("codex", installed={"pi", "claude"}, provider_status=cooling)["provider"] == "claude"
+    assert allocate("codex", installed={"pi"}, provider_status=cooling)["provider"] == "pi"
+
+    def reading(entries):
+        ledger = [{"refs": dict(provider_error_provider="pi", provider_error="capacity",
+                                 provider_capacity_model=name, provider_capacity_at=at)}
+                  for name, at in entries]
+        with patch("terminal_panel.events", return_value=json.dumps(ledger)), \
+                patch.dict(os.environ, {"OMS_ROOM_ID": ""}), \
+                patch("datetime.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            return dispatch.routing_status(project)
+
+    expired = reading([(model, thirty_min_ago)])
+    assert allocate("codex", installed={"pi", "claude"}, provider_status=expired)["provider"] == "pi"
+    routes = deepcopy(panel_routing.policy())
+    other = "openrouter/other:free"
+    routes["tiers"]["routine"] = [dict(routes["tiers"]["routine"][0], model=name)
+                                   for name in (model, other)]
+    with patch.object(panel_routing, "policy", return_value=routes):
+        both = {"pi": {"cooldown": {model: five_min_ago, other: five_min_ago}}}
+        assert allocate("codex", installed={"pi"}, provider_status=both)["provider"] == "pi"
+        assert allocate("codex", installed={"pi"}, provider_status=cooling)["model"] == other
+
+    # An older offset timestamp sorts later as text; chronological newest still wins.
+    older = (now - timedelta(seconds=600)).astimezone(timezone(timedelta(hours=10))).isoformat()
+    rows = [(model, five_min_ago), (model, older), (model, thirty_min_ago)]
+    for malformed in ("", "0", "malformed", "2026-02-30T00:00:00Z", 0, None, [],
+                      now.replace(tzinfo=None).isoformat(), (now + timedelta(seconds=1)).isoformat()):
+        rows.extend([(model, malformed), (other, malformed)])
+    expected = {model: five_min_ago}
+    assert reading(rows)["pi"]["cooldown"] == expected
+    assert reading(list(reversed(rows)))["pi"]["cooldown"] == expected
+    assert reading([])["pi"]["cooldown"] == {}
+    for age in (0, panel_routing.PI_COOLDOWN_SECONDS - 1, panel_routing.PI_COOLDOWN_SECONDS, 1800):
+        at = (now - timedelta(seconds=age)).isoformat()
+        readings = reading([(model, at)])
+        active = age < panel_routing.PI_COOLDOWN_SECONDS
+        assert readings["pi"]["cooldown"] == ({model: at} if active else {})
+        assert allocate("codex", installed={"pi", "claude"}, provider_status=readings)["provider"] == (
+            "claude" if active else "pi")
+    for invalid in (None, "", 0, {}, {"cooldown": None}, {"cooldown": []}, {"cooldown": model}):
+        assert allocate("codex", installed={"pi", "claude"}, provider_status={"pi": invalid})["provider"] == "pi"
+
+
 # Exact tier models keep main ownership and judgment on the native pair.
 def exercise_exact_model_routing():
     from panel_routing import valid_route
@@ -43,6 +98,7 @@ def exercise_exact_model_routing():
         assert "cooldown" in str(error)
     else:
         raise AssertionError("sole capped route was accepted")
+    exercise_pi_cooldown_routing()
     # Read-only investigate workers must avoid Pi when another provider is available.
     assert allocate("codex", role="worker", access="read", purpose="investigate", installed={"pi", "claude"})["provider"] == "claude"
     assert allocate("codex", role="worker", access="read", purpose="investigate", installed={"pi"})["provider"] == "pi"

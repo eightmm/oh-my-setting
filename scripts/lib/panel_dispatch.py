@@ -131,23 +131,39 @@ def provider_catalog(selection="all"):
 
 
 def routing_status(repo, room_id=None, main=None, snapshot_sink=None):
-    """Reuse the board's recorded HUD/pane readings without a provider usage query."""
+    """Reuse recorded readings and unexpired Pi capacity cooldowns without a provider query."""
     from terminal_panel import repository, snapshot
     from terminal_panel import events
     from panel_metrics import collect
+    from panel_routing import PI_COOLDOWN_SECONDS
     readings = {}
     try:
         rows = json.loads(events(repo, "list", "--json", output=True))
-        daily = {}
+        daily, cooldown, capacity_times = {}, {}, {}
         from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
         for row in rows:
             refs = row.get("refs", {})
             if refs.get("provider_error_provider") == "pi" and refs.get("provider_error") == "capacity":
                 model, day = refs.get("provider_daily_model"), refs.get("provider_daily_day")
                 if isinstance(model, str) and isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and day <= today:
                     daily[model] = max(day, daily.get(model, ""))
-        readings["pi"] = {"daily_cap": daily}
+                model = refs.get("provider_capacity_model")
+                at_str = refs.get("provider_capacity_at")
+                if isinstance(model, str) and model and isinstance(at_str, str):
+                    try:
+                        at_dt = datetime.fromisoformat(at_str.replace("Z", "+00:00"))
+                        if at_dt.tzinfo is None:
+                            continue
+                        age = (now - at_dt).total_seconds()
+                    except ValueError:
+                        continue
+                    if 0 <= age < PI_COOLDOWN_SECONDS and (
+                            model not in capacity_times or at_dt > capacity_times[model]):
+                        capacity_times[model] = at_dt
+                        cooldown[model] = at_str
+        readings["pi"] = {"daily_cap": daily, "cooldown": cooldown}
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         pass
     if not (room_id or os.environ.get("OMS_ROOM_ID")):

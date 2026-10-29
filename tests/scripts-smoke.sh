@@ -13759,7 +13759,7 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
 
   local retry_repo="$fixture/provider-retry/repo"
   local retry_state="$fixture/provider-retry/state"
-  local retry_attempt retry_case
+  local retry_attempt retry_case retry_model
   mkdir -p "$fixture/provider-retry"
   make_committed_repo "$retry_repo"
   make_committed_repo "$retry_state"
@@ -13823,14 +13823,16 @@ printf '%s\n' "$PI_OUTPUT"
 exit "${PI_EXIT:-1}"
 EOF
   chmod +x "$fixture/bin/pi"
-  for retry_case in plain daily success refusal; do
+  for retry_case in plain daily paid success refusal; do
     retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider pi \
       --tool panel-dispatch --then starting:routed-starting --then working:routed-working)"
     : > "$fixture/provider-retry/runs"
+    retry_model=openrouter/thinkingmachines/inkling:free
     # shellcheck disable=SC2089,SC2090 # the stub prints PI_OUTPUT verbatim; quotes are data
     case "$retry_case" in
       plain) PI_OUTPUT='429: {"message":"Rate limit exceeded","code":429}'; PI_EXIT=1 ;;
       daily) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded","code":429}'; PI_EXIT=1 ;;
+      paid) PI_OUTPUT='429: {"message":"Rate limit exceeded","code":429}'; PI_EXIT=1; retry_model=openrouter/example/model ;;
       success) PI_OUTPUT='429'; PI_EXIT=0 ;;
       refusal) PI_OUTPUT='429: {"message":"free-models-per-day limit exceeded; blocked by content filtering","code":429}'; PI_EXIT=1 ;;
     esac
@@ -13838,7 +13840,7 @@ EOF
     export PI_OUTPUT PI_EXIT
     if PANEL_ARGV="$fixture/provider-retry/argv" PANEL_ENV="$fixture/provider-retry/env" \
       PANEL_RUNS="$fixture/provider-retry/runs" PATH="$fixture/bin:$PATH" \
-      OMS_MODEL_EXPLICIT=openrouter/thinkingmachines/inkling:free OMS_PANEL_DISPATCH=1 \
+      OMS_MODEL_EXPLICIT="$retry_model" OMS_PANEL_DISPATCH=1 \
       OMS_PANEL_ROLE=worker OMS_PANEL_FALLBACK_PROVIDER=claude \
       OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 OMS_PANEL_FALLBACK_EFFORT=medium \
       OMS_ATTEMPT_ID="$retry_attempt" OMS_AGENT=codex \
@@ -13855,14 +13857,23 @@ EOF
     else
       [ "$retry_status" -eq 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = $'pi\nclaude' ] || fail "Pi $retry_case fallback failed: $(cat "$fixture/provider-retry/log")"
       "$ROOT/scripts/agent-events.sh" --repo "$retry_state" show --attempt "$retry_attempt" --json > "$fixture/provider-retry/record"
-      python3 - "$fixture/provider-retry/record" "$retry_case" <<'PYCASE' || fail 'Pi daily cap record mismatch'
+      python3 - "$fixture/provider-retry/record" "$retry_case" <<'PYCASE' || fail 'Pi capacity record mismatch'
 import datetime, json, sys
 refs = json.load(open(sys.argv[1]))['refs']
 if sys.argv[2] == 'daily':
     assert refs['provider_daily_model'] == 'openrouter/thinkingmachines/inkling:free', refs
     assert refs['provider_daily_day'] == datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d'), refs
+    assert not refs.get('provider_capacity_model') and not refs.get('provider_capacity_at'), refs
 else:
     assert not refs.get('provider_daily_model'), refs
+    if sys.argv[2] == 'plain':
+        assert refs.get('provider_capacity_model') == 'openrouter/thinkingmachines/inkling:free', refs
+        at = refs['provider_capacity_at']
+        assert len(at) == 20 and at.endswith('Z'), refs
+        recorded = datetime.datetime.fromisoformat(at.replace('Z', '+00:00'))
+        assert recorded <= datetime.datetime.now(datetime.timezone.utc), refs
+    else:
+        assert not refs.get('provider_capacity_model') and not refs.get('provider_capacity_at'), refs
 PYCASE
       if [ "$retry_case" = daily ]; then
         OMS_ROOM_ID="" OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1 python3 - "$ROOT" "$retry_state" <<'PYROUTE' || fail 'daily cap did not reach allocation'
