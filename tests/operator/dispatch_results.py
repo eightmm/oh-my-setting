@@ -4617,3 +4617,30 @@ closed_parent = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str
                               env=dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]),
                               capture_output=True, text=True)
 assert closed_parent.returncode != 0 and "identity" in closed_parent.stderr
+
+# The finalize verifier takes a slot of the machine-wide verify pool: with the only slot held it must wait.
+import tempfile, threading, time
+with tempfile.TemporaryDirectory() as slot_runtime:
+    os.environ["XDG_RUNTIME_DIR"], os.environ["OMS_VERIFY_SLOTS"] = slot_runtime, "1"
+    inherited_slot = os.environ.pop("OMS_VERIFY_SLOT_HELD", None)  # a verify wrapper's marker would skip the queue
+    try:
+        holder = saved._hold_verify_slot()
+        finished = []
+        runner = threading.Thread(target=lambda: finished.append(saved._run_verifier(project, "true", 30)))
+        runner.start()
+        runner.join(2)
+        assert runner.is_alive() and not finished, "finalize verifier ignored the held verify slot"
+        saved._release_verify_slot(holder)
+        runner.join(int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+        assert finished == [{"exit": 0}], finished
+        assert saved._run_verifier(project, 'test -d "$OMS_VERIFY_SLOT_HELD"', 30) == {"exit": 0}, "verifier must see its held slot"
+        os.environ["OMS_VERIFY_SLOTS"] = "0"
+        try:
+            saved._run_verifier(project, "true", 30)
+            raise AssertionError("OMS_VERIFY_SLOTS=0 was accepted")
+        except ValueError as error:
+            assert "OMS_VERIFY_SLOTS" in str(error), error
+    finally:
+        del os.environ["XDG_RUNTIME_DIR"], os.environ["OMS_VERIFY_SLOTS"]
+        if inherited_slot is not None:
+            os.environ["OMS_VERIFY_SLOT_HELD"] = inherited_slot

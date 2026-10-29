@@ -665,12 +665,50 @@ def _plan_hint(repo, task_id, has_write_patch):
         pass
 
 
+def _hold_verify_slot():
+    """Take one slot of the machine-wide verify pool (peer-common.sh owns it); closing stdin releases it."""
+    holder = subprocess.Popen(['bash', '-c', '. "$1"; oms_verify_slot_hold', '_', str(ROOT / 'scripts/lib/peer-common.sh')],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        line = holder.stdout.readline().strip()
+        held = line.split(' ', 1)[0] == 'held'
+    except BaseException:
+        _release_verify_slot(holder)
+        raise
+    if not held:
+        code = holder.wait()
+        raise ValueError('verify slot unavailable (exit %s)%s' % (
+            code, '; OMS_VERIFY_SLOTS must be a positive integer' if code == 2 else ''))
+    holder.slot = line[len('held'):].strip()
+    return holder
+
+
+def _release_verify_slot(holder):
+    try:
+        holder.stdin.close()
+        holder.wait(timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        holder.kill()
+        holder.wait()
+    finally:
+        holder.stdout.close()
+
+
 def _run_verifier(repo, verify, timeout, evidence_repo=None):
+    holder = _hold_verify_slot()
+    try:
+        return _run_verifier_slotted(repo, verify, timeout, evidence_repo, holder.slot)
+    finally:
+        _release_verify_slot(holder)
+
+
+def _run_verifier_slotted(repo, verify, timeout, evidence_repo, slot):
     creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) if os.name == 'nt' else 0
     process = subprocess.Popen(['bash', '-c', verify], cwd=str(repo),
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=os.name == 'posix',
-                               creationflags=creationflags)
+                               creationflags=creationflags,
+                               env=dict(os.environ, OMS_VERIFY_SLOT_HELD=slot) if slot else None)
     output = {}
     def drain(name, pipe):
         retained, total = bytearray(), 0

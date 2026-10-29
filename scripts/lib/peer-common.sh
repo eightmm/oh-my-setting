@@ -763,8 +763,179 @@ ma_agy_read_cleanup() {
 # provider calls; a hung verify otherwise wedges the delegation or review gate
 # indefinitely. Every timeout backend exits 124 on expiry, which callers treat
 # as a normal nonzero verify failure.
+#
+# Verify runs share a machine-wide admission queue so parallel workers, review
+# gates, patch-land admission and finalize cannot stack suites until timeouts
+# (exit 124) become load artifacts. The purpose is bounding load, not mutual
+# exclusion, so the limit is soft: a verifier creates its own queue entry (a
+# mkdir-made directory `<epoch>-<pid>-<random>`, never touching a live entry of
+# another process), drops entries whose pid is gone, and proceeds once its entry
+# is among the first N by name. Arrivals racing within the same second may
+# briefly exceed N. Contention never fails a verify; an unusable pool directory
+# runs it unthrottled with one stderr note. Waiting happens before the verify
+# clock starts. A kill leaves only its own entry, which any waiter removes once
+# the pid is dead.
+oms_verify_slot_count() {
+  local n="${OMS_VERIFY_SLOTS:-}" cpus=""
+  if [ -z "$n" ]; then
+    cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '%s' "${NUMBER_OF_PROCESSORS:-}")"
+    cpus="$(printf '%s' "$cpus" | tr -d '\r')"
+    case "$cpus" in ''|*[!0-9]*) cpus=4 ;; esac
+    n=$((cpus / 4))
+    [ "$n" -ge 2 ] || n=2
+  elif ! [[ "$n" =~ ^[1-9][0-9]{0,5}$ ]]; then
+    echo "error: OMS_VERIFY_SLOTS must be a positive integer (got '$n')" >&2
+    return 2
+  fi
+  printf '%s\n' "$n"
+}
+
+oms_verify_slot_start() {  # PID
+  TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//' || true
+}
+
+# Own process id. Bash 3.2 has no BASHPID and $$ names the parent shell inside
+# a subshell, so a child sh reports its parent (this process). The child must
+# be forked from this shell, never from a command substitution, whose subshell
+# would be the reported parent.
+oms_verify_self_pid() {
+  local f
+  local PATH="${PATH:-/usr/bin:/bin}"
+  f="$(mktemp "${TMPDIR:-/tmp}/oms-verify-pid.XXXXXX" 2>/dev/null)" || return 1
+  sh -c 'echo $PPID' > "$f"
+  read -r OMS_VERIFY_SLOT_PID < "$f" || true
+  rm -f "$f"
+  OMS_VERIFY_SLOT_PID="$(printf '%s' "$OMS_VERIFY_SLOT_PID" | tr -d '\r')"
+  case "$OMS_VERIFY_SLOT_PID" in ''|*[!0-9]*) OMS_VERIFY_SLOT_PID=""; return 1 ;; esac
+}
+
+# True while the entry's owner pid is alive (and, when recorded, still has the
+# start time the entry was created with, so a recycled pid does not keep it).
+oms_verify_entry_alive() {  # ENTRY_DIR
+  local entry="$1" name pid start="" now=""
+  name="${entry##*/}"
+  pid="${name#*-}"
+  pid="${pid%%-*}"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  pid=$((10#$pid))
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ -f "$entry/start" ] || return 0
+  read -r start < "$entry/start" 2>/dev/null || true
+  [ -n "$start" ] || return 0
+  now="$(oms_verify_slot_start "$pid")"
+  [ -z "$now" ] || [ "$now" = "$start" ]
+}
+
+# Sets OMS_VERIFY_SLOT to this process's queue entry once admitted (callers
+# refresh OMS_VERIFY_SLOT_PID first: a forked subshell inherits its parent's
+# value). Inside a verify that already holds a slot (OMS_VERIFY_SLOT_HELD names
+# it) nothing is queued, so nested verifiers cannot wait on their own caller.
+oms_verify_slot_acquire() {
+  local n root entry mine="" name entries alive ahead noted=-60 e
+  local PATH="${PATH:-/usr/bin:/bin}"
+  if [ -n "${OMS_VERIFY_SLOT_HELD:-}" ] && [ -d "$OMS_VERIFY_SLOT_HELD" ]; then
+    return 0
+  fi
+  n="$(oms_verify_slot_count)" || return $?
+  [ -n "${OMS_VERIFY_SLOT_PID:-}" ] || { echo "error: cannot determine own pid for verify slot" >&2; return 1; }
+  # Per-user state (same base as tsp-queue), never shared temp. chmod only a
+  # directory this call just created: mkdir fails on an existing symlink.
+  root="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}}/oh-my-setting/verify-slots"
+  mkdir -p "${root%/*}" 2>/dev/null && mkdir "$root" 2>/dev/null && chmod 700 "$root" 2>/dev/null || true
+  name="$(printf '%010d-%010d-%s' "$(date +%s)" "$OMS_VERIFY_SLOT_PID" "$RANDOM$RANDOM")"
+  mine="$root/$name"
+  if [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ] || ! mkdir "$mine" 2>/dev/null; then
+    echo "verify: slot pool $root unusable; running unthrottled" >&2
+    return 0
+  fi
+  oms_verify_slot_start "$OMS_VERIFY_SLOT_PID" > "$mine/start" 2>/dev/null || true
+  OMS_VERIFY_SLOT="$mine"
+  while :; do
+    if [ -n "${OMS_VERIFY_CANCELLED:-}" ]; then
+      oms_verify_slot_release
+      return "$OMS_VERIFY_CANCELLED"
+    fi
+    [ -d "$mine" ] || mkdir "$mine" 2>/dev/null || true
+    alive=0
+    ahead=0
+    entries="$(cd "$root" && ls -1 2>/dev/null | LC_ALL=C sort)"
+    for e in $entries; do
+      case "$e" in [0-9]*-[0-9]*-*) ;; *) continue ;; esac
+      if [ "$e" != "$name" ] && ! oms_verify_entry_alive "$root/$e"; then
+        rm -rf "$root/$e" 2>/dev/null || true
+        continue
+      fi
+      alive=$((alive + 1))
+      [ "$e" = "$name" ] && break
+      ahead=$((ahead + 1))
+    done
+    [ "$ahead" -ge "$n" ] || return 0
+    if [ $((SECONDS - noted)) -ge 60 ]; then
+      noted=$SECONDS
+      echo "verify: waiting for a slot ($n in use)" >&2
+    fi
+    sleep 1
+  done
+}
+
+# Removes only this process's own entry.
+oms_verify_slot_release() {
+  local PATH="${PATH:-/usr/bin:/bin}"
+  [ -n "${OMS_VERIFY_SLOT:-}" ] || return 0
+  rm -rf "$OMS_VERIFY_SLOT" 2>/dev/null || true
+  OMS_VERIFY_SLOT=""
+}
+
+# Entry for non-bash callers: hold one slot until stdin closes, so a crashed
+# caller frees it through EOF. Prints "held" once the slot is owned.
+oms_verify_slot_hold() {
+  oms_verify_self_pid || OMS_VERIFY_SLOT_PID=""
+  oms_verify_slot_acquire || exit $?
+  trap 'oms_verify_slot_release' EXIT
+  printf 'held %s\n' "${OMS_VERIFY_SLOT:-}"
+  read -r _ || true
+}
+
+# The caller's INT/TERM traps are kept in a file because Bash 3.2 reports no
+# traps from a command substitution.
+oms_verify_traps_save() {
+  local PATH="${PATH:-/usr/bin:/bin}"
+  OMS_VERIFY_TRAPS="$(mktemp "${TMPDIR:-/tmp}/oms-verify-traps.XXXXXX" 2>/dev/null || true)"
+  [ -z "$OMS_VERIFY_TRAPS" ] || trap -p INT TERM > "$OMS_VERIFY_TRAPS"
+  trap 'oms_verify_slot_signal INT' INT
+  trap 'oms_verify_slot_signal TERM' TERM
+}
+
+oms_verify_traps_restore() {
+  local PATH="${PATH:-/usr/bin:/bin}"
+  trap - INT TERM
+  [ -z "${OMS_VERIFY_TRAPS:-}" ] || { . "$OMS_VERIFY_TRAPS"; rm -f "$OMS_VERIFY_TRAPS"; }
+  OMS_VERIFY_TRAPS=""
+}
+
+oms_verify_slot_signal() {  # SIGNAL
+  oms_verify_slot_release
+  oms_verify_traps_restore
+  # A caller trap that survives the signal must still stop a queued waiter.
+  case "$1" in INT) OMS_VERIFY_CANCELLED=130 ;; *) OMS_VERIFY_CANCELLED=143 ;; esac
+  # Only this process: $$ would name the parent shell inside a subshell.
+  [ -z "${OMS_VERIFY_SLOT_PID:-}" ] || kill -s "$1" "$OMS_VERIFY_SLOT_PID"
+}
+
 run_verify_with_timeout() {
-  ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$@"
+  local rc=0
+  OMS_VERIFY_CANCELLED=""
+  oms_verify_self_pid || OMS_VERIFY_SLOT_PID=""
+  oms_verify_traps_save
+  if oms_verify_slot_acquire; then
+    OMS_VERIFY_SLOT_HELD="${OMS_VERIFY_SLOT:-${OMS_VERIFY_SLOT_HELD:-}}" \
+      ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$@" || rc=$?
+  else
+    rc=$?
+  fi
+  oms_verify_slot_release
+  oms_verify_traps_restore
+  return "$rc"
 }
 
 ma_verify_timeout_note() {

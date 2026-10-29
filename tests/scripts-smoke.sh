@@ -20639,6 +20639,107 @@ test_python_timeout_fallback_bounds_verifier() {
   [ "$rc" = 124 ] || fail "Python verifier timeout fallback should exit 124, got $rc"
 }
 
+test_verify_slots_bound_concurrent_verifies() {
+  local rt="$TMP/verify-slots" lib="$ROOT/scripts/lib/peer-common.sh" out="" pid="" i
+
+  # A verify wrapper running this suite exports its own slot marker; it would skip the test queue.
+  local OMS_VERIFY_SLOT_HELD="" OMS_VERIFY_SLOT="" OMS_VERIFY_SLOT_PID="" OMS_VERIFY_CANCELLED=""
+  mkdir -p "$rt"
+  run_slotted() {  # LABEL SECONDS: log start and end stamps in $rt/order
+    XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout bash -c "echo $2-start >> \"$3\"; sleep $4; echo $2-end >> \"$3\""' \
+      _ "$lib" "$1" "$rt/order" "$2" 2>"$rt/$1.err"
+  }
+  run_slotted a 2 & pid=$!
+  sleep 0.5
+  run_slotted b 1
+  wait "$pid"
+  [ "$(tr '\n' ' ' < "$rt/order")" = "a-start a-end b-start b-end " ] ||
+    fail "OMS_VERIFY_SLOTS=1 should serialize verifies: $(cat "$rt/order")"
+  contains "$(cat "$rt/b.err")" "verify: waiting for a slot (1 in use)" || fail "waiting verify should say so"
+
+  local slots="$rt/oh-my-setting/verify-slots" lp
+  # A dead entry ahead in the queue (and an unrelated name) must not block admission.
+  mkdir -p "$slots/0000000001-0999999999-dead" "$slots/not-an-entry"
+  out="$(XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout true; echo rc=$?' _ "$lib" 2>&1)"
+  [ "$out" = "rc=0" ] || fail "a dead queue entry should not block admission: $out"
+  [ ! -e "$slots/0000000001-0999999999-dead" ] || fail "a dead queue entry should be removed"
+  rmdir "$slots/not-an-entry"
+
+  for i in 0 -1 x 1.5; do
+    out="$(XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS="$i" bash -c '. "$1"; run_verify_with_timeout true; echo rc=$?' _ "$lib" 2>&1)"
+    contains "$out" "OMS_VERIFY_SLOTS must be a positive integer" && contains "$out" "rc=2" ||
+      fail "OMS_VERIFY_SLOTS='$i' should be rejected: $out"
+  done
+
+  XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout bash -c "echo \$\$ > \"$2\"; exec sleep 30"' \
+    _ "$lib" "$rt/cmdpid" >/dev/null 2>&1 &
+  pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$rt/cmdpid" ] && break; sleep 0.5; done
+  kill -TERM "$pid"
+  kill -TERM "$(cat "$rt/cmdpid")"
+  out=0
+  wait "$pid" || out=$?
+  [ "$out" = 143 ] || fail "interrupted verify should keep its signal exit 143, got $out"
+  [ -z "$(ls -A "$slots")" ] || fail "interrupted verify should free its slot"
+
+  # A verify that runs a nested verify must not wait on its own slot.
+  out="$(XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 OMS_PEER_VERIFY_TIMEOUT=4s bash -c '. "$1"
+    run_verify_with_timeout bash -c ". \"\$1\"; run_verify_with_timeout true; echo inner=\$?" _ "$1"
+    echo outer=$?' _ "$lib" 2>&1)"
+  [ "$out" = "$(printf 'inner=0\nouter=0')" ] || fail "nested verify under one slot should complete: $out"
+
+  # A waiter whose turn has not come keeps waiting without failing, then runs once the entry ahead is gone.
+  sleep 60 & lp=$!
+  mkdir -p "$slots/0000000001-$(printf '%010d' "$lp")-live"
+  XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout touch "$2"' _ "$lib" "$rt/ran" >/dev/null 2>&1 &
+  pid=$!
+  sleep 2
+  [ ! -e "$rt/ran" ] && kill -0 "$pid" 2>/dev/null || fail "a queued verify should still be waiting behind a live entry"
+  kill "$lp"; wait "$lp" 2>/dev/null || true
+  out=0
+  wait "$pid" || out=$?
+  [ "$out" = 0 ] && [ -e "$rt/ran" ] || fail "a queued verify should run after the entry ahead is released (rc=$out)"
+  [ -z "$(ls -A "$slots")" ] || fail "queue entries should be gone: $(ls -A "$slots")"
+
+  # A holder recorded under one timezone survives a contender running under another.
+  XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 TZ=UTC bash -c '. "$1"; run_verify_with_timeout sleep 4' _ "$lib" >/dev/null 2>&1 &
+  pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(ls -A "$slots")" ] && break; sleep 0.5; done
+  XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 TZ=KST-9 bash -c '. "$1"; run_verify_with_timeout touch "$2"' _ "$lib" "$rt/ran-tz" >/dev/null 2>&1 &
+  lp=$!
+  sleep 2
+  [ ! -e "$rt/ran-tz" ] || fail "a contender in another timezone deleted a live holder's entry"
+  wait "$pid"; wait "$lp"
+  [ -e "$rt/ran-tz" ] || fail "the other-timezone contender should run once the holder ends"
+
+  # A symlinked pool is refused: its target is left alone and the verify still runs.
+  local rt2="$TMP/verify-slots-link" mode
+  mkdir -p "$rt2/oh-my-setting" "$rt2/victim"
+  chmod 755 "$rt2/victim"
+  ln -s "$rt2/victim" "$rt2/oh-my-setting/verify-slots"
+  out="$(XDG_RUNTIME_DIR="$rt2" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout true; echo rc=$?' _ "$lib" 2>&1)"
+  mode="$(ls -ld "$rt2/victim" | cut -c1-10)"
+  [ "$mode" = drwxr-xr-x ] || fail "a symlinked pool target must keep its mode, got $mode"
+  [ -z "$(ls -A "$rt2/victim")" ] || fail "a symlinked pool target must stay empty"
+  contains "$out" "unusable; running unthrottled" && contains "$out" "rc=0" ||
+    fail "a symlinked pool should run the verify unthrottled with a note: $out"
+
+  # Cancelling a queued waiter ends only the waiter, never its parent shell.
+  XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout sleep 5' _ "$lib" >/dev/null 2>&1 &
+  pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(ls -A "$slots")" ] && break; sleep 0.5; done
+  out="$(XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"
+    (run_verify_with_timeout true) 2>/dev/null &
+    waiter=$!
+    sleep 1.5
+    kill -TERM "$waiter"
+    wait "$waiter"; echo waiter=$?
+    sleep 0.5
+    ls "$2" | wc -l | tr -d " "' _ "$lib" "$slots" 2>&1)"
+  wait "$pid"
+  [ "$out" = "$(printf 'waiter=143\n1')" ] || fail "cancelled queued waiter should exit 143 alone and leave only the holder's entry: $out"
+}
+
 test_scrubber_blocks_json_quoted_secret() {
   local f="$TMP/scrub-json-secret"
 
