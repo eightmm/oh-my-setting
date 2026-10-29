@@ -21316,6 +21316,23 @@ SH
   [ ! -e "$project/.oms/plan/autopilot-run.json" ] ||
     fail "autopilot wrote a campaign receipt before checking its phase wall"
 
+  rc=0
+  out="$(HOME="$TEST_HOME" OMS_AUTOPILOT_PLAN_FROM_SPEC="$planner" \
+    AUTOPILOT_PLANNER_CALL_MARKER="$planner_called" \
+    "$ROOT/scripts/autopilot.sh" --repo "$project" --planner codex --worker codex \
+      --reviewer claude --allowed file.txt --base main --review-mode off propose 2>&1)" || rc=$?
+  [ -e "$planner_called" ] || fail "stub planner was not reached ($rc): $out"
+  if ! python3 - "$project/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    routing = json.load(handle)["routing"]
+assert routing["provider_timeout"] == "5m", routing
+assert [routing[role]["timeout"] for role in ("planner", "worker", "reviewer")] == ["15m", "30m", "20m"], routing
+PY
+  then
+    fail "default proposal receipt must contain the role timeout defaults"
+  fi
+
   command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || return 0
   out="$(bash -c "
     . '$ROOT/scripts/lib/agent-memory-common.sh'

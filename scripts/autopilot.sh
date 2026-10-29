@@ -48,6 +48,7 @@ REVIEW_MODE_EXPLICIT=0
 DRAFT_PR=0
 RETRY_KNOWN=0
 PROVIDER_TIMEOUT="5m"
+PROVIDER_TIMEOUT_EXPLICIT=0
 PLANNER_TIMEOUT=""
 WORKER_TIMEOUT=""
 REVIEWER_TIMEOUT=""
@@ -160,10 +161,10 @@ Options:
                           an intentional baseline failure. Landing preserves
                           the reason; candidate verification must still pass.
   --discover              Include bounded work evidence in the initial proposal.
-  --provider-timeout DUR  Default per-provider wall clock (default: 5m; max 24h).
-  --planner-timeout DUR   Planner override for --provider-timeout.
-  --worker-timeout DUR    Worker override for --provider-timeout.
-  --reviewer-timeout DUR  Reviewer override for --provider-timeout.
+  --provider-timeout DUR  Override role defaults (recorded default: 5m; max 24h).
+  --planner-timeout DUR   Planner timeout (default: 15m, or --provider-timeout).
+  --worker-timeout DUR    Worker timeout (default: 30m, or --provider-timeout).
+  --reviewer-timeout DUR  Reviewer timeout (default: 20m, or --provider-timeout).
   --planner-model MODEL   Exact planner model.
   --worker-model MODEL    Exact default model for tasks without an assignment.
   --reviewer-model MODEL  Exact semantic-review model.
@@ -261,7 +262,7 @@ while [ "$#" -gt 0 ]; do
     --discover) DISCOVER=1; shift ;;
     --provider-timeout)
       [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
-      PROVIDER_TIMEOUT="$2"; shift 2 ;;
+      PROVIDER_TIMEOUT="$2"; PROVIDER_TIMEOUT_EXPLICIT=1; shift 2 ;;
     --planner-timeout)
       [ "$#" -ge 2 ] || fail "--planner-timeout requires a duration"
       PLANNER_TIMEOUT="$2"; shift 2 ;;
@@ -519,9 +520,15 @@ case "$REPLAN_TASKS" in *[!0-9]*|"") fail "--replan-tasks must be 1..2" ;; esac
 case "$REVIEW_MODE" in shadow|gate|off) ;; *) fail "--review-mode must be shadow, gate, or off" ;; esac
 case "$REMOTE" in *[!A-Za-z0-9._-]*|"") fail "--remote has unsafe characters" ;; esac
 validate_duration "$PROVIDER_TIMEOUT" "--provider-timeout"
-[ -n "$PLANNER_TIMEOUT" ] || PLANNER_TIMEOUT="$PROVIDER_TIMEOUT"
-[ -n "$WORKER_TIMEOUT" ] || WORKER_TIMEOUT="$PROVIDER_TIMEOUT"
-[ -n "$REVIEWER_TIMEOUT" ] || REVIEWER_TIMEOUT="$PROVIDER_TIMEOUT"
+if [ "$PROVIDER_TIMEOUT_EXPLICIT" -eq 1 ]; then
+  [ -n "$PLANNER_TIMEOUT" ] || PLANNER_TIMEOUT="$PROVIDER_TIMEOUT"
+  [ -n "$WORKER_TIMEOUT" ] || WORKER_TIMEOUT="$PROVIDER_TIMEOUT"
+  [ -n "$REVIEWER_TIMEOUT" ] || REVIEWER_TIMEOUT="$PROVIDER_TIMEOUT"
+else
+  [ -n "$PLANNER_TIMEOUT" ] || PLANNER_TIMEOUT=15m
+  [ -n "$WORKER_TIMEOUT" ] || WORKER_TIMEOUT=30m
+  [ -n "$REVIEWER_TIMEOUT" ] || REVIEWER_TIMEOUT=20m
+fi
 validate_duration "$PLANNER_TIMEOUT" "--planner-timeout"
 validate_duration "$WORKER_TIMEOUT" "--worker-timeout"
 validate_duration "$REVIEWER_TIMEOUT" "--reviewer-timeout"

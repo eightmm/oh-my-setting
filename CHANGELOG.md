@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms autopilot` role timeouts default to planner 15m, worker 30m and
+  reviewer 20m instead of 5m each, so an implementation-sized worker no longer
+  times out in a contract frozen at propose; an explicit `--provider-timeout`
+  still sets every role without its own override.
 - `oms intent draft` asks the drafter to find existing tests that exercise the
   modules a goal changes and to add bounded consumer checks to the required
   checks, and the plan-from-spec planner describes the admission floor as it
