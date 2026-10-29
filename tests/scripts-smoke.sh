@@ -38155,6 +38155,147 @@ assert row["status"] == "verified", row
 ' || fail "repo state hid stale task verification: $state_json"
 }
 
+test_portable_capsule_rejects_unknown_fields() {
+  local project="$TMP/portable-capsule-fields"
+  make_committed_repo "$project"
+  python3 - "$ROOT" "$project" "$TMP/strict-capsule.json" <<'PY'
+import copy, json, pathlib, subprocess, sys
+
+root, repo, output = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(root / "scripts" / "lib"))
+from oms_runtime import capsule, failures
+from oms_runtime.common import CoreError, canonical_json, sha256_bytes
+
+(repo / "PROJECT.md").write_text("""# Demo
+## Goal
+Preserve portable continuity.
+## Acceptance Criteria
+- [id:portable] Preserve current exports.
+## Scope
+- allowed_paths: scripts/, tests/
+- forbidden_paths: private/
+""", encoding="utf-8")
+task_dir = repo / ".oms" / "task"
+task_dir.mkdir(parents=True, exist_ok=True)
+(task_dir / "current.md").write_text("""# Active Agent Task
+## Loop State
+- attempts: 0
+- custom.limit: 2
+- note: bounded
+""", encoding="utf-8")
+capsule.export(repo, output)
+assert capsule.verify(output)["valid"] is True
+exported = json.loads(output.read_text(encoding="utf-8"))
+base = copy.deepcopy(exported)
+contract = base["payload"]["contract"]
+assert contract["objective"]["text"] == "Preserve portable continuity.", contract
+assert contract["criteria"] and contract["scope"]["allowed"], contract
+assert contract["budget"] == {"attempts": 0, "custom.limit": 2, "note": "bounded"}, contract
+base["payload"]["continuity"]["failures"] = [{
+    "id": "failure-1", "kind": "verify", "summary": "capacity",
+    "classification": failures.classify("capacity", 0),
+}]
+
+def save(row):
+    row = copy.deepcopy(row)
+    row["digest"] = sha256_bytes(canonical_json(row["payload"]))
+    row["capsule_id"] = "capsule-" + row["digest"][:32]
+    output.write_bytes(canonical_json(row))
+
+save(base)
+assert capsule.verify(output)["valid"] is True
+
+def nodes(value, path=()):
+    yield path, value
+    if isinstance(value, dict):
+        for name, item in value.items():
+            yield from nodes(item, path + (name,))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from nodes(item, path + (index,))
+
+def at(row, path):
+    for part in path:
+        row = row[part]
+    return row
+
+def reject(row, message, cli=False):
+    save(row)
+    for operation in (capsule.verify, lambda path: capsule.import_capsule(repo, path)):
+        try:
+            operation(output)
+        except CoreError as exc:
+            assert exc.exit_code == 2 and message in str(exc), (str(exc), row)
+        else:
+            raise AssertionError("digest-valid invalid capsule was accepted: %r" % row)
+    if cli:
+        for action in ("verify", "import"):
+            result = subprocess.run([str(root / "scripts" / "runtime.sh"), "--repo", str(repo),
+                                     "capsule", action, str(output)], capture_output=True, text=True)
+            assert result.returncode == 2 and message in result.stderr, result
+    assert not (repo / ".oms" / "portable").exists(), "rejected input created import state"
+
+before = {path.relative_to(repo): path.read_bytes() for path in repo.rglob("*") if path.is_file()}
+for path, value in nodes(base):
+    if isinstance(value, dict):
+        extra = "bad label" if path and path[-1] == "budget" else "unexpected"
+        for name in ("approval", "command", "", extra):
+            for item in (None, 0, "", {}):
+                row = copy.deepcopy(base)
+                at(row, path)[name] = item
+                reject(row, "unknown field", cli=name == "command" and item == 0)
+    if path and path[-1] not in ("schema", "payload", "digest", "capsule_id"):
+        malformed = ([], 0, "") if isinstance(value, dict) else (
+            ({}, 0, "") if isinstance(value, list) else ({"command": "echo"}, []))
+        for item in malformed:
+            row = copy.deepcopy(base)
+            at(row, path[:-1])[path[-1]] = item
+            reject(row, "expected")
+after = {path.relative_to(repo): path.read_bytes() for path in repo.rglob("*") if path.is_file()}
+assert before == after, "rejected input changed repository files"
+
+empty = copy.deepcopy(base)
+empty["payload"]["project"] = {}
+empty["payload"]["contract"] = {"objective": {}, "scope": {"allowed": [], "forbidden": []},
+                                 "criteria": [], "budget": {}, "coverage": 0, "complete": False}
+empty["payload"]["continuity"] = {"failures": [], "warnings": [], "next_action_ids": []}
+optional = copy.deepcopy(empty)
+optional["payload"]["project"]["head"] = None
+optional["payload"]["contract"]["objective"] = None
+optional["payload"].pop("created_at", None)
+for row in (exported, base, empty, optional):
+    save(row)
+    assert capsule.verify(output)["valid"] is True
+    first = capsule.import_capsule(repo, output)
+    second = capsule.import_capsule(repo, output)
+    assert first["imported"] is True and second["idempotent"] is True
+    assert first["authority_transfer"] is False and second["authority_transfer"] is False
+
+for size in (capsule.MAX_CAPSULE_BYTES - 1, capsule.MAX_CAPSULE_BYTES, capsule.MAX_CAPSULE_BYTES + 1):
+    row = copy.deepcopy(empty)
+    row["payload"]["continuity"]["warnings"] = [""]
+    save(row)
+    row["payload"]["continuity"]["warnings"] = ["x" * (size - output.stat().st_size)]
+    save(row)
+    assert output.stat().st_size == size
+    if size > capsule.MAX_CAPSULE_BYTES:
+        before = {path.name: path.read_bytes() for path in (repo / ".oms" / "portable" / "imports").iterdir()}
+        for operation in (capsule.verify, lambda path: capsule.import_capsule(repo, path)):
+            try:
+                operation(output)
+            except CoreError as exc:
+                assert exc.exit_code == 2, exc
+            else:
+                raise AssertionError("oversized capsule was accepted")
+        after = {path.name: path.read_bytes() for path in (repo / ".oms" / "portable" / "imports").iterdir()}
+        assert before == after, "oversized input changed import state"
+    else:
+        assert capsule.verify(output)["valid"] is True
+        capsule.import_capsule(repo, output)
+        assert capsule.latest_import(repo)["status"] != "invalid"
+PY
+}
+
 test_portable_capsule_import_surfaces_advisory_continuity() {
   local project="$TMP/portable-capsule-continuity"
   local capsule_file="$TMP/portable-capsule.json"

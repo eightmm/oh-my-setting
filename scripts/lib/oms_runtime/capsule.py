@@ -12,6 +12,74 @@ from .common import CoreError, atomic_write_bytes, atomic_write_json, bounded_li
 MAX_CAPSULE_BYTES = 1024 * 1024
 MAX_IMPORT_BYTES = MAX_CAPSULE_BYTES + 4096
 
+# None marks a scalar, a list describes its entries, and str marks the
+# user-defined budget labels parsed from task Loop State lines.
+_CAPSULE_FIELDS = {
+    "schema": None,
+    "capsule_id": None,
+    "digest": None,
+    "payload": {
+        "schema": None,
+        "created_at": None,
+        "authority_transfer": None,
+        "project": {"head": None, "state_digest": None},
+        "contract": {
+            "objective": {"text": None, "source": None},
+            "scope": {
+                "allowed": [None], "allowed_source": None,
+                "forbidden": [None], "authoritative": None,
+                "layers": [{"source": None, "allowed": [None], "forbidden": [None]}],
+            },
+            "criteria": [{"id": None, "text": None, "source": None,
+                          "status": None, "evidence_refs": [None]}],
+            "coverage": None,
+            "complete": None,
+            "budget": str,
+        },
+        "continuity": {
+            "next_action_ids": [None],
+            "failures": [{
+                "id": None, "kind": None, "summary": None,
+                "classification": {
+                    "code": None, "retryable": None, "fallback_allowed": None,
+                    "context_escalation_allowed": None, "recovery": None,
+                    "matched": None, "exit": None,
+                },
+            }],
+            "warnings": [None],
+            "task_state": None,
+            "next_step": None,
+        },
+    },
+}
+
+
+def _validate_fields(value: Any, fields: Any, location: str) -> None:
+    if value is None:
+        return
+    if isinstance(fields, dict) or fields is str:
+        if not isinstance(value, dict):
+            raise CoreError("portable capsule expected an object at %s" % location)
+        for name, item in value.items():
+            if fields is str:
+                if (not isinstance(name, str) or
+                        not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", name) or
+                        name not in sanitize_portable({name: 0})):
+                    raise CoreError("portable capsule has an unknown field at %s" % location)
+                child = None
+            else:
+                if name not in fields:
+                    raise CoreError("portable capsule has an unknown field at %s" % location)
+                child = fields[name]
+            _validate_fields(item, child, location + "." + name)
+    elif isinstance(fields, list):
+        if not isinstance(value, list):
+            raise CoreError("portable capsule expected a list at %s" % location)
+        for item in value:
+            _validate_fields(item, fields[0], location + "[]")
+    elif isinstance(value, (dict, list)):
+        raise CoreError("portable capsule expected a scalar at %s" % location)
+
 
 def _payload(repo: Path) -> Dict[str, Any]:
     # Local import avoids a projection -> capsule -> evidence -> projection
@@ -103,6 +171,7 @@ def validate(raw: Any) -> Dict[str, Any]:
     payload = raw.get("payload")
     if not isinstance(payload, dict) or payload.get("schema") != CAPSULE_SCHEMA:
         raise CoreError("portable capsule payload is invalid")
+    _validate_fields(raw, _CAPSULE_FIELDS, "envelope")
     if payload.get("authority_transfer") is not False:
         raise CoreError("a portable capsule must not transfer authority")
     expected = str(raw.get("digest", ""))
