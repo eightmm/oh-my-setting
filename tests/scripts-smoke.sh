@@ -11171,6 +11171,7 @@ printf '## Commands\n\n- Test: bash tests/run.sh\n\n'
 printf '## Verification\n\n- Success criteria: greeting prints\n- Required checks: bash tests/greet.sh\n\n'
 printf '## Edge cases\n\n- empty name input\n\n'
 printf '## Notes\n\n- Risks: none\n- Do not touch: docs/\n'
+printf 'tokens used\n308535\nusage detail: {}\n'
 EOF
   chmod +x "$bin_dir/codex"
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -11190,7 +11191,7 @@ EOF
     fail "prompt echo leaked into the candidate: $candidate"
   # Transport tail is not spec: the artifact's Exit section and token footer
   # follow the answer (field finding, first live draft) and must not ride.
-  if grep -Eq '^## Exit$|^tokens used$|^model-result: ' "$candidate"; then
+  if grep -Eq '^## Exit$|^tokens used$|^308535$|^usage detail: |^model-result: ' "$candidate"; then
     fail "artifact transport tail leaked into the candidate: $candidate"
   fi
   [ ! -e "$project/PROJECT.md" ] || fail "draft must never touch PROJECT.md"
@@ -11462,6 +11463,30 @@ EOF
 
   sed 's|- Required checks: true|- Required checks: bash tests/greet.sh|' \
     "$intent_dir/intent-vacuous.md" > "$intent_dir/intent-good.md"
+  for scope in 'src/, *' '`src/`,' '`src/` `tests/`' '``' '` . `' '`src/'; do
+    sed "s@- Scope: src/@- Scope: $scope@" "$intent_dir/intent-good.md" > "$intent_dir/intent-unsafe.md"
+    rc=0
+    "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-unsafe > "$project/unsafe-out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "unsafe Scope must refuse adopt ($scope): $rc"
+    assert_file_contains "$project/unsafe-out" 'PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly'
+    [ ! -e "$project/PROJECT.md" ] || fail "unsafe Scope published PROJECT.md"
+  done
+  for scope in '' '.' '`.'; do
+    sed "s@- Scope: src/@- Scope: $scope@" "$intent_dir/intent-good.md" > "$intent_dir/intent-unsafe.md"
+    rc=0
+    "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-unsafe > "$project/unsafe-out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid Scope must refuse adopt ($scope): $rc"
+    case "$scope" in
+      '') expected='PROJECT.md Scope is empty; pass --allowed explicitly' ;;
+      '.') expected='PROJECT.md Scope cannot grant the whole repository; pass --allowed explicitly' ;;
+      *) expected='PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly' ;;
+    esac
+    assert_file_contains "$project/unsafe-out" "$expected"
+  done
+  sed 's@- Scope: src/@- Scope: `src/`, `tests/`@' "$intent_dir/intent-good.md" > "$intent_dir/intent-ticks.md"
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-ticks > "$project/ticks-out" 2>&1 ||
+    fail "backticked Scope should adopt: $(cat "$project/ticks-out")"
+  rm -f "$project/PROJECT.md"
   # A live autopilot receipt blocks adoption: a spec swap under a live run
   # only bricks it into spec-changed park.
   mkdir -p "$project/.oms/plan"
@@ -39445,6 +39470,18 @@ done
 exit 0
 EOF
   chmod +x "$planner"
+
+  sed 's@- Scope: src/, tests/@- Scope: `src/`, `tests/`@' "$project/PROJECT.md" > "$project/scope-ticks"
+  mv "$project/scope-ticks" "$project/PROJECT.md"
+  git -C "$project" add PROJECT.md
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' commit -qm 'test: backtick Scope'
+  rc=0
+  out="$(OMS_AUTOPILOT_PLAN_FROM_SPEC="$planner" OMS_TEST_SCOPE_CALLED="$marker" \
+    OMS_TEST_REAL_PLAN_FROM_SPEC="$ROOT/scripts/plan-from-spec.sh" \
+    "$ROOT/scripts/autopilot.sh" --repo "$project" propose 2>&1)" || rc=$?
+  contains "$out" 'autopilot: allowed: src,tests (from PROJECT.md Scope)' ||
+    fail "backtick Scope was not normalized: $out"
+  [ -e "$marker" ] || fail "backtick Scope did not reach planner: $out"
 
   for kind in empty prose parentheses root; do
     case "$kind" in

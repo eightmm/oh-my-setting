@@ -392,10 +392,36 @@ def normalize_list(text):
     return values
 
 
+def normalize_scope_default(raw):
+    """Normalize the plain path list derived from PROJECT.md Scope."""
+    if not raw.strip():
+        raise SystemExit(3)
+    items = [item.strip() for item in raw.split(",")]
+    if any(not item for item in items):
+        raise SystemExit(2)
+    items = [item[1:-1] if len(item) >= 2 and item.startswith("`") and
+             item.endswith("`") else item for item in items]
+    if any(item == "." for item in items):
+        raise SystemExit(4)
+    allowed_chars = set("._/-:")
+    for item in items:
+        if not item or any(char.isspace() or char in "()" or
+                           not (char.isalnum() or char in allowed_chars) for char in item):
+            raise SystemExit(5)
+    try:
+        normalized = normalize_list(",".join(items))
+    except (OSError, ValueError, SyntaxError):
+        raise SystemExit(2)
+    if any(item == "." for item in normalized):
+        raise SystemExit(4)
+    return normalized
+
+
 def _usage():
     print(
         "usage: path_scope.py match-any PATH PATTERN... | "
         "inside CANDIDATE ENVELOPE... | normalize-list TEXT | "
+        "normalize-scope-default TEXT | "
         "classify-many RULE_FILE",
         file=sys.stderr,
     )
@@ -415,6 +441,9 @@ def main(argv):
             candidate = normalize(argv[2])
             envelope = [normalize(item) for item in argv[3:]]
             return 0 if within_envelope(candidate, envelope) else 1
+        if action == "normalize-scope-default" and len(argv) == 3:
+            print(",".join(normalize_scope_default(argv[2])))
+            return 0
         if action == "normalize-list" and len(argv) == 3:
             print(",".join(normalize_list(argv[2])))
             return 0

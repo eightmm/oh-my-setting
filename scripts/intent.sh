@@ -56,8 +56,9 @@ show    List candidates, or print one with --id.
 adopt   The explicit approval act and the only PROJECT.md writer. Refuses
         while a live autopilot receipt exists (a spec swap under a live
         run only bricks it — abandon first), refuses when PROJECT.md
-        already exists (back it up or remove it deliberately), refuses an
-        acceptance that already passes (a pre-passing check cannot prove
+        already exists (back it up or remove it deliberately), refuses
+        unsafe Scope defaults and an acceptance that already passes (a
+        pre-passing check cannot prove
         the work), and warns when the acceptance reads scope-file content
         (planners must not copy that shape into task verifies — the
         admission floor rejects it). Writes PROJECT.md with
@@ -465,7 +466,7 @@ if re.search(r"529|overloaded|rate limit", text, re.IGNORECASE):
 # The router records route/footer metadata even when the provider answered
 # nothing; that transport text must not turn an empty answer into a refusal.
 lines = text.splitlines()
-transport = re.compile(r"^(seat-health: |model-route: |model-result: |model-fallback: |stop-reason: )")
+transport = re.compile(r"^(seat-health: |model-route: |model-result: |model-fallback: |stop-reason: |usage detail: )")
 paired = {"served model", "configured model", "cost usd", "tokens used"}
 while lines:
     tail = lines[-1].strip()
@@ -735,7 +736,7 @@ if not anchors:
     sys.stderr.write("error: the answer carries no '## Status' skeleton\n")
     raise SystemExit(3)
 kept = lines[anchors[-1]:]
-footer = re.compile(r"^(stop-reason: |tokens used$|[0-9][0-9,]*$|model-result: |model-route: |model-fallback: )")
+footer = re.compile(r"^(stop-reason: |tokens used$|[0-9][0-9,]*$|model-result: |model-route: |model-fallback: |usage detail: )")
 # Two-line footers: the label names what the next line is (a model name, a
 # cost), and neither line is the answer.
 paired = ("served model", "configured model", "cost usd", "tokens used")
@@ -823,6 +824,16 @@ if [ "$ACTION" = adopt ]; then
   candidate_sha="$(snapshot_intent_file "$INTENT_FILE" "$intent_snapshot")" || exit 3
   candidate_sha="${candidate_sha//$'\r'/}"
   [ -n "$candidate_sha" ] || fail "could not digest the intent candidate snapshot"
+
+  scope="$(awk '{ sub(/\r$/, "") } /^- Scope:/ { sub(/^- Scope:[ \t]*/, ""); print; exit }' "$intent_snapshot")"
+  scope_rc=0
+  python3 "$SCRIPT_DIR/lib/path_scope.py" normalize-scope-default "$scope" >/dev/null || scope_rc=$?
+  case "$scope_rc" in
+    0) ;;
+    3) fail "PROJECT.md Scope is empty; pass --allowed explicitly" ;;
+    4) fail "PROJECT.md Scope cannot grant the whole repository; pass --allowed explicitly" ;;
+    *) fail "PROJECT.md Scope is not a safe --allowed path list; pass --allowed explicitly" ;;
+  esac
 
   meta="$(validate_intent_file "$intent_snapshot")" || exit 3
   meta="${meta//$'\r'/}"

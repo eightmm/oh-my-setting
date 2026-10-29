@@ -1352,34 +1352,7 @@ normalize_allowed() {  # TEXT
 }
 
 normalize_scope_default() {  # PROJECT_SCOPE -> normalized allowed envelope
-  python3 - "$1" "$PATH_SCOPE_HELPER" <<'PY'
-import runpy, sys
-
-raw, helper = sys.argv[1:]
-if not raw.strip():
-    raise SystemExit(3)
-if "," in raw:
-    items = [item.strip() for item in raw.split(",")]
-    if any(not item for item in items):
-        raise SystemExit(2)
-else:
-    items = [raw.strip()]
-if any(item == "." for item in items):
-    raise SystemExit(4)
-# A derived envelope is plain paths only: a glob such as * or ** could grant the whole repository.
-allowed_chars = set("._/-:")
-for item in items:
-    if any(char.isspace() or char in "()" or
-           not (char.isalnum() or char in allowed_chars) for char in item):
-        raise SystemExit(5)
-try:
-    normalized = runpy.run_path(helper)["normalize_list"](",".join(items))
-except (OSError, ValueError, SyntaxError):
-    raise SystemExit(2)
-if any(item == "." for item in normalized):
-    raise SystemExit(4)
-print(",".join(normalized))
-PY
+  python3 "$PATH_SCOPE_HELPER" normalize-scope-default "$1" | tr -d '\r'
 }
 
 # A plan file is not the same thing as a plan bound to THIS contract.
