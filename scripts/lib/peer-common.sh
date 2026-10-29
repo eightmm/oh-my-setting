@@ -361,7 +361,7 @@ PY
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
   local root name digest changed surface hard soft execution named
-  local replacement_softened
+  local replacement_softened warn_soft
   MA_READ_GUARD_DIAGNOSTIC=""
   ma_read_guard_purge_new_bytecode || return 2
   # A linked source's HEAD also appears in the state's Git metadata. Diagnose
@@ -500,7 +500,13 @@ $named}"
         ;;
     esac
     if [ -n "$soft" ]; then
-      echo "warning: read pass observed $name repository changes: $soft; not attributable to the provider, review before landing" >&2
+      warn_soft=0
+      for surface in $(printf '%s' "$soft" | tr ',' ' '); do
+        case "$surface" in remote-refs|foreign-ref) ;; *) warn_soft=1 ;; esac
+      done
+      if [ "$warn_soft" = 1 ]; then
+        echo "warning: read pass observed $name repository changes: $soft; not attributable to the provider" >&2
+      fi
     fi
     if [ -n "$hard" ]; then
       MA_READ_GUARD_DIAGNOSTIC="error: read pass changed $name repository protected surfaces: $hard${MA_READ_GUARD_DIAGNOSTIC:+

@@ -473,6 +473,22 @@ def exercise_observed_worker_leases():
         assert (source / "value.txt").read_text() == source_value + "pending scratch review\n"
         assert untracked_state.read_text() == "owner state stays here\n"
         assert (project / "value.txt").read_text() == "old\n", "read pass edited A source"
+        quiet_source = temporary / ("quiet-source-" + role)
+        subprocess.run(["git", "init", "-q", str(quiet_source)], check=True)
+        subprocess.run(["git", "-C", str(quiet_source), "-c", "user.name=fixture",
+                        "-c", "user.email=fixture@invalid", "commit", "-qm", "initial", "--allow-empty"], check=True)
+        guard_script = '''
+. "$1/lib/peer-common.sh"
+REPO="$2" MA_READ_SOURCE_REPO="$3"
+ma_read_guard_begin "$4" || exit 2
+git -C "$REPO" update-ref refs/remotes/quiet-test/main "$(git -C "$REPO" rev-parse HEAD)" || exit 2
+ma_read_guard_assert
+'''
+        guard = subprocess.run(["bash", "-c", guard_script, "guard", str(panel.ENTRY.parent),
+                                str(project), str(quiet_source), str(temporary / "quiet-read")],
+                               capture_output=True, text=True, timeout=90)
+        subprocess.run(["git", "-C", str(project), "update-ref", "-d", "refs/remotes/quiet-test/main"], check=True)
+        assert guard.returncode == 0 and "read pass observed" not in guard.stderr, guard
         mutations = [(project / "value.txt", False), (project / "value.txt", True),
                      (source / "value.txt", False)]
         if role == "reviewer":
@@ -484,6 +500,7 @@ def exercise_observed_worker_leases():
                 capture_output=True, text=True, timeout=90)
             if target.parent == project and not strict:
                 assert result.returncode == 0 and "warning: read pass observed state repository changes: tracked" in result.stderr, result
+                assert "review before landing" not in result.stderr, result
             else:
                 assert result.returncode != 0 and "protected" in result.stderr, result
             assert target.read_bytes() != original, "read guard mutation fixture did not execute"

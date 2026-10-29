@@ -32507,8 +32507,8 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
   out="${result#*$'\t'}"
   contains "$out" 'changed outside the worktree during this run: remote-refs' ||
     fail "the remote-ref surface should still be reported: $out"
-  contains "$out" 'cannot be attributed to codex' ||
-    fail "the remote-ref warning should remain non-attributable: $out"
+  contains "$out" 'remote-refs; review these before landing' ||
+    fail "the remote-ref warning should name the action: $out"
   artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | sed -n '1p')"
   [ -f "$artifact" ] || fail "missing soft remote-ref artifact: $out"
   assert_file_contains "$artifact" '## Repository changed during the run'
@@ -36136,7 +36136,7 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
       out="$(OMS_WORKER_GUARD_STRICT="$strict" ma_read_guard_assert 2>&1)" || rc=$?
       if [ "$strict" = 0 ]; then
         [ "$rc" = 0 ] || fail "foreign oms branch move stopped a cross-repo read: $out"
-        contains "$out" 'state repository changes: foreign-ref' || fail "read foreign-ref warning missing: $out"
+        ! contains "$out" 'read pass observed state repository changes: foreign-ref;' || fail "read foreign-ref should be quiet: $out"
       else
         [ "$rc" = 2 ] || fail "strict read tolerated a foreign ref move: $out"
         contains "$out" 'state repository protected surfaces: refs' || fail "strict read refs not hard: $out"
@@ -36154,7 +36154,7 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
       out="$(OMS_WORKER_GUARD_STRICT="$strict" ma_read_guard_assert 2>&1)" || rc=$?
       if [ "$strict" = 0 ]; then
         [ "$rc" = 0 ] || fail "foreign oms branch creation stopped a read: $out"
-        contains "$out" 'state repository changes: foreign-ref' || fail "read branch-create warning missing: $out"
+        ! contains "$out" 'read pass observed state repository changes: foreign-ref;' || fail "read foreign-ref should be quiet: $out"
       else
         [ "$rc" = 2 ] || fail "strict read tolerated foreign oms branch creation: $out"
         contains "$out" 'state repository protected surfaces: refs' || fail "strict read branch-create refs not hard: $out"
@@ -36196,8 +36196,8 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
       out="$(OMS_WORKER_GUARD_STRICT="$strict" ma_read_guard_assert 2>&1)" || rc=$?
       if [ "$strict" = 0 ]; then
         [ "$rc" = 0 ] || fail "foreign oms move stopped a linked read: $out"
-        contains "$out" 'state repository changes: foreign-ref' || fail "linked state warning missing: $out"
-        contains "$out" 'source repository changes: foreign-ref' || fail "linked source warning missing: $out"
+        ! contains "$out" 'read pass observed state repository changes: foreign-ref;' || fail "linked state foreign-ref should be quiet: $out"
+        ! contains "$out" 'read pass observed source repository changes: foreign-ref;' || fail "linked source foreign-ref should be quiet: $out"
       else
         [ "$rc" = 2 ] || fail "strict linked read tolerated a foreign ref move: $out"
       fi

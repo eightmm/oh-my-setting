@@ -2807,8 +2807,7 @@ if [ -n "$worker_guard_dir" ]; then
     fi
   done
   if [ -n "$worker_guard_soft" ]; then
-    echo "warning: the repository changed outside the worktree during this run: $worker_guard_soft" >&2
-    echo "warning: this cannot be attributed to $TO — your own edits look the same. Review before landing." >&2
+    echo "warning: the repository changed outside the worktree during this run: $worker_guard_soft; review these before landing" >&2
     printf '\n\n## Repository changed during the run\n\n- surfaces: %s\n- not attributable to the worker; review the patch before landing\n' \
       "$worker_guard_soft" >> "$artifact"
   fi
