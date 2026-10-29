@@ -638,6 +638,7 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
   --repo "$repo" --to codex >"$TMP/gd-park.out" 2>&1 || rc=$?
 [ "$rc" = 3 ] || fail "exhausted plan should park with exit 3, got $rc"
 grep -Fq 'reason=tasks-exhausted' "$TMP/gd-park.out" || fail "park reason missing"
+grep -Fq 'agent-plan add' "$TMP/gd-park.out" || fail "unbound plan lost add guidance"
 grep -Fq 'goal-drive: parent-agent next:' "$TMP/gd-park.out" ||
   fail "park recovery should be addressed to the parent agent"
 if grep -Fq 'goal-drive: next:' "$TMP/gd-park.out"; then
@@ -680,6 +681,45 @@ grep -Fq 'oms advise' "$TMP/gd-park2.out" ||
   fail "a repeated park must surface the advise hint: $(cat "$TMP/gd-park2.out")"
 [ "$(park_row | python3 -c 'import json,sys; print(json.load(sys.stdin).get("count",0))')" = 2 ] ||
   fail "two parks of the same goal should share one fingerprint"
+
+# A reviewed plan can only add work through the remainder proposal.
+cat > "$repo/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: active
+EOF
+git -C "$repo" add PROJECT.md
+git -C "$repo" commit -qm 'test: bind exhausted plan to project'
+python3 - "$repo/.oms/plan/tasks.json" "$repo/PROJECT.md" <<'PYCONTRACT'
+import hashlib, json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    plan = json.load(handle)
+with open(sys.argv[2], "rb") as handle:
+    digest = hashlib.sha256(handle.read()).hexdigest()
+plan["project_contract"] = {"schema": 1, "spec_sha256": digest,
+    "allowed_envelope": ["README.md"], "acceptance_files": [], "acceptance_manifest": []}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(plan, handle)
+PYCONTRACT
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$repo" --to codex >"$TMP/gd-bound-park.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "bound exhausted plan should park, got $rc"
+grep -Fq 'autopilot remainder proposal (once per contract)' "$TMP/gd-bound-park.out" || fail "bound plan lost remainder guidance"
+grep -Fq 'oms autopilot abandon' "$TMP/gd-bound-park.out" || fail "bound plan lost abandon guidance"
+if grep -Fq 'agent-plan add' "$TMP/gd-bound-park.out"; then
+  fail "bound plan advertised a refused add"
+fi
+python3 - "$repo/.oms/plan/tasks.json" <<'PYCONTRACT'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    plan = json.load(handle)
+plan.pop("project_contract")
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(plan, handle)
+PYCONTRACT
 
 # Acceptance passing is what closes those rows: without it every park stayed
 # OPEN in the resume hook, inbox, and advise prompts until a human swept it.

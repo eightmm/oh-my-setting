@@ -2764,6 +2764,9 @@ for line in sys.stdin:
         found = match.group(1)
 print(found)
 ' | tr -d '\r')"
+    if [ "$accept_reason" = acceptance-timeout ]; then
+      park "$accept_reason" "acceptance timed out after ${OMS_PLAN_ACCEPT_TIMEOUT:-10m}; adjust OMS_PLAN_ACCEPT_TIMEOUT (default 10m) after inspecting the receipt"
+    fi
     if [ -n "$accept_reason" ]; then
       park "$accept_reason" "inspect the acceptance receipt and restore the frozen plan, files, and repository state before retrying"
     fi
@@ -2836,6 +2839,14 @@ print(found)
     printf '%s\n' "$run_out" | tail -n 6
     if [ "$run_rc" -ne 0 ]; then
       if printf '%s\n' "$run_out" | grep 'no actionable task' > /dev/null; then
+        if python3 - "$PLAN_FILE" 2>/dev/null <<'PYCONTRACT'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raise SystemExit(0 if json.load(handle).get("project_contract") is not None else 1)
+PYCONTRACT
+        then
+          park "tasks-exhausted" "acceptance fails and the plan has no actionable task; use the autopilot remainder proposal (once per contract), or oms autopilot abandon and a fresh contract"
+        fi
         park "tasks-exhausted" "acceptance fails and the plan has no actionable task; add tasks (agent-plan add) or decompose the remaining gap"
       fi
       park "task-failed" "plan-run failed (see its ledger row); review the task, then re-run goal-drive"
