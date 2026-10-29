@@ -396,7 +396,11 @@ def _stopped_write_continuation(last, eligible_result):
 
 def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, patch_reference=None,
                  allow_stale_base=False):
-    """(brief file, native session or None, note) for the next round of one of this main's workers."""
+    """(brief file, native session or None, note) for this main's next worker round.
+
+    Fresh sessions receive the bounded tail of the verified answer so the final
+    report survives earlier progress output.
+    """
     from terminal_panel import MAX_PROMPT, _rework_history, clean, events, owning_attempt
     from terminal_panel import repository, results, session_stored, verified_patch, work_repository
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
@@ -660,7 +664,11 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                                                           "no patch transferred")
     else:
         has_summary = eligible_result and bool(call.get("answer"))
-        summary = clean(str(call["answer"]), 1500) if has_summary else "no verified summary recorded"
+        summary = "no verified summary recorded"
+        if has_summary:
+            # The final report sits at the end of a long answer, so keep the tail.
+            flat = clean(str(call["answer"]), 1 << 30)
+            summary = flat if len(flat) <= 1500 else "... (earlier output omitted) " + flat[-1470:]
         reason = ("the earlier worker ran on %s, not %s" % (ran, route["provider"])
                   if session and ran != route["provider"] else
                   "the earlier session is not recorded or no longer on disk")

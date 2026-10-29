@@ -215,8 +215,7 @@ def _safe_summary(path, repo):
     return sanitize_multiline(text, MAX_SUMMARY).strip()
 
 
-def _indexed(repo, row, maximum=MAX_RESULT):
-    path = row.get('artifact', '')
+def _artifact_path(repo, path):
     if not isinstance(path, str) or not path.startswith('.oms/artifacts/'):
         raise ValueError('artifact is outside OMS evidence')
     try:
@@ -226,10 +225,46 @@ def _indexed(repo, row, maximum=MAX_RESULT):
         raise ValueError('artifact is outside OMS evidence') from error
     if os.path.commonpath((str(artifacts), str(target))) != str(artifacts):
         raise ValueError('artifact is outside OMS evidence')
+
+
+def _indexed(repo, row, maximum=MAX_RESULT):
+    path = row.get('artifact', '')
+    _artifact_path(repo, path)
     data = _read(repo, path, maximum)
     if not row.get('artifact_sha256') or hashlib.sha256(data).hexdigest() != row['artifact_sha256']:
         raise ValueError('artifact digest mismatch')
     return data
+
+
+def _final_attempt_output(repo, artifact):
+    """Bounded, confined counterpart of peer_artifacts.final_attempt_output.
+
+    Missing records or unusable entries retain the indexed transcript; unsafe
+    reads propagate so results can report unavailable evidence.
+    """
+    base = artifact[:-3] if artifact.endswith('.md') else artifact
+    sidecar = base + '.attempts.json'
+    try:
+        info = (Path(repo) / sidecar).lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError('attempt record is a symlink')
+    _artifact_path(repo, sidecar)
+    record = json.loads(_read(repo, sidecar, 1024 * 1024))
+    attempts = record.get('attempts') if isinstance(record, dict) else None
+    if not isinstance(attempts, list):
+        return None
+    for attempt in reversed(attempts):
+        name = attempt.get('output') if isinstance(attempt, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*\.out', name):
+            continue
+        output = str(Path(sidecar).parent / name)
+        if stat.S_ISLNK((Path(repo) / output).lstat().st_mode):
+            raise ValueError('attempt output is a symlink')
+        _artifact_path(repo, output)
+        return _read(repo, output, 1024 * 1024).decode('utf-8', errors='replace').strip()
+    return None
 
 
 def _review_run_id(row):
@@ -2001,7 +2036,11 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 call['alias'] = alias
             if (task_id or room_participant) and row.get('artifact') and row.get('kind') in ('ask', 'call', 'consult', 'delegate', 'review'):
                 try:
-                    answer, _ = artifact_sections_stream(io.BytesIO(_indexed(repo, row, 1024 * 1024)))
+                    verified_bytes = _indexed(repo, row, 1024 * 1024)
+                    answer = (_final_attempt_output(repo, row['artifact'])
+                              if attempt_meta.get('refs', {}).get('panel_fallback') else None)
+                    if answer is None:
+                        answer, _ = artifact_sections_stream(io.BytesIO(verified_bytes))
                     answer = re.split(r'(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$|## Verify\s*$)', answer)[0]
                     answer = re.sub(r'(?m)^model-route:.*\n?', '', answer)
                     # Only a deliberation (Answer/Findings sections) drops the prompt echo before it;
@@ -2015,7 +2054,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                     complete = sanitize_multiline(safe, maximum, maximum).strip()
                     call['answer'] = sanitize_multiline(complete, MAX_RESULT, MAX_RESULT).strip()
                     call['answer_truncated'] = call['answer'] != complete
-                except (OSError, ValueError, TypeError):
+                except (OSError, ValueError, TypeError, RuntimeError):
                     call['answer'] = 'Answer evidence unavailable'
             if row.get('patch') and row.get('patch_sha256'):
                 try:

@@ -1979,6 +1979,19 @@ def prompt_of(rows):
     out = continued(rows)
     return out[0].read_text()
 assert "A fresh worker continues" in prompt_of([]), "empty results must still fall back to a fresh worker"
+long_row = [{"calls": [{"attempt_id": last_round["attempt_id"], "exit": 0,
+                        "answer": "HEAD-NOISE " + "chatter " * 400 + "LAST-SENTENCE-OF-REPORT."}]}]
+long_text = prompt_of(long_row)
+assert "LAST-SENTENCE-OF-REPORT." in long_text and "HEAD-NOISE" not in long_text, long_text
+for answer in ("", 0, None, "x" * 1500, "x" * 1501):
+    long_row[0]["calls"][0]["answer"] = answer
+    bounded_text = prompt_of(long_row).split("Earlier summary: ", 1)[1].split("\nNew instructions", 1)[0]
+    if not answer:
+        assert bounded_text == "no verified summary recorded", bounded_text
+    elif len(answer) == 1500:
+        assert bounded_text == answer, len(bounded_text)
+    else:
+        assert bounded_text.startswith("... (earlier output omitted) ") and len(bounded_text) <= 1500, len(bounded_text)
 def with_patch(path, digest):
     return [{"calls": [{"attempt_id": last_round["attempt_id"], "patch": path, "patch_sha256": digest,
                         "exit": 0, "answer": "SAFE-CONTINUATION-SUMMARY",

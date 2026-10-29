@@ -4375,6 +4375,7 @@ with patch.dict(os.environ, environment, clear=True):
             raise
     else:
         artifact_attempt = review_attempt("artifact-symlink-loop")
+        artifact_attempt["refs"] = {"panel_fallback": "capacity"}
         artifact_rows = [
             dict(task_id="artifact-symlink-loop", kind="ask", attempt_id="artifact-symlink-loop",
                  exit=0, artifact=".oms/artifacts/self-referencing.md", artifact_sha256="0" * 64),
@@ -4386,6 +4387,107 @@ with patch.dict(os.environ, environment, clear=True):
             artifact_result = saved.results(review_fixture_repo, task_id="artifact-symlink-loop")["rows"][0]
         assert [call.get("answer") for call in artifact_result["calls"]] == [
             "Answer evidence unavailable", "Sibling answer retained"], artifact_result["calls"]
+    def fallback_call(task, body, fallback):
+        path = artifact_dir / (task + ".md")
+        path.write_text(body, encoding="utf-8")
+        attempt = review_attempt(task)
+        if fallback:
+            attempt["refs"] = {"panel_fallback": "capacity"}
+        rows = [dict(task_id=task, kind="ask", attempt_id=task, exit=0, artifact=".oms/artifacts/" + task + ".md",
+                     artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest())]
+        with patch.object(saved, "_records", return_value=([attempt], rows)):
+            return saved.results(review_fixture_repo, task_id=task)["rows"][0]["calls"][0]["answer"]
+    marker = "panel-provider-fallback: provider=claude model=m reason=capacity exit=1\n"
+    plain = "## Output\nDefect notes\n```\n" + marker + "```\nTail notes\n## Exit\n0\n"
+    kept = fallback_call("fallback-quote", plain, False)
+    assert "Defect notes" in kept and "Tail notes" in kept, kept
+    fallback_answer = fallback_call(
+        "fallback-ran",
+        "## Output\nHTTP 429 daily cap exhausted\ntokens used\n12\nusage detail: x\n"
+        "panel-provider-fallback: skipped reason=none\n" + marker +
+        "FINAL-FALLBACK-REPORT\n" + marker + "QUOTED-LATER\n## Exit\n0\n", True)
+    assert "429" in fallback_answer, fallback_answer  # missing sidecar uses combined artifact pipeline (truncated at usage detail)
+    # A fallback whose final attempt output carries the body and a quoted marker
+    # keeps the body and excludes the primary 429 dump (sidecar present).
+    out_path = artifact_dir / "fallback-sidecar.attempt-1.out"
+    out_path.write_text("Body kept from final output\n```\n" + marker + "```\n", encoding="utf-8")
+    sidecar_path = artifact_dir / "fallback-sidecar.attempts.json"
+    sidecar_path.write_text(json.dumps({"attempts": [{"output": "fallback-sidecar.attempt-1.out"}]}),
+                             encoding="utf-8")
+    artifact_path_sidecar = artifact_dir / "fallback-sidecar.md"
+    artifact_path_sidecar.write_text("## Output\nHTTP 429 primary error\n## Exit\n0\n", encoding="utf-8")
+    attempt_sidecar = review_attempt("fallback-sidecar")
+    attempt_sidecar["refs"] = {"panel_fallback": "capacity"}
+    rows_sidecar = [dict(task_id="fallback-sidecar", kind="ask", attempt_id="fallback-sidecar", exit=0,
+                          artifact=".oms/artifacts/fallback-sidecar.md",
+                          artifact_sha256=hashlib.sha256(artifact_path_sidecar.read_bytes()).hexdigest())]
+    with patch.object(saved, "_records", return_value=([attempt_sidecar], rows_sidecar)):
+        sidecar_answer = saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"]
+    assert "Body kept from final output" in sidecar_answer, sidecar_answer
+    assert marker.strip() in sidecar_answer, sidecar_answer
+    assert "429" not in sidecar_answer, sidecar_answer
+    with patch.object(saved, "_records", return_value=([attempt_sidecar], rows_sidecar)):
+        # Requirement 1: a valid final output cannot bypass the indexed digest.
+        digest = rows_sidecar[0]["artifact_sha256"]
+        rows_sidecar[0]["artifact_sha256"] = "0" * 64
+        assert saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"] == "Answer evidence unavailable"
+        rows_sidecar[0]["artifact_sha256"] = digest
+        # Requirement 3: malformed entries/fields and empty lists still render.
+        for payload in ({"attempts": [None]}, {"attempts": []}, {"attempts": [0, "", {}, {"output": 0}]},
+                        {"attempts": [{"output": "../outside.out"}]}, {"attempts": None}, [], 0):
+            sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
+            assert saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"] == "HTTP 429 primary error", payload
+        sidecar_data = json.dumps({"attempts": [{"output": out_path.name}, None, {"output": 0}]})
+        sidecar_path.write_text(sidecar_data, encoding="utf-8")
+        assert "Body kept" in saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"]
+        # Missing sidecars retain the verified artifact; unreadable records fail closed.
+        sidecar_path.unlink()
+        assert saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"] == "HTTP 429 primary error"
+        for malformed in ("", "{", "x" * (1024 * 1024 + 1)):
+            sidecar_path.write_text(malformed, encoding="utf-8")
+            assert saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"] == "Answer evidence unavailable"
+        sidecar_path.write_text(sidecar_data + " " * (1024 * 1024 - len(sidecar_data)), encoding="utf-8")
+        assert "Body kept" in saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"]
+        sidecar_path.write_text(sidecar_data, encoding="utf-8")
+        for size in (0, 1024 * 1024, 1024 * 1024 + 1):
+            out_path.write_text("x" * size, encoding="utf-8")
+            bounded = saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]
+            if size > 1024 * 1024:
+                assert bounded["answer"] == "Answer evidence unavailable", bounded
+            else:
+                assert (bounded["answer"] == "" if size == 0 else
+                        bounded["answer"].startswith("x") and len(bounded["answer"]) <= saved.MAX_RESULT), size
+                assert bounded["answer_truncated"] == (size > saved.MAX_RESULT), bounded
+        out_path.unlink()
+        assert saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"] == "Answer evidence unavailable"
+        # Requirements 2 and 4: neither sidecar may follow links, including loops.
+        outside = temporary / "outside-attempt.out"
+        outside.write_text("OUTSIDE-MUST-NOT-BE-READ", encoding="utf-8")
+        for link_path in (out_path, sidecar_path):
+            for destination in (outside, link_path):
+                if link_path.exists() or link_path.is_symlink():
+                    link_path.unlink()
+                try:
+                    link_path.symlink_to(destination)
+                except (OSError, NotImplementedError):
+                    if os.name != "nt":
+                        raise
+                else:
+                    with patch.object(saved, "_read", wraps=saved._read) as sidecar_read:
+                        assert saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"] == "Answer evidence unavailable"
+                    blocked = link_path.relative_to(review_fixture_repo).as_posix()
+                    assert blocked not in [entry.args[1] for entry in sidecar_read.call_args_list]
+                finally:
+                    if link_path.is_symlink():
+                        link_path.unlink()
+            link_path.write_text(sidecar_data if link_path == sidecar_path else "Body kept", encoding="utf-8")
+        # A nested artifact must use its own adjacent sidecars.
+        nested = artifact_dir / "nested"
+        nested.mkdir()
+        for path in (artifact_path_sidecar, sidecar_path, out_path):
+            path.rename(nested / path.name)
+        rows_sidecar[0]["artifact"] = ".oms/artifacts/nested/fallback-sidecar.md"
+        assert saved.results(review_fixture_repo, task_id="fallback-sidecar")["rows"][0]["calls"][0]["answer"] == "Body kept"
     linked_result = project / saved.results(project, "panel-council-test")["rows"][0]["artifact"]
     linked_result.write_text("changed\n")
     assert saved.results(project, "panel-council-test")["rows"][0]["missing_result"]

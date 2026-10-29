@@ -45,6 +45,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- When a write worker's primary provider failed and the provider fallback
+  answered, `oms panel --results` and continuation summaries show the
+  fallback's final answer from the attempt sidecars instead of the primary's
+  error text. The recorded artifact digest is still verified first; sidecars
+  are read bounded, confined to `.oms/artifacts` and never through symlinks,
+  and malformed attempt records leave the answer unavailable.
 - After a transient upstream 429 on a free Pi model, panel routing skips that
   model for 20 minutes when another provider serves the tier, instead of
   sending the next worker into the same limit. Pi alone still serves; the
