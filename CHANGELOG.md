@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A panel main session is named "oms main · <repo>" so it stands out in
+  `/resume`: Claude gets `--name` when its `--help` lists it, Codex gets the
+  name as an instruction prefix. An empty, sensitive or unreadable repository
+  label falls back to plain "oms main", never the raw directory name.
 - CI's affected path selects in `affected_plan` (`check.sh --affected
   --print-affected-mode --ci-output`) and runs the narrow checks in a separate
   `affected_verify` job, so operator-tools starts right after selection instead

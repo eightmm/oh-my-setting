@@ -382,26 +382,52 @@ with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
     claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--autocompact <auto|tokens>'\n")
     claude_stub.chmod(0o700)
     old_path = os.environ.get("PATH", "")
-    try:
-        os.environ["PATH"] = help_dir
+    bash_dir = os.path.dirname(shutil.which("bash"))
+    def clear_claude_probes():
+        panel_native._claude_help.cache_clear()
         panel_native._claude_supports_autocompact.cache_clear()
+        panel_native._claude_supports_name.cache_clear()
+    try:
+        os.environ["PATH"] = help_dir + os.pathsep + old_path
+        clear_claude_probes()
         supported_argv = panel.native_command("claude", project)
         resumed_supported_argv = panel.native_command("claude", project, resume="compact-session")
         assert supported_argv[supported_argv.index("--autocompact") + 1] == "300000"
         assert resumed_supported_argv[resumed_supported_argv.index("--autocompact") + 1] == "300000"
 
+        expected_name = "oms main · " + os.path.basename(str(project))
+        for argv in (supported_argv, resumed_supported_argv):
+            assert "--name" not in argv
+        claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '-n, --name <name>  Set a display name'\n")
+        clear_claude_probes()
+        for argv in (panel.native_command("claude", project), panel.native_command("claude", project, resume="named-session")):
+            assert argv[argv.index("--name") + 1] == expected_name, argv
+        codex_text = panel.native_command("codex", project)[-1]
+        assert codex_text.startswith(expected_name + " — "), codex_text[:80]
+        with patch.object(panel, "safe_label", side_effect=ValueError):
+            assert panel.native_command("claude", project)[panel.native_command("claude", project).index("--name") + 1] == "oms main"
+            assert panel.native_command("codex", project)[-1].startswith("oms main — ")
+
+        with patch.object(panel, "safe_label", side_effect=subprocess.TimeoutExpired("bash", 5)):
+            assert panel.native_command("claude", project)[panel.native_command("claude", project).index("--name") + 1] == "oms main"
+            assert panel.native_command("codex", project)[-1].startswith("oms main — ")
+
+        claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--name-only'\n")
+        clear_claude_probes()
+        assert "--name" not in panel.native_command("claude", project)
+
         claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]'\n")
-        panel_native._claude_supports_autocompact.cache_clear()
+        clear_claude_probes()
         unsupported_argv = panel.native_command("claude", project)
-        assert "--autocompact" not in unsupported_argv
+        assert "--autocompact" not in unsupported_argv and "--name" not in unsupported_argv
 
         os.environ["PATH"] = ""
-        panel_native._claude_supports_autocompact.cache_clear()
+        clear_claude_probes()
         missing_argv = panel.native_command("claude", project)
-        assert "--autocompact" not in missing_argv
+        assert "--autocompact" not in missing_argv and "--name" not in missing_argv
     finally:
         os.environ["PATH"] = old_path
-        panel_native._claude_supports_autocompact.cache_clear()
+        clear_claude_probes()
 
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]

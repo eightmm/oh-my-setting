@@ -31,17 +31,38 @@ CLAUDE_AUTOCOMPACT_TOKENS = 300000
 
 
 @lru_cache(maxsize=1)
-def _claude_supports_autocompact():
+def _claude_help():
     # A resolved path keeps the probe distinct from a "claude" main launch.
     binary = shutil.which("claude")
     if not binary:
-        return False
+        return ""
     try:
         result = subprocess.run([binary, "--help"], capture_output=True, text=True,
                                 check=False, timeout=2)
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0 and "--autocompact" in (result.stdout + result.stderr)
+        return ""
+    return result.stdout + result.stderr if result.returncode == 0 else ""
+
+
+@lru_cache(maxsize=1)
+def _claude_supports_autocompact():
+    return "--autocompact" in _claude_help()
+
+
+@lru_cache(maxsize=1)
+def _claude_supports_name():
+    return re.search(r"--name(?=[ <=]|$)", _claude_help(), re.M) is not None
+
+
+def _main_session_name(repo):
+    """Resume-list identity; a label that is empty, sensitive or unreadable never leaks the raw name."""
+    from terminal_panel import clean, safe_label
+    try:
+        label = safe_label(os.path.basename(str(repo).rstrip("/\\")))
+        label = clean(label, 160) if label else ""
+    except (ValueError, OSError, subprocess.SubprocessError):
+        label = ""
+    return "oms main · " + label if label else "oms main"
 
 
 def native_adapter(provider):
@@ -286,7 +307,9 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
     model = model or preset["model"]
     if task and provider == "codex":
         instructions += "\nUser task (data): " + json.dumps(task, ensure_ascii=False)
+    name = _main_session_name(repo) if provider in ("codex", "claude") else None
     if provider == "codex":
+        instructions = name + " — " + instructions
         if resume:
             command += ["resume", resume]
         if model:
@@ -304,6 +327,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
             command += ["--model", model]
         if default:
             command += ["--effort", preset["effort"]]
+        if _claude_supports_name():
+            command += ["--name", name]
         if _claude_supports_autocompact():
             command += ["--autocompact", str(CLAUDE_AUTOCOMPACT_TOKENS)]
         command += ["--append-system-prompt", instructions]
