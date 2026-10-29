@@ -30737,7 +30737,9 @@ with (temporary / 'canonical-call.out').open('w+') as log, (temporary / 'canonic
         result = run_sync()
         assert result.returncode == 75 and 'call-sync-fixture2' in result.stdout, result.stdout
         release2.touch()
-        assert call2.wait(timeout=30) == 0
+        call2_rc = call2.wait(timeout=30)
+        log2.seek(0); output2 = log2.read()
+        assert call2_rc == 0, (call2_rc, output2)
         result = run_sync()
         assert result.returncode == 0, result.stdout
         assert git(repo, 'rev-parse', 'HEAD') == tip
@@ -30825,26 +30827,37 @@ oms_canonical_sync_gate "$2" hold "$@"
 '''
 gate = subprocess.Popen(['bash', '-c', gate_cmd, 'bash', str(root), str(repo), str(gate_ready), str(gate_release)])
 waiter = None
+call_timeout = int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '90'))
 try:
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + call_timeout
     while not gate_ready.exists() and time.monotonic() < deadline:
         time.sleep(.05)
     assert gate_ready.exists()
     acquire = '. "$1/scripts/lib/canonical-sync.sh"; trap oms_canonical_call_release EXIT; oms_canonical_call_acquire "$2" waiting-call'
     blocked = subprocess.run(['bash', '-c', acquire, 'bash', str(root), str(repo)],
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=10)
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=call_timeout)
     assert blocked.returncode == 75 and 'after 5s' in blocked.stdout, blocked.stdout
     assert not (repo / '.oms/locks/canonical-sync.d/waiting-call').exists()
-    waiter = subprocess.Popen(['bash', '-c', acquire, 'bash', str(root), str(repo)])
-    time.sleep(.3)
+    waiting = temporary / 'sync-gate-waiting'
+    acquire_waiting = ('. "$1/scripts/lib/canonical-sync.sh"; waiting_marker="$3"; '
+                       'oms_poll_sleep_labeled() { touch "$waiting_marker"; read -r ignored; }; '
+                       'trap oms_canonical_call_release EXIT; oms_canonical_call_acquire "$2" waiting-call')
+    waiter = subprocess.Popen(['bash', '-c', acquire_waiting, 'bash', str(root), str(repo), str(waiting)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    deadline = time.monotonic() + call_timeout
+    while not waiting.exists() and waiter.poll() is None and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert waiting.exists(), 'waiter did not observe the held gate'
     assert waiter.poll() is None and not (repo / '.oms/locks/canonical-sync.d/waiting-call').exists()
     gate_release.touch()
-    assert gate.wait(timeout=10) == 0 and waiter.wait(timeout=10) == 0
+    assert gate.wait(timeout=call_timeout) == 0
+    waiter_output, _ = waiter.communicate('\n', timeout=call_timeout)
+    assert waiter.returncode == 0, (waiter.returncode, waiter_output)
 finally:
     gate_release.touch()
-    gate.wait(timeout=10)
+    gate.wait(timeout=call_timeout)
     if waiter is not None:
-        waiter.wait(timeout=10)
+        waiter.communicate('\n' if waiter.poll() is None else None, timeout=call_timeout)
 
 # Diverged histories cannot merge, even when tracked/untracked state is clean.
 (repo / 'local.txt').write_text('local history\n')

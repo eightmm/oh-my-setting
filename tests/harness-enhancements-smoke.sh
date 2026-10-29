@@ -756,11 +756,18 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
     done ;;
   deadline)
     python3 - <<'PY'
-import os, pathlib, signal, subprocess, sys
-child = subprocess.Popen([sys.executable, '-c',
-    'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
+import os, subprocess, sys
+child = subprocess.Popen([sys.executable, '-c', '''
+import os, pathlib, signal
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+path = pathlib.Path(os.environ['OMS_TEST_STAGE_CHILD'])
+ready = path.with_suffix('.ready')
+ready.write_text(str(os.getpid()))
+ready.replace(path)
+while True:
+    signal.pause()
+'''],
     start_new_session=os.name == 'posix')
-pathlib.Path(os.environ['OMS_TEST_STAGE_CHILD']).write_text(str(child.pid))
 child.wait()
 PY
     ;;
@@ -844,10 +851,11 @@ if os.name != 'posix':
     print('SKIP: detached descendant deadline probe requires POSIX signals')
     raise SystemExit(0)
 child_file = pathlib.Path(tmp) / 'stage-child'
+call_timeout = float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
 env = dict(os.environ, OMS_SHELLCHECK_BIN=gate+'/fake-shellcheck', OMS_TEST_CHECK_MUTATION='deadline',
            OMS_CHECK_STAGE_TIMEOUT_SECONDS='2', OMS_TEST_STAGE_CHILD=str(child_file))
 command = ['bash', 'scripts/check.sh', '--quick', '--changed-from', base, '--changed-to', head]
-result = subprocess.run(command, cwd=gate, env=env, capture_output=True, text=True, timeout=25)
+result = subprocess.run(command, cwd=gate, env=env, capture_output=True, text=True, timeout=call_timeout)
 assert result.returncode == 124, (result.stdout, result.stderr)
 assert child_file.exists(), (result.stdout, result.stderr)
 child = int(child_file.read_text())
@@ -869,26 +877,26 @@ log = pathlib.Path(next(line[len(prefix):] for line in result.stderr.splitlines(
 assert 'stage deadline exceeded' in log.read_text(), log
 log.unlink()
 # A caller cancellation uses the same cleanup path rather than waiting out the deadline.
-env['OMS_CHECK_STAGE_TIMEOUT_SECONDS'] = '60'
+env['OMS_CHECK_STAGE_TIMEOUT_SECONDS'] = str(max(60, int(call_timeout * 2)))
 for mode in ('--quick', '--affected'):
     child_file.unlink()
     command[2] = mode
     process = subprocess.Popen(command, cwd=gate, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, start_new_session=True)
     try:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + call_timeout
         while not child_file.exists() and time.monotonic() < deadline:
             assert process.poll() is None
             time.sleep(.02)
         assert child_file.exists(), 'stage did not start'
         process.send_signal(signal.SIGTERM)
-        output, error = process.communicate(timeout=15)
+        output, error = process.communicate(timeout=call_timeout)
         assert process.returncode == 143, (output, error)
         assert not alive(int(child_file.read_text()))
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=15)
+            process.wait(timeout=call_timeout)
 # Cancel inside Popen, after the session exists but before its handle returns.
 # This deterministically covers the launch window without production test hooks.
 race = r'''
@@ -911,7 +919,7 @@ for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         result = subprocess.run([sys.executable, '-c', race, gate+'/scripts/check.sh', 'bash', '60',
                                  sys.executable, '-c', 'import time; time.sleep(60)'],
                                 env=dict(env, OMS_TEST_STAGE_SIGNAL=str(int(sig))),
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=call_timeout)
         child = int(child_file.read_text())
         assert result.returncode == 128 + sig, (sig, result.returncode, result.stderr)
         assert not alive(child), (sig, child)
