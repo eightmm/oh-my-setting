@@ -8,6 +8,25 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The free Pi route is write overflow after the native providers in the light
+  and routine tiers, so weekly-quota ordering among Codex and Claude applies
+  again instead of tier order picking Pi first.
+- Automatic review of a docs-only patch uses the routine tier; manual reviewer
+  and verifier dispatches default to deep, and trust-boundary changes keep
+  frontier.
+- `oms panel --continue` routes to the provider that ran the continued write
+  attempt, so its native session resumes instead of a fresh worker receiving
+  only a summary.
+- The panel main's guidance starts independent ready work concurrently and
+  waits on each call's notification, instead of reading as one dispatch at a
+  time.
+- Verify runs share a soft per-user admission pool (`OMS_VERIFY_SLOTS`, default
+  a quarter of the CPUs, at least 2), so parallel workers, review gates and
+  admission stop stacking suites into timeouts; contention never fails a
+  verify and an unusable pool runs unthrottled with one note.
+- Read-pass guard warnings that only report remote-ref activity are silent,
+  and the worker's soft repository-change warning is one line that still asks
+  for review before landing.
 - A panel main session is named "oms main · <repo>" so it stands out in
   `/resume`: Claude gets `--name` when its `--help` lists it, Codex gets the
   name as an instruction prefix. An empty, sensitive or unreadable repository
@@ -45,6 +64,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Automatic graph context packs drop entries carrying absolute paths or
+  secret-shaped text instead of refusing the whole pack, and a refused pack
+  names the field and kind without echoing the value.
+- Provider health accepts an Antigravity plugin-list row without a version
+  (GitHub issue #9), so a built-in plugin no longer breaks the oh-my-setting
+  plugin check.
+- `oms patch-land` exits 75 while the landing lock is held, like `oms land`, so
+  plan-run treats it as retryable.
+- Pi workers report token usage through the shared usage envelope, Pi's JSON
+  error results exit nonzero, and the OpenRouter daily-cap message puts that
+  free model in daily cooldown.
+- Docs match code for the panel's non-repository exit (3) and patch-land's
+  lock exit.
+- A continued round that passes no longer leaves the task's results row at
+  "retry implement" because an earlier round in the same continuation chain
+  failed; independent failed calls still count.
 - The land CI scope query treats a skipped `affected checks` job as optional, like `operator-tools (affected)`, so a full CI selection proves full scope and install is no longer blocked as ci-scope-unknown.
 - Reattaching to a panel whose main has ended opens a main again; when none can open, the control view shows the reason, and a main whose startup fails waits for Enter so its error stays visible.
 - `oms panel --finalize` waits only for review read passes running in its own execution checkout (or with no recorded checkout), so reviews in other checkouts no longer defer finalize with exit 75 indefinitely.
