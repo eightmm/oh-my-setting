@@ -45,10 +45,10 @@ if not lines or lines[0] != "Installed plugins:":
     unknown()
 plugins = {}
 for line in lines[1:]:
-    row = re.fullmatch(r"\s*- ([A-Za-z0-9][A-Za-z0-9._-]*) \((enabled|disabled), ([^()]+)\)", line)
+    row = re.fullmatch(r"\s*- ([A-Za-z0-9][A-Za-z0-9._-]*) \((enabled|disabled)(?:, ([^()]*))?\)", line)
     if row:
         name, status, version = row.groups()
-        if name in plugins or not version.strip():
+        if name in plugins or (version is not None and not version.strip()):
             unknown()
         plugins[name] = status
     elif not plugins or not re.fullmatch(r" {4,}(?:Source|Components):\s+\S.*", line):

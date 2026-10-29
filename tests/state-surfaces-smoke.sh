@@ -1575,6 +1575,36 @@ PY
   if grep -Fq "plugin uninstall" "$log"; then
     fail "Antigravity lookup failure still attempted uninstall"
   fi
+  printf '%s\n' 'Installed plugins:' '- Google.securecoder.securecoder (enabled)' \
+    '    Components: 8 skills' '- oh-my-setting (enabled, 0.7.0)' \
+    '    Source:     antigravity' '    Components: 1 MCP server' > "$TMP/agy-list"
+  : > "$log"
+  OMS_TEST_AGY_LIST_FILE="$TMP/agy-list" PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-versionless-neighbor" 2>&1 ||
+    fail "versionless neighboring plugin blocked Antigravity removal"
+  grep -Fq 'agy plugin uninstall oh-my-setting' "$log" ||
+    fail "versionless neighboring plugin did not permit removal"
+  printf '%s\n' 'Installed plugins:' '- Google.securecoder.securecoder (enabled)' \
+    '    Components: 8 skills' > "$TMP/agy-list"
+  : > "$log"
+  OMS_TEST_AGY_LIST_FILE="$TMP/agy-list" PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-only-versionless" 2>&1 ||
+    fail "versionless-only Antigravity list should report absent"
+  grep -Fq 'agy-plugin: already absent' "$TMP/agy-only-versionless" ||
+    fail "versionless-only Antigravity list did not report absent"
+  if grep -Fq "plugin uninstall" "$log"; then
+    fail "versionless-only Antigravity list attempted uninstall"
+  fi
+  printf '%s\n' 'Installed plugins:' '- x (enabled, )' > "$TMP/agy-list"
+  : > "$log"
+  status=0
+  OMS_TEST_AGY_LIST_FILE="$TMP/agy-list" PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-empty-version" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "empty Antigravity plugin version permitted removal"
+  if grep -Fq "plugin uninstall" "$log"; then
+    fail "empty Antigravity plugin version attempted uninstall"
+  fi
+  touch "$TMP/agy.registered"
   printf '%s\n' 'Installed plugins:' '- oh-my-setting (enabled, 0.7.0)' 'unexpected output' > "$TMP/agy-list"
   status=0
   OMS_TEST_AGY_LIST_FILE="$TMP/agy-list" PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
