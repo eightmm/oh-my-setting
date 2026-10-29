@@ -408,6 +408,63 @@ with patch.object(panel, "_dispatch_call_finished", return_value=True), \
     assert dispatch.scope_overlaps(temporary, "room", finalized_room, "main", ["src/shared.py"]) == []
     assert dispatch.scope_overlaps(temporary, "room", finished_room, "main", ["src/shared.py"]) == []
 
+def exercise_continuation_preference():
+    from panel_routing import allocate
+    status = {"codex": {"weekly_used": 80}, "claude": {"weekly_used": 10}}
+    args = dict(owner="codex", role="builder", tier="routine", access="write",
+                installed={"codex", "claude"}, provider_status=status, check_visibility=False)
+    assert allocate(**args, preferred="codex")["provider"] == "codex"
+    assert allocate(**dict(args, installed={"claude"}), preferred="codex")["provider"] == "claude"
+    assert allocate(**args, preferred="missing")["provider"] == "claude"
+    for preferred in (None, "", 0, "malformed"):
+        assert allocate(**args, preferred=preferred)["provider"] == "claude"
+    for usage, expected in ((0, "codex"), (89, "codex"), (90, "claude")):
+        readings = dict(status, codex={"weekly_used": usage})
+        assert allocate(**dict(args, provider_status=readings), preferred="codex")["provider"] == expected
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    import panel_routing
+    model = next(c["model"] for c in panel_routing.policy()["tiers"]["routine"] if c["provider"] == "codex")
+    capped = dict(status, codex={"daily_cap": {model: today}})
+    assert allocate(**dict(args, provider_status=capped), preferred="codex")["provider"] == "claude"
+    assert allocate(**dict(args, role="reviewer", access="read"), preferred="codex")["provider"] == "claude"
+
+
+exercise_continuation_preference()
+
+# Dispatch passes the actual provider of the newest owned writer, including alias lookup.
+def exercise_continuation_dispatch_preference():
+    rows = [{"attempt_id": "one", "parent_attempt_id": "parent", "task_id": "task",
+             "created_at": "1", "provider": "claude", "refs": {"panel_role": "worker"}},
+            {"attempt_id": "two", "parent_attempt_id": "parent", "task_id": "task",
+             "created_at": "2", "provider": "claude",
+             "refs": {"panel_role": "worker", "panel_provider": "codex"}}]
+    captured = []
+    def capture(*args, **kwargs):
+        preferred = kwargs.get("preferred")
+        route = allocate("codex", role="builder", tier="routine", access="write",
+                         installed={"codex", "claude"}, check_visibility=False,
+                         provider_status={"codex": {"weekly_used": 80}, "claude": {"weekly_used": 10}},
+                         preferred=preferred)
+        captured.append((preferred, route["provider"]))
+        raise RuntimeError("route captured")
+    with patch.object(panel, "child_environment", return_value={}), \
+         patch.object(dispatch.room, "resolve", return_value="room"), \
+         patch.object(panel, "routing_status", return_value={}), \
+         patch.object(panel, "resolve_call_alias", return_value="task"), \
+         patch.object(panel, "owning_attempt", return_value=["parent"]), \
+         patch.object(panel, "events", return_value=json.dumps(rows)), \
+         patch.object(panel, "selected_route", side_effect=capture):
+        for target in (None, "claude"):
+            try:
+                dispatch.dispatch(temporary, "codex", "builder", "routine", "write", None,
+                                  brief="brief", continue_task="alias", target=target)
+            except RuntimeError as error:
+                assert str(error) == "route captured"
+    assert captured == [("codex", "codex"), (None, "claude")], captured
+
+exercise_continuation_dispatch_preference()
+
 # Continuation checks the execution worktree's clean HEAD, not room metadata or dirty files.
 continuation_patch = b"--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-before\n+worker change\n"
 
@@ -423,10 +480,12 @@ def continuation_git_repo(name):
     base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     return repo, base
 
-def run_continuation_fixture(room_repo, work_repo, base):
+def run_continuation_fixture(room_repo, work_repo, base, answer=None):
     import panel_results as continuation_results
     call = {"attempt_id": "worker-attempt", "exit": 0, "patch": "patches/continued.patch",
             "patch_sha256": "fixture-sha", "event_id": "fixture-event"}
+    if answer is not None:
+        call["answer"] = answer
     previous = {"attempt_id": "worker-attempt", "parent_attempt_id": "parent", "terminal": True,
                 "refs": {"panel_access": "write", "panel_location": "repository", "panel_provider": "codex"}}
     rows = [{"attempt_id": "parent", "terminal": False}, previous]
@@ -473,6 +532,11 @@ subprocess.run(["git", "-c", "user.name=continuation fixture", "-c", "user.email
 (dirty_repo / "shared.txt").write_text("dirty conflict\n")
 dirty_note, _ = run_continuation_fixture(dirty_repo, dirty_repo, dirty_base)
 assert "differs from current HEAD" in dirty_note and "applies cleanly" in dirty_note, dirty_note
+
+flagged_answer = "pass" + "word" + "=" + "fixture-value"
+flagged_note, flagged_text = run_continuation_fixture(dirty_repo, dirty_repo, dirty_base, flagged_answer)
+assert "earlier summary omitted: flagged by the outbound scan" in flagged_text, flagged_text
+assert flagged_answer not in flagged_text and "summary omitted" in flagged_note
 
 # An abbreviated recorded base that resolves to HEAD is not drift.
 abbrev_repo, abbrev_base = continuation_git_repo("continuation-abbreviated-base-repo")
@@ -541,7 +605,9 @@ continuation_rows = [
      "refs": {"panel_alias": "R444", "panel_room_id": "continued-room", "panel_access": "read"}},
 ]
 continued_alias = {}
-with patch.object(panel, "selected_route", return_value=warning_route), \
+with patch.object(panel, "resolve_call_alias", side_effect=lambda repo, room, task: task), \
+        patch.object(panel, "owning_attempt", return_value=[]), \
+        patch.object(panel, "selected_route", return_value=warning_route), \
         patch.object(panel, "safe_label", side_effect=lambda value: value), \
         patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "continued-room"}), \
         patch.object(dispatch.room, "resolve", return_value="continued-room"), \
@@ -565,7 +631,9 @@ judge_only_rows = [{"attempt_id": "judge-round-1", "task_id": "judge-task",
                     "refs": {"panel_alias": "B211", "panel_room_id": "continued-room", "panel_access": "write"}}]
 continuation_options = {}
 continued_brief.write_text("Continue the judge-only task.\n")
-with patch.object(panel, "selected_route", return_value=warning_route), \
+with patch.object(panel, "resolve_call_alias", side_effect=lambda repo, room, task: task), \
+        patch.object(panel, "owning_attempt", return_value=[]), \
+        patch.object(panel, "selected_route", return_value=warning_route), \
         patch.object(panel, "safe_label", side_effect=lambda value: value), \
         patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "continued-room"}), \
         patch.object(dispatch.room, "resolve", return_value="continued-room"), \

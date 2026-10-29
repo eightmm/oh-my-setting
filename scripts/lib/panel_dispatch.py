@@ -224,7 +224,7 @@ def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candid
 
 
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
-                   repo=None, room_id=None, main=None, task_id=None, candidate=None, routing_readings=None):
+                   repo=None, room_id=None, main=None, task_id=None, candidate=None, routing_readings=None, preferred=None):
     from terminal_panel import MAIN_OWNERS, MODEL_IDS, PROVIDERS, allocate, policy, provider_catalog, routable_route_model
     from terminal_panel import route_family, routing_status
     if owner not in MAIN_OWNERS:
@@ -259,7 +259,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs,
-                         owner_model=owner_model, repo=visibility_repo_resolved)
+                         owner_model=owner_model, repo=visibility_repo_resolved, preferred=preferred)
         peer = next(row for row in rows if row["provider"] == route["provider"])
         route.update(binary=peer["binary"], model=routable_route_model(
             route["provider"], route["model"], catalogs[route["provider"]]))
@@ -474,6 +474,17 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             verified_patch(repo, call)
         except (OSError, ValueError, TypeError):
             verified_failure = False
+    def outbound_clean(value):
+        import terminal_panel
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as candidate:
+            candidate.write(value)
+            candidate.flush()
+            checked = subprocess.run(
+                ["bash", "-c", '. "$1"; ma_validate_outbound_prompt "$2"',
+                 "oms-continuation-scan", str(terminal_panel.OUTBOUND_SCANNER), candidate.name],
+                capture_output=True, text=True, check=False)
+        return checked.returncode == 0
+
     verification_section = ""
     unsafe_verification_path = False
     if verified_failure and call.get("reason_code") != "worker_authority_violation":
@@ -490,16 +501,6 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             verify_command = (_dispatch_verifier(repo, room_id, member, caller, task_id=task_id)
                               if isinstance(room_id, str) and isinstance(member, str)
                               and isinstance(caller, str) and caller else None)
-
-            def outbound_clean(value):
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8") as candidate:
-                    candidate.write(value)
-                    candidate.flush()
-                    checked = subprocess.run(
-                        ["bash", "-c", '. "$1"; ma_validate_outbound_prompt "$2"',
-                         "oms-continuation-scan", str(terminal_panel.OUTBOUND_SCANNER), candidate.name],
-                        capture_output=True, text=True, check=False)
-                return checked.returncode == 0
 
             _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
             record = next((row for row in reversed(artifacts)
@@ -669,6 +670,10 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             # The final report sits at the end of a long answer, so keep the tail.
             flat = clean(str(call["answer"]), 1 << 30)
             summary = flat if len(flat) <= 1500 else "... (earlier output omitted) " + flat[-1470:]
+            import panel_results
+            if panel_results._contains_outbound_machine_path(summary) or not outbound_clean(summary):
+                summary = "earlier summary omitted: flagged by the outbound scan"
+                has_summary = False
         reason = ("the earlier worker ran on %s, not %s" % (ran, route["provider"])
                   if session and ran != route["provider"] else
                   "the earlier session is not recorded or no longer on disk")
@@ -677,7 +682,9 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                     % (task_id, reason, head, where, summary, verification_section))
         note = "no resumable session (%s); fresh worker transfers %s and %s" % (
             reason, "verified patch" if patch and body else "no patch",
-            "recorded summary" if has_summary else "no verified summary")
+            "recorded summary" if has_summary else ("summary omitted by outbound scan"
+                                                       if summary.startswith("earlier summary omitted:")
+                                                       else "no verified summary"))
     if verification_section:
         note += "; verification failure attached"
     if drift_note:
@@ -787,8 +794,20 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
     routing_report = []
     readings = routing_status(repo, room_id, main, snapshot_sink=routing_report) if not target else None
+    preferred = None
+    if continue_task and not target and not model:
+        from terminal_panel import _rework_history, owning_attempt, repository, resolve_call_alias
+        history_repo = repository(dispatch_env["OMS_ROOM_REPO"]) if dispatch_env.get("OMS_ROOM_REPO") else repo
+        resolved_task = resolve_call_alias(history_repo, room_id, continue_task)
+        parents = owning_attempt(history_repo, owner, main, dispatch_env)
+        history = _rework_history(json.loads(events(history_repo, "list", "--json", output=True)),
+                                  resolved_task, parents)
+        if history:
+            last = history[-1]
+            preferred = last.get("refs", {}).get("panel_provider") or last.get("provider")
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
-                           room_id=room_id, task_id=task_id, candidate=candidate, routing_readings=readings)
+                           room_id=room_id, task_id=task_id, candidate=candidate, routing_readings=readings,
+                           **({"preferred": preferred} if preferred else {}))
     if access == "write":
         _require_assigned_route(repo, task_id, route)
     if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
@@ -838,6 +857,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                                            allow_stale_base=allow_stale_base)
         resume_usage_baseline = continuation_env.get("OMS_RESUME_USAGE_BASELINE")
         temporary, task_id = brief, continue_task
+        if preferred and route["provider"] == preferred:
+            note += "; preferred earlier worker provider"
         print(note, file=sys.stderr)
     try:
         if temporary:

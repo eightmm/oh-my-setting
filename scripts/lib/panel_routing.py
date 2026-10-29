@@ -220,7 +220,7 @@ def public_candidates(candidates, repo):
 
 
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
-             recent=None, writer=None, catalogs=None, owner_model=None, repo=None, check_visibility=True):
+             recent=None, writer=None, catalogs=None, owner_model=None, repo=None, check_visibility=True, preferred=None):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
     recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task.
@@ -322,6 +322,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             usable = sorted(usable, key=lambda c: native_families[c["provider"]] == family)
         else:
             usable = sorted(usable, key=lambda c: c["provider"] == judged)
+    if role not in INDEPENDENT and preferred:
+        usable = sorted(usable, key=lambda c: c["provider"] != preferred)
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])
     return dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
 
