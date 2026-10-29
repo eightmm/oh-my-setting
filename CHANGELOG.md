@@ -8,6 +8,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms panel --council` takes a difficulty tier with `--workload`: routine
+  seats Sonnet and Terra, the default deep seats Opus, Sol, Sonnet and Terra,
+  and frontier seats Opus, Sol, Fable and Astra; the interactive council asks
+  for the difficulty.
+- Idle panel watchers no longer redraw while reads are pending, and an expired
+  claim already checked is reused for one cache interval instead of being
+  rechecked on every refresh.
 - The free Pi route is write overflow after the native providers in the light
   and routine tiers, so weekly-quota ordering among Codex and Claude applies
   again instead of tier order picking Pi first.
