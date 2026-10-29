@@ -385,6 +385,15 @@ def interactive(repo, view="auto", attention_only=False):
             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                         "@oms_panel_attention", "1" if attention_only else "0"), check=True)
         cache = {"held": held}
+        if managed_session():
+            old_notice = navigation.pop("main_notice", None)
+            if old_notice is not None and navigation.get("notice") == old_notice:
+                navigation.pop("notice", None)
+            notice = subprocess.run(tmux_command("show-options", "-qv", "-t", "=" + os.environ["OMS_PANEL_SESSION"],
+                                                 "@oms_panel_notice"), capture_output=True, text=True,
+                                    check=False, timeout=3, stdin=subprocess.DEVNULL)
+            if notice.returncode == 0 and notice.stdout.strip() and "notice" not in navigation:
+                navigation["notice"] = navigation["main_notice"] = clean(notice.stdout.replace("\r", "").strip(), 200)
         navigation["installed"] = [name for name in MAIN_HARNESSES if main_installed(name)]
         navigation["line_input"] = not raw_keys()
         navigation["reload_stamps"] = stamps

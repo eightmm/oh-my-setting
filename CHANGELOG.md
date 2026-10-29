@@ -45,6 +45,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Reattaching to a panel whose main has ended opens a main again; when none can open, the control view shows the reason, and a main whose startup fails waits for Enter so its error stays visible.
 - `oms panel --finalize` waits only for review read passes running in its own execution checkout (or with no recorded checkout), so reviews in other checkouts no longer defer finalize with exit 75 indefinitely.
 - When a write worker's primary provider failed and the provider fallback
   answered, `oms panel --results` and continuation summaries show the

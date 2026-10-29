@@ -507,7 +507,17 @@ def run_native(provider, repo, resume=None, model=None, task=None):
                 print("%s session exited (%s)." % (provider, status))
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             if not attempt:
-                raise
+                if not (managed_session() and sys.stdin.isatty() and sys.stdout.isatty()):
+                    raise
+                print("oms panel: " + clean(str(error), 200), file=sys.stderr)
+                while True:
+                    print("Enter close window", flush=True)
+                    try:
+                        key = _main_exit_key()
+                    except EOFError:
+                        return 1
+                    if key in ("", "\r", "\n"):
+                        return 1
             if exit_info.get("attempt") and exit_info.get("room"):
                 try:
                     # Startup can fail after replacing the window tag. Adopt only
@@ -896,14 +906,14 @@ def panel_mains():
     return next(([name] for name in names if name in MAIN_HARNESSES and main_installed(name)), [])
 
 
-def _resume_crashed_main(repo, provider):
-    """Offer a stored conversation only when release classification proves its main dead."""
+def _resume_crashed_main(repo, provider, _rows=None):
+    """Offer a proof-classified crash conversation; a pre-release snapshot survives automatic abandonment."""
     if not provider or provider == "pi" or not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
     try:
         import panel_release
         from terminal_panel import SESSION_ID, clean, safe_label, session_stored
-        rows = json.loads(panel_release.events(repo, "list", "--json"))
+        rows = json.loads(panel_release.events(repo, "list", "--json")) if _rows is None else _rows
         releasable = panel_release.classify(rows)["releasable"]
         by_attempt = {row.get("attempt_id"): row for row in rows if isinstance(row, dict)}
         candidates = []
@@ -939,6 +949,7 @@ def add_main_window(repo, session, launch, view, attention_only, env, resume=Non
                                    env=env, text=True).strip()
     bind_window(pane, launch, view, attention_only, model)
     board_split(pane, repo, watch_shell(repo, launch, model=model), main_watch=True)
+    subprocess.run(tmux_command("set-option", "-t", "=" + session, "@oms_panel_notice", ""), check=False)
     return pane
 
 
@@ -1477,11 +1488,31 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
 
 def construct_panel(repo, session, owner, env, view, attention_only, launch, resume, model, task,
                     panel_mains_override=None):
+    """Open a preferred main on creation or empty reattachment; persist failures for the control view."""
     # Recheck after taking the construction lock: another caller may have created it while we waited.
     from terminal_panel import MAX_LIVE_MAINS, _lock, add_main_window, bind_window, board_split
     from terminal_panel import check_legacy_main, clean, ensure_room, launch_command, live_main_refusal
     from terminal_panel import live_mains, native_repository, panel_mains, panel_room, panel_shell
     from terminal_panel import session_owner, tmux_command, watch_shell
+
+    def notice(message):
+        # Session storage survives attach clearing stderr and is read by the control view.
+        if message:
+            print(message, file=sys.stderr)
+        subprocess.run(tmux_command("set-option", "-t", "=" + session, "@oms_panel_notice", message),
+                       check=False)
+
+    def missing_main():
+        from terminal_panel import MAIN_HARNESSES, main_missing
+        selected = os.environ.get("OMS_PANEL_MAIN")
+        if selected is not None:
+            selected = selected.strip()
+            if not selected:
+                return "OMS_PANEL_MAIN is empty"
+            if selected not in MAIN_HARNESSES:
+                return "OMS_PANEL_MAIN must name one of " + ", ".join(MAIN_HARNESSES)
+        return main_missing(selected or MAIN_HARNESSES[0])
+
     current_owner = session_owner(session)
     if current_owner:
         if current_owner != str(repo):
@@ -1490,19 +1521,44 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
     created = pane = None
     try:
         if owner is not None:
-            # The project's panel already exists: add the requested native window, then attach.
-            if launch:
+            # Plain reattachment repairs a board whose main has ended, under the usual start guards.
+            automatic = not launch
+            try:
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+                mains = panel_mains() if automatic else []
+                crash_history = None
+                if automatic and mains and not resume and sys.stdin.isatty() and sys.stdout.isatty():
+                    # Release rewrites crash records; retain them for an offer only after the zero-main proof.
+                    import panel_release
+                    try:
+                        crash_history = json.loads(panel_release.events(repo, "list", "--json"))
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        pass
                 release_unleased_dead_mains(repo)
                 if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
+                    if automatic:
+                        notice("")
+                        return None
                     raise ValueError(live_main_refusal(repo))
+                if automatic:
+                    if not mains:
+                        notice(missing_main())
+                        return None
+                    launch = mains[0]
+                    if not resume:
+                        resume = _resume_crashed_main(repo, launch, _rows=crash_history)
                 with _lock(repo, "panel-main-session", timeout=.1):
                     check_legacy_main(repo)
                 created = "window"
                 pane = add_main_window(repo, session, launch, view, attention_only, env, resume, model, task)
                 subprocess.run(tmux_command("select-window", "-t", pane), check=True)
                 subprocess.run(tmux_command("select-pane", "-t", pane), check=True)
+                notice("")
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                if not automatic:
+                    raise
+                notice("%s main not opened: %s" % (launch or "Preferred", clean(str(error), 120)))
         else:
             # A new panel opens one preferred main and retains a separate control window.
             mains = [] if launch else (panel_mains() if panel_mains_override is None else panel_mains_override)
@@ -1530,15 +1586,19 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             board_split(pane, repo, watch_shell(repo, launch, model=model), main_watch=bool(launch))
             subprocess.run(tmux_command("select-pane", "-t", pane), check=True)
             opened = []
+            failure = None
             for index, provider in enumerate(mains):
                 try:
                     opened.append(add_main_window(repo, session, provider, view, attention_only, env,
                                                   resume if index == 0 else None))
-                except (OSError, subprocess.CalledProcessError) as error:
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
                     # The control window stays usable; a main that failed to open can be started from it.
-                    print("%s main not opened: %s" % (provider, clean(str(error), 120)), file=sys.stderr)
+                    failure = "%s main not opened: %s" % (provider, clean(str(error), 120))
+                    print(failure, file=sys.stderr)
             if opened:
                 subprocess.run(tmux_command("select-window", "-t", opened[0]), check=True)
+            elif not launch:
+                notice(failure or missing_main())
     except (OSError, subprocess.CalledProcessError):
         # Only failed construction is rolled back; an existing panel and its work are preserved.
         if created == "session":

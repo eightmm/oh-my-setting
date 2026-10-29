@@ -447,7 +447,10 @@ Inline and Herdr without `--launch` instead open the control menu, preselecting 
 `OMS_PANEL_HARNESS`, otherwise the new-panel main (the selected `OMS_PANEL_MAIN` name
 or first installed Claude/Pi/Codex), falling back to Claude. Press the selected harness's
 key (`1` Claude, `2` Pi, `0` Codex) to start it.
-Reattaching never opens mains again; later launches attach to it (or switch the current
+Reattaching opens a main the same way only when the panel has no live main, under the same
+start guards; when none can open, the control view shows why (for example an empty
+`OMS_PANEL_MAIN` or a missing CLI). A main window whose startup fails waits for Enter
+before closing, so its error stays readable. Later launches attach to it (or switch the current
 tmux client), and `--launch` adds a native window there instead of opening a
 second session. A session with that name recorded for another checkout is
 refused. A launch that loses a creation race, or arrives before a just-created

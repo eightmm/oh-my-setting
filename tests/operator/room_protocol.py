@@ -533,6 +533,193 @@ call(["bash", "-c", heartbeat_probe, "verify-heartbeat", str(root),
 main_attempts = ended_mains()
 import panel_results as saved
 _operator_block("native-controls")
+def test_panel_reattach():
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import panel_release
+    for count, explicit in ((0, False), (1, False), (2, False),
+                            (ValueError("main window status unavailable"), False),
+                            (0, True), (1, True), (ValueError("main window status unavailable"), True)):
+        calls = []
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {}, clear=True))
+            output = io.StringIO()
+            output.isatty = lambda: True
+            stack.enter_context(patch("sys.stdin", new=SimpleNamespace(isatty=lambda: True)))
+            stack.enter_context(patch("sys.stdout", new=output))
+            stack.enter_context(patch.object(panel_release, "events", return_value="malformed" if count == 2
+                                            else '[{"attempt_id":"crash"}]'))
+            stack.enter_context(patch.object(panel, "session_owner", return_value="."))
+            stack.enter_context(patch.object(panel, "panel_room", return_value="fixture-room"))
+            stack.enter_context(patch.object(panel, "panel_mains", return_value=["claude"]))
+            offer = stack.enter_context(patch.object(panel_native, "_resume_crashed_main", return_value="session_123"))
+            release = stack.enter_context(patch.object(panel_native, "release_unleased_dead_mains",
+                                                        side_effect=lambda *a: calls.append("release")))
+            stack.enter_context(patch.object(panel, "live_mains", side_effect=count if isinstance(count, Exception)
+                                            else lambda *a: calls.append("count") or count))
+            lease = stack.enter_context(patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()))
+            legacy = stack.enter_context(patch.object(panel, "check_legacy_main"))
+            stack.enter_context(patch.object(panel, "live_main_refusal", return_value="fixture refusal"))
+            opened = stack.enter_context(patch.object(panel, "add_main_window", return_value="%2"))
+            stack.enter_context(patch.object(panel, "tmux_command", side_effect=lambda *a: ["tmux"] + list(a)))
+            def tmux_result(argv, **kwargs):
+                failed = isinstance(count, Exception) and "@oms_panel_notice" in argv
+                if failed and kwargs.get("check"):
+                    raise subprocess.CalledProcessError(1, argv)
+                return subprocess.CompletedProcess(argv, 1 if failed else 0)
+            tmux = stack.enter_context(patch.object(panel.subprocess, "run", side_effect=tmux_result))
+            stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+            try:
+                panel.construct_panel(Path("."), "oms-fixture", ".", {}, "auto", False,
+                                      "codex" if explicit else None, None, None, None)
+            except ValueError as error:
+                assert explicit and count != 0, (explicit, count, error)
+            else:
+                assert not explicit or count == 0
+            assert release.call_count == 1
+            assert opened.call_count == (1 if count == 0 else 0), count
+            assert offer.call_count == (1 if count == 0 and not explicit else 0), count
+            if count == 0:
+                assert calls == ["release", "count"], calls
+                lease.assert_called_once_with(Path("."), "panel-main-session", timeout=.1)
+                legacy.assert_called_once()
+                assert opened.call_args.args[2] == ("codex" if explicit else "claude")
+                assert opened.call_args.args[6] == (None if explicit else "session_123")
+                if not explicit:
+                    assert offer.call_args.kwargs["_rows"] == [{"attempt_id": "crash"}]
+                assert any(c.args[0] == ["tmux", "select-window", "-t", "%2"] for c in tmux.call_args_list)
+
+    crash = {"attempt_id": "crash", "provider": "claude", "updated_at": "2026-10-22T00:00:00Z",
+             "refs": {"panel_harness": "claude", "native_session": "session_123"}}
+    for rows, answer, expected in (([crash], "r", "session_123"), ([crash], "", None),
+                                   ([crash], "unknown", None), ([], "r", None), ([{}], "r", None)):
+        output = io.StringIO()
+        output.isatty = lambda: True
+        with patch.object(panel_release, "events", side_effect=AssertionError("released history was reread")), \
+                patch.object(panel_release, "classify", return_value={"releasable": [{"attempt": "crash"}]}), \
+                patch.object(panel, "session_stored", return_value=True), \
+                patch.object(panel, "safe_label", return_value="Recovered work"), \
+                patch("sys.stdin", new=SimpleNamespace(isatty=lambda: True)), \
+                patch("sys.stdout", new=output), patch("builtins.input", return_value=answer):
+            assert panel_native._resume_crashed_main(Path("."), "claude", _rows=rows) == expected
+
+
+def test_panel_notice():
+    import panel_interaction
+    from contextlib import nullcontext
+    for owner in (None, "."):
+        for configured, mains, failure, expected in (
+                (None, [], None, "Claude main needs the claude CLI on PATH"),
+                ("", [], None, "OMS_PANEL_MAIN is empty"),
+                ("  ", [], None, "OMS_PANEL_MAIN is empty"),
+                ("unknown", [], None, "OMS_PANEL_MAIN"),
+                ("codex", [], None, "Codex main needs the codex CLI on PATH"),
+                (None, ["claude"], OSError("fixture launch failed"), "fixture launch failed"),
+                (None, ["claude"], subprocess.CalledProcessError(1, "fixture"), "main not opened"),
+                (None, ["claude"], ValueError("fixture refusal"), "fixture refusal")):
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, {}, clear=True))
+                if configured is not None:
+                    os.environ["OMS_PANEL_MAIN"] = configured
+                stack.enter_context(patch.object(panel, "session_owner", return_value=owner))
+                stack.enter_context(patch.object(panel, "panel_mains", return_value=mains))
+                stack.enter_context(patch.object(panel, "panel_room", return_value="fixture-room"))
+                stack.enter_context(patch.object(panel_native, "_resume_crashed_main", return_value=None))
+                stack.enter_context(patch.object(panel_native, "release_unleased_dead_mains"))
+                stack.enter_context(patch.object(panel, "live_mains", return_value=0))
+                stack.enter_context(patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()))
+                stack.enter_context(patch.object(panel, "check_legacy_main"))
+                stack.enter_context(patch.object(panel, "ensure_room", return_value="fixture-room"))
+                stack.enter_context(patch.object(panel, "panel_shell", return_value="control"))
+                stack.enter_context(patch.object(panel, "native_repository", return_value=Path(".")))
+                stack.enter_context(patch.object(panel, "board_split"))
+                stack.enter_context(patch.object(panel, "watch_shell", return_value="watch"))
+                stack.enter_context(patch.object(panel, "add_main_window", side_effect=failure))
+                stack.enter_context(patch.object(panel, "tmux_command", side_effect=lambda *a: ["tmux"] + list(a)))
+                stack.enter_context(patch.object(panel.subprocess, "check_output", return_value="%1"))
+                tmux = stack.enter_context(patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)))
+                warning = stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+                panel.construct_panel(Path("."), "oms-fixture", owner, {}, "auto", False, None, None, None, None)
+                notices = [c.args[0][-1] for c in tmux.call_args_list if "@oms_panel_notice" in c.args[0]]
+                assert notices and expected in notices[-1], (owner, configured, notices)
+                assert expected in warning.getvalue(), warning.getvalue()
+    for text, code in (("fixture main missing\r\n", 0), ("", 0), ("ignored", 1)):
+        seen = []
+        replies = iter((subprocess.CompletedProcess([], code, text, ""), subprocess.CompletedProcess([], 0, "", "")))
+        def tmux_reply(argv, **kwargs):
+            return next(replies) if "show-options" in argv else subprocess.CompletedProcess([], 0)
+        def choose(*args):
+            seen.append(dict(args[5]))
+            if len(seen) == 2:
+                raise EOFError
+            return "9"
+        with patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-fixture"}, clear=True), \
+                patch.object(panel, "managed_session", return_value=True), \
+                patch.object(panel_interaction.time, "monotonic", return_value=-1), \
+                patch.object(panel, "source_stamps", return_value={}), \
+                patch.object(panel, "panel_mains", return_value=[]), \
+                patch.object(panel, "main_installed", return_value=False), \
+                patch.object(panel, "raw_keys", return_value=False), \
+                patch.object(panel, "tmux_command", side_effect=lambda *a: ["tmux"] + list(a)), \
+                patch.object(panel, "read_choice", side_effect=choose), \
+                patch.object(panel.subprocess, "run", side_effect=tmux_reply):
+            assert panel_interaction.interactive(Path(".")) == 0
+        assert seen[0].get("notice") == ("fixture main missing" if text and code == 0 else None), seen
+        assert "notice" not in seen[1], seen
+
+    # Starting from the control menu also clears a previously recorded failure.
+    with patch.object(panel, "bind_window"), patch.object(panel, "board_split"), \
+            patch.object(panel, "native_repository", return_value=Path(".")), \
+            patch.object(panel, "launch_command", return_value="native"), \
+            patch.object(panel, "watch_shell", return_value="watch"), \
+            patch.object(panel, "tmux_command", side_effect=lambda *a: ["tmux"] + list(a)), \
+            patch.object(panel.subprocess, "check_output", return_value="%2"), \
+            patch.object(panel.subprocess, "run") as tmux:
+        panel.add_main_window(Path("."), "oms-fixture", "claude", "auto", False, {})
+        assert tmux.call_args.args[0][-2:] == ["@oms_panel_notice", ""]
+
+
+def test_panel_startup_error():
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    for managed, tty_in, tty_out in ((True, True, True), (False, True, True),
+                                     (True, False, True), (True, True, False)):
+        for stage in ("lease", "legacy", "native"):
+            for error in (ValueError("panel operation is busy; retry later"), OSError("fixture startup failed"),
+                          subprocess.CalledProcessError(7, ["fixture"])):
+                output = io.StringIO()
+                output.isatty = lambda: tty_out
+                with ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-fixture"}, clear=True))
+                    stack.enter_context(patch.object(panel, "managed_session", return_value=managed))
+                    stack.enter_context(patch.object(panel, "_lock", side_effect=error if stage == "lease"
+                                                    else lambda *a, **k: nullcontext()))
+                    stack.enter_context(patch.object(panel, "check_legacy_main", side_effect=error if stage == "legacy" else None))
+                    stack.enter_context(patch.object(panel, "run_single_native", side_effect=error))
+                    stack.enter_context(patch("sys.stdin", new=SimpleNamespace(isatty=lambda: tty_in)))
+                    stack.enter_context(patch("sys.stdout", new=output))
+                    warning = stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+                    keys = ["r", "\n"] if stage == "lease" else ["\r"] if stage == "legacy" else \
+                        ["" if isinstance(error, OSError) else EOFError]
+                    key = stack.enter_context(patch.object(panel, "_main_exit_key", side_effect=keys))
+                    if managed and tty_in and tty_out:
+                        assert panel.run_native("codex", Path(".")) == 1
+                        assert key.call_count == len(keys) and "Enter" in output.getvalue()
+                        assert str(error) in warning.getvalue()
+                    else:
+                        try:
+                            panel.run_native("codex", Path("."))
+                        except (ValueError, OSError, subprocess.SubprocessError) as raised:
+                            assert raised is error
+                        else:
+                            raise AssertionError("unmanaged startup failure swallowed")
+                        key.assert_not_called()
+
+
+test_panel_reattach()
+test_panel_notice()
+test_panel_startup_error()
+
 for pair_harness, pair_owner, matches in (
         ("pi", "codex", True), ("pi", "pi", True), ("agy", "antigravity", True),
         ("claude", "claude", True), ("codex", "codex", True), ("roomtest", "roomtest", True),
