@@ -32604,6 +32604,111 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
     done
   done
 
+  # A main may fast-forward its checked-out branch, then detach at a different
+  # tip before the guard polls. Both reflogs must still explain the ref move.
+  for branch in feature oms/foreign; do
+    for strict in 0 1; do
+      git -C "$sibling" checkout -q "$branch"
+      next="$(git -C "$project" commit-tree -p "$branch" -m fast-forward "${branch}^{tree}")"
+      rm -f "$ready" "$done"
+      (
+        local tries=0
+        while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+        [ -f "$ready" ] || exit 1
+        git -C "$sibling" merge -q --ff-only "$next" || exit 1
+        git -C "$sibling" checkout -q --detach main || exit 1
+        touch "$done"
+      ) &
+      pid=$!
+      result="$(OMS_WORKER_GUARD_STRICT="$strict" run_guarded_worker "$project" \
+        "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+      wait "$pid" || fail "foreign fast-forward and detach fixture timed out"
+      if [ "$strict" = 0 ]; then
+        [ "${result%%$'\t'*}" = 0 ] || fail "foreign fast-forward then detach stopped worker: $result"
+        contains "$result" 'during this run: foreign-ref' || fail "detached foreign ref warning missing: $result"
+      else
+        [ "${result%%$'\t'*}" != 0 ] || fail "strict mode tolerated foreign fast-forward then detach: $result"
+        contains "$result" 'outside its worktree: refs' || fail "strict detached foreign refs not hard: $result"
+      fi
+    done
+  done
+
+  # Exercise incomplete receipts without starting a provider for each damaged
+  # file. A second checkout of the same branch cannot borrow the first's proof.
+  (
+    . "$ROOT/scripts/lib/harness-residue.sh"
+    . "$ROOT/scripts/lib/oms-common.sh"
+    local snapshot="$TMP/guard-detached-evidence"
+    local duplicate="$TMP/guard-detached-duplicate"
+    local metadata head_log branch_log saved case_name rc
+    git -C "$sibling" checkout -q oms/foreign || exit 1
+    git -C "$project" worktree add -q --force "$duplicate" oms/foreign || exit 1
+    metadata="$(oms_harness_git_path_physical "$sibling" --git-dir)"
+    head_log="$metadata/logs/HEAD"
+    branch_log="$project/.git/logs/refs/heads/oms/foreign"
+    oms_worker_surface_snapshot "$project" "$snapshot" "$project" || exit 1
+    rc=0
+    oms_worker_refs_only_foreign "$project" "$snapshot" "$project" || rc=$?
+    [ "$rc" = 1 ] || fail "unchanged refs must not count as a foreign move"
+    next="$(git -C "$project" commit-tree -p oms/foreign -m evidence 'oms/foreign^{tree}')"
+    git -C "$sibling" merge -q --ff-only "$next" || exit 1
+    git -C "$sibling" checkout -q --detach HEAD || exit 1
+    oms_worker_refs_only_foreign "$project" "$snapshot" "$project" ||
+      fail "complete detached reflog evidence must be accepted"
+    git -C "$sibling" checkout -q --detach main || exit 1
+    oms_worker_gitmeta_only_foreign_checkout_heads "$project" "$snapshot" "$project" ||
+      fail "the proven detached checkout metadata must be accepted"
+    git -C "$sibling" checkout -q feature || exit 1
+    oms_worker_gitmeta_only_foreign_checkout_heads "$project" "$snapshot" "$project" ||
+      fail "switching to another branch must retain the proven ref move"
+    git -C "$sibling" checkout -q --detach main || exit 1
+    saved="$snapshot/current"
+    mkdir -p "$saved"
+    cp "$head_log" "$saved/head-log"
+    cp "$branch_log" "$saved/branch-log"
+    cp "$metadata/HEAD" "$metadata/gitdir" "$snapshot/refs-protected" "$saved/"
+    for case_name in empty-head empty-head-suffix empty-branch-suffix malformed-head \
+      discontinuous-head short-oid invalid-oid wrong-tip unknown-ref head-prefix branch-prefix \
+      missing-head missing-branch symlink-head symlink-branch registration protected; do
+      case "$case_name" in
+        empty-head) : > "$metadata/HEAD" ;;
+        empty-head-suffix) cp "$snapshot/foreign-worktrees/${metadata##*/}/log" "$head_log" ;;
+        empty-branch-suffix) cp "$snapshot/foreign-worktrees/${metadata##*/}/ref-log" "$branch_log" ;;
+        malformed-head) printf 'malformed\n' >> "$head_log" ;;
+        discontinuous-head) printf '%s %s fixture\n' "$next" "$next" >> "$head_log" ;;
+        short-oid) printf '%s zero fixture\n' "$(git -C "$project" rev-parse main)" >> "$head_log" ;;
+        invalid-oid) printf '%s %sz fixture\n' "$(git -C "$project" rev-parse main)" "${next%?}" >> "$head_log" ;;
+        wrong-tip) printf '%s\n' "$next" > "$metadata/HEAD" ;;
+        unknown-ref) printf 'ref: refs/heads/not-present\n' > "$metadata/HEAD" ;;
+        head-prefix) printf 'rewritten\n' > "$head_log" ;;
+        branch-prefix) printf 'rewritten\n' > "$branch_log" ;;
+        missing-head) rm "$head_log" ;;
+        missing-branch) rm "$branch_log" ;;
+        symlink-head) rm "$head_log"; ln -s "$saved/head-log" "$head_log" ;;
+        symlink-branch) rm "$branch_log"; ln -s "$saved/branch-log" "$branch_log" ;;
+        registration) printf '\n' >> "$metadata/gitdir" ;;
+        protected) printf 'refs/heads/oms/foreign\n' >> "$snapshot/refs-protected" ;;
+      esac
+      rc=0
+      oms_worker_refs_only_foreign "$project" "$snapshot" "$project" >/dev/null 2>&1 || rc=$?
+      [ "$rc" = 1 ] || fail "$case_name evidence must reject the foreign move: $rc"
+      rm -f "$head_log" "$branch_log"
+      cp "$saved/head-log" "$head_log"
+      cp "$saved/branch-log" "$branch_log"
+      cp "$saved/HEAD" "$saved/gitdir" "$metadata/"
+      cp "$saved/refs-protected" "$snapshot/refs-protected"
+    done
+    oms_worker_refs_only_foreign "$project" "$snapshot" "$project" ||
+      fail "restoring intact evidence must restore attribution"
+    rc=0
+    oms_worker_refs_only_foreign "$project" "$snapshot" "$sibling" || rc=$?
+    [ "$rc" = 1 ] || fail "the worker's own checkout must not supply foreign proof"
+    git -C "$duplicate" checkout -q --detach main || exit 1
+    rc=0
+    oms_worker_gitmeta_only_foreign_checkout_heads "$project" "$snapshot" "$project" || rc=$?
+    [ "$rc" = 1 ] || fail "another checkout must not borrow the proven checkout's logs"
+  ) || fail "detached foreign ref evidence checks failed"
+
   local managed_root="$TMP/guard-branch-managed"
   local existing="$managed_root/foreign-existing/wt"
   mkdir -p "${existing%/wt}"

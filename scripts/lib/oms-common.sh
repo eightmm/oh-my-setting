@@ -2324,11 +2324,12 @@ oms_worker_gitmeta_only_foreign_worktrees() {  # REPO BEFORE_DIR CURRENT_WORKTRE
   [ -s "$before/gitmeta-removed" ] || [ -s "$before/gitmeta-added" ]
 }
 
-# Ref age/committer identity alone is forgeable. Require an existing branch to
-# stay checked out in the same foreign checkout, with an appended HEAD reflog
-# recording its new tip and the ref log's committer/time. Plain update-ref in
-# the worker/shared checkout leaves no such evidence. This is cooperative
-# attribution, not isolation from a same-UID worker that writes foreign logs.
+# Ref age/committer identity alone is forgeable. Require the snapshot's foreign
+# checkout and appended HEAD/branch reflogs to explain an existing branch move.
+# If it has since switched or detached, its HEAD history must reach its current
+# tip. Plain update-ref in the worker/shared checkout leaves no such evidence.
+# This is cooperative attribution, not isolation from a same-UID worker that
+# writes foreign logs.
 oms_worker_refs_only_foreign() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local repo="$1" before="$2" worker="${3:-}"
   local common receipt entry ref head logpath
@@ -2355,6 +2356,7 @@ def tip(path):
 if tip(sys.argv[1]) != tip(sys.argv[2]):
     raise SystemExit(1)
 PY
+  : > "$before/refs-moved-checkouts" || return 1
   while IFS= read -r ref; do
     ref="${ref//$'\r'/}"
     receipt=""
@@ -2370,13 +2372,12 @@ PY
       head="$(sed -n '1p' "$entry/HEAD")"; head="${head//$'\r'/}"
       [ "$head" = "ref: $ref" ] || continue
       oms_worker_gitmeta_is_foreign_worktree "$repo" "$common/worktrees/${entry##*/}" "$worker" || continue
-      cmp -s "$entry/gitdir" "$common/worktrees/${entry##*/}/gitdir" &&
-        cmp -s "$entry/HEAD" "$common/worktrees/${entry##*/}/HEAD" || continue
+      cmp -s "$entry/gitdir" "$common/worktrees/${entry##*/}/gitdir" || continue
       logpath="$common/worktrees/${entry##*/}/logs/HEAD"
       [ -f "$logpath" ] && [ ! -L "$logpath" ] &&
         [ -f "$common/logs/$ref" ] && [ ! -L "$common/logs/$ref" ] || continue
       [ -f "$entry/ref-log" ] || continue
-      if python3 - "$entry/log" "$logpath" "$common/logs/$ref" "$before/refs" "$before/refs-now" "$ref" "$entry/ref-log" <<'PY'
+      if python3 - "$entry/log" "$logpath" "$common/logs/$ref" "$before/refs" "$before/refs-now" "$ref" "$entry/ref-log" "$common/worktrees/${entry##*/}/HEAD" <<'PY'
 import sys
 before, now, branch = (open(path, 'rb').read() for path in sys.argv[1:4])
 branch_before = open(sys.argv[7], 'rb').read()
@@ -2390,6 +2391,22 @@ rows = [row.split(b'\t', 1)[0].split(b' ', 2) for row in branch[len(branch_befor
 head_rows = [row.split(b'\t', 1)[0].split(b' ', 2) for row in now[len(before):].splitlines()]
 if not rows:
     raise SystemExit(1)
+current_head = open(sys.argv[8], 'rb').read().strip()
+if current_head != ('ref: ' + ref).encode():
+    # A later checkout cannot excuse missing or discontinuous HEAD evidence.
+    head_tip = old
+    for fields in head_rows:
+        if (len(fields) != 3 or fields[0] != head_tip or
+                len(fields[1]) != len(old) or
+                any(char not in b'0123456789abcdef' for char in fields[1])):
+            raise SystemExit(1)
+        head_tip = fields[1]
+    if current_head.startswith(b'ref: '):
+        current_ref = current_head[5:]
+        current_head = next((line.split()[0] for line in
+                             open(sys.argv[5], 'rb') if line.split()[-1] == current_ref), b'')
+    if not head_rows or head_tip != current_head:
+        raise SystemExit(1)
 tip_oid = old
 for fields in rows:
     if len(fields) != 3 or fields[0] != tip_oid or not any(
@@ -2398,7 +2415,11 @@ for fields in rows:
     tip_oid = fields[1]
 raise SystemExit(0 if tip_oid == new else 1)
 PY
-      then receipt=1; break; fi
+      then
+        printf '%s\n' "${entry##*/}" >> "$before/refs-moved-checkouts" || return 1
+        receipt=1
+        break
+      fi
     done
     [ -n "$receipt" ] || return 1
   done < "$before/refs-changed"
@@ -2564,9 +2585,12 @@ PY
     cmp -s "$before/foreign-worktrees/$entry/gitdir" "$common/worktrees/$entry/gitdir" || return 1
     old_head="$(sed -n '1p' "$before/foreign-worktrees/$entry/HEAD")"; old_head="${old_head//$'\r'/}"
     new_head="$(sed -n '1p' "$common/worktrees/$entry/HEAD")"; new_head="${new_head//$'\r'/}"
+    [ "$old_head" != "$new_head" ] || return 1
+    # Only the checkout whose appended logs explained the move may detach.
+    if grep -Fxq "$entry" "$before/refs-moved-checkouts"; then continue; fi
     case "$new_head" in 'ref: refs/heads/'*) ;; *) return 1 ;; esac
     ref="${new_head#ref: }"
-    [ "$old_head" != "$new_head" ] && grep -Fxq "$ref" "$before/refs-changed" || return 1
+    grep -Fxq "$ref" "$before/refs-changed" || return 1
   done < "$before/gitmeta-checkout-entries"
   return 0
 }
