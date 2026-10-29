@@ -4082,6 +4082,8 @@ members = [{"participant": "gone-review", "role": "worker", "joined": True},
 def fake_run(command, **kwargs):
     if command[2:3] == ["land"]:
         return subprocess.CompletedProcess(command, 0, json.dumps({"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}), "")
+    if command[:1] == ["tsp"]:  # the background probe on hosts with tsp installed
+        return subprocess.CompletedProcess(command, 1, "", "")
     assert command[2:3] == [str(panel.ENTRY)] or "agent-events" in command, command
     return subprocess.CompletedProcess(command, 0, json.dumps(listed), "")
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
