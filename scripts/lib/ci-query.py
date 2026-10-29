@@ -23,9 +23,9 @@ import time
 FULL_JOBS = (["lint", "affected_plan", "gate", "native (ubuntu-latest, copy)"]
              + ["focused (%d/4)" % lane for lane in range(1, 5)]
              + ["scripts-smoke (%d/4)" % shard for shard in range(1, 5)])
-# Native-risk legs and the affected-only operator job run only when the plan asks.
+# Native-risk legs and the affected-only operator and narrow-check jobs run only when the plan asks.
 OPTIONAL_JOBS = re.compile(
-    r"python39|native \((macos|windows)-latest, auto\)|operator-tools \(affected\)")
+    r"python39|native \((macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks")
 
 
 def repo_slug(destination):

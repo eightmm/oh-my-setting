@@ -596,6 +596,7 @@ if scope == "duplicate":
     rows.append({"name": "gate", "conclusion": "success"})
 if scope == "full-operator-skipped":
     rows.append({"name": "operator-tools (affected)", "conclusion": "skipped"})
+    rows.append({"name": "affected checks", "conclusion": "skipped"})
 if scope == "affected-operator":
     rows.append({"name": "operator-tools (affected)", "conclusion": "success"})
 if scope == "extra-failure":
