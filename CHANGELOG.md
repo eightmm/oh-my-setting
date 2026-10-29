@@ -45,6 +45,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A write worker's in-run guard judges sibling worktrees against the
+  caller's temp directory, as its snapshot did, instead of the worker's private
+  TMPDIR. Before this, every `oms patch-land` admit or land worktree under the
+  temp directory looked foreign mid-run and stopped each running write worker.
+  A guard stop is no longer mislabelled as an owner-authority violation.
 - A hard `gitmeta` worker or read guard stop now prints `gitmeta classifiers:`
   with each classifier's yes/no decision, and lists every capture's changed slots by
   label, so a refusal during concurrent worker lifecycles can be attributed.

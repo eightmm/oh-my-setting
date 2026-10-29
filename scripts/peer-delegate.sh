@@ -1983,17 +1983,19 @@ run_worker() {
   ma_run_routed_provider "$TO" "$WORKER_ACCESS" "$prompt" "$artifact" "$worktree" \
     peer-delegate "$REPO" "$timestamp" || worker_status=$?
   if [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; then
-    local_authority_detail="$(awk '
-      /^BLOCKED: delegated worker changed owner authority shared-state$/ { seen=1; next }
-      seen && NF { print; count += 1; if (count >= 8) exit }
-    ' "$artifact" 2>/dev/null || true)"
-    echo "error: $TO changed owner authority shared-state" >&2
-    while IFS= read -r authority_line; do
-      [ -z "$authority_line" ] || echo "error: shared-state: $authority_line" >&2
-    done <<EOF
+    route_retry_terminal=1
+    if grep -Fxq 'BLOCKED: delegated worker changed owner authority shared-state' "$artifact"; then
+      local_authority_detail="$(awk '
+        /^BLOCKED: delegated worker changed owner authority shared-state$/ { seen=1; next }
+        seen && NF { print; count += 1; if (count >= 8) exit }
+      ' "$artifact" 2>/dev/null || true)"
+      echo "error: $TO changed owner authority shared-state" >&2
+      while IFS= read -r authority_line; do
+        [ -z "$authority_line" ] || echo "error: shared-state: $authority_line" >&2
+      done <<EOF
 $local_authority_detail
 EOF
-    route_retry_terminal=1
+    fi
   fi
   worker_attempt_id="${OMS_LAST_ATTEMPT_ID:-}"
   worker_attempt_owned="${OMS_LAST_ATTEMPT_OWNED:-0}"
@@ -2278,6 +2280,7 @@ plan_started=1
 # only inspects the patch it returns, so a write around the patch — the primary
 # worktree, git config, remotes, refs, hooks — was previously invisible.
 worker_guard_dir=""
+worker_guard_tmp_base="${TMPDIR:-/tmp}"
 worker_operation_snapshot_sha=""
 worker_guard_worktree_physical=""
 worker_git_execution_snapshot_sha=""
@@ -2433,6 +2436,8 @@ worker_execution_boundary_check() {
 }
 worker_protected_surface_diff() {
   local changed source_changed
+  # Provider scratch is private; sibling classification uses the snapshot's base.
+  local TMPDIR="$worker_guard_tmp_base"
   changed="$(delegate_with_worktree_registry_lock "$REPO" \
     oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
     "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2

@@ -33151,6 +33151,48 @@ git -C SIB -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m
     "$managed_root" "${moved/SIB/$sibling_parent-moved-strict/wt}")"
   [ "${result%%	*}" != 0 ] ||
     fail "strict mode must keep a dead-owner scratch HEAD move hard: $result"
+
+  # Admission runs beside the delegate root in the caller's temporary base.
+  # The post-attempt guard must retain that base while the provider uses its
+  # private TMPDIR, including for a sibling registered after the snapshot.
+  # Strict mode must retain the quiet live exemption; a soft fallback hides
+  # an in-run misclassification once the final guard uses the caller's base.
+  local temp_project="$project-tmp"
+  local caller_tmp="$TMP/guard-sibling-caller-tmp"
+  local admit_parent="$caller_tmp/oh-my-setting-admit.snapshot"
+  local admit_worktree="$admit_parent/wt-snapshot"
+  local metadata
+  make_guard_repo "$temp_project"
+  mkdir -p "$caller_tmp"
+  result="$(OMS_WORKER_GUARD_STRICT=1 TMPDIR="$caller_tmp" run_delegate_beside_sibling "$temp_project" "$managed_root" \
+    'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+set -e
+test \"\$TMPDIR\" != '$caller_tmp'
+mkdir -p '$admit_parent'
+git -C '$temp_project' worktree add --quiet --detach '$admit_worktree' HEAD
+printf 'kind=oh-my-setting-temp\\npid=%s\\nrepo=%s\\nworktree=%s\\ntemporary=1\\n' \
+  '$$' '$temp_project' '$admit_worktree' > '$admit_parent/.oh-my-setting-tmp'")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a live admit sibling in the snapshot TMPDIR must not fail the run: $result"
+  if contains "$result" 'owner authority'; then
+    fail "a live admit sibling must not report an owner authority violation: $result"
+  fi
+
+  # Restoring the trusted base must preserve the hard surface for an existing
+  # sibling's canonical wiring, and name the guard stop accurately.
+  metadata="$(git -C "$admit_worktree" rev-parse --git-dir)"
+  metadata="${metadata//$'\r'/}"
+  case "$metadata" in /*) ;; *) metadata="$temp_project/$metadata" ;; esac
+  result="$(TMPDIR="$caller_tmp" run_delegate_beside_sibling "$temp_project" "$managed_root" \
+    'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+printf '%s\\n' '$temp_project/.git' > '$metadata/gitdir'")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "editing a TMPDIR sibling's gitdir must remain hard: $result"
+  contains "$result" 'outside its worktree: gitmeta' ||
+    fail "a TMPDIR sibling gitdir edit must name the gitmeta surface: $result"
+  if contains "$result" 'changed owner authority shared-state'; then
+    fail "a gitmeta guard stop must not be labelled owner authority: $result"
+  fi
 }
 
 # The incident that serialized every main's launches: sibling B starts after
