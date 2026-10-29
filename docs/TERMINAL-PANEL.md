@@ -490,6 +490,12 @@ and up to three in narrow sidebars. Main task titles wrap too. Internal task IDs
 stay in wide metadata rows or Details. Details gives bounded titles separate
 wrapped lines, so long titles need not compete with location and purpose.
 No absolute home paths or transcripts are added to panel metadata.
+Up to four background rows sit below the board: `Autopilot:` with the receipt's
+recorded stage and age, `Graph:` runs started within 24 hours (marked
+unconfirmed), `Queue:` tsp and fallback jobs whose enqueue recorded this
+project's physical checkout, and `Install pending:` with the short SHA and
+recorded reason while the newest land pushed but did not install. They are
+recorded evidence, not process liveness; a failing source drops only its row.
 
 Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS /
 WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context used. When room history contains earlier mains, they fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership

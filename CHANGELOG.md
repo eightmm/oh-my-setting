@@ -8,6 +8,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The panel shows the project's background work below the board: the
+  autopilot stage, recent graph runs, this project's tsp queue jobs, and a
+  landed commit whose install was skipped, with its recorded reason.
 - `oms panel --council` takes a difficulty tier with `--workload`: routine
   seats Sonnet and Terra, the default deep seats Opus, Sol, Sonnet and Terra,
   and frontier seats Opus, Sol, Fable and Astra; the interactive council asks
@@ -71,6 +74,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The worker guard no longer stops write workers when the main fast-forwards
+  its own `oms/*` branch in a scratch worktree and then detaches it; the
+  move counts as foreign only when that checkout's reflogs explain it.
+- A continuation can verify with `--only` smoke test names that its carried
+  verified patch adds.
 - Automatic graph context packs drop entries carrying absolute paths or
   secret-shaped text instead of refusing the whole pack, and a refused pack
   names the field and kind without echoing the value.
