@@ -8,6 +8,7 @@ no project identity and is omitted; shell metadata is never executed.
 """
 
 import datetime
+import heapq
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,8 @@ import time
 
 from dashboard_projection import clean
 
+# Budget precedes project filtering; summaries count inspected records only.
+MAX_RECORDS = 32
 MAX_BYTES = 1024 * 1024
 RECENT_SECONDS = 24 * 60 * 60
 STAGES = {"proposing", "proposal-review", "approved", "driving", "reviewing", "publishing"}
@@ -102,9 +105,8 @@ def _graphs(repo, now):
     items = []
     try:
         directory = _project_path(repo, "graph", "runs")
-        for path in sorted(directory.iterdir(), reverse=True):
-            if not RUN_ID.fullmatch(path.name):
-                continue
+        for path in heapq.nlargest(MAX_RECORDS, (path for path in directory.iterdir()
+                                                    if RUN_ID.fullmatch(path.name))):
             try:
                 if not _directory(path):
                     continue
@@ -149,10 +151,10 @@ def _queue(repo, now):
         try:
             result = _run(["tsp"])
             if result.returncode == 0 and _directory(queue):
-                for line in result.stdout.replace("\r", "").splitlines():
-                    fields = line.split()
-                    if len(fields) < 2 or not fields[0].isdigit() or fields[1] not in {"queued", "running"}:
-                        continue
+                live = (line.split() for line in result.stdout.replace("\r", "").splitlines())
+                live = (fields for fields in live if len(fields) >= 2 and fields[0].isdigit()
+                        and fields[1] in {"queued", "running"})
+                for fields in heapq.nlargest(MAX_RECORDS, live, key=lambda fields: (len(fields[0].lstrip("0")), fields[0].lstrip("0"))):
                     try:
                         row = _metadata(queue / fields[0], repo)
                         if row:
@@ -163,9 +165,20 @@ def _queue(repo, now):
             pass
     try:
         if _directory(fallback):
-            for path in sorted(fallback.glob("*.meta")):
-                if not re.fullmatch(r"[1-9][0-9]{0,9}", path.stem):
-                    continue
+            def records():
+                for path in fallback.glob("*.meta"):
+                    if not re.fullmatch(r"[1-9][0-9]{0,9}", path.stem):
+                        continue
+                    try:
+                        info = path.lstat()
+                        if stat.S_ISREG(info.st_mode):
+                            yield (info.st_mtime_ns, path.name, path)
+                    except OSError:
+                        continue
+
+            paths = (entry[2] for entry in heapq.nlargest(MAX_RECORDS, records()))
+            candidates = []
+            for path in paths:
                 try:
                     row = _metadata(path, repo)
                     if not row:
@@ -173,13 +186,22 @@ def _queue(repo, now):
                     status = row.get("status")
                     if not isinstance(status, str) or Path(status).name != status or (fallback / status).exists():
                         continue
-                    result = _run(["ps", "-o", "stat=", "-p", path.stem])
-                    state = result.stdout.strip()
-                    if result.returncode == 0 and state and not state.startswith("Z"):
-                        items.append("fallback #%s running (unconfirmed) %s" % (path.stem, clean(row.get("label") or "job", 80)))
-                except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                    candidates.append((path.stem, row))
+                except (OSError, ValueError, TypeError):
                     continue
-    except (OSError, ValueError):
+            if candidates:
+                result = _run(["ps", "-o", "pid=,stat=", "-p", ",".join(pid for pid, _ in candidates)])
+                states = {}
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        fields = line.split()
+                        if len(fields) == 2 and fields[0].isdigit():
+                            states[fields[0]] = fields[1]
+                for pid, row in candidates:
+                    state = states.get(pid, "")
+                    if state and not state.startswith("Z"):
+                        items.append("fallback #%s running (unconfirmed) %s" % (pid, clean(row.get("label") or "job", 80)))
+    except (OSError, ValueError, subprocess.SubprocessError):
         pass
     return _summary("Queue: ", items)
 

@@ -6248,6 +6248,20 @@ with events_path.open("a") as stream:
 assert bg._graphs(bg_root, clock) == []
 events_path.write_text("{broken\n")
 assert bg._graphs(bg_root, clock) == []
+# Only the newest valid graph names consume the read budget.
+graph_runs = graph_dir.parent
+for index in range(3):
+    run = graph_runs / ("run-20261029T10000%dZ-abcdef01" % index)
+    if not run.exists():
+        run.mkdir()
+    (run / "events.jsonl").write_text(json.dumps({"event": "run_started", "ts": bg_stamp(1)}) + "\n")
+(graph_runs / "malformed").mkdir()
+with patch.object(bg, "MAX_RECORDS", 2), patch.object(bg, "_read", wraps=bg._read) as reads:
+    bg._graphs(bg_root, clock)
+    assert [call.args[0].parent.name for call in reads.call_args_list] == [
+        "run-20261029T100002Z-abcdef01", "run-20261029T100001Z-abcdef01"]
+with patch.object(bg, "MAX_RECORDS", 0), patch.object(bg, "_read", wraps=bg._read) as reads:
+    assert bg._graphs(bg_root, clock) == [] and reads.call_count == 0
 for size, accepted in ((0, True), (8, True), (9, False)):
     pilot.write_bytes(b" " * size)
     try:
@@ -6293,7 +6307,17 @@ for table in ("", "0 finished x\n", "bad running x\n", "1 queued x\r\n"):
     with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
             patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, table, "")):
         assert bool(bg._queue(bg_root, clock)) == ("queued" in table), table
-for process, visible in (("S", True), ("Z", False), ("", False)):
+with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
+        patch.object(bg, "MAX_RECORDS", 2), patch.object(bg, "_metadata", wraps=bg._metadata) as reads, \
+        patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess(
+            [], 0, "1 running x\n3 queued x\nbad running x\n2 queued x\n", "")):
+    bg._queue(bg_root, clock)
+    assert [call.args[0].name for call in reads.call_args_list] == ["3", "2"]
+with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
+        patch.object(bg, "MAX_RECORDS", 0), patch.object(bg, "_metadata", wraps=bg._metadata) as reads, \
+        patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, queue_table, "")):
+    assert bg._queue(bg_root, clock) == [] and reads.call_count == 0
+for process, visible in (("99 S", True), ("99 Z", False), ("", False), ("bad S", False)):
     (fallback_dir / "99.meta").write_text("# oms-panel " + json.dumps({"project": str(bg_root.resolve()),
         "label": "fallback work", "status": "99.status"}) + "\n")
     with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
@@ -6310,6 +6334,59 @@ for identity, status_name in (("", "99.status"), (str(bg_root.resolve()), "../ou
     with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
             patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")):
         assert bg._queue(bg_root, clock) == []
+
+# Bound metadata reads to the newest records, and batch all fallback process checks.
+for index in range(1, 35):
+    (fallback_dir / (str(index) + ".meta")).write_text("# oms-panel " + json.dumps({
+        "project": str(bg_root.resolve()), "status": str(index) + ".status", "label": str(index)}) + "\n")
+    os.utime(fallback_dir / (str(index) + ".meta"), ns=(index * 1000000000, index * 1000000000))
+(fallback_dir / "99.meta").unlink()
+with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+        patch.object(bg, "_metadata", wraps=bg._metadata) as reads, \
+        patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess(
+            [], 0, "34 S\n33 Z\n32 R\nmalformed\n", "")) as processes:
+    rows = bg._queue(bg_root, clock)
+    assert reads.call_count == bg.MAX_RECORDS, reads.call_count
+    assert [call.args[0].stem for call in reads.call_args_list] == [str(i) for i in range(34, 2, -1)]
+    assert processes.call_count == 1, processes.call_count
+    assert processes.call_args.args[0] == ["ps", "-o", "pid=,stat=", "-p", ",".join(str(i) for i in range(34, 2, -1))]
+    assert "#34 running" in rows[0] and "#32 running" in rows[0] and "#33" not in rows[0], rows
+with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+        patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "34 S", "")):
+    assert bg._queue(bg_root, clock) == []
+
+# A recent low PID must outrank older finished high PIDs.
+for index in range(2, 35):
+    (fallback_dir / (str(index) + ".status")).write_text("0\n")
+os.utime(fallback_dir / "1.meta", ns=(100000000000, 100000000000))
+with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+        patch.object(bg, "_metadata", wraps=bg._metadata) as reads, \
+        patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1 S\n", "")) as processes:
+    rows = bg._queue(bg_root, clock)
+    assert reads.call_count == bg.MAX_RECORDS and reads.call_args_list[0].args[0].stem == "1"
+    assert processes.call_count == 1 and "#1 running" in rows[0], rows
+
+(fallback_dir / "bad.meta").write_text("invalid")
+(fallback_dir / "500.meta").mkdir()
+try:
+    (fallback_dir / "501.meta").symlink_to(fallback_dir / "1.meta")
+except (OSError, NotImplementedError):
+    pass
+original_lstat = Path.lstat
+def fallback_lstat(path, *args, **kwargs):
+    if path == fallback_dir / "34.meta":
+        raise OSError("record disappeared")
+    return original_lstat(path, *args, **kwargs)
+with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+        patch.object(Path, "lstat", fallback_lstat), patch.object(bg, "MAX_RECORDS", 1), \
+        patch.object(bg, "_metadata", wraps=bg._metadata) as reads, \
+        patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1 S\n", "")):
+    assert "#1 running" in bg._queue(bg_root, clock)[0]
+    assert reads.call_count == 1 and reads.call_args.args[0].stem == "1"
+with patch.dict(os.environ, dict(queue_env, OMS_TSP_FORCE_FALLBACK="1")), \
+        patch.object(bg, "MAX_RECORDS", 0), patch.object(bg, "_metadata", wraps=bg._metadata) as reads, \
+        patch.object(bg.subprocess, "run", side_effect=AssertionError("zero budget needs no probe")):
+    assert bg._queue(bg_root, clock) == [] and reads.call_count == 0
 
 land_record = {"sha": "a" * 40, "push": {"rc": 0}, "update": {"rc": "skipped", "reason": "partial-gate"}}
 with patch.dict(os.environ, {"OMS_INSTALL_RECEIPT": str(temporary / "absent-install.json")}):
