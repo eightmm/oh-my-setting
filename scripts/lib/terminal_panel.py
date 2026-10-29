@@ -407,7 +407,7 @@ def main(argv=None):
     parser.add_argument("--retry-delivery", action="store_true", help="retry delivery of a saved task result without its original summary file")
     parser.add_argument("--result-id", help="saved result revision for --retry-delivery")
     parser.add_argument("--workload", choices=TIERS,
-                        help="capability tier instead of the role's default; council accepts deep or frontier")
+                        help="capability tier instead of the role's default; council accepts routine, deep or frontier")
     parser.add_argument("--access", choices=("read", "write"))
     parser.add_argument("--purpose", choices=("explain", "investigate", "implement"), help="plain worker task kind")
     parser.add_argument("--prompt", help="bounded read task for --dispatch")
@@ -570,8 +570,8 @@ def main(argv=None):
         parser.error("--council requires --task-id, --label and --prompt")
     if (args.to or args.reasoning_effort) and not args.dispatch:
         parser.error("--to and --reasoning-effort require --dispatch")
-    if args.council and args.workload and args.workload not in ("deep", "frontier"):
-        parser.error("council --workload must be deep or frontier")
+    if args.council and args.workload and args.workload not in ("routine", "deep", "frontier"):
+        parser.error("council --workload must be routine, deep or frontier")
     if args.task_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.task_id):
         parser.error("invalid task ID")
     if args.from_task and (not args.brief_file or any(

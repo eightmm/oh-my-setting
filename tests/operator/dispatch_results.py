@@ -1530,7 +1530,7 @@ for title in ("".join(("api", "_key", "=", "fixture-value")), "/private/absolute
         pass
 assert panel.safe_label("설명 \033[31m source") == "설명 ?[31m source"
 
-# The council reuses the peer front door: four seats over two families, explicit rounds,
+# The council reuses the peer front door: seats over two families, explicit rounds,
 # bounded repairs, and the owning main's child links rather than a new task DB.
 council_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
                 "--owner", "codex", "--task-id", "panel-council-test", "--label", "Decide readable results",
@@ -1543,6 +1543,18 @@ for rounds in (1, 2):
     assert planned["argv"][planned["argv"].index("--providers") + 1] == \
         "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
     assert len(planned["argv"][planned["argv"].index("--providers") + 1].split(",")) == 4 == planned["seats"]
+for rounds in (1, 2):
+    routine_plan = json.loads(call(council_args + ["--workload", "routine", "--rounds", str(rounds), "--dry-run"]))
+    assert (routine_plan["seats"], routine_plan["families"], routine_plan["primary_calls"]) == (2, 2, 2 * (rounds + 1))
+    assert routine_plan["argv"][routine_plan["argv"].index("--providers") + 1] == \
+        "claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
+for invalid_tier in ("", "light", "malformed"):
+    try:
+        panel.council_command(project, "Compare", "invalid-tier", "Compare", workload=invalid_tier)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid council tier accepted: " + invalid_tier)
 frontier_plan = json.loads(call(council_args + ["--workload", "frontier", "--dry-run"]))
 assert frontier_plan["argv"][frontier_plan["argv"].index("--providers") + 1] == \
     "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
@@ -1552,12 +1564,13 @@ one_route = deepcopy(panel.policy())
 one_route["tiers"]["deep"] = one_route["tiers"]["deep"][:1]
 one_route["tiers"]["routine"] = one_route["tiers"]["routine"][:1]
 with patch.object(panel, "policy", return_value=one_route):
-    try:
-        panel.council(project, "codex", "council-one-route", "One route", "Compare options.", dry_run=True)
-    except ValueError as error:
-        assert "two independent provider families" in str(error)
-    else:
-        raise AssertionError("council started with one provider family")
+    for tier in ("routine", "deep"):
+        try:
+            panel.council(project, "codex", "council-one-route", "One route", "Compare options.", dry_run=True, workload=tier)
+        except ValueError as error:
+            assert "two independent provider families" in str(error)
+        else:
+            raise AssertionError("council started with one provider family")
 call(council_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
 council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]

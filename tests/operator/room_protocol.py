@@ -343,6 +343,8 @@ for owner in panel.PROVIDERS:
     assert all(phrase in panel.bootstrap(owner, project) for phrase in (
         "consumers in the worker brief", "drives the public entry point"))
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
+    assert "routine for a bounded reversible choice" in panel.bootstrap(owner, project)
+    assert "frontier for architecture, trust-boundary or hard-to-reverse decisions" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project)
     assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
     guidance = panel.bootstrap(owner, project)
@@ -870,6 +872,18 @@ for task in ("/review", "../scripts inspect", "Explain " + "/" + "home" + "/fixt
         assert task_open.call_args.kwargs["task"] == task
         expected_title = "x" * 160 if task == "x" * 160 else "Shared work"
         assert chosen_room.call_args.kwargs["title"] == expected_title
+
+# Council difficulty is passed through, including the default and invalid-input fallback.
+for entered, expected in (("", "deep"), ("routine", "routine"), ("deep", "deep"),
+                          ("frontier", "frontier"), ("light", "deep")):
+    with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show", side_effect=empty_control), \
+            patch.object(panel, "read_field", side_effect=["c", "council-task", "Title", "Question", entered, "", "q"]), \
+            patch.object(panel, "council", return_value=0) as menu_council, \
+            patch.dict(os.environ, environment, clear=True), patch("sys.stdout", new=io.StringIO()) as menu_output:
+        assert panel.interactive(project) == 0
+        assert menu_council.call_args.kwargs["workload"] == expected
+        if entered == "light":
+            assert "deep" in menu_output.getvalue()
 
 # More actions opens ordinary scrollable help, even when the viewport is short.
 with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show", side_effect=empty_control), \

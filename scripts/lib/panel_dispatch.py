@@ -2725,9 +2725,12 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
         raise ValueError("council needs a bounded prompt")
     if not safe_label(label):
         raise ValueError("council needs a task title")
+    if workload not in ("routine", "deep", "frontier"):
+        raise ValueError("council tier must be routine, deep or frontier")
     routes = policy()
-    # Four seats, two per family: deep plus a cheaper routine pair by default; frontier on request.
-    seats = routes["tiers"]["deep"] + routes["tiers"]["frontier" if workload == "frontier" else "routine"]
+    # Routine uses one pair; deep and frontier add their pair to the deep pair.
+    seats = routes["tiers"]["routine"] if workload == "routine" else (
+        routes["tiers"]["deep"] + routes["tiers"]["frontier" if workload == "frontier" else "routine"])
     seats = [item for item in seats if item["provider"] in PROVIDERS]
     if len({item["provider"] for item in seats}) < 2:
         raise ValueError("council tier must include two independent provider families")

@@ -606,8 +606,12 @@ def interactive(repo, view="auto", attention_only=False):
             elif choice == "c":
                 task_id = read_field("Discussion task ID: ")
                 label = read_field("Task title: ")
-                prompt = read_field("Question for the four seats: ")
-                status = council(repo, provider, task_id, label, prompt)
+                prompt = read_field("Question for the council: ")
+                workload = read_field("Difficulty routine/deep/frontier [deep]: ", required=False) or "deep"
+                if workload not in ("routine", "deep", "frontier"):
+                    print("Unknown difficulty; using deep.")
+                    workload = "deep"
+                status = council(repo, provider, task_id, label, prompt, workload=workload)
                 previous = "council exit=%s / owner decision pending" % status
                 read_field("Press Enter to return: ", required=False)
             elif choice == "d":
