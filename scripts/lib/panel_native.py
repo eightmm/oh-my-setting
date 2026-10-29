@@ -232,7 +232,7 @@ def bootstrap(provider, repo):
         "Campaign precedence: if the user asks you to complete this project or an autopilot contract exists for this "
         "repository, supervise that campaign instead of driving its tasks through the shared panel plan. Before any "
         "action inspect oms autopilot status and its receipt; before run, review the exact proposal bytes and digest. "
-        "Start or re-enter only through oms autopilot propose, run with --review-mode gate and the reviewed "
+        "Start or re-enter only through oms autopilot propose --review-mode gate (frozen at intake), run with the reviewed "
         "--expected-proposal-sha256, status, or the receipt's validated continuation. Never dispatch panel write "
         "workers for campaign-owned tasks, release or reclaim their tasks, reset a contract to evade cycle exhaustion, "
         "or override a parked receipt. Use reviewer, critic or security-auditor only for read-only campaign proposal, "

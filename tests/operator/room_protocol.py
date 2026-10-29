@@ -366,7 +366,7 @@ for owner in panel.PROVIDERS:
     assert "if the user asks you to complete this project or an autopilot contract exists" in guidance
     assert "Before any action inspect oms autopilot status and its receipt" in guidance
     assert "before run, review the exact proposal bytes and digest" in guidance
-    assert "oms autopilot propose, run with --review-mode gate" in guidance
+    assert "oms autopilot propose --review-mode gate (frozen at intake), run with the reviewed" in guidance
     assert "Never dispatch panel write workers for campaign-owned tasks" in guidance
     assert "release or reclaim their tasks" in guidance
     assert "reset a contract to evade cycle exhaustion" in guidance
