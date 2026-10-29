@@ -770,10 +770,10 @@ def continue_dirty(attempt=committed_attempt, record=committed_record):
     raise AssertionError('continue resumed stopped write work')
 dirty_message = continue_dirty()
 dirty_patch = committed['patch']
-assert dirty_message.startswith('recoverable delegate evidence exists for task committed-task; run oms panel '
-                                '--salvage committed-task --attempt att_committed and inspect: '), dirty_message
+assert dirty_message.startswith('already salvaged as ' + dirty_patch), dirty_message
 assert 'registered worktree: ' + str(committed_tree) in dirty_message, dirty_message
 assert 'already salvaged as ' + dirty_patch in dirty_message and 'fresh dispatch' in dirty_message, dirty_message
+assert dirty_message.index('fresh dispatch') < dirty_message.index('registered worktree: '), dirty_message
 # Without a salvage record the refusal is unchanged.
 for path in (salvage_repo / '.oms/salvage-provenance').glob('*.json'):
     path.rename(path.with_suffix('.hidden'))
@@ -807,6 +807,8 @@ assert 'already salvaged' not in unsalvaged_message and 'fresh dispatch' not in 
 assert 'registered worktree: ' not in gone_message, gone_message
 gone_patch = panel_dispatch._newest_salvage_patch(salvage_repo, 'scratch-task', gone_attempt['attempt_id'])
 assert gone_patch and 'already salvaged as ' + gone_patch in gone_message and 'fresh dispatch' in gone_message, gone_message
+assert gone_message.startswith('already salvaged as ' + gone_patch), gone_message
+assert gone_message.index('fresh dispatch') < gone_message.index('recoverable delegate evidence'), gone_message
 # A salvage that died after its provenance but before its patch leaves evidence no patch backs: --continue
 # says so and points at a re-run, and names a fresh dispatch once the kept worktree is gone.
 cut_tree, cut_attempt = kept_fixture('cut')

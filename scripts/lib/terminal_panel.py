@@ -898,9 +898,10 @@ def main(argv=None):
                 if last_line:
                     reason += ": " + clean(last_line[0], 200)
             message = "error: %s %s" % (clean(verb, 80), reason)
+            message = clean(message, 207)
         else:
-            message = "error: " + clean(str(error), 200)
-        print(clean(message, 207), file=sys.stderr)
+            message = clean("error: " + clean(str(error), 1000), 1000)
+        print(message, file=sys.stderr)
         return 1
 
 

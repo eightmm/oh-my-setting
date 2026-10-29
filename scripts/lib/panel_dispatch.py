@@ -575,17 +575,20 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                            "oms panel --salvage cannot succeed; a fresh dispatch is required: %s" %
                            (task_id, ", ".join(recovery_evidence)))
             else:
-                message = ("recoverable delegate evidence exists for task %s; run oms panel --salvage %s "
-                           "--attempt %s and inspect: %s" %
-                           (task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
                 salvaged = (_newest_salvage_patch(repo, task_id, last.get("attempt_id"))
                             if any(item.startswith(".oms/salvage-provenance/") for item in recovery_evidence)
                             or not any(item.startswith("registered worktree: ") for item in recovery_evidence)
                             else None)
                 if salvaged:
-                    message += ("; already salvaged as %s; stopped write work is not carried by --continue: if the "
-                                "worktree has not changed since, start a fresh dispatch whose brief includes that "
-                                "patch; salvage again only after it changed" % salvaged)
+                    message = ("already salvaged as %s; stopped write work is not carried by --continue: if the "
+                               "worktree has not changed since, start a fresh dispatch whose brief includes that "
+                               "patch; salvage again only after it changed; recoverable delegate evidence exists "
+                               "for task %s; run oms panel --salvage %s --attempt %s and inspect: %s" %
+                               (salvaged, task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
+                else:
+                    message = ("recoverable delegate evidence exists for task %s; run oms panel --salvage %s "
+                               "--attempt %s and inspect: %s" %
+                               (task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
             panel_salvage._raise_recovery_evidence(recovery_evidence, message)
         payload_sha = panel_salvage._empty_provenance_identity(task_id, last.get("attempt_id"))
         relative = panel_salvage._empty_provenance_path(task_id, last.get("attempt_id"))

@@ -1738,6 +1738,24 @@ for failure, expected in (
         assert expected in rendered_error, rendered_error
         assert "--brief-file" not in rendered_error and "x" * 40 not in rendered_error, rendered_error
         assert len(rendered_error.splitlines()[0]) <= 207, rendered_error
+long_error = "x" * 600 + " distinctive recovery action"
+with patch.object(panel, "dispatch", side_effect=ValueError(long_error)), \
+        patch.object(panel.sys, "stderr", new_callable=io.StringIO) as error_text:
+    assert panel.main(["--repo", str(root), "--dispatch", "advisor", "--owner", "claude",
+                       "--main", "flow-main", "--prompt", "question"]) == 1
+    rendered_error = error_text.getvalue()
+    assert rendered_error.startswith("error: ") and len(rendered_error.splitlines()) == 1, rendered_error
+    assert "distinctive recovery action" in rendered_error, rendered_error
+for detail in ("", "x" * 993, "x" * 994, "bad\nline"):
+    with patch.object(panel, "dispatch", side_effect=ValueError(detail)), \
+            patch.object(panel.sys, "stderr", new_callable=io.StringIO) as error_text:
+        assert panel.main(["--repo", str(root), "--dispatch", "advisor", "--owner", "claude",
+                           "--main", "flow-main", "--prompt", "question"]) == 1
+        rendered_error = error_text.getvalue()
+        assert rendered_error.startswith("error:") and len(rendered_error.splitlines()) == 1, rendered_error
+        assert len(rendered_error.rstrip("\n")) <= 1000, rendered_error
+        if len(detail) == 993:
+            assert rendered_error.rstrip("\n") == "error: " + detail, rendered_error
 with patch.object(panel, "session_owner", return_value="/elsewhere"):
     try:
         panel.split_panel(Path("/tmp/project-a"))
