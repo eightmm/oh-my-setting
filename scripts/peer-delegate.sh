@@ -2913,8 +2913,8 @@ if [ -n "$worker_guard_dir" ]; then
     fi
     guard_metadata_details="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worker-guard-details.py" \
       "$worker_guard_dir" "$worker_guard_changed")"
-    case ",$worker_guard_changed," in
-      *,gitmeta,*)
+    case ", $worker_guard_changed," in
+      *", gitmeta,"*)
         for guard_manifest_dir in "$worker_guard_dir" "$worker_source_guard_dir"; do
           [ -n "$guard_manifest_dir" ] || continue
           oms_worker_gitmeta_trace_report "$guard_manifest_dir" | sed 's/^/  /' >&2 || true

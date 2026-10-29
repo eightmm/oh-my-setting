@@ -58,9 +58,9 @@ for directory, prefix in directories:
                 continue
             for line in sorted(before ^ read(path)):
                 name = metadata_name(line)
-                if name and name not in seen:
+                if name and (label, name) not in seen:
                     rows.append("gitmeta " + prefix + name + " [" + label + "]")
-                    seen.add(name)
+                    seen.add((label, name))
     if "refs" in surfaces:
         before = read(os.path.join(directory, "refs"))
         now = read(os.path.join(directory, "refs-now")) or read(os.path.join(directory, "guard-report-refs-now"))
