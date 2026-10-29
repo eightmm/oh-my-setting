@@ -803,7 +803,7 @@ PY
       END { if (separator != "") print "" }
     ')"
     if [ -n "$verifier_hit" ] && [ "$ALLOW_VERIFIER_CHANGE" = 0 ]; then
-      record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change; base floor still required)"
+      record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change; base floor still required; changed shell/python/json files are already parsed by the syntax gate, so drop bash -n or py_compile checks of them from --verify)"
     elif [ -n "$verifier_hit" ]; then
       record "verifier" "PASS" "verifier change permitted; base floor still required: $verifier_hit"
     elif [ -n "$verification_surface" ]; then
