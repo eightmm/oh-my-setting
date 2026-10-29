@@ -30676,6 +30676,7 @@ git(source, 'commit', '-m', 'advance remote fixture')
 git(source, 'push', 'origin', 'main')
 before, tip = git(repo, 'rev-parse', 'HEAD'), git(source, 'rev-parse', 'HEAD')
 (bin_dir / 'codex').write_text('''#!/usr/bin/env bash
+case "${1:-}" in --version|--help) echo codex-fake; exit 0 ;; esac
 cat >/dev/null
 : > "$OMS_SYNC_READY"
 while [ ! -f "$OMS_SYNC_RELEASE" ]; do sleep 0.05; done
