@@ -151,13 +151,25 @@ def _queue(repo, now):
         try:
             result = _run(["tsp"])
             if result.returncode == 0 and _directory(queue):
-                live = (line.split() for line in result.stdout.replace("\r", "").splitlines())
+                live = (line.split(None, 3) for line in result.stdout.replace("\r", "").splitlines())
                 live = (fields for fields in live if len(fields) >= 2 and fields[0].isdigit()
                         and fields[1] in {"queued", "running"})
+                socket = os.environ.get("TS_SOCKET")
+                if socket is None:
+                    uid = getattr(os, "getuid", None)
+                    if uid is None:
+                        identity = _run(["id", "-u"])
+                        user_id = identity.stdout.strip() if identity.returncode == 0 else ""
+                    else:
+                        user_id = str(uid())
+                    if user_id.isdigit():
+                        socket = "%s/socket-ts.%s" % (os.environ.get("TMPDIR", "/tmp"), user_id)
                 for fields in heapq.nlargest(MAX_RECORDS, live, key=lambda fields: (len(fields[0].lstrip("0")), fields[0].lstrip("0"))):
                     try:
                         row = _metadata(queue / fields[0], repo)
-                        if row:
+                        if (row and len(fields) == 4 and isinstance(row.get("queue_socket"), str)
+                                and row["queue_socket"] == socket and isinstance(row.get("queue_command"), str)
+                                and row["queue_command"] and row["queue_command"] == fields[3]):
                             items.append("#%s %s %s" % (fields[0], fields[1], clean(row.get("label") or "job", 80)))
                     except (OSError, ValueError, TypeError):
                         continue

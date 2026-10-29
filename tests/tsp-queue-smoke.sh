@@ -51,7 +51,7 @@ binary.mkdir()
 stub = binary / "tsp"
 stub.write_text('#!/usr/bin/env bash\ncase "$1" in -S) exit 0;; *) printf "%s\\n" "${TSP_FIXTURE_JOB-42}";; esac\n')
 stub.chmod(0o755)
-env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"])
+env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"], TS_SOCKET=str(root / "socket"))
 label = "attributed job"
 for fallback in (False, True):
     env["OMS_TSP_FORCE_FALLBACK"] = "1" if fallback else "0"
@@ -66,8 +66,25 @@ for fallback in (False, True):
     record = json.loads(next(line[len("# oms-panel "):] for line in lines if line.startswith("# oms-panel ")))
     assert record["project"] == str(pathlib.Path(repo).resolve()), record
     assert record["label"] == label, record
+    if not fallback:
+        assert record["queue_socket"] == env["TS_SOCKET"] and record["queue_command"] == "[attributed job]true", record
+        assert result.stderr == "", result.stderr
     assert result.stdout == job + "\n", result.stdout
 env["OMS_TSP_FORCE_FALLBACK"] = "0"
+env.pop("TS_SOCKET")
+env["TMPDIR"] = str(root)
+result = subprocess.run([tsp, "enqueue", "--", "printf", "%s", "two words"], cwd=alias, env=env,
+                        capture_output=True, text=True, timeout=20)
+assert result.returncode == 0 and result.stdout == "42\n" and result.stderr == "", result
+row = json.loads((pathlib.Path(env["OMS_TSP_STATE_DIR"]) / "42").read_text().splitlines()[0][len("# oms-panel "):])
+assert row["queue_socket"] == str(root) + "/socket-ts." + subprocess.check_output(["id", "-u"], text=True).strip(), row
+assert row["queue_command"] == "printf %s two words", row
+env["TMPDIR"] = ""
+result = subprocess.run([tsp, "enqueue", "--", "true"], cwd=alias, env=env,
+                        capture_output=True, text=True, timeout=20)
+assert result.returncode == 0, result.stderr
+row = json.loads((pathlib.Path(env["OMS_TSP_STATE_DIR"]) / "42").read_text().splitlines()[0][len("# oms-panel "):])
+assert row["queue_socket"] == "/socket-ts." + subprocess.check_output(["id", "-u"], text=True).strip(), row
 for job, code in (("43\r", 0), ("0", 0), ("", 2), ("bad", 2)):
     env["TSP_FIXTURE_JOB"] = job
     result = subprocess.run([tsp, "enqueue", "--", "true"], cwd=root, env=env,
@@ -77,6 +94,7 @@ for job, code in (("43\r", 0), ("0", 0), ("", 2), ("bad", 2)):
         lines = (pathlib.Path(env["OMS_TSP_STATE_DIR"]) / job.strip()).read_text().splitlines()
         row = json.loads(next(line[len("# oms-panel "):] for line in lines if line.startswith("# oms-panel ")))
         assert row["project"] == "" and row["label"] == "", row
+        assert row["queue_command"] == "true", row
 PY
 
 if [ "$(uname -s)" = Linux ]; then

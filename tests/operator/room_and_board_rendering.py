@@ -6286,24 +6286,46 @@ queue_dir.mkdir()
 fallback_dir = temporary / "background fallback"
 fallback_dir.mkdir()
 queue_env = {"OMS_TSP_STATE_DIR": str(queue_dir), "OMS_TSP_FALLBACK_DIR": str(fallback_dir),
-             "OMS_TSP_FORCE_FALLBACK": "0"}
+             "OMS_TSP_FORCE_FALLBACK": "0", "TS_SOCKET": "fixture-socket"}
 for job, identity in (("1", str(bg_root.resolve())), ("2", ""), ("3", str(project.resolve()))):
-    (queue_dir / job).write_text("# oms-panel " + json.dumps({"project": identity, "label": "safe\x1b[31m\n" + "x" * 300}) + "\n")
+    (queue_dir / job).write_text("# oms-panel " + json.dumps({"project": identity, "label": "safe\x1b[31m\n" + "x" * 300, "queue_socket": "fixture-socket", "queue_command": "work"}) + "\n")
 (queue_dir / "4").write_text("meta_note=$(touch should-never-exist)\n")
 (queue_dir / "5").write_text("# oms-panel {bad}\n")
-queue_table = "ID State Output\n1 running /tmp/log\n2 queued x\n3 queued x\n4 queued x\n5 queued x\n"
+queue_table = "ID State Output\n1 running /tmp/log work\n2 queued x work\n3 queued x work\n4 queued x work\n5 queued x work\n"
 with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
         patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, queue_table, "")):
     rows = bg._queue(bg_root, clock)
     assert len(rows) == 1 and "#1 running" in rows[0] and "#2" not in rows[0] and "#3" not in rows[0], rows
     assert "\x1b" not in rows[0] and "\n" not in rows[0] and len(rows[0]) < 220, rows
     assert not (temporary / "should-never-exist").exists()
+for socket, command in (("other-socket", "work"), ("fixture-socket", "other"), (None, None), ("", "work")):
+    (queue_dir / "1").write_text("# oms-panel " + json.dumps({"project": str(bg_root.resolve()),
+        "queue_socket": socket, "queue_command": command}) + "\n")
+    with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
+            patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1 running x work\n", "")):
+        assert bg._queue(bg_root, clock) == [], (socket, command)
+(queue_dir / "1").write_text("# oms-panel " + json.dumps({"project": str(bg_root.resolve()),
+    "label": "safe", "queue_socket": "fixture-socket", "queue_command": "work"}) + "\n")
+default_env = dict(queue_env, TMPDIR=str(temporary), XDG_RUNTIME_DIR=str(temporary))
+default_env.pop("TS_SOCKET")
+(queue_dir / "1").write_text("# oms-panel " + json.dumps({"project": str(bg_root.resolve()),
+    "queue_socket": str(temporary) + "/socket-ts.12", "queue_command": "work"}) + "\n")
+for uid_result, visible in ((subprocess.CompletedProcess([], 0, "12\r\n", ""), True),
+                            (subprocess.CompletedProcess([], 1, "12", ""), False),
+                            (subprocess.CompletedProcess([], 0, "bad", ""), False),
+                            (subprocess.CompletedProcess([], 0, "", ""), False)):
+    with patch.dict(os.environ, default_env, clear=True), patch.object(bg.os, "getuid", None, create=True), \
+            patch.object(bg.shutil, "which", return_value="tsp"), patch.object(bg, "_run", side_effect=[
+                subprocess.CompletedProcess([], 0, "1 running x work\n", ""), uid_result]):
+        assert bool(bg._queue(bg_root, clock)) == visible, uid_result
+(queue_dir / "1").write_text("# oms-panel " + json.dumps({"project": str(bg_root.resolve()),
+    "label": "safe", "queue_socket": "fixture-socket", "queue_command": "work"}) + "\n")
 with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value=None):
     assert bg._queue(bg_root, clock) == []
 with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
         patch.object(bg.subprocess, "run", side_effect=subprocess.TimeoutExpired("tsp", 2)):
     assert bg._queue(bg_root, clock) == []
-for table in ("", "0 finished x\n", "bad running x\n", "1 queued x\r\n"):
+for table in ("", "0 finished x\n", "bad running x\n", "1 queued x work\r\n"):
     with patch.dict(os.environ, queue_env), patch.object(bg.shutil, "which", return_value="tsp"), \
             patch.object(bg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, table, "")):
         assert bool(bg._queue(bg_root, clock)) == ("queued" in table), table

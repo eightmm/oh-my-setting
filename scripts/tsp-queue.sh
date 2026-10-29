@@ -138,7 +138,7 @@ write_fallback_meta() {
 }
 
 project_metadata() {
-  python3 - "$1" "${2:-}" <<'PY'
+  python3 - "$@" <<'PY'
 import json, pathlib, subprocess, sys
 project = ""
 try:
@@ -148,7 +148,11 @@ try:
         project = str(pathlib.Path(result.stdout.replace("\r", "").rstrip("\n")).resolve(strict=True))
 except (OSError, ValueError, subprocess.SubprocessError):
     pass
-print(json.dumps({"project": project, "label": sys.argv[1], "status": pathlib.Path(sys.argv[2]).name}))
+row = {"project": project, "label": sys.argv[1], "status": pathlib.Path(sys.argv[2]).name}
+if len(sys.argv) > 3:
+    row["queue_socket"] = sys.argv[3]
+    row["queue_command"] = ("[" + sys.argv[1] + "]" if sys.argv[1] else "") + " ".join(sys.argv[4:])
+print(json.dumps(row))
 PY
 }
 
@@ -278,7 +282,7 @@ cmd_enqueue() {
   fi
   job_id="${job_id//$'\r'/}"
   require_id "$job_id"
-  record="$(project_metadata "$label")"
+  record="$(project_metadata "$label" "" "${TS_SOCKET-${TMPDIR-/tmp}/socket-ts.$(id -u 2>/dev/null)}" "$@")"
   record="${record//$'\r'/}"
   write_meta "$STATE_DIR/$job_id" "$note" "$record" "$@"
   printf '%s\n' "$job_id" > "$STATE_DIR/last"
