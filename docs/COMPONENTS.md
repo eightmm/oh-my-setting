@@ -837,8 +837,9 @@ when one is given, and a task with allowed paths needs the landed range, from
 the nearest earlier pushed receipt (else the first parent) to SHA, to change at
 least one of them, so a receipt for unrelated work cannot finish it. The task retains the commit and receipt
 file SHA-256 as landing proof and counts as done in plan status and the panel.
-The typed `patch-land` path with `--expected-landing-receipt-sha256` remains the
-default for single patches.
+`patch-land` remains the default front door for single patches. It passes
+`--expected-landing-receipt-sha256` to `oms agent-plan finish` internally; this
+is a `finish` argument, not a `patch-land` option.
 
 Receipt discovery stays clone-local (linked worktrees share their canonical
 namespace). When an authorized main lands from a separate clone, it can use

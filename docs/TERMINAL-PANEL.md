@@ -15,7 +15,7 @@ Run `oms` in a terminal to open the control panel. Native Claude Code, Pi or Cod
 keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
 worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
-Without `--repo`, the panel resolves the current Git top-level and refuses a non-repository with exit 2; `--providers`, `--routes` and `--help` remain available anywhere, and explicit `--repo PATH` also accepts a non-repository directory.
+Without `--repo`, the panel resolves the current Git top-level and refuses a non-repository with exit 3; explicit `--repo PATH` also requires a Git repository and returns 3 otherwise. `--providers`, `--routes` and `--help` remain available anywhere.
 The sidebar reads OMS state; it does not replace the providers' native conversation or authentication.
 
 Finished dispatch calls keep an owner-only OMS transcript beside their activity summary in `.oms/panel-state/dispatch-logs/`. In a call's Detail press `x` for Transcript, or select Transcript (`x` or Tab) in its Results reader; arrows, Page Up/Down and search in the reader navigate the captured assistant messages, commands and tool results, edit content and final report. Esc returns. Secret-shaped lines are masked using the outbound scanner patterns. Each capture keeps at most the last 8 MiB with a truncation marker; captures older than 30 days or beyond the newest 128 are pruned when another capture finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show “transcript not captured”; provider homes are never read.
@@ -204,7 +204,7 @@ Fresh Claude mains receive a panel-generated UUID via `--session-id`, retained a
 the attempt's `native_session` reference. Resumed Claude mains keep `--resume`
 and that reference, so restarting keeps the same room participant and unread mail.
 Resumed Claude mains pass `--system-prompt-snapshot off` so they rebuild their appended
-prompt instead of reusing the stored one; that needs Claude Code 2.1.257 or later.
+prompt instead of reusing the stored one; this needs Claude Code 2.1.257 or later.
 When supported by the installed Claude CLI, panel Claude mains also use `--autocompact 300000`.
 After `/clear`, restart and explicit resume follow the participant's current
 bound session; the original join boundary and mailbox remain intact.
@@ -246,8 +246,8 @@ dispatch and council. Their registration fallback remains separate from worker t
 Direct Pi and agy launch are deferred; this ownership phase enables their stored
 rows and consumers. Their launch dry runs report the resolved owner with `argv: null`.
 The available Pi launch uses the existing `oms harness pi`
-bridge and requires both Pi 0.80.4 or newer (its `agent_settled` event marks the main
-idle) and Codex CLI on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
+bridge and requires Pi 0.80.4 or newer (the bridge waits for `agent_settled`)
+and Codex CLI on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
 `--resume` until Pi session ownership can be verified. It has no Codex native hook or
 context/quota reading, but [`scripts/lib/pi-oms-extension.mjs`](../scripts/lib/pi-oms-extension.mjs)
 forwards Pi activity to `hook_state.py` and delivers room mail through its hook context.
@@ -915,7 +915,9 @@ bounded to 8 KiB, rejects sensitive-looking text and private absolute paths,
 and is cleaned of terminal controls. New result revisions are immutable artifacts
 registered in the existing artifact index, rather than a second task database.
 For each landed write patch, `accepted` also requires a passing automatic review
-gate. If review is missing or ends without a verdict, finalize `completed` (not
+gate. Before any side effect, `--finalize` waits up to 120 seconds for live
+review read passes on the same execution checkout; if they remain, it exits 75,
+so retry later. If review is missing or ends without a verdict, finalize `completed` (not
 `accepted`) and explain why in the summary. Finalization checks the full lifecycle
 projection, independently of the display
 window. Missing retained patch or landing evidence refuses acceptance. A failed,
@@ -1742,7 +1744,9 @@ metadata is written through typed `agent-events --ref NAME=VALUE` and projected
 as bounded panel metadata; see [the dashboard contract](DASHBOARD.md).
 
 Exit 0 is successful collection, 1 is degraded collection or launch failure, 2
-is invalid usage or a worker attempting owner actions, and 130 is interruption.
+is invalid usage or a worker attempting owner actions, 3 is an unusable or
+non-repository `--repo` (or current directory), 75 is deferred finalization
+while review read passes remain live, and 130 is interruption.
 Native launches propagate the process exit. Existing tools retain patch
 admission, verification and publication authority. No permission bypass,
 automatic patch application, commit, push, installation or new service is added.
