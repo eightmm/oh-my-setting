@@ -8,6 +8,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The autopilot remainder planner sees why the frozen acceptance failed: the
+  latest acceptance command, status and a bounded, redacted log tail go into
+  the decompose prompt as fenced data, and a parked plan's hints name the
+  once-per-contract remainder proposal and `OMS_PLAN_ACCEPT_TIMEOUT`.
+- Panel campaign guidance chooses `--review-mode gate` at `oms autopilot
+  propose`, where the review mode freezes.
 - The panel shows the project's background work below the board: the
   autopilot stage, recent graph runs, this project's tsp queue jobs, and a
   landed commit whose install was skipped, with its recorded reason.
@@ -74,6 +80,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- An accepted finalize no longer refuses a task whose first write round failed
+  (for example on a provider capacity error) and was redone by a fresh
+  dispatch: the failed round counts as superseded when the landed retry has the
+  same task, purpose and every entry of its declared scope.
+- `oms panel` prints in-process errors up to 1000 characters, so the recovery
+  step at the end of a refusal is no longer cut off, and the already-salvaged
+  `--continue` refusal leads with the fresh-dispatch action.
+- Panel queue rows show a tsp job only when its recorded socket and command
+  match the live queue, so a reused tsp id no longer inherits another
+  project's label.
+- `oms intent draft` drops the provider usage footer, and `intent adopt`
+  accepts backticked check files and refuses a Scope autopilot cannot use.
+- The patch-admit verifier refusal says changed shell, Python and JSON files
+  are already parsed by its syntax gate.
 - The worker guard no longer stops write workers when the main fast-forwards
   its own `oms/*` branch in a scratch worktree and then detaches it; the
   move counts as foreign only when that checkout's reflogs explain it.
