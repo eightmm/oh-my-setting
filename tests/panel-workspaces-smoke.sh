@@ -398,6 +398,8 @@ try:
         check(len(workspace_rows()) == 1 and client_session() == tmux('display-message', '-p', '-t', ws, '#{session_name}'),
               'reuse created state or did not focus')
         press(b'\x1b[15~')
+        settle(lambda: (client_session(), active_pane('origin')), lambda seen: seen == ('origin', origin_pane),
+               'F5 after reuse did not return to the origin pane')
 
         # Binding replacement refuses and never adopts.
         tmux('set-option', '-t', ws, 'key-table', 'root')
