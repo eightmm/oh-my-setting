@@ -49,15 +49,18 @@ if os.path.isdir(source):
 for directory, prefix in directories:
     if "gitmeta" in surfaces:
         before = read(os.path.join(directory, "gitmeta"))
-        now = set()
-        for name in ("gitmeta-admin-now", "gitmeta-now", "guard-report-gitmeta-now"):
-            now = read(os.path.join(directory, name))
-            if now:
-                break
-        for line in sorted(before ^ now):
-            name = metadata_name(line)
-            if name:
-                rows.append("gitmeta " + prefix + name)
+        # Each classifier can leave a different view of concurrent registry activity.
+        seen = set()
+        for capture, label in (("gitmeta-admin-now", "admin"), ("gitmeta-now", "now"),
+                               ("guard-report-gitmeta-now", "report")):
+            path = os.path.join(directory, capture)
+            if not os.path.isfile(path):
+                continue
+            for line in sorted(before ^ read(path)):
+                name = metadata_name(line)
+                if name and name not in seen:
+                    rows.append("gitmeta " + prefix + name + " [" + label + "]")
+                    seen.add(name)
     if "refs" in surfaces:
         before = read(os.path.join(directory, "refs"))
         now = read(os.path.join(directory, "refs-now")) or read(os.path.join(directory, "guard-report-refs-now"))

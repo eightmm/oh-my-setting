@@ -1412,6 +1412,24 @@ if restored:
 PY
 }
 
+# Report decisions only; raw captures stay in the temporary guard directory.
+oms_worker_gitmeta_trace_report() {
+  local before_dir="$1"
+  local file="$before_dir/gitmeta-trace"
+  if [ -s "$file" ]; then
+    python3 - "$file" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    line = stream.read()
+allowed = set(" ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_=. -")
+line = "".join(ch for ch in line if ch in allowed)
+line = line[:300].rstrip()
+if line:
+    print("gitmeta classifiers: " + line)
+PY
+  fi
+}
+
 oms_worker_surface_diff() {
   local repo="$1"
   local before_dir="$2"
@@ -1426,6 +1444,9 @@ oms_worker_surface_diff() {
   : > "$before_dir/gitmeta-managed-added"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
+    if [ "$name" = gitmeta ]; then
+      : > "$before_dir/gitmeta-trace"
+    fi
     if [ "$name" = files ]; then
       OMS_WG_GITMETA_MANAGED_ADDED_OUT="$before_dir/gitmeta-managed-added" \
         OMS_WG_GITMETA_MANAGED_COMPLETE_OUT="$before_dir/gitmeta-managed-complete" \
@@ -1438,54 +1459,99 @@ oms_worker_surface_diff() {
       "$current_worktree_physical" "$surface_git_dir" | cmp -s - "$before_dir/$name"; then
       continue
     fi
-      if [ "$name" = gitmeta ] && oms_worker_gitmeta_settles "$repo" \
-        "$before_dir/gitmeta" "$current_worktree_physical"; then
-        continue
+      if [ "$name" = gitmeta ]; then
+        if oms_worker_gitmeta_settles "$repo" \
+          "$before_dir/gitmeta" "$current_worktree_physical"; then
+          printf 'settles=yes ' >> "$before_dir/gitmeta-trace"
+          continue
+        else
+          printf 'settles=no ' >> "$before_dir/gitmeta-trace"
+        fi
       fi
-      if [ "$name" = gitmeta ] && ! oms_worker_gitmeta_admin_changes_are_safe "$repo" \
-        "$before_dir" "$current_worktree_physical"; then
-        changed="${changed:+$changed, }gitmeta"
-        continue
+      if [ "$name" = gitmeta ]; then
+        if oms_worker_gitmeta_admin_changes_are_safe "$repo" \
+          "$before_dir" "$current_worktree_physical"; then
+          printf 'admin-safe=yes ' >> "$before_dir/gitmeta-trace"
+        else
+          printf 'admin-safe=no ' >> "$before_dir/gitmeta-trace"
+          changed="${changed:+$changed, }gitmeta"
+          continue
+        fi
       fi
-      if [ "$name" = gitmeta ] && [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
-        oms_worker_gitmeta_only_added_removed_siblings "$repo" \
-        "$before_dir" "$current_worktree_physical"; then
-        changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
-        continue
+      if [ "$name" = gitmeta ] && [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ]; then
+        if oms_worker_gitmeta_only_added_removed_siblings "$repo" \
+          "$before_dir" "$current_worktree_physical"; then
+          printf 'only-added-removed-siblings=yes ' >> "$before_dir/gitmeta-trace"
+          changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
+          continue
+        else
+          printf 'only-added-removed-siblings=no ' >> "$before_dir/gitmeta-trace"
+        fi
       fi
-      if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ] &&
-        [ "${OMS_WG_GITMETA_QUIET_STALE:-0}" = 1 ] &&
-        [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ]; then
-        # A resolved partial removal invalidates the earlier quiet verdict.
-        # Recompute it against the final registration set before deciding.
-        if oms_worker_gitmeta_admin_changes_are_safe "$repo" "$before_dir" \
-          "$current_worktree_physical" && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ]; then
-          OMS_WG_GITMETA_QUIET_STALE=0
+      if [ "$name" = gitmeta ]; then
+        if [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ] &&
+          [ "${OMS_WG_GITMETA_QUIET_STALE:-0}" = 1 ] &&
+          [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ]; then
+          printf 'refresh-needed=yes ' >> "$before_dir/gitmeta-trace"
+          # A resolved partial removal invalidates the earlier quiet verdict.
+          # Recompute it against the final registration set before deciding.
+          if oms_worker_gitmeta_admin_changes_are_safe "$repo" "$before_dir" \
+            "$current_worktree_physical"; then
+            printf 'admin-safe-refresh=yes ' >> "$before_dir/gitmeta-trace"
+            if [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ]; then
+              printf 'refresh-quiet=yes ' >> "$before_dir/gitmeta-trace"
+              OMS_WG_GITMETA_QUIET_STALE=0
+            else
+              printf 'refresh-quiet=no ' >> "$before_dir/gitmeta-trace"
+            fi
+          else
+            printf 'admin-safe-refresh=no ' >> "$before_dir/gitmeta-trace"
+          fi
+        else
+          printf 'refresh-needed=no ' >> "$before_dir/gitmeta-trace"
         fi
       fi
       # Strict mode rejects classified soft changes, but preserves this existing
       # quiet exemption for validated live managed-worktree lifecycle activity.
-      if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ] &&
-        [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ] &&
-        [ "${OMS_WG_GITMETA_QUIET_STALE:-0}" != 1 ]; then
-        continue
+      if [ "$name" = gitmeta ]; then
+        if [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ] &&
+          [ "${OMS_WG_GITMETA_PARTIAL_REMOVE_STUCK:-0}" != 1 ] &&
+          [ "${OMS_WG_GITMETA_QUIET_STALE:-0}" != 1 ]; then
+          printf 'quiet-exempt=yes ' >> "$before_dir/gitmeta-trace"
+          continue
+        else
+          printf 'quiet-exempt=no ' >> "$before_dir/gitmeta-trace"
+        fi
       fi
-      if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
-        "$before_dir" "$current_worktree_physical"; then
-        changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
-        continue
+      if [ "$name" = gitmeta ]; then
+        if oms_worker_gitmeta_only_kept_siblings "$repo" \
+          "$before_dir" "$current_worktree_physical"; then
+          printf 'only-kept-siblings=yes ' >> "$before_dir/gitmeta-trace"
+          changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
+          continue
+        else
+          printf 'only-kept-siblings=no ' >> "$before_dir/gitmeta-trace"
+        fi
       fi
-      if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
-        [ "$name" = gitmeta ] && oms_worker_gitmeta_only_foreign_checkout_heads "$repo" \
-        "$before_dir" "$current_worktree_physical"; then
-        changed="${changed:+$changed, }foreign-ref"
-        continue
+      if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] && [ "$name" = gitmeta ]; then
+        if oms_worker_gitmeta_only_foreign_checkout_heads "$repo" \
+          "$before_dir" "$current_worktree_physical"; then
+          printf 'only-foreign-checkout-heads=yes ' >> "$before_dir/gitmeta-trace"
+          changed="${changed:+$changed, }foreign-ref"
+          continue
+        else
+          printf 'only-foreign-checkout-heads=no ' >> "$before_dir/gitmeta-trace"
+        fi
       fi
-      if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
-        [ "$name" = gitmeta ] && oms_worker_gitmeta_only_foreign_worktrees "$repo" \
-        "$before_dir" "$current_worktree_physical"; then
-        changed="${changed:+$changed, }foreign-worktree"
-        continue
+      if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] && [ "$name" = gitmeta ]; then
+        if oms_worker_gitmeta_only_foreign_worktrees "$repo" \
+          "$before_dir" "$current_worktree_physical"; then
+          printf 'only-foreign-worktrees=yes ' >> "$before_dir/gitmeta-trace"
+          changed="${changed:+$changed, }foreign-worktree"
+          continue
+        else
+          printf 'only-foreign-worktrees=no ' >> "$before_dir/gitmeta-trace"
+        fi
       fi
       if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
         [ "$name" = refs ] && oms_worker_refs_only_foreign "$repo" \

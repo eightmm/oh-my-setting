@@ -491,7 +491,12 @@ $named}"
           fi
         done
         python3 "$MA_LIB_DIR/worker-guard-details.py" \
-          "$MA_READ_GUARD_DIR/$name" "$named" | head -n 8 | sed 's/^/  /' >&2 || true
+          "$MA_READ_GUARD_DIR/$name" "$named" | head -n 12 | sed 's/^/  /' >&2 || true
+        case ", ${hard}," in
+          *", gitmeta,"*)
+            oms_worker_gitmeta_trace_report "$MA_READ_GUARD_DIR/$name" | \
+              sed 's/^/  /' >&2 || true ;;
+        esac
         ;;
     esac
     if [ -n "$soft" ]; then

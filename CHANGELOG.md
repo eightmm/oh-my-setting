@@ -41,6 +41,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A hard `gitmeta` worker or read guard stop now prints `gitmeta classifiers:`
+  with each classifier's yes/no decision, and lists every capture's changed slots by
+  label, so a refusal during concurrent worker lifecycles can be attributed.
 - A read-only `worker --purpose investigate` dispatch is no longer routed to Pi
   while another provider serves the tier after the catalog and quota checks: Pi
   read workers have no shell, so they cannot run git or tests. Pi alone still serves.

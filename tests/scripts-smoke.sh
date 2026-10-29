@@ -32688,6 +32688,8 @@ EOF
     fail "duplicate metadata must not inherit a live sibling's managed exemption: $out"
   contains "$out" 'outside its worktree: gitmeta' ||
     fail "duplicate managed-looking metadata should be a gitmeta violation: $out"
+  printf '%s\n' "$out" | grep -E 'gitmeta classifiers: .*=no' >/dev/null ||
+    fail "duplicate metadata should name a rejecting gitmeta classifier: $out"
 }
 
 # smoke-weight: 5
@@ -34479,8 +34481,8 @@ answer, code = artifact_sections(repo / row["artifact"])
 reason = "The worker guard stopped this run: protected state changed outside the worker's worktree (gitmeta)."
 assert code == "1" and answer.startswith(reason) and "nothing was landed" in answer, (code, answer)
 assert "snapshot=canonical repository gitmeta worktrees/" in answer, answer
-details = answer.split("Changed paths/refs by snapshot (up to 8 sanitized lines):\n", 1)[1].split("\nExecution-state details:", 1)[0]
-assert 1 <= len(details.splitlines()) <= 8, details
+details = answer.split("Changed paths/refs by snapshot (up to 12 sanitized lines):\n", 1)[1].split("\nExecution-state details:", 1)[0]
+assert 1 <= len(details.splitlines()) <= 12, details
 assert str(repo) not in answer, answer
 failures = [json.loads(line) for line in (repo / ".oms/failures.jsonl").read_text().splitlines()]
 failure = [row for row in failures if row.get("cmd") == "peer-delegate --to codex worker-authority"][-1]
@@ -34573,6 +34575,8 @@ $body"
     [ "$read_rc" = 2 ] || fail "read guard accepted a planted worktree entry: $read_out"
     contains "$read_out" 'gitmeta worktrees/' ||
       fail "planted read metadata should remain hard: $read_out"
+    printf '%s\n' "$read_out" | grep -E 'gitmeta classifiers: .*=no' >/dev/null ||
+      fail "read metadata should name a rejecting gitmeta classifier: $read_out"
 
     make_live_managed_sibling "$wt" "$read_cleanup"
     sed 's/^pid=.*/pid=999999999/' "$read_cleanup/.oh-my-setting-tmp" \

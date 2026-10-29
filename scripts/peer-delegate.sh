@@ -2913,6 +2913,13 @@ if [ -n "$worker_guard_dir" ]; then
     fi
     guard_metadata_details="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worker-guard-details.py" \
       "$worker_guard_dir" "$worker_guard_changed")"
+    case ",$worker_guard_changed," in
+      *,gitmeta,*)
+        for guard_manifest_dir in "$worker_guard_dir" "$worker_source_guard_dir"; do
+          [ -n "$guard_manifest_dir" ] || continue
+          oms_worker_gitmeta_trace_report "$guard_manifest_dir" | sed 's/^/  /' >&2 || true
+        done ;;
+    esac
     guard_metadata_details="$(printf '%s\n' "$guard_metadata_details" | python3 -c '
 import sys
 lines = [line.rstrip("\r\n") for line in sys.stdin]
@@ -2928,9 +2935,9 @@ for value in lines:
         details.append("snapshot=canonical repository " + value)
     else:
         details.append(value)
-for value in details[:8]:
+for value in details[:12]:
     print(value)
-if len(details) > 8:
+if len(details) > 12:
     print("additional changed paths omitted")
 ')"
     guard_execution_details="$(
@@ -2984,7 +2991,7 @@ if len(details) > 8:
     fi
     # Result readers relay the last Output before the last Exit, and the worker's
     # Output above was never closed. Paths stay in the local bullets above.
-    printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs by snapshot (up to 8 sanitized lines):\n%s\nExecution-state details:\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
+    printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs by snapshot (up to 12 sanitized lines):\n%s\nExecution-state details:\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
       "$worker_guard_changed" "$guard_metadata_details" "$guard_execution_details" "$guard_failure_hint" >> "$artifact"
     OMS_INDEX_PROVIDER_USAGE_JSON="$guard_provider_usage_payload" \
       OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" ||
