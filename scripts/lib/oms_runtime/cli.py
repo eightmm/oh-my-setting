@@ -35,6 +35,7 @@ from .release import apply as apply_release
 from .release import promote as promote_release
 from .release import resolve as resolve_release
 from .release import status as release_status
+from . import targets
 
 def emit(value: Any, pretty: bool=False) -> None:
     print(json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2 if pretty else None, separators=None if pretty else (',', ':')))
@@ -162,17 +163,33 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             emit(value, args.pretty)
             return 0
         if args.command == 'backend':
+            if args.backend_action == 'target':
+                if args.target_action == 'add':
+                    value = targets.add(repo, args.name, args.ssh_alias, args.workdir)
+                elif args.target_action == 'remove':
+                    value = targets.remove(repo, args.name)
+                else:
+                    value = targets.listing(repo)
+                emit(value, args.pretty)
+                return 0
+            if getattr(args, 'target', None) is not None:
+                if args.profile != 'remote':
+                    raise CoreError('--target requires the remote backend')
+                if args.backend_action == 'run':
+                    raise CoreError('SSH target execution is not yet supported', exit_code=3)
+                emit(targets.check(repo, args.target), args.pretty)
+                return 3
             if args.backend_action == 'describe':
                 value = describe_backend(args.profile)
                 rc = 0
             elif args.backend_action == 'check':
-                value = check_backend(args.profile, image=args.image, adapter=args.adapter)
+                value = check_backend(args.profile, image=args.image, adapter=args.adapter or '')
                 rc = 0 if value['ready'] else 3
             else:
                 command = list(args.remainder)
                 if command and command[0] == '--':
                     command = command[1:]
-                value, rc = run_backend(args.profile, repo, command, timeout_seconds=args.timeout_seconds, image=args.image, adapter=args.adapter, worktree=_path(repo, args.worktree) if args.worktree else None, allow_network=args.allow_network, inherit_env=args.inherit_env, log_path=_path(repo, args.log) if args.log else None, receipt_path=_path(repo, args.receipt) if args.receipt else None, log_limit=args.log_limit, memory_mb=args.memory_mb, cpus=args.cpus, pids_limit=args.pids_limit, tmpfs_mb=args.tmpfs_mb)
+                value, rc = run_backend(args.profile, repo, command, timeout_seconds=args.timeout_seconds, image=args.image, adapter=args.adapter or '', worktree=_path(repo, args.worktree) if args.worktree else None, allow_network=args.allow_network, inherit_env=args.inherit_env, log_path=_path(repo, args.log) if args.log else None, receipt_path=_path(repo, args.receipt) if args.receipt else None, log_limit=args.log_limit, memory_mb=args.memory_mb, cpus=args.cpus, pids_limit=args.pids_limit, tmpfs_mb=args.tmpfs_mb)
             emit(value, args.pretty)
             return rc
         if args.command == 'experiment':

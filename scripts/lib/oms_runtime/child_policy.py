@@ -39,6 +39,8 @@ def child_action_is_read_only(args: argparse.Namespace) -> bool:
     if command == "capsule":
         return getattr(args, "capsule_action", None) in ("verify", "diff")
     if command == "backend":
+        if getattr(args, "backend_action", None) == "target":
+            return getattr(args, "target_action", None) == "list"
         return getattr(args, "backend_action", None) in ("describe", "check")
     if command == "experiment":
         action = getattr(args, "experiment_action", None)

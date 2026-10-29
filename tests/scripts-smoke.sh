@@ -38296,6 +38296,227 @@ for size in (capsule.MAX_CAPSULE_BYTES - 1, capsule.MAX_CAPSULE_BYTES, capsule.M
 PY
 }
 
+test_runtime_backend_target_registry() {
+  local project="$TMP/runtime-targets"
+  mkdir -p "$project"
+  python3 - "$ROOT" "$project" <<'PY'
+import contextlib, copy, io, json, os, pathlib, subprocess, sys
+from unittest.mock import patch
+
+root, repo = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(root / "scripts" / "lib"))
+from oms_runtime import capsule
+from oms_runtime.cli import main
+from oms_runtime.common import pretty_json
+
+os.environ["OMS_LOCK_DIR"] = str(repo.parent / "target-locks")
+registry = repo / ".oms" / "runtime" / "targets.json"
+
+def call(*args, rc=0, child=False):
+    output, errors = io.StringIO(), io.StringIO()
+    with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1" if child else ""}), \
+            patch("oms_runtime.cli.repo_root", return_value=repo), \
+            contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+        try:
+            code = main(["backend", *args])
+        except SystemExit as exc:
+            code = exc.code
+    assert code == rc, (args, code, output.getvalue(), errors.getvalue())
+    return json.loads(output.getvalue()) if output.getvalue() else errors.getvalue()
+
+assert call("target", "list", child=True) == {"schema": 1, "targets": {}}
+from oms_runtime import targets
+assert call("check", "remote", "--target", "missing", rc=3, child=True)["target_valid"] is False
+assert not (repo / ".oms").exists(), "listing created state"
+assert "unknown remote target" in call("target", "remove", "missing", rc=2)
+assert not (repo / ".oms").exists(), "unknown removal created state"
+assert "read-only" in call("target", "add", "sample", "--ssh-alias", "sample-host",
+                           "--workdir", "/work/sample", rc=2, child=True)
+assert not registry.exists(), "child mutation created registry"
+
+for value in ("", "-host", "user@host", "host:22", "host name", "host\n", "é", "x" * 65):
+    call("target", "add", "sample", "--ssh-alias=" + value, "--workdir", "/work/sample", rc=2)
+    call("target", "add", "--ssh-alias", "sample-host", "--workdir", "/work/sample", "--", value, rc=2)
+for value in ("", "0", "relative", "~/work", "C:/work", "/work\n", "/work\x00",
+              "/work\t", "/work\x7f", "/work/" + "pass" + "word" + chr(61) + "value"):
+    # NUL is exercised in-process; it cannot be represented in process argv.
+    call("target", "add", "sample", "--ssh-alias", "sample-host", "--workdir=" + value, rc=2)
+for option in ("--identity-file", "--ssh-option", "--adapter"):
+    call("target", "add", "sample", "--ssh-alias", "sample-host", "--workdir", "/work/sample",
+         option, "unexpected", rc=2)
+assert not registry.exists(), "invalid input created registry"
+
+expected = {"ssh_alias": "sample-host", "workdir": "/work/sample"}
+assert call("target", "add", "sample", "--ssh-alias", expected["ssh_alias"],
+            "--workdir", expected["workdir"])["targets"] == {"sample": expected}
+saved = registry.read_bytes()
+assert "already exists" in call("target", "add", "sample", "--ssh-alias", "other-host",
+                               "--workdir", "/other", rc=2)
+assert call("target", "list", child=True)["targets"] == {"sample": expected}
+for name in ("0", "n" * 64):
+    call("target", "add", name, "--ssh-alias", name, "--workdir", "/")
+    call("target", "remove", name)
+assert registry.read_bytes() == saved
+for action in (("add", "child", "--ssh-alias", "child-host", "--workdir", "/work"),
+               ("remove", "sample")):
+    assert "read-only" in call("target", *action, rc=2, child=True)
+assert registry.read_bytes() == saved, "child mutation changed registry"
+assert "unknown remote target" in call("target", "remove", "missing", rc=2)
+assert registry.read_bytes() == saved
+
+# Target selection must never reach adapter discovery or launch a process,
+# even with an ambient adapter and in a harness child.
+with patch.dict(os.environ, {"OMS_REMOTE_ADAPTER": "ambient-adapter"}), \
+        patch("oms_runtime.cli.check_backend", side_effect=AssertionError("adapter check reached")), \
+        patch("oms_runtime.cli.run_backend", side_effect=AssertionError("adapter run reached")), \
+        patch("subprocess.run", side_effect=AssertionError("offline action launched a process")), \
+        patch("subprocess.Popen", side_effect=AssertionError("offline action launched a process")):
+    assert call("target", "list", child=True)["targets"] == {"sample": expected}
+    for name, valid in (("sample", True), ("missing", False), ("", False), ("-bad", False)):
+        row = call("check", "remote", "--target=" + name, rc=3, child=True)
+        assert row["ready"] is False and row["target_valid"] is valid, row
+        assert row["enforced"]["filesystem"] is False and row["enforced"]["network"] is False
+        assert "not yet supported" in row["reason"]
+        assert "not yet supported" in call("run", "remote", "--target=" + name,
+                                           "--log", str(repo / "never.log"),
+                                           "--receipt", str(repo / "never.json"),
+                                           "--", "never-execute", rc=3)
+    for action in ("check", "run"):
+        suffix = ("--", "never-execute") if action == "run" else ()
+        for options in (("--target", "sample", "--adapter", "explicit"),
+                        ("--adapter", "explicit", "--target", "sample"),
+                        ("--adapter=", "--target=sample")):
+            assert "not allowed with argument" in call(action, "remote", *options, *suffix, rc=2)
+        for profile in ("isolated", "trusted-local"):
+            assert "requires the remote backend" in call(action, profile, "--target", "sample", *suffix, rc=2)
+assert registry.read_bytes() == saved
+assert not (repo / "never.log").exists() and not (repo / "never.json").exists()
+
+bad = [None, [], 0, {}, {"schema": 0, "targets": {}}, {"schema": True, "targets": {}},
+       {"schema": "1", "targets": {}}, {"schema": 1, "targets": []},
+       {"schema": 1, "targets": {}, "command": "ignored"}]
+for record in (None, [], 0, {}, dict(expected, command="ignored"),
+               {"ssh_alias": 0, "workdir": "/"}, {"ssh_alias": "bad@host", "workdir": "/"},
+               {"ssh_alias": "host", "workdir": 0}, {"ssh_alias": "host", "workdir": ""},
+               {"ssh_alias": "host", "workdir": "/\ud800"}):
+    bad.append({"schema": 1, "targets": {"sample": record}})
+bad.append({"schema": 1, "targets": {"-bad": expected}})
+for raw in [b"", b"{broken", b"\xff"] + [json.dumps(row).encode() for row in bad]:
+    registry.write_bytes(raw)
+    call("target", "list", rc=2)
+    call("target", "add", "new", "--ssh-alias", "new-host", "--workdir", "/new", rc=2)
+    call("target", "remove", "sample", rc=2)
+    assert call("check", "remote", "--target", "sample", rc=3)["target_valid"] is False
+    assert registry.read_bytes() == raw, "malformed state was overwritten"
+registry.write_bytes(saved)
+
+edge = copy.deepcopy(targets.listing(repo))
+edge["targets"]["edge"] = {"ssh_alias": "edge-host", "workdir": "/edge"}
+size = len(pretty_json(edge))
+for limit in (0, size - 1):
+    with patch.object(targets, "MAX_STATE_BYTES", limit):
+        call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+    assert registry.read_bytes() == saved
+with patch.object(targets, "MAX_STATE_BYTES", size):
+    assert call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge") == edge
+    assert call("target", "list") == edge
+call("target", "remove", "edge")
+assert registry.read_bytes() == saved
+
+with patch("oms_runtime.common.os.replace", side_effect=OSError("interrupted replacement")):
+    assert "cannot update" in call("target", "add", "edge", "--ssh-alias", "edge-host",
+                                   "--workdir", "/edge", rc=2)
+assert registry.read_bytes() == saved
+assert not list(registry.parent.glob(".targets.json.*")), "failed replacement leaked temporary state"
+
+# A completed rename followed by interruption leaves a whole committed file;
+# retrying the same addition refuses the duplicate instead of overwriting it.
+replace = os.replace
+def interrupted_after_replace(source, destination):
+    replace(source, destination)
+    raise OSError("interrupted after replacement")
+with patch("oms_runtime.common.os.replace", side_effect=interrupted_after_replace):
+    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+assert call("target", "list") == edge
+call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+call("target", "remove", "edge")
+
+outside = repo.parent / "outside-targets.json"
+outside.write_bytes(saved)
+registry.unlink()
+for kind in ("file", "runtime", "state"):
+    link = registry if kind == "file" else (registry.parent if kind == "runtime" else repo / ".oms")
+    destination = outside if kind == "file" else repo.parent / ("outside-" + kind)
+    if kind != "file":
+        destination.mkdir()
+        relative = "targets.json" if kind == "runtime" else "runtime/targets.json"
+        (destination / relative).parent.mkdir(parents=True, exist_ok=True)
+        (destination / relative).write_bytes(saved)
+        if kind == "state":
+            registry.parent.rmdir()
+        link.rmdir()
+    link.symlink_to(destination, target_is_directory=kind != "file")
+    call("target", "list", rc=2)
+    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+    call("target", "remove", "sample", rc=2)
+    assert call("check", "remote", "--target", "sample", rc=3)["target_valid"] is False
+    assert (destination if kind == "file" else destination / relative).read_bytes() == saved
+    link.unlink()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if kind != "file":
+        link.mkdir()
+registry.parent.mkdir(parents=True, exist_ok=True)
+registry.mkdir()
+call("target", "list", rc=2)
+call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+registry.rmdir()
+registry.write_bytes(saved)
+
+for parent in (registry.parent, repo / ".oms"):
+    registry.unlink()
+    registry.parent.rmdir()
+    if parent == repo / ".oms":
+        parent.rmdir()
+    parent.write_text("not a directory", encoding="utf-8")
+    call("target", "list", rc=2)
+    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+    call("target", "remove", "sample", rc=2)
+    assert parent.read_text(encoding="utf-8") == "not a directory"
+    parent.unlink()
+    registry.parent.mkdir(parents=True)
+    registry.write_bytes(saved)
+
+def parallel(actions, expected_codes):
+    command = [sys.executable, str(root / "scripts" / "lib" / "oms_core.py"), "--repo", str(repo), "backend", "target"]
+    environment = dict(os.environ, OMS_HARNESS_CHILD="")
+    children = [subprocess.Popen(command + list(args), env=environment, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True) for args in actions]
+    results = [(child.communicate(timeout=30), child.returncode) for child in children]
+    assert sorted(code for _, code in results) == sorted(expected_codes), results
+
+parallel([("add", "parallel" + str(i), "--ssh-alias", "host", "--workdir", "/work") for i in range(4)], [0] * 4)
+assert len(call("target", "list")["targets"]) == 5
+parallel([("remove", "parallel" + str(i)) for i in range(4)], [0] * 4)
+parallel([("add", "same", "--ssh-alias", "host", "--workdir", "/work")] * 2, [0, 2])
+assert set(call("target", "list")["targets"]) == {"sample", "same"}
+call("target", "remove", "same")
+assert registry.read_bytes() == saved
+if os.name == "posix":
+    assert registry.stat().st_mode & 0o777 == 0o600
+
+output = repo.parent / "targets-capsule.json"
+capsule.export(repo, output)
+portable = output.read_text(encoding="utf-8")
+assert all(value not in portable for value in ("targets.json", "ssh_alias", "sample-host", "/work/sample"))
+assert capsule.verify(output)["valid"] is True
+assert capsule.import_capsule(repo, output)["authority_transfer"] is False
+assert registry.read_bytes() == saved
+assert call("target", "remove", "sample")["targets"] == {}
+assert call("target", "list", child=True) == {"schema": 1, "targets": {}}
+assert "unknown remote target" in call("target", "remove", "sample", rc=2)
+PY
+}
+
 test_portable_capsule_import_surfaces_advisory_continuity() {
   local project="$TMP/portable-capsule-continuity"
   local capsule_file="$TMP/portable-capsule.json"
