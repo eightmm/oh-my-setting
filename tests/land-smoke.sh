@@ -1408,6 +1408,64 @@ for lock_kind in 0 1; do
   if python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True' "$TMP/active.json" 2>/dev/null; then
     python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["step"]=="gate" and r["minutes"]>=0, r' "$TMP/active.json" ||
       fail "status must report the active gate step: $(cat "$TMP/active.json")"
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active_matches_receipt"] is True' "$TMP/active.json" ||
+      fail "matching holder must identify the selected receipt"
+    crlf_bin="$TMP/crlf-python-$lock_kind"
+    mkdir -p "$crlf_bin"
+    OMS_TEST_REAL_PYTHON="$(command -v python3)"
+    export OMS_TEST_REAL_PYTHON
+    cat > "$crlf_bin/python3" <<'SHIM'
+#!/usr/bin/env bash
+case "${2:-}" in
+  *'r=json.load(sys.stdin)'*)
+    "$OMS_TEST_REAL_PYTHON" "$@" | awk '{printf "%s\r\n", $0}'
+    exit "${PIPESTATUS[0]}" ;;
+  *) exec "$OMS_TEST_REAL_PYTHON" "$@" ;;
+esac
+SHIM
+    chmod +x "$crlf_bin/python3"
+    PATH="$crlf_bin:$PATH" OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json > "$TMP/crlf-active.json" ||
+      fail "status failed with CRLF Python output"
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active_matches_receipt"] is True and r["step"] == "gate", r' "$TMP/crlf-active.json" ||
+      fail "CRLF Python output must preserve matching holder and step"
+    holder="$receipt_dir/active-holder"
+    cp "$holder" "$TMP/holder-backup"
+    bash -c ':' &
+    dead_holder_pid=$!
+    wait "$dead_holder_pid"
+    kill -0 "$dead_holder_pid" 2>/dev/null && fail "dead holder fixture PID was reused"
+    python3 - "$holder" "$dead_holder_pid" <<'PYDEAD'
+import json, sys
+path, pid = sys.argv[1:]
+with open(path, encoding="utf-8") as f:
+    holder = json.load(f)
+holder["pid"] = int(pid)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(holder, f)
+PYDEAD
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json > "$TMP/dead-active.json" || fail "status failed for dead holder"
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True and r["active_matches_receipt"] is False and "active_holder" not in r and "step" not in r, r' "$TMP/dead-active.json" || fail "dead holder must remain unknown"
+    cp "$TMP/holder-backup" "$holder"
+    python3 - "$holder" <<'PYTEST'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    holder = json.load(f)
+holder["receipt"] = "different.json"
+holder["sha"] = "0" * 40
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(holder, f)
+PYTEST
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json > "$TMP/other-active.json" ||
+      fail "status failed for another holder"
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True and r["active_matches_receipt"] is False and r["active_holder"] == "0"*40 and "step" not in r and "minutes" not in r, r' "$TMP/other-active.json" ||
+      fail "another holder must not inherit this receipt step"
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep 'lock is held by another landing' > /dev/null ||
+      fail "text status must identify another holder"
+    printf '{broken' > "$holder"
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json > "$TMP/other-active.json" || fail "malformed holder broke status"
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True and r["active_matches_receipt"] is False and "step" not in r, r' "$TMP/other-active.json" || fail "malformed holder must remain unattributed"
+    cp "$TMP/holder-backup" "$holder"
     OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep '^land .*: running (lock held)' > /dev/null ||
       fail "text status must say the lock is held"
     active_rc=0

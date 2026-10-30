@@ -777,9 +777,44 @@ land_active() {  # true | false | null, from a read-only probe of the land lock
   esac
 }
 
+# No cleanup trap: identity validation makes a crashed holder's record inert.
+run_job_with_holder() {
+  local rc=0
+  oms_file_lock_set_current_identity || { run_job; return $?; }
+  rm -f "$LAND_DIR/active-holder"
+  python3 - "$LAND_DIR/active-holder" "$STAMP.json" "${STAMP%%-*}" \
+    "$OMS_FILE_LOCK_CURRENT_PID" "$OMS_FILE_LOCK_CURRENT_START" <<'PYHOLDER' || { run_job; return $?; }
+import json, os, sys, tempfile
+path, receipt, sha, pid, start = sys.argv[1:]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".holder.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(dict(receipt=receipt, sha=sha, pid=int(pid), start=start), f)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PYHOLDER
+  run_job || rc=$?
+  rm -f "$LAND_DIR/active-holder"
+  return "$rc"
+}
+
 show_status() {  # show_status [RECEIPT]; default: this HEAD's newest, else the newest
-  local newest="${1:-}" active rc=0 head=""
+  local newest="${1:-}" active rc=0 head="" holder="" holder_pid="" holder_start="" current_start=""
   active="$(land_active)"
+  if [ "$active" = true ]; then
+    holder="$(cat "$LAND_DIR/active-holder" 2>/dev/null || true)"
+    holder_pid="$(printf '%s' "$holder" | python3 -c 'import json,sys; r=json.load(sys.stdin); p=r["pid"]; assert type(p) is int and p > 0; print(p)' 2>/dev/null || true)"
+    holder_start="$(printf '%s' "$holder" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r["start"], str) and r["start"]; print(r["start"])' 2>/dev/null || true)"
+    holder_pid="${holder_pid//$'\r'/}"
+    holder_start="${holder_start//$'\r'/}"
+    if [ -n "$holder_pid" ] && [ -n "$holder_start" ] && oms_file_lock_pid_alive "$holder_pid"; then
+      current_start="$(oms_file_lock_process_start_token "$holder_pid" 2>/dev/null || true)"
+      current_start="${current_start//$'\r'/}"
+    fi
+    [ -n "$current_start" ] && [ "$current_start" = "$holder_start" ] || holder=""
+  fi
   if [ "$ACTIVE_EXIT" -eq 1 ]; then
     case "$active" in true) rc=3 ;; false) rc=0 ;; *) rc=4 ;; esac
   fi
@@ -802,7 +837,7 @@ show_status() {  # show_status [RECEIPT]; default: this HEAD's newest, else the 
     echo "no landing recorded under $LAND_DIR"
     return 1
   fi
-  python3 - "$newest" "$active" "$JSON" "${head:-}" <<'PY' || return $?
+  python3 - "$newest" "$active" "$JSON" "${head:-}" "$holder" <<'PY' || return $?
 import calendar, json, sys, time
 from pathlib import Path
 r = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -815,10 +850,27 @@ try:
 except (OSError, ValueError):
     pass
 active = {"true": True, "false": False}.get(sys.argv[2])
+try:
+    holder = json.loads(sys.argv[5])
+    if (not isinstance(holder, dict) or not isinstance(holder.get("receipt"), str)
+            or not isinstance(holder.get("sha"), str)
+            or len(holder["sha"]) not in (40, 64)
+            or any(ch not in "0123456789abcdef" for ch in holder["sha"])):
+        holder = {}
+except (ValueError, TypeError):
+    holder = {}
+matches = bool(active is True and holder.get("receipt") == Path(sys.argv[1]).name
+               and holder.get("sha") == r.get("sha"))
 g, p, u, c = r.get("gate", {}), r.get("push", {}), r.get("update", {}), r.get("ci", {})
 if sys.argv[3] == "1":
     r["active"] = active
-    if active:
+    r.pop("step", None)
+    r.pop("minutes", None)
+    if active is True:
+        r["active_matches_receipt"] = matches
+        if holder.get("sha"):
+            r["active_holder"] = holder["sha"]
+    if matches:
         r["step"] = ("gate" if g.get("rc") == "pending" else "push" if p.get("rc") == "pending"
                      else "ci" if c.get("conclusion") == "pending"
                      else "sync" if r.get("sync", {}).get("state") == "running" else "update")
@@ -831,13 +883,17 @@ if sys.argv[3] == "1":
     sys.exit(0)
 state = r.get("state")
 receipt_state = state
-if state == "running" and active is True:
+if state == "running" and matches:
     state = "running (lock held)"
+elif state == "running" and active is True:
+    state = "receipt says running (lock held by another landing or unknown holder)"
 elif state == "running" and active is False:
     state = "receipt says running, but no land holds the lock (stale receipt)"
 elif state == "running" and active is None:
     state = "receipt says running, but lock activity is unknown"
 print("land %s: %s" % (str(r.get("sha", ""))[:7], state))
+if active is True and not matches:
+    print("  lock is held by another landing or an unknown holder")
 if sys.argv[4] and r.get("sha") != sys.argv[4]:
     print("  note: newest land in this repository, not this worktree's HEAD %s" % sys.argv[4][:7])
 if receipt_state == "running" or active is True:
@@ -886,7 +942,7 @@ case "$MODE" in
       trap land_ready_exit EXIT
     fi
     rc=0
-    oms_with_file_lock "$LAND_DIR/active" run_job || rc=$?
+    oms_with_file_lock "$LAND_DIR/active" run_job_with_holder || rc=$?
     if [ -n "$READY_FILE" ] && [ -f "$READY_FILE" ]; then
       ready_state=""
       IFS= read -r ready_state < "$READY_FILE" || true
