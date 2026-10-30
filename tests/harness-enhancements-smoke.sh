@@ -507,6 +507,257 @@ EOF
   grep -Fxq 'check: overlap-smoke.test_selected_failure FAILED' "$out" ||
     fail "a failed smoke test must be named for the fail ledger: $(cat "$out")"
 
+  cat > "$TMP/serial-signal-smoke.sh" <<'EOF'
+test_serial_signal() {
+  echo "$$" > "$OMS_TEST_SERIAL_SUITE_PID"
+  python3 -c 'import os, pathlib, signal; pathlib.Path(os.environ["OMS_TEST_SERIAL_CHILD_PID"]).write_text(str(os.getpid())); signal.pause()'
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_serial_signal
+# SMOKE_TEST_CALLS_END
+EOF
+  python3 - "$ROOT" "$TMP" <<'PY_SERIAL' || fail "serial SIGINT left smoke processes running"
+import os, pathlib, signal, subprocess, sys, time
+root, tmp = sys.argv[1:]
+if os.name != 'posix':
+    print('SKIP: serial process-group signal probe requires POSIX')
+    raise SystemExit(0)
+suite_pid = pathlib.Path(tmp, 'serial-suite-pid')
+child_pid = pathlib.Path(tmp, 'serial-child-pid')
+env = dict(os.environ, OMS_SMOKE_SUITE=tmp+'/serial-signal-smoke.sh',
+           OMS_TEST_SERIAL_SUITE_PID=str(suite_pid), OMS_TEST_SERIAL_CHILD_PID=str(child_pid))
+timeout = float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
+process = subprocess.Popen([root+'/tests/run-smoke-shard.sh'], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+def alive(pid):
+    try:
+        state = subprocess.check_output(['ps', '-o', 'stat=', '-p', str(pid)], text=True).strip()
+        return bool(state) and not state.startswith('Z')
+    except subprocess.CalledProcessError:
+        return False
+try:
+    until = time.monotonic() + timeout
+    while not child_pid.exists() and time.monotonic() < until:
+        assert process.poll() is None
+        time.sleep(.02)
+    assert child_pid.exists() and suite_pid.exists(), 'serial suite did not start'
+    pids = [int(suite_pid.read_text()), int(child_pid.read_text())]
+    os.killpg(process.pid, signal.SIGINT)
+    process.wait(timeout=timeout)
+    until = time.monotonic() + timeout
+    while any(alive(pid) for pid in pids) and time.monotonic() < until:
+        time.sleep(.02)
+    assert not any(alive(pid) for pid in pids), pids
+finally:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.wait(timeout=timeout)
+PY_SERIAL
+
+  cat > "$TMP/orphan-smoke.sh" <<'EOF'
+test_slow() {
+  echo "$PPID" > "$OMS_TEST_SLOW_READY"
+  sleep 60
+}
+test_orphan() {
+  sleep 60 >/dev/null 2>&1 &
+  echo "$!" > "$OMS_TEST_ORPHAN_PID"
+  echo "$PPID" > "$OMS_TEST_ORPHAN_RUNNER"
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_slow
+test_orphan
+# SMOKE_TEST_CALLS_END
+EOF
+  python3 - "$ROOT" "$TMP" <<'PY_ORPHAN' || fail "deadline cleanup left an orphan"
+import os, pathlib, signal, subprocess, sys, time
+root, tmp = sys.argv[1:]
+if os.name != 'posix':
+    print('SKIP: orphan process-group probe requires POSIX')
+    raise SystemExit(0)
+marker = pathlib.Path(tmp, 'orphan-marker')
+slow = pathlib.Path(tmp, 'orphan-slow')
+child_file = pathlib.Path(tmp, 'orphan-child')
+runner_file = pathlib.Path(tmp, 'orphan-runner')
+env = dict(os.environ, OMS_SMOKE_SUITE=tmp+'/orphan-smoke.sh',
+           OMS_CHECK_DEADLINE_MARKER=str(marker), OMS_TEST_SLOW_READY=str(slow),
+           OMS_TEST_ORPHAN_PID=str(child_file), OMS_TEST_ORPHAN_RUNNER=str(runner_file))
+timeout = float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
+process = subprocess.Popen([root+'/tests/run-smoke-shard.sh', '--jobs', '2'], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+def alive(pid):
+    try:
+        stat = subprocess.check_output(['ps', '-o', 'stat=', '-p', str(pid)], text=True).strip()
+        return bool(stat) and not stat.startswith('Z')
+    except subprocess.CalledProcessError:
+        return False
+child = None
+try:
+    until = time.monotonic() + timeout
+    while not (slow.exists() and child_file.exists() and runner_file.exists()) and time.monotonic() < until:
+        assert process.poll() is None
+        time.sleep(.02)
+    assert slow.exists() and child_file.exists() and runner_file.exists()
+    child, runner = int(child_file.read_text()), int(runner_file.read_text())
+    while alive(runner) and time.monotonic() < until:
+        time.sleep(.02)
+    assert not alive(runner) and alive(child), (runner, child)
+    marker.write_text('deadline')
+    process.send_signal(signal.SIGTERM)
+    os.killpg(int(slow.read_text()), signal.SIGTERM)
+    process.wait(timeout=timeout)
+    until = time.monotonic() + timeout
+    while alive(child) and time.monotonic() < until:
+        time.sleep(.02)
+    assert not alive(child), child
+finally:
+    if child is not None and alive(child):
+        os.kill(child, signal.SIGKILL)
+    if process.poll() is None:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=timeout)
+PY_ORPHAN
+
+  cat > "$TMP/deadline-smoke.sh" <<'EOF'
+test_deadline() {
+  sleep 60
+}
+test_deadline_two() {
+  sleep 60
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_deadline
+test_deadline_two
+# SMOKE_TEST_CALLS_END
+EOF
+  cat > "$TMP/exit124-smoke.sh" <<'EOF'
+test_exit124() {
+  return 124
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_exit124
+# SMOKE_TEST_CALLS_END
+EOF
+  cat > "$TMP/teardown-smoke.sh" <<'EOF'
+test_completed() {
+  :
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_completed
+# SMOKE_TEST_CALLS_END
+sleep 60
+EOF
+  python3 - "$ROOT" "$TMP" <<'PY_CANCEL' || fail "cancelled test was attributed to the later deadline"
+import os, pathlib, subprocess, sys
+root, tmp = sys.argv[1:]
+if os.name != 'posix':
+    print('SKIP: cancellation probe requires POSIX')
+    raise SystemExit(0)
+source = pathlib.Path(root, 'scripts/check.sh').read_text()
+source = source.split('run_stage_with_deadline() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+marker = pathlib.Path(tmp, 'cancel-marker')
+helper = '''import os, pathlib, signal, subprocess, sys, time
+runner, marker, timeout = sys.argv[1], pathlib.Path(sys.argv[2]), float(sys.argv[3])
+p = subprocess.Popen([runner], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+try:
+    until = time.monotonic() + timeout
+    while time.monotonic() < until:
+        files = list(marker.parent.glob(marker.name + '.progress.*'))
+        if any('test_deadline' in f.read_text() for f in files):
+            break
+        if p.poll() is not None:
+            raise RuntimeError('runner exited before progress')
+        time.sleep(.02)
+    else:
+        raise RuntimeError('runner progress did not appear')
+    os.killpg(p.pid, signal.SIGTERM)
+    p.wait(timeout=timeout)
+    pathlib.Path(str(marker) + '.cancelled').touch()
+    signal.pause()
+finally:
+    if p.poll() is None:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait(timeout=timeout)
+'''
+timeout = float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
+env = dict(os.environ, OMS_SMOKE_SUITE=tmp+'/deadline-smoke.sh', OMS_CHECK_DEADLINE_MARKER=str(marker))
+wall = max(1, int(timeout) - 15)
+result = subprocess.run([sys.executable, '-c', source, 'bash', str(wall), sys.executable, '-c', helper,
+                         root+'/tests/run-smoke-shard.sh', str(marker), str(timeout)],
+                        env=env, capture_output=True, text=True, timeout=timeout)
+assert pathlib.Path(str(marker) + '.cancelled').exists(), (result.stdout, result.stderr)
+assert result.returncode == 124, (result.stdout, result.stderr)
+assert 'deadline-smoke.test_deadline INTERRUPTED' not in result.stdout, result.stdout
+PY_CANCEL
+  python3 - "$ROOT" "$TMP/deadline-smoke.sh" "$TMP" <<'PY_DEADLINE' || fail "deadline smoke label was incorrect"
+import os, pathlib, subprocess, sys
+root, suite, tmp = sys.argv[1:]
+source = pathlib.Path(root, 'scripts/check.sh').read_text()
+source = source.split('run_stage_with_deadline() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+marker = pathlib.Path(tmp, 'deadline-marker')
+env = dict(os.environ, OMS_SMOKE_SUITE=suite, OMS_CHECK_DEADLINE_MARKER=str(marker))
+check = pathlib.Path(root, 'scripts/check.sh').read_text()
+functions = check[check.index('run_stage_with_deadline() {'):check.index('# CI hosts have no provider CLI')]
+stage_env = dict(os.environ, OMS_SMOKE_SUITE=suite, OMS_CHECK_STAGE_TIMEOUT_SECONDS='2',
+                 CHECK_RUNTIME=tmp, TMPDIR=tmp, BASH='bash', FOCUSED_LANE='', LIST_STAGES='0')
+stage_call = functions + '\nstage smoke "$1" --only test_deadline\n'
+result = subprocess.run(['bash', '-c', stage_call, 'probe', root+'/tests/run-smoke-shard.sh'],
+                        env=stage_env, capture_output=True, text=True,
+                        timeout=float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert result.returncode == 124, (result.stdout, result.stderr)
+assert 'check: deadline-smoke.test_deadline INTERRUPTED (stage deadline)' in result.stdout, (result.stdout, result.stderr)
+assert 'check: deadline-smoke.test_deadline FAILED' not in result.stdout
+assert 'check: smoke FAILED ' in result.stderr
+land = pathlib.Path(root, 'scripts/land.sh').read_text()
+block = land.split('      failed_stages="$(awk -v marker=', 1)[1].split('      "$ROOT/scripts/fail-ledger.sh"', 1)[0]
+block = 'failed_stages="$(awk -v marker=' + block + 'printf "%s" "$failed_stages"'
+log = pathlib.Path(tmp, 'land-deadline.log')
+log.write_text('attempt-start\n' + result.stderr + result.stdout + 'check: smoke FAILED (2s)\n')
+def summary(rc):
+    return subprocess.check_output(['bash', '-c', block], text=True,
+                                   env=dict(os.environ, marker='attempt-start', LOG=str(log), rc=str(rc)))
+assert summary(124) == 'smoke stage deadline ', summary(124)
+assert summary(1) == 'smoke stage deadline ', summary(1)
+log.write_text('attempt-start\ncheck: deadline diagnostics retained: log\ncheck: smoke FAILED (2s)\n')
+assert summary(1) == 'smoke ', summary(1)
+log.write_text('attempt-start\ncheck: smoke FAILED (1s)\n')
+assert summary(3) == 'smoke ', summary(3)
+stage_env['OMS_SMOKE_SUITE'] = tmp+'/exit124-smoke.sh'
+immediate = subprocess.run(['bash', '-c', functions + '\nstage smoke "$1"\n', 'probe', root+'/tests/run-smoke-shard.sh'],
+                           env=stage_env, capture_output=True, text=True,
+                           timeout=float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert immediate.returncode == 124, (immediate.stdout, immediate.stderr)
+assert 'INTERRUPTED' not in immediate.stdout + immediate.stderr
+log.write_text('attempt-start\n' + immediate.stderr + immediate.stdout)
+assert 'stage deadline' not in summary(124), summary(124)
+timed_env = dict(stage_env, OMS_SMOKE_TIMINGS='1')
+timed = subprocess.run([root+'/tests/run-smoke-shard.sh'], env=timed_env, capture_output=True, text=True,
+                       timeout=float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert timed.returncode == 124, (timed.stdout, timed.stderr)
+assert 'check: exit124-smoke.test_exit124 FAILED' in timed.stdout, timed.stdout
+stage_env['OMS_SMOKE_SUITE'] = tmp+'/teardown-smoke.sh'
+teardown = subprocess.run(['bash', '-c', functions + '\nstage smoke "$1"\n', 'probe', root+'/tests/run-smoke-shard.sh'],
+                          env=stage_env, capture_output=True, text=True,
+                          timeout=float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert teardown.returncode == 124, (teardown.stdout, teardown.stderr)
+assert 'teardown-smoke.test_completed INTERRUPTED' not in teardown.stdout + teardown.stderr, (teardown.stdout, teardown.stderr)
+bracket = pathlib.Path(tmp, 'marker[review]')
+bracket.mkdir()
+env['TMPDIR'] = str(bracket)
+env['OMS_CHECK_DEADLINE_MARKER'] = str(bracket / 'deadline-marker')
+parallel = subprocess.run([sys.executable, '-c', source, 'bash', '2',
+                           root+'/tests/run-smoke-shard.sh', '--jobs', '2'],
+                          env=env, capture_output=True, text=True,
+                          timeout=float(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert parallel.returncode == 124, (parallel.stdout, parallel.stderr)
+for name in ('test_deadline', 'test_deadline_two'):
+    assert 'check: deadline-smoke.' + name + ' INTERRUPTED (stage deadline)' in parallel.stdout, parallel.stdout
+    assert 'check: deadline-smoke.' + name + ' FAILED' not in parallel.stdout
+PY_DEADLINE
+
   local signal_suite="$TMP/signal-smoke.sh"
   local signal_tmp="$TMP/signal-tmp"
   local leader child fast linger linger_state="" status=0

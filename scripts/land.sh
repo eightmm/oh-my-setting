@@ -584,6 +584,13 @@ run_job() {
       # ledger is queryable where scattered gate logs are not.
       failed_stages="$(awk -v marker="$marker" 'index($0, marker) { current=1; next } current { print }' "$LOG" |
         sed -n 's/^check: \([^ ]*\) FAILED.*/\1/p' | sort -u | tr '\n' ' ')"
+      if awk -v marker="$marker" '
+        index($0, marker) { current=1; next }
+        current && /^check: stage deadline triggered$/ { found=1 }
+        END { exit !found }
+      ' "$LOG"; then
+        failed_stages="${failed_stages}stage deadline "
+      fi
       load_note=''
       if [ -n "$load_start" ] && [ -n "$load_end" ] && [ -n "$cpus" ]; then
         load_note=" (load $load_start->$load_end on $cpus CPUs)"

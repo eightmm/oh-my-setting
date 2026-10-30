@@ -32,6 +32,7 @@ running nothing.
 A passing run prints one line with its duration. Set OMS_VERBOSE=1 for the full
 test output; a failing run always prints everything. OMS_SMOKE_TIMINGS=1 prints
 the slowest tests, bounded by OMS_SMOKE_TIMING_LIMIT (default 10).
+When a check stage reaches its deadline, the running test is marked INTERRUPTED.
 EOF
 }
 
@@ -284,17 +285,24 @@ awk -v timings="$TIMINGS" -v members=" $(printf '%s' "$members" | tr '\n' ' ') "
       print "  local oms_smoke_name=\"$1\""
       print "  local oms_smoke_started=\"$(date +%s)\""
       print "  local oms_smoke_elapsed"
+      print "  local oms_smoke_status"
       print "  \"$oms_smoke_name\""
+      print "  oms_smoke_status=$?"
       print "  oms_smoke_elapsed=$(($(date +%s) - oms_smoke_started))"
       print "  printf \047%s\\t%s\\n\047 \"$oms_smoke_elapsed\" \"$oms_smoke_name\" >> \"$OMS_SMOKE_TIMING_FILE\""
+      print "  return \"$oms_smoke_status\""
       print "}"
     }
     for (i=1; i<=count; i++) {
       if (index(members, " " names[i] " ") == 0) continue
       # The marker names the test a failure belongs to.
+      print "if [ -n \"${OMS_CHECK_SMOKE_PROGRESS:-}\" ]; then printf \047%s\\n\047 " names[i] " >> \"$OMS_CHECK_SMOKE_PROGRESS\" || true; fi"
       print "printf \047smoke-test: %s\\n\047 " names[i]
       if (timings == "1") print "oms_smoke_run_test " names[i]
       else print names[i]
+      print "oms_smoke_status=$?"
+      print "if [ -n \"${OMS_CHECK_SMOKE_PROGRESS:-}\" ]; then printf \047\\n\047 >> \"$OMS_CHECK_SMOKE_PROGRESS\" || true; fi"
+      print "(exit \"$oms_smoke_status\")"
     }
     emitted=1
     tail=1
@@ -319,7 +327,14 @@ awk -v timings="$TIMINGS" -v members=" $(printf '%s' "$members" | tr '\n' ' ') "
 # agent has to read and pay for. A failure prints everything.
 run_log="$(mktemp "${TMPDIR:-/tmp}/oms-smoke-run.XXXXXX")"
 timing_file=""
-trap 'rm -f "$RUN_SCRIPT" "$run_log" ${timing_file:+"$timing_file"}' EXIT
+progress_file=""
+trap 'rm -f "$RUN_SCRIPT" "$run_log" ${timing_file:+"$timing_file"} ${progress_file:+"$progress_file"}' EXIT
+if [ -n "${OMS_CHECK_DEADLINE_MARKER:-}" ]; then
+  progress_file="$(mktemp "${OMS_CHECK_DEADLINE_MARKER}.progress.XXXXXX" 2>/dev/null)" || progress_file=""
+  if [ -n "$progress_file" ]; then
+    printf '%s\n' "$(basename "$SUITE" .sh)" > "$progress_file" || progress_file=""
+  fi
+fi
 if [ "$TIMINGS" = "1" ]; then
   case "$TIMING_LIMIT" in
     *[!0-9]*|"") fail "OMS_SMOKE_TIMING_LIMIT requires a positive integer" ;;
@@ -330,7 +345,12 @@ fi
 run_started="$(date +%s)"
 run_status=0
 OMS_SMOKE_RUNNER_ACTIVE=1 OMS_TEST_ROOT="$ROOT" \
-  OMS_SMOKE_TIMING_FILE="$timing_file" bash "$RUN_SCRIPT" > "$run_log" 2>&1 || run_status=$?
+  OMS_SMOKE_TIMING_FILE="$timing_file" OMS_CHECK_SMOKE_PROGRESS="$progress_file" bash "$RUN_SCRIPT" > "$run_log" 2>&1 || run_status=$?
+active_test=""
+if [ -n "$progress_file" ] && [ -f "$progress_file" ]; then
+  active_test="$(tail -n 1 "$progress_file")"
+fi
+[ -z "$progress_file" ] || : > "$progress_file" || true
 run_elapsed=$(( $(date +%s) - run_started ))
 if [ "$run_status" -ne 0 ] || [ "${OMS_VERBOSE:-0}" = "1" ]; then
   cat "$run_log"
@@ -338,7 +358,13 @@ fi
 if [ "$run_status" -ne 0 ]; then
   # Same shape as a check stage, so the land fail ledger records the test.
   failed_test="$(sed -n 's/^smoke-test: //p' "$run_log" | tail -n 1)"
-  [ -z "$failed_test" ] || echo "check: $(basename "$SUITE" .sh).$failed_test FAILED"
+  if [ -n "$failed_test" ]; then
+    if [ -n "${OMS_CHECK_DEADLINE_MARKER:-}" ] && [ -f "$OMS_CHECK_DEADLINE_MARKER" ]; then
+      [ "$active_test" != "$failed_test" ] || echo "check: $(basename "$SUITE" .sh).$failed_test INTERRUPTED (stage deadline)"
+    else
+      echo "check: $(basename "$SUITE" .sh).$failed_test FAILED"
+    fi
+  fi
 fi
 if [ -n "$timing_file" ] && [ -s "$timing_file" ]; then
   LC_ALL=C sort -rn "$timing_file" | sed -n "1,${TIMING_LIMIT}p" |

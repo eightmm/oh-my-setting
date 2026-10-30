@@ -443,7 +443,7 @@ CHECK_STATE_GUARD_ACTIVE=1
 # suites create additional process groups, so a deadline must also follow PPIDs.
 run_stage_with_deadline() {  # SECONDS COMMAND...
   exec python3 - "$BASH" "$@" <<'PY'
-import os, signal, subprocess, sys, time
+import glob, os, signal, subprocess, sys, time
 
 bash, wall, *command = sys.argv[1:]
 try:
@@ -543,6 +543,21 @@ try:
     rc = process.wait(timeout=seconds)
 except subprocess.TimeoutExpired:
     print('error: stage deadline exceeded after %ss: %s' % (wall, command[0]), file=sys.stderr)
+    marker = os.environ.get('OMS_CHECK_DEADLINE_MARKER')
+    if marker:
+        try:
+            with open(marker, 'w') as handle:
+                handle.write('deadline\n')
+            for path in glob.glob(glob.escape(marker) + '.progress.*'):
+                try:
+                    with open(path) as progress:
+                        lines = progress.read().splitlines()
+                    if len(lines) >= 2 and lines[-1]:
+                        print('check: %s.%s INTERRUPTED (stage deadline)' % (lines[0], lines[-1]), flush=True)
+                except OSError:
+                    pass
+        except OSError as exc:
+            print('warning: could not record stage deadline: %s' % exc, file=sys.stderr)
     for sig in forwarded:
         signal.signal(sig, signal.SIG_IGN)
     stop()
@@ -555,7 +570,7 @@ PY
 # agent between edits, and a green run has nothing to say beyond "ok".
 stage() {  # stage NAME COMMAND...
   local name="$1"
-  local log
+  local log deadline_marker
   local rc=0
   local started elapsed deadline=1800
   shift
@@ -586,7 +601,8 @@ stage() {  # stage NAME COMMAND...
   # Recorded operator stage: 1,179s. Leave room for slower shared hosts; CI
   # bounds the whole lane separately rather than tightening fixture assertions.
   [ "$name" != operator-tools ] || deadline=3600
-  run_stage_with_deadline "${OMS_CHECK_STAGE_TIMEOUT_SECONDS:-$deadline}" "$@" > "$log" 2>&1 &
+  deadline_marker="$CHECK_RUNTIME/${log##*/}.deadline"
+  OMS_CHECK_DEADLINE_MARKER="$deadline_marker" run_stage_with_deadline "${OMS_CHECK_STAGE_TIMEOUT_SECONDS:-$deadline}" "$@" > "$log" 2>&1 &
   CHECK_STAGE_PID=$!
   wait "$CHECK_STAGE_PID" || rc=$?
   CHECK_STAGE_PID=""
@@ -621,7 +637,12 @@ stage() {  # stage NAME COMMAND...
     rm -f "$log"
   fi
   if [ "$rc" -ne 0 ]; then
-    [ "$rc" -ne 124 ] || echo "check: deadline diagnostics retained: $log" >&2
+    if [ -f "$deadline_marker" ]; then
+      echo "check: stage deadline triggered" >&2
+      echo "check: deadline diagnostics retained: $log" >&2
+    elif [ "$rc" -eq 124 ]; then
+      echo "check: failure diagnostics retained: $log" >&2
+    fi
     echo "check: $name FAILED (${elapsed}s)" >&2
     exit "$rc"
   fi
