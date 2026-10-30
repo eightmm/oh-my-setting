@@ -277,7 +277,7 @@ def exercise_exact_model_routing():
                         row for row in rows if row["provider"] in selection.split(",")]), \
                         patch.object(panel, "selected_route", return_value=exact_route), \
                         patch.object(panel, "routing_status", return_value={}), \
-                        patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
+                        patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: args[-2]):
                     fallback = panel.dispatch(project, "codex", "worker", None, "read", "explain", prompt="Inspect source.")
                     assert (fallback["provider"] if fallback else None) == expected, fallback
             # The board and discovery keep handling a third tier provider without promoting a main.
@@ -431,7 +431,7 @@ def exercise_public_only_routing():
             patch.object(panel, "routing_status", return_value={}), \
             patch.object(panel, "provider_catalog", side_effect=route_catalog), \
             patch.object(panel, "alternate_route", wraps=panel.alternate_route) as alternate, \
-            patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
+            patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: args[-2]):
         fallback = panel.dispatch(state_repo, "codex", "worker", None, "read", "explain",
                                   prompt="Inspect source.", work_repo=work_repo)
         assert fallback is None, fallback
@@ -1292,7 +1292,7 @@ assert alternate_route(automatic, both, provider_status={other: {"weekly_used": 
 assert alternate_route(automatic, {"codex", "claude"}, {other: {"weekly_used": 97.2}}) is None
 with patch.object(panel, "selected_route", return_value=explicit), \
         patch.object(panel, "provider_catalog", side_effect=AssertionError("explicit --to queried fallback")), \
-        patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
+        patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: args[-2]):
     assert panel.dispatch(project, "claude", "worker", None, "read", None,
                           prompt="explicit route", target="codex", model="gpt-6-luna") is None
 recorded = {"codex": {"weekly_used": 90}, "claude": {"weekly_used": None}}
@@ -1303,7 +1303,7 @@ def dispatched_fallback(readings):
                                                                   binary="claude", effort="medium")), \
             patch.object(panel, "provider_catalog", side_effect=lambda name="all": [row for row in catalog if row["provider"] == name]), \
             patch.object(panel, "routing_status", return_value=readings) as status, \
-            patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
+            patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: args[-2]):
         result = panel.dispatch(project, "claude", "worker", None, "write", "implement", brief=str(fallback_brief),
                                 verify="true")
         status.assert_called_once()

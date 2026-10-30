@@ -4807,7 +4807,7 @@ PY
     elif [ -z "${OMS_PANEL_FALLBACK_PROVIDER:-}" ] || [ -z "${OMS_PANEL_FALLBACK_MODEL:-}" ]; then
       panel_fallback_skip=no-fallback-route
     elif [ -z "$panel_fallback_skip" ]; then
-      panel_fallback_skip=provider-failure
+      panel_fallback_skip="provider-failure"
     fi
     ma_record_panel_fallback_skip "$panel_fallback_skip" "$provider_status" "$state_repo" "$artifact"
   fi
