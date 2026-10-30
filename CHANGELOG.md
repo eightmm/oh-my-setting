@@ -8,6 +8,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Scoped panel write workers get a bounded list of graph consumers outside
+  their scope in the first prompt, with an instruction to keep them compatible.
+- Accepted `oms panel --finalize` without `--evidence` records the unique
+  digest-verified admission report of each landed patch and refuses when it is
+  missing or ambiguous.
+- Panel guidance says shared release bookkeeping stays out of parallel worker
+  briefs and the main writes it once per landing batch.
+- A smoke test killed by the stage deadline is reported as `INTERRUPTED (stage
+  deadline)`; the land ledger names a stage deadline only when the deadline
+  marker proves it fired, not for any exit 124.
+
 - Without `scripts/check.sh`, `oms peer-delegate` and gated `oms peer-review`
   print the PROJECT.md verify command as a suggested `--verify` instead of
   guessing a verifier.
@@ -134,6 +145,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Panel-observed write attempts record their plan lease, so `oms panel
+  --accept` matches real panel workers instead of refusing every candidate.
+- A panel call whose provider exits cleanly waits up to 30s for the subreaper
+  supervisor's exhaustion receipt instead of ending "settlement pending" with
+  status 1, a skipped review gate and reserved scope.
+- A stage-deadline stop waits up to 5s for the descendants it killed to
+  disappear before `check.sh` exits.
 - A parallel autopilot batch no longer parks with `batch contract changed`
   after a task that edits an acceptance file lands with verifier-change
   consent: the batch binds the project contract with acceptance-manifest
