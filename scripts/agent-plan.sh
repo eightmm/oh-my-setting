@@ -73,6 +73,9 @@ EXPECTED_TASK_SHA256=""
 EXPECTED_TASK_SHA256_SET=0
 EXPECTED_CANCEL_LEASE=""
 EXPECTED_CANCEL_LEASE_SET=0
+ALL_INACTIVE=0
+CANCEL_ID_SET=0
+CANCEL_STATE_SET=0
 OPERATOR_CONSENT=""
 DECISION_ARTIFACT=""
 EXPECTED_DECISION_ARTIFACT_SHA256=""
@@ -163,6 +166,10 @@ Commands:
                                      ready/blocked task. Preserves task evidence;
                                      cancelled is closed, never verified or a
                                      dependency-satisfying state.
+  cancel --all-inactive --expected-plan-sha256 SHA --operator-consent cancel
+         --reason TEXT --decision-artifact REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Cancel unleased ready/blocked tasks in one write.
          --id ID --landed-commit SHA  Complete reviewed work integrated by
                                      commit. Requires an exact-SHA oms land
                                      receipt with passed gate/push/CI and
@@ -282,13 +289,13 @@ while [ "$#" -gt 0 ]; do
     --*) COMPLETION_OTHER_OPTION=1 ;;
   esac
   case "$1" in
-    --repo|--id|--expected-plan-sha256|--expected-task-sha256|--expected-state|--expected-lease-id|--operator-consent|--reason|--decision-artifact|--expected-decision-artifact-sha256) ;;
+    --repo|--id|--all-inactive|--expected-plan-sha256|--expected-task-sha256|--expected-state|--expected-lease-id|--operator-consent|--reason|--decision-artifact|--expected-decision-artifact-sha256) ;;
     --*) CANCEL_OTHER_OPTION=1 ;;
   esac
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
     --file) [ "$#" -ge 2 ] || fail "--file requires path"; PLAN_FILE="$2"; PLAN_FILE_SET=1; shift 2 ;;
-    --id) [ "$#" -ge 2 ] || fail "--id requires value"; ID="$2"; shift 2 ;;
+    --id) [ "$#" -ge 2 ] || fail "--id requires value"; ID="$2"; CANCEL_ID_SET=1; shift 2 ;;
     --title) [ "$#" -ge 2 ] || fail "--title requires text"; TITLE="$2"; shift 2 ;;
     --goal) [ "$#" -ge 2 ] || fail "--goal requires text"; GOAL="$2"; shift 2 ;;
     --provider) [ "$#" -ge 2 ] || fail "--provider requires name"; PROVIDER="$2"; shift 2 ;;
@@ -336,8 +343,9 @@ while [ "$#" -gt 0 ]; do
     --accept-files) [ "$#" -ge 2 ] || fail "--accept-files requires a value"; ACCEPT_FILES="$2"; shift 2 ;;
     --owner-id) [ "$#" -ge 2 ] || fail "--owner-id requires a value"; OWNER_ID="$2"; shift 2 ;;
     --markers-dir) [ "$#" -ge 2 ] || fail "--markers-dir requires a path"; MARKERS_DIR="$2"; shift 2 ;;
-    --expected-state) [ "$#" -ge 2 ] || fail "--expected-state requires a value"; EXPECTED_STATE="$2"; shift 2 ;;
+    --expected-state) [ "$#" -ge 2 ] || fail "--expected-state requires a value"; EXPECTED_STATE="$2"; CANCEL_STATE_SET=1; shift 2 ;;
     --expected-lease-id) [ "$#" -ge 2 ] || fail "--expected-lease-id requires a value"; EXPECTED_CANCEL_LEASE="$2"; EXPECTED_CANCEL_LEASE_SET=1; shift 2 ;;
+    --all-inactive) ALL_INACTIVE=1; shift ;;
     --check) CHECK_ONLY=1; shift ;;
     --apply) APPLY=1; shift ;;
     --disposition) [ "$#" -ge 2 ] || fail "--disposition requires a value"; DISPOSITION="$2"; shift 2 ;;
@@ -392,6 +400,7 @@ done
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
 [ "$CHECK_ONLY" = 0 ] || [ "$ACTION" = recover-lease ] || [ "$ACTION" = retire ] ||
   fail "--check is valid only with recover-lease or retire"
+[ "$ALL_INACTIVE" = 0 ] || [ "$ACTION" = cancel ] || fail "--all-inactive requires cancel"
 [ "$APPLY" = 0 ] || [ "$ACTION" = retire ] || fail "--apply is valid only with retire"
 [ "$APPLY" = 0 ] || [ "$CHECK_ONLY" = 0 ] || fail "retire --apply and --check are mutually exclusive"
 [ -z "$REUSE_PASS_RUN" ] || [ "$ACTION" = accept ] || fail "--reuse-pass requires accept"
@@ -414,26 +423,32 @@ case "$ACTION" in
   cancel)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
       fail "cancel is parent-only"
-    [ "$ID" ] && [ "$EXPECTED_TASK_SHA256_SET" = 1 ] &&
-      [ -n "$EXPECTED_PLAN_SHA256" ] && [ "$OPERATOR_CONSENT" = cancel ] &&
-      { [ "$EXPECTED_STATE" = ready ] || [ "$EXPECTED_STATE" = blocked ]; } &&
-      [ "$EXPECTED_CANCEL_LEASE_SET" = 1 ] &&
+    [ -n "$EXPECTED_PLAN_SHA256" ] && [ "$OPERATOR_CONSENT" = cancel ] &&
       [ -n "$REASON" ] && [ -n "$DECISION_ARTIFACT" ] &&
       [ -n "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
-      fail "cancel requires exact plan/task CAS, --operator-consent cancel, --reason and decision-artifact digest"
+      fail "cancel requires plan CAS, --operator-consent cancel, --reason and decision-artifact digest"
+    if [ "$ALL_INACTIVE" = 1 ]; then
+      [ "$CANCEL_ID_SET" = 0 ] && [ "$EXPECTED_TASK_SHA256_SET" = 0 ] &&
+        [ "$CANCEL_STATE_SET" = 0 ] && [ "$EXPECTED_CANCEL_LEASE_SET" = 0 ] ||
+        fail "--all-inactive cannot be combined with task-specific options"
+    else
+      [ -n "$ID" ] && [ "$EXPECTED_TASK_SHA256_SET" = 1 ] &&
+        { [ "$EXPECTED_STATE" = ready ] || [ "$EXPECTED_STATE" = blocked ]; } &&
+        [ "$EXPECTED_CANCEL_LEASE_SET" = 1 ] || fail "cancel requires exact task/state/lease CAS"
+    fi
     [ -z "$COMPLETION_BUNDLE$EXPECTED_COMPLETION_BUNDLE_SHA256" ] &&
       [ "$CANCEL_OTHER_OPTION" = 0 ] ||
       fail "cancel options cannot be mixed with completion or unrelated options"
     [ "${#EXPECTED_PLAN_SHA256}" -eq 64 ] &&
       [ "${EXPECTED_PLAN_SHA256#*[!0-9a-f]}" = "$EXPECTED_PLAN_SHA256" ] ||
       fail "cancel requires a lowercase plan SHA-256"
-    [ "${#EXPECTED_TASK_SHA256}" -eq 64 ] &&
+    [ "$ALL_INACTIVE" = 1 ] || { [ "${#EXPECTED_TASK_SHA256}" -eq 64 ] &&
       [ "${EXPECTED_TASK_SHA256#*[!0-9a-f]}" = "$EXPECTED_TASK_SHA256" ] ||
-      fail "cancel requires a lowercase task SHA-256"
+      fail "cancel requires a lowercase task SHA-256"; }
     [ "${#EXPECTED_DECISION_ARTIFACT_SHA256}" -eq 64 ] &&
       [ "${EXPECTED_DECISION_ARTIFACT_SHA256#*[!0-9a-f]}" = "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
       fail "cancel requires a lowercase decision-artifact SHA-256"
-    [ "$EXPECTED_CANCEL_LEASE" = none ] ||
+    [ "$ALL_INACTIVE" = 1 ] || [ "$EXPECTED_CANCEL_LEASE" = none ] ||
       { [ "${#EXPECTED_CANCEL_LEASE}" -ge 1 ] && [ "${#EXPECTED_CANCEL_LEASE}" -le 200 ] &&
         [ "${EXPECTED_CANCEL_LEASE#*[!A-Za-z0-9._:-]}" = "$EXPECTED_CANCEL_LEASE" ]; } ||
       fail "cancel requires --expected-lease-id TOKEN or none"
@@ -665,7 +680,7 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON" OMS_CLAIM_TTL="$CLAIM_TTL" \
   OMS_EXPECTED_PROPOSAL_SHA256="$EXPECTED_PROPOSAL_SHA256" \
   OMS_EXPECTED_PLAN_SHA256="$EXPECTED_PLAN_SHA256" \
-  OMS_EXPECTED_CANCEL_STATE="$EXPECTED_STATE" \
+  OMS_CANCEL_ALL_INACTIVE="$ALL_INACTIVE" OMS_EXPECTED_CANCEL_STATE="$EXPECTED_STATE" \
   OMS_EXPECTED_CANCEL_LEASE="$EXPECTED_CANCEL_LEASE" \
   OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}" \
   OMS_ACCEPT_FILES="$ACCEPT_FILES" OMS_EXPECTED_STATE="$EXPECTED_STATE" \

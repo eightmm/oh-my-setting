@@ -1693,6 +1693,7 @@ row = json.dumps({
     "native_pid_source": os.environ["OMS_DL_NATIVE_PID_SOURCE"],
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
     "worktree": os.environ["OMS_DL_WT"],
+    "access": os.environ["OMS_DL_ACCESS"],
     "task_id": binding.task_id if binding else os.environ.get("OMS_DL_TASK", ""),
     "lease_id": binding.lease_id if binding else os.environ.get("OMS_DL_LEASE", ""),
     "autopilot_owner_id": os.environ.get("OMS_DL_AUTOPILOT_OWNER", ""),
@@ -1723,6 +1724,7 @@ PY
   DELEGATION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
     fail "could not timestamp the worker marker"
   export OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="" \
+    OMS_DL_ACCESS="$WORKER_ACCESS" \
     OMS_DL_SOUL_SHA="" OMS_DL_PID="$$" \
     OMS_DL_NATIVE_PID="$DELEGATION_NATIVE_PID" \
     OMS_DL_NATIVE_PID_SOURCE="$DELEGATION_NATIVE_PID_SOURCE" \

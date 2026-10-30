@@ -450,10 +450,11 @@ if [ "$ACTION" = abandon ]; then
   echo "autopilot: a fresh propose may now bind a new contract"
   if plan_has_open_tasks; then
     echo "autopilot: plan still needs resolution: $PLAN_FILE"
+    printf 'autopilot: cancel inactive tasks: oms agent-plan --repo %q cancel --all-inactive --expected-plan-sha256 SHA --operator-consent cancel --reason TEXT --decision-artifact FILE --expected-decision-artifact-sha256 SHA\n' "$REPO"
     printf 'autopilot: inspect plan retirement: oms agent-plan --repo %q retire --check\n' "$REPO"
     echo "autopilot: --disposition completed-external fails when acceptance files changed."
     echo "autopilot: --disposition superseded requires every task to be done or cancelled."
-    echo "autopilot: cancel requires exact plan/task/state/lease checks, --operator-consent cancel, --reason, --decision-artifact and --expected-decision-artifact-sha256."
+    echo "autopilot: single-task cancel requires exact plan/task/state/lease checks, --operator-consent cancel, --reason, --decision-artifact and --expected-decision-artifact-sha256."
   fi
   exit 0
 fi

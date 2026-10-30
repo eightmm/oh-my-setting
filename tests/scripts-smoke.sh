@@ -5854,6 +5854,12 @@ PY_READ
 #!/usr/bin/env bash
 prompt="$(cat)"
 [ -n "$prompt" ] || exit 0
+python3 - "$OMS_TEST_DELEGATIONS" "$HOME/access-observed" <<'PYACCESS'
+import json, pathlib, sys
+rows = [json.loads(p.read_text()) for p in pathlib.Path(sys.argv[1]).glob('*.json')]
+assert len(rows) == 1, rows
+pathlib.Path(sys.argv[2]).write_text(rows[0].get('access', 'missing'))
+PYACCESS
 if [ ! -f "$HOME/first-attempt" ]; then
   touch "$HOME/first-attempt"
   echo 'temporary fixture failure'
@@ -5863,8 +5869,9 @@ echo 'repaired read-only report'
 EOF
   chmod +x "$bin_dir/codex"
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    OMS_TEST_DELEGATIONS="$project/.oms/delegations" "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt 'Read-only repair' --read-only --repair 1)"
+  [ "$(cat "$home_dir/access-observed")" = read ] || fail "read delegation marker access missing"
   contains "$out" 'repair: 1/1 round(s) used' || fail "read-only repair failed: $out"
   contains "$out" 'effort=medium / read' || fail "actual read effort missing: $out"
   artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p')"
@@ -5883,6 +5890,13 @@ EOF
   assert_file_contains "$project/blocked.out" 'patch: none (read-only)'
   [ -z "$(find "$project/.oms/artifacts/delegate" -name '*.patch')" ] ||
     fail "blocked read-only run created a patch"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_DELEGATIONS="$project/.oms/delegations" "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --prompt 'Write marker audit' --allow-no-change --no-verify \
+    >/dev/null || fail "write marker delegation failed"
+  [ "$(cat "$home_dir/access-observed")" = write ] || fail "write delegation marker access missing"
+
 }
 
 test_delegate_embeds_review_findings() {
@@ -8963,6 +8977,36 @@ PY
     fail "cancellation accepted a task with a live worker marker"
   fi
   rm -f "$project/.oms/delegations/active.json"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    native_pid="$(oms_process_native_pid "$$")"
+    native_source="$(oms_process_native_pid_source)"
+    printf '{"schema":4,"id":"unidentified","pid":%s,"native_pid":%s,"native_pid_source":"%s","task_id":"","lease_id":""}\n' \
+      "$$" "$native_pid" "$native_source" > "$project/.oms/delegations/unidentified.json"
+  )
+  for marker_access in absent write invalid; do
+    python3 - "$project/.oms/delegations/unidentified.json" "$marker_access" <<'PYMARKER'
+import json, sys
+p, access = sys.argv[1:]
+with open(p, encoding='utf-8') as f: row = json.load(f)
+row.pop('access', None)
+if access != 'absent': row['access'] = access
+with open(p, 'w', encoding='utf-8') as f: json.dump(row, f)
+PYMARKER
+    if "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+        --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
+        --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+        --expected-decision-artifact-sha256 "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$decision" | tr -d '\r')" >/dev/null 2>&1; then
+      fail "cancellation accepted unidentified $marker_access marker"
+    fi
+  done
+  python3 - "$project/.oms/delegations/unidentified.json" <<'PYMARKER'
+import json, sys
+p = sys.argv[1]
+with open(p, encoding='utf-8') as f: row = json.load(f)
+row['access'] = 'read'
+with open(p, 'w', encoding='utf-8') as f: json.dump(row, f)
+PYMARKER
   "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
     --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
     --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
@@ -9089,6 +9133,132 @@ assert task["lease_id"] == "lease_preserved_123" and task["review_lease_id"] == 
 assert task["autopilot_owner_id"] == "owner_" + "1" * 32, task
 assert task["history"] == [{"schema": 1, "kind": "prior-review", "receipt": "receipt-sha256"}], task
 ' || fail "cancellation overwrote existing task evidence, lease, owner or history"
+  local batch="$TMP/agent-plan-cancel-batch" batch_sha decision_hash batch_out opt missing_sha missing_task_sha marker_access
+  make_committed_repo "$batch"
+  "$plan" --repo "$batch" init --goal batch >/dev/null
+  "$plan" --repo "$batch" add --id ready_task --title ready >/dev/null
+  "$plan" --repo "$batch" add --id blocked_task --title blocked >/dev/null
+  "$plan" --repo "$batch" block --id blocked_task --reason blocked >/dev/null
+  "$plan" --repo "$batch" add --id running_task --title running >/dev/null
+  "$plan" --repo "$batch" add --id leased_task --title leased >/dev/null
+  python3 - "$batch/.oms/plan/tasks.json" <<'PYBATCH'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p, encoding='utf-8'))
+d['tasks']['running_task']['state'] = 'running'
+d['tasks']['running_task']['lease_id'] = 'live_lease'
+d['tasks']['leased_task']['lease_id'] = 'held_lease'
+with open(p, 'w', encoding='utf-8') as f: json.dump(d, f, indent=2)
+PYBATCH
+  printf 'Batch decision.\n' > "$batch/decision.md"
+  decision_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$batch/decision.md" | tr -d '\r')"
+  batch_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$batch/.oms/plan/tasks.json" | tr -d '\r')"
+  cp "$batch/.oms/plan/tasks.json" "$TMP/batch-before.json"
+  for opt in id task state lease stale; do
+    case "$opt" in
+      id) set -- --id ready_task ;;
+      task) set -- --expected-task-sha256 "$batch_sha" ;;
+      state) set -- --expected-state ready ;;
+      lease) set -- --expected-lease-id none ;;
+      stale) set -- --expected-plan-sha256 "$(printf '%064d' 0)" ;;
+    esac
+    if "$plan" --repo "$batch" cancel --all-inactive --expected-plan-sha256 "$batch_sha" \
+        --operator-consent cancel --reason batch --decision-artifact decision.md \
+        --expected-decision-artifact-sha256 "$decision_hash" "$@" >/dev/null 2>&1; then
+      fail "batch cancellation accepted invalid $opt"
+    fi
+    cmp "$TMP/batch-before.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "failed batch rewrote plan"
+  done
+  python3 - "$batch/.oms/plan/tasks.json" <<'PYMISSING'
+import json, sys
+p = sys.argv[1]
+with open(p, encoding='utf-8') as f: row = json.load(f)
+del row['tasks']['ready_task']['state']
+with open(p, 'w', encoding='utf-8') as f: json.dump(row, f)
+PYMISSING
+  missing_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$batch/.oms/plan/tasks.json" | tr -d '\r')"
+  cp "$batch/.oms/plan/tasks.json" "$TMP/batch-missing.json"
+  missing_task_sha="$(python3 -c 'import hashlib,json,sys; t=json.load(open(sys.argv[1]))["tasks"]["ready_task"]; print(hashlib.sha256(json.dumps(t,sort_keys=True,ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()).hexdigest())' "$batch/.oms/plan/tasks.json" | tr -d '\r')"
+  if "$plan" --repo "$batch" cancel --id ready_task --expected-plan-sha256 "$missing_sha" \
+      --expected-task-sha256 "$missing_task_sha" --expected-state ready --expected-lease-id none \
+      --operator-consent cancel --reason batch --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$decision_hash" >/dev/null 2>&1; then
+    fail "single cancellation accepted a task with missing state"
+  fi
+  cmp "$TMP/batch-missing.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "missing-state single refusal rewrote plan"
+  if "$plan" --repo "$batch" cancel --all-inactive --expected-plan-sha256 "$missing_sha" \
+      --operator-consent cancel --reason batch --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$decision_hash" >/dev/null 2>&1; then
+    fail "batch accepted a task with missing state"
+  fi
+  cmp "$TMP/batch-missing.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "missing-state refusal rewrote plan"
+  cp "$TMP/batch-before.json" "$batch/.oms/plan/tasks.json"
+  mkdir -p "$batch/.oms/delegations"
+  printf '{invalid\n' > "$batch/.oms/delegations/bad.json"
+  if "$plan" --repo "$batch" cancel --all-inactive --expected-plan-sha256 "$batch_sha" \
+      --operator-consent cancel --reason batch --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$decision_hash" >/dev/null 2>&1; then
+    fail "batch accepted malformed markers"
+  fi
+  cmp "$TMP/batch-before.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "marker refusal rewrote plan"
+  rm -f "$batch/.oms/delegations/bad.json"
+  python3 - "$project/.oms/delegations/unidentified.json" "$batch/.oms/delegations/live.json" <<'PYMARKER'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f: row = json.load(f)
+row['task_id'] = 'ready_task'
+with open(sys.argv[2], 'w', encoding='utf-8') as f: json.dump(row, f)
+PYMARKER
+  if "$plan" --repo "$batch" cancel --all-inactive --expected-plan-sha256 "$batch_sha" \
+      --operator-consent cancel --reason batch --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$decision_hash" >/dev/null 2>&1; then
+    fail "batch accepted a live task marker"
+  fi
+  cmp "$TMP/batch-before.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "live marker refusal rewrote plan"
+  rm -f "$batch/.oms/delegations/live.json"
+  python3 - "$project/.oms/delegations/unidentified.json" "$batch/.oms/delegations/unidentified.json" <<'PYMARKER'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f: row = json.load(f)
+row.pop('access')
+with open(sys.argv[2], 'w', encoding='utf-8') as f: json.dump(row, f)
+PYMARKER
+  if "$plan" --repo "$batch" cancel --all-inactive --expected-plan-sha256 "$batch_sha" \
+      --operator-consent cancel --reason batch --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$decision_hash" >/dev/null 2>&1; then
+    fail "batch accepted an unidentified legacy marker"
+  fi
+  cmp "$TMP/batch-before.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "legacy marker refusal rewrote plan"
+  python3 - "$batch/.oms/delegations/unidentified.json" <<'PYMARKER'
+import json, sys
+p = sys.argv[1]
+with open(p, encoding='utf-8') as f: row = json.load(f)
+row['access'] = 'read'
+with open(p, 'w', encoding='utf-8') as f: json.dump(row, f)
+PYMARKER
+  batch_out="$("$plan" --repo "$batch" cancel --all-inactive --expected-plan-sha256 "$batch_sha" \
+    --operator-consent cancel --reason batch --decision-artifact decision.md \
+    --expected-decision-artifact-sha256 "$decision_hash")" || fail "batch cancellation failed"
+  printf '%s\n' "$batch_out" | grep -F running_task >/dev/null || fail "batch omitted active task"
+  python3 - "$TMP/batch-before.json" "$batch/.oms/plan/tasks.json" "$batch_sha" "$decision_hash" <<'PYBATCH' || fail "batch evidence does not match original tasks"
+import hashlib, json, sys
+before, after = [json.load(open(p, encoding='utf-8')) for p in sys.argv[1:3]]
+for name in ('ready_task', 'blocked_task'):
+    old, task = before['tasks'][name], after['tasks'][name]
+    rec = task['cancellation']
+    raw = json.dumps(old, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
+    assert task['state'] == 'cancelled' and rec['state'] == old['state']
+    assert rec['task_sha256'] == hashlib.sha256(raw).hexdigest()
+    assert rec['plan_sha256'] == sys.argv[3] and rec['decision_artifact_sha256'] == sys.argv[4]
+    assert rec['lease_id_sha256'] == hashlib.sha256(b'').hexdigest()
+assert after['tasks']['running_task'] == before['tasks']['running_task']
+assert after['tasks']['leased_task'] == before['tasks']['leased_task']
+PYBATCH
+  cp "$batch/.oms/plan/tasks.json" "$TMP/batch-after.json"
+  batch_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$batch/.oms/plan/tasks.json" | tr -d '\r')"
+  if "$plan" --repo "$batch" cancel --all-inactive --expected-plan-sha256 "$batch_sha" \
+      --operator-consent cancel --reason batch --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$decision_hash" >/dev/null 2>&1; then
+    fail "empty batch cancellation succeeded"
+  fi
+  cmp "$TMP/batch-after.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "empty batch rewrote plan"
 }
 
 # smoke-weight: 12

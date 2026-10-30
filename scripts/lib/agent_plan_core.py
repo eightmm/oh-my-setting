@@ -710,6 +710,8 @@ def worker_marker_is_typed(marker):
         if (not isinstance(value, str)
                 or (value and not ID_RE.fullmatch(value))):
             return False
+    if "access" in marker and marker["access"] not in ("read", "write"):
+        return False
     if marker.get("executor_id", "") in {".", ".."}:
         return False
     marker_owner = marker.get("autopilot_owner_id", "")
@@ -1296,7 +1298,9 @@ def get_task(i):
     return t
 
 if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch", "cancel"):
-    i = require_id(); t = get_task(i)
+    batch_cancel = act == "cancel" and env("OMS_CANCEL_ALL_INACTIVE") == "1"
+    i = "" if batch_cancel else require_id()
+    t = None if batch_cancel else get_task(i)
     if act in {"review", "finish"}:
         candidate_patch = env("OMS_PATCH") or t.get("patch", "")
         if candidate_patch:
@@ -1328,28 +1332,37 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         reject_controls(reason, "cancellation reason")
         if not reason or len(reason) > 500:
             die("cancellation reason must be 1..500 characters")
-        if t.get("state") not in ("ready", "blocked"):
-            die("task %s is %s; cancellation requires an inactive ready/blocked task" % (i, t.get("state")))
-        expected_state = env("OMS_EXPECTED_CANCEL_STATE")
-        expected_lease = env("OMS_EXPECTED_CANCEL_LEASE")
-        expected_lease = "" if expected_lease == "none" else expected_lease
-        if (expected_state not in ("ready", "blocked") or
-                t.get("state") != expected_state or
-                t.get("lease_id", "") != expected_lease):
-            die("task state or lease changed after cancellation was reviewed")
-        if "cancellation" in t:
-            die("task %s already has cancellation evidence" % i)
         expected_plan = env("OMS_EXPECTED_PLAN_SHA256")
-        expected_task = env("OMS_EXPECTED_TASK_SHA256")
         if not re.fullmatch(r"[0-9a-f]{64}", expected_plan):
             die("cancel requires an exact --expected-plan-sha256")
-        if not re.fullmatch(r"[0-9a-f]{64}", expected_task):
-            die("cancel requires an exact --expected-task-sha256")
         raw_plan = read_regular_bytes(path, "active plan", 1024 * 1024)
         if hashlib.sha256(raw_plan).hexdigest() != expected_plan:
             die("active plan changed after cancellation was reviewed")
-        if exact_task_sha256(t) != expected_task:
-            die("task changed after cancellation was reviewed")
+        if batch_cancel:
+            if any("state" not in task for task in tasks.values()):
+                die("plan contains a task without state; cancellation refused")
+            selected = {key: task for key, task in tasks.items()
+                        if task.get("state") in ("ready", "blocked")
+                        and not task.get("lease_id", "")}
+            if not selected:
+                die("no inactive unleased tasks to cancel")
+        else:
+            if t.get("state") not in ("ready", "blocked"):
+                die("task %s is %s; cancellation requires an inactive ready/blocked task" % (i, t.get("state")))
+            expected_state = env("OMS_EXPECTED_CANCEL_STATE")
+            expected_lease = env("OMS_EXPECTED_CANCEL_LEASE")
+            expected_lease = "" if expected_lease == "none" else expected_lease
+            if (expected_state not in ("ready", "blocked") or
+                    t.get("state") != expected_state or t.get("lease_id", "") != expected_lease):
+                die("task state or lease changed after cancellation was reviewed")
+            expected_task = env("OMS_EXPECTED_TASK_SHA256")
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_task):
+                die("cancel requires an exact --expected-task-sha256")
+            if exact_task_sha256(t) != expected_task:
+                die("task changed after cancellation was reviewed")
+            selected = {i: t}
+        if any("cancellation" in task for task in selected.values()):
+            die("task already has cancellation evidence")
         repo_root = state_repo()
         canonical = os.path.join(repo_root, ".oms", "plan", "tasks.json")
         try:
@@ -1378,23 +1391,32 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         markers = load_worker_markers()
         if any(not worker_marker_is_typed(marker) for marker in markers):
             die("worker marker set is malformed or unproven; cancellation refused")
-        matching = [marker for marker in markers if marker.get("task_id") == i]
-        if any(not marker.get("task_id") for marker in markers):
-            die("worker marker lacks task identity; cancellation refused")
-        for marker in matching:
-            if marker_pid_alive(marker):
-                die("task %s has a live worker marker; cancellation refused" % i)
-        t["cancellation"] = {
-            "schema": 1, "kind": "operator-cancellation", "ts": ts,
-            "operator_consent": "cancel", "reason": reason,
-            "state": expected_state,
-            "original_updated": t.get("updated", ""),
-            "lease_id_sha256": hashlib.sha256(expected_lease.encode("utf-8")).hexdigest(),
-            "plan_sha256": expected_plan, "task_sha256": expected_task,
-            "decision_artifact": decision_rel,
-            "decision_artifact_sha256": decision_sha,
-        }
-        t["state"] = "cancelled"
+        for marker in markers:
+            marker_task = marker.get("task_id")
+            if (marker_task in selected or
+                    (not marker_task and marker.get("access") != "read")) and marker_pid_alive(marker):
+                die("live worker marker prevents cancellation: %s" % (marker_task or "unidentified"))
+        for task in selected.values():
+            task_state = task["state"]
+            task_lease = task.get("lease_id", "")
+            task_digest = exact_task_sha256(task)
+            task["cancellation"] = {
+                "schema": 1, "kind": "operator-cancellation", "ts": ts,
+                "operator_consent": "cancel", "reason": reason,
+                "state": task_state, "original_updated": task.get("updated", ""),
+                "lease_id_sha256": hashlib.sha256(task_lease.encode("utf-8")).hexdigest(),
+                "plan_sha256": expected_plan, "task_sha256": task_digest,
+                "decision_artifact": decision_rel, "decision_artifact_sha256": decision_sha,
+            }
+            task["state"] = "cancelled"
+            task["updated"] = ts
+        if batch_cancel:
+            active = sorted(key for key, task in tasks.items()
+                            if task.get("state") in ("claimed", "running", "review", "landing"))
+            save(d)
+            print("plan: cancelled %s; still active: %s" %
+                  (", ".join(sorted(selected)), ", ".join(active) or "none"))
+            sys.exit(0)
     elif act == "touch":
         # Heartbeat: a live worker refreshes claimed_at so reclaim's TTL clock
         # restarts and it is not mistaken for a dead worker mid-run.
