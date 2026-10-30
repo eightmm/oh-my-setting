@@ -335,7 +335,10 @@ and task digests, expected state and lease (`none` for an empty lease), the
 explicit `--operator-consent cancel`, a bounded reason, and a repo-relative
 decision artifact with its exact SHA-256. Cancellation refuses a changed plan,
 task, state, lease, unsafe artifact, malformed marker set, or live worker
-marker. The transition preserves the task's existing artifact, patch, history,
+marker; a live marker without a task id blocks unless it records read-only
+access. `oms agent-plan cancel --all-inactive` cancels every unleased `ready`
+or `blocked` task in one write under the same consent, plan digest and
+decision artifact. The transition preserves the task's existing artifact, patch, history,
 and provenance and records the reviewed digests and decision-artifact digest.
 Readers reconstruct the pre-cancellation task from that receipt and reject any
 other task-field change. Active-plan reads and retirement validation reopen the

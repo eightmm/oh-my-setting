@@ -822,8 +822,9 @@ from the new worktree. Inspect and admit that patch in the owner checkout first,
 or include a bounded recovery in a fresh dispatch brief.
 Stopped writes with a recorded worktree must first go through
 `oms panel --salvage TASK_ID --attempt ATTEMPT_ID`; inspect the recovery and include
-the recovered work in a fresh dispatch brief. A timeout result card may still offer
-the general continuation hint; the CLI enforces this salvage prerequisite for writes.
+the recovered work in a fresh dispatch brief. A timed-out write result card advises
+salvage first; a timed-out read keeps the `--continue` hint. Salvage of an attempt
+with nothing to recover reports `nothing_to_recover` and exits 0.
 A continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N". Unless the
 environment sets them, write calls get a 40m wall (60m at high effort) and any
 call with `--verify` gets a 20m verify wall, enough for the repository smoke suites.

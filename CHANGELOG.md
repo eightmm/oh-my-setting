@@ -8,6 +8,39 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Without `scripts/check.sh`, `oms peer-delegate` and gated `oms peer-review`
+  print the PROJECT.md verify command as a suggested `--verify` instead of
+  guessing a verifier.
+- `oms plan-from-spec` names the OMS smoke runner only inside this repository;
+  planners in other projects are told to use their own narrowest test selector.
+- `oms panel --accept` takes `--allow-verifier-change` and
+  `--allow-floor-change REASON` and forwards them to admission.
+- Panel-dispatched plan workers record their plan id, so `oms panel --accept`
+  matches them instead of calling the candidate ambiguous.
+- An oversized MCP JSON tool result is an error that names its size and the
+  limit, instead of truncated invalid JSON; `oms_handoffs` returns the newest
+  40 handoffs and `oms session-handoff list --limit N` reports the `omitted`
+  count.
+- The resume hook treats a plan whose tasks are all done or cancelled as
+  closed, and says when a land lock is held, possibly by another worktree.
+- A failed `oms update` rollback restore continues through the remaining
+  targets, keeps the managed snapshot, names it and the failed targets, and no
+  longer prints a plain "rollback restored".
+- `oms land status` attributes the step and elapsed minutes only to the landing
+  whose identity-validated holder record matches the receipt; a lock held by
+  another landing or an unknown holder is reported as such.
+- `oms agent-plan cancel --all-inactive` cancels every unleased ready or blocked
+  task in one write; delegation markers record their access, and a live
+  unidentified read-only marker no longer blocks cancellation.
+- `oms panel --salvage` of an attempt with nothing to recover reports
+  `nothing_to_recover` and exits 0; a timed-out write result advises salvage
+  before `--continue`, a timed-out read keeps the `--continue` hint, and an
+  unreadable canonical-sync registry fails immediately.
+- `oms room list` and `oms room show` with an explicit `--repo` read that
+  repository's rooms even when the session inherits another room binding.
+- `scripts/install-mcp.sh` fails when an MCP add, inspection or remove fails
+  instead of reporting success, skips the remove when inspection proves the
+  server absent, and prints a fixed diagnostic instead of raw provider output.
 - `oms land` records the host 1-minute load before and after the gate and the
   CPU count in its receipt, and a failed gate's fail-ledger summary names them,
   so gate failures under foreign load can be told apart from real ones.
