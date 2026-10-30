@@ -4181,6 +4181,159 @@ with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_regi
                 {"scope-result": (accepted_retry, {"ts": "2026-10-17T00:00:00Z"})})
             assert not settled_retry["pending"] and settled_retry["superseded"][0]["attempt"] == previous["attempt_id"]
     previous = dict(failed_worker, state="review")
+    # A stopped call with controller-recorded empty recovery is not a patch candidate.
+    import panel_salvage
+    empty_worker = dict(failed_worker, parent_attempt_id="different-main")
+    empty_path = project / panel_salvage._empty_provenance_path("scope-result", empty_worker["attempt_id"])
+    empty_path.parent.mkdir(parents=True, exist_ok=True)
+    empty_digest = panel_salvage._empty_provenance_identity("scope-result", empty_worker["attempt_id"])
+    empty_record = {"schema": 1, "payload_sha256": empty_digest, "records": [{"encoding_warnings": [],
+        "salvaged_from": {"task": "scope-result", "attempt": empty_worker["attempt_id"],
+                          "outcome": "nothing_to_recover", "reason": "arbitrary"}}]}
+    with patch.object(saved, "_records", return_value=([empty_worker, retry_worker], [failed_row] + retry_rows)), \
+            patch.object(panel_salvage, "_latest", return_value=(str(project / "missing-kept"), empty_worker["attempt_id"], None, project, {}, True)), \
+            patch.object(panel_salvage, "_attempt_recovery_evidence", return_value=[]):
+        try:
+            saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+            raise AssertionError("missing empty salvage accepted")
+        except ValueError as error:
+            assert "matching landed patch" in str(error), error
+        empty_path.write_text(json.dumps(empty_record))
+        assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])["outcome"] == "accepted"
+        for bad in ({}, dict(empty_record, payload_sha256="0" * 64), dict(empty_record, records=[])):
+            empty_path.write_text(json.dumps(bad))
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("invalid empty salvage accepted")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+        for field, value in (("task", "other"), ("attempt", "other"), ("outcome", "recovered")):
+            origin = dict(empty_record["records"][0]["salvaged_from"], **{field: value})
+            empty_path.write_text(json.dumps(dict(empty_record, records=[{"encoding_warnings": [], "salvaged_from": origin}])))
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("foreign empty salvage accepted")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+        empty_path.write_text(json.dumps(empty_record))
+        with patch.object(saved, "_records", return_value=([empty_worker, retry_worker],
+                [dict(failed_row, patch="patch", patch_sha256="x")] + retry_rows)), \
+                patch.object(saved, "verified_patch", return_value=b"patch"):
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("nonempty patch accepted without landing")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+        with patch.object(panel_salvage, "_attempt_recovery_evidence", return_value=["recoverable"]):
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("recoverable attempt accepted")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+    # Recovery must inspect the recorded execution clone, not the state clone.
+    recovery_clone = temporary / "empty-recovery-clone"
+    recovery_root = temporary / "empty-recovery-worktrees"
+    recovery_tree = recovery_root / "oh-my-setting-delegate.fixture" / "wt"
+    recovery_tree.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", str(project), str(recovery_clone)], check=True)
+    subprocess.run(["git", "-C", str(recovery_clone), "worktree", "add", "--detach", str(recovery_tree)],
+                   check=True, stdout=subprocess.DEVNULL)
+    (recovery_tree.parent / ".oh-my-setting-tmp").write_text(
+        "kind=oh-my-setting-temp\ntemporary=1\nrepo=%s\nworktree=%s\n" % (recovery_clone, recovery_tree))
+    recovery_worker = dict(empty_worker, terminal=True, tool="peer-delegate", refs=dict(empty_worker["refs"],
+        panel_location="worktree:oh-my-setting-delegate.fixture/wt", panel_room_id="room-fixture",
+        panel_room_participant="call-0123456789abcdef"))
+    base = subprocess.check_output(["git", "-C", str(recovery_clone), "rev-parse", "HEAD"], text=True).strip()
+    recovery_row = dict(failed_row, base_sha=base)
+    anchor = {"call": {"participant": "call-0123456789abcdef", "room": "room-fixture",
+                       "task_id": "scope-result", "attempt_id": recovery_worker["attempt_id"]},
+              "execution_repo": str(recovery_clone)}
+    def recovery_query(repo, verb, *args):
+        return [recovery_worker, retry_worker] if verb == "agent-events" else {"rows": [recovery_row] + retry_rows}
+    with patch.dict(os.environ, {"OMS_DELEGATE_WORKTREE_ROOT": str(recovery_root)}), \
+            patch.object(saved, "_records", return_value=([recovery_worker, retry_worker], [recovery_row] + retry_rows)), \
+            patch.object(saved, "_query", side_effect=recovery_query), \
+            patch.object(panel_salvage.dispatch_supervisor, "read", return_value=anchor):
+        assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])["outcome"] == "accepted"
+        (recovery_tree / "value.txt").write_text("changed after empty salvage\n")
+        for execution in (str(recovery_clone), str(temporary / "missing-execution"), "", "malformed"):
+            anchor["execution_repo"] = execution
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("recoverable or unavailable execution accepted")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+        anchor["execution_repo"] = str(recovery_clone)
+        (recovery_tree / "value.txt").write_text((recovery_clone / "value.txt").read_text())
+        for attempt_ref in ("", "other", None):
+            anchor["call"]["attempt_id"] = attempt_ref
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("unvalidated execution owner accepted")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+        anchor["call"]["attempt_id"] = recovery_worker["attempt_id"]
+        recovery_worker = dict(recovery_worker, refs=dict(recovery_worker["refs"]))
+        recovery_worker["refs"].pop("panel_location")
+        artifact = project / ".oms/artifacts/empty-location.txt"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("worktree kept at %s\n" % recovery_tree)
+        recovery_row = dict(recovery_row, artifact=".oms/artifacts/empty-location.txt",
+                            artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
+        with patch.object(saved, "_records", return_value=([recovery_worker, retry_worker], [recovery_row] + retry_rows)):
+            assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])["outcome"] == "accepted"
+            (recovery_tree / "value.txt").write_text("changed after empty salvage\n")
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("dirty artifact-only worktree accepted")
+            except ValueError as error:
+                assert "matching landed patch" in str(error), error
+            (recovery_tree / "value.txt").write_text((recovery_clone / "value.txt").read_text())
+            for bad_base in (None, "", "0", "malformed", "0" * 40):
+                recovery_row = dict(recovery_row, base_sha=bad_base)
+                try:
+                    saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                    raise AssertionError("unverified kept worktree base accepted")
+                except ValueError as error:
+                    assert "matching landed patch" in str(error), error
+            recovery_row = dict(recovery_row, base_sha=base)
+            marker = recovery_tree.parent / ".oh-my-setting-tmp"
+            marker_contents = marker.read_bytes()
+            try:
+                marker.write_bytes(b"malformed")
+                try:
+                    saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                    raise AssertionError("unverified kept worktree identity accepted")
+                except ValueError as error:
+                    assert "matching landed patch" in str(error), error
+            finally:
+                marker.write_bytes(marker_contents)
+            actual_run = subprocess.run
+            def bad_git_root(args, **kwargs):
+                env = kwargs.get("env", {})
+                if args[-2:] == ["rev-parse", "--show-toplevel"] and env.get("GIT_CONFIG_NOSYSTEM") == "1":
+                    return subprocess.CompletedProcess(args, git_status, stdout=git_root, stderr="")
+                return actual_run(args, **kwargs)
+            for git_status, git_root in ((1, ""), (0, ""), (0, "malformed\n"), (0, str(project) + "\n")):
+                with patch.object(subprocess, "run", side_effect=bad_git_root):
+                    try:
+                        saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                        raise AssertionError("invalid Git root accepted")
+                    except ValueError as error:
+                        assert "matching landed patch" in str(error), error
+            metadata = recovery_clone / ".git"
+            hidden = recovery_clone / "hidden-git-metadata"
+            metadata.rename(hidden)
+            try:
+                try:
+                    saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                    raise AssertionError("non-Git execution repository accepted")
+                except ValueError as error:
+                    assert "matching landed patch" in str(error), error
+            finally:
+                hidden.rename(metadata)
+        artifact.unlink()
+    empty_path.unlink()
     continued = dict(retry_worker, refs=dict(retry_worker["refs"], panel_continues=previous["attempt_id"]))
     with patch.object(saved, "_records", return_value=([previous, continued], [failed_row] + retry_rows)):
         result = saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])

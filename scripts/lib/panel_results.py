@@ -784,6 +784,57 @@ def _continues(workers, index, end):
     return cursor == index
 
 
+def _empty_salvaged_attempt(repo, worker, rows):
+    import panel_salvage
+
+    task, attempt = worker.get('task_id'), worker.get('attempt_id')
+    if not task or not attempt or not worker.get('terminal', worker.get('state') in
+            {'failed', 'timed_out', 'cancelled', 'abandoned'}):
+        return False
+    try:
+        digest = panel_salvage._empty_provenance_identity(task, attempt)
+        raw = _read(repo, panel_salvage._empty_provenance_path(task, attempt),
+                    panel_salvage.MAX_EVIDENCE, True)
+        provenance = panel_salvage._provenance(raw, digest)
+        if not any(record['salvaged_from'].get('task') == task
+                   and record['salvaged_from'].get('attempt') == attempt
+                   and record['salvaged_from'].get('outcome') == 'nothing_to_recover'
+                   for record in provenance['records']):
+            return False
+        for row in rows:
+            if row.get('kind') == 'delegate' and row.get('task_id') == task and row.get('attempt_id') == attempt:
+                if row.get('patch_sha256') and row['patch_sha256'] != hashlib.sha256(b'').hexdigest():
+                    return False
+                if row.get('patch') and verified_patch(repo, row):
+                    return False
+        kept_path, _, _, execution, indexed, _ = panel_salvage._latest(repo, task, attempt)
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_CONFIG_SYSTEM=os.devnull, GIT_OPTIONAL_LOCKS='0')
+        check = subprocess.run(['git', '-C', str(execution), 'rev-parse', '--show-toplevel'],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                               env=env, timeout=15, check=False)
+        root = check.stdout.replace('\r', '').rstrip('\n')
+        if check.returncode or not root or Path(root).resolve(strict=True) != Path(execution).resolve(strict=True):
+            return False
+        try:
+            kept_stat = Path(kept_path).lstat()
+        except FileNotFoundError:
+            kept_stat = None
+        if kept_stat is not None:
+            if not stat.S_ISDIR(kept_stat.st_mode):
+                return False
+            kept, common, head = panel_salvage._managed(execution, kept_path)
+            base = panel_salvage._launch_base(execution, indexed)
+            if (not base or panel_salvage._capture(kept, common, base, head)[0]
+                    or panel_salvage._managed(execution, kept) != (kept, common, head)):
+                return False
+        evidence = panel_salvage._attempt_recovery_evidence(repo, task, attempt, attempt_row=worker, execution=execution)
+        return not panel_salvage._without_clean_worktrees(repo, task, attempt, execution, evidence)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return False
+
+
 def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None):
     """Account for discarded retries without treating failure as admission."""
     from review_settlement import _participant_parents
@@ -898,6 +949,10 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
                      key=lambda a: (a.get('created_at', ''), a['attempt_id']))
     admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
     selected, admissions, superseded = _write_candidates(repo, workers, admissions, attempts, owner, main_id)
+    candidates = [(worker, admission) for worker, admission in zip(selected, admissions)
+                  if admission or not _empty_salvaged_attempt(repo, worker, rows)]
+    selected = [worker for worker, _ in candidates]
+    admissions = [admission for _, admission in candidates]
     # Fence this task and its unassigned write workers while other tasks keep moving.
     worker_ids = {a.get('attempt_id') for a in workers}
     task_attempts = [a for a in related if a.get('task_id') == task_id or a.get('attempt_id') in worker_ids]
