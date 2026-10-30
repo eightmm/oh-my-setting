@@ -1406,7 +1406,8 @@ echo "$cli \$*" >> "$log"
 case "\$1 \$2" in
   "mcp get")
     if [ "\${OMS_TEST_MCP_LOOKUP_FAIL:-}" = "$cli" ]; then
-      echo "could not read $cli MCP configuration" >&2
+      echo "private-output-$cli $TMP/private-path"
+      echo "private-error-$cli $TMP/private-path" >&2
       exit 24
     fi
     if [ ! -f "$TMP/$cli.registered" ]; then
@@ -1416,7 +1417,13 @@ case "\$1 \$2" in
     cat "$TMP/$cli.registered"
     ;;
   "mcp add")
-    printf '%s\n' "\$*" > "$TMP/$cli.registered"
+    [ "\${OMS_TEST_MCP_ADD_FAIL:-}" != "$cli" ] || exit 26
+    for arg in "\$@"; do :; done
+    if [ "$cli" = codex ]; then
+      printf '  command: python3\n  args: %s\n' "\$arg" > "$TMP/$cli.registered"
+    else
+      printf '  Command: python3\n  Args: %s\n' "\$arg" > "$TMP/$cli.registered"
+    fi
     ;;
   "mcp remove")
     [ "\${OMS_TEST_MCP_REMOVE_FAIL:-}" != "$cli" ] || exit 23
@@ -1433,6 +1440,7 @@ EOF
     fail "install-mcp should succeed with both CLIs present"
   grep -Fq "mcp: claude registered" "$TMP/mcp-first" || fail "claude was not registered"
   grep -Fq "mcp: codex registered" "$TMP/mcp-first" || fail "codex was not registered"
+  ! grep -Fq "mcp remove" "$log" || fail "absent registration invoked remove during install"
   grep -Fq "scripts/oms-mcp-server.py" "$TMP/claude.registered" ||
     fail "claude registration does not point at the server"
 
@@ -1440,6 +1448,8 @@ EOF
     fail "re-registration should succeed"
   grep -Fq "mcp: claude already registered" "$TMP/mcp-second" ||
     fail "second run should detect the existing claude registration"
+  grep -Fq "mcp: codex already registered" "$TMP/mcp-second" ||
+    fail "second run should detect the existing codex registration"
 
   PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null ||
     fail "removal should succeed"
@@ -1454,8 +1464,8 @@ EOF
   fi
 
   for cli in claude codex; do
-    printf 'registered\n' > "$TMP/claude.registered"
-    printf 'registered\n' > "$TMP/codex.registered"
+    printf 'Command: python3\nArgs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/claude.registered"
+    printf 'command: python3\nargs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/codex.registered"
     : > "$log"
     status=0
     out="$(OMS_TEST_MCP_REMOVE_FAIL="$cli" PATH="$bin:/usr/bin:/bin" \
@@ -1475,19 +1485,54 @@ EOF
   done
 
   for cli in claude codex; do
-    printf 'registered\n' > "$TMP/claude.registered"
-    printf 'registered\n' > "$TMP/codex.registered"
+    printf 'Command: python3\nArgs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/claude.registered"
+    printf 'command: python3\nargs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/codex.registered"
     : > "$log"
     status=0
     out="$(OMS_TEST_MCP_LOOKUP_FAIL="$cli" PATH="$bin:/usr/bin:/bin" \
       bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
     [ "$status" -ne 0 ] || fail "$cli MCP state lookup failure was ignored"
+    grep -Fq "could not inspect the $cli MCP registration" <<< "$out" || fail "$cli inspection diagnostic missing"
+    ! grep -Fq "private-" <<< "$out" || fail "$cli inspection output leaked"
     [ -f "$TMP/$cli.registered" ] || fail "$cli lookup failure mutated its registration"
     grep -Fq "claude mcp get" "$log" && grep -Fq "codex mcp get" "$log" ||
       fail "MCP state lookup failure stopped the independent provider check"
 
+    status=0
+    out="$(OMS_TEST_MCP_LOOKUP_FAIL="$cli" PATH="$bin:/usr/bin:/bin" \
+      bash "$ROOT/scripts/install-mcp.sh" 2>&1)" || status=$?
+    [ "$status" -ne 0 ] || fail "$cli install ignored MCP state lookup failure"
+    ! grep -Fq "private-" <<< "$out" || fail "$cli install inspection output leaked"
+    grep -Fq "$cli" <<< "$out" || fail "$cli lookup failure was not named"
+    [ -f "$TMP/$cli.registered" ] || fail "$cli install mutated an uninspectable registration"
+
     PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null ||
       fail "MCP removal could not recover after a state lookup failure for $cli"
+  done
+
+  for cli in claude codex; do
+    printf 'previous registration\n' > "$TMP/$cli.registered"
+    : > "$log"
+    status=0
+    out="$(OMS_TEST_MCP_REMOVE_FAIL="$cli" PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" 2>&1)" || status=$?
+    [ "$status" -ne 0 ] || fail "$cli replacement accepted remove failure"
+    grep -Fq "$cli" <<< "$out" || fail "$cli replacement failure did not name provider"
+    grep -Fq 're-run scripts/install-mcp.sh' <<< "$out" || fail "$cli remove failure lacks recovery command"
+    [ -f "$TMP/$cli.registered" ] || fail "$cli failed removal lost registration"
+    ! grep -Fq "$cli mcp add" "$log" || fail "$cli add followed failed removal"
+    PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null || fail "cleanup failed"
+  done
+
+  for cli in claude codex; do
+    printf 'previous registration\n' > "$TMP/$cli.registered"
+    : > "$log"
+    status=0
+    out="$(OMS_TEST_MCP_ADD_FAIL="$cli" PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" 2>&1)" || status=$?
+    [ "$status" -ne 0 ] || fail "$cli add failure was accepted"
+    grep -Fq "$cli mcp remove" "$log" || fail "$cli old registration was not removed before add"
+    [ ! -f "$TMP/$cli.registered" ] || fail "$cli failed add left a registration"
+    grep -Fq "re-run scripts/install-mcp.sh" <<< "$out" || fail "$cli add failure lacks recovery command"
+    PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null || fail "cleanup failed"
   done
 
   # No CLIs on PATH is non-fatal while installing, but removal cannot claim it

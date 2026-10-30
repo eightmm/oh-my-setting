@@ -68,7 +68,6 @@ mcp_registration_state() {  # CLI
   case "$out" in
     *"No MCP server named"*"$NAME"*) return 1 ;;
   esac
-  [ -z "$out" ] || printf '%s\n' "$out" >&2
   return 2
 }
 
@@ -129,17 +128,28 @@ register_claude() {
         ;;
     esac
   fi
-  local current
-  if current="$(provider_cmd claude mcp get "$NAME" 2>/dev/null)" &&
-     printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
+  local current state=0
+  current="$(provider_cmd claude mcp get "$NAME" 2>&1)" || state=$?
+  if [ "$state" -ne 0 ]; then
+    case "$current" in
+      *"No MCP server named"*"$NAME"*) ;;
+      *) echo "error: could not inspect the claude MCP registration" >&2; return 1 ;;
+    esac
+  elif printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
     echo "mcp: claude already registered"
     return 0
   fi
-  provider_cmd claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
+  if [ "$state" = 0 ]; then
+    if ! provider_cmd claude mcp remove -s user "$NAME" >/dev/null 2>&1; then
+      echo "error: could not remove the claude MCP registration; re-run scripts/install-mcp.sh" >&2
+      return 1
+    fi
+  fi
   if provider_cmd claude mcp add -s user "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
     echo "mcp: claude registered ($NAME)"
   else
-    echo "warn: could not register the MCP server with claude" >&2
+    echo "error: could not register the MCP server with claude; re-run scripts/install-mcp.sh" >&2
+    return 1
   fi
 }
 
@@ -178,17 +188,28 @@ register_codex() {
         ;;
     esac
   fi
-  local current
-  if current="$(provider_cmd codex mcp get "$NAME" 2>/dev/null)" &&
-     printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
+  local current state=0
+  current="$(provider_cmd codex mcp get "$NAME" 2>&1)" || state=$?
+  if [ "$state" -ne 0 ]; then
+    case "$current" in
+      *"No MCP server named"*"$NAME"*) ;;
+      *) echo "error: could not inspect the codex MCP registration" >&2; return 1 ;;
+    esac
+  elif printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
     echo "mcp: codex already registered"
     return 0
   fi
-  provider_cmd codex mcp remove "$NAME" >/dev/null 2>&1 || true
+  if [ "$state" = 0 ]; then
+    if ! provider_cmd codex mcp remove "$NAME" >/dev/null 2>&1; then
+      echo "error: could not remove the codex MCP registration; re-run scripts/install-mcp.sh" >&2
+      return 1
+    fi
+  fi
   if provider_cmd codex mcp add "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
     echo "mcp: codex registered ($NAME)"
   else
-    echo "warn: could not register the MCP server with codex" >&2
+    echo "error: could not register the MCP server with codex; re-run scripts/install-mcp.sh" >&2
+    return 1
   fi
 }
 
