@@ -1727,7 +1727,7 @@ except Exception:
         pass
     raise
 if binding:
-    print(binding.plan_id)
+    print(binding.plan_id + " " + binding.lease_id)
 PY
   }
   DELEGATION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
@@ -1756,9 +1756,11 @@ PY
     fi
   }
   if [ -n "$OBSERVED_BINDING" ]; then
-    observed_plan_id="$(oms_with_file_lock "$delegation_lock_target" register_delegation_marker)" ||
+    observed_lineage="$(oms_with_file_lock "$delegation_lock_target" register_delegation_marker)" ||
       fail "marker registration failed; provider was not started"
-    observed_plan_id="${observed_plan_id//$'\r'/}"
+    observed_lineage="${observed_lineage//$'\r'/}"
+    observed_plan_id="${observed_lineage%% *}"
+    observed_lease_id="${observed_lineage#* }"
     case "$observed_plan_id" in
       plan_*)
         case "${observed_plan_id#plan_}" in
@@ -1768,6 +1770,16 @@ PY
         ;;
       *) fail "validated observation has malformed lineage" ;;
     esac
+    case "$observed_lease_id" in
+      lease_*)
+        case "${observed_lease_id#lease_}" in
+          *[!0-9a-f]*) fail "validated observation has malformed lineage" ;;
+        esac
+        [ "${#observed_lease_id}" -eq 38 ] || fail "validated observation has malformed lineage"
+        ;;
+      *) fail "validated observation has malformed lineage" ;;
+    esac
+    PLAN_LEASE_ID="$observed_lease_id"
     export OMS_INDEX_PLAN_ID="$observed_plan_id"
   else
     oms_with_file_lock "$delegation_lock_target" register_delegation_marker ||
