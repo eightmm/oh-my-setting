@@ -26591,6 +26591,77 @@ PY
   out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
   contains "$out" 'Ship the resume surface' || fail "nested state shadowed the repository root"
 
+  # Exercise terminal plan states and a read-only land status through a fake root.
+  cp "$repo/.oms/plan/tasks.json" "$TMP/resume-plan-original.json"
+  local states expected fake_root="$TMP/resume-fake-root" status_file="$TMP/resume-land.json"
+  for states in cancelled done,cancelled done,ready ''; do
+    python3 - "$repo/.oms/plan/tasks.json" "$states" <<'PYPLAN'
+import json, sys
+states = sys.argv[2].split(',') if sys.argv[2] else []
+with open(sys.argv[1], 'w') as f:
+    json.dump({'goal': 'Plan fixture', 'accept': 'true',
+               'tasks': {str(i): {'state': state} for i, state in enumerate(states)}}, f)
+PYPLAN
+    out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+    case "$states" in
+      cancelled|done,cancelled) if contains "$out" 'plan: Plan fixture'; then
+          fail "closed plan must stay silent: $states"; fi ;;
+      *) contains "$out" 'plan: Plan fixture' || fail "open or empty plan disappeared: $states" ;;
+    esac
+  done
+  cp "$TMP/resume-plan-original.json" "$repo/.oms/plan/tasks.json"
+  mkdir -p "$fake_root/scripts"
+  for script in agent-task.sh fail-ledger.sh auto-update.sh; do
+    ln -s "$ROOT/scripts/$script" "$fake_root/scripts/$script"
+  done
+  ln -s "$ROOT/scripts/lib" "$fake_root/scripts/lib"
+  cp "$ROOT/scripts/resume-hook.sh" "$fake_root/scripts/resume-hook.sh"
+  cat > "$fake_root/scripts/land.sh" <<'EOFLAND'
+#!/usr/bin/env bash
+[ "$1" = status ] && [ "$2" = --repo ] && [ "$4" = --json ] && [ "$5" = --active-exit ] || exit 1
+cat "$OMS_TEST_LAND_STATUS" || exit 1
+exit 3
+EOFLAND
+  chmod -x "$fake_root/scripts/land.sh"
+  for expected in running passed failed interrupted missing ''; do
+    python3 - "$status_file" "$expected" <<'PYSTATE'
+import json, sys
+row = {'active': True, 'sha': '1234567', 'gate': {'rc': 'stale'}}
+if sys.argv[2] != 'missing':
+    row['state'] = sys.argv[2]
+with open(sys.argv[1], 'w') as output:
+    json.dump(row, output)
+PYSTATE
+    out="$(printf '{"cwd":"%s"}' "$repo" | PATH="/usr/bin:/bin" OMS_TEST_LAND_STATUS="$status_file" bash "$fake_root/scripts/resume-hook.sh")"
+    land_lines="$(printf '%s\n' "$out" | grep '^- land ' || true)"
+    [ "$land_lines" = '- land lock held (possibly another worktree); oms land status' ] ||
+      fail "incorrect lock status for $expected: $land_lines"
+  done
+  printf '%s\n' '{"active":true}' > "$status_file"
+  out="$(printf '{"cwd":"%s"}' "$repo" | OMS_TEST_LAND_STATUS="$status_file" bash "$fake_root/scripts/resume-hook.sh")"
+  contains "$out" 'land lock held (possibly another worktree); oms land status' || fail "missing receipt hid held lock"
+  for expected in false null 0 malformed empty failure; do
+    case "$expected" in
+      false|null|0) printf '{"active":%s,"state":"running"}\n' "$expected" > "$status_file" ;;
+      malformed) printf '{bad\n' > "$status_file" ;;
+      empty) : > "$status_file" ;;
+      failure) rm -f "$status_file" ;;
+    esac
+    out="$(printf '{"cwd":"%s"}' "$repo" | OMS_TEST_LAND_STATUS="$status_file" bash "$fake_root/scripts/resume-hook.sh")" ||
+      fail "land probe failure broke resume"
+    if contains "$out" '- land '; then fail "inactive or invalid land appeared: $expected"; fi
+  done
+  cat > "$fake_root/scripts/land.sh" <<'EOFTIMEOUT'
+#!/usr/bin/env bash
+exec python3 -c 'import time; time.sleep(10)'
+EOFTIMEOUT
+  chmod +x "$fake_root/scripts/land.sh"
+  out="$(printf '{"cwd":"%s"}' "$repo" | bash "$fake_root/scripts/resume-hook.sh")" || fail "land timeout broke resume"
+  if contains "$out" '- land '; then fail "timed out land appeared"; fi
+  rm -f "$fake_root/scripts/land.sh"
+  out="$(printf '{"cwd":"%s"}' "$repo" | bash "$fake_root/scripts/resume-hook.sh")" || fail "missing land broke resume"
+  if contains "$out" '- land '; then fail "missing land appeared"; fi
+
   # Native Windows Python writes CRLF to a pipe. Every value read back into
   # Bash must lose the CR before it participates in path checks or output.
   real_python="$(command -v python3)"

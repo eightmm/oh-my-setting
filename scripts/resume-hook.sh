@@ -94,7 +94,7 @@ if isinstance(tasks, dict):
               if isinstance(t, dict)]
 else:
     states = [str(t.get("state") or "?") for t in tasks if isinstance(t, dict)]
-if states and all(state == "done" for state in states):
+if states and all(state in ("done", "cancelled") for state in states):
     sys.exit(0)  # a finished plan is history, not a resumption duty
 counts = {}
 for state in states:
@@ -125,6 +125,29 @@ $plan_lines
 EOF_PLAN
   fi
 fi
+
+# The land lock is shared across worktrees; its holder is not identified here.
+land_line="$(python3 -X utf8 -I -B - "$ROOT/scripts/land.sh" "$cwd" <<'PYLAND' 2>/dev/null
+import json, subprocess, sys, tempfile
+try:
+    with tempfile.TemporaryFile() as output:
+        result = subprocess.run(["bash", sys.argv[1], "status", "--repo", sys.argv[2],
+                                 "--json", "--active-exit"],
+                                stdin=subprocess.DEVNULL, stdout=output,
+                                stderr=subprocess.DEVNULL, timeout=2)
+        if result.returncode not in (0, 3):
+            raise ValueError("status failed")
+        output.seek(0)
+        row = json.loads(output.read(65537))
+    if row.get("active") is not True:
+        raise ValueError("inactive")
+    print("- land lock held (possibly another worktree); oms land status")
+except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+    pass
+PYLAND
+)" || land_line=""
+land_line="${land_line//$'\r'/}"
+[ -z "$land_line" ] || append "$land_line"
 
 # Prefer the current task over recency. Legacy/other-task digests stay readable,
 # but never silently become the current task's continuation.
