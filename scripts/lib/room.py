@@ -2145,9 +2145,9 @@ def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=
 def main(argv=None):
     parser = argparse.ArgumentParser(description="OMS work rooms: shared threads, addressed messages and explicit consumption.")
     parser.add_argument("action", choices=("new", "join", "bind", "scope", "describe", "leave", "close", "send", "updates", "ack", "show", "list", "publish", "rollover", "relay-server"))
-    parser.add_argument("--repo", default=os.environ.get("OMS_ROOM_REPO") or os.getcwd())
-    parser.add_argument("--id", default=os.environ.get("OMS_ROOM_ID"))
-    parser.add_argument("--participant", default=os.environ.get("OMS_ROOM_PARTICIPANT"))
+    parser.add_argument("--repo")
+    parser.add_argument("--id")
+    parser.add_argument("--participant")
     parser.add_argument("--provider", default=os.environ.get("OMS_AGENT", "codex"))
     parser.add_argument("--role", choices=sorted(ROLES), default="main")
     parser.add_argument("--model")
@@ -2175,6 +2175,21 @@ def main(argv=None):
     parser.add_argument("--worktree", help=argparse.SUPPRESS)
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(raw_argv)
+    explicit_repo = args.repo is not None
+    args.repo = args.repo if explicit_repo else os.environ.get("OMS_ROOM_REPO") or os.getcwd()
+    foreign_read = False
+    repo = None
+    if explicit_repo and args.action in {"list", "show"} and os.environ.get("OMS_ROOM_ID") and os.environ.get("OMS_ROOM_REPO"):
+        try:
+            repo = state_repository(args.repo, allow_foreign=True)
+            foreign_read = repo != state_repository(os.environ["OMS_ROOM_REPO"])
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            parser.exit(2, "error: room: " + clean(str(exc), 300) + "\n")
+    if not foreign_read:
+        if args.id is None:
+            args.id = os.environ.get("OMS_ROOM_ID")
+        if args.participant is None:
+            args.participant = os.environ.get("OMS_ROOM_PARTICIPANT")
     if args.action == "relay-server":
         if not args.queue or not args.worktree or not args.id or not args.participant:
             parser.error("relay-server requires --queue, --worktree, --id and --participant")
@@ -2239,7 +2254,8 @@ def main(argv=None):
             result = _relay_request(relay_queue, request)
             print(json.dumps(result, ensure_ascii=False) if args.json else result.get("status", "ok"))
             return 0
-        repo = state_repository(args.repo)
+        if repo is None:
+            repo = state_repository(args.repo)
         if args.id and args.action not in {"new", "rollover"} and not args.exact:
             args.id = resolve(repo, identifier(args.id, "room"))
         if args.action == "new":

@@ -150,10 +150,28 @@ with patch.dict(os.environ, resolver_env, clear=True):
     with patch.dict(os.environ, {"OMS_DELEGATE_WORKTREE_ROOT": str(alias_registry)}):
         assert panel.repository(working_root) == working_root
 
-for front in ("room", "panel"):
-    conflict = ["bash", str(panel.ENTRY), front] + (["show"] if front == "room" else []) + ["--repo", str(project), "--json"]
-    refused = subprocess.run(conflict, env=selected_env, capture_output=True, text=True, timeout=30)
-    assert refused.returncode and "conflicts" in refused.stderr, refused
+foreign_id = json.loads(call(["bash", str(panel.ENTRY), "room", "new", "--repo", str(project), "--json"], resolver_env))["id"]
+foreign_state = project / ".oms"
+before = {str(p.relative_to(foreign_state)): (p.read_bytes() if p.is_file() else None)
+          for p in foreign_state.rglob("*")}
+room_front = ["bash", str(panel.ENTRY), "room"]
+for option in (["--repo", str(project)], ["--repo=" + str(project)]):
+    listed = json.loads(call(room_front + ["list"] + option + ["--json"], selected_env))
+    assert foreign_id in [item["id"] for item in listed["rooms"]], listed
+    shown = json.loads(call(room_front + ["show"] + option + ["--id", foreign_id, "--json"], selected_env))
+    assert shown["id"] == foreign_id, shown
+    for action in (["show"], ["show", "--id", ""], ["show", "--id", "../bad"]):
+        refused = subprocess.run(room_front + action + option, env=selected_env, capture_output=True, text=True, timeout=30)
+        assert refused.returncode, refused
+    refused = subprocess.run(room_front + ["send"] + option + ["--id", foreign_id, "--text", "hello"],
+                             env=selected_env, capture_output=True, text=True, timeout=30)
+    assert refused.returncode and "selected repository conflicts with the inherited room repository" in refused.stderr, refused
+after = {str(p.relative_to(foreign_state)): (p.read_bytes() if p.is_file() else None)
+         for p in foreign_state.rglob("*")}
+assert after == before, (before.keys(), after.keys())
+conflict = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]
+refused = subprocess.run(conflict, env=selected_env, capture_output=True, text=True, timeout=30)
+assert refused.returncode and "conflicts" in refused.stderr, refused
 for restricted in (["updates", "--participant", "not-enrolled"],
                    ["join", "--participant", "resolution-orphan", "--role", "worker", "--parent", "not-enrolled"]):
     refused = subprocess.run(["bash", str(panel.ENTRY), "room"] + restricted +

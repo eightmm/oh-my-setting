@@ -132,10 +132,10 @@ def _state_repository(value):
         return local
 
 
-def state_repository(value):
+def state_repository(value, allow_foreign=False):
     shared = _state_repository(value)
     inherited = os.environ.get("OMS_ROOM_REPO") if os.environ.get("OMS_ROOM_ID") else None
-    if inherited and _state_repository(inherited) != shared:
+    if inherited and not allow_foreign and _state_repository(inherited) != shared:
         raise ValueError("selected repository conflicts with the inherited room repository")
     return shared
 

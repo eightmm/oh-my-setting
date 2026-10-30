@@ -1361,6 +1361,8 @@ oms panel --repo . --room team --watch --view graph
 oms room show --repo . --id team --json
 ```
 
+With an inherited room binding, `room list --repo OTHER` and `room show --repo OTHER --id ROOM` can read another repository without using the inherited room or participant.
+
 These are agent-side interfaces; agents operate them internally. For already
 open Codex, Claude or another CLI, the agent joins with its exact native session
 ID and a distinct participant ID. Only the session hash is stored. Without a
