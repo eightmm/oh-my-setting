@@ -26883,8 +26883,9 @@ EOF
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$TMP" | "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0 outside an adopted repo"
   [ -z "$out" ] || fail "non-adopted dir must stay silent"
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" |
-    OMS_RESUME_HOOK=0 "$ROOT/scripts/resume-hook.sh")"
+  # A disabled hook exits before reading stdin; a pipe producer can get SIGPIPE.
+  out="$(OMS_RESUME_HOOK=0 "$ROOT/scripts/resume-hook.sh" < "$TMP/codex-sessionstart-input.json")" ||
+    fail "disabled resume hook must exit 0"
   [ -z "$out" ] || fail "OMS_RESUME_HOOK=0 must disable the hook"
 
   # A newer unrelated session must not displace this task's handoff.
