@@ -4162,6 +4162,16 @@ PY
   cat "$7" >> "$1"
 }
 
+ma_record_panel_fallback_skip() {
+  local reason="$1" status="$2" state_repo="$3" artifact="$4"
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$status" -ne 0 ] && [ -n "$reason" ] &&
+    [ -n "${OMS_ATTEMPT_ID:-}" ] && [ -n "$state_repo" ]; then
+    "$(ma_scripts_dir)/agent-events.sh" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" \
+      --actor provider-router --ref "panel_fallback_skip=$reason" >/dev/null ||
+      printf 'panel-provider-fallback: skip reason not recorded\n' >> "$artifact"
+  fi
+}
+
 ma_run_routed_provider_inner() {
   local provider="$1"
   local access="$2"
@@ -4498,7 +4508,11 @@ EOF
         [ -z "$swap_resume" ] || { OMS_RESUME_SESSION="$swap_resume"; export OMS_RESUME_SESSION; }
       fi
     else
+      panel_fallback_skip=worktree-changed
       printf '\npanel-provider-fallback: skipped; write worktree changed after provider failure\n' >> "$artifact"
+    fi
+    if [ "$fallback_allowed" = 1 ] && [ "$OMS_MODEL_FALLBACK_USED" != 1 ]; then
+      panel_fallback_skip=alternate-not-routable
     fi
   fi
 
@@ -4699,6 +4713,14 @@ ma_run_routed_provider() {
           --ref "panel_model=$OMS_MODEL_PRIMARY"
           --ref "panel_access=$access"
           --ref "panel_effort=${OMS_REASONING_SELECTED:-auto}")
+        case "${OMS_PANEL_FALLBACK_DECISION:-}" in
+          selected|explicit-target|no-eligible-alternate|alternate-not-routable)
+            start_args+=(--ref "panel_fallback_decision=$OMS_PANEL_FALLBACK_DECISION")
+            if [ "$OMS_PANEL_FALLBACK_DECISION" = selected ]; then
+              start_args+=(--ref "panel_fallback_provider=${OMS_PANEL_FALLBACK_PROVIDER:-}"
+                           --ref "panel_fallback_model=${OMS_PANEL_FALLBACK_MODEL:-}")
+            fi ;;
+        esac
         [ -z "${OMS_PANEL_LABEL:-}" ] || start_args+=(--ref "panel_label=$OMS_PANEL_LABEL")
         [ -z "${OMS_PANEL_ALIAS:-}" ] || start_args+=(--ref "panel_alias=$OMS_PANEL_ALIAS")
         case "${OMS_PANEL_CONTINUES:-}" in
@@ -4737,6 +4759,20 @@ PY
       OMS_ATTEMPT_OWNED=1
     fi
     export OMS_ATTEMPT_ID
+    if [ "$OMS_ATTEMPT_OWNED" = 0 ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
+      case "${OMS_PANEL_FALLBACK_DECISION:-}" in
+        selected|explicit-target|no-eligible-alternate|alternate-not-routable)
+          local -a fallback_refs
+          fallback_refs=(--ref "panel_fallback_decision=$OMS_PANEL_FALLBACK_DECISION")
+          if [ "$OMS_PANEL_FALLBACK_DECISION" = selected ]; then
+            fallback_refs+=(--ref "panel_fallback_provider=${OMS_PANEL_FALLBACK_PROVIDER:-}"
+                            --ref "panel_fallback_model=${OMS_PANEL_FALLBACK_MODEL:-}")
+          fi
+          "$events" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" \
+            --actor provider-router "${fallback_refs[@]}" >/dev/null ||
+            echo 'warning: panel fallback decision not recorded' >&2 ;;
+      esac
+    fi
   fi
 
   if [ "$OMS_ATTEMPT_OWNED" = 1 ]; then
@@ -4751,8 +4787,30 @@ PY
         "$OMS_ATTEMPT_ID" "$owner_pid" "$heartbeat_seconds"
   fi
   native_session_file="$(agent_memory_mktemp 2>/dev/null)" || native_session_file=""
+  local panel_fallback_skip=""
+  OMS_MODEL_FALLBACK_USED=0
+  OMS_MODEL_FALLBACK_REASON=""
   OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
   provider_status="$status"
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$provider_status" -ne 0 ] &&
+    [ "${OMS_MODEL_FALLBACK_USED:-0}" != 1 ]; then
+    if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
+      panel_fallback_skip=interactive
+    elif [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; then
+      panel_fallback_skip=authority-violation
+    elif [ "${OMS_MODEL_FALLBACK_REASON:-}" = policy-declined ]; then
+      panel_fallback_skip=policy-decline
+    elif [ "${OMS_PANEL_PROVIDER_ERROR_RECORDED:-0}" != 1 ]; then
+      panel_fallback_skip=error-not-recorded
+    elif [ -z "${OMS_PANEL_PROVIDER_ERROR_CLASS:-}" ]; then
+      panel_fallback_skip=error-unclassified
+    elif [ -z "${OMS_PANEL_FALLBACK_PROVIDER:-}" ] || [ -z "${OMS_PANEL_FALLBACK_MODEL:-}" ]; then
+      panel_fallback_skip=no-fallback-route
+    elif [ -z "$panel_fallback_skip" ]; then
+      panel_fallback_skip=provider-failure
+    fi
+    ma_record_panel_fallback_skip "$panel_fallback_skip" "$provider_status" "$state_repo" "$artifact"
+  fi
   if [ -n "$read_guard_tmp" ]; then
     guard_stderr="$read_guard_tmp/post-check.stderr"
     if ! ma_read_guard_assert 2>"$guard_stderr"; then

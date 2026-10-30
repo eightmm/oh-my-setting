@@ -875,6 +875,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 temporaries.append(brief)
                 _validate_dry_run_inputs(prompt, brief)
         fallback = None
+        fallback_decision = "explicit-target" if target else "no-eligible-alternate"
         if not target:
             remaining = {candidate["provider"] for candidate in policy()["tiers"][route["workload"]]}
             while remaining:
@@ -882,6 +883,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 if not fallback:
                     break
                 remaining.discard(fallback["provider"])
+                fallback_decision = "alternate-not-routable"
                 try:
                     peer = provider_catalog(fallback["provider"])[0]
                     if (peer["installed"] and access in peer["access"] and peer["exact_model_override"]):
@@ -894,7 +896,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                         fallback = None
                 except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
                     fallback = None
-        options = {}
+        options = {"fallback_decision": fallback_decision}
         if candidate is not None:
             options["candidate"] = candidate
         if continuation_patch is not None:
@@ -2309,7 +2311,7 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
                  candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None,
-                 routing_report=None, routing_repo=None):
+                 routing_report=None, routing_repo=None, fallback_decision=None):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
     from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
@@ -2390,6 +2392,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"],
                OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
+    env["OMS_PANEL_FALLBACK_DECISION"] = "selected" if fallback else (fallback_decision or "no-eligible-alternate")
     if fallback:
         env.update(OMS_PANEL_FALLBACK_PROVIDER=fallback["provider"],
                    OMS_PANEL_FALLBACK_MODEL=fallback["model"],

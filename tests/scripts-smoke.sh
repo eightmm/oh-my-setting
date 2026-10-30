@@ -13137,6 +13137,30 @@ assert metric['reports'] == 1 and metric['total'] == row['prompt_bytes'], metric
 assert 'not tokens' in metric['basis'] and 'repair' in metric['basis'], metric
 PY
 
+  # A failed panel route records its selection and why no retry ran.
+  local absent="$TMP/artifact-index-no-alternate"
+  mkdir -p "$absent/bin" "$absent/repo"
+  cat > "$absent/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+printf '%s\n' '{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}'
+exit 1
+EOF
+  chmod +x "$absent/bin/codex"
+  git -C "$absent/repo" init -q -b main
+  PATH="$absent/bin:$PATH" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=advisor OMS_PANEL_PURPOSE=advise \
+    OMS_PANEL_FALLBACK_DECISION=no-eligible-alternate OMS_AGENT=codex "$ROOT/scripts/agent-call.sh" \
+    --repo "$absent/repo" --artifact-dir "$absent/artifacts" --to codex --model gpt-6.1-sol \
+    --prompt "Assess failed route" >"$absent/out" 2>&1 || true
+  python3 - "$absent/repo/.oms/lifecycle/events.jsonl" <<'PYREF' || fail "missing fallback decision refs"
+import json, sys
+refs = {}
+for line in open(sys.argv[1]):
+    refs.update(json.loads(line).get('refs') or {})
+assert refs['panel_fallback_decision'] == 'no-eligible-alternate', refs
+assert refs['panel_fallback_skip'] == 'no-fallback-route', refs
+PYREF
+
   # A panel read call that failed over to the other provider is indexed, printed
   # and attributed to the provider that answered, never the one that failed.
   local swap="$TMP/artifact-index-call-swap"
@@ -13156,7 +13180,7 @@ EOF
   git -C "$swap/repo" init -q -b main
   out="$(PATH="$swap/bin:$PATH" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=advisor OMS_PANEL_PURPOSE=advise \
     OMS_PANEL_FALLBACK_PROVIDER=claude OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 \
-    OMS_PANEL_FALLBACK_EFFORT=medium OMS_AGENT=codex "$ROOT/scripts/agent-call.sh" \
+    OMS_PANEL_FALLBACK_DECISION=selected OMS_PANEL_FALLBACK_EFFORT=medium OMS_AGENT=codex "$ROOT/scripts/agent-call.sh" \
     --repo "$swap/repo" --artifact-dir "$swap/artifacts" --to codex --model gpt-6.1-sol \
     --prompt "Assess provider fallback attribution" 2>&1)" || fail "fallback advisor call failed: $out"
   contains "$out" 'ok: claude ->' || fail "fallback call did not name the provider that answered: $out"
@@ -13174,6 +13198,9 @@ for event in events:
         refs.update(event.get('refs') or {})
 assert refs['panel_provider'] == 'claude' and refs['panel_model'] == 'claude-sonnet-5-5', refs
 assert refs['panel_fallback'] == 'provider-model-unavailable', refs
+assert refs['panel_fallback_decision'] == 'selected', refs
+assert refs['panel_fallback_provider'] == 'claude' and refs['panel_fallback_model'] == 'claude-sonnet-5-5', refs
+assert 'panel_fallback_skip' not in refs, refs
 sidecars = list(pathlib.Path(sys.argv[2]).glob('*.attempts.json'))
 assert len(sidecars) == 1, sidecars
 attempts = json.loads(sidecars[0].read_text())['attempts']
@@ -14155,6 +14182,49 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
   make_committed_repo "$retry_repo"
   make_committed_repo "$retry_state"
   printf 'fixture prompt\n' > "$fixture/provider-retry/prompt"
+  # BEGIN early panel failover skip fixture
+  for retry_case in refusal-zero fallback-failed authority interactive interactive-authority interactive-zero nonpanel noattempt nostate; do
+    retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider codex \
+      --tool panel-dispatch --then starting:routed-starting --then working:routed-working)"
+    fixture_attempt="$retry_attempt"
+    fixture_state_repo="$retry_state"
+    case "$retry_case" in
+      refusal-zero) fixture_exit=0 fixture_guard=0 fixture_interactive=0 fixture_panel=1 expected_status=4 expected_skip=policy-decline ;;
+      fallback-failed) fixture_exit=7 fixture_guard=0 fixture_interactive=0 fixture_panel=1 expected_status=7 expected_skip='' ;;
+      authority) fixture_exit=0 fixture_guard=1 fixture_interactive=0 fixture_panel=1 expected_status=125 expected_skip=authority-violation ;;
+      interactive) fixture_exit=7 fixture_guard=0 fixture_interactive=1 fixture_panel=1 expected_status=7 expected_skip=interactive ;;
+      interactive-authority) fixture_exit=7 fixture_guard=1 fixture_interactive=1 fixture_panel=1 expected_status=125 expected_skip=interactive ;;
+      interactive-zero) fixture_exit=0 fixture_guard=0 fixture_interactive=1 fixture_panel=1 expected_status=0 expected_skip='' ;;
+      nonpanel) fixture_exit=0 fixture_guard=1 fixture_interactive=0 fixture_panel=0 expected_status=125 expected_skip='' ;;
+      noattempt) fixture_exit=0 fixture_guard=1 fixture_interactive=0 fixture_panel=1 expected_status=125 expected_skip='' fixture_attempt='' fixture_state_repo='' ;;
+      nostate) fixture_exit=0 fixture_guard=1 fixture_interactive=0 fixture_panel=1 expected_status=125 expected_skip='' fixture_state_repo='' ;;
+    esac
+    retry_status=0
+    FIXTURE_EXIT="$fixture_exit" FIXTURE_GUARD="$fixture_guard" FIXTURE_CASE="$retry_case" \
+      OMS_PEER_INTERACTIVE="$fixture_interactive" OMS_PANEL_DISPATCH="$fixture_panel" \
+      OMS_ATTEMPT_ID="$fixture_attempt" OMS_MODEL_EXPLICIT=gpt-6.1-sol OMS_AGENT=codex \
+      bash -c '. "$1/scripts/lib/peer-common.sh"
+        fixture_dir="$2"
+        agent_memory_mktemp() { mktemp "$fixture_dir/attempt-temp.XXXXXX"; }
+        ma_provider_attempt() { OMS_PROVIDER_ERROR_CLASSIFICATION=""; OMS_PROVIDER_ERROR_EXIT=""; [ "$FIXTURE_CASE" != refusal-zero ] || printf "%s\n" "unable to respond to this request" > "$4"; [ "$FIXTURE_CASE" != fallback-failed ] || OMS_MODEL_FALLBACK_USED=1; return "$FIXTURE_EXIT"; }
+        ma_write_post_attempt_guard() { [ "$FIXTURE_GUARD" != 1 ]; }
+        ma_run_routed_provider codex write "$2/prompt" "$2/output" "$3" delegate "$4" ""' \
+      _ "$ROOT" "$fixture/provider-retry" "$retry_repo" "$fixture_state_repo" \
+      > "$fixture/provider-retry/early-log" 2>&1 || retry_status=$?
+    [ "$retry_status" = "$expected_status" ] || fail "early $retry_case returned $retry_status"
+    if [ "$retry_case" != refusal-zero ]; then
+      compgen -G "$fixture/provider-retry/attempt-temp.*" > /dev/null && fail "early $retry_case left its attempt file"
+    fi
+    rm -f "$fixture/provider-retry"/attempt-temp.*
+    python3 - "$retry_state/.oms/lifecycle/events.jsonl" "$retry_attempt" "$expected_skip" <<'PYEARLY' || fail "early $retry_case skip record mismatch"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+skips = [row['refs']['panel_fallback_skip'] for row in rows
+         if row.get('attempt_id') == sys.argv[2] and 'panel_fallback_skip' in row.get('refs', {})]
+assert skips == ([sys.argv[3]] if sys.argv[3] else []), skips
+PYEARLY
+  done
+  # END early panel failover skip fixture
   run_provider_retry() { # ATTEMPT; stub failure env comes from the caller
     : > "$fixture/provider-retry/runs"
     if PANEL_FAIL=1 PANEL_ARGV="$fixture/provider-retry/argv" \
@@ -14162,7 +14232,7 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
       PATH="$fixture/bin:$PATH" OMS_MODEL_EXPLICIT=gpt-6.1-sol OMS_PANEL_DISPATCH=1 \
       OMS_PANEL_ROLE=worker OMS_PANEL_FALLBACK_PROVIDER=claude \
       OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 OMS_PANEL_FALLBACK_EFFORT=medium \
-      OMS_ATTEMPT_ID="$1" OMS_AGENT=codex \
+      OMS_PANEL_FALLBACK_DECISION=selected OMS_ATTEMPT_ID="$1" OMS_AGENT=codex \
       bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$3"; OMS_MODEL_EXPLICIT=gpt-6.1-sol; export OMS_MODEL_EXPLICIT; ma_run_routed_provider codex write "$2/prompt" "$2/output" "$3" delegate "$4" "" ""' \
         _ "$ROOT" "$fixture/provider-retry" "$retry_repo" "$retry_state" > "$fixture/provider-retry/log" 2>&1; then
       retry_status=0
@@ -14189,6 +14259,10 @@ routes = [row["refs"] for row in rows if row.get("refs", {}).get("panel_provider
 assert len(routes) == 1, routes
 assert routes[0]["panel_provider"] == "claude" and routes[0]["panel_model"] == "claude-sonnet-5-5", routes
 assert routes[0]["panel_fallback"] == "provider-model-unavailable", routes
+decisions = [row["refs"] for row in rows if row.get("refs", {}).get("panel_fallback_decision")]
+assert len(decisions) == 1 and decisions[0]["panel_fallback_decision"] == "selected", decisions
+assert decisions[0]["panel_fallback_provider"] == "claude", decisions
+assert decisions[0]["panel_fallback_model"] == "claude-sonnet-5-5", decisions
 PY
   grep -Fq 'fallback_used=1 reason=provider-model-unavailable' "$fixture/provider-retry/log" "$fixture/provider-retry/output" 2>/dev/null ||
     grep -rF 'fallback_used=1 reason=provider-model-unavailable' "$fixture/provider-retry" > /dev/null ||
@@ -14203,6 +14277,9 @@ PY
     PANEL_SPOOF="$retry_case" run_provider_retry "$retry_attempt"
     [ "$retry_status" -eq 7 ] && [ "$(cat "$fixture/provider-retry/runs")" = codex ] ||
       fail "answer text '$retry_case' triggered a same-tier provider retry (status $retry_status)"
+    "$ROOT/scripts/agent-events.sh" --repo "$retry_state" show --attempt "$retry_attempt" --json |
+      python3 -c 'import json,sys; assert json.load(sys.stdin)["refs"]["panel_fallback_skip"] == "error-not-recorded"' ||
+      fail "unclassified error did not record the first failed guard"
   done
 
   cat > "$fixture/bin/pi" <<'EOF'
@@ -14256,6 +14333,9 @@ EOF
       [ "$retry_status" -eq 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = pi ] || fail 'successful Pi response triggered fallback'
     elif [ "$retry_case" = refusal ]; then
       [ "$retry_status" -ne 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = pi ] || fail 'Pi refusal triggered fallback'
+      "$ROOT/scripts/agent-events.sh" --repo "$retry_state" show --attempt "$retry_attempt" --json |
+        python3 -c 'import json,sys; assert json.load(sys.stdin)["refs"]["panel_fallback_skip"] == "policy-decline"' ||
+        fail 'Pi refusal did not record the policy decline'
     else
       [ "$retry_status" -eq 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = $'pi\nclaude' ] || fail "Pi $retry_case fallback failed: $(cat "$fixture/provider-retry/log")"
       "$ROOT/scripts/agent-events.sh" --repo "$retry_state" show --attempt "$retry_attempt" --json > "$fixture/provider-retry/record"

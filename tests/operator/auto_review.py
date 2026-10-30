@@ -135,7 +135,8 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
         patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
         patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
         patch.object(panel, "work_repository", return_value=worker_execution_repo), \
-        patch.object(panel, "provider_catalog", return_value=catalog_rows), \
+        patch.object(panel, "provider_catalog", side_effect=lambda selection: [
+            row for row in catalog_rows if row["provider"] in selection.split(",")]), \
         patch.dict(os.environ, room_env, clear=True):
     panel._prepare_dispatch_call(project, shared, auto_call, room_owner,
                                  "test -f scripts/fixture.py", worker_execution_repo)
@@ -158,7 +159,9 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert dispatch_args[2:4] == ("reviewer", "read")
     assert dispatch_args[10]["workload"] == "deep", dispatch_args[10]
     assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
-    assert set(dispatch_kwargs) == {"candidate", "routing_report", "routing_repo"}, dispatch_kwargs
+    assert set(dispatch_kwargs) == {"candidate", "routing_report", "routing_repo", "fallback_decision"}, dispatch_kwargs
+    assert dispatch_kwargs["fallback_decision"] == "alternate-not-routable", dispatch_kwargs
+    assert dispatch_args[16] is None, dispatch_args
     assert dispatch_kwargs["candidate"] == {"patch": auto_patch_path, "sha256": auto_digest,
                                              "base": auto_index["base_sha"]}, dispatch_kwargs
     assert isinstance(dispatch_kwargs["routing_report"], list)
