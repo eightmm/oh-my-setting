@@ -431,6 +431,38 @@ def _admission(repo, rows, task_id, worker):
     return matches[-1]
 
 
+def _automatic_admission_evidence(repo, rows, admissions, task_id):
+    if not admissions:
+        raise ValueError('accepted requires --evidence when admission evidence is missing or ambiguous')
+    refs = []
+    for admission in admissions:
+        candidates = {}
+        if (not isinstance(admission, dict) or not isinstance(admission.get('patch_sha256'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', admission['patch_sha256'])):
+            raise ValueError('accepted requires --evidence when admission evidence is missing or ambiguous')
+        for row in rows:
+            if (not admission or row.get('kind') != 'patch-admit' or row.get('exit') != 0
+                    or row.get('patch_sha256') != admission.get('patch_sha256')
+                    or (row.get('task_id') and row.get('task_id') != (admission.get('task_id') or task_id))
+                    or (admission.get('plan_id') and row.get('plan_id') != admission.get('plan_id'))):
+                continue
+            try:
+                _indexed(repo, row)
+                ref = _relative(repo, row.get('artifact'))
+            except (OSError, ValueError, TypeError):
+                continue
+            if ref['sha256'] == row.get('artifact_sha256'):
+                candidates[ref['path']] = ref
+        if len(candidates) != 1:
+            raise ValueError('accepted requires --evidence when admission evidence is missing or ambiguous')
+        ref = next(iter(candidates.values()))
+        if ref not in refs:
+            refs.append(ref)
+    if len(refs) > 8:
+        raise ValueError('use at most eight evidence references; provide --evidence')
+    return refs
+
+
 @contextlib.contextmanager
 def _lock(repo, name='panel-results', timeout=10):
     if not isinstance(name, str) or not ID.fullmatch(name):
@@ -1805,6 +1837,9 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
         binding = snapshot['binding']
         if outcome == 'accepted':
             _review_preflight(repo, task_id, workers, rows, admissions)
+            if not refs:
+                refs = _automatic_admission_evidence(repo, rows, admissions, task_id)
+                snapshot['evidence'] = [dict(ref) for ref in refs]
         if outcome == 'accepted' and (not verify or not refs):
             raise ValueError('accepted requires an evidence reference and a passing verifier')
         _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding)

@@ -3839,6 +3839,13 @@ finalized = json.loads(accept_call("panel", *accept_finalize, execution=accept_e
 assert finalized["outcome"] == "accepted" and saved.result_matches_plan(accept_repo, "accept-task", finalized)
 assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout) == finished_task
 assert json.loads(accept_call("panel", *accept_finalize, execution=accept_execution).stdout)["revision"] == finalized["revision"]
+auto_finalize = accept_finalize[:-2]
+automatic = json.loads(accept_call("panel", *auto_finalize, execution=accept_execution).stdout)
+assert len(automatic["evidence"]) == 1, automatic
+assert automatic["evidence"][0]["path"].startswith(".oms/artifacts/admit/"), automatic
+assert automatic["evidence"][0] == saved._relative(accept_repo, automatic["evidence"][0]["path"])
+assert finalized["evidence"][0]["path"] == ".oms/artifacts/fixture/accept.patch", finalized
+
 # A retry still requires the identical publication proof and completion.
 wrong_completion = list(accept_finalize)
 wrong_completion[wrong_completion.index("--landed-commit") + 1] = accept_base.decode()
@@ -3907,6 +3914,52 @@ try:
                    for row in saved._records(project)[1]), "changed evidence wrote a result"
 finally:
     (project / "value.txt").write_bytes(evidence_before)
+def exercise_auto_admission_evidence():
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        repo = Path(directory)
+        reports = repo / ".oms/artifacts/admit"
+        reports.mkdir(parents=True)
+        artifact = reports / "admit-one.md"
+        artifact.write_text("admitted\n")
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        landed = {"patch_sha256": "a" * 64, "task_id": "task", "plan_id": "plan"}
+        row = dict(landed, kind="patch-admit", exit=0, artifact=".oms/artifacts/admit/admit-one.md",
+                   artifact_sha256=digest)
+        expected = [saved._relative(repo, row["artifact"])]
+        assert saved._automatic_admission_evidence(repo, [row], [landed], "task") == expected
+        for invalid in ([], [dict(row, artifact_sha256="0" * 64)], [dict(row, exit=1)],
+                        [dict(row, patch_sha256="")], [dict(row, artifact="")], [row, dict(row, artifact=".oms/artifacts/admit/admit-two.md")]):
+            (reports / "admit-two.md").write_text("admitted\n")
+            try:
+                saved._automatic_admission_evidence(repo, invalid, [landed], "task")
+                raise AssertionError("invalid or ambiguous admission accepted")
+            except ValueError as error:
+                assert "--evidence" in str(error), error
+        rows = []
+        landed_many = []
+        for number in range(9):
+            path = reports / ("admit-%s.md" % number)
+            path.write_text("admitted %s\n" % number)
+            item = dict(landed, patch_sha256=str(number) * 64)
+            landed_many.append(item)
+            rows.append(dict(item, kind="patch-admit", exit=0,
+                             artifact=".oms/artifacts/admit/" + path.name,
+                             artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+        assert len(saved._automatic_admission_evidence(repo, rows[:8], landed_many[:8], "task")) == 8
+        try:
+            saved._automatic_admission_evidence(repo, rows, landed_many, "task")
+            raise AssertionError("evidence limit exceeded")
+        except ValueError as error:
+            assert "--evidence" in str(error), error
+        try:
+            saved._automatic_admission_evidence(repo, [row], [], "task")
+            raise AssertionError("empty admission accepted")
+        except ValueError as error:
+            assert "--evidence" in str(error), error
+
+exercise_auto_admission_evidence()
+
 # BEGIN patch-scope finalize regression (also runnable as an isolated case).
 scope_patch = project / ".oms/artifacts/scope-result.patch"
 scope_worker = {"attempt_id": "att_scope_write", "task_id": "scope-result", "parent_attempt_id": "scope-main",
