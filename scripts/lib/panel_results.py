@@ -915,10 +915,10 @@ def _live_review_read_passes(repo, execution_checkout=None):
     entries = Path(repo) / '.oms/locks/canonical-sync.d'
     if not entries.exists() and not entries.is_symlink():
         if entries.parent.exists() and not os.access(str(entries.parent), os.R_OK | os.X_OK):
-            return ['canonical-sync-registry']
+            raise ValueError('canonical-sync registry .oms/locks/canonical-sync.d cannot be inspected; inspect and repair its directory or permissions, then retry finalize')
         return []
     if entries.is_symlink() or not entries.is_dir() or not os.access(str(entries), os.R_OK | os.X_OK):
-        return ['canonical-sync-registry']
+        raise ValueError('canonical-sync registry .oms/locks/canonical-sync.d cannot be inspected; inspect and repair its directory or permissions, then retry finalize')
     try:
         command = ['bash', '-c', '. "$1"; shift; oms_canonical_sync_live_review_entries "$@"',
                    'panel-live-reviews', str(ROOT / 'scripts/lib/canonical-sync.sh'), str(repo)]
@@ -928,7 +928,7 @@ def _live_review_read_passes(repo, execution_checkout=None):
             command,
             stderr=subprocess.DEVNULL, text=True, timeout=30).replace('\r', '')
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ['canonical-sync-registry']
+        raise ValueError('canonical-sync registry .oms/locks/canonical-sync.d cannot be inspected; inspect and repair its directory or permissions, then retry finalize')
     return sorted(name for name in live.splitlines() if name)
 
 
@@ -1834,6 +1834,9 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
                           'errors': [{'error': clean(str(error), 240)}]}
         for error in settlement.get('errors', []):
             print('OMS review settlement error: ' + clean(str(error), 300), file=sys.stderr)
+        if settlement.get('errors'):
+            print('For task %s, inspect the owner-scoped dry run: oms panel --settle-review --owner %s'
+                  % (task_id, owner), file=sys.stderr)
         if settlement.get('pending'):
             print('OMS review settlement: %d worker(s) remain pending' % len(settlement['pending']), file=sys.stderr)
         try:
@@ -2093,6 +2096,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             break
         last = metadata_attempts[-1] if metadata_attempts else {}
         metadata = last.get('refs', {})
+        timeout_action = ('continue with --continue TASK_ID' if metadata.get('panel_access') == 'read' else
+                          'salvage (--salvage TASK_ID); --continue if empty, else inspect and re-dispatch with recovered patch')
         reason_code = last.get('reason_code')
         terminal_failure = last.get('state') in TERMINAL_FAILURE_STATES
         termination_reason = (_reason_phrase(reason_code)
@@ -2221,7 +2226,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             representative = 'timed out'
             if failed_stage != 'review':
                 stages[failed_stage]['state'] = 'timed out'
-            action = 'continue with --continue TASK_ID'
+            action = timeout_action
         elif ending == 'verify_failed':
             representative, action = 'verify failed', 'retry verify'
             stages[failed_stage]['state'] = 'verify failed'
@@ -2258,7 +2263,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 'cancelled': 'salvage or re-dispatch',
                 'failed': 'inspect failure and retry',
                 'abandoned': 'salvage or re-dispatch',
-                'timed_out': 'continue with --continue TASK_ID',
+                'timed_out': timeout_action,
             }[last['state']]
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),

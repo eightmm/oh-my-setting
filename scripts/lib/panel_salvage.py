@@ -675,6 +675,12 @@ def record_empty_salvage(repo, task, attempt, reason):
     return relative
 
 
+def _empty_result(repo, task, attempt, reason):
+    record_empty_salvage(repo, task, attempt, reason)
+    return {'outcome': 'nothing_to_recover', 'task': task, 'attempt': attempt,
+            'reason': reason, 'next_action': '--continue %s may now resume the session without a patch' % task}
+
+
 def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None):
     if attempt_id is not None and task is None:
         path, attempt, reason, execution = _standalone(repo, attempt_id, artifact)
@@ -697,9 +703,7 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
             if evidence:
                 _raise_recovery_evidence(evidence, 'recoverable delegate evidence prevents empty salvage: %s' %
                                          ', '.join(evidence))
-            record_empty_salvage(repo, task, attempt, 'no kept worktree or indexed patch')
-            raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
-                             % (attempt, task)) from error
+            return _empty_result(repo, task, attempt, 'no kept worktree or indexed patch')
         base = indexed.get('base_sha', '')
         if not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{7,64}', base):
             raise ValueError('indexed patch has no valid recorded base')
@@ -717,9 +721,7 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
             if evidence:
                 _raise_recovery_evidence(evidence, 'recoverable delegate evidence prevents empty salvage: %s' %
                                          ', '.join(evidence))
-            record_empty_salvage(repo, task, attempt, 'indexed patch is empty')
-            raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
-                             % (attempt, task))
+            return _empty_result(repo, task, attempt, 'indexed patch is empty')
         paths = panel_results._patch_paths(patch)
         if not paths:
             raise ValueError('indexed patch has no file changes')
@@ -746,9 +748,7 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
             if evidence:
                 _raise_recovery_evidence(evidence, 'recoverable delegate evidence prevents empty salvage: %s' %
                                          ', '.join(evidence))
-            record_empty_salvage(repo, task, attempt, 'kept worktree is clean at its recorded base')
-            raise ValueError('nothing to recover for %s; --continue %s may now resume the session without a patch'
-                             % (attempt, task))
+            return _empty_result(repo, task, attempt, 'kept worktree is clean at its recorded base')
     if not patch:
         raise ValueError('kept worktree has no changes')
     metadata = {'schema': 1, 'kind': 'oms-salvaged-patch', 'base_sha': base,
@@ -871,6 +871,9 @@ def cli_main(arguments=None):
         result = salvage(repo, args.salvage, selected if args.repo else None, args.attempt, args.artifact)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif result.get('outcome') == 'nothing_to_recover':
+            print('nothing to recover for %s: %s; %s' %
+                  (result['attempt'], result['reason'], result['next_action']))
         else:
             print('patch: ' + result['patch_path'])
             print('metadata: ' + result['metadata_path'])

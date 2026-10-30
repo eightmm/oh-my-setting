@@ -2148,7 +2148,10 @@ dead_worker = settlement_worker(dead_task, dead_main)
 time.sleep(1.1)
 with patch.dict(os.environ, dict(environment, OMS_PANEL_MAIN_ATTEMPT=dead_main), clear=True), \
         patch.object(review_settlement, "_apply", side_effect=ValueError("fixture deferred settlement")):
-    deferred = saved.finalize(project, "codex", dead_task, str(summary), "completed")
+    settlement_output = io.StringIO()
+    with redirect_stderr(settlement_output):
+        deferred = saved.finalize(project, "codex", dead_task, str(summary), "completed")
+assert "--settle-review --owner codex" in settlement_output.getvalue() and dead_task in settlement_output.getvalue()
 assert deferred["settlement"]["errors"] and not deferred["settlement"]["applied"], deferred
 call(event_command + ["transition", "--attempt", dead_main, "--state", "cancelled"])
 dead_successor = call(dead_command + ["--then", "starting", "--then", "working"]).strip()
@@ -2987,6 +2990,14 @@ try:
         assert {path.relative_to(project): path.read_bytes()
                 for directory in protected_result_dirs for path in directory.rglob("*")
                 if path.is_file()} == before_conflict
+    with patch.object(saved.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "fixture")), \
+            patch.object(saved.time, "sleep", side_effect=AssertionError("inspection failure waited")):
+        try:
+            saved.finalize(project, "codex", "registry-error", str(summary), "completed")
+        except ValueError as error:
+            assert "canonical-sync registry" in str(error) and "repair" in str(error), error
+        else:
+            raise AssertionError("registry inspection failure was accepted")
     malformed_review.mkdir()
     deferred = panel_with_review_wait(deferred_args[3:], 2, cwd=project, env=environment)
     assert deferred.returncode == 75 and \
@@ -4508,7 +4519,7 @@ with patch.dict(os.environ, environment, clear=True):
         ("guard", {"exit": 1, "state": "failed", "guard": "scope"},
          "implement guard stop (scope)", "guard stop (scope)", "inspect guard stop and salvage partial work"),
         ("timeout", {"exit": 124, "state": "timed_out"},
-         "timed out", "timed out", "continue with --continue TASK_ID"),
+         "timed out", "timed out", "salvage (--salvage TASK_ID); --continue if empty, else inspect and re-dispatch with recovered patch"),
         ("verify", {"exit": 0, "verify_exit": 1, "state": "done", "reason_code": "verification_failed"},
          "verify failed", "verify failed", "retry verify"),
         ("provider", {"exit": 1, "state": "failed", "provider_error_exit": 1},
@@ -4535,6 +4546,17 @@ with patch.dict(os.environ, environment, clear=True):
         assert projected["stages"][stage_name]["state"] == expected_stage_state, projected
         rendered = question_view.render_results({"rows": [projected]}, width=200)
         assert expected_state in rendered and expected_action in rendered, rendered
+    for access in ("read", "write", None, "", "malformed"):
+        for with_call in (False, True):
+            attempt = {"attempt_id": "att-timeout-access", "task_id": "timeout-access", "state": "timed_out",
+                       "reason_code": "provider_timeout", "updated_at": "2026-10-22", "refs": {"panel_access": access}}
+            calls = ([dict(task_id="timeout-access", kind="delegate", attempt_id=attempt["attempt_id"],
+                           exit=124, state="timed_out")] if with_call else [])
+            with patch.object(saved, "_records", return_value=([attempt], calls)):
+                row = saved.results(project, task_id="timeout-access")["rows"][0]
+            expected = ("continue with --continue TASK_ID" if access == "read" else
+                        "salvage (--salvage TASK_ID); --continue if empty, else inspect and re-dispatch with recovered patch")
+            assert row["next_action"] == expected, row
     for code, expected, state in (("panel_call_interrupted", "interrupted (caller exited or was signalled)", "cancelled"),
                                   ("provider_failed", "provider failed", "failed"),
                                   ("odd\x1b[31m_code", "stopped (odd?[31m_code)", "cancelled"),

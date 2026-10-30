@@ -273,13 +273,9 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
                          'encoding_warnings': []}]}))
         scratch_record['patch'] = scratch_patch
         scratch_record['patch_sha256'] = hashlib.sha256(b'').hexdigest()
-        try:
-            panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
-        except ValueError as error:
-            assert str(error) == ('nothing to recover for %s; --continue scratch-task may now resume the session '
-                                  'without a patch' % scratch_attempt['attempt_id']), error
-        else:
-            raise AssertionError('empty indexed patch was accepted')
+        empty = panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        assert empty['outcome'] == 'nothing_to_recover' and empty['reason'] == 'indexed patch is empty', empty
+        assert '--continue scratch-task' in empty['next_action'], empty
         empty_record_path = salvage_repo / panel_salvage._empty_provenance_path(
             'scratch-task', scratch_attempt['attempt_id'])
         empty_record = json.loads(empty_record_path.read_text())
@@ -290,12 +286,16 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
         # A delegate-located missing worktree with no indexed patch metadata is also empty salvage.
         scratch_record.pop('patch')
         scratch_record.pop('patch_sha256')
-        try:
-            panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
-        except ValueError as error:
-            assert 'nothing to recover for %s' % scratch_attempt['attempt_id'] in str(error), error
-        else:
-            raise AssertionError('missing indexed patch metadata was not recorded as empty salvage')
+        empty = panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        assert empty['outcome'] == 'nothing_to_recover' and empty['reason'] == 'no kept worktree or indexed patch', empty
+        for options in ([], ['--json']):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert panel.main(['--repo', str(salvage_repo), '--salvage', 'scratch-task', *options]) == 0
+            if options:
+                assert json.loads(output.getvalue()) == empty
+            else:
+                assert 'nothing to recover' in output.getvalue() and '--continue scratch-task' in output.getvalue()
         foreign_provenance.unlink()
         empty_record = json.loads(empty_record_path.read_text())
         outcomes = [row['salvaged_from'] for row in empty_record['records']
@@ -728,12 +728,8 @@ def drop_clean():
             panel_results, '_query', side_effect=lambda repo, verb, *args: {'rows': [clean_record]}):
         return panel_salvage._without_clean_worktrees(
             salvage_repo, 'clean-task', 'att_clean', salvage_execution_repo, clean_evidence)
-try:
-    kept_salvage(clean_tree, clean_attempt, clean_record)
-except ValueError as error:
-    assert 'nothing to recover for att_clean' in str(error), error
-else:
-    raise AssertionError('clean kept worktree produced a patch')
+empty = kept_salvage(clean_tree, clean_attempt, clean_record)
+assert empty['outcome'] == 'nothing_to_recover' and empty['reason'] == 'kept worktree is clean at its recorded base', empty
 assert clean_receipt.is_file(), 'clean kept worktree left no empty-salvage receipt'
 assert drop_clean() == []
 (clean_tree / 'late.md').write_text('written after inspection\n')
