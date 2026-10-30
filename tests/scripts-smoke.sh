@@ -10779,7 +10779,7 @@ EOF
   assert_file_contains "$project/out" "proposed 1 task(s)"
   make_committed_repo "$allow_project"
   bin_dir="$allow_project/bin"
-  mkdir -p "$bin_dir" "$allow_project/home"
+  mkdir -p "$bin_dir" "$allow_project/home" "$allow_project/tests"
   mkdir -p "$allow_project/scripts"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$allow_project/scripts/check.sh"; chmod +x "$allow_project/scripts/check.sh"
   printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash scripts/check.sh fast\n\n## Verification\n\n- Required checks: bash scripts/check.sh fast\n- Required check files: scripts/check.sh\n' > "$allow_project/PROJECT.md"
@@ -10787,6 +10787,15 @@ EOF
   HOME="$allow_project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$allow_project" --to codex >"$allow_project/out" 2>&1 ||
     fail "a user project's scripts/check.sh must be proposed without OMS markers: $(tail -3 "$allow_project/out")"
   assert_file_contains "$allow_project/out" "proposed 1 task(s)"
+  printf '%s() {\n  "$ROOT/scripts/peer-delegate.sh" --dry-run\n}\n' test_fixture_delegates \
+    > "$allow_project/tests/scripts-smoke.sh"
+  for verify in 'bash tests/run-smoke-shard.sh' \
+    'bash tests/run-smoke-shard.sh --only test_fixture_delegates'; do
+    fake_planner "$verify"
+    HOME="$allow_project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$allow_project" --to codex >"$allow_project/out" 2>&1 ||
+      fail "a foreign project's smoke runner must be proposed: $(tail -3 "$allow_project/out")"
+    assert_file_contains "$allow_project/out" "proposed 1 task(s)"
+  done
 }
 
 # smoke-weight: 13
@@ -10835,6 +10844,10 @@ EOF
     fail "propose should succeed: $(tail -4 "$project/out")"
   assert_file_contains "$project/out" "proposed 2 task(s)"
   assert_file_contains "$home_dir/planner-prompt" "changed verification files (tests, verifier scripts) restored from HEAD"
+  if grep -Fq 'run-smoke-shard' "$home_dir/planner-prompt"; then
+    fail "foreign project prompt must not name the OMS smoke runner"
+  fi
+  assert_file_contains "$home_dir/planner-prompt" "prefer the narrowest existing test selector of the project for the touched module."
   assert_file_contains "$project/out" "review the list"
   # t2 verifies with `bash tests/run.sh` and may change tests/ -- patch-admit
   # refuses a patch that rewrites the test judging it, so that task is

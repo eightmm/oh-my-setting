@@ -151,6 +151,10 @@ PY
   fail "--provider-timeout must not exceed 24h"
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
+is_oms_repo=0
+if [ -f "$REPO/.agents/plugins/marketplace.json" ] && [ -f "$REPO/scripts/install-claude-hooks.sh" ]; then
+  is_oms_repo=1
+fi
 SPEC="$REPO/PROJECT.md"
 # A parent's scratch worktree proposes against its own tree into the main checkout's plan.
 STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
@@ -200,7 +204,7 @@ fi
 # dependencies that stay inside the proposal).
 validate_proposal() {  # FILE [APPLY] -> prints "ok <count>" or fails with reason
   python3 - "$1" "$MAX_TASKS" "$ID_PREFIX" "$ALLOWED_ENVELOPE" "$PLAN_FILE" "${2:-0}" \
-    "$ROOT/scripts/lib/path_scope.py" "$REPO" "$ROOT/scripts/lib/task-assignment.py" "$COLLABORATION" "$WORKER_PROVIDER" <<'PY'
+    "$ROOT/scripts/lib/path_scope.py" "$REPO" "$ROOT/scripts/lib/task-assignment.py" "$COLLABORATION" "$WORKER_PROVIDER" "$is_oms_repo" <<'PY'
 import json, os, re, runpy, shlex, sys, unicodedata
 
 within_envelope = runpy.run_path(sys.argv[7])["within_envelope"]
@@ -469,21 +473,17 @@ def smoke_test_delegates(name):
 
 
 def delegating_verifier(verify):
-    is_oms_repo = (
-        os.path.isfile(os.path.join(repo, ".agents", "plugins", "marketplace.json")) and
-        os.path.isfile(os.path.join(repo, "scripts", "install-claude-hooks.sh"))
-    )
-    if is_oms_repo:
+    if sys.argv[12] == "1":
         for suite in DELEGATING_SUITES + FULL_SUITE_VERIFIERS:
             if (os.path.isfile(os.path.join(repo, suite)) and
                     any(script_invocations(verify, basename(suite)))):
                 return suite
-    for names in smoke_shard_invocations(verify):
-        if names is None:
-            return "tests/run-smoke-shard.sh"
-        for name in names:
-            if smoke_test_delegates(name):
-                return "tests/run-smoke-shard.sh --only %s" % name
+        for names in smoke_shard_invocations(verify):
+            if names is None:
+                return "tests/run-smoke-shard.sh"
+            for name in names:
+                if smoke_test_delegates(name):
+                    return "tests/run-smoke-shard.sh --only %s" % name
     return None
 
 def reject_controls(value, label):
@@ -955,6 +955,16 @@ Existing plan (id | state | title | scope):
 $plan_context
 --- end contract ---"
 
+if [ "$is_oms_repo" = 1 ]; then
+  delegation_rule='Delegation rule: task verifies run inside a worker, so never run a delegating
+suite or a whole-suite verifier. Prefer bash tests/run-smoke-shard.sh --only
+test_NAME only when that named smoke test does not invoke plan-run.sh,
+goal-drive.sh, autopilot.sh, or peer-delegate.sh.'
+else
+  delegation_rule='Delegation rule: task verifies run inside a worker, so never run a whole-suite
+verifier or a suite that itself launches agent workers; prefer the narrowest existing test selector of the project for the touched module.'
+fi
+
 prompt="Decompose the remaining work for this repository into at most $MAX_TASKS
 plan tasks. Ground every task in the PROJECT.md contract below; stay inside
 Scope, never touch Non-goals.
@@ -1002,10 +1012,7 @@ it passes. Never write a verify that reads or asserts content that only
 exists in the task's patch (grep/sed/cat of an allowed path, inline asserts
 of new behavior) — those can never pass the floor; new-behavior and consumer
 proof belong in the plan-level acceptance, which runs on the finished tree.
-Delegation rule: task verifies run inside a worker, so never run a delegating
-suite or a whole-suite verifier. Prefer bash tests/run-smoke-shard.sh --only
-test_NAME only when that named smoke test does not invoke plan-run.sh,
-goal-drive.sh, autopilot.sh, or peer-delegate.sh.
+$delegation_rule
 Keep each task within roughly 180 changed lines by default so worker/review
 budgets can carry the full patch. If a genuinely indivisible task must exceed
 that budget, make the exception explicit in its title so parent review sees it.
