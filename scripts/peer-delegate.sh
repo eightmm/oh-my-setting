@@ -1716,6 +1716,8 @@ except Exception:
     except FileNotFoundError:
         pass
     raise
+if binding:
+    print(binding.plan_id)
 PY
   }
   DELEGATION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
@@ -1742,8 +1744,24 @@ PY
       write_delegation_marker
     fi
   }
-  oms_with_file_lock "$delegation_lock_target" register_delegation_marker ||
-    fail "marker registration failed; provider was not started"
+  if [ -n "$OBSERVED_BINDING" ]; then
+    observed_plan_id="$(oms_with_file_lock "$delegation_lock_target" register_delegation_marker)" ||
+      fail "marker registration failed; provider was not started"
+    observed_plan_id="${observed_plan_id//$'\r'/}"
+    case "$observed_plan_id" in
+      plan_*)
+        case "${observed_plan_id#plan_}" in
+          *[!0-9a-f]*) fail "validated observation has malformed lineage" ;;
+        esac
+        [ "${#observed_plan_id}" -eq 37 ] || fail "validated observation has malformed lineage"
+        ;;
+      *) fail "validated observation has malformed lineage" ;;
+    esac
+    export OMS_INDEX_PLAN_ID="$observed_plan_id"
+  else
+    oms_with_file_lock "$delegation_lock_target" register_delegation_marker ||
+      fail "marker registration failed; provider was not started"
+  fi
 fi
 
 {

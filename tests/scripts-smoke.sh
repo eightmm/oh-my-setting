@@ -593,6 +593,7 @@ def refuse(binding, extra=(), use_env=None, contains=None):
         assert contains in result.stderr, result.stderr
 binding = current()
 for raw in ("{}", "[]", "null", "{", "z" * 4097, json.dumps(binding)[:-1] + ',"task_id":"lease-bound"}',
+            *(json.dumps(dict(binding, plan_id=value)) for value in ("", "0", "plan_" + "0" * 31, "plan_" + "g" * 32)),
             json.dumps(dict(binding, lease_id="lease_" + "0" * 32)), json.dumps(dict(binding, plan_id="plan_" + "0" * 32)),
             json.dumps(dict(binding, task_id="lease-bound; printf injected")), json.dumps(dict(binding, room_id="foreign")),
             json.dumps(dict(binding, claim_provider="claude")), json.dumps(dict(binding, owner_provider="codex")),
@@ -626,6 +627,12 @@ for invalid in ("ownerless", "duplicate", "symlink", "hardlink", "oversize", "pr
         refuse(json.dumps(binding), contains="assignment mismatch" if invalid in ("provider", "model", "reasoning_effort") else None)
     finally:
         path.unlink(); backup.unlink(); path.write_bytes(original)
+# Exercise the real producer after the observation is validated.
+run(peer + ["--observe-plan-binding", json.dumps(binding)], child_env)
+rows = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_text().splitlines()]
+delegates = [row for row in rows if row.get("kind") == "delegate" and row.get("task_id") == "lease-bound"]
+assert delegates and delegates[-1].get("plan_id") == binding["plan_id"], delegates
+started.unlink()
 # Freeze a production panel snapshot, replace its lease via the API, then run the actual peer command.
 real_launch = subprocess.Popen
 def replace_before_launch(argv, *args, **kwargs):
