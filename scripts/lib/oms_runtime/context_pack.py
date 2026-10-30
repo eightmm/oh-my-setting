@@ -307,8 +307,44 @@ def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> 
                         _transform=_sanitize_automatic)
 
 
+def scoped_consumers(repo: Path, state: Path, scopes: Any) -> str:
+    from oms_runtime.context import _fresh_graph
+    from oms_graph.project.blast import blast_radius
+    from path_scope import matches_any, validate_patterns
+
+    if not isinstance(scopes, list) or not scopes or not all(isinstance(x, str) for x in scopes):
+        raise CoreError("invalid graph scopes")
+    for scope in scopes:
+        _check_path(scope, "scope")
+    validate_patterns(scopes)
+    checked = _fresh_graph(repo, state=state)
+    if checked is None:
+        raise CoreError("graph unavailable")
+    graph = checked[0]
+    paths = sorted({node.get("path", "") for node in graph.nodes.values()
+                    if node.get("path") and matches_any(node["path"], scopes)})
+    result = blast_radius(graph, paths)
+    tests = set(result["tests"])
+    consumers = [path for path in result["files"] if not matches_any(path, scopes)]
+    consumers.sort(key=lambda path: (path not in tests, path))
+    consumers = [_check_path(path, "consumer") for path in consumers if not sensitive_text(path)][:12]
+    if not consumers:
+        return ""
+    return ("## Consumers outside your scope (from graph blast of your scoped files; not exhaustive)\n"
+            + "\n".join("- " + path for path in consumers)
+            + "\nKeep changes compatible with them (signatures, keyword arguments, mocks by name); "
+              "report any consumer you could not keep compatible; do not edit them.")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 4 and args[0] == "--consumers":
+        try:
+            print(scoped_consumers(Path(args[1]), Path(args[2]), json.loads(args[3])))
+        except (CoreError, OSError, ValueError, TypeError, KeyError):
+            print("scoped consumer graph unavailable", file=sys.stderr)
+            return 2
+        return 0
     if len(args) == 5 and args[0] == "--auto":
         try:
             pack = automatic_context_pack(Path(args[1]), Path(args[2]), Path(args[3]), args[4])

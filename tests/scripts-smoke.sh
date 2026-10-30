@@ -6108,7 +6108,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   local mode
-  for mode in default first cached disabled autobuild-disabled unmatched; do
+  for mode in default first cached disabled autobuild-disabled unmatched scoped; do
     local flags=()
     local query='recover lease'
     local expect_ready=0
@@ -6129,6 +6129,7 @@ EOF
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
       OMS_CONTEXT_CAPTURE="$capture" OMS_GRAPH_EXPECT_READY="$expect_ready" \
       OMS_GRAPH_AUTOBUILD="$autobuild" \
+      OMS_PANEL_GRAPH_SCOPES="$( [ "$mode" != scoped ] || printf '["lease.py"]' )" \
       OMS_GRAPH_TEST_LIB="$ROOT/scripts/lib" PATH="$bin_dir:/usr/bin:/bin" \
       "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
       --artifact-dir "$TMP/delegate-auto-graph-artifacts" --no-verify --allow-no-change \
@@ -6145,6 +6146,10 @@ artifact_dir = pathlib.Path(sys.argv[5])
 text = prompt.read_text(encoding="utf-8")
 assert "private_recover_lease" not in text and "untracked.py" not in text, text
 assert "def recover_lease" not in text, "automatic orientation included source bytes"
+if mode == "scoped":
+    assert "Consumers outside your scope" in text and "tests/test_lease.py" in text, text
+else:
+    assert "Consumers outside your scope" not in text, text
 if mode in ("default", "disabled", "autobuild-disabled", "unmatched"):
     assert "## Project Graph orientation" not in text, text
     if mode == "unmatched":

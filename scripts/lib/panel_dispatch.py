@@ -2515,6 +2515,10 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if binding and route["kind"] in {"worker", "researcher"}:
         argv += ["--observe-plan-binding", json.dumps(binding._asdict(), separators=(",", ":"))]
     if access == "write":
+        if scopes:
+            env["OMS_PANEL_GRAPH_SCOPES"] = json.dumps(scopes, separators=(",", ":"))
+        else:
+            env.pop("OMS_PANEL_GRAPH_SCOPES", None)
         # The worker's first prompt states its path contract: the plan task's
         # stored paths and the scopes this dispatch declared.
         allowed, forbidden = _plan_task_paths(repo, task_id)

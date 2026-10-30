@@ -1404,6 +1404,15 @@ Graph source: detached worker snapshot. Bounded orientation is not exhaustive co
     printf '\nGraph orientation unavailable or unmatched; inspect source paths, callers and tests directly.\n' >> "$prompt_file"
     echo 'graph-context: unavailable or unmatched; using direct repository discovery' >&2
   fi
+  if [ -n "${OMS_PANEL_GRAPH_SCOPES:-}" ]; then
+    if consumer_section="$(OMS_PEER_KILL_AFTER=1 ma_run_bounded 25 graph-consumers python3 -B "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" \
+      --consumers "$worktree" "$worktree/.oms/project-graph" "$OMS_PANEL_GRAPH_SCOPES" 2>/dev/null)"; then
+      consumer_section="$(printf '%s' "$consumer_section" | tr -d '\r')"
+      [ -z "$consumer_section" ] || printf '\n%s\n' "$consumer_section" >> "$prompt_file"
+    else
+      printf '\nScoped consumer graph unavailable; inspect consumers directly.\n' >> "$prompt_file"
+    fi
+  fi
   # Graph metadata is untrusted too. Never call a worker on an unchecked layer.
   ma_validate_outbound_prompt "$prompt_file" ||
     fail "automatic graph context failed outbound validation; no worker ran"
