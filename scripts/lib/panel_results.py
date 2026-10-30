@@ -1630,7 +1630,8 @@ def _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_
     return record
 
 
-def accept(repo, owner, task_id, message, verify, expected_patch_sha256=None, execution_repo=None):
+def accept(repo, owner, task_id, message, verify, expected_patch_sha256=None, execution_repo=None,
+           allow_verifier_change=False, allow_floor_change=None):
     """Apply one reviewed candidate and commit locally; publication remains explicit."""
     _owner()
     execution = _execution_repo(repo, execution_repo)
@@ -1638,6 +1639,12 @@ def accept(repo, owner, task_id, message, verify, expected_patch_sha256=None, ex
         raise ValueError('accept requires a nonblank commit message')
     if expected_patch_sha256 is not None and not re.fullmatch(r'[0-9a-f]{64}', expected_patch_sha256):
         raise ValueError('expected patch digest must be a lowercase SHA-256')
+    if not isinstance(allow_verifier_change, bool):
+        raise ValueError('allow_verifier_change must be boolean')
+    if allow_floor_change is not None and (not isinstance(allow_floor_change, str)
+            or not allow_floor_change.strip()
+            or any(ord(c) < 32 or ord(c) == 127 for c in allow_floor_change)):
+        raise ValueError('allow_floor_change requires a nonblank single-line reason without control characters')
     with _accept_lock(repo, execution):
         base = _git(execution, 'rev-parse', 'HEAD').decode().strip()
         if _git(execution, 'status', '--porcelain', '--untracked-files=all'):
@@ -1653,9 +1660,14 @@ def accept(repo, owner, task_id, message, verify, expected_patch_sha256=None, ex
             _git(execution, 'apply', '--cached', '--binary', str(patch_path), env=index_env)
             expected_tree = _git(execution, 'write-tree', env=index_env)
             try:
-                result = subprocess.run(['bash', str(ROOT / 'scripts/patch-land.sh'), '--repo', str(execution),
+                command = ['bash', str(ROOT / 'scripts/patch-land.sh'), '--repo', str(execution),
                     '--patch', str(patch_path), '--verify', verify, '--panel-accept',
-                    json.dumps(dict(snapshot=snapshot, owner=owner, task_id=task_id, base=base))],
+                    json.dumps(dict(snapshot=snapshot, owner=owner, task_id=task_id, base=base))]
+                if allow_verifier_change:
+                    command.append('--allow-verifier-change')
+                if allow_floor_change is not None:
+                    command.extend(['--allow-floor-change', allow_floor_change])
+                result = subprocess.run(command,
                     stdin=subprocess.DEVNULL, stdout=sys.stderr, check=False)
                 if result.returncode:
                     raise ValueError('patch-land failed; use existing patch-land --recover for incomplete receipts')

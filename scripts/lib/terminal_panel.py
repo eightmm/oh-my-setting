@@ -384,6 +384,8 @@ def main(argv=None):
     parser.add_argument("--open-chat", help="navigate to a selected room participant without starting a model turn")
     parser.add_argument("--chat-surface", choices=("auto", "terminal", "app"), default="auto")
     parser.add_argument("--accept", metavar="TASK", help="commit one reviewed worker candidate locally; publication stays explicit")
+    parser.add_argument("--allow-verifier-change", action="store_true", help="allow --accept to change its verifier")
+    parser.add_argument("--allow-floor-change", metavar="REASON", help="owner reason for an intentional failed admission floor")
     parser.add_argument("--message", help="commit message for --accept")
     parser.add_argument("--expected-patch-sha256", help="assert the reviewed candidate digest for --accept")
     parser.add_argument("--landed-commit", help="finish the plan with a published SHA before --finalize")
@@ -558,6 +560,11 @@ def main(argv=None):
         parser.error("--dry-run only plans a launch, role dispatch or council")
     if (args.message is not None or args.expected_patch_sha256 is not None) and not args.accept:
         parser.error("--message and --expected-patch-sha256 require --accept")
+    if not args.accept and (args.allow_verifier_change or args.allow_floor_change is not None):
+        parser.error("consent options require --accept")
+    if args.allow_floor_change is not None and (not args.allow_floor_change.strip() or
+            any(ord(c) < 32 or ord(c) == 127 for c in args.allow_floor_change)):
+        parser.error("--allow-floor-change requires a nonblank single-line reason without control characters")
     if args.accept is not None and (not args.accept or not (args.repo and args.message and args.verify) or args.task_id):
         parser.error("--accept TASK requires --repo, --message and --verify; takes no --task-id")
     if args.landed_commit is not None and not args.finalize:
@@ -762,7 +769,9 @@ def main(argv=None):
             return 0
         if args.accept:
             report = accept(repo, args.owner or caller_owner(), args.accept, args.message, args.verify,
-                            args.expected_patch_sha256, execution_repo=execution)
+                            args.expected_patch_sha256, execution_repo=execution,
+                            allow_verifier_change=args.allow_verifier_change,
+                            allow_floor_change=args.allow_floor_change)
             print("committed locally; publication pending: " + report['sha'])
             print("Next: oms land --repo " + shlex.quote(str(execution)))
             return 0

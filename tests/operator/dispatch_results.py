@@ -3135,6 +3135,76 @@ def prepare_accept_clone(label):
         subprocess.run(["git", "-C", str(clone), "config", key, value], check=True)
     return clone, dict(accept_env, OMS_ROOM_REPO=str(clone))
 
+# A reviewed patch that changes its own verifier needs explicit owner consent.
+consent_repo, consent_env = prepare_accept_clone("accept verifier consent")
+consent_verify = "awk -f value.txt /dev/null"
+accept_call("agent-plan", "add", "--id", "consent-task", "--title", "Consent fixture",
+            "--allowed", "value.txt,literal[*].txt", "--verify", consent_verify,
+            execution=consent_repo, env=consent_env)
+accept_call("agent-plan", "claim", "--id", "consent-task", "--provider", "codex",
+            execution=consent_repo, env=consent_env)
+consent_task = json.loads(accept_call("agent-plan", "evidence-snapshot", "--id", "consent-task",
+                                      execution=consent_repo, env=consent_env).stdout)
+accept_call("agent-plan", "start", "--id", "consent-task", "--lease-id", consent_task["lease_id"],
+            execution=consent_repo, env=consent_env)
+consent_worker = accept_call("agent-events", "start", "--provider", "local", "--tool", "peer-delegate",
+    "--task-id", "consent-task", "--parent-attempt-id", consent_env["OMS_PANEL_MAIN_ATTEMPT"],
+    "--ref", "panel_role=worker", "--ref", "panel_access=write", "--ref", "panel_lease_id=" + consent_task["lease_id"],
+    "--then", "starting", "--then", "working", "--then", "verifying", "--then", "review",
+    execution=consent_repo, env=consent_env).stdout.strip()
+consent_artifact = consent_repo / ".oms/artifacts/fixture/consent.md"
+consent_artifact.write_text(accept_artifact.read_text())
+consent_patch = consent_artifact.with_suffix(".patch")
+consent_patch.write_bytes(accept_patch.read_bytes())
+consent_index_env = dict(consent_env, OMS_TASK_ID="consent-task", OMS_ATTEMPT_ID=consent_worker,
+                         OMS_INDEX_PLAN_ID=consent_task["plan_id"])
+call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" delegate local 0 "$3" "$4"',
+      "consent-fixture", str(root / "scripts/lib/peer-common.sh"), str(consent_repo),
+      str(consent_artifact), str(consent_patch)], consent_index_env)
+call(["bash", "-c", '. "$1"; ma_append_artifact_index "$2" review-outcome local 0 "$3"',
+      "consent-fixture", str(root / "scripts/lib/peer-common.sh"), str(consent_repo), str(consent_artifact)],
+     dict(consent_index_env, OMS_INDEX_REVIEW_OUTCOME_JSON=accept_review))
+consent_options = ("--accept", "consent-task", "--message", "fix: consent fixture", "--verify", consent_verify)
+consent_base = subprocess.check_output(["git", "-C", str(consent_repo), "rev-parse", "HEAD"])
+refused = accept_call("panel", *consent_options, execution=consent_repo, env=consent_env, check=False)
+assert refused.returncode != 0 and "REJECT" in refused.stderr, refused.stderr
+assert any("patch modifies its own verifier" in p.read_text()
+           for p in (consent_repo / ".oms/artifacts/admit").glob("*.md"))
+assert subprocess.check_output(["git", "-C", str(consent_repo), "rev-parse", "HEAD"]) == consent_base
+assert not subprocess.check_output(["git", "-C", str(consent_repo), "status", "--porcelain"])
+original_run = subprocess.run
+captured_admission = []
+def inspect_consent_command(command, *args, **kwargs):
+    if len(command) > 1 and str(command[1]).endswith("scripts/patch-land.sh"):
+        captured_admission.append(command)
+        return subprocess.CompletedProcess(command, 1)
+    return original_run(command, *args, **kwargs)
+with patch.dict(os.environ, consent_env, clear=True), patch.object(saved.subprocess, "run", side_effect=inspect_consent_command):
+    try:
+        saved.accept(consent_repo, "codex", "consent-task", "fix: consent fixture", consent_verify,
+                     execution_repo=consent_repo, allow_verifier_change=True, allow_floor_change="0")
+        raise AssertionError("mock admission unexpectedly succeeded")
+    except ValueError as error:
+        assert "patch-land failed" in str(error), error
+assert len(captured_admission) == 1
+assert captured_admission[0][-3:] == ["--allow-verifier-change", "--allow-floor-change", "0"]
+consented = accept_call("panel", *consent_options, "--allow-verifier-change",
+                        execution=consent_repo, env=consent_env)
+assert "committed locally" in consented.stdout
+consent_result = json.loads(accept_call("agent-plan", "show", "--id", "consent-task",
+                                        execution=consent_repo, env=consent_env).stdout)
+assert consent_result["state"] == "review" and consent_result["panel_accept"]["patch_sha256"] == accept_digest
+assert "allow_verifier_change" not in consent_result["panel_accept"]
+assert "allow_floor_change" not in consent_result["panel_accept"]
+assert not subprocess.check_output(["git", "-C", str(consent_repo), "status", "--porcelain"])
+for consent_flag in (("--allow-verifier-change",), ("--allow-floor-change", "reason")):
+    invalid = accept_call("panel", *consent_flag, execution=consent_repo, env=consent_env, check=False)
+    assert invalid.returncode == 2 and "require --accept" in invalid.stderr, invalid.stderr
+for reason in ("", " ", "\n", "bad\rvalue", "bad\tvalue", "bad\x7fvalue"):
+    invalid = accept_call("panel", *consent_options, "--allow-floor-change", reason,
+                          execution=consent_repo, env=consent_env, check=False)
+    assert invalid.returncode == 2 and "--allow-floor-change" in invalid.stderr, invalid.stderr
+
 # A commit hook that mutates the index must never run for the internal exact-tree
 # accept commit.
 hook_repo, hook_env = prepare_accept_clone("accept commit hook")
