@@ -112,6 +112,7 @@ Options:
                        reviewer verdicts (a GATE: pass self-report cannot
                        pass a diff that fails the project's own checks).
                        Defaults to a declared fast mode (ml-smoke with --ml).
+                       Without check.sh, a PROJECT.md command is suggested only.
                        Otherwise pass --verify explicitly; review never
                        silently starts the full release suite.
   --covers ID          Gate mode: acceptance criterion the gate verify run
@@ -708,9 +709,13 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/review}"
 
 # Mechanical gate backstop: default to the project's own check contract so a
 # GATE: pass self-report alone cannot pass a diff that fails the checks.
-if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "$MA_READ_SOURCE_REPO/scripts/check.sh" ]; then
-  VERIFY_CMD="$(oms_default_verify_command "$MA_READ_SOURCE_REPO/scripts/check.sh" "$ML_PRESET")" || exit 2
-  echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
+if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ]; then
+  if [ -x "$MA_READ_SOURCE_REPO/scripts/check.sh" ]; then
+    VERIFY_CMD="$(oms_default_verify_command "$MA_READ_SOURCE_REPO/scripts/check.sh" "$ML_PRESET")" || exit 2
+    echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
+  else
+    { cat "$MA_READ_SOURCE_REPO/PROJECT.md" 2>/dev/null || true; } | oms_verify_hint
+  fi
 fi
 
 # Explicit coverage may only ride the mechanical verify receipt: reviewer

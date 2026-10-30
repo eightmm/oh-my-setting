@@ -884,6 +884,38 @@ oms_default_verify_command() {
   fi
 }
 
+# Read a single declared command as data; never execute the project text.
+oms_project_verify_command() {
+  awk '
+    { sub(/\r$/, "") }
+    /^##[[:space:]]/ { section = $0; next }
+    section == "## Verification" && /^- Required checks:/ && !required_seen {
+      required_seen = 1; required = substr($0, index($0, ":") + 1)
+    }
+    section == "## Commands" && /^- Test:/ && !test_seen {
+      test_seen = 1; test = substr($0, index($0, ":") + 1)
+    }
+    function clean(value) {
+      sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value)
+      if (value ~ /^`.*`$/) { value = substr(value, 2, length(value) - 2) }
+      sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value)
+      if (toupper(value) ~ /^(TODO|TBD|N\/A|NONE)$/) return ""
+      return value
+    }
+    END { value = clean(required); if (value == "") value = clean(test); if (value != "") print value }
+  '
+}
+
+oms_verify_hint() {
+  local command
+  command="$(oms_project_verify_command)"
+  if [ -n "$command" ]; then
+    printf 'no automatic verifier selected; suggested: --verify %q\n' "$command" >&2
+  else
+    printf '%s\n' 'no automatic verifier selected; pass --verify CMD or --no-verify' >&2
+  fi
+}
+
 # Pure read intent wins over write nouns ("review the fix" is a read), but a
 # read request explicitly coordinated with an action ("review and fix") is a
 # write. Anything ambiguous stays read — the conservative default.

@@ -2617,6 +2617,29 @@ EOF
 
   assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-run-*.md' 'check-contract-ran'
 
+  git -C "$project" rm -q scripts/check.sh
+  printf '## Commands\n- Test: false\n## Verification\n- Required checks: `bash tests/run.sh`\r\n' > "$project/PROJECT.md"
+  git -C "$project" add PROJECT.md
+  git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm declared-check
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --allow-no-change --prompt 'Declared hint' 2>&1)"
+  contains "$out" 'no automatic verifier selected; suggested: --verify bash\ tests/run.sh' || fail "missing declared hint: $out"
+  artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p')"
+  if grep -Fq '## Verify' "$artifact"; then fail 'suggested command ran'; fi
+  printf '## Verification\n- Required checks: TODO\n' > "$project/PROJECT.md"
+  git -C "$project" add PROJECT.md
+  git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm no-declared-check
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --allow-no-change --prompt 'Generic hint' 2>&1)"
+  contains "$out" 'no automatic verifier selected; pass --verify CMD or --no-verify' || fail "missing generic hint: $out"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\ncase "$1" in fast) echo check-contract-ran ;; *) exit 2 ;; esac\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm restore-check
+
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
     --to codex \

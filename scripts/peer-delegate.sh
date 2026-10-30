@@ -152,6 +152,7 @@ Options:
                        "bash scripts/check.sh fast" when implemented.
                        A check.sh without fast needs an explicit --verify CMD
                        (or --no-verify); ML checks are never inferred from style.
+                       Without check.sh, a PROJECT.md command is suggested only.
                        Read-only reports have no automatic test run.
   --read-only          Run the worker with read access (plan mode / read-only
                        sandbox). An audit or review role produces a report,
@@ -1171,6 +1172,8 @@ if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] &&
     VERIFY_CMD="$(oms_default_verify_command "$check_snapshot")" || { rm -f "$check_snapshot"; exit 2; }
     rm -f "$check_snapshot"
     echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
+  else
+    { git -C "$DELEGATE_SOURCE_REPO" show "$verify_base:PROJECT.md" 2>/dev/null || true; } | oms_verify_hint
   fi
 fi
 plan_allowed=""
