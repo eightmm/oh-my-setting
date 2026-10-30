@@ -501,16 +501,19 @@ def stop():
         current = tree(snapshot)
     except (OSError, ValueError, subprocess.SubprocessError):
         snapshot = current = {}
+    killed = {}
     for pid, identity in owned.items():
         # A reparented child retains its start time; a recycled PID does not.
         try:
             if snapshot.get(pid, (None, None))[1] == identity[1]:
                 os.kill(pid, signal.SIGKILL)
+                killed[pid] = identity[1]
         except ProcessLookupError:
             pass
     for pid in current.keys() - owned.keys():
         try:
             os.kill(pid, signal.SIGKILL)
+            killed[pid] = current[pid][1]
         except ProcessLookupError:
             pass
     try:
@@ -518,6 +521,27 @@ def stop():
     except ProcessLookupError:
         pass
     process.wait(timeout=10)
+    deadline = time.monotonic() + 5
+    while killed:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            for pid in killed:
+                print('warning: stage descendant %s survived cleanup' % pid, file=sys.stderr)
+            break
+        try:
+            rows = subprocess.check_output(['ps', '-eo', 'pid=,stat=,lstart='],
+                                           text=True, timeout=remaining)
+            observed = {}
+            for row in rows.splitlines():
+                pid, state, stamp = row.strip().split(None, 2)
+                observed[int(pid)] = (state, stamp)
+            killed = {pid: stamp for pid, stamp in killed.items()
+                      if pid in observed and observed[pid][1] == stamp
+                      and not observed[pid][0].startswith('Z')}
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        if killed:
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
 
 def interrupted(signum, _frame):
     global pending_signal

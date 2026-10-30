@@ -1127,6 +1127,39 @@ prefix = 'check: deadline diagnostics retained: '
 log = pathlib.Path(next(line[len(prefix):] for line in result.stderr.splitlines() if line.startswith(prefix)))
 assert 'stage deadline exceeded' in log.read_text(), log
 log.unlink()
+# Delay delivery to a detached TERM-resistant child, making the post-KILL
+# wait observable without depending on scheduler load.
+delayed = r'''
+import os, pathlib, signal, subprocess, sys
+source = pathlib.Path(sys.argv.pop(1)).read_text()
+source = source.split('run_stage_with_deadline() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+kill = os.kill
+def delayed_kill(pid, sig):
+    path = pathlib.Path(os.environ['OMS_TEST_STAGE_CHILD'])
+    if sig == signal.SIGKILL and path.exists() and pid == int(path.read_text()):
+        subprocess.Popen([sys.executable, '-c',
+                          'import os,signal,sys,time; time.sleep(.5); os.kill(int(sys.argv[1]), signal.SIGKILL)',
+                          str(pid)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    else:
+        kill(pid, sig)
+os.kill = delayed_kill
+exec(compile(source, sys.argv[0], 'exec'))
+'''
+child_file.unlink()
+child_code = "import os,pathlib,signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(os.environ['OMS_TEST_STAGE_CHILD']).write_text(str(os.getpid())); signal.pause()"
+launcher = "import subprocess,sys; subprocess.Popen([sys.executable, '-c', sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).wait()"
+try:
+    result = subprocess.run([sys.executable, '-c', delayed, gate+'/scripts/check.sh', 'bash', '1',
+                             sys.executable, '-c', launcher, child_code], env=env,
+                            capture_output=True, text=True, timeout=call_timeout)
+    assert result.returncode == 124, (result.stdout, result.stderr)
+    assert not alive(int(child_file.read_text())), 'detached child survived cleanup'
+finally:
+    if child_file.exists():
+        child = int(child_file.read_text())
+        if alive(child):
+            os.kill(child, signal.SIGKILL)
 # A caller cancellation uses the same cleanup path rather than waiting out the deadline.
 env['OMS_CHECK_STAGE_TIMEOUT_SECONDS'] = str(max(60, int(call_timeout * 2)))
 for mode in ('--quick', '--affected'):
