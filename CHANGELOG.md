@@ -38,6 +38,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   unreadable canonical-sync registry fails immediately.
 - `oms room list` and `oms room show` with an explicit `--repo` read that
   repository's rooms even when the session inherits another room binding.
+- `oms panel --finalize --outcome accepted` no longer requires landed evidence for a
+  stopped write attempt whose salvage recorded `nothing_to_recover`, when it has no
+  verified patch and its kept worktree is absent or provably clean at its launch base.
+- Panel calls record the failover decision (`panel_fallback_decision`) on the
+  attempt, and a failed panel call that did not fail over records one
+  `panel_fallback_skip` reason, so a missed failover can be diagnosed afterwards.
 - `scripts/install-mcp.sh` fails when an MCP add, inspection or remove fails
   instead of reporting success, skips the remove when inspection proves the
   server absent, and prints a fixed diagnostic instead of raw provider output.
