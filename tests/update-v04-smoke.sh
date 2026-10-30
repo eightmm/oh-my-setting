@@ -168,6 +168,34 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   git -C "$source" commit -qm "fixture: failing doctor"
   failed="$(git -C "$source" rev-parse HEAD)"
 
+  mkdir -p "$TMP/fail-bin" "$TMP/kept"
+  cat > "$TMP/fail-bin/cp" <<'EOF_CP'
+#!/usr/bin/env bash
+case "$1" in
+  -p) case "${2:-}" in */oms-managed.*/0) exit 1 ;; esac ;;
+  */oms-receipt.*) exit 1 ;;
+esac
+exec /bin/cp "$@"
+EOF_CP
+  chmod +x "$TMP/fail-bin/cp"
+  if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    TMPDIR="$TMP/kept" PATH="$TMP/fail-bin:/usr/bin:/bin" \
+    "$installed/scripts/update.sh" --no-tools >"$TMP/restore-fail.out" 2>&1; then
+    fail "restore failure should fail the update"
+  fi
+  local kept_managed kept_receipt
+  kept_managed="$(find "$TMP/kept" -name 'oms-managed.*' -type d -print)"
+  kept_receipt="$(find "$TMP/kept" -name 'oms-receipt.*' -type f -print)"
+  [ -n "$kept_managed" ] && [ -f "$kept_managed/0" ] || fail "managed snapshot was not kept"
+  [ -n "$kept_receipt" ] && [ -s "$kept_receipt" ] || fail "receipt snapshot was not kept"
+  grep -Fq "$kept_managed" "$TMP/restore-fail.out" || fail "managed snapshot location was not reported"
+  grep -Fq "$kept_receipt" "$TMP/restore-fail.out" || fail "receipt snapshot location was not reported"
+  grep -Fq "$home/.codex/AGENTS.md" "$TMP/restore-fail.out" || fail "failed target was not reported"
+  grep -Fq "$receipt" "$TMP/restore-fail.out" || fail "failed receipt was not reported"
+  ! grep -Fq 'update: rollback restored ' "$TMP/restore-fail.out" || fail "failed restore reported success"
+  cp "$kept_managed/0" "$home/.codex/AGENTS.md"
+  cp "$kept_receipt" "$receipt"
+
   if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools >"$TMP/fail.out" 2>&1; then
     fail "doctor failure should fail the update"

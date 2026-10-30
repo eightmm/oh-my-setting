@@ -429,23 +429,31 @@ restore_managed_targets() {
   local index=0
   local path
   local backup
+  local target_failed
+  local failed=0
   while [ "$index" -lt "${#MANAGED_PATHS[@]}" ]; do
     path="${MANAGED_PATHS[$index]}"
+    target_failed=0
     for backup in "$path".backup.*; do
       [ -L "$backup" ] || [ -e "$backup" ] || continue
-      rm -rf "$backup"
+      rm -rf "$backup" || target_failed=1
     done
-    rm -rf "$path"
+    rm -rf "$path" || target_failed=1
     if [ "${MANAGED_PRESENT[$index]}" = "1" ]; then
-      mkdir -p "$(dirname "$path")"
-      copy_preserving "$managed_backup/$index" "$path"
+      mkdir -p "$(dirname "$path")" || target_failed=1
+      copy_preserving "$managed_backup/$index" "$path" || target_failed=1
     fi
     for backup in "$managed_backup/$index.backups"/*; do
       [ -L "$backup" ] || [ -e "$backup" ] || continue
-      copy_preserving "$backup" "$(dirname "$path")/${backup##*/}"
+      copy_preserving "$backup" "$(dirname "$path")/${backup##*/}" || target_failed=1
     done
+    if [ "$target_failed" = 1 ]; then
+      failed=1
+      echo "error: failed to restore managed target: $path (snapshot index $index)" >&2
+    fi
     index=$((index + 1))
   done
+  return "$failed"
 }
 
 CODEX_CONFIG_PATH="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
@@ -468,11 +476,13 @@ for managed_path in \
 done
 
 cleanup_update_tmp() {
-  rm -f "$receipt_backup"
-  rm -rf "$managed_backup"
+  [ "$keep_receipt_backup" = 1 ] || rm -f "$receipt_backup"
+  [ "$keep_managed_backup" = 1 ] || rm -rf "$managed_backup"
   oms_install_lifecycle_lock_release
 }
 TRANSACTION_ACTIVE=0
+keep_receipt_backup=0
+keep_managed_backup=0
 trap cleanup_update_tmp EXIT
 
 # The running shell sourced the pre-checkout helper library, which an older
@@ -506,14 +516,30 @@ restore_previous() {
   elif command -v codex >/dev/null 2>&1; then
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null 2>&1 || rollback_failed=1
   fi
-  restore_managed_targets || rollback_failed=1
+  if ! restore_managed_targets; then
+    rollback_failed=1
+    keep_managed_backup=1
+    echo "error: managed snapshot kept at: $managed_backup" >&2
+    echo "error: manually copy each failed target and its backup siblings from its snapshot index in that directory" >&2
+  fi
   precompile_installed_tree
-  if [ -s "$receipt_backup" ]; then cp "$receipt_backup" "$RECEIPT"; else rm -f "$RECEIPT"; fi
-  echo "update: rollback restored $current" >&2
+  if [ -s "$receipt_backup" ]; then
+    if ! cp "$receipt_backup" "$RECEIPT"; then
+      rollback_failed=1
+      keep_receipt_backup=1
+      echo "error: failed to restore receipt: $RECEIPT" >&2
+      echo "error: receipt snapshot kept at: $receipt_backup; manually copy it back to the receipt path" >&2
+    fi
+  elif ! rm -f "$RECEIPT"; then
+    rollback_failed=1
+    keep_receipt_backup=1
+    echo "error: failed to remove receipt: $RECEIPT; empty snapshot kept at: $receipt_backup" >&2
+  fi
   if [ "$rollback_failed" = "1" ]; then
-    echo "error: rollback restored source and receipt but an external component needs repair" >&2
+    echo "error: rollback incomplete; inspect the errors above and repair affected components" >&2
     return 1
   fi
+  echo "update: rollback restored $current" >&2
 }
 
 handle_update_signal() {
