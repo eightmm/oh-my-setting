@@ -306,9 +306,9 @@ TOOLS = [
         "name": "oms_handoffs",
         "description": (
             "Captured session-handoff digests for the repository, newest"
-            " first (paths and sizes; read a digest with oms_handoff_show)."
+            " first (most recent 40, with omitted count; read a digest with oms_handoff_show)."
         ),
-        "argv": ["bash", "scripts/session-handoff.sh", "list", "--json"],
+        "argv": ["bash", "scripts/session-handoff.sh", "list", "--json", "--limit", "40"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
@@ -354,6 +354,7 @@ TOOLS = [
             " manifest: stable and edge by exact commit, readiness, and the"
             " apply command. Read-only; nothing here applies an update."
         ),
+        "json_output": True,
         "argv": ["bash", "scripts/runtime.sh", "release", "status"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
@@ -365,6 +366,7 @@ TOOLS = [
             " profiles, required and missing commands, and whether the"
             " selection is configured by a receipt."
         ),
+        "json_output": True,
         "argv": ["bash", "scripts/runtime.sh", "profile", "current"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
@@ -376,6 +378,7 @@ TOOLS = [
             " action, retryability, and escalation flags, as fail-ledger rows"
             " and typed refusals use them."
         ),
+        "json_output": True,
         "argv": ["bash", "scripts/runtime.sh", "failure", "catalog"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
@@ -856,7 +859,15 @@ def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
     )
     output = output.strip() or ("exit %d" % proc.returncode)
     if len(output) > OUTPUT_LIMIT:
-        output = output[:OUTPUT_LIMIT] + "\n[truncated]"
+        if "--json" in tool["argv"] or tool.get("json_output"):
+            hint = tool.get("positional")
+            if tool["name"] == "oms_journal":
+                hint = "view"
+            guidance = (" Narrow the %s argument." % hint) if hint else ""
+            return ("error: JSON output has %d characters; limit is %d.%s"
+                    % (len(output), OUTPUT_LIMIT, guidance)), True
+        omitted = len(output) - OUTPUT_LIMIT
+        output = output[:OUTPUT_LIMIT] + "\n[truncated: %d characters omitted]" % omitted
     return output, proc.returncode != 0
 
 

@@ -49,6 +49,10 @@ Subcommands:
   list      List captured handoff digests (newest first); --json for machines.
   show FILE Print a captured digest to stdout.
 
+list options:
+  --json           Emit JSON.
+  --limit N        Show at most N newest digests (default: all).
+
 capture options:
   --agent NAME     claude | codex | antigravity (default: claude).
   --session ID     Session id / file. Default: most recent for --cwd.
@@ -804,32 +808,60 @@ slug_id() {
 }
 
 cmd_list() {
-  local as_json=0
-  if [ "${1:-}" = "--json" ]; then as_json=1; shift; fi
-  [ "$#" -eq 0 ] || fail "list takes no arguments"
+  local as_json=0 limit=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) as_json=1; shift ;;
+      --limit)
+        [ "$#" -ge 2 ] || fail "--limit requires a nonnegative integer"
+        case "$2" in ''|*[!0-9]*) fail "--limit requires a nonnegative integer" ;; esac
+        limit="$2"; shift 2 ;;
+      *) fail "unknown list option: $1" ;;
+    esac
+  done
   local dir
   dir="$(oms_repo_root "${OMS_STATE_REPO:-$PWD}")/.oms/handoffs"
   if [ ! -d "$dir" ]; then
     if [ "$as_json" -eq 1 ]; then
-      echo '{"schema": 1, "handoffs": []}'
+      if [ -n "$limit" ]; then
+        echo '{"schema": 1, "handoffs": [], "omitted": 0}'
+      else
+        echo '{"schema": 1, "handoffs": []}'
+      fi
     else
       echo "no handoffs captured"
     fi
     return 0
   fi
   if [ "$as_json" -eq 1 ]; then
-    OMS_SH_DIR="$dir" python3 -c '
+    OMS_SH_DIR="$dir" OMS_SH_LIMIT="$limit" python3 -c '
 import glob, json, os
 rows = []
 for path in sorted(glob.glob(os.path.join(os.environ["OMS_SH_DIR"], "*.md")),
                    key=os.path.getmtime, reverse=True):
     rows.append({"path": path, "bytes": os.path.getsize(path),
                  "mtime": int(os.path.getmtime(path))})
-print(json.dumps({"schema": 1, "handoffs": rows}, ensure_ascii=False))
+limit = os.environ["OMS_SH_LIMIT"]
+result = {"schema": 1, "handoffs": rows}
+if limit:
+    count = int(limit)
+    result["handoffs"] = rows[:count]
+    result["omitted"] = max(0, len(rows) - count)
+print(json.dumps(result, ensure_ascii=False))
 '
     return 0
   fi
-  find "$dir" -maxdepth 1 -type f -name '*.md' -exec ls -1t {} + 2>/dev/null
+  if [ -n "$limit" ]; then
+    OMS_SH_DIR="$dir" OMS_SH_LIMIT="$limit" python3 -c '
+import glob, os
+paths = sorted(glob.glob(os.path.join(os.environ["OMS_SH_DIR"], "*.md")),
+               key=os.path.getmtime, reverse=True)
+for path in paths[:int(os.environ["OMS_SH_LIMIT"])]:
+    print(path)
+'
+  else
+    find "$dir" -maxdepth 1 -type f -name '*.md' -exec ls -1t {} + 2>/dev/null
+  fi
 }
 
 cmd_show() {

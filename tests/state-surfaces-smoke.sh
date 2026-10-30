@@ -408,6 +408,50 @@ assert rendered["structuredContent"]["graph"]["nodes"], rendered
 assert rendered["structuredContent"]["graph"]["title"].startswith("OMS Context Graph"), rendered
 PY
 
+  # Exercise the shared size boundary and the bounded handoff projection.
+  python3 - "$ROOT" "$repo" <<'PYTEST' || fail "MCP output bounds"
+import importlib.util, json, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+root, repo = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("mcp_bounds", root / "scripts/oms-mcp-server.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+tool = next(t for t in m.TOOLS if t["name"] == "oms_project_graph_query")
+for size in (0, m.OUTPUT_LIMIT, m.OUTPUT_LIMIT + 1):
+    with patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "x" * size, "")):
+        text, error = m.run_tool(tool, {"repo": str(repo), "query": "x"})
+    assert error == (size > m.OUTPUT_LIMIT), (size, text[-100:])
+    if error:
+        assert str(size) in text and str(m.OUTPUT_LIMIT) in text and "query" in text, text
+text_tool = next(t for t in m.TOOLS if t["name"] == "oms_handoff_show")
+with patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "x" * (m.OUTPUT_LIMIT + 1), "")):
+    text, error = m.run_tool(text_tool, {"repo": str(repo), "file": "x"})
+assert not error and "1" in text[m.OUTPUT_LIMIT:], text[-100:]
+directory = repo / ".oms/handoffs"
+empty = subprocess.run(["bash", str(root / "scripts/session-handoff.sh"), "list", "--json", "--limit", "0"], cwd=repo, capture_output=True, text=True)
+assert json.loads(empty.stdout) == {"schema": 1, "handoffs": [], "omitted": 0}, empty.stdout
+directory.mkdir()
+for i in range(42):
+    path = directory / ("%03d.md" % i)
+    path.write_text("x")
+    os.utime(path, (i + 1, i + 1))
+result = m.handle({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "oms_handoffs", "arguments": {"repo": str(repo)}}})["result"]
+assert not result["isError"], result
+body = json.loads(result["content"][0]["text"])
+assert len(body["handoffs"]) == 40 and body["omitted"] == 2, body
+assert Path(body["handoffs"][0]["path"]).name == "041.md"
+assert Path(body["handoffs"][-1]["path"]).name == "002.md"
+default = subprocess.run(["bash", str(root / "scripts/session-handoff.sh"), "list", "--json"], cwd=repo, capture_output=True, text=True)
+assert len(json.loads(default.stdout)["handoffs"]) == 42 and "omitted" not in json.loads(default.stdout)
+for limit, expected in (("0", 0), ("42", 42)):
+    proc = subprocess.run(["bash", str(root / "scripts/session-handoff.sh"), "list", "--json", "--limit", limit], cwd=repo, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert len(json.loads(proc.stdout)["handoffs"]) == expected
+for args in (("--limit", "bad"), ("--limit",), ("--unknown",)):
+    assert subprocess.run(["bash", str(root / "scripts/session-handoff.sh"), "list", *args], cwd=repo, capture_output=True).returncode != 0
+PYTEST
+
   # A Korean Windows console defaults stdio to cp949, which cannot encode the
   # check mark. Replies must stay strict UTF-8 and the server must survive.
   printf '%s\n%s\n' \
