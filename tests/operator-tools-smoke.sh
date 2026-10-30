@@ -1523,6 +1523,17 @@ CONTINUATION
         raise AssertionError("precreated launch record accepted")
     precreated.unlink()
     if sys.platform == "linux":
+        # The provider can exit before its adopted descendant has finished.
+        code = ("import subprocess,sys; "
+                "subprocess.Popen([sys.executable,'-c','import time; time.sleep(1.5)'], "
+                "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)")
+        status, member, notice = dispatch_case(code, "subreaper-delayed-exit")
+        assert status == 0, notice
+        name = member["participant"]
+        assert room.status(project, shared)["call_results"][name]["exit"] == 0
+        assert panel._dispatch_call_finished(project, shared, member)
+        assert not room.participant(room.status(project, shared), name)["owns"]
+
         status, member, notice = dispatch_case("pass", "subreaper-quick")
         assert status == 0, notice
         name = member["participant"]

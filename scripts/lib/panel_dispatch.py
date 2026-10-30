@@ -2686,6 +2686,22 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                             process.wait(timeout=25)
                         except subprocess.TimeoutExpired:
                             pass
+                    elif (launch["backend"] == "subreaper" and not term_sent
+                          and status not in {129, 130, 143}):
+                        # The provider exit receipt precedes the supervisor's
+                        # ECHILD receipt when adopted descendants remain alive.
+                        deadline = time.monotonic() + 30
+                        while process.poll() is None:
+                            receipt = _dispatch_supervisor_receipt(repo, launch)
+                            if receipt and receipt["all_reaped"]:
+                                break
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            try:
+                                process.wait(timeout=min(remaining, 0.2))
+                            except subprocess.TimeoutExpired:
+                                pass
                     # Snapshots may assist shutdown but never establish whole-tree exhaustion.
                     record_pending()
                     exit_verified = _dispatch_call_finished(repo, room_id, launch)
