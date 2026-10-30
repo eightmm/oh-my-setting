@@ -49,7 +49,6 @@
   smoke and copy lifecycle coverage. Native macOS/Windows lifecycle, stock Bash
   3.2/BSD and Python 3.9 run for install/lifecycle/portability/Python compatibility
   changes and weekly/manual runs. Only plan-authorized skips pass the stable
-  gate. In this repository `oms land` defaults to CI-parity affected checks
-  against the destination; explicit `--gate` wins and CI remains
-  authoritative. Smoke shards and focused lanes balance by measured cost
-  (`# smoke-weight:` lines, focused registration order); refresh from CI timings.
+  gate. CI remains authoritative. Smoke shards and focused lanes balance by
+  measured cost (`# smoke-weight:` lines, focused registration order); refresh
+  from CI timings.

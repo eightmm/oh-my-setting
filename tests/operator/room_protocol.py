@@ -319,8 +319,9 @@ for owner in panel.PROVIDERS:
     assert all(phrase in panel.bootstrap(owner, project) for phrase in (
         "cause is known", "one or two files", "brief costs more than the edit", "failed the same bounded task twice",
         "larger multi-file or parallelisable work", "long verification", "authentication, permissions, secrets, install, deletion, hooks", "oms peer-review --gate --verify", "same landing path",
-        "Release bookkeeping (changelog, version, manifest, inventory files)",
-        "one documenter worker per landing batch", "paid compute needs the user's authority", "--purpose investigate",
+        "Serialize shared release bookkeeping (changelog, version, manifest, inventory files): keep it out of parallel worker briefs;",
+        "the main writes it once per landing batch during integration, or assigns one documenter for the batch.",
+        "paid compute needs the user's authority", "--purpose investigate",
         "oms job-digest", "one background wait or notification, not repeated polls"))
     assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
     assert "preferred installed provider" not in panel.bootstrap(owner, project) and \
@@ -3271,7 +3272,8 @@ with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": room_owner, "OMS_PANEL_SE
         start = text.index("Edit directly for")
         return text[start:text.index("repeated polls.", start)]
     assert ownership_rule(tower) == ownership_rule(panel_native.bootstrap("codex", project)), tower
-    assert "cause is known" in tower and "one documenter worker per landing batch" in tower
+    assert "cause is known" in tower and \
+        "the main writes it once per landing batch during integration, or assigns one documenter for the batch." in tower
     assert "--purpose investigate" in tower and "a fix of at most two lines" not in tower
 # Same task reuse cannot return another participant's artifact as the result.
 assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
