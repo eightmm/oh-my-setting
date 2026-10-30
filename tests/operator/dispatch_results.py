@@ -2,7 +2,7 @@ execution_repo = temporary / "verification-execution-root"
 execution_repo.mkdir()
 import panel_dispatch as dispatch
 from contextlib import redirect_stderr, redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
@@ -2991,7 +2991,7 @@ try:
                 for directory in protected_result_dirs for path in directory.rglob("*")
                 if path.is_file()} == before_conflict
     with patch.object(saved.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "fixture")), \
-            patch.object(saved.time, "sleep", side_effect=AssertionError("inspection failure waited")):
+            patch.object(saved, "time", Mock(wraps=saved.time, sleep=Mock(side_effect=AssertionError("inspection failure waited")))):
         try:
             saved.finalize(project, "codex", "registry-error", str(summary), "completed")
         except ValueError as error:
