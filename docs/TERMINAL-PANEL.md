@@ -699,6 +699,7 @@ Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium 
 | Role | Default tier | Access | Front door | Runs |
 | --- | --- | --- | --- | --- |
 | `researcher` | light | read | `oms panel --dispatch researcher` | `peer-delegate --role researcher` |
+| `scholar` | deep | read | `oms panel --dispatch scholar` | `peer-delegate --role scholar` |
 | `worker` | routine | read or scoped write | `oms panel --dispatch worker` | `peer-delegate --role` |
 | `builder` | routine | read or scoped write | `oms panel --dispatch builder` | `peer-delegate --role` |
 | `refactorer` | routine | read or scoped write | `oms panel --dispatch refactorer` | `peer-delegate --role` |
@@ -713,6 +714,8 @@ Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium 
 | `architect` | frontier | read | `oms panel --dispatch architect` | `peer-delegate --role --read-only` |
 | `critic` | frontier | read | `oms panel --dispatch critic` | `peer-delegate --role --read-only` |
 
+Scholar performs multi-source literature research with verified citations at high effort; its default wall is 60 minutes, and `--workload frontier` selects the hardest surveys. Researcher remains the pinned cheap lookup role.
+
 The plain `worker` role uses the `analysis-worker` strategy for reads and
 investigations, and `implementation-worker` for implementation. Other roles use
 their role name as the strategy. Write access requires `--access write`, a scoped brief and a verifier;
@@ -724,10 +727,11 @@ judgment (never `accepted`). The same role routes are available without opening
 the panel; see [Without the panel](#without-the-panel).
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` overrides one dispatch's effort. Panel dispatches with `--verify` and patch-admit (including patch-land admission) default to a 20m verify timeout; standalone peer commands default to 10m. Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Codex and Claude tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Pi and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported effort flag. Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher`,
+`--reasoning-effort` overrides one dispatch's effort. Panel dispatches with `--verify` and patch-admit (including patch-land admission) default to a 20m verify timeout; standalone peer commands default to 10m. Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Codex and Claude tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Pi and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported effort flag. Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher` (researcher, scholar),
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
-security-auditor) in `panel_role`; the strategy itself is the recorded purpose
-(plain workers record explain/investigate/implement). `oms panel --routes`
+security-auditor) in `panel_role`; the strategy is generally the recorded purpose
+(plain workers record explain/investigate/implement, and scholar records research).
+Dispatches also pass the selected strategy in `OMS_PANEL_STRATEGY` alongside the board kind in `OMS_PANEL_ROLE`; lifecycle refs retain it as `panel_strategy`. `oms panel --routes`
 prints each role's tier and chosen candidate, plus
 these kinds and the write-capable roles. Dispatch and council owner defaults use
 `OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
@@ -1817,7 +1821,7 @@ rooms, native windows) has no section of its own: verify it with `--shard 1/4`,
 about 8 minutes at low load.
 
 
-## Researcher and supporting strategies
+## Researcher, scholar and supporting strategies
 
 Use `oms panel --dispatch researcher --owner claude --prompt 'Find and cite the relevant contract.'`
 for one bounded document/source question. The control menu's
@@ -1838,6 +1842,15 @@ the newest exact ID. An omitted minor version means zero; `6.10` is newer than
 paid availability probe runs. If the pinned model cannot run, the task fails
 without an implicit older-model or more expensive-family substitution. A provider
 without a model catalog retains the configured exact ID until policy is refreshed.
+
+Use `oms panel --dispatch scholar --owner claude --prompt 'Compare the primary sources with verified citations.'`
+for a multi-source literature survey. Scholar uses the deep tier at high effort by
+default, accepts `--workload frontier`, and keeps read access and the research
+purpose. It shares the researcher board kind and web tool policy, with the
+`scholar` strategy recorded separately. Invalid research strategies, board roles,
+purposes and write access are refused before the provider runs, including calls with an
+existing attempt. Scholar has a 60-minute default wall; `OMS_PEER_TIMEOUT`
+overrides it. Review gates and worker continuation remain unavailable.
 
 Researcher requires read access, the light tier and low effort. Write scopes,
 implementation, review gates, worker continuation and high-model/effort overrides

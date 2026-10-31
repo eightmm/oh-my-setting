@@ -1812,11 +1812,12 @@ def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
 def panel_main_base(payload: dict[str, Any], room: str) -> str:
     return ("[oms panel] You are a control-tower main. Delegate implementation, investigation and test repair: "
             "oms panel --dispatch ROLE --owner %s%s (worker --purpose implement|investigate|explain, builder, refactorer, "
-            "researcher, reviewer, verifier, security-auditor and the other roles; each picks its capability tier, "
+            "researcher, scholar, reviewer, verifier, security-auditor and the other roles; each picks its capability tier, "
             "--workload light|routine|deep|frontier overrides it) "
             "--access write --brief-file PATH --verify COMMAND (or --access read --prompt TEXT), with --task-id and --label "
             "and --reasoning-effort high for trust boundaries or unclear failures, low for lookups "
             "and mechanical edits, otherwise the tier default; "
+            "Scholar runs multi-source literature research with verified citations on the deep tier at high effort. "
             "Use security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, "
             "install), verifier before declaring completion (original request against final result), integrator "
             "when merging or resolving conflicts, performance-engineer when performance needs measurement, "

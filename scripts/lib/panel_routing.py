@@ -32,7 +32,7 @@ CODEX_MIN_MAJOR = 6
 # Role strategy -> the board kind recorded as panel_role; acceptance, scopes and continuation key on the kind.
 KINDS = {"worker": "worker", "builder": "worker", "refactorer": "worker", "documenter": "worker",
          "integrator": "worker", "performance-engineer": "worker", "release-engineer": "worker",
-         "researcher": "researcher", "advisor": "advisor", "architect": "advisor", "critic": "advisor",
+         "researcher": "researcher", "scholar": "researcher", "advisor": "advisor", "architect": "advisor", "critic": "advisor",
          "reviewer": "reviewer", "verifier": "reviewer", "security-auditor": "reviewer"}
 WRITERS = {"worker", "builder", "refactorer", "documenter", "integrator", "performance-engineer"}
 # Judges of another context's work prefer the provider other than the main's when the tier offers it.
@@ -241,7 +241,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     elif purpose:
         raise ValueError("--purpose applies to plain workers; the role names the task")
     else:
-        purpose = {"advisor": "advise", "reviewer": "review", "researcher": "research"}.get(role, role)
+        purpose = {"advisor": "advise", "reviewer": "review", "researcher": "research", "scholar": "research"}.get(role, role)
     candidates = routes["tiers"][tier]
     if role in INDEPENDENT or KINDS[role] == "advisor":
         candidates = [c for c in candidates if c["provider"] in MODEL_IDS]

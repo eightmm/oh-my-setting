@@ -184,7 +184,7 @@ assert allocate("codex", role="reviewer", installed=both,
 assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly_used": 100}})["provider"] == "codex"
 # Routing spread follows quota readings except that independent judgments always avoid the owner.
 routing_roles = {
-    "researcher": "light",
+    "researcher": "light", "scholar": "deep",
     "worker": "routine", "builder": "routine", "documenter": "light",
     "integrator": "deep", "performance-engineer": "deep",
     "reviewer": "deep", "verifier": "deep", "security-auditor": "frontier",
@@ -238,6 +238,7 @@ for ran, provider in (("codex", "claude"), ("claude", "codex")):
     assert view["chosen"]["builder"]["provider"] == provider, (ran, view["chosen"]["builder"])
 from panel_view import PURPOSE_NAMES
 assert set(routes["roles"]) <= set(PURPOSE_NAMES), "every role strategy needs a board label"
+assert PURPOSE_NAMES["scholar"] == "Literature research"
 for role, rule in routes["roles"].items():
     expected = allocate(routes["owner"], role, installed=both)
     assert routes["chosen"][role] == {k: expected[k] for k in ("provider", "model", "effort")}
@@ -288,7 +289,7 @@ for target in ("grok", "muse"):
 for role, kind, tier in (("builder", "worker", "routine"), ("integrator", "worker", "deep"),
                          ("release-engineer", "worker", "routine"), ("critic", "advisor", "frontier"),
                          ("verifier", "reviewer", "deep"), ("reviewer", "reviewer", "deep"),
-                         ("researcher", "researcher", "light")):
+                         ("researcher", "researcher", "light"), ("scholar", "researcher", "deep")):
     allocated = allocate("claude", role=role, installed=both)
     assert (allocated["kind"], allocated["workload"]) == (kind, tier), allocated
 for bad in ({"role": "verifier", "access": "write"}, {"role": "release-engineer", "access": "write"},
@@ -315,7 +316,7 @@ for owner in panel.PROVIDERS:
     assert all(trigger in panel.bootstrap(owner, project) for trigger in (
         "security-auditor for risky changes", "verifier before declaring completion", "integrator when merging",
         "performance-engineer when performance needs measurement", "documenter at completion",
-        "release-engineer when deploying", "not all by default", "a context apart"))
+        "release-engineer when deploying", "Scholar runs multi-source literature research", "not all by default", "a context apart"))
     assert all(phrase in panel.bootstrap(owner, project) for phrase in (
         "cause is known", "one or two files", "brief costs more than the edit", "failed the same bounded task twice",
         "larger multi-file or parallelisable work", "long verification", "authentication, permissions, secrets, install, deletion, hooks", "oms peer-review --gate --verify", "same landing path",

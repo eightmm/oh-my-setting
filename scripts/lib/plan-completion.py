@@ -1168,7 +1168,7 @@ def main_research(repo, bundle, task, reviewer):
     if (info['classification'] != 'research-only' or info['provenance'] not in
             ('main-authored', 'main-reviewed-external') or task.get('patch') or task.get('landing')
             or task.get('landed_commit') or task.get('role') not in
-            ('researcher', 'analysis-worker', 'advisor', 'reviewer') or
+            ('researcher', 'scholar', 'analysis-worker', 'advisor', 'reviewer') or
             info['original_deliverable'] != task.get('title') or info['read_only_contract'] != 'original-report-only' or
             re.search(r'(?i)\b(implement|fix|repair|build|deploy|install|publish|push|merge)\b', task.get('title', ''))):
         fail('main research cannot replace an original product or landing obligation')

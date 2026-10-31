@@ -598,7 +598,7 @@ if [ -n "$OBSERVED_BINDING" ]; then
   case "${OMS_PANEL_ROLE:-}" in
     worker) ;;
     researcher)
-      [ "$WORKER_ACCESS" = read ] && [ "$ROLE" = researcher ] ||
+      [ "$WORKER_ACCESS" = read ] && { [ "$ROLE" = researcher ] || [ "$ROLE" = scholar ]; } ||
         fail "researcher plan observation requires its read-only role"
       ;;
     *) fail "plan observation requires an admitted panel worker or researcher" ;;

@@ -334,7 +334,7 @@ PURPOSE_NAMES = {"implement": "Implement patch", "explain": "Explain code",
                  "performance-engineer": "Measure performance", "release-engineer": "Prepare release",
                  "architect": "Structure design", "critic": "Find failure cases", "verifier": "Verify against request",
                  "security-auditor": "Security audit", "reviewer": "Review changes", "advisor": "Advise decision",
-                 "researcher": "Look up sources", "worker": "Work"}
+                 "researcher": "Look up sources", "scholar": "Literature research", "worker": "Work"}
 ATTENTION_STATES = {"blocked", "waiting_input", "waiting_approval", "review", "orphaned",
                     "failed", "timed_out", "abandoned"}
 

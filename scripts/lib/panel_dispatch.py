@@ -2376,6 +2376,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             env["OMS_PANEL_CONTINUES"] = continuation_patch["attempt"]
         env["OMS_PANEL_CONTINUATION"] = json.dumps(
             {key: value for key, value in continuation_patch.items() if key != "attempt"}, separators=(",", ":"))
+    if role == "scholar" and not env.get("OMS_PEER_TIMEOUT"):
+        env["OMS_PEER_TIMEOUT"] = "60m"
     if access == "write" and not env.get("OMS_PEER_TIMEOUT"):
         # A scoped build plus its own checks outlasts the 30m delegate wall; high effort gets the longest.
         env["OMS_PEER_TIMEOUT"] = "60m" if route.get("effort") == "high" else "40m"
@@ -2391,7 +2393,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if moved:
         env["OMS_ROOM_ID"] = moved[0]
     env.pop("OMS_ATTEMPT_ID", None)
-    env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"],
+    env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"], OMS_PANEL_STRATEGY=route["role"],
                OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
     env["OMS_PANEL_FALLBACK_DECISION"] = "selected" if fallback else (fallback_decision or "no-eligible-alternate")
     if fallback:
@@ -2836,7 +2838,7 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
     where.setdefault("panel_room_id", room_id or "")
     where.setdefault("panel_room_participant", env.get("OMS_ROOM_PARTICIPANT") or "")
     env.pop("OMS_ATTEMPT_ID", None)
-    env.update(OMS_TASK_ID=task_id, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="advisor",
+    env.update(OMS_TASK_ID=task_id, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="advisor", OMS_PANEL_STRATEGY="advisor",
                OMS_PANEL_PURPOSE="advise", OMS_PANEL_WORKLOAD="main",
                OMS_PANEL_LABEL=safe_label(label))
     print("council: %s seats / %s families / %s primary calls + up to %s format repairs / %s" %

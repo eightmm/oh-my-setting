@@ -143,7 +143,17 @@ def exercise_exact_model_routing():
     for owner in ("claude", "codex"):
         installed = {"pi", "claude", "codex"}
         assert allocate(owner, role="documenter", installed=installed)["provider"] == "pi"
-        assert allocate(owner, role="researcher", installed=installed)["provider"] in {"claude", "codex"}
+        researcher = allocate(owner, role="researcher", installed=installed)
+        assert researcher["provider"] in {"claude", "codex"} and researcher["workload"] == "light" and researcher["effort"] == "low"
+        scholar = allocate(owner, role="scholar", installed=installed)
+        assert (scholar["kind"], scholar["workload"], scholar["effort"], scholar["purpose"]) == ("researcher", "deep", "high", "research")
+        assert scholar["provider"] in {"claude", "codex"}
+        try:
+            allocate(owner, role="scholar", access="write", installed=installed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("scholar write access accepted")
     from datetime import datetime, timezone, timedelta
     model = "openrouter/thinkingmachines/inkling:free"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1104,6 +1114,40 @@ with patch.dict(os.environ, {"OMS_LOCK_DIR": str(temporary / "graph-locks"), "XD
 assert not shadow_marker.exists(), "panel dispatch imported repository pathlib.py"
 assert not fsmonitor_marker.exists(), "panel dispatch executed repository core.fsmonitor"
 
+# Capture the actual child environment without invoking a provider.
+for configured_timeout, expected_timeout in ((None, "60m"), ("17m", "17m"), ("", "60m"), ("0", "0"), ("60m", "60m"), ("malformed", "malformed")):
+    scholar_route = allocate("codex", role="scholar", installed={"claude", "codex"})
+    captured = []
+    launch_subprocess = types.SimpleNamespace(**vars(subprocess))
+    def capture_launch(*args, **kwargs):
+        captured.append(dict(kwargs["env"]))
+        return FinishedDispatchProcess()
+    launch_subprocess.Popen = capture_launch
+    initial = {} if configured_timeout is None else {"OMS_PEER_TIMEOUT": configured_timeout}
+    with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "0", "OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}), \
+            patch.object(panel, "work_repository", side_effect=lambda path: Path(path)), \
+            patch.object(panel, "child_environment", return_value=initial), \
+            patch.object(panel, "plan_link", return_value=None), \
+            patch.object(panel, "_prepare_dispatch_call", return_value=None), \
+            patch.object(panel, "_dispatch_output_log", return_value=("", os.devnull)), \
+            patch.object(panel, "_save_dispatch_output"), \
+            patch.object(panel, "_stop_dispatch", return_value=True), \
+            patch.object(panel, "_observe_dispatch_session"), \
+            patch.object(panel, "_observe_dispatch_descendants"), \
+            patch.object(panel, "_print_dispatch_next_ready"), \
+            patch.object(panel, "_validate_dispatch_verifier"), \
+            patch.object(dispatch, "_prepare_panel_graph"), \
+            patch.object(dispatch, "subprocess", launch_subprocess):
+        with open(os.devnull, "wb") as sink, patch.object(panel, "_dispatch_output_log", return_value=("", sink.fileno())):
+            assert dispatch.run_dispatch(graph_fixture, "codex", "scholar", "read", "Research.", None,
+                                         None, "scholar-env", False, None, scholar_route,
+                                         None, None, [], work_repo=graph_fixture) == 0
+    observed, = captured
+    assert observed["OMS_PANEL_ROLE"] == "researcher", observed
+    assert observed["OMS_PANEL_STRATEGY"] == "scholar", observed
+    assert observed["OMS_PANEL_PURPOSE"] == "research", observed
+    assert observed["OMS_PEER_TIMEOUT"] == expected_timeout, observed
+
 # Same-repository dispatch retains its per-role execution locations, with one
 # recorded main per caller and read/write authority tested independently.
 main_attempts = {}
@@ -1120,7 +1164,10 @@ cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
          ("claude", "reviewer", None, "read", None, "gpt-6.1-sol"),
          ("claude", "security-auditor", None, "read", None, "gpt-6-astra"),
          ("codex", "researcher", None, "read", None, "claude-haiku-5-5"),
-         ("claude", "researcher", None, "read", None, "gpt-6-luna")]
+         ("claude", "researcher", None, "read", None, "gpt-6-luna"),
+         ("codex", "scholar", None, "read", None, "claude-opus-5-5"),
+         ("claude", "scholar", None, "read", None, "gpt-6.1-sol"),
+         ("claude", "scholar", "frontier", "read", None, "gpt-6-astra")]
 for index, (owner, role, workload, access, purpose, expected) in enumerate(cases):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
                "--owner", owner, "--access", access, "--task-id", "panel-route-%s" % index,
@@ -1159,6 +1206,7 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
     attempt = next(row for row in attempts if row.get("task_id") == "panel-route-%s" % index)
     refs = attempt["refs"]
     assert refs["panel_role"] == panel.KINDS[role] and refs["panel_model"] == expected, attempt
+    assert refs["panel_strategy"] == role, refs
     assert refs["panel_purpose"] == route["route"]["purpose"] and (role == "worker" or refs["panel_purpose"] in (
         role, "advise", "review", "research")), refs
     assert refs["panel_effort"] == route["route"]["effort"], refs
@@ -1171,10 +1219,13 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
     assert attempt["state"] == ("review" if access == "write" else "done"), attempt
     assert refs["panel_location"].startswith("worktree:") if role not in {"advisor", "reviewer"} else refs["panel_location"] == "repository", refs
     assert str(home) not in json.dumps(refs) and str(project) not in json.dumps(refs), refs
-    if role == "advisor":
+    if role in {"advisor", "scholar"}:
         retained = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
                                     "--task-id", "panel-route-%s" % index, "--json"]))["rows"][0]
-        assert any(c.get("kind") == "call" and "inspected source" in c.get("answer", "") for c in retained["calls"]), retained
+        artifact_kind = "call" if role == "advisor" else "delegate"
+        answer_text = "inspected source" if role == "advisor" else "inspected the bounded repository task."
+        assert any(c.get("kind") == artifact_kind and answer_text in c.get("answer", "")
+                   for c in retained["calls"]), retained
         assert retained["acceptance"] is False
     observed = json.loads(worker_log.read_text().splitlines()[-1])
     assert expected in observed["argv"], observed
@@ -1445,7 +1496,7 @@ with patch.object(panel, "provider_catalog", side_effect=fixture_provider_catalo
             except ValueError:
                 pass
     # Only write-capable roles continue a session; judges keep a context apart from the implementer.
-    for role in ("reviewer", "verifier", "security-auditor", "critic", "advisor", "release-engineer"):
+    for role in ("reviewer", "verifier", "security-auditor", "critic", "advisor", "release-engineer", "scholar"):
         judge = panel.selected_route("claude", role, None, "read", None)
         try:
             panel.routed_command(panel.ENTRY, project, judge, brief=str(brief), verify="true", resume="fixture-session")
@@ -1453,7 +1504,7 @@ with patch.object(panel, "provider_catalog", side_effect=fixture_provider_catalo
         except ValueError as error:
             assert "only write-capable roles continue" in str(error), error
     # Among read roles only a reviewer runs a verifier; the rest refuse an explicit one and name the reviewer.
-    for role in ("verifier", "security-auditor", "critic", "worker", "advisor"):
+    for role in ("verifier", "security-auditor", "critic", "worker", "advisor", "scholar"):
         try:
             panel.routed_command(panel.ENTRY, project, panel.selected_route("claude", role, None, "read", None),
                                  prompt="Check.", verify="exit 7")

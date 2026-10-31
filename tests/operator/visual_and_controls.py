@@ -6,6 +6,8 @@ from panel_view import (role_style, call_identity, status_tag, paint, GLYPHS, gl
 assert role_style("main", "reviewer") == "main"
 for role in ("advisor", "reviewer", "critic", "verifier", "security-auditor", "architect", "council", "researcher"):
     assert role_style(role) == role_style("worker", role) == "judge", role
+from panel_routing import KINDS
+assert role_style(KINDS["scholar"]) == "judge"
 for role in ("worker", "builder", "refactorer", "documenter", "integrator", "performance-engineer", "release-engineer"):
     assert role_style(role) == "worker", role
 assert role_style("unrecorded") == "unknown" and role_style("worker", "advise") == "worker"

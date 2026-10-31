@@ -49,6 +49,8 @@ Haiku or Luna at low effort, pinned to its exact model ID. No write scopes, impl
 gate, continuation or automatic model escalation are permitted. Catalog discovery
 does not prove live access or authorize spending; the main retains all decisions.
 
+A panel `scholar` is read-only and uses the deep tier at high effort for multi-source literature research with verified citations. Use `--workload frontier` for the hardest surveys.
+
 Reuse `test-designer`, `patch-reviewer` and `repo-auditor` for tests, patch judgment
 and scoped audits. Document drafting is an ordinary scoped write worker. Do not
 create a paid seat merely to run a deterministic verification command.
@@ -76,7 +78,7 @@ publication authority. Project and global overrides retain precedence.
 | `documenter` | Record behavior, decisions and completion handoff | Assigned documentation paths |
 | `release-engineer` | Prepare packaging, deployment and rollback when releasing | Read-only preparation; execution needs separate authorization |
 
-In the terminal panel, `oms panel --dispatch ROLE` accepts `worker`, `researcher`
+In the terminal panel, `oms panel --dispatch ROLE` accepts `worker`, `researcher`, `scholar`
 and the built-in strategies below. Existing standard names remain valid for
 `peer-delegate --role`; use this panel mapping when dispatching from the panel:
 

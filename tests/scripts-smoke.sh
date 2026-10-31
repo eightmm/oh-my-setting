@@ -7156,14 +7156,14 @@ call('room.sh', 'join', '--id', room, '--participant', participant, '--provider'
 
 env.update(OMS_ROOM_ID=room, OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
 counter = 0
-def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex', main_report=False, producer_exit=0):
+def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex', main_report=False, producer_exit=0, role=None):
     global counter
     read_base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
     counter += 1
     tid = 'research%d' % counter
     ap('add', '--id', tid, '--title', 'Inspect all original obligations', '--allowed', 'file.txt,verify.sh',
        '--verify', '' if empty_verify else command,
-       '--role', 'analysis-worker' if main_report else '',
+       '--role', role if role is not None else 'analysis-worker' if main_report else '',
        '--assignment', json.dumps({'provider': claim_provider, 'workload': 'routine'}))
     ap('claim', '--id', tid, '--provider', 'codex',
        extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
@@ -7507,6 +7507,10 @@ invoke(main_report, action='accept-main-research')
 main_done = plan()['tasks'][main_report['task_id']]
 assert main_done['completion_kind'] == 'main-research-accepted' and main_done['state'] == 'done'
 assert 'landing' not in main_done and not main_done['patch']
+scholar_report = setup(main_report=True, role='scholar')
+invoke(scholar_report, action='accept-main-research')
+scholar_done = plan()['tasks'][scholar_report['task_id']]
+assert scholar_done['role'] == 'scholar' and scholar_done['completion_kind'] == 'main-research-accepted'
 # The completion verifier uses the bounded verifier budget, rejects invalid
 # budgets before launching, and leaves the reviewed task unchanged on timeout.
 verifier_marker = repo / '.oms/artifacts/verifier-budget-launched'
@@ -14519,6 +14523,18 @@ PY
     "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
     --model claude-haiku-5-5 --reasoning-effort low --prompt "Researcher web tools probe" >/dev/null
   cp "$home_dir/claude-argv" "$home_dir/claude-researcher-argv"
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher OMS_PANEL_STRATEGY=scholar OMS_PANEL_DISPATCH=1 OMS_PANEL_PURPOSE=research \
+    "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --model claude-opus-5-5 --reasoning-effort high --prompt "Scholar web tools probe" >/dev/null
+  grep -Fxq -- 'Read,Grep,Glob,Bash,WebSearch,WebFetch' "$home_dir/claude-argv" || fail 'scholar needs web tools'
+  for spec in 'researcher high claude-haiku-5-5 research' 'researcher low claude-opus-5-5 research' 'scholar high claude-opus-5-5 invalid' 'invalid low claude-haiku-5-5 research'; do
+    set -- $spec
+    if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher OMS_PANEL_STRATEGY="$1" OMS_PANEL_DISPATCH=1 OMS_PANEL_PURPOSE="$4" \
+      "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+      --model "$3" --reasoning-effort "$2" --prompt "Invalid research probe" >/dev/null 2>&1; then
+      fail "invalid researcher strategy or route accepted: $spec"
+    fi
+  done
   # A researcher role left in the environment is not a panel researcher dispatch.
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher \
     "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
@@ -22402,6 +22418,15 @@ test_agent_role_and_delegate_injection() {
     'Use before acceptance in a separate context from the implementer.'
   assert_file_contains "$ROOT/roles/reviewer.md" 'Read-only.'
   assert_file_contains "$ROOT/roles/reviewer.md" 'Do not edit, apply patches or accept your own implementation.'
+
+  [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+    "$ROOT/scripts/agent-role.sh" --name scholar resolve)" = "$ROOT/roles/scholar.md" ] ||
+    fail "agent-role should resolve scholar"
+  ( cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+    OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --to codex --role scholar --read-only --artifact-dir "$empty_project/scholar-arts" --prompt "research" >/dev/null 2>&1 ) ||
+    fail "delegate should inject scholar"
+  assert_one_artifact_contains "$empty_project/scholar-arts" 'codex-*.md' 'SCHOLAR-STRATEGY'
 
   # Dry-run checks brief selection for one reusable session; no provider runs.
   for role in builder refactorer; do

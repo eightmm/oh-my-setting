@@ -900,6 +900,50 @@ grep -Fxq -- 'web_search="live"' "$TMP/logs/codex.researcher.argv" ||
   fail 'codex researcher seat must use live web search'
 grep -Fxq -- 'features.apps=false' "$TMP/logs/codex.researcher.argv" ||
   fail 'codex researcher seat must keep apps connectors disabled'
+rm -f "$TMP/logs/codex.argv"
+PATH="$TMP/codexbin:$PATH" MA_KIND=delegate MA_SHOW_REPO=0 MA_QUORUM_FALLBACK=answer \
+  MA_DEBATE_ROLE=workers MA_DEBATE_TOPIC=task MA_DEBATE_SECTIONS='' OMS_PANEL_ROLE=researcher OMS_PANEL_STRATEGY=scholar OMS_PANEL_DISPATCH=1 \
+  ma_provider_attempt codex read "$prompt_file" "$TMP/logs/codex.scholar-output" "$repo" \
+    gpt-6.1-sol high provider-registry '' codex-scholar >/dev/null 2>&1 || true
+[ -f "$TMP/logs/codex.argv" ] || fail 'scholar did not reach codex'
+grep -Fxq -- 'web_search="live"' "$TMP/logs/codex.argv" || fail 'codex scholar needs live web search'
+# Refusals must precede transport and lifecycle writes, even with a supplied
+# attempt or no state repository. Empty strategy retains the cheap legacy role.
+for guard_context in fresh supplied stateless; do
+  guard_attempt=''
+  guard_repo="$repo"
+  [ "$guard_context" != supplied ] || guard_attempt=att_00000000000000000000000000000000
+  [ "$guard_context" != stateless ] || guard_repo=''
+  for spec in 'scholar|write|high|gpt-6.1-sol|research' 'scholar|read|high|gpt-6.1-sol|invalid' \
+    'scholar|read|high|gpt-6.1-sol|' 'scholar|read|high|gpt-6.1-sol|0' \
+    'scholar||high|gpt-6.1-sol|research' 'scholar|0|high|gpt-6.1-sol|research' \
+    'scholar|malformed|high|gpt-6.1-sol|research' \
+    'other|read|low|gpt-6-luna|research' '0|read|low|gpt-6-luna|research' \
+    'researcher|read|high|gpt-6-luna|research' 'researcher|read|low|gpt-6.1-sol|research' \
+    '|read|high|gpt-6.1-sol|research'; do
+    IFS='|' read -r guard_strategy guard_access guard_effort guard_model guard_purpose <<< "$spec"
+    rm -f "$TMP/logs/codex.argv"
+    rc=0
+    PATH="$TMP/codexbin:$PATH" OMS_ATTEMPT_ID="$guard_attempt" \
+      OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=researcher OMS_PANEL_STRATEGY="$guard_strategy" OMS_PANEL_PURPOSE="$guard_purpose" \
+      OMS_REASONING_SELECTED="$guard_effort" OMS_MODEL_PRIMARY="$guard_model" \
+      ma_run_routed_provider codex "$guard_access" "$prompt_file" "$TMP/logs/guard-output" "$repo" provider-registry "$guard_repo" guard \
+      >"$TMP/logs/guard-output" 2>"$TMP/logs/guard-error" || rc=$?
+    [ "$rc" -eq 2 ] || fail "research guard accepted $guard_context $spec"
+    [ ! -e "$TMP/logs/codex.argv" ] || fail "research guard launched codex: $guard_context $spec"
+    grep -Eq 'researchers require|scholars require|invalid researcher strategy' "$TMP/logs/guard-error" || fail "research guard was not reached: $spec"
+  done
+done
+for guard_role in worker advisor reviewer '' 0 malformed; do
+  rm -f "$TMP/logs/codex.argv"
+  rc=0
+  PATH="$TMP/codexbin:$PATH" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE="$guard_role" OMS_PANEL_STRATEGY=scholar \
+    OMS_PANEL_PURPOSE=research OMS_REASONING_SELECTED=high OMS_MODEL_PRIMARY=gpt-6.1-sol \
+    ma_run_routed_provider codex write "$prompt_file" "$TMP/logs/guard-output" "$repo" provider-registry "$repo" guard \
+    >"$TMP/logs/guard-output" 2>"$TMP/logs/guard-error" || rc=$?
+  [ "$rc" -eq 2 ] && [ ! -e "$TMP/logs/codex.argv" ] || fail 'mismatched scholar board role reached codex'
+  grep -Fq 'invalid researcher strategy for panel role' "$TMP/logs/guard-error" || fail 'mismatched scholar role bypassed admission'
+done
 grep -Fxq -- '--always-approve' "$TMP/logs/grok.argv" || fail 'Grok write authority missing'
 grep -Fxq -- 'workspace' "$TMP/logs/grok.argv" || fail 'Grok workspace sandbox missing'
 grep -Fxq -- 'yolo' "$TMP/logs/gemini.argv" || fail 'Gemini write authority missing'

@@ -20,6 +20,7 @@
   },
   "roles": {
     "researcher": {"tier": "light"},
+    "scholar": {"tier": "deep"},
     "worker": {"tier": "routine"},
     "builder": {"tier": "routine"},
     "refactorer": {"tier": "routine"},
