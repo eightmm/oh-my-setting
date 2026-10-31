@@ -6,6 +6,48 @@ from unittest.mock import Mock, patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
+# BEGIN continued acceptance regression
+with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": "main"}):
+    task = {"state": "running", "verify": "true", "lease_id": "lease", "plan_id": "plan"}
+    main = {"attempt_id": "main", "tool": "panel-main", "provider": "codex"}
+    first = {"task_id": "chain", "attempt_id": "first", "parent_attempt_id": "main",
+             "created_at": "1", "refs": {"panel_role": "worker", "panel_access": "write",
+                                           "panel_lease_id": "lease"}}
+    final = dict(first, attempt_id="final", created_at="2",
+                 refs=dict(first["refs"], panel_continues="first"))
+    row = {"kind": "delegate", "task_id": "chain", "attempt_id": "final", "exit": 0,
+           "plan_id": "plan", "patch_sha256": "final-digest"}
+    review = {"kind": "review-outcome", "task_id": "chain", "exit": 0,
+              "review": {"candidate": {"patch_sha256": "final-digest"}, "gate_verify_exit": 0,
+                         "seats": [{"verdict": "pass"}]}}
+    with patch.object(saved, "_owned_task", return_value=task), \
+            patch.object(saved, "_plan_bindings", return_value={}), \
+            patch.object(saved, "_records", return_value=([main, first, final], [row, review])), \
+            patch.object(saved, "_admission", return_value=None), \
+            patch.object(saved, "_empty_salvaged_attempt", return_value=False), \
+            patch.object(saved, "_worker_owns", return_value=["value.txt"]), \
+            patch.object(saved, "verified_patch", return_value=b""), \
+            patch.object(saved, "_indexed"):
+        assert saved._accept_preflight(project, project, "codex", "chain", "true")["worker"] == final
+        for ref in (None, "", "0", "malformed"):
+            unrelated = dict(final, refs=dict(final["refs"], panel_continues=ref))
+            with patch.object(saved, "_records", return_value=([main, first, unrelated], [row, review])):
+                try:
+                    saved._accept_preflight(project, project, "codex", "chain", "true")
+                    raise AssertionError("unrelated worker accepted")
+                except ValueError as error:
+                    assert "unique worker candidate" in str(error), error
+        older_review = dict(review, review=dict(review["review"], candidate={"patch_sha256": "old-digest"}))
+        with patch.object(saved, "_records", return_value=([main, first, final], [row, older_review])):
+            try:
+                saved._accept_preflight(project, project, "codex", "chain", "true")
+                raise AssertionError("unreviewed final worker accepted")
+            except ValueError as error:
+                assert "passing review gate" in str(error), error
+    selected, admissions, _ = saved._write_candidates(project, [first, final], [{"event_id": "old"}, None], [], "codex")
+    assert selected == [first, final] and admissions == [{"event_id": "old"}, None]
+# END continued acceptance regression
+
 
 def exercise_continued_stage_rollup(repo):
     task = "continued-stage"
@@ -1778,7 +1820,7 @@ else:
     raise AssertionError("main-written sensitive content passed outbound scan")
 
 for has_write_patch, expected in (
-        (True, "after oms land run oms agent-plan finish --id hint-task --landed-commit SHA"),
+        (True, "oms panel --accept hint-task, then oms panel --finalize --landed-commit SHA"),
         (False, "a task with no patch cannot finish by landing; close it with oms agent-plan accept-main-research (completion bundle) or oms agent-plan block --id hint-task --reason TEXT")):
     hint = io.StringIO()
     with patch.object(saved.subprocess, "run", return_value=SimpleNamespace(

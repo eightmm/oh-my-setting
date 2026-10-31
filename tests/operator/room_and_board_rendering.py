@@ -4906,6 +4906,7 @@ quota_limits = {"primary": {"used_percent": 9.0, "window_minutes": 10080,
                 "secondary": {"used_percent": 70, "window_minutes": 300,
                               "resets_at": quota_now + 60}}
 with patch.dict(os.environ, {"CODEX_HOME": str(quota_home)}):
+    from panel_metrics import weekly_reading
     assert codex_weekly_reading(quota_now) == {}
     for weekly_slot in ("primary", "secondary"):
         limits = quota_limits if weekly_slot == "primary" else {
@@ -4915,6 +4916,7 @@ with patch.dict(os.environ, {"CODEX_HOME": str(quota_home)}):
             json.dumps({"payload": {"type": "token_count", "rate_limits": limits}}) + "\n" +
             json.dumps({"payload": {"type": "other"}}) + "\n")
         assert codex_weekly_reading(quota_now)["weekly_used"] == 9
+        assert weekly_reading("codex", now=time.time())["used"] == 9
     with patch("panel_metrics.os.open", side_effect=AssertionError("unchanged log was reread")):
         assert codex_weekly_reading(quota_now)["weekly_used"] == 9
         assert codex_weekly_reading(quota_now + 61) == {}, "cache retained an expired quota"
@@ -4953,14 +4955,106 @@ with patch.dict(os.environ, {"CODEX_HOME": str(quota_home)}):
     older_day = quota_day.parent / "10"
     older_day.mkdir()
     (older_day / "rollout-older.jsonl").write_text(json.dumps({"rate_limits": quota_limits}) + "\n")
+    os.utime(older_day / "rollout-older.jsonl", (quota_now - 10000, quota_now - 10000))
     for day in ("11", "12"):
         (quota_day.parent / day).mkdir()
     assert codex_weekly_reading(quota_now) == {}, "searched beyond the newest three day directories"
+    assert weekly_reading("codex", now=time.time())["used"] == 9
+    from datetime import timezone
+    old_event = datetime.fromtimestamp(quota_now - 3600, timezone.utc).isoformat()
+    quota_log.write_text(json.dumps({"timestamp": old_event, "rate_limits": quota_limits}) + "\n" +
+                         json.dumps({"timestamp": datetime.fromtimestamp(quota_now, timezone.utc).isoformat(),
+                                     "payload": {"type": "other"}}) + "\n")
+    observed = weekly_reading("codex", now=time.time())
+    assert abs(observed["observed_at"] - (quota_now - 3600)) < 0.001, observed
+    with patch("panel_metrics._codex_auto_weekly", side_effect=AssertionError("full scan on current main")):
+        from panel_metrics import current_weekly_reading
+        current = current_weekly_reading("codex", now=time.time())
+        assert abs(current["observed_at"] - (quota_now - 3600)) < 0.001, current
+    for stamp in (None, "", "malformed"):
+        quota_log.write_text(json.dumps({"timestamp": stamp, "rate_limits": quota_limits}) + "\n")
+        assert weekly_reading("codex", now=time.time())["observed_at"] is None
+        assert codex_weekly_reading(time.time(), detail=True)["observed_at"] is None
     with patch("panel_metrics.os.scandir", side_effect=OSError("unavailable sessions")):
         assert codex_weekly_reading(quota_now) == {}
     with patch.dict(os.environ, {"CODEX_HOME": ""}), \
             patch("panel_metrics.Path.home", side_effect=RuntimeError("home unavailable")):
         assert codex_weekly_reading(quota_now) == {}
+# Quota event time, rather than subsequent file activity, selects a target reading.
+rank_home = temporary / "quota-ranking"
+rank_day = rank_home / "sessions" / "2026" / "10" / "13"
+rank_day.mkdir(parents=True)
+rank_now = time.time()
+rank_old = datetime.fromtimestamp(rank_now - 3600, timezone.utc).isoformat()
+rank_new = datetime.fromtimestamp(rank_now - 30, timezone.utc).isoformat()
+rank_a, rank_b = rank_day / "rollout-a.jsonl", rank_day / "rollout-b.jsonl"
+def rank_event(stamp, used):
+    return json.dumps({"timestamp": stamp, "rate_limits": {"primary": {
+        "window_minutes": 10080, "used_percent": used, "resets_at": rank_now + 7200}}}) + "\n"
+with patch.dict(os.environ, {"CODEX_HOME": str(rank_home)}):
+    from panel_watch import auto_swap_plan
+    main = {"role": "main", "provider": "claude", "attempt": "rank-main", "consumer": "a" * 32}
+    source = {"used": 97, "observed_at": rank_now, "resets_at": rank_now + 7200}
+    for recent_used, old_used in ((100, 9), (9, 100)):
+        rank_a.write_text(rank_event(rank_old, old_used))
+        rank_b.write_text(rank_event(rank_new, recent_used))
+        os.utime(rank_a, (rank_now, rank_now))
+        os.utime(rank_b, (rank_now - 10, rank_now - 10))
+        selected = weekly_reading("codex", now=rank_now)
+        assert selected["used"] == recent_used, selected
+        with patch("room_view.nodes", return_value=[main]), \
+                patch("panel_metrics.current_weekly_reading", return_value=source), \
+                patch("panel_watch.time.time", return_value=rank_now):
+            planned = auto_swap_plan({}, "rank-main", ["claude", "codex"])
+        assert bool(planned[3]) == (recent_used < 90), planned
+    rank_a.write_text(rank_event("malformed", 100) + rank_event(rank_old, 0))
+    rank_b.write_text(rank_event(None, 90))
+    assert weekly_reading("codex", now=rank_now)["used"] == 0
+    rank_a.write_text(rank_event("malformed", 0))
+    assert weekly_reading("codex", now=rank_now)["observed_at"] is None
+    rank_a.write_text(rank_event("1970-01-01T00:00:00Z", 0))
+    assert weekly_reading("codex", now=rank_now)["observed_at"] == 0
+    rank_a.write_text(rank_event(rank_new, 9) + rank_event(rank_old, 100))
+    assert weekly_reading("codex", now=rank_now)["used"] == 9
+with tempfile.TemporaryDirectory() as limit_dir:
+    limit_day = Path(limit_dir) / "sessions" / "2026" / "10" / "13"
+    limit_day.mkdir(parents=True)
+    with patch.dict(os.environ, {"CODEX_HOME": limit_dir}):
+        assert weekly_reading("codex", now=rank_now) == {}
+        for index in range(65):
+            path = limit_day / ("rollout-%02d.jsonl" % index)
+            path.write_text(rank_event(rank_new if index == 64 else rank_old, 100 if index == 64 else index))
+            os.utime(path, (rank_now - index, rank_now - index))
+            if index == 63:
+                with patch("panel_metrics.os.open", wraps=os.open) as exact_opens:
+                    assert weekly_reading("codex", now=rank_now)["used"] == 0
+                assert exact_opens.call_count == 64
+        with patch("panel_metrics.os.open", wraps=os.open) as quota_opens:
+            result = weekly_reading("codex", now=rank_now)
+        assert result["used"] == 0 and quota_opens.call_count == 64, (result, quota_opens.call_count)
+with tempfile.TemporaryDirectory() as entry_dir:
+    entry_day = Path(entry_dir) / "sessions" / "2026" / "10" / "13"
+    entry_day.mkdir(parents=True)
+    for index in range(4093):
+        (entry_day / ("rollout-%04d.jsonl" % index)).touch()
+    with patch.dict(os.environ, {"CODEX_HOME": entry_dir}):
+        with patch("panel_metrics.os.open", wraps=os.open) as exact_entries:
+            assert weekly_reading("codex", now=rank_now) == {}
+        assert exact_entries.call_count == 64
+        (entry_day / "rollout-over-limit.jsonl").touch()
+        with patch("panel_metrics.os.open", wraps=os.open) as excess_entries:
+            assert weekly_reading("codex", now=rank_now) == {}
+        assert excess_entries.call_count == 0
+with tempfile.TemporaryDirectory() as hud_entry_dir:
+    with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": hud_entry_dir}):
+        assert weekly_reading("claude", now=1000) == {}
+        for index in range(4095):
+            (Path(hud_entry_dir) / ("ignored-%04d" % index)).touch()
+        (Path(hud_entry_dir) / ("ctx-" + "a" * 24 + ".json")).write_text(json.dumps({
+            "ts": 1000, "seven_day": {"used_percentage": 0, "resets_at": 2000}}))
+        assert weekly_reading("claude", now=1000)["used"] == 0
+        (Path(hud_entry_dir) / "over-limit").touch()
+        assert weekly_reading("claude", now=1000) == {}
 hud = temporary / "panel-hud"
 hud.mkdir()
 consumer = "a" * 32
@@ -4968,6 +5062,16 @@ cache = hud / ("ctx-" + consumer[:24] + ".json")
 cache.write_text(json.dumps({"schema": 1, "used_percentage": 25, "ts": 1000,
                             "seven_day": {"used_percentage": 0, "resets_at": 2000}}))
 with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
+    assert weekly_reading("claude", consumer, 1000)["used"] == 0
+    assert weekly_reading("claude", consumer, 2000) == {}
+    assert weekly_reading("claude", "invalid", 1000) == {}
+    cache.write_text(json.dumps({"ts": 1000, "seven_day": {"used_percentage": 90, "resets_at": 2000}}))
+    assert weekly_reading("claude", None, 1000)["used"] == 90
+    assert weekly_reading("claude", None, 2000) == {}
+    cache.write_text(json.dumps({"ts": 1000, "five_hour": {"used_percentage": 100, "resets_at": 2000}}))
+    assert weekly_reading("claude", consumer, 1000) == {}
+    cache.write_text(json.dumps({"schema": 1, "used_percentage": 25, "ts": 1000,
+                                "seven_day": {"used_percentage": 0, "resets_at": 2000}}))
     assert cached(consumer, 1000)["context_left"] == 75
     assert cached(consumer, 1000)["weekly_used"] == 0
     assert cached(consumer, 1601) == {"source": "cache stale"}

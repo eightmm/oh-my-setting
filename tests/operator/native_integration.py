@@ -79,6 +79,279 @@ assert pending_clicks == ["new layout"], pending_clicks
 # A stalled read must not redraw on every completion poll.
 import panel_watch
 from types import SimpleNamespace
+# Auto swap uses only the numeric weekly source, never the rendered pane footer.
+auto_now = time.time()
+auto_main = {"role": "main", "provider": "claude", "attempt": "auto-attempt", "consumer": "a" * 32}
+auto_state = {"land": {"active": False}}
+auto_reading = {"used": 97, "resets_at": auto_now + 1000, "observed_at": auto_now}
+def auto_case(current, target=None, *, land=False, disabled=False, repeat=False):
+    nav, spawned = {}, []
+    state = {"land": {"active": land}}
+    def read(provider, consumer, now):
+        return current if provider == "claude" else target or {}
+    with patch.dict(os.environ, {"OMS_PANEL_AUTO_SWAP": "0" if disabled else "1"}), \
+            patch("room_view.nodes", return_value=[auto_main]), \
+            patch("panel_metrics.weekly_reading", side_effect=read), \
+            patch.object(panel_watch, "_auto_claim", return_value=True), \
+            patch.object(panel, "start_spawn", side_effect=lambda *a, **k: spawned.append((a, k)) or True):
+        panel_watch.consider_auto_swap(project, state, "auto-attempt", ["claude", "codex", "pi"], [], nav)
+        if repeat:
+            panel_watch.consider_auto_swap(project, state, "auto-attempt", ["claude", "codex", "pi"], [], nav)
+    return nav, spawned
+nav, spawned = auto_case(auto_reading, {"used": 41}, repeat=True)
+assert len(spawned) == 1 and spawned[0][0][1] == "codex" and spawned[0][1]["swap"]
+assert "7d 97%" in nav["notice"] and "7d 41%" in nav["notice"]
+assert not auto_case(dict(auto_reading, used=96))[1]
+assert not auto_case(dict(auto_reading, used=96.9))[1]
+import runpy
+import panel_metrics
+hud_writer = runpy.run_path(str(root / "scripts/claude-statusline.py"))["write_context_cache"]
+hud_session = "autoswap-hud-fixture"
+hud_consumer = hashlib.sha256(hud_session.encode()).hexdigest()[:32]
+hud_main = dict(auto_main, consumer=hud_consumer)
+with tempfile.TemporaryDirectory() as hud_dir, \
+        patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": hud_dir, "OMS_PANEL_AUTO_SWAP": "1"}), \
+        patch("room_view.nodes", return_value=[hud_main]), \
+        patch("panel_metrics._codex_auto_weekly", return_value={}), \
+        patch.object(panel_watch, "_auto_claim", return_value=True), \
+        patch.object(panel, "start_spawn", return_value=True) as hud_spawn:
+    for raw, persisted, expected in ((96.4, 96, False), (96.6, 97, True)):
+        hud_writer({"session_id": hud_session, "context_window": {"used_percentage": 10},
+                    "rate_limits": {"seven_day": {"used_percentage": raw, "resets_at": time.time() + 3600}}})
+        reading = panel_metrics.current_weekly_reading("claude", hud_consumer)
+        assert reading["used"] == persisted, reading
+        hud_spawn.reset_mock()
+        panel_watch.consider_auto_swap(project, auto_state, "auto-attempt", ["claude", "codex"], [], {})
+        assert bool(hud_spawn.call_count) is expected
+# Codex session observations follow the same whole-percentage thresholds.
+from datetime import datetime, timezone
+for raw, current, expected in ((96.6, True, True), (96.4, True, False),
+                               (89.6, False, False), (89.4, False, True)):
+    with tempfile.TemporaryDirectory() as codex_dir:
+        codex_day = Path(codex_dir) / "sessions" / "2026" / "10" / "30"
+        codex_day.mkdir(parents=True)
+        stamp = datetime.now(timezone.utc).isoformat()
+        row = {"timestamp": stamp, "rate_limits": {"primary": {"window_minutes": 10080,
+               "used_percent": raw, "resets_at": time.time() + 3600}}}
+        (codex_day / "rollout-fraction.jsonl").write_text(json.dumps(row) + "\n")
+        main = dict(auto_main, provider="codex" if current else "claude")
+        with patch.dict(os.environ, {"CODEX_HOME": codex_dir, "OMS_PANEL_AUTO_SWAP": "1"}), \
+                patch("room_view.nodes", return_value=[main]), \
+                patch.object(panel_watch, "_auto_claim", return_value=True), \
+                patch.object(panel, "start_spawn", return_value=True) as codex_spawn:
+            assert panel_metrics.weekly_reading("codex")["used"] == round(raw)
+            assert panel_metrics.current_weekly_reading("codex")["used"] == round(raw)
+            if current:
+                with patch("panel_metrics.weekly_reading", return_value={}):
+                    panel_watch.consider_auto_swap(project, auto_state, "auto-attempt", ["claude", "codex"], [], {})
+            else:
+                with patch("panel_metrics.current_weekly_reading", return_value=auto_reading):
+                    panel_watch.consider_auto_swap(project, auto_state, "auto-attempt", ["claude", "codex"], [], {})
+            assert bool(codex_spawn.call_count) is expected, (raw, current)
+            with patch("panel_native.swap_main", side_effect=lambda repo, target, precondition, **kwargs:
+                       precondition("auto-attempt", {"provider": "codex" if current else "claude"})):
+                try:
+                    if current:
+                        with patch("panel_metrics.weekly_reading", return_value={}):
+                            accepted = panel_watch.automatic_swap(project, "claude", "auto-attempt", "codex", None)
+                    else:
+                        with patch("panel_metrics.current_weekly_reading", return_value=auto_reading):
+                            accepted = panel_watch.automatic_swap(project, "codex", "auto-attempt", "claude", "a" * 32)
+                except ValueError as error:
+                    assert not current and not expected and str(error) == "auto swap skipped: target quota exhausted"
+                else:
+                    assert bool(accepted) is expected, (raw, current)
+assert not auto_case({})[1]
+assert not auto_case(dict(auto_reading, observed_at=auto_now - 601))[1]
+with patch("panel_watch.time.time", return_value=auto_now):
+    assert auto_case(dict(auto_reading, observed_at=auto_now - 600))[1]
+    assert not auto_case(dict(auto_reading, resets_at=auto_now))[1]
+assert not auto_case(auto_reading, land=True)[1]
+assert not auto_case(auto_reading, disabled=True)[1]
+nav, spawned = auto_case(auto_reading, {"used": 90})
+assert not spawned and "no other main" in nav["notice"]
+assert auto_case(auto_reading)[1][0][0][1] == "codex"
+with patch("panel_metrics.current_weekly_reading", return_value=auto_reading), \
+        patch("panel_metrics.weekly_reading", return_value={"used": 100}), \
+        patch.object(panel_watch, "_auto_claim", return_value=True), \
+        patch("panel_native.swap_main", side_effect=lambda repo, target, precondition, **kwargs:
+              precondition("auto-attempt", {"provider": "claude"})):
+    try:
+        panel_watch.automatic_swap(project, "codex", "auto-attempt", "claude", "a" * 32)
+        assert False, "exhausted target was accepted"
+    except ValueError as error:
+        assert str(error) == "auto swap skipped: target quota exhausted"
+for target_used in (None, 0, 89, 90, 100):
+    target_row = {} if target_used is None else {"used": target_used}
+    with patch("panel_metrics.current_weekly_reading", return_value=auto_reading), \
+            patch("panel_metrics.weekly_reading", return_value=target_row), \
+            patch.object(panel_watch, "_auto_claim", return_value=True), \
+            patch("panel_native.swap_main", side_effect=lambda repo, target, precondition, **kwargs:
+                  precondition("auto-attempt", {"provider": "claude"})):
+        try:
+            accepted = panel_watch.automatic_swap(project, "codex", "auto-attempt", "claude", "a" * 32)
+        except ValueError as error:
+            assert target_used >= 90 and str(error) == "auto swap skipped: target quota exhausted"
+        else:
+            assert accepted is True and (target_used is None or target_used < 90)
+busy_process = Mock()
+busy_process.poll.return_value = None
+busy_spawns = [(busy_process, "codex", 0, False)]
+busy_plan = ("claude", "a" * 32, auto_reading, [(0, "codex", {})])
+with patch.dict(os.environ, {"OMS_PANEL_AUTO_SWAP": "1"}), \
+        patch.object(panel_watch, "_auto_claim", return_value=True) as busy_claim, \
+        patch.object(panel, "start_spawn", return_value=True) as busy_start:
+    panel_watch.consider_auto_swap(project, auto_state, "auto-attempt", ["claude", "codex"],
+                                   busy_spawns, {}, plan=busy_plan)
+    assert not busy_claim.called and not busy_start.called
+    busy_process.poll.return_value = 0
+    panel_watch.consider_auto_swap(project, auto_state, "auto-attempt", ["claude", "codex"],
+                                   busy_spawns, {}, plan=busy_plan)
+    assert busy_claim.call_count == 1 and busy_start.call_count == 1
+auto_order = []
+with patch.dict(os.environ, {"OMS_PANEL_AUTO_SWAP": "1"}), \
+        patch("room_view.nodes", return_value=[auto_main]), \
+        patch("panel_metrics.weekly_reading", side_effect=lambda provider, consumer, now: (
+            auto_reading if provider == "claude" else {})), \
+        patch.object(panel_watch, "_auto_claim", return_value=True), \
+        patch.object(panel, "start_spawn", side_effect=lambda *a, **k: auto_order.append("spawn")):
+    panel_watch.consider_auto_swap(project, auto_state, "auto-attempt", ["claude", "codex"], [], {},
+                                   before_spawn=lambda: auto_order.append("draw"))
+assert auto_order == ["draw", "spawn"], auto_order
+for current, expected in ((auto_reading, True), (dict(auto_reading, used=96), False),
+                          (dict(auto_reading, observed_at=auto_now - 601), False), ({}, False)):
+    with patch("panel_metrics.current_weekly_reading", return_value=current), \
+            patch("panel_metrics.weekly_reading", return_value={}), \
+            patch("panel_native.swap_main", side_effect=lambda repo, target, precondition, **kwargs: (
+                precondition("auto-attempt", {"provider": "claude"}),
+                precondition("changed-attempt", {"provider": "claude"}))):
+        assert panel_watch.automatic_swap(project, "codex", "auto-attempt", "claude", "a" * 32) == (expected, False)
+with tempfile.TemporaryDirectory() as auto_dir:
+    auto_repo = Path(auto_dir)
+    assert panel_watch._auto_claim(auto_repo, "first", 2000, check_only=True)
+    assert panel_watch._auto_claim(auto_repo, "first", 2060, check_only=True)
+    assert not (auto_repo / ".oms/artifacts/panel-auto-swap.json").exists()
+    assert panel_watch._auto_claim(auto_repo, "first", 2000)
+    assert panel_watch._auto_claim(auto_repo, "first", 4000)
+    assert not panel_watch._auto_claim(auto_repo, "second", 5799)
+    assert panel_watch._auto_claim(auto_repo, "second", 5800)
+    assert panel_watch._auto_claim(auto_repo, "notice", 5800, notice=True)
+    assert not panel_watch._auto_claim(auto_repo, "notice", 5800, notice=True)
+    auto_path = auto_repo / ".oms/artifacts/panel-auto-swap.json"
+    for malformed in ("{", "[]", "null", '{"time": "bad"}', '{"time": true}', '{"time": -1}'):
+        auto_path.write_text(malformed)
+        assert not panel_watch._auto_claim(auto_repo, "invalid", 8000)
+        assert auto_path.read_text() == malformed
+    for empty in ("", "{}", '{"time": 0}'):
+        auto_path.write_text(empty)
+        assert not panel_watch._auto_claim(auto_repo, "edge", 1799)
+        assert panel_watch._auto_claim(auto_repo, "edge", 1800)
+assert panel_watch.auto_check_due(0, 0) == (True, 60)
+assert panel_watch.auto_check_due(5, 60) == (False, 60)
+assert panel_watch.auto_check_due(60, 60) == (True, 120)
+with patch("room_view.nodes", return_value=[dict(auto_main, provider="codex")]), \
+        patch("panel_metrics.current_weekly_reading", return_value=dict(auto_reading, used=96)), \
+        patch("panel_metrics.weekly_reading", side_effect=AssertionError("unnecessary target scan")):
+    assert panel_watch.auto_swap_plan(auto_state, "auto-attempt", ["claude", "codex"]) is None
+deadline, evaluations = 0, 0
+for collection_time in (0, 5):
+    due, deadline = panel_watch.auto_check_due(collection_time, deadline)
+    evaluations += int(due)
+assert evaluations == 1
+with tempfile.TemporaryDirectory() as retry_dir:
+    retry_repo = Path(retry_dir)
+    retry_clock = [2000.0]
+    def retry_read(provider, consumer, now):
+        return {"used": 97, "resets_at": now + 3600, "observed_at": now} if provider == "claude" else {}
+    with patch.dict(os.environ, {"OMS_PANEL_AUTO_SWAP": "1"}), \
+            patch("room_view.nodes", return_value=[auto_main]), \
+            patch("panel_metrics.weekly_reading", side_effect=retry_read), \
+            patch.object(panel_watch.time, "time", side_effect=lambda: retry_clock[0]), \
+            patch.object(panel_watch.subprocess, "Popen", side_effect=[OSError("temporary"), Mock()]) as retry_spawn:
+        first_nav = {}
+        panel_watch.consider_auto_swap(retry_repo, auto_state, "auto-attempt", ["claude", "codex"], [], first_nav)
+        assert "auto_seen" not in first_nav and retry_spawn.call_count == 1
+        retry_clock[0] += 1801
+        restarted_nav = {}
+        panel_watch.consider_auto_swap(retry_repo, auto_state, "auto-attempt", ["claude", "codex"], [], restarted_nav)
+        assert restarted_nav.get("auto_seen") == "auto-attempt" and retry_spawn.call_count == 2
+finished_swap = Mock()
+finished_swap.poll.return_value = 1
+finished_swap.communicate.return_value = ("", "refused")
+finished_nav = {"auto_seen": "auto-attempt"}
+assert panel_watch.reap_spawns([(finished_swap, "codex", 0, True)], finished_nav)
+assert "auto_seen" not in finished_nav
+with patch("panel_native.swap_main", side_effect=lambda repo, target, **kwargs: kwargs), \
+        patch("panel_metrics.current_weekly_reading", return_value=auto_reading), \
+        patch.object(room, "send") as postponed_messages, \
+        patch.object(panel_watch, "_auto_claim") as postponed_claim:
+    callbacks = panel_watch.automatic_swap(project, "codex", "auto-attempt", "claude", "a" * 32)
+    for unused in range(2):
+        try:
+            callbacks["auto_handoff"](False, "fixture-room", "fixture-main", "auto-attempt")
+            assert False, "missing handoff was accepted"
+        except ValueError as error:
+            assert "postponed" in str(error)
+    assert postponed_messages.call_count == 2 and not postponed_claim.called
+    assert postponed_messages.call_args_list[0].kwargs["message_id"] == postponed_messages.call_args_list[1].kwargs["message_id"]
+# Automatic swaps preserve the main when no handoff arrives below 100%, or a land starts during the wait.
+import panel_native
+from contextlib import ExitStack, nullcontext
+from subprocess import CompletedProcess
+swap_attempt = "att_" + "a" * 32
+swap_window = ("@1", swap_attempt, "%1", "fixture-main", "fixture-room")
+swap_old = {"attempt_id": swap_attempt, "provider": "claude", "tool": "panel-main", "terminal": False,
+            "state": "working", "refs": {"panel_room_participant": "fixture-main", "panel_host": "tmux",
+                                           "panel_harness": "claude"}}
+for usage, land_active, ack, manual in ((97, False, False, False), (100, False, False, False),
+                                        (100, True, False, False), (97, True, True, False),
+                                        (97, False, True, False), (97, False, False, True)):
+    shown = dict(auto_reading, used=usage)
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {"OMS_PANEL_SWAP_HANDOFF_SECONDS": "1" if ack else "0"}))
+        stack.enter_context(patch.object(panel_native.shutil, "which", return_value="fixture"))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+        stack.enter_context(patch.object(panel_native, "resolve_main", return_value={"owner": "codex", "model": "fixture", "transport": "native"}))
+        stack.enter_context(patch.object(panel, "policy", return_value={"main": {"codex": {"model": "fixture"}}}))
+        stack.enter_context(patch.object(panel, "native_repository", return_value=project))
+        stack.enter_context(patch.object(panel, "_lock", return_value=nullcontext()))
+        stack.enter_context(patch.object(panel, "resolve_session", return_value=("fixture", str(project))))
+        stack.enter_context(patch.object(panel, "_swap_main_window", return_value=swap_window))
+        stack.enter_context(patch.object(panel, "live_mains", return_value=1))
+        stack.enter_context(patch.object(panel, "main_history", return_value=[swap_old]))
+        nonce = "b" * 32
+        stack.enter_context(patch.object(panel_native.uuid, "uuid4", return_value=SimpleNamespace(hex=nonce)))
+        messages = ([{"sender": "fixture-main", "message_kind": "handoff",
+                      "text": "SWAP_HANDOFF swap-" + nonce + ": ready"}] if ack else [])
+        stack.enter_context(patch.object(room, "status", return_value={"id": "fixture-room", "messages": messages}))
+        stack.enter_context(patch.object(room, "participant", return_value={"role": "main", "provider": "claude"}))
+        stack.enter_context(patch.object(room, "validate_main_swap"))
+        notices = stack.enter_context(patch.object(room, "send"))
+        stack.enter_context(patch.object(panel, "_swap_digest", return_value="fixture digest"))
+        stack.enter_context(patch.object(panel, "_swap_handoff_file", return_value=project / "fixture-handoff"))
+        stack.enter_context(patch.object(panel, "launch_command", return_value="fixture"))
+        land_flags = iter((False, land_active))
+        runs = stack.enter_context(patch.object(panel_native.subprocess, "run", side_effect=lambda command, **kwargs:
+            CompletedProcess(command, 0, json.dumps({"active": next(land_flags)}) if "land" in command else "", "")))
+        stack.enter_context(patch.object(panel_metrics, "current_weekly_reading", return_value=shown))
+        stack.enter_context(patch.object(panel_metrics, "weekly_reading", return_value={}))
+        claims = stack.enter_context(patch.object(panel_watch, "_auto_claim", return_value=True))
+        typed = stack.enter_context(patch.object(panel, "_swap_submit", side_effect=[None, ValueError("fixture exit")]))
+        try:
+            if manual:
+                panel_native.swap_main(project, "codex")
+            else:
+                panel_watch.automatic_swap(project, "codex", swap_attempt, "claude", "a" * 32)
+            assert False, "fixture should stop the swap"
+        except ValueError as error:
+            assert str(error) == ("automatic main swap postponed; handoff not received" if usage < 100 and not ack and not manual else
+                                  "land is in progress; swap refused" if land_active else "fixture exit"), error
+        assert claims.call_count == (1 if not manual and (usage == 100 or ack) and not land_active else 0)
+        assert notices.call_count == (1 if usage < 100 and not ack and not manual else 0)
+        if notices.called:
+            assert notices.call_args.kwargs["message_id"] == "auto-swap-postponed-" + swap_attempt
+        assert typed.call_count == (2 if (usage == 100 or ack or manual) and not land_active else 1)
+        assert sum("land" in call.args[0] for call in runs.call_args_list) == (1 if manual or usage < 100 and not ack else 2)
 clock = [0.0]
 class StalledRead:
     pending = False

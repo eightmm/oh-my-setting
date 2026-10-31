@@ -1311,9 +1311,10 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
         print("plan %s linked to a read-only call; record the owner decision with oms panel --finalize"
               % task_id, file=sys.stderr)
     else:
-        print("plan %s running (lease %s): after acceptance oms agent-plan review --id %s --lease-id %s "
-              "--artifact PATH [--patch PATH]; after oms land: oms agent-plan finish --id %s --landed-commit SHA"
-              % (task_id, binding.lease_id, task_id, binding.lease_id, task_id), file=sys.stderr)
+        print("plan %s running (lease %s): review with oms agent-plan review --id %s --lease-id %s "
+              "--artifact PATH --patch PATH, then oms patch-land --plan-task %s; "
+              "or accept with oms panel --accept %s, then oms panel --finalize --landed-commit SHA"
+              % (task_id, binding.lease_id, task_id, binding.lease_id, task_id, task_id), file=sys.stderr)
     return binding
 
 

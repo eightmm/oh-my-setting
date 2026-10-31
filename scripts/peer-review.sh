@@ -467,7 +467,7 @@ write_prompt() {
     # seeded diff (gpt-6-sol, 2 runs each): this bound cut input 37%, output
     # 56% and time 46% with the same recall; without the tests clause the
     # bounded seat misreported existing coverage as missing.
-    [ "$NO_DIFF" -eq 1 ] || printf 'Scope: read the diff, the functions it changes or directly calls, and their existing tests; do not survey unrelated files; stop once each finding has line evidence.\n'
+    [ "$NO_DIFF" -eq 1 ] || printf 'Scope: read the diff, the functions it changes or directly calls, and their existing tests; do not survey unrelated files; make one systematic pass over the whole scoped diff and report every blocking finding you can evidence with file/line; do not stop after the first finding.\n'
     printf 'If there are no actionable findings, say "No findings".\n\n'
     if [ "$ML_PRESET" -eq 1 ]; then
       printf 'This is an ML pre-training gate. Prioritize silent ML bugs and metric corruption:\n'

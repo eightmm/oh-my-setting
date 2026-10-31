@@ -1295,12 +1295,12 @@ mkdir -p "$repo/.github/workflows"
 printf 'on: push\n' > "$repo/.github/workflows/test.yml"
 git -C "$repo" add .github/workflows/test.yml
 gate 'echo update failure probe; echo "check: ok"'
-if OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
+if OMS_TEST_UPDATE_RC=76 OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
   --handoff-receipt-to "$handoff" > "$TMP/update-failed.out" 2>&1; then
   fail "installation failure was reported as a successful landing"
 fi
 [ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] || fail "update failure lost the successful push"
-grep -q 'install update exit 42' "$TMP/update-failed.out" || fail "update failure reason missing"
+grep -q 'pushed; CI passed; installation deferred (live workers)' "$TMP/update-failed.out" || fail "update deferral reason missing"
 [ -z "$(find "$handoff_dir" -name "$(git -C "$repo" rev-parse HEAD)-*.json" -print)" ] ||
   fail "failed install transferred a receipt"
 python3 - "$receipt_dir" "$(git -C "$repo" rev-parse HEAD)" <<'PY' || fail "update failure receipt is wrong"
@@ -1309,15 +1309,24 @@ rows = [json.loads(path.read_text()) for path in pathlib.Path(sys.argv[1]).glob(
 matches = [row for row in rows if row.get("sha") == sys.argv[2]]
 assert len(matches) == 1, matches
 r = matches[0]
-assert r["state"] == "failed" and r["push"]["rc"] == 0 and r["update"]["rc"] == 42, r
+assert r["state"] == "failed" and r["push"]["rc"] == 0 and r["update"]["rc"] == 76 and r["update"]["reason"] == "deferred-live-workers", r
 PY
 
 # Retry the already-pushed commit: neither its gate nor successful CI repeats.
+: > "$TMP/events"
+if OMS_TEST_CI_RC=4 OMS_TEST_UPDATE_RC=42 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/update-error.out" 2>&1; then
+  fail "installation error was reported as success"
+fi
+grep -q 'install update exit 42' "$TMP/update-error.out" || fail "update failure reason missing"
+"$LAND" status --repo "$repo" --json | python3 -c 'import json,sys; assert json.load(sys.stdin)["update"]["reason"] == "exit-42"' || fail "failed update kept a stale reason"
+[ "$(cat "$TMP/events")" = update ] || fail "deferral retry repeated successful CI"
 : > "$TMP/events"
 OMS_TEST_CI_RC=4 OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/resume.out" 2>&1 ||
   fail "failed update could not resume: $(cat "$TMP/resume.out")"
 [ "$(cat "$TMP/events")" = update ] || fail "resume repeated successful CI"
+"$LAND" status --repo "$repo" --json | python3 -c 'import json,sys; assert json.load(sys.stdin)["update"]["reason"] == "installed"' || fail "successful update reason is wrong"
 receipt="$("$LAND" status --repo "$repo" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["log"])')"
 [ "$(grep -c '^update failure probe$' "$receipt")" = 1 ] || fail "resume repeated the gate"
 : > "$TMP/events"

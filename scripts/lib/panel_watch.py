@@ -1,7 +1,9 @@
 """Background reads, window indicators and the terminal watcher."""
 
 import json
+import math
 import os
+from contextlib import nullcontext
 import panel_debate
 import panel_host
 import panel_messages
@@ -13,6 +15,8 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
+from pathlib import Path
 
 # Call-local facade imports preserve the public entry point and avoid import cycles.
 
@@ -67,7 +71,7 @@ def mark_window(attention, asked=False):
         pass
 
 
-def start_spawn(repo, provider, spawns, navigation, swap=False):
+def start_spawn(repo, provider, spawns, navigation, swap=False, auto=None):
     """Start a main off the input loop; a second request waits for the first."""
     from terminal_panel import ENTRY, clean
     if any(entry[0].poll() is None for entry in spawns):
@@ -76,15 +80,168 @@ def start_spawn(repo, provider, spawns, navigation, swap=False):
     env = os.environ.copy()
     env.pop("OMS_ROOM_PARTICIPANT", None)
     try:
-        proc = subprocess.Popen(["bash", str(ENTRY), "panel", "--repo", str(repo),
-                                 "--swap-main" if swap else "--spawn-main", provider, "--json"],
+        command = ["bash", str(ENTRY), "panel", "--repo", str(repo),
+                   "--swap-main" if swap else "--spawn-main", provider, "--json"]
+        if auto:
+            code = ("import json,sys; sys.path.insert(0,sys.argv[1]); "
+                    "from panel_watch import automatic_swap; "
+                    "print(json.dumps(automatic_swap(*json.loads(sys.argv[2]))))")
+            command = [sys.executable, "-c", code, str(Path(__file__).parent),
+                       json.dumps([str(repo), provider, *auto])]
+        proc = subprocess.Popen(command,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, env=env)
     except OSError as error:
         navigation["notice"] = clean(str(error), 160)
         return
     spawns.append((proc, provider, time.monotonic(), swap))
-    navigation["notice"] = ("Waiting for handoff to %s..." if swap else "Starting %s main...") % provider.capitalize()
+    if not auto:
+        navigation["notice"] = ("Waiting for handoff to %s..." if swap else "Starting %s main...") % provider.capitalize()
+    return True
+
+
+def _auto_claim(repo, attempt, now, notice=False, *, locked=False, check_only=False):
+    from terminal_panel import DURABLE, _lock, _read
+    try:
+        with nullcontext() if locked else _lock(repo, "panel-main-start", timeout=.1):
+            path = DURABLE["canonical_repo_path"](str(repo), ".oms/artifacts/panel-auto-swap.json",
+                                                   "panel auto swap", True)
+            def record(raw):
+                previous = json.loads(raw) if raw else {}
+                if not isinstance(previous, dict):
+                    raise ValueError("invalid auto swap state")
+                if notice:
+                    if previous.get("notice") == attempt:
+                        raise ValueError("already notified")
+                    previous["notice"] = attempt
+                else:
+                    timestamp = previous.get("time", 0)
+                    if (not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool)
+                            or not math.isfinite(timestamp) or timestamp < 0
+                            or now - timestamp < 1800):
+                        raise ValueError("cooldown or attempt already recorded")
+                    previous.update(attempt=attempt, time=now)
+                return (json.dumps(previous) + "\n").encode()
+            if check_only:
+                record(_read(repo, ".oms/artifacts/panel-auto-swap.json", missing=True))
+            else:
+                DURABLE["atomic_mutate"](path, record, str(repo), missing_ok=True, create_parent=True,
+                                         label="panel auto swap")
+        return True
+    except (OSError, ValueError, TypeError, OverflowError, SystemExit):
+        return False
+
+
+def automatic_swap(repo, target, expected, provider, consumer):
+    """Run the existing swap with a locked quota precondition."""
+    from panel_native import swap_main
+    from panel_metrics import current_weekly_reading, weekly_reading
+    import room
+    repo = Path(repo)
+    committed = [False]
+
+    def precondition(attempt, old):
+        now = time.time()
+        reading = current_weekly_reading(provider, consumer, now)
+        if (attempt != expected or old.get("provider") != provider or not reading
+                or reading.get("observed_at") is None
+                or not 0 <= now - reading["observed_at"] <= 600 or reading["used"] < 97):
+            return False
+        target_reading = weekly_reading(target, None, now)
+        if target_reading and target_reading["used"] >= 90:
+            raise ValueError("auto swap skipped: target quota exhausted")
+        return True
+
+    def handoff_check(supplied, ident, member, attempt):
+        if supplied:
+            return
+        now = time.time()
+        reading = current_weekly_reading(provider, consumer, now)
+        if (not reading or reading.get("observed_at") is None
+                or not 0 <= now - reading["observed_at"] <= 600 or reading["used"] < 100):
+            try:
+                room.send(repo, ident, member, "all", "OMS panel: automatic main swap postponed; handoff not received.",
+                          message_id="auto-swap-postponed-" + attempt)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                raise ValueError("automatic main swap postponed; room notice unavailable") from error
+            raise ValueError("automatic main swap postponed; handoff not received")
+
+    def commit(attempt):
+        if not _auto_claim(repo, attempt, time.time(), locked=True):
+            raise ValueError("auto swap skipped: cooldown or claim unavailable")
+        committed[0] = True
+
+    try:
+        return swap_main(repo, target, precondition=precondition, auto_handoff=handoff_check, auto_commit=commit)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if (not committed[0] and not str(error).startswith("automatic main swap postponed;")
+                and str(error) != "land is in progress; swap refused"):
+            _auto_claim(repo, expected, time.time())
+        raise
+
+
+def auto_swap_plan(state, attempt, installed):
+    from panel_metrics import current_weekly_reading, weekly_reading
+    from room_view import nodes
+    mains = [row for row in nodes(state) if row.get("role") == "main"]
+    current = next((row for row in mains if attempt in (row.get("attempt"), row.get("participant"))), None)
+    if not current:
+        return
+    provider = current.get("provider")
+    if provider == "claude" and not current.get("consumer"):
+        return
+    now = time.time()
+    reading = current_weekly_reading(provider, current.get("consumer"), now)
+    # Thresholds use displayed whole percentages: 97% for the main and 90% for targets.
+    if (not reading or reading.get("observed_at") is None
+            or not 0 <= now - reading["observed_at"] <= 600 or reading["used"] < 97):
+        return
+    candidates = []
+    for name in installed:
+        if name in ("pi", provider):
+            continue
+        quota = weekly_reading(name, None, now)
+        if quota and quota["used"] >= 90:
+            continue
+        candidates.append((quota["used"] if quota else 101, name, quota))
+    return provider, current.get("consumer"), reading, candidates
+
+
+def consider_auto_swap(repo, state, attempt, installed, spawns, navigation, plan=None, before_spawn=None):
+    from terminal_panel import start_spawn
+    if (os.environ.get("OMS_PANEL_AUTO_SWAP") == "0" or not attempt
+            or state.get("land", {}).get("active") or navigation.get("auto_seen") == attempt):
+        return
+    plan = plan if plan is not None else auto_swap_plan(state, attempt, installed)
+    if not plan:
+        return
+    provider, consumer, reading, candidates = plan
+    now = time.time()
+    if not 0 <= now - reading["observed_at"] <= 600 or reading["resets_at"] <= now:
+        return
+    if not candidates:
+        if _auto_claim(repo, attempt, now, notice=True):
+            navigation["notice"] = "main quota exhausted; no other main with quota left"
+        return
+    if any(entry[0].poll() is None for entry in spawns):
+        navigation["notice"] = "A main start or swap is already in progress"
+        return
+    if not _auto_claim(repo, attempt, now, check_only=True):
+        return
+    _, target, quota = min(candidates)
+    try:
+        reset = datetime.fromtimestamp(reading["resets_at"]).strftime("%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        reset = "unknown"
+    target_usage = "%s%% used" % quota["used"] if quota else "unknown"
+    navigation["notice"] = ("main weekly quota: %s 7d %s%% used (resets %s); swapping main to %s (7d %s)"
+                            % (provider, reading["used"], reset, target, target_usage))
+    if before_spawn is not None:
+        before_spawn()
+    if start_spawn(repo, target, spawns, navigation, swap=True, auto=(attempt, provider, consumer)):
+        navigation["auto_seen"] = attempt
+    else:
+        _auto_claim(repo, attempt, time.time())
 
 
 def reap_spawns(spawns, navigation):
@@ -98,6 +255,8 @@ def reap_spawns(spawns, navigation):
         if proc.poll() is None:
             continue
         spawns.remove(entry)
+        if swap:
+            navigation.pop("auto_seen", None)
         out, err = proc.communicate()
         try:
             report = json.loads(out)
@@ -107,6 +266,10 @@ def reap_spawns(spawns, navigation):
             navigation["notice"] = clean((err.strip().splitlines() or ["main did not start"])[-1], 160)
         done = True
     return done
+
+
+def auto_check_due(now, deadline):
+    return (True, now + 60) if now >= deadline else (False, deadline)
 
 
 def watch(repo, provider, count=0, no_animation=False, view=None, attention_only=False):
@@ -120,7 +283,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     from terminal_panel import refreshed_navigation, reload_ready, reset_group_view, session_option
     from terminal_panel import source_stamps, stale_notice, start_spawn, swap_choices, tab_event
     from terminal_panel import terminal_style, tmux_command, toggle_context_headers, update_context_header
-    from panel_navigation import accept_activity_report
+    from panel_navigation import accept_activity_report, pane_local_option
     from panel_input import TerminalInput, choose
     from panel_view import freeze_report
     n, frame, last = 0, 0, None
@@ -224,6 +387,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             # Native reads can defer Python's SIGINT handler; redirected watches need the input loop too.
             background = BackgroundRead() if inputs.fd is not None or not capable and not sys.stdout.isatty() else None
             previews = BackgroundRead()
+            auto_reads, auto_attempt, next_auto = BackgroundRead(), None, 0
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             board = freeze_report(state)
             density, filtered = view or board_view("auto"), attention_only
@@ -279,6 +443,16 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             flagged = alert
                     if managed_session():
                         update_context_header(state, main_attempt, repo, navigation)
+                        if (status == 0 and state.get("collection", {}).get("ok") is True
+                                and os.environ.get("OMS_PANEL_AUTO_SWAP") != "0" and main_attempt
+                                and not state.get("land", {}).get("active")
+                                and navigation.get("auto_seen") != main_attempt and not auto_reads.pending
+                                and pane_local_option("@oms_panel_main_watch") == "1"):
+                            due, next_auto = auto_check_due(time.monotonic(), next_auto)
+                            if due:
+                                auto_attempt = main_attempt
+                                auto_reads.start(lambda snapshot=state, attempt=main_attempt:
+                                                 auto_swap_plan(snapshot, attempt, installed))
                     if n and not sys.stdout.isatty():
                         print("----")
                     n += 1
@@ -292,7 +466,9 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if REJECTED_RELOAD.pop("notice", False):
                         navigation["notice"] = "New panel code does not start yet; keeping this board"
 
-                if background and inputs.fd is None and not collected:
+                ready, auto_result = auto_reads.take()
+
+                if background and inputs.fd is None and not collected and not ready:
                     inputs.wait(.05)
                     continue
 
@@ -325,11 +501,17 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     last = draw_frame(drawn, size, terminal, last)
                     return size
 
-                if collected or size is None or not capable:
+                if (ready and auto_result and not isinstance(auto_result, Exception)
+                        and auto_attempt is not None and auto_attempt == main_attempt and status == 0 and managed_session()
+                        and state.get("collection", {}).get("ok") is True
+                        and pane_local_option("@oms_panel_main_watch") == "1"):
+                    consider_auto_swap(repo, state, main_attempt, installed, spawns, navigation,
+                                       plan=auto_result, before_spawn=redraw)
+                if collected or ready or size is None or not capable:
                     size = redraw(discard_stale_clicks=collected)
                 if count and n >= count:
                     return status
-                deadline = time.monotonic() + .05 if background and background.pending else next_read
+                deadline = time.monotonic() + .05 if (background and background.pending) or auto_reads.pending else next_read
                 while True:
                     pending_cancel = navigation.get("cancel_pending")
                     if (pending_cancel and navigation.get("selected") !=
@@ -339,7 +521,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
-                    events = inputs.wait(min(.05 if previews.pending else
+                    events = inputs.wait(min(.05 if previews.pending or auto_reads.pending else
                                              .25 if motion or inputs.fd is not None else 5, remaining))
                     try:
                         resized = os.get_terminal_size(sys.stdout.fileno()) != size

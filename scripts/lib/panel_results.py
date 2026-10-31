@@ -687,8 +687,10 @@ def _plan_hint(repo, task_id, has_write_patch):
                                capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=60)
         if not shown.returncode and json.loads(shown.stdout).get('state') not in ('done', None):
             if has_write_patch:
-                print('plan %s is not done: after oms land run oms agent-plan finish --id %s --landed-commit SHA'
-                      % (task_id, task_id), file=sys.stderr)
+                print('plan %s is not done: oms panel --accept %s, then oms panel --finalize --landed-commit SHA; '
+                      'or review with oms agent-plan review --id %s --lease-id L --artifact A --patch P and land '
+                      'with oms patch-land --plan-task %s'
+                      % (task_id, task_id, task_id, task_id), file=sys.stderr)
             else:
                 print('plan %s is not done: a task with no patch cannot finish by landing; close it with '
                       'oms agent-plan accept-main-research (completion bundle) or oms agent-plan block '
@@ -877,7 +879,7 @@ def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None):
         reason = None
         if not admissions[index] and worker.get('task_id'):
             for end in range(index + 1, len(workers)):
-                if admissions[end] and _continues(workers, index, end):
+                if _continues(workers, index, end):
                     replacement, reason = workers[end], 'continued'
                     break
         # Fresh retries need every failed scope entry verbatim in the later scope.

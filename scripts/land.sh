@@ -84,6 +84,7 @@ Without --wait the job detaches (setsid) and this prints the receipt path.
 Retrying the same commit/destination/gate reuses successful push evidence and
 resumes CI/install only. Concurrent jobs wait up to OMS_LOCK_TIMEOUT (default
 300 seconds), then exit 75 if the lock remains held; waiter order is unspecified.
+Live workers defer installation (update exit 76); retry the same command.
 With --no-update, a receipt with successful gate/push but unsuccessful CI may
 re-query CI for its exact SHA while that SHA remains reachable from the fetched
 target; this never reruns the gate or push and never installs.
@@ -765,13 +766,26 @@ run_job() {
     fi
     rc=0
     OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
-    rset update.rc="$rc" update.expected_sha="$SHA" update.root="$install" update.authority="$authority"
+    case "$rc" in
+      0) update_reason=installed ;;
+      76) update_reason=deferred-live-workers ;;
+      *) update_reason="exit-$rc" ;;
+    esac
+    rset update.rc="$rc" update.reason="$update_reason" update.expected_sha="$SHA" update.root="$install" update.authority="$authority"
+    if [ "$rc" -eq 76 ]; then
+      local retry_args=("$ROOT/scripts/land.sh" --repo "$REPO" --remote "$REMOTE" --target "$TARGET" --gate "$GATE" --wait --ci-wait "$CI_WAIT" --sibling-wait "$SIBLING_WAIT")
+      [ -z "$HANDOFF_TO" ] || retry_args+=(--handoff-receipt-to "$HANDOFF_TO")
+      [ -z "$SYNC_TO" ] || retry_args+=(--sync-shared "$SYNC_TO")
+      [ "$IGNORE_SIBLINGS" -eq 0 ] || retry_args+=(--ignore-siblings)
+      local retry_command
+      retry_command="$(printf '%q ' "${retry_args[@]}")"
+      finish failed "pushed; CI passed; installation deferred (live workers); retry: $retry_command"
+      return 1
+    fi
     if [ "$rc" -ne 0 ]; then
       finish failed "pushed $SHORT but install update exit $rc; ci $conclusion"
       return 1
     fi
-    # A resumed install must not keep the reason an earlier attempt stopped for.
-    rset update.reason=installed
   fi
   finish passed "pushed $SHORT to $REMOTE/$TARGET; ci $conclusion"
 }

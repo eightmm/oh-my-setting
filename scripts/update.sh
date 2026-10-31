@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+retry_command="$(printf '%q ' "$0" "$@")"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
   # shellcheck source=scripts/lib/python-runtime.sh
@@ -45,6 +46,8 @@ Usage: update.sh [--check] [--rollback] [--ref REF] [--fallback-to-edge] [--tool
 
 Update transactionally, preserving the installed component profile. Link or
 doctor failure restores the previous commit, links, and install receipt.
+Exit 76 defers installation while delegated workers are live; retry the same command.
+A worker that starts during the update is not detected.
 
 Options:
   --check       Fetch and report whether the configured ref has changed.
@@ -136,6 +139,28 @@ if [ "$CHECK_ONLY" != 1 ]; then
   trap 'exit 130' INT
   trap 'exit 143' TERM
   oms_install_lifecycle_lock_acquire update || exit $?
+  worker_root="${OMS_DELEGATE_WORKTREE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/worktrees}"
+  worker_count=0
+  worker_ids=""
+  if [ -d "$worker_root" ]; then
+    # shellcheck source=scripts/lib/harness-residue.sh
+    . "$ROOT/scripts/lib/harness-residue.sh"
+  fi
+  for worker_dir in "$worker_root"/oh-my-setting-delegate.*; do
+    marker="$worker_dir/.oh-my-setting-tmp"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    [ "$(oms_harness_read_marker_value "$marker" kind | tr -d '\r')" = oh-my-setting-temp ] || continue
+    worker_pid="$(oms_harness_read_marker_value "$marker" pid | tr -d '\r')"
+    case "$worker_pid" in ''|*[!0-9]*|0) echo "warning: unproven worker identity: ${worker_dir##*/}" >&2 ;; esac
+    oms_harness_marker_owner_alive "$marker" || continue
+    worker_count=$((worker_count + 1))
+    if [ "$worker_count" -le 5 ]; then worker_ids="$worker_ids ${worker_dir##*/}"; fi
+  done
+  if [ "$worker_count" -gt 0 ]; then
+    echo "installation deferred: $worker_count live worker(s):$worker_ids" >&2
+    echo "retry: $retry_command" >&2
+    exit 76
+  fi
 fi
 
 oms_install_require_owner "$ROOT" "update the install" || exit 1

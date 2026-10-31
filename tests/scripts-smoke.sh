@@ -4698,7 +4698,7 @@ test_peer_review_dry_run_artifacts() {
   assert_one_artifact_contains "$artifact_dir" 'codex-review-current-diff-*.md' \
     'material unnecessary scope or complexity'
   assert_one_artifact_contains "$artifact_dir" 'codex-review-current-diff-*.md' \
-    'Scope: read the diff, the functions it changes or directly calls, and their existing tests'
+    'Scope: read the diff, the functions it changes or directly calls, and their existing tests; do not survey unrelated files; make one systematic pass over the whole scoped diff and report every blocking finding you can evidence with file/line; do not stop after the first finding.'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' 'Peer review synthesis'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' '## codex'
 }

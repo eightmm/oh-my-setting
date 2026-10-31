@@ -569,6 +569,11 @@ receipt_transaction_update() {
   upstream="$(receipt_transaction_upstream "$ref")"
   [ -z "$output" ] || printf '%s\n' "$output"
   remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$status" -eq 76 ]; then
+    write_state skipped "installation deferred (live workers)" "$current" "$expected" "$upstream"
+    echo "auto-update: skipped (live workers)"
+    return 0
+  fi
   if [ "$status" -eq 75 ] &&
      { printf '%s\n' "$output" | grep -F 'error: update target changed after preflight:' > /dev/null ||
        printf '%s\n' "$output" | grep -F 'error: selected update target is not a valid fast-forward' > /dev/null; }; then

@@ -357,8 +357,8 @@ for owner in panel.PROVIDERS:
     assert "record the owner result with oms panel --finalize" in guidance
     assert "oms agent-plan add only" in guidance
     assert "Dependent tasks become ready automatically" in guidance
-    assert "oms agent-plan finish --id ID --landed-commit SHA" in guidance
-    assert "after patch-land, use finish with its expected landing receipt" in guidance
+    assert "oms panel --accept TASK" in guidance
+    assert "oms patch-land --plan-task ID" in guidance
     assert "oms agent-plan accept-main-research" in guidance
     assert "Owner --finalize records the result but does not itself mark a plan task done" in guidance
     assert "For each landed write patch, accepted also requires a passing automatic review gate" in guidance

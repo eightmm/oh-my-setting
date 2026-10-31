@@ -224,9 +224,9 @@ def bootstrap(provider, repo):
         "Panel mains work from the shared plan (oms agent-plan): claim a ready task in the confirmed PROJECT.md plan's order (dependencies first), delegate it (--task-id moves it "
         "to running), verify it, carry it through artifact inspection, integration and the required checks, run "
         "oms agent-plan review after acceptance, then record the owner result with oms panel --finalize. "
-        "Dependent tasks become ready automatically when all dependencies are done: after an authorized land, use "
-        "oms agent-plan finish --id ID --landed-commit SHA; after patch-land, use finish with its expected landing "
-        "receipt. Eligible verified local research completion uses oms agent-plan accept-main-research. Owner "
+        "Dependent tasks become ready automatically when all dependencies are done: use oms panel --accept TASK, then "
+        "after the authorized land, oms panel --finalize --landed-commit SHA; or review with oms agent-plan review "
+        "and land with oms patch-land --plan-task ID. Eligible verified local research completion uses oms agent-plan accept-main-research. Owner "
         "--finalize records the result but does not itself mark a plan task done; do not manually release dependencies. "
         "For each landed write patch, accepted also requires a passing automatic review gate; if review is missing or ends without a verdict, finalize completed (not accepted) and explain why in the summary. "
         "Campaign precedence: if the user asks you to complete this project or an autopilot contract exists for this "
@@ -243,7 +243,8 @@ def bootstrap(provider, repo):
         "A worker exit or review handoff is an intermediate step: continue the current authorized goal until it is "
         "done or a concrete scope, authority or runtime blocker remains. State that blocker and its next action. "
         "Use the shared OMS_ROOM_REPO for plan and result records even while editing in a scratch worktree. "
-        "After an authorized land elsewhere, finish the shared task with --landed-commit SHA; local completion "
+        "For a plan-bound write, use oms panel --accept TASK and finalize after land; or review and land with "
+        "oms patch-land --plan-task ID. Local completion "
         "uses --finalize --outcome completed --verify COMMAND and preserves pending acceptance. "
         "To know whether a land is running, use oms land status --repo PATH (active: true) - never pgrep. "
         "Before editing shared files, declare your scope with oms room scope --owns PATH, and pass "
@@ -1252,9 +1253,23 @@ def live_main_pane(repo):
     return pane, refs.get("panel_harness")
 
 
-def swap_main(repo, harness, model=None):
+def _swap_land_idle(repo):
+    from terminal_panel import ENTRY
+    land = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo),
+                           "--active-exit", "--json"],
+                          capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
+    status = json.loads(land.stdout) if land.returncode in (0, 3, 4) and land.stdout.strip() else None
+    if not isinstance(status, dict):
+        raise ValueError("land status is unavailable; swap refused")
+    # A finished flock leaves its file behind; only a running receipt blocks an unknown lock state.
+    if land.returncode == 3 or status.get("active") is True or (
+            land.returncode == 4 and status.get("state") == "running"):
+        raise ValueError("land is in progress; swap refused")
+
+
+def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None, auto_commit=None):
     """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
-    from terminal_panel import ENTRY, MAIN_HARNESSES, _lock, _main_window, _swap_digest, _swap_handoff_file
+    from terminal_panel import MAIN_HARNESSES, _lock, _main_window, _swap_digest, _swap_handoff_file
     from terminal_panel import _swap_main_window, _swap_submit, launch_command, live_mains, main_history
     from terminal_panel import main_installed, native_repository, policy, provider_catalog
     from terminal_panel import resolve_session, tmux_command
@@ -1273,16 +1288,7 @@ def swap_main(repo, harness, model=None):
         if model not in catalog.get("catalog_models", catalog.get("models", [])):
             raise ValueError("swap model is not in the installed provider catalog")
     with _lock(repo, "panel-main-start", timeout=.1):
-        land = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo),
-                               "--active-exit", "--json"],
-                              capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
-        status = json.loads(land.stdout) if land.returncode in (0, 3, 4) and land.stdout.strip() else None
-        if not isinstance(status, dict):
-            raise ValueError("land status is unavailable; swap refused")
-        # flock leaves its file behind, so a finished land reads as unknown; only a running receipt blocks then.
-        if land.returncode == 3 or status.get("active") is True or (
-                land.returncode == 4 and status.get("state") == "running"):
-            raise ValueError("land is in progress; swap refused")
+        _swap_land_idle(repo)
         session, session_repo = resolve_session(repo, wait=False)
         if session_repo != str(repo):
             raise ValueError("no panel main to swap")
@@ -1299,6 +1305,8 @@ def swap_main(repo, harness, model=None):
         current = room.participant(state, member)
         if current["role"] != "main" or current["provider"] != old["provider"]:
             raise ValueError("current room main binding is unverified")
+        if precondition is not None and not precondition(attempt, old):
+            raise ValueError("auto swap skipped: condition changed")
         swap_event = {"kind": "main-swap", "participant": member, "provider": owner,
                       "model": model, "attempt": attempt, "harness": harness}
         room.validate_main_swap(repo, dict(state, id=ident), swap_event, old, released=False)
@@ -1325,6 +1333,8 @@ def swap_main(repo, harness, model=None):
                     break
                 time.sleep(.25)
             supplied = bool(handoff)
+            if auto_handoff is not None:
+                auto_handoff(supplied, ident, member, attempt)
             handoff = handoff or _swap_digest(repo, ident, member)
             handoff_file = _swap_handoff_file(repo, ident, attempt, handoff, supplied)
             prompt = ("Take over as the sole main in the existing OMS room. Preserve existing plan claims and "
@@ -1343,6 +1353,14 @@ def swap_main(repo, harness, model=None):
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_attempt", attempt),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
+            if auto_commit is not None:
+                try:
+                    _swap_land_idle(repo)
+                    auto_commit(attempt)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_attempt"),
+                                   capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+                    raise
             exit_requested = True  # A failed submit can still have delivered the exit request.
             _swap_submit(pane, "/quit" if old["refs"].get("panel_harness") == "pi" else "/exit")
             deadline = time.monotonic() + 30

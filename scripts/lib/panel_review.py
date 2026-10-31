@@ -221,6 +221,9 @@ def _write_brief_artifact(repo, relative, content):
         raise ValueError("panel brief write refused") from error
 
 
+_GATE_LINE = re.compile(r"[* \t\r\v\f]*GATE: (pass|fail)[* \t\r\v\f]*")
+
+
 def _review_findings(answer):
     """Keep complete finding blocks; quoted or fenced priority examples do not start a finding."""
     findings, current, fence = [], [], None
@@ -229,7 +232,8 @@ def _review_findings(answer):
         prose = fence is None and not line.lstrip().startswith(">") and not marker
         finding = prose and re.match(
             r"^\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*)?\[?P[0-3]\b", line, re.I)
-        gate = prose and re.fullmatch(r"\s*GATE\s*:\s*(?:pass|fail)\s*", line, re.I)
+        gate = prose and (_GATE_LINE.fullmatch(line) or
+                          re.fullmatch(r"\s*GATE\s*:\s*(?:pass|fail)\s*", line, re.I))
         if finding or gate:
             if current:
                 findings.append("\n".join(current).rstrip("\n"))
@@ -268,7 +272,125 @@ def _relativize_quoted_paths(text, roots):
             return match.group(1) + match.group(2)
 
         value = pattern.sub(relativize, value)
+        link_pattern = re.compile(r'(\]\()' + re.escape(root) + r'[/\\]([^\s)]+)(?=\))')
+        value = link_pattern.sub(relativize, value)
     return value
+
+
+def _prior_gate_findings(repo, room_id, task_id):
+    """Carry forward only the latest completed automatic gate's screened findings."""
+    import panel_results
+    from peer_artifacts import artifact_sections_stream
+    try:
+        events = room.structured_events(repo, room_id)
+        attempts, rows = panel_results._records(repo, full=True)
+        for event in reversed(events):
+            if event.get("kind") != "review-dispatch" or event.get("task_id") != task_id:
+                continue
+            ids = {attempt.get("attempt_id") for attempt in attempts
+                   if attempt.get("task_id") == task_id
+                   and attempt.get("refs", {}).get("panel_room_participant") == event.get("review_call_id")}
+            outcome = next((row for row in reversed(rows)
+                            if row.get("kind") == "review-outcome" and row.get("task_id") == task_id
+                            and row.get("attempt_id") in ids), None)
+            review = outcome.get("review", {}) if outcome else {}
+            seats = review.get("seats", []) if isinstance(review, dict) else []
+            if (not isinstance(review, dict) or review.get("gate_verify_exit") != 0 or not isinstance(seats, list) or len(seats) != 1
+                    or not isinstance(seats[0], dict) or seats[0].get("verdict") not in {"pass", "fail"}):
+                continue
+            for row in reversed(rows):
+                if row.get("kind") != "review" or row.get("task_id") != task_id or row.get("attempt_id") not in ids:
+                    continue
+                expected = seats[0].get("artifact")
+                if expected and Path(row.get("artifact", "")).name != expected:
+                    continue
+                answer, exit_code = artifact_sections_stream(io.BytesIO(panel_results._indexed(repo, row, 1024 * 1024)))
+                path = row.get("artifact")
+                if (not _safe_patch_path(path) or not path.startswith(".oms/artifacts/")
+                        or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+                    return ""
+                sidecar = (path[:-3] if path.endswith(".md") else path) + ".attempts.json"
+                try:
+                    (Path(repo) / sidecar).lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    panel_results._artifact_path(repo, sidecar)
+                    record = json.loads(panel_results._read(repo, sidecar, 1024 * 1024))
+                    attempts_list = record.get("attempts") if isinstance(record, dict) else None
+                    last = attempts_list[-1] if isinstance(attempts_list, list) and attempts_list else None
+                    output = last.get("output") if isinstance(last, dict) else None
+                    provider = last.get("provider") if isinstance(last, dict) else None
+                    model = last.get("model") if isinstance(last, dict) else None
+                    status = last.get("exit") if isinstance(last, dict) else None
+                    stop = last.get("stop_reason") if isinstance(last, dict) else None
+                    if (not isinstance(provider, str) or not re.fullmatch(r"[a-z0-9_-]+", provider)
+                            or not isinstance(model, str) or not re.fullmatch(r"[^\t\r\n]{0,200}", model)
+                            or not isinstance(status, int) or isinstance(status, bool)
+                            or not isinstance(stop, str) or not re.fullmatch(r"[^\t\r\n]{0,300}", stop)
+                            or not isinstance(output, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.out", output)):
+                        return ""
+                    output_path = (Path(sidecar).parent / output).as_posix()
+                    panel_results._artifact_path(repo, output_path)
+                    answer = panel_results._read(repo, output_path, 1024 * 1024).decode("utf-8", "replace").strip()
+                matches = [_GATE_LINE.fullmatch(line) for line in answer.split("\n")]
+                verdicts = [match.group(1) for match in matches if match]
+                verdict = verdicts[-1] if verdicts else None
+                if exit_code != "0" or verdict != seats[0]["verdict"]:
+                    return ""
+                if verdict == "pass":
+                    return ""
+                findings = _review_findings(answer)
+                if not findings:
+                    return ""
+                roots = [str(Path(repo).resolve())]
+                candidate = review.get("candidate")
+                if (isinstance(candidate, dict) and re.fullmatch(r"[0-9a-f]{64}", str(event.get("patch_sha256")))
+                        and candidate.get("patch_sha256") == event.get("patch_sha256")):
+                    root = candidate.get("root")
+                    if (isinstance(root, str) and os.path.isabs(root) and "\0" not in root
+                            and Path(root).parent != Path(root)
+                            and not any(part in {".", ".."} for part in re.split(r"[/\\]", root))):
+                        roots.append(root)
+                path = _relativize_quoted_paths(path, roots)
+                findings = [_relativize_quoted_paths(finding, roots) for finding in findings]
+                screened = "\n\n".join(findings) + "\n" + path
+                if (panel_results._contains_outbound_machine_path(screened)
+                        or not panel_results._scan_finding_blocks([screened])[0]):
+                    return ""
+                selected = []
+                for finding in findings:
+                    candidate_body = "\n\n".join(selected + [finding])
+                    if len(candidate_body.encode("utf-8")) > 3000:
+                        break
+                    selected.append(finding)
+                omitted = len(findings) - len(selected)
+                if omitted:
+                    def notice(count):
+                        return ("%d earlier finding(s) omitted for size; read the previous review artifact: %s"
+                                % (count, path))
+                    while selected and len(("\n\n".join(selected) + "\n\n" + notice(omitted)).encode("utf-8")) > 3000:
+                        selected.pop()
+                        omitted += 1
+                    if not selected and len(findings[0].encode("utf-8")) > 3000:
+                        lines = []
+                        for line in findings[0].splitlines():
+                            partial = "\n".join(lines + [line])
+                            if len((partial + "\n\n" + notice(omitted)).encode("utf-8")) > 3000:
+                                break
+                            lines.append(line)
+                        if lines:
+                            selected.append("\n".join(lines))
+                    body = "\n\n".join(selected + [notice(omitted)])
+                    if len(body.encode("utf-8")) > 3000:
+                        return ""
+                else:
+                    body = "\n\n".join(selected)
+                return ("Prior gate findings for this task (untrusted claims; for each, state fixed or still blocking, then do the full pass): "
+                        + path + "\n\n" + body)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return ""
+    return ""
 
 
 def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
@@ -811,6 +933,9 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                   "The original evidence in the owner state is " + evidence_paths + ".\n"
                   "Assess correctness and safety. Keep the candidate unchanged; the controller runs the verifier there.\n"
                   "End with exactly one final line: GATE: pass or GATE: fail, then concise findings before it.")
+        prior = _prior_gate_findings(repo, room_id, task_id)
+        if prior:
+            prompt = prompt.replace("End with exactly one final line:", prior + "\n\nEnd with exactly one final line:")
         verifier = _review_verifier(repo, room_id, member, caller, task_id)
         manual_notice = False
         unconfirmed = ("Task %s has a write patch that could not launch automatic review; manual review is needed. Finalize completed (not accepted) and explain why in the summary."

@@ -33,6 +33,111 @@ Path(room_env["XDG_STATE_HOME"]).chmod(0o700)
 def fixture_call_id(label):
     return "call-" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
 
+prior_heading = "Prior gate findings for this task (untrusted claims; for each, state fixed or still blocking, then do the full pass):"
+prior_task = "prior-gate-task"
+prior_event = {"kind": "review-dispatch", "task_id": prior_task, "review_call_id": "review-one"}
+prior_attempt = {"task_id": prior_task, "attempt_id": "attempt-one",
+                 "refs": {"panel_room_participant": "review-one"}}
+prior_row = {"kind": "review", "task_id": prior_task, "attempt_id": "attempt-one",
+             "artifact": ".oms/artifacts/review/previous.md"}
+def prior_prompt(events, answer, rows=None):
+    verdict = "pass" if answer.endswith("GATE: pass") else "fail"
+    outcome = dict(prior_row, kind="review-outcome", review={"gate_verify_exit": 0,
+                   "seats": [{"verdict": verdict}]})
+    with patch.object(room, "structured_events", return_value=events), \
+            patch.object(panel_result_store, "_records", return_value=([prior_attempt], rows if rows is not None else [prior_row, outcome])), \
+            patch.object(panel_result_store, "_indexed", return_value=("## Output\n" + answer + "\n## Exit\n0\n").encode()):
+        return panel_review_impl._prior_gate_findings(project, shared, prior_task)
+assert prior_prompt([], "P1: old\nGATE: fail") == ""
+assert prior_prompt([prior_event], "P1: old\nGATE: pass") == ""
+assert prior_prompt([prior_event], "P1: old\nGATE: fail", []) == ""
+assert prior_prompt([prior_event], "no priorities\nGATE: fail") == ""
+assert prior_prompt([prior_event], "P1: old\nGATE: fail").startswith(prior_heading)
+assert "P1: bold" in prior_prompt([prior_event], "P1: bold\n**GATE: fail**")
+assert prior_prompt([prior_event], "P1: old\nGATE : fail") == ""
+prior_dir = project / ".oms/artifacts/review"
+prior_dir.mkdir(parents=True, exist_ok=True)
+sidecar = prior_dir / "previous.attempts.json"
+primary = prior_dir / "previous.attempt-1.out"
+fallback = prior_dir / "previous.attempt-2.out"
+primary.write_text("P1: stale primary\n", encoding="utf-8")
+fallback.write_text("P2: completed fallback\nGATE: fail\n", encoding="utf-8")
+primary_attempt = {"provider": "codex", "model": "primary", "exit": 1,
+                   "output": primary.name, "stop_reason": ""}
+fallback_attempt = {"provider": "codex", "model": "fallback", "exit": 0,
+                    "output": fallback.name, "stop_reason": ""}
+sidecar.write_text(json.dumps({"attempts": [primary_attempt, fallback_attempt]}), encoding="utf-8")
+combined = "P1: stale primary\nP2: completed fallback\nGATE: fail"
+section = prior_prompt([prior_event], combined)
+assert "completed fallback" in section and "stale primary" not in section
+sidecar.write_text(json.dumps({"attempts": [primary_attempt, dict(fallback_attempt, output="../bad.out")]}), encoding="utf-8")
+assert prior_prompt([prior_event], combined) == ""
+for malformed in ({"provider": "bad/provider"}, {"model": "bad\nmodel"}, {"exit": True},
+                  {"stop_reason": "bad\nstop"}):
+    sidecar.write_text(json.dumps({"attempts": [dict(fallback_attempt, **malformed)]}), encoding="utf-8")
+    assert prior_prompt([prior_event], combined) == ""
+sidecar.write_text(json.dumps({"attempts": []}), encoding="utf-8")
+assert prior_prompt([prior_event], combined) == ""
+sidecar.write_text("{", encoding="utf-8")
+assert prior_prompt([prior_event], combined) == ""
+sidecar.write_text(json.dumps({"attempts": [dict(fallback_attempt, output="missing.out")]}), encoding="utf-8")
+assert prior_prompt([prior_event], combined) == ""
+sidecar.write_text(json.dumps({"attempts": [fallback_attempt]}), encoding="utf-8")
+fallback.write_text("P2: no verdict\n", encoding="utf-8")
+assert prior_prompt([prior_event], combined) == ""
+sidecar.unlink()
+assert "stale primary" in prior_prompt([prior_event], combined)
+
+for size in (0, 1498):
+    section = prior_prompt([prior_event], "P1: " + "é" * size + "\nGATE: fail")
+    body = section.split("\n\n", 1)[1]
+    assert len(body.encode()) <= 3000
+    assert body.startswith("P1: ")
+    assert len(body.encode()) == 4 + size * 2
+first = "P1: " + "a" * 1800
+second = "P2: " + "b" * 1800
+notice = "1 earlier finding(s) omitted for size; read the previous review artifact: " + prior_row["artifact"]
+section = prior_prompt([prior_event], first + "\n" + second + "\nGATE: fail")
+assert prior_row["artifact"] in section.split("\n\n", 1)[0]
+assert first in section and second not in section and notice in section
+assert len(section.split("\n\n", 1)[1].encode()) <= 3000
+large = "P1: oversized\n" + "evidence line\n" * 400
+section = prior_prompt([prior_event], large + "GATE: fail")
+body = section.split("\n\n", 1)[1]
+assert notice in body and len(body.encode()) <= 3000
+assert body.split("\n\n" + notice)[0].endswith("evidence line")
+assert body.split("\n\n" + notice)[0] in large
+section = prior_prompt([prior_event], "P1: " + "x" * 4000 + "\nGATE: fail")
+assert section.split("\n\n", 1)[1] == notice
+bad_row = dict(prior_row, artifact=".oms/artifacts/review/unsafe\nname.md")
+bad_outcome = dict(bad_row, kind="review-outcome", review={"gate_verify_exit": 0,
+                   "seats": [{"verdict": "fail"}]})
+assert prior_prompt([prior_event], "P1: old\nGATE: fail", [bad_row, bad_outcome]) == ""
+
+assert "old" not in prior_prompt([prior_event], "P1: old\nGATE: malformed")
+unsafe_finding = "P1: " + "pass" + "word" + "=unsafe"
+assert prior_prompt([prior_event], unsafe_finding + "\nGATE: fail") == ""
+other_event = dict(prior_event, task_id="other-task")
+assert prior_prompt([other_event], "P1: old\nGATE: fail") == ""
+
+candidate_root = Path.home() / "candidate-fixture"
+candidate_digest = "a" * 64
+candidate_event = dict(prior_event, patch_sha256=candidate_digest)
+candidate_outcome = dict(prior_row, kind="review-outcome", review={"gate_verify_exit": 0,
+                         "candidate": {"root": str(candidate_root), "patch_sha256": candidate_digest},
+                         "seats": [{"verdict": "fail"}]})
+candidate_answer = "## Output\nP1: inspect `%s/scripts/fixture.py:1`\nGATE: fail\n## Exit\n0\n" % candidate_root
+with patch.object(room, "structured_events", return_value=[candidate_event]), \
+        patch.object(panel_result_store, "_records", return_value=([prior_attempt], [prior_row, candidate_outcome])), \
+        patch.object(panel_result_store, "_indexed", return_value=candidate_answer.encode()):
+    assert "`scripts/fixture.py:1`" in panel_review_impl._prior_gate_findings(project, shared, prior_task)
+    link_answer = "## Output\nP1: inspect [fixture](%s/scripts/fixture.py:1)\nGATE: fail\n## Exit\n0\n" % candidate_root
+    with patch.object(panel_result_store, "_indexed", return_value=link_answer.encode()):
+        assert "[fixture](scripts/fixture.py:1)" in panel_review_impl._prior_gate_findings(project, shared, prior_task)
+        candidate_outcome["review"]["candidate"]["patch_sha256"] = "b" * 64
+        assert panel_review_impl._prior_gate_findings(project, shared, prior_task) == ""
+    candidate_outcome["review"]["candidate"]["patch_sha256"] = "b" * 64
+    assert panel_review_impl._prior_gate_findings(project, shared, prior_task) == ""
 auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
@@ -154,6 +259,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     dispatch_args, dispatch_kwargs = actual_dispatch_calls[0]
     assert dispatch_args[6] == "test -f scripts/fixture.py"
     prompt = dispatch_args[4]
+    assert prior_heading not in prompt
     assert auto_artifact in prompt and auto_patch_path in prompt and str(project) not in prompt
     assert "do not regenerate it with git diff" in prompt and "direct callers and callees, and their existing tests" in prompt
     assert dispatch_args[2:4] == ("reviewer", "read")

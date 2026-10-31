@@ -91,6 +91,24 @@ OMS does not restore Pi; it reports no verified replacement main and retains
 the handoff file and room claims for recovery. `--model`
 selects an exact installed catalog model; swap has no dry-run and requires tmux.
 
+The main board also requests this swap automatically when its fresh weekly quota
+reading reaches 97%. Thresholds compare whole percentages as displayed: 97% for
+the current main and 90% for targets. It chooses an installed alternative below
+90% weekly usage, or an alternative with unknown usage, and waits 30 minutes between automatic
+attempts. Set `OMS_PANEL_AUTO_SWAP=0` to disable this behavior. Five-hour quota
+does not trigger a swap. Codex target ranking reads up to 64 recently modified
+session logs and chooses their newest unexpired weekly event. Before handoff,
+the automatic swap checks the target's weekly quota again. Below 100% usage it
+postpones the swap if the main does not provide a handoff; at 100% it may use
+the recorded-state digest. It checks for an active land again before exit;
+neither a postponed handoff nor an active land starts the cooldown.
+
+Delegated workers also defer installation: `oms update` exits 76 while a worker
+marker proves its owner is live. `oms land` keeps successful push and CI evidence,
+records `update.reason: deferred-live-workers`, and prints a retry command. The
+retry resumes installation; auto-update records the deferral as skipped. This
+check does not detect a worker that starts after installation begins.
+
 For a goal bounded by `PROJECT.md`, the main reads the user's request scope,
 `PROJECT.md` and its References before planning. It proposes bounded tasks with
 `oms plan-from-spec`, reviews the proposal, and applies the reviewed bytes with
@@ -103,7 +121,9 @@ record the owner result with `oms panel --finalize`. For one-step owner patch
 acceptance, `oms panel --accept TASK --repo PATH --message TEXT --verify
 COMMAND` admits and commits the reviewed patch and records the plan review;
 after a published landing, `oms panel --finalize --landed-commit SHA` binds the
-owner result to that accepted change. Choose the role from the
+owner result to that accepted change. Acceptance treats a `--continue` chain as
+one candidate: its latest round supersedes earlier unadmitted rounds, and its
+patch still needs a matching passing review gate. Choose the role from the
 task's scope and source, rely on the automatic reviewer gate, and add a critic
 or security-auditor when the change warrants one. Use `oms agent-plan add` only
 for bounded gaps outside the reviewed proposal. Dependencies become ready
@@ -146,6 +166,11 @@ the unpatched source. The gate rejects candidate changes by the verifier.
 Automatic review uses routine for patches containing only `.md` or `.rst` files under `docs/` or top-level `README.md` and `CHANGELOG.md`, excluding `AGENTS.md` and `CLAUDE.md`; otherwise it uses deep. Unknown or unsafe paths and trust-boundary patterns use frontier (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins, hooks, install/uninstall, land and patch scripts, workflows, rules, permission/settings/policy files).
 Patch admission reports `security: ADVISE` with risk paths and auditor guidance, or `SKIP` when none are found; this advisory does not change the `ADMIT`/`REJECT` verdict.
 A write call that exits 0 with a digest-verified patch, no failed verify and no guard stop starts this review automatically (`auto_review` in config/panel-routing.json, default true). It reuses the call's `--verify`, else the plan task's, and mails the main for manual review when neither exists. A FAIL verdict drafts a `--continue` fix brief and prints its command without launching it.
+Gate reviewers make a full pass over the scoped diff and report every evidenced
+blocking finding. A follow-up gate receives screened findings from the last
+completed failed gate's final provider attempt and checks whether each remains
+blocking. The carried findings are bounded to 3000 bytes; an omission notice
+links the previous artifact when findings exceed that limit.
 `--room` selects a room without
 changing `OMS_ROOM_REPO`. With no `OMS_ROOM_REPO`, that room resolves in `--repo`.
 An owner result saved with `--finalize --outcome completed --verify COMMAND`

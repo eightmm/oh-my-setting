@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-v04-update.XXXXXX")"
 trap '[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMP"' EXIT
+export OMS_DELEGATE_WORKTREE_ROOT="$TMP/empty-worker-cache"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -167,6 +168,59 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   git -C "$source" add scripts/doctor.sh scripts/lib/precompile_probe.py
   git -C "$source" commit -qm "fixture: failing doctor"
   failed="$(git -C "$source" rev-parse HEAD)"
+
+  local worker_root="$home/.cache/oh-my-setting/worktrees"
+  local OMS_DELEGATE_WORKTREE_ROOT="$worker_root"
+  export OMS_DELEGATE_WORKTREE_ROOT
+  local worker="$worker_root/oh-my-setting-delegate.test"
+  local rc=0 tree_before tree_after index
+  tree_digest() {
+    python3 - "$installed" <<'PY'
+import hashlib, os, sys
+h = hashlib.sha256()
+for root, dirs, files in os.walk(sys.argv[1]):
+    dirs[:] = sorted(d for d in dirs if d != '.git')
+    for name in sorted(files):
+        path = os.path.join(root, name)
+        h.update(os.path.relpath(path, sys.argv[1]).encode())
+        h.update(os.readlink(path).encode() if os.path.islink(path) else open(path, 'rb').read())
+print(h.hexdigest())
+PY
+  }
+  tree_before="$(tree_digest)"
+  mkdir -p "$worker"
+  printf 'kind=oh-my-setting-temp\npid=%s\nworktree=%s\n' "$$" "$worker/wt-test" > "$worker/.oh-my-setting-tmp"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$installed/scripts/update.sh" --no-tools > "$TMP/live-worker.out" 2>&1 || rc=$?
+  [ "$rc" = 76 ] || fail "live worker did not defer update: $rc"
+  grep -Fq 'installation deferred: 1 live worker(s)' "$TMP/live-worker.out" || fail "missing worker deferral"
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$first" ] || fail "deferred update changed HEAD"
+  cmp "$receipt" "$before_receipt" || fail "deferred update changed receipt"
+  tree_after="$(tree_digest)"
+  [ "$tree_before" = "$tree_after" ] || fail "deferred update changed installed tree bytes"
+  for worker_total in 5 6; do
+    for index in 1 2 3 4 5; do
+      [ "$index" -lt "$worker_total" ] || continue
+      mkdir -p "$worker_root/oh-my-setting-delegate.$index"
+      cp "$worker/.oh-my-setting-tmp" "$worker_root/oh-my-setting-delegate.$index/.oh-my-setting-tmp"
+    done
+    rc=0
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+      "$installed/scripts/update.sh" --no-tools > "$TMP/many-workers.out" 2>&1 || rc=$?
+    [ "$rc" = 76 ] || fail "multiple workers did not defer update: $rc"
+    grep -Fq "installation deferred: $worker_total live worker(s)" "$TMP/many-workers.out" || fail "worker count missing"
+    [ "$(grep 'installation deferred:' "$TMP/many-workers.out" | grep -o 'oh-my-setting-delegate\.' | wc -l | tr -d ' ')" = 5 ] || fail "worker identifier limit not enforced"
+  done
+  rm -rf "$worker_root/oh-my-setting-delegate."[1-5]
+  for worker_pid in malformed '' 0; do
+    printf 'kind=oh-my-setting-temp\npid=%s\n' "$worker_pid" > "$worker/.oh-my-setting-tmp"
+    rc=0
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+      "$installed/scripts/update.sh" --no-tools > "$TMP/unproven-worker.out" 2>&1 || rc=$?
+    [ "$rc" != 76 ] || fail "unproven marker blocked despite the liveness helper"
+    grep -Fq 'warning: unproven worker identity:' "$TMP/unproven-worker.out" || fail "unproven identity not reported"
+  done
+  printf 'kind=oh-my-setting-temp\npid=2147483647\nworktree=%s\n' "$worker/wt-test" > "$worker/.oh-my-setting-tmp"
 
   mkdir -p "$TMP/fail-bin" "$TMP/kept"
   cat > "$TMP/fail-bin/cp" <<'EOF_CP'
@@ -1155,6 +1209,10 @@ if [ "${1:-}" = --check ]; then
   printf 'update-check: available %s -> %s\n' "$current" "$OMS_TEST_UPDATE_TARGET"
   exit 0
 fi
+if [ "${OMS_TEST_UPDATE_DEFER:-0}" = 1 ]; then
+  echo 'installation deferred: 1 live worker(s)'
+  exit 76
+fi
 if [ -n "${OMS_TEST_UPDATE_APPLY_TARGET:-}" ] &&
    [ "${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-}" != "$OMS_TEST_UPDATE_APPLY_TARGET" ]; then
   echo "error: update target changed after preflight: expected ${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-none}, actual $OMS_TEST_UPDATE_APPLY_TARGET" >&2
@@ -1239,6 +1297,13 @@ PY
   grep -Fq 'auto-update: skipped (another run in progress)' "$home/locked.out" ||
     fail "schema-2 auto-update ignored the shared apply lock"
   [ ! -e "$marker" ] || fail "locked schema-2 auto-update invoked the mutating updater"
+
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto.log" \
+    OMS_TEST_UPDATE_TARGET="$target" OMS_TEST_UPDATE_MARKER="$marker" OMS_TEST_UPDATE_DEFER=1 \
+    "$repo/scripts/auto-update.sh" apply > "$home/deferred.out" || fail "worker deferral failed auto-update"
+  grep -Fq 'auto-update: skipped (live workers)' "$home/deferred.out" || fail "auto-update did not classify worker deferral"
+  grep -Fq 'status=skipped' "$state" || fail "worker deferral was not recorded as skipped"
 
   # The ref is resolved twice (preflight and transactional update). If it is
   # force-moved between them, the second target must not replace the commit

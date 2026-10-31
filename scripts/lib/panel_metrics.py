@@ -24,7 +24,7 @@ def percent(value):
     return round(value)
 
 
-def cached(consumer, now):
+def _hud_record(consumer):
     if not isinstance(consumer, str) or not re.fullmatch(r"[0-9a-f]{32}", consumer):
         return {}
     folder = Path(os.environ.get("OMS_HUD_CACHE_DIR") or Path(tempfile.gettempdir()) / "oh-my-setting-hud")
@@ -41,7 +41,15 @@ def cached(consumer, now):
                 return {}
             raw = handle.read(8193)
         data = json.loads(raw)
-        timestamp = mapping(data).get("ts")
+        return mapping(data)
+    except (OSError, ValueError, RecursionError):
+        return {}
+
+
+def cached(consumer, now):
+    try:
+        data = _hud_record(consumer)
+        timestamp = data.get("ts")
         if number(timestamp) is None:
             return {}
         if timestamp > now:
@@ -116,7 +124,7 @@ def numeric_reading(text, provider):
 
 CODEX_WEEK_SECONDS = 10080 * 60
 CODEX_TAIL_BYTES = 256 * 1024
-_CODEX_QUOTA_CACHE = (None, {})
+_CODEX_QUOTA_CACHE = (None, ({}, None))
 
 
 def _codex_session_file(home):
@@ -151,7 +159,7 @@ def _codex_session_file(home):
     return max(files, key=lambda path: path.stat().st_mtime_ns) if files else None
 
 
-def codex_weekly_reading(now):
+def codex_weekly_reading(now, *, detail=False):
     """Use only the newest log's bounded quota tail, rechecking expiry on cache hits."""
     global _CODEX_QUOTA_CACHE
     try:
@@ -163,9 +171,11 @@ def codex_weekly_reading(now):
         if not stat.S_ISREG(info.st_mode) or now - info.st_mtime > CODEX_WEEK_SECONDS:
             return {}
         key = (str(path), info.st_ino, info.st_mtime_ns, info.st_size)
-        cached_key, limits = _CODEX_QUOTA_CACHE
+        cached_key, cached_reading = _CODEX_QUOTA_CACHE
+        limits, observed = cached_reading
         if key != cached_key:
             limits = {}
+            observed = None
             fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                          | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
             with os.fdopen(fd, "rb") as handle:
@@ -188,18 +198,124 @@ def codex_weekly_reading(now):
                 if "rate_limits" in row or "rate_limits" in payload:
                     limits = mapping(row.get("rate_limits") if "rate_limits" in row
                                      else payload.get("rate_limits"))
+                    observed = _stamp(row.get("timestamp"))
                     break
-            _CODEX_QUOTA_CACHE = (key, limits)
+            _CODEX_QUOTA_CACHE = (key, (limits, observed))
         for name in ("primary", "secondary"):
             window = mapping(limits.get(name))
             if window.get("window_minutes") != 10080:
                 continue
             used, reset = percent(window.get("used_percent")), number(window.get("resets_at"))
             if used is not None and reset is not None and reset > now:
+                if detail:
+                    return {"used": used, "resets_at": reset,
+                            "observed_at": observed, "source": "session log"}
                 return {"weekly_used": used, "source": "session log"}
         return {}
     except (OSError, ValueError, TypeError, OverflowError, RuntimeError):
         return {}
+
+
+def _codex_auto_weekly(now):
+    """Find the newest unexpired weekly record, including older sessions."""
+    try:
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+        folders = [(home / "sessions", 0)]
+        files, remaining = [], 4096
+        patterns = (r"[0-9]{4}", r"(?:0[1-9]|1[0-2])", r"(?:0[1-9]|[12][0-9]|3[01])")
+        while folders:
+            folder, depth = folders.pop()
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    remaining -= 1
+                    if remaining < 0:
+                        return {}
+                    if depth < 3 and re.fullmatch(patterns[depth], entry.name):
+                        if entry.is_dir(follow_symlinks=False):
+                            folders.append((Path(entry.path), depth + 1))
+                    elif depth == 3 and re.fullmatch(r"rollout-.*\.jsonl", entry.name):
+                        if entry.is_file(follow_symlinks=False):
+                            info = entry.stat(follow_symlinks=False)
+                            files.append((info.st_mtime_ns, entry.path, info.st_ino, info.st_size))
+        best = None
+        for modified, path, inode, size in sorted(files, reverse=True)[:64]:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(info.st_mode) or (info.st_ino, info.st_size, info.st_mtime_ns)
+                        != (inode, size, modified)):
+                    continue
+                start = max(0, size - CODEX_TAIL_BYTES)
+                handle.seek(start)
+                body = handle.read(CODEX_TAIL_BYTES)
+            if start:
+                body = body.partition(b"\n")[2]
+            for line in reversed(body.splitlines()):
+                if b'"rate_limits"' not in line:
+                    continue
+                try:
+                    row = mapping(json.loads(line))
+                except (ValueError, UnicodeError, RecursionError):
+                    continue
+                payload = mapping(row.get("payload"))
+                limits = mapping(row.get("rate_limits") if "rate_limits" in row else payload.get("rate_limits"))
+                for name in ("primary", "secondary"):
+                    window = mapping(limits.get(name))
+                    used = number(window.get("used_percent"))
+                    reset = number(window.get("resets_at"))
+                    if (window.get("window_minutes") == 10080 and used is not None and used <= 100
+                            and reset is not None and reset > now):
+                        observed = _stamp(row.get("timestamp"))
+                        if (best is None or observed is not None and
+                                (best["observed_at"] is None or observed > best["observed_at"])):
+                            best = {"used": used, "resets_at": reset, "observed_at": observed,
+                                    "source": "session log"}
+        return best or {}
+    except (OSError, ValueError, TypeError, OverflowError, RuntimeError):
+        return {}
+
+
+def weekly_reading(provider, consumer=None, now=None):
+    """Return an unexpired authoritative weekly reading, never pane output."""
+    now = time.time() if now is None else now
+    if provider == "codex":
+        reading = _codex_auto_weekly(now)
+        return dict(reading, used=percent(reading["used"])) if reading else {}
+    if provider != "claude":
+        return {}
+    if consumer is None:
+        folder = Path(os.environ.get("OMS_HUD_CACHE_DIR") or Path(tempfile.gettempdir()) / "oh-my-setting-hud")
+        try:
+            if folder.is_symlink():
+                return {}
+            records = []
+            with os.scandir(folder) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= 4096:
+                        return {}
+                    match = re.fullmatch(r"ctx-([0-9a-f]{24})\.json", entry.name)
+                    if match:
+                        records.append(_hud_record(match.group(1) + "0" * 8))
+            valid = [row for row in records if number(row.get("ts")) is not None and row["ts"] <= now
+                     and number(mapping(row.get("seven_day")).get("resets_at")) is not None
+                     and mapping(row.get("seven_day"))["resets_at"] > now
+                     and percent(mapping(row.get("seven_day")).get("used_percentage")) is not None]
+            data = max(valid, key=lambda row: row["ts"]) if valid else {}
+        except OSError:
+            return {}
+    else:
+        data = _hud_record(consumer)
+    week = mapping(data.get("seven_day"))
+    used, reset, observed = percent(week.get("used_percentage")), number(week.get("resets_at")), number(data.get("ts"))
+    if used is None or reset is None or reset <= now or observed is None or observed > now:
+        return {}
+    return {"used": used, "resets_at": reset, "observed_at": observed, "source": "HUD"}
+
+
+def current_weekly_reading(provider, consumer=None, now=None):
+    now = time.time() if now is None else now
+    return codex_weekly_reading(now, detail=True) if provider == "codex" else weekly_reading(provider, consumer, now)
 
 
 def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
