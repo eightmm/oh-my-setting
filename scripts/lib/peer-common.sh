@@ -12,7 +12,7 @@
 # Return the verifier's bounded wall time in seconds. Keep this aligned with
 # run_verify_with_timeout: outer supervisors must leave room for it.
 ma_verify_timeout_seconds() {  # [DURATION]
-  python3 - "${1:-${OMS_PEER_VERIFY_TIMEOUT:-10m}}" <<'PY'
+  "${OMS_PYTHON_BIN:-python3}" - "${1:-${OMS_PEER_VERIFY_TIMEOUT:-10m}}" <<'PY'
 import math, re, sys
 match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([smhd]?)", sys.argv[1])
 if not match:
@@ -649,6 +649,13 @@ ma_run_bounded() {
   local pybin="${OMS_PYTHON_BIN:-}"
   local helper="${OMS_RUN_BOUNDED_HELPER:-}"
   shift 2
+
+  # GNU timeout treats zero as unbounded; use the outer verifier budget's
+  # validation for every backend, while retaining fractional duration overrides.
+  if [ "$label" = verify ] && ! ma_verify_timeout_seconds "$wall" >/dev/null; then
+    echo "error: OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h" >&2
+    return 2
+  fi
 
   if [ "$label" = provider ] && [ -n "${OMS_PEER_CANCEL_DIR:-}" ]; then
     [ -n "$pybin" ] || pybin="$(command -v python3 2>/dev/null || true)"

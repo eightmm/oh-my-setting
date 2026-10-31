@@ -20974,14 +20974,37 @@ PY
 }
 
 test_python_timeout_fallback_bounds_verifier() {
-  local python_bin rc=0
+  local python_bin backend duration out expected rc=0
 
   python_bin="$(python3 -c 'import sys; print(sys.executable.replace("\\", "/"))' | tr -d '\r')"
-  OMS_PYTHON_BIN="$python_bin" \
-    OMS_RUN_BOUNDED_HELPER="$ROOT/scripts/lib/run-bounded.py" \
-    bash -c '. "$1"; PATH=""; OMS_PEER_VERIFY_TIMEOUT=1s OMS_PEER_KILL_AFTER=1s run_verify_with_timeout /bin/sleep 30' \
-      _ "$ROOT/scripts/lib/peer-common.sh" >/dev/null 2>&1 || rc=$?
-  [ "$rc" = 124 ] || fail "Python verifier timeout fallback should exit 124, got $rc"
+  for backend in native python; do
+    if [ "$backend" = native ]; then
+      command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || continue
+    fi
+    for duration in '' 0.5s 20m 24h 86400s 0 0s 24.0001h malformed; do
+      expected=2
+      case "$duration" in ''|0.5s|20m|24h|86400s) expected=0 ;; esac
+      rc=0
+      out="$(OMS_PYTHON_BIN="$python_bin" OMS_RUN_BOUNDED_HELPER="$ROOT/scripts/lib/run-bounded.py" \
+        XDG_RUNTIME_DIR="$TMP/verifier-budget-$backend" OMS_PEER_VERIFY_TIMEOUT="$duration" \
+        bash -c '. "$1"; [ "$2" != python ] || PATH=""; run_verify_with_timeout /bin/echo verifier-ran' \
+          _ "$ROOT/scripts/lib/peer-common.sh" "$backend" 2>&1)" || rc=$?
+      [ "$rc" = "$expected" ] || fail "$backend verifier budget '$duration' should exit $expected, got $rc: $out"
+      if [ "$expected" = 0 ]; then
+        [ "$out" = verifier-ran ] || fail "$backend valid verifier budget did not run: $out"
+      else
+        contains "$out" 'OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h' ||
+          fail "$backend invalid verifier budget needs a bounded diagnostic: $out"
+        contains "$out" verifier-ran && fail "$backend invalid verifier budget ran the command"
+      fi
+    done
+    rc=0
+    OMS_PYTHON_BIN="$python_bin" OMS_RUN_BOUNDED_HELPER="$ROOT/scripts/lib/run-bounded.py" \
+      XDG_RUNTIME_DIR="$TMP/verifier-budget-$backend" \
+      bash -c '. "$1"; [ "$2" != python ] || PATH=""; OMS_PEER_VERIFY_TIMEOUT=1s OMS_PEER_KILL_AFTER=1s run_verify_with_timeout /bin/sleep 30' \
+        _ "$ROOT/scripts/lib/peer-common.sh" "$backend" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 124 ] || fail "$backend verifier timeout should exit 124, got $rc"
+  done
 }
 
 test_verify_slots_bound_concurrent_verifies() {

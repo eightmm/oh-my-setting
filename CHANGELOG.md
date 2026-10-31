@@ -8,6 +8,29 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The terminal panel replaces its main with another installed CLI when the
+  main provider's weekly usage reaches 97%. Targets at 90% or more are skipped,
+  a 30-minute cooldown applies, and a land in progress blocks the swap. Below
+  100% the swap waits for an acknowledged handoff; `OMS_PANEL_AUTO_SWAP=0`
+  turns it off.
+- `oms update` defers installation while delegated workers are live (exit 76).
+  `oms land` keeps successful push and CI evidence, records
+  `update.reason: deferred-live-workers` and prints the retry command.
+  Auto-update reports the deferral as skipped.
+- Automatic gate reviews are told to report every evidenced blocking finding.
+  A follow-up gate receives the previous failed gate's screened final-attempt findings,
+  bounded to 3000 bytes, and checks which remain blocking.
+- `oms panel --accept` treats a `--continue` chain as one candidate: an
+  unadmitted earlier round is superseded by the round that continues it.
+- Plan-closure hints name `oms panel --accept` then
+  `--finalize --landed-commit`, or `oms agent-plan review` then
+  `oms patch-land --plan-task`.
+- The read-only `scholar` role performs multi-source literature research at
+  deep tier, high effort and a 60-minute default wall, with frontier available
+  for harder surveys. Runtime guards enforce its research purpose and read
+  access; the cheap researcher role keeps its restrictions.
+- Write dispatches warn when the shared-plan task's verifier is absent or
+  differs from `--verify`, without changing either command or claim rules.
 - Scoped panel write workers get a bounded list of graph consumers outside
   their scope in the first prompt, with an instruction to keep them compatible.
 - Accepted `oms panel --finalize` without `--evidence` records the unique
@@ -145,6 +168,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Verifier budgets use the same positive, finite, at-most-24h validation on
+  native and Python timeout backends, so zero no longer disables GNU timeout.
+  Empty values retain caller defaults; valid fractional overrides and the
+  10m standalone / 20m panel and admission defaults are preserved.
 - Panel-observed write attempts record their plan lease, so `oms panel
   --accept` matches real panel workers instead of refusing every candidate.
 - A panel call whose provider exits cleanly waits up to 30s for the subreaper

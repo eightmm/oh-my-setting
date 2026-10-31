@@ -726,8 +726,13 @@ repository patches and returns findings for owner `--finalize --outcome complete
 judgment (never `accepted`). The same role routes are available without opening
 the panel; see [Without the panel](#without-the-panel).
 
+Write dispatches with `--task-id` warn when the shared-plan task has no verifier
+or its verifier differs from `--verify` (ignoring only outer whitespace). The
+warning changes neither command nor plan claims; write dispatch still requires
+a scoped brief and a verifier.
+
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` overrides one dispatch's effort. Panel dispatches with `--verify` and patch-admit (including patch-land admission) default to a 20m verify timeout; standalone peer commands default to 10m. Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Codex and Claude tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Pi and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported effort flag. Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher` (researcher, scholar),
+`--reasoning-effort` overrides one dispatch's effort. Panel dispatches with `--verify` and patch-admit (including patch-land admission) default to a 20m verify timeout; standalone peer commands default to 10m. Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. Verifier budgets must be positive finite durations up to 24h; zero, malformed and larger values are refused before the command runs on both native and Python timeout backends. An empty value keeps the caller's default, and fractional durations remain valid. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Codex and Claude tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Pi and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported effort flag. Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher` (researcher, scholar),
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
 security-auditor) in `panel_role`; the strategy is generally the recorded purpose
 (plain workers record explain/investigate/implement, and scholar records research).
@@ -1816,9 +1821,17 @@ result selection, menu cycling and view inheritance in an existing tmux server.
 Use `tests/operator-tools-smoke.sh --list-sections` to see focused verification
 areas: `auto-review` covers the review gate, `native-pty` covers terminal
 lifecycle behavior, and `room-rollover` covers room succession; combine
-independent top-level areas with commas. Core panel behavior (board, routing,
-rooms, native windows) has no section of its own: verify it with `--shard 1/4`,
-about 8 minutes at low load.
+independent areas with commas. `core/room-and-board-rendering` covers board
+rendering and shared-plan verifier warnings; `dispatch-results` covers dispatch
+and result handling. Size a composed `--verify` from its measured section timings:
+sequential sections add together, and slot waiting precedes the verifier clock.
+Use a finite caller override when that composition outlasts the default.
+Local measurements on 2026-10-31 were 16s for
+`core/room-and-board-rendering`, 422s for `dispatch-results` and 4s for the two
+selected timeout regressions (`test_python_timeout_fallback_bounds_verifier` and
+`test_run_with_timeout_require_refuses_unbounded`). These scoped runs did not
+reproduce a 20m budget exhaustion; they do not bound the full serial suite or
+other host loads.
 
 
 ## Researcher, scholar and supporting strategies
