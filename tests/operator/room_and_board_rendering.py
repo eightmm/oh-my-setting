@@ -2719,6 +2719,99 @@ with patch.dict(os.environ, {"OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": "", "OMS
         assert "--main needs a room" in str(error)
     else:
         raise AssertionError("--main without a room was ignored")
+def exercise_shared_plan_verifier_warnings(temporary):
+    from contextlib import ExitStack, redirect_stdout
+
+    repo = temporary / "shared-plan-verifier-warnings"
+    execution = temporary / "shared-plan-verifier-execution"
+    for directory in (repo, execution):
+        (directory / ".oms/plan").mkdir(parents=True)
+    plan = repo / ".oms/plan/tasks.json"
+    brief = repo / "brief.md"
+    brief.write_text("Update value.txt and verify it.\n")
+    (execution / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": {"matching": {"verify": "false"}}}))
+    tasks = {
+        "matching": {"verify": "true"}, "empty": {"verify": ""},
+        "whitespace": {"verify": " \t\n"}, "unset": {}, "zero": {"verify": 0},
+        "malformed": {"verify": ["true"]}, "quoted": {"verify": "printf '%s' 'two  words'"},
+    }
+    for task_id, task in tasks.items():
+        task.update(id=task_id, state="claimed", claimed_by_participant="another-main", lease_id="original")
+    plan.write_text(json.dumps({"tasks": tasks}))
+
+    def check(task_id, command, expected="", refused=None, access="write", canonical=False):
+        route = {"kind": "worker" if access == "write" else "reviewer", "provider": "codex",
+                 "model": "fixture-model", "role": "builder" if access == "write" else "reviewer",
+                 "workload": "routine", "effort": "low", "access": access,
+                 "purpose": "implement" if access == "write" else "review"}
+        before = {path: path.read_bytes() for directory in (repo, execution)
+                  for path in directory.rglob("*") if path.is_file()}
+        for _ in range(2):
+            warning, output = io.StringIO(), io.StringIO()
+            with patch.object(panel, "selected_route", return_value=route), \
+                    patch.dict(os.environ, {"OMS_ROOM_REPO": str(repo) if canonical else ""}), \
+                    redirect_stderr(warning), redirect_stdout(output):
+                try:
+                    result = panel.dispatch(execution if canonical else repo, "codex", route["role"],
+                        "routine", access, route["purpose"], brief=str(brief), verify=command, task_id=task_id,
+                        target="codex", dry_run=True, scopes=["value.txt"] if access == "write" else None,
+                        work_repo=execution if canonical else None)
+                except ValueError as error:
+                    assert refused and refused in str(error), error
+                else:
+                    assert refused is None and result == 0, (refused, result)
+                    preview = json.loads(output.getvalue())
+                    assert preview["executes"] is False, preview
+                    argv = preview["argv"]
+                    assert argv[argv.index("--verify") + 1] == command, argv
+                    if canonical:
+                        assert argv[argv.index("--repo") + 1] == str(execution), argv
+            assert warning.getvalue() == expected, (task_id, command, warning.getvalue(), expected)
+        after = {path: path.read_bytes() for directory in (repo, execution)
+                 for path in directory.rglob("*") if path.is_file()}
+        assert after == before, "verifier warning changed plan claims or wrote dispatch artifacts"
+
+    # Exercise the public dispatch and its real command/refusal logic; no provider or claim can run.
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {}, clear=True))
+        stack.enter_context(patch.object(panel, "child_environment", return_value={}))
+        stack.enter_context(patch.object(panel.room, "resolve", return_value=None))
+        stack.enter_context(patch.object(panel, "repository", side_effect=lambda value: Path(value).resolve()))
+        stack.enter_context(patch.object(panel, "work_repository", side_effect=lambda value: Path(value).resolve()))
+        stack.enter_context(patch.object(panel, "native_repository", side_effect=lambda value: value))
+        stack.enter_context(patch.object(panel, "_validate_dry_run_inputs"))
+        for method in ("run", "call", "Popen"):
+            stack.enter_context(patch.object(panel.subprocess, method, side_effect=AssertionError("provider launch")))
+        claim = stack.enter_context(patch.object(panel, "plan_link", side_effect=AssertionError("dry-run claim")))
+        for task_id in ("empty", "whitespace", "unset", "zero", "malformed"):
+            check(task_id, "true", "WARN: shared-plan task %s has no verify command; "
+                  "plan verification is absent\n" % task_id)
+        check("matching", "true")
+        check("matching", " \ttrue \n")
+        mismatch = "WARN: dispatch verify differs from shared-plan task matching; the plan verifier is unchanged\n"
+        check("matching", "false", mismatch)
+        check("matching", "false", mismatch, canonical=True)
+        check("matching", "true", canonical=True)
+        for command in (None, "", " \t"):
+            check("matching", command, mismatch, refused="write roles need a scoped brief file and verifier")
+        check("empty", None, "WARN: shared-plan task empty has no verify command; plan verification is absent\n",
+              refused="write roles need a scoped brief file and verifier")
+        check("quoted", "printf '%s' 'two words'",
+              "WARN: dispatch verify differs from shared-plan task quoted; the plan verifier is unchanged\n")
+        check("missing", "true")
+        check(None, "true")
+        check("empty", "true", access="read")
+        check("matching", "false", access="read")
+        for body in ("", "{", "null", "0", "[]", '{}', '{"tasks": []}', '{"tasks": {"matching": 0}}'):
+            plan.write_text(body)
+            check("matching", "true")
+        plan.unlink()
+        check("matching", "true")
+        claim.assert_not_called()
+
+
+exercise_shared_plan_verifier_warnings(temporary)
+
 # UX contract from the critique debate: the quit key survives narrow footers, arrows move the
 # detail with the main, hidden tabs keep their attention, and attention rows name their state.
 # Footer hints follow the selection (at most five), keep the chat/board toggle and "?" in every width,

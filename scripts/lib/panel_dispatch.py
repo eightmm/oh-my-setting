@@ -1132,19 +1132,43 @@ def _plan_task_paths(repo, task_id):
 
 def _plan_task_has_verifier(repo, task_id):
     """Check only the structured plan task contract; brief prose is not authority."""
+    return bool(_plan_task_verifier(repo, task_id))
+
+
+def _plan_task_verifier(repo, task_id):
+    """Return the stored command, empty for an invalid verifier, or None for no readable task."""
     if not task_id:
-        return False
+        return None
     from terminal_panel import _read
     try:
         raw = _read(Path(repo), ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
         if not raw:
-            return False
+            return None
         document = json.loads(raw)
         tasks = document.get("tasks", {}) if isinstance(document, dict) else {}
         task = tasks.get(task_id) if isinstance(tasks, dict) else None
-        return isinstance(task, dict) and isinstance(task.get("verify"), str) and bool(task["verify"].strip())
+        if isinstance(task, dict):
+            verify = task.get("verify")
+            return verify.strip() if isinstance(verify, str) else ""
     except (OSError, ValueError, TypeError):
-        return False
+        return None
+
+
+def _warn_plan_verifier(repo, task_id, verify):
+    """Warn on empty or mismatched shared-plan verifiers without changing claims or commands.
+
+    Compare only outer whitespace: shell quoting makes inner whitespace significant.
+    Commands stay out of diagnostics because plan and caller text may be sensitive.
+    """
+    planned = _plan_task_verifier(repo, task_id)
+    if planned is None:
+        return
+    if not planned:
+        print("WARN: shared-plan task %s has no verify command; plan verification is absent" % task_id,
+              file=sys.stderr)
+    elif not isinstance(verify, str) or verify.strip() != planned:
+        print("WARN: dispatch verify differs from shared-plan task %s; the plan verifier is unchanged" % task_id,
+              file=sys.stderr)
 
 
 def _require_assigned_route(repo, task_id, route):
@@ -2342,6 +2366,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         task_id = "panel-" + route["purpose"] + "-" + uuid.uuid4().hex[:8]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
         raise ValueError("invalid task ID")
+    if access == "write":
+        _warn_plan_verifier(repo, task_id, verify)
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
     argv[argv.index("--repo") + 1] = str(execution)
     if candidate is not None:
