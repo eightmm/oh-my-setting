@@ -94,6 +94,7 @@ OPERATOR_RUNNER="$ROOT/tests/operator/runner.py"
 OPERATOR_SPEC="${OMS_OPERATOR_SHARD:-1/1}"
 OPERATOR_MODE=run
 OPERATOR_SECTION=''
+OPERATOR_CASE=''
 case "${1:-}" in
   --jobs)
     [ "$#" = 2 ] || fail '--jobs requires N'
@@ -148,11 +149,18 @@ case "${1:-}" in
     [ "$#" = 1 ] || fail '--list-sections takes no arguments'
     OPERATOR_MODE=sections-list ;;
   --section)
-    [ "$#" = 2 ] || fail '--section requires NAME[,NAME...]'
+    if [ "$#" = 4 ] && [ "$3" = --case ]; then
+      OPERATOR_CASE="$4"
+      [ -n "$OPERATOR_CASE" ] || fail '--case requires CASE'
+    else
+      [ "$#" = 2 ] || fail '--section requires NAME[,NAME...] [--case CASE]'
+    fi
     [ -z "${OMS_OPERATOR_SHARD:-}" ] || fail '--shard and --section are exclusive'
     OPERATOR_SECTION="$2" ;;
+  --case)
+    fail '--case requires exactly one --section NAME before it' ;;
   -h|--help)
-    echo 'usage: operator-tools-smoke.sh [--shard I/N | --section NAME[,NAME...] | --list-sections | --jobs N | --list [N] | --self-check [N]] (N=1..4)'
+    echo 'usage: operator-tools-smoke.sh [--shard I/N | --section NAME[,NAME...] | --list-sections | --section NAME --case CASE | --jobs N | --list [N] | --self-check [N]] (N=1..4)'
     echo 'OMS_OPERATOR_SHARD=I/N also selects a shard; no selector runs every section.'
     exit 0 ;;
   '') ;;
@@ -177,7 +185,7 @@ if [ -z "${OMS_OPERATOR_TIMINGS:-}" ]; then
 fi
 operator_status=0
 if [ -n "$OPERATOR_SECTION" ]; then
-  PYTHONDONTWRITEBYTECODE=1 python3 "$OPERATOR_RUNNER" --run-sections "$TMP" "$OPERATOR_SECTION" || operator_status=$?
+  PYTHONDONTWRITEBYTECODE=1 python3 "$OPERATOR_RUNNER" --run-sections "$TMP" "$OPERATOR_SECTION" ${OPERATOR_CASE:+--case "$OPERATOR_CASE"} || operator_status=$?
 else
   PYTHONDONTWRITEBYTECODE=1 python3 "$OPERATOR_RUNNER" --run-shard "$TMP" "$OPERATOR_SPEC" || operator_status=$?
 fi

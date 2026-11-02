@@ -4269,6 +4269,7 @@ def exercise_auto_admission_evidence():
 exercise_auto_admission_evidence()
 
 # BEGIN patch-scope finalize regression (also runnable as an isolated case).
+(project / ".oms/artifacts").mkdir(parents=True, exist_ok=True)
 scope_patch = project / ".oms/artifacts/scope-result.patch"
 scope_worker = {"attempt_id": "att_scope_write", "task_id": "scope-result", "parent_attempt_id": "scope-main",
                 "refs": {"panel_role": "worker", "panel_access": "write", "panel_room_id": "scope-room",

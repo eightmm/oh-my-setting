@@ -72,6 +72,144 @@ def body(name):
     return padding + rest.split("# OPERATOR_SECTION_END dispatch_exit\n", 1)[0], str(SOURCE)
 
 
+def case_markers(code):
+    """Top-level `# BEGIN X` / `# END X` pairs as {case: (begin_line, end_line)}, 1-based."""
+    found, open_case = {}, None
+    for number, line in enumerate(code.splitlines(), 1):
+        match = re.match(r"# (BEGIN|END) (.+)$", line)
+        if not match:
+            continue
+        kind, text = match.groups()
+        case = re.split(r" \(|\.", text, 1)[0].strip()
+        if kind == "BEGIN":
+            if open_case:
+                raise ValueError("case %r begins inside case %r" % (case, open_case[0]))
+            if case in found:
+                raise ValueError("duplicate case %r" % case)
+            open_case = (case, number)
+        elif not open_case or open_case[0] != case:
+            raise ValueError("END %r has no matching BEGIN" % case)
+        else:
+            found[case] = (open_case[1], number)
+            open_case = None
+    if open_case:
+        raise ValueError("BEGIN %r has no END" % open_case[0])
+    return found
+
+
+def case_body(name, case):
+    if not case:
+        raise ValueError("--case requires a non-empty CASE")
+    code, filename = body(name)
+    found = case_markers(code)
+    if case not in found:
+        raise ValueError("unknown case %r in section %s; valid cases: %s" % (case, name, ", ".join(found) or "none"))
+    begin, end = found[case]
+    keep = set(range(begin + 1, end))
+    # Definitions outside every case stay so a block runs without its predecessors' setup.
+    # An assignment stays only if every name it reads is already available.
+    always, assigns = [], []
+    for node in ast.parse(code, filename).body:
+        first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+        if any(first <= close and node.end_lineno >= open_ for open_, close in found.values()):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            always.append((first, node))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
+                and not any(isinstance(n, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom)) for n in ast.walk(node.value)) \
+                and not any(isinstance(n, ast.Subscript) for n in ast.walk(node)):  # containers may be filled by skipped code
+            assigns.append((first, node))
+    available = set(dir(__import__("builtins")))  # fixture values are runtime state, not literals
+    for _, node in always:
+        available |= {n.asname or n.name.split(".")[0] for n in getattr(node, "names", [])} | {getattr(node, "name", "")}
+    changed = True
+    while changed:
+        changed = False
+        for item in list(assigns):
+            node = item[1]
+            reads = {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+            if reads <= available:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                available |= {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+                always.append(item)
+                assigns.remove(item)
+                changed = True
+    for first, node in always:
+        keep.update(range(first, node.end_lineno + 1))
+    # Blank lines elsewhere keep traceback numbers equal to the file's lines.
+    return "\n".join(line if number in keep else "" for number, line in enumerate(code.splitlines(), 1)) + "\n", filename
+
+
+def module_names(code, filename, lines=None):
+    """(bound, loaded) module names; loads come from module level and, transitively, from
+    the top-level defs it names or that start inside `lines` (all of them when None)."""
+    import symtable
+    table = symtable.symtable(code, filename, "exec")
+    bound = {s.get_name() for s in table.get_symbols() if s.is_assigned() or s.is_imported() or s.is_namespace()}
+
+    def reads(scope):
+        found, stack = set(), [scope]
+        while stack:
+            current = stack.pop()
+            stack.extend(current.get_children())
+            found |= {s.get_name() for s in current.get_symbols() if s.is_referenced()
+                      and (s.is_global())}
+        return found - bound
+
+    defs = {}
+    for child in table.get_children():
+        defs.setdefault(child.get_name(), []).append(child)
+    # symtable marks a module name referenced when only functions use it, so module-level
+    # loads come from the AST outside function bodies (comprehension targets count as bound).
+    tree = ast.parse(code, filename)
+    # Only module-scope bindings (comprehension targets included) count; names bound after a
+    # block or only in its functions' locals are a known limit of this ordering-free check.
+    stored, walk = set(), list(tree.body)
+    while walk:
+        node = walk.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            stored.add(node.id)
+        walk.extend(ast.iter_child_nodes(node))
+    loaded, stack = set(), list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack.extend(node.decorator_list if not isinstance(node, ast.Lambda) else [])
+            stack.extend(node.args.defaults + [d for d in node.args.kw_defaults if d])
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            loaded.add(node.id)
+        stack.extend(ast.iter_child_nodes(node))
+    loaded -= stored
+    queue = [c for cs in defs.values() for c in cs if lines is None or c.get_lineno() in lines]
+    seen = set()
+    while True:
+        for child in queue:
+            loaded |= reads(child)
+        queue = [c for name in loaded - seen for c in defs.get(name, [])]
+        seen |= loaded
+        if not queue:
+            return bound, loaded - bound
+
+
+def provided_names():
+    import builtins
+    names = {"root", "temporary", "section", "_operator_block", "fixture_file"} | set(dir(builtins))
+    for fixture in ("fixtures.py", "helpers.py", "provider_fixture.py", "pty_fixture.py"):
+        names |= module_names((HERE / fixture).read_text(encoding="utf-8"), fixture)[0]
+    return names
+
+
+def unresolved_case_names(name, case):
+    code, filename = case_body(name, case)
+    begin, end = case_markers(body(name)[0])[case]
+    bound, loaded = module_names(code, filename, set(range(begin + 1, end)))
+    provided = provided_names()
+    return sorted(loaded - bound - provided)
+
+
 def self_check(total):
     shard("1/%s" % total)
     names = [name for name, _, _ in SECTIONS]
@@ -91,6 +229,12 @@ def self_check(total):
     for name, _, filename in SECTIONS:
         if not filename or filename.endswith(".py"):
             ast.parse(body(name)[0], filename or str(SOURCE))
+    for name, _, filename in SECTIONS:
+        if not filename or filename.endswith(".py"):
+            for case in case_markers(body(name)[0]):
+                missing = unresolved_case_names(name, case)
+                if missing:
+                    raise ValueError("case %r in section %s cannot run alone; unresolved names: %s" % (case, name, ", ".join(missing)))
     tree = ast.parse(body("dispatch-exit")[0], str(SOURCE))
     defined = [node.lineno for node in tree.body if isinstance(node, ast.FunctionDef)
                and node.name == "exercise_dispatch_exit_evidence"]
@@ -109,16 +253,16 @@ def self_check(total):
     return [(name, bucket % total + 1) for name, bucket, _ in SECTIONS]
 
 
-def execute(name, temporary):
+def execute(name, temporary, case=None):
     os.chdir(temporary)
     namespace = {"root": ROOT, "temporary": temporary, "section": name}
     fixture = HERE / "fixtures.py"
     exec(compile(fixture.read_text(encoding="utf-8"), str(fixture), "exec"), namespace)
     namespace["_operator_block"] = lambda phase: print("operator-integration: " + phase, flush=True)
-    code, filename = body(name)
-    if name == "dispatch-exit":
+    code, filename = case_body(name, case) if case is not None else body(name)
+    if name == "dispatch-exit" and case is None:
         code += "\nexercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env)\n"
-    elif name == "worker-leases":
+    elif name == "worker-leases" and case is None:
         code += '\nwith patch.object(panel, "provider_catalog", side_effect=fixture_provider_catalog):\n    exercise_observed_worker_leases()\n'
     if name == "auto-review":
         with namespace["patch"].object(namespace["panel"], "_settle_dispatch", return_value=None):
@@ -127,7 +271,7 @@ def execute(name, temporary):
         exec(compile(code, filename, "exec"), namespace)
 
 
-def run_sections(names, temporary):
+def run_sections(names, temporary, case=None):
     partial, failure = False, 0
     for name in names:
         socket_denied = os.environ.get("OMS_OPERATOR_SOCKET_DENIED") == "1"
@@ -148,6 +292,8 @@ def run_sections(names, temporary):
                        "operator-section", str(ROOT), str(directory), str(HERE / filename)]
         else:
             command = [sys.executable, str(HERE / "runner.py"), "--execute", str(directory), name]
+            if case is not None:
+                command += ["--case", case]
         print("operator-section: " + name + " started", flush=True)
         result = subprocess.run(command, cwd=directory)
         elapsed = int(time.monotonic() - started)
@@ -194,6 +340,19 @@ def execution_contract(total):
             assert results == ([1] if mode == "failure" else [0] * len(groups)), (mode, results)
             manifests.append(observed)
     assert all(manifest == manifests[0] for manifest in manifests), "fixture launches depend on selection mode"
+    with tempfile.TemporaryDirectory(prefix="oms-operator-contract-") as directory, \
+            patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+        for name, _, filename in SECTIONS:
+            if filename and not filename.endswith(".py"):
+                continue
+            for case in case_markers(body(name)[0]):
+                observed = []
+                parent = Path(directory) / ("case-%d" % len(list(Path(directory).iterdir())))
+                parent.mkdir()
+                with patch.object(subprocess, "run", side_effect=lambda command, cwd: observed.append(
+                        [part.replace(str(cwd), "{fixture}") for part in command]) or subprocess.CompletedProcess(command, 0)):
+                    run_sections([name], parent, case)
+                assert observed == [manifests[0][name] + ["--case", case]], (name, case, observed)
 
 
 def main(args):
@@ -205,13 +364,21 @@ def main(args):
     elif mode == "--list-sections" and len(args) == 1:
         self_check(4)
         print("\n".join(name for name, _, _ in SECTIONS))
-    elif mode == "--execute" and len(args) == 3:
+    elif mode == "--execute" and len(args) in {3, 5} and args[3:4] in ([], ["--case"]):
         name = requested_sections(args[2])[0]
-        execute(name, Path(args[1]))
-    elif mode in {"--run-shard", "--run-sections"} and len(args) == 3:
-        self_check(shard(args[2])[1] if mode == "--run-shard" else 4)
-        names = selected(args[2]) if mode == "--run-shard" else requested_sections(args[2])
-        return run_sections(names, Path(args[1]))
+        execute(name, Path(args[1]), args[4] if len(args) == 5 else None)
+    elif mode == "--run-shard" and len(args) == 3:
+        self_check(shard(args[2])[1])
+        return run_sections(selected(args[2]), Path(args[1]))
+    elif mode == "--run-sections" and len(args) in {3, 5} and args[3:4] in ([], ["--case"]):
+        self_check(4)
+        names = requested_sections(args[2])
+        case = args[4] if len(args) == 5 else None
+        if case is not None:
+            if len(names) != 1:
+                raise ValueError("--case requires exactly one --section")
+            case_body(names[0], case)
+        return run_sections(names, Path(args[1]), case)
     else:
         raise ValueError("invalid operator runner arguments")
     return 0
