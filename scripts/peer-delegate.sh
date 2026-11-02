@@ -2850,10 +2850,28 @@ if [ -n "$worker_guard_dir" ]; then
       worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface"
     fi
   done
+  if [ "$WORKER_ACCESS" = read ] && [ -n "$worker_guard_soft" ]; then
+    # A reader has no patch, and other sessions moving refs does not change
+    # the files it read from its own worktree HEAD.
+    guard_read_soft=""
+    for guard_surface in $(printf '%s' "$worker_guard_soft" | tr ',' ' '); do
+      case "$guard_surface" in
+        foreign-ref|remote-refs) ;;
+        *) guard_read_soft="${guard_read_soft:+$guard_read_soft, }$guard_surface" ;;
+      esac
+    done
+    worker_guard_soft="$guard_read_soft"
+  fi
   if [ -n "$worker_guard_soft" ]; then
-    echo "warning: the repository changed outside the worktree during this run: $worker_guard_soft; review these before landing" >&2
-    printf '\n\n## Repository changed during the run\n\n- surfaces: %s\n- not attributable to the worker; review the patch before landing\n' \
-      "$worker_guard_soft" >> "$artifact"
+    if [ "$WORKER_ACCESS" = read ]; then
+      echo "warning: the repository changed outside the worktree during this run: $worker_guard_soft" >&2
+      printf '\n\n## Repository changed during the run\n\n- surfaces: %s\n- the repository moved during the run; findings are from %s\n' \
+        "$worker_guard_soft" "$(git -C "$worktree" rev-parse HEAD 2>/dev/null || echo unknown)" >> "$artifact"
+    else
+      echo "warning: the repository changed outside the worktree during this run: $worker_guard_soft; review these before landing" >&2
+      printf '\n\n## Repository changed during the run\n\n- surfaces: %s\n- not attributable to the worker; review the patch before landing\n' \
+        "$worker_guard_soft" >> "$artifact"
+    fi
   fi
   worker_guard_changed="$worker_guard_hard"
   if [ -n "$worker_guard_changed" ]; then

@@ -32947,7 +32947,7 @@ run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>o
     OMS_WORKER_GUARD_STRICT="${OMS_WORKER_GUARD_STRICT:-0}" \
     OMS_WORKER_AUTHORITY_EXCLUSIVE="${OMS_WORKER_AUTHORITY_EXCLUSIVE:-0}" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$dir" --to codex --prompt x ${3:+--allow-no-change} \
-    --no-verify 2>&1)" || rc=$?
+    ${OMS_TEST_GUARD_READ:+--read-only} --no-verify 2>&1)" || rc=$?
   printf '%s\t%s' "$rc" "$out"
 }
 
@@ -32964,6 +32964,17 @@ test_worker_guard_sees_planted_and_ignored_files() {
   [ "${result%%	*}" = 0 ] || fail "unattributable churn must not fail an ordinary run: $result"
   contains "$result" 'changed outside the worktree during this run: files' ||
     fail "the untracked surface should still be reported: $result"
+  # A reader keeps the section for surfaces it cannot ignore, naming the HEAD
+  # its findings come from instead of a patch to review.
+  result="$(OMS_TEST_GUARD_READ=1 run_guarded_worker "$project" "printf 'evil3\n' > $project/sitecustomize3.py")"
+  [ "${result%%	*}" = 0 ] || fail "a read-only run should survive unattributable churn: $result"
+  contains "$result" 'changed outside the worktree during this run: files' ||
+    fail "the read-only run should still report files: $result"
+  contains "$result" 'review these before landing' && fail "read warning mentions landing: $result"
+  local read_artifact
+  read_artifact="$(printf '%s\n' "${result#*	}" | sed -n 's/^artifact: //p' | sed -n '1p')"
+  assert_file_contains "$read_artifact" '## Repository changed during the run'
+  assert_file_contains "$read_artifact" "findings are from $(git -C "$project" rev-parse HEAD)"
   result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" "printf 'evil2\n' > $project/sitecustomize2.py" allow)"
   [ "${result%%	*}" != 0 ] || fail "strict mode should fail on a planted file: $result"
 
@@ -33001,6 +33012,17 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
   assert_file_contains "$artifact" '## Repository changed during the run'
   assert_file_contains "$artifact" '- surfaces: remote-refs'
   assert_file_contains "$artifact" '- not attributable to the worker; review the patch before landing'
+
+  # A reader has no patch to land, so a moved remote-tracking ref is not news.
+  result="$(OMS_TEST_GUARD_READ=1 run_guarded_worker "$project" \
+    "git -C \"$project\" update-ref refs/remotes/origin/main \"\$(git -C \"$project\" rev-parse HEAD~1)\"")"
+  [ "${result%%$'\t'*}" = 0 ] || fail "a read-only run failed on a remote-ref change: $result"
+  out="${result#*$'\t'}"
+  contains "$out" 'Repository changed during the run' && fail "read-only remote-ref section leaked: $out"
+  contains "$out" 'changed outside the worktree' && fail "read-only remote-ref warning leaked: $out"
+  artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | sed -n '1p')"
+  [ -f "$artifact" ] || fail "missing read-only artifact: $out"
+  ! grep -q 'Repository changed during the run' "$artifact" || fail "read-only artifact has the section"
 
   result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" \
     "git -C \"$project\" update-ref -d refs/remotes/origin/main")"
