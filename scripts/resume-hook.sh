@@ -220,6 +220,112 @@ fi
 portable_line="${portable_line//$'\r'/}"
 [ -z "$portable_line" ] || append "$portable_line"
 
+# Previous room: a reopened panel gets a fresh room, so the last main's closing
+# words in the most recently written other room are shown (capped, read-only).
+# Sealed rooms are skipped: their successor carries the conversation.
+if [ -n "${OMS_ROOM_ID:-}" ] && [ -d "$cwd/.oms/threads" ]; then
+  room_lines="$(python3 -X utf8 -I -B - "$ROOT/scripts/lib" "$cwd" "$OMS_ROOM_ID" <<'PYROOM' 2>/dev/null
+import os, re, sys, time
+try:
+    sys.path.insert(0, sys.argv[1])
+    import room
+    repo, current = sys.argv[2], sys.argv[3]
+    folder = os.path.join(repo, ".oms/threads")
+    deadline = time.monotonic() + 1.5
+    found = []
+    with os.scandir(folder) as entries:
+        for index, entry in enumerate(entries):
+            if index >= room.MAX_SCAN_ENTRIES:
+                break
+            ident = entry.name[:-6]
+            if entry.name.endswith(".jsonl") and ident != current and entry.is_file(follow_symlinks=False):
+                found.append((entry.stat(follow_symlinks=False).st_mtime, ident))
+    found.sort(reverse=True)
+    for stamp, ident in found[:5]:
+        if time.monotonic() > deadline:
+            break
+        try:
+            state = room.project(room.records(repo, ident))
+        except Exception:
+            continue
+        if state.get("successor"):
+            continue
+        mains = {p["participant"] for p in state["participants"] if p.get("role") == "main"}
+        texts = [m for m in state["messages"] if m.get("sender") in mains and str(m.get("text") or "").strip()]
+        lines = ["- previous room %s (last active %s): oms room show --id %s" % (
+            ident, time.strftime("%Y-%m-%d %H:%MZ", time.gmtime(stamp)), ident)]
+        for message in texts[-2:]:
+            text = " ".join(str(message["text"]).split())
+            text = re.sub(r"(?i)\b([\w.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|credential)[\w.-]*)\s*[=:]\s*\S+", r"\1=[redacted]", text)
+            text = re.sub(r"(?<![\w.~$-])(?:/(?:home|Users|root)/|[A-Za-z]:\\Users\\)\S*", "[path]", text)
+            raw = text.encode("utf-8")
+            if len(raw) > 300:
+                text = raw[:297].decode("utf-8", errors="ignore") + "..."
+            lines.append("  main: " + text)
+        print("\n".join(lines))
+        break
+except Exception:
+    pass
+PYROOM
+)" || room_lines=""
+  room_lines="${room_lines//$'\r'/}"
+  if [ -n "$room_lines" ]; then
+    while IFS= read -r line; do append "$line"; done <<EOF_ROOM
+$room_lines
+EOF_ROOM
+  fi
+fi
+
+# Unpublished work: commits on this branch (and other registered worktrees'
+# branches) that no remote has. A branch without an upstream is measured
+# against the remote default branch, which the upstream count cannot see.
+# Counts and branch names only; every git call is time-bounded.
+ahead_line="$(python3 -X utf8 -I -B - "$cwd" <<'PYAHEAD' 2>/dev/null
+import subprocess, sys
+repo = sys.argv[1]
+def git(*args):
+    try:
+        done = subprocess.run(["git", "-C", repo, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+try:
+    if not git("remote"):
+        raise SystemExit(0)
+    default = (git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+               or next((n for n in ("origin/main", "origin/master")
+                        if git("rev-parse", "--verify", "-q", "refs/remotes/" + n)), None))
+    def ahead(branch):
+        base = git("rev-parse", "--abbrev-ref", branch + "@{u}") or default
+        count = git("rev-list", "--count", "%s..refs/heads/%s" % (base, branch)) if base else None
+        return (int(count), base) if count and count.isdigit() and int(count) else None
+    here = git("symbolic-ref", "--short", "HEAD")
+    parts, seen = [], set()
+    if here:
+        seen.add(here)
+        row = ahead(here)
+        if row:
+            parts.append("%d commit(s) on %s not on %s" % (row[0], here, row[1]))
+    others = []
+    for line in (git("worktree", "list", "--porcelain") or "").splitlines():
+        name = line[len("branch refs/heads/"):] if line.startswith("branch refs/heads/") else ""
+        if name and name not in seen:
+            seen.add(name)
+            row = ahead(name)
+            if row:
+                others.append("%s(%d)" % (name, row[0]))
+    if others:
+        parts.append("other worktrees: " + ", ".join(others[:8]) + (" +%d more" % (len(others) - 8) if len(others) > 8 else ""))
+    if parts:
+        print("- unpublished: " + "; ".join(parts))
+except Exception:
+    pass
+PYAHEAD
+)" || ahead_line=""
+ahead_line="${ahead_line//$'\r'/}"
+[ -z "$ahead_line" ] || append "$ahead_line"
+
 # Unresolved failures: one line, newest row's summary and suggested next.
 ledger="$cwd/.oms/failures.jsonl"
 if [ -s "$ledger" ]; then

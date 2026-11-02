@@ -1931,6 +1931,65 @@ test_resume_hook_reads_utf8_repo() {
     fail "a Hangul cwd under a non-UTF-8 locale must resolve the repo: $out"
 }
 
+# A returning panel main sees the previous room's last main words and any
+# branch ahead of the remote default, even without an upstream; no remote and
+# no ahead commits stay silent.
+test_resume_hook_shows_previous_room_and_unpublished_work() {
+  local repo="$TMP/resume-digest" remote="$TMP/resume-digest-remote.git" out
+  local long
+
+  mkdir -p "$repo/.oms"
+  git -C "$repo" init -q -b main
+  git -C "$repo" -c user.email=test@example.com -c user.name=Test commit -q --allow-empty -m base
+  out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | OMS_ROOM_ID=room-new bash "$ROOT/scripts/resume-hook.sh")" ||
+    fail "the resume hook must exit 0"
+  [ -z "$out" ] || fail "no remote and no room must print nothing: $out"
+
+  long="$(printf 'x%.0s' $(seq 1 400))"
+  python3 -X utf8 -I - "$ROOT/scripts/lib" "$repo" "$long" <<'PY' ||
+import sys
+sys.path.insert(0, sys.argv[1])
+import room
+repo, long = sys.argv[2:4]
+room.create(repo, "room-old", "Earlier campaign")
+room.join(repo, "room-old", "boss", "claude", model="claude-opus-5-5", native_session="old-main")
+room.send(repo, "room-old", "boss", "all", "first note")
+room.send(repo, "room-old", "boss", "all", "stopped: evidence in the report")
+room.send(repo, "room-old", "boss", "all", long)
+room.create(repo, "room-new", "Current")
+PY
+    fail "the fixture rooms should build"
+  out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | OMS_ROOM_ID=room-new bash "$ROOT/scripts/resume-hook.sh")" ||
+    fail "the resume hook must exit 0"
+  grep -Fq -- '- previous room room-old' <<<"$out" || fail "the older room must be named: $out"
+  grep -Fq 'oms room show --id room-old' <<<"$out" || fail "the pointer must show: $out"
+  grep -Fq 'stopped: evidence in the report' <<<"$out" || fail "the second-to-last main message must show: $out"
+  grep -Fq 'first note' <<<"$out" && fail "only the last two main messages show: $out"
+  [ "$(grep -c 'xxxxxxxxxx' <<<"$out")" = 1 ] && ! grep -Fq "$long" <<<"$out" ||
+    fail "a long message must be capped: $out"
+  out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | env -u OMS_ROOM_ID bash "$ROOT/scripts/resume-hook.sh")"
+  grep -Fq 'previous room' <<<"$out" && fail "without a current room nothing is previous: $out"
+
+  git init -q --bare "$remote"
+  git -C "$repo" remote add origin "$remote"
+  git -C "$repo" push -q origin main 2>/dev/null
+  git -C "$repo" fetch -q origin
+  git -C "$repo" checkout -q -b feature
+  git -C "$repo" -c user.email=test@example.com -c user.name=Test commit -q --allow-empty -m one
+  git -C "$repo" -c user.email=test@example.com -c user.name=Test commit -q --allow-empty -m two
+  git -C "$repo" worktree add -q -b side "$TMP/resume-digest-side" main
+  git -C "$TMP/resume-digest-side" -c user.email=test@example.com -c user.name=Test commit -q --allow-empty -m side
+  out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | bash "$ROOT/scripts/resume-hook.sh")"
+  grep -Fq -- '- unpublished: 2 commit(s) on feature not on origin/main; other worktrees: side(1)' <<<"$out" ||
+    fail "an upstream-less branch must count against the default branch: $out"
+  grep -Fq "$TMP" <<<"$out" && fail "no path may leak: $out"
+  git -C "$repo" push -q origin feature
+  git -C "$repo" branch -q --set-upstream-to=origin/feature feature
+  out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | bash "$ROOT/scripts/resume-hook.sh")"
+  grep -Fq 'on feature' <<<"$out" && fail "a pushed branch is not unpublished: $out"
+  git -C "$repo" worktree remove --force "$TMP/resume-digest-side"
+}
+
 test_panel_main_activity
 test_classifier_boundaries
 test_peer_tail_is_bounded
@@ -1939,4 +1998,5 @@ test_fail_ledger_hook_resolves_on_success
 test_route_is_hermetic_to_inherited_harness_session
 test_live_thread_delivery_at_existing_safe_points
 test_resume_hook_reads_utf8_repo
+test_resume_hook_shows_previous_room_and_unpublished_work
 echo "autonomy-hook-smoke: ok"
