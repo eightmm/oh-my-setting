@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- When a session resumes in a panel room, the resume hook lists up to five
+  earlier rooms that were not rolled over, with their last two main messages,
+  redacted and capped at 300 bytes. It also counts commits on this branch and
+  on other worktree branches that are not yet on the upstream or `origin`
+  default branch. Each part has a short deadline and stays silent on failure.
 - The terminal panel replaces its main with another installed CLI when the
   main provider's weekly usage reaches 97%. Targets at 90% or more are skipped,
   a 30-minute cooldown applies, and a land in progress blocks the swap. Below
@@ -168,6 +173,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `scripts/check.sh` and `tests/lib/smoke-env.sh` unset `OMS_PEER_TIMEOUT`,
+  `OMS_PEER_PRINT_TIMEOUT`, `OMS_WORKER_GUARD_STRICT` and
+  `OMS_WORKER_GUARD_OFF`, so a gate run under autopilot acceptance no longer
+  inherits its seat wall or strict worker guard.
+- The env-secret scanner no longer treats `GIT_CONFIG_KEY_<n>` variables as
+  secret holders. Their values are git config key names such as the
+  `core.hooksPath` hooks guard, which made admission refuse any line
+  containing that key. A key value containing `@` (URL-subsection userinfo)
+  still counts; `GIT_CONFIG_VALUE_<n>` handling is unchanged.
+- Update fixtures copy `scripts/lib/harness-residue.sh`, and the early
+  failover fixture sets a panel role, matching role validation on every panel
+  dispatch.
 - Verifier budgets use the same positive, finite, at-most-24h validation on
   native and Python timeout backends, so zero no longer disables GNU timeout.
   Empty values retain caller defaults; valid fractional overrides and the
