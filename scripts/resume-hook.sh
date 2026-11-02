@@ -299,10 +299,20 @@ try:
     def ahead(branch):
         base = git("rev-parse", "--abbrev-ref", branch + "@{u}") or default
         # Patch-id equivalence drops commits that landed under another SHA (regraft,
-        # cherry-pick); merges have no patch-id and always count.
-        count = git("rev-list", "--cherry-pick", "--right-only", "--count",
-                    "%s...refs/heads/%s" % (base, branch)) if base else None
-        return (int(count), base) if count and count.isdigit() and int(count) else None
+        # cherry-pick); merges have no patch-id, so a merge-only branch counts only
+        # when its merged tree differs from the base tree. Without merge-tree
+        # (git < 2.38) or on conflict, merges count: never hides work.
+        if not base:
+            return None
+        rng = "%s...refs/heads/%s" % (base, branch)
+        count = git("rev-list", "--cherry-pick", "--right-only", "--count", rng)
+        if not (count and count.isdigit() and int(count)):
+            return None
+        if git("rev-list", "--cherry-pick", "--right-only", "--no-merges", "--count", rng) == "0":
+            merged = git("merge-tree", "--write-tree", base, "refs/heads/" + branch)
+            if merged and merged.split()[0] == git("rev-parse", base + "^{tree}"):
+                return None
+        return (int(count), base)
     here = git("symbolic-ref", "--short", "HEAD")
     parts, seen = [], set()
     if here:

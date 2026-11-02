@@ -2107,9 +2107,18 @@ PY
   git -C "$repo" fetch -q origin
   git -C "$repo" worktree add -q -b merged "$TMP/resume-digest-merged" main
   git -C "$TMP/resume-digest-merged" -c user.email=test@example.com -c user.name=Test merge -q --no-ff -m merge origin/main
+  # A merge-only branch whose content is upstream is absent where git has merge-tree
+  # (>= 2.38); older git keeps counting merges, so the fixtures branch on availability.
+  if git merge-tree --write-tree HEAD HEAD >/dev/null 2>&1; then merged_part=""
+  else merged_part="merged(1), "; fi
+  git -C "$repo" worktree add -q -b evil "$TMP/resume-digest-evil" main
+  git -C "$TMP/resume-digest-evil" -c user.email=test@example.com -c user.name=Test merge -q --no-ff --no-commit origin/main
+  printf 'extra\n' >"$TMP/resume-digest-evil/extra.txt"
+  git -C "$TMP/resume-digest-evil" add extra.txt
+  git -C "$TMP/resume-digest-evil" -c user.email=test@example.com -c user.name=Test commit -q -m 'merge with new content'
   out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | bash "$ROOT/scripts/resume-hook.sh")"
-  grep -Fq -- '- unpublished: 2 commit(s) on feature not on origin/main; other worktrees: merged(1), side(1)' <<<"$out" ||
-    fail "an upstream-less branch and an unpublished merge must count against the default branch: $out"
+  grep -Fq -- "- unpublished: 2 commit(s) on feature not on origin/main; other worktrees: evil(1), ${merged_part}side(1)" <<<"$out" ||
+    fail "an upstream-less branch and a merge adding content must count (upstream-only merges only without merge-tree): $out"
   grep -Fq 'landed(' <<<"$out" && fail "a commit landed under another SHA is not unpublished: $out"
   grep -Fq "$TMP" <<<"$out" && fail "no path may leak: $out"
   git -C "$repo" push -q origin feature
@@ -2119,6 +2128,7 @@ PY
   git -C "$repo" worktree remove --force "$TMP/resume-digest-side"
   git -C "$repo" worktree remove --force "$TMP/resume-digest-landed"
   git -C "$repo" worktree remove --force "$TMP/resume-digest-merged"
+  git -C "$repo" worktree remove --force "$TMP/resume-digest-evil"
 }
 
 test_panel_main_activity
