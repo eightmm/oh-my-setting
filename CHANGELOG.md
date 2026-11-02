@@ -8,6 +8,33 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms land --wait` retries an installation deferred by live delegated workers
+  (update exit 76) every 15 seconds, within the `--sibling-wait` budget, and
+  logs each wait. Without `--wait`, or once the budget is spent, it keeps the
+  deferral record and retry command as before.
+- A Claude panel main's `PreToolUse` hook refuses Bash commands that move the
+  canonical checkout's index or refs (merge, checkout, commit, stash, reset and
+  similar) while that checkout's delegated calls are live; use
+  `oms sync-shared` or `oms land --sync-shared` instead. The hook fails open on
+  any error and applies only to panel mains. Hooks schema is 7.
+- Owner `--finalize --verify` reuses a matching admission pass instead of
+  re-running the verifier when the clean landed tree equals the admitted base
+  plus the single admitted patch and the report header names the same command.
+  Any mismatch runs the verifier as before.
+- The resume digest counts unpublished commits by patch-id, so commits that
+  reached the default branch under another SHA (regraft, cherry-pick) are no
+  longer listed as unpublished; merge commits still count.
+- CI focused lane 2 moves six light stages to lane 3, cutting its predicted
+  wall time from about 1380s to 1210s.
+- Read-only delegate reports no longer append "Repository changed during the
+  run" when the only changes are other worktrees' branch refs or remote refs.
+  Other soft changes read "the repository moved during the run; findings are
+  from <sha>" instead of asking to review a patch. Write calls and strict mode
+  are unchanged.
+- `oms panel` sizes its board split in cells on tmux older than 3.1, which
+  rejects `split-window -l N%` ("create pane failed: -l invalid"). tmux 3.1
+  and newer keep percent sizes for detached sessions. `-p` is never used,
+  because tmux 3.3 and 3.4 mis-parse it.
 - Claude Code mains opened by `oms panel` launch with `--disallowedTools=Agent`
   when the installed CLI lists that option, so delegation goes through
   `oms panel --dispatch` and stays on the board. Ordinary Claude Code sessions,
