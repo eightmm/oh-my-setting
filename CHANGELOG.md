@@ -8,6 +8,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Claude Code mains opened by `oms panel` launch with `--disallowedTools=Agent`
+  when the installed CLI lists that option, so delegation goes through
+  `oms panel --dispatch` and stays on the board. Ordinary Claude Code sessions,
+  workers and other providers are unchanged.
+- Claude panel mains, like Codex mains, receive the full control-tower rules on
+  their first prompt after startup, compact, clear or resume, then the short
+  pointer. Sessions without a panel main attempt are unchanged.
 - When a session resumes in a panel room, the resume hook lists up to five
   earlier rooms that were not rolled over, with their last two main messages,
   redacted and capped at 300 bytes. It also counts commits on this branch and
@@ -173,6 +180,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A first, still-retryable automatic-review launch failure no longer sends the
+  "manual review is needed" mail; it is sent once no retry remains.
+- `oms scratch-worktree --help` names `oms cleanup --apply` as the residue
+  remover instead of doctor/gc.
 - `scripts/check.sh` and `tests/lib/smoke-env.sh` unset `OMS_PEER_TIMEOUT`,
   `OMS_PEER_PRINT_TIMEOUT`, `OMS_WORKER_GUARD_STRICT` and
   `OMS_WORKER_GUARD_OFF`, so a gate run under autopilot acceptance no longer
