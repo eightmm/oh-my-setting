@@ -3815,6 +3815,15 @@ direct_unrelated = accept_call("agent-plan", "finish", "--id", "accept-task", "-
 assert direct_unrelated.returncode != 0 and "does not contain the accepted commit" in \
     direct_unrelated.stderr, direct_unrelated.stderr
 assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task").stdout)["state"] == "review"
+# A plain patch-land without panel acceptance must name the --accept repair path.
+with patch.object(saved, "_owned_task", return_value={"plan_id": "plan_x", "lease_id": "l1"}):
+    try:
+        saved._validate_landed_acceptance(accept_repo, accept_execution, "codex", "accept-task", accept_verify,
+                                          accept_sha)
+        raise AssertionError("landed acceptance without panel_accept was accepted")
+    except ValueError as error:
+        assert "(it was not landed with oms panel --accept)" in str(error) and \
+            "--plan-task" in str(error), error
 # Stable patch IDs ignore whitespace. A different Python indentation must not
 # bind the reviewed patch even though it locates the same candidate class.
 indent_repo = temporary / "accept indentation collision"

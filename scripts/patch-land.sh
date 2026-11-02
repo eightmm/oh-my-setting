@@ -1175,8 +1175,14 @@ if [ -z "$PATCH" ] && [ -n "$PLAN_TASK" ]; then
 fi
 [ -n "$PATCH" ] || fail "--patch is required (or --plan-task with a stored patch)"
 [ -z "$PLAN_TASK" ] || {
-  [ "$PLAN_STATE" = "review" ] ||
-    fail "plan task $PLAN_TASK is $PLAN_STATE, not review"
+  [ "$PLAN_STATE" = "review" ] || {
+    case "$PLAN_STATE" in
+      claimed | running)
+        fail "plan task $PLAN_TASK is $PLAN_STATE, not review; publish its review first: oms agent-plan review --id $PLAN_TASK --artifact REPORT --patch PATCH" ;;
+      *)
+        fail "plan task $PLAN_TASK is $PLAN_STATE, not review" ;;
+    esac
+  }
   [ -n "$PLAN_LEASE_ID" ] && [ "$PLAN_REVIEW_LEASE_ID" = "$PLAN_LEASE_ID" ] ||
     fail "plan task $PLAN_TASK has a stale review lease"
   [ -n "$PLAN_REVIEW_PATCH" ] ||

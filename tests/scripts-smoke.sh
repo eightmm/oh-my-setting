@@ -25268,6 +25268,7 @@ test_patch_land_rejects_stale_review_patch_lease() {
     >/dev/null 2>"$project/err" || rc=$?
   [ "$rc" = 2 ] || fail "stale stored review patch should be rejected before admission"
   assert_file_contains "$project/err" "not review"
+  assert_file_contains "$project/err" "oms agent-plan review --id"
   rc=0
   (cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t1 \
     --patch "$TMP/land-stale-review.patch" --verify true) \

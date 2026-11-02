@@ -1021,6 +1021,19 @@ def _live_review_read_passes(repo, execution_checkout=None):
     return sorted(name for name in live.splitlines() if name)
 
 
+def _unbound_plan_landing(rows, worker):
+    """Return the plan_id of a worker's delegate patch whose landing is bound to another plan."""
+    patches = [r for r in rows if r.get('kind') == 'delegate'
+               and r.get('attempt_id') == worker.get('attempt_id') and r.get('patch_sha256')]
+    if not patches or not patches[-1].get('plan_id'):
+        return None
+    plan_id, digest = patches[-1]['plan_id'], patches[-1]['patch_sha256']
+    if any(r.get('kind') == 'patch-land' and r.get('patch_sha256') == digest and r.get('exit') == 0
+           and r.get('plan_id') != plan_id for r in rows):
+        return plan_id
+    return None
+
+
 def _review_preflight(repo, task_id, workers, rows, admissions=None):
     """Share scope and digest-bound review checks before application and acceptance."""
     # Scope evidence is checked first, including for unlanded candidates.
@@ -1058,8 +1071,12 @@ def _review_preflight(repo, task_id, workers, rows, admissions=None):
                                   'gate_verify_exit': latest['review'].get('gate_verify_exit'),
                                   'seat_verdicts': [seat.get('verdict') for seat in latest['review']['seats']]})
     if missing_admission:
-        raise ValueError("write worker call(s) lack matching landed patch evidence: %s; acceptance needs oms patch-land of each worker's own patch using the exact delegate patch bytes so the landing is recorded; landing evidence is read from this state repository, so a patch-land run in an independent clone does not count; land from this checkout or an oms scratch-worktree; otherwise finalize with --outcome completed"
-                         % ', '.join(missing_admission))
+        unbound = sorted({plan for index, worker in enumerate(workers) if not admissions[index]
+                          for plan in [_unbound_plan_landing(rows, worker)] if plan})
+        cause = ('; a patch-land of these bytes exists but is not bound to plan %s (land with oms patch-land --plan-task %s)'
+                 % (', '.join(unbound), task_id) if unbound else '')
+        raise ValueError("write worker call(s) lack matching landed patch evidence: %s; acceptance needs oms patch-land of each worker's own patch using the exact delegate patch bytes so the landing is recorded; landing evidence is read from this state repository, so a patch-land run in an independent clone does not count; land from this checkout or an oms scratch-worktree; otherwise finalize with --outcome completed%s"
+                         % (', '.join(missing_admission), cause))
     if missing_reviews:
         raise ValueError('write worker call(s) lack a passing review gate: %s; run the review or finalize completed instead'
                          % ', '.join(missing_reviews))
@@ -1716,6 +1733,8 @@ def _publication_contains_acceptance(execution, landed_commit, record, patch):
 def _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_commit):
     task = _owned_task(repo, execution, owner, task_id)
     record = task.get('panel_accept')
+    if record is None:
+        raise ValueError('task has no exact panel acceptance bound to its current lease (it was not landed with oms panel --accept); a plain patch-land landing is finalized without --landed-commit, and accepted additionally needs that patch-land bound with --plan-task')
     required = {'schema', 'task_id', 'plan_id', 'lease_id', 'candidate_event_id',
                 'candidate_attempt_id', 'patch_sha256', 'artifact', 'patch', 'commit', 'tree', 'base',
                 'review_gate'}
