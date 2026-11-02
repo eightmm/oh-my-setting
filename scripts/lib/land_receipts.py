@@ -36,6 +36,50 @@ def range_base(chain, pushed):
     return next((c for c in chain[1:] if c in pushed), chain[1] if len(chain) > 1 else "")
 
 
+def pushed_unpassed_base(directories, prior, read, binds=None):
+    """push.base of a land of `prior` that pushed but never passed, else None.
+
+    A pushed land whose CI failed still put its work on the target; the passed
+    fix-forward land after it proves the whole tree. Any passed receipt for
+    `prior` keeps its own range (tasks finish against it), as does a land that
+    never pushed. `directories` are (path, sibling) pairs; a sibling receipt
+    must satisfy binds(receipt, name)."""
+    found = None
+    for directory, sibling in directories:
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            if not name.startswith(prior + "-") or not name.endswith(".json"):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    continue
+                receipt = json.loads(read(path))
+            except (OSError, ValueError, SystemExit):
+                continue
+            if (not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or
+                    receipt["schema"] != 1 or receipt.get("sha") != prior or
+                    (sibling and not (binds and binds(receipt, name)))):
+                continue
+            if receipt.get("state") == "passed":
+                return None
+            push = receipt.get("push")
+            if (found is not None or not isinstance(push, dict) or
+                    type(push.get("rc")) is not int or push["rc"] != 0 or
+                    push.get("moved") == 0):
+                continue
+            try:
+                base = recorded_base(receipt)
+            except ValueError:
+                continue
+            if base is not None and base != prior:
+                found = base
+    return found
+
+
 def recorded_base(receipt):
     push = receipt.get("push", {})
     if "base" not in push:

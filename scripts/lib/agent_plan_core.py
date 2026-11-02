@@ -257,6 +257,7 @@ def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
     stale = None
     passed = False
     legacy = None
+    unfinished = None
     recorded_base = _load(os.path.join(os.path.dirname(__file__), "land_receipts.py"))["recorded_base"]
     for directory, sibling, name in candidates:
         if sibling:
@@ -273,7 +274,7 @@ def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
             continue
         if not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or receipt["schema"] != 1:
             continue
-        if receipt.get("sha") != sha or receipt.get("state") != "passed":
+        if receipt.get("sha") != sha:
             continue
         if sibling and not sibling_receipt_binds_repo(receipt, name):
             continue
@@ -283,6 +284,10 @@ def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
         if (type(gate.get("rc")) is not int or gate["rc"] != 0 or
                 type(push.get("rc")) is not int or push["rc"] != 0 or
                 ci.get("conclusion") != "success"):
+            continue
+        if receipt.get("state") != "passed":
+            if unfinished is None:
+                unfinished = receipt.get("state")
             continue
         passed = True
         remote, target = receipt.get("remote"), receipt.get("target")
@@ -329,6 +334,10 @@ def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
     if passed:
         die("landed commit %s is not reachable from a passed receipt's local pushed target ref; "
             "fetch %s first" % (sha, stale or "its remote"))
+    if unfinished is not None:
+        die("no passed oms land receipt for %s: gate, push and CI succeeded but the receipt state is %r "
+            "(for example an update deferred for live workers); re-run oms land to finish installation"
+            % (sha, str(unfinished)[:40]))
     die("no passed oms land receipt for %s with gate/push ok and CI success" % sha)
 
 def landed_range_paths(sha, receipt_sha256):
@@ -392,6 +401,26 @@ def landed_range_paths(sha, receipt_sha256):
         if base == sha:
             die("receipt push.base does not describe a nonempty landed range")
         git("merge-base", "--is-ancestor", base, sha)
+        # A pushed land whose CI failed carries work a passed fix-forward land
+        # proves with its full gate; extend over such pushes, never over a
+        # passed land or one that did not push.
+        directories = [(primary, False)] + [(d, True) for d in siblings]
+        def binds(prior_receipt, prior_name):
+            return receipts["sibling_receipt_binds_repo"](env("OMS_REPO"), prior_receipt, prior_name)
+        seen = {sha}
+        for _ in range(32):
+            seen.add(base)
+            earlier = receipts["pushed_unpassed_base"](directories, base, read, binds)
+            if earlier is None or earlier in seen:
+                break
+            try:
+                if subprocess.run(["git", "-C", env("OMS_REPO"), "merge-base", "--is-ancestor", earlier, base],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  env=git_env, timeout=30).returncode != 0:
+                    break
+            except (OSError, subprocess.TimeoutExpired):
+                break
+            base = earlier
     else:
         pushed = {prior for prior, _, _ in receipts["pushed_receipts"](directory, sha, read)}
         chain = git("rev-list", "--first-parent", "--max-count=1000", sha).split()

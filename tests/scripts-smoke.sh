@@ -7461,6 +7461,63 @@ assert s["stale_review"] == [], s
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "out-of-scope proof changed plan"
   "$SH" --repo "$d" finish --id scoped --landed-commit "$inside" >/dev/null ||
     fail "commit finish must accept a landing that touches allowed_paths"
+  # A pushed land whose CI failed still put its work on the target, and the
+  # fix-forward land after it proves the whole tree: its range extends back over
+  # that push. A land that never pushed, or one that passed, bounds the range.
+  local fwd_head fwd_a fwd_b fwd_c fwd_d fwd_e
+  fwd_receipt() {  # sha state push-rc base ci
+    python3 - "$receipt_dir/$1-fwd.json" "$@" <<'PY'
+import json, sys
+path, sha, state, rc, base, ci = sys.argv[1:]
+push = {"rc": int(rc)}
+if base: push["base"] = base
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump({"schema": 1, "state": state, "sha": sha, "remote": "origin", "target": "main",
+               "gate": {"rc": 0}, "push": push, "ci": {"conclusion": ci}}, handle)
+PY
+  }
+  fwd_commit() { printf 'x\n' > "$d/$1"; git -C "$d" add "$1"; git -C "$d" commit -qm "$1"; git -C "$d" rev-parse HEAD; }
+  mkdir -p "$d/src"
+  fwd_head="$(git -C "$d" rev-parse HEAD)"
+  fwd_a="$(fwd_commit src/pushed-failed.txt)"
+  fwd_b="$(fwd_commit unrelated-b.txt)"
+  fwd_c="$(fwd_commit src/unpushed-failed.txt)"
+  fwd_d="$(fwd_commit unrelated-d.txt)"
+  fwd_e="$(fwd_commit unrelated-e.txt)"
+  git -C "$d" update-ref refs/remotes/origin/main HEAD
+  fwd_receipt "$fwd_a" failed 0 "$fwd_head" failure
+  fwd_receipt "$fwd_b" passed 0 "$fwd_a" success
+  fwd_receipt "$fwd_c" failed 1 "$fwd_b" failure
+  fwd_receipt "$fwd_d" passed 0 "$fwd_c" success
+  fwd_receipt "$fwd_e" update-deferred 0 "$fwd_d" success
+  for mode in pushed-failed unpushed-failed deferred; do
+    "$SH" --repo "$d" add --id "fwd-$mode" --title "$mode" --allowed "src/$mode.txt" >/dev/null
+    "$SH" --repo "$d" claim --id "fwd-$mode" --provider codex >/dev/null
+    "$SH" --repo "$d" review --id "fwd-$mode" --artifact artifact.md --patch change.patch >/dev/null
+  done
+  "$SH" --repo "$d" finish --id fwd-pushed-failed --landed-commit "$fwd_b" >/dev/null ||
+    fail "a passed fix-forward land did not finish the task of the pushed CI-failed land before it"
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  if "$SH" --repo "$d" finish --id fwd-unpushed-failed --landed-commit "$fwd_d" >"$d/err" 2>&1; then
+    fail "a land that never pushed was bridged by the next passed land"
+  fi
+  assert_file_contains "$d/err" "landed commit $fwd_d does not land task fwd-unpushed-failed: $fwd_c..$fwd_d"
+  # A passed land is never bridged: the task of the land before it stays refused.
+  "$SH" --repo "$d" add --id fwd-passed --title passed --allowed src/pushed-failed.txt >/dev/null
+  "$SH" --repo "$d" claim --id fwd-passed --provider codex >/dev/null
+  "$SH" --repo "$d" review --id fwd-passed --artifact artifact.md --patch change.patch >/dev/null
+  fwd_receipt "$fwd_d" passed 0 "$fwd_b" success
+  if "$SH" --repo "$d" finish --id fwd-passed --landed-commit "$fwd_d" >"$d/err" 2>&1; then
+    fail "a land range was extended over a passed land"
+  fi
+  assert_file_contains "$d/err" "$fwd_b..$fwd_d"
+  fwd_receipt "$fwd_d" passed 0 "$fwd_c" success
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  if "$SH" --repo "$d" finish --id fwd-deferred --landed-commit "$fwd_e" >"$d/err" 2>&1; then
+    fail "commit finish accepted a receipt whose update was deferred"
+  fi
+  assert_file_contains "$d/err" 're-run oms land to finish installation'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "refused fix-forward finishes changed plan"
   # A separate producer clone explicitly hands real land receipts back to the
   # shared plan checkout. Two commits need the predecessor to cover src/.
   local handoff_remote="$TMP/plan-handoff.git" producer="$TMP/plan-producer"
