@@ -870,7 +870,9 @@ PY
     # Informational: name affected suites that --verify skips so they do not
     # first fail at the land gate. The graph needs a Git range, so the applied
     # tree becomes an unreferenced commit via a throwaway index; the trusted
-    # harness graph reads it, never the candidate's scripts. Fail-open.
+    # harness graph reads it, never the candidate's scripts. Fail-open. The
+    # graph diffs the worktree, so a racy index entry re-hashes files: keep
+    # global/system filters and fsmonitor out, like every git call above.
     if [ "$VERIFY_EXIT" = 0 ] && [ "$VERIFICATION" = command ] &&
       [ -x "$ROOT/scripts/graph.sh" ] && command -v timeout >/dev/null 2>&1; then
       hint_idx="$worktree_parent/hint-index"
@@ -882,7 +884,10 @@ PY
         hint_head="$(hint_git rev-parse HEAD 2>/dev/null)" &&
         hint_commit="$(GIT_AUTHOR_NAME=oms GIT_AUTHOR_EMAIL=oms@localhost GIT_COMMITTER_NAME=oms GIT_COMMITTER_EMAIL=oms@localhost \
           hint_git commit-tree "$hint_tree" -p "$hint_head" -m admit 2>/dev/null)" &&
-        hint_json="$(timeout 60 bash "$ROOT/scripts/graph.sh" project affected --repo "$worktree" \
+        hint_json="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+          GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false \
+          GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \
+          timeout 60 bash "$ROOT/scripts/graph.sh" project affected --repo "$worktree" \
           --base "$hint_head" --head "$hint_commit" \
           --guard 'scripts/graph.sh' --guard 'scripts/lib/oms_graph/**' --guard 'tests/graph-smoke.sh' \
           --runnable 'tests/operator/*' --json 2>/dev/null)"; then
