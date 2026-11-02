@@ -388,7 +388,7 @@ for owner in panel.PROVIDERS:
     assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
 with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
     claude_stub = Path(help_dir) / "claude"
-    claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--autocompact <auto|tokens>'\n")
+    claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--autocompact <auto|tokens>' '--disallowedTools <tools...>'\n")
     claude_stub.chmod(0o700)
     old_path = os.environ.get("PATH", "")
     bash_dir = os.path.dirname(shutil.which("bash"))
@@ -396,6 +396,7 @@ with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
         panel_native._claude_help.cache_clear()
         panel_native._claude_supports_autocompact.cache_clear()
         panel_native._claude_supports_name.cache_clear()
+        panel_native._claude_supports_disallowed_tools.cache_clear()
     try:
         os.environ["PATH"] = help_dir + os.pathsep + old_path
         clear_claude_probes()
@@ -403,6 +404,10 @@ with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
         resumed_supported_argv = panel.native_command("claude", project, resume="compact-session")
         assert supported_argv[supported_argv.index("--autocompact") + 1] == "300000"
         assert resumed_supported_argv[resumed_supported_argv.index("--autocompact") + 1] == "300000"
+
+        for argv in (supported_argv, resumed_supported_argv):
+            assert "--disallowedTools=Agent" in argv
+            assert argv.index("--disallowedTools=Agent") < argv.index("--append-system-prompt")
 
         expected_name = "oms main · " + os.path.basename(str(project))
         for argv in (supported_argv, resumed_supported_argv):
@@ -421,19 +426,22 @@ with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
             assert panel.native_command("claude", project)[panel.native_command("claude", project).index("--name") + 1] == "oms main"
             assert panel.native_command("codex", project)[-1].startswith("oms main — ")
 
-        claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--name-only'\n")
+        claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--name-only' '--disallowedTools-extra'\n")
         clear_claude_probes()
-        assert "--name" not in panel.native_command("claude", project)
+        malformed_argv = panel.native_command("claude", project)
+        assert "--name" not in malformed_argv and "--disallowedTools=Agent" not in malformed_argv
 
         claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]'\n")
         clear_claude_probes()
         unsupported_argv = panel.native_command("claude", project)
         assert "--autocompact" not in unsupported_argv and "--name" not in unsupported_argv
+        assert "--disallowedTools=Agent" not in unsupported_argv
 
         os.environ["PATH"] = ""
         clear_claude_probes()
         missing_argv = panel.native_command("claude", project)
         assert "--autocompact" not in missing_argv and "--name" not in missing_argv
+        assert "--disallowedTools=Agent" not in missing_argv
     finally:
         os.environ["PATH"] = old_path
         clear_claude_probes()

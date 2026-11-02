@@ -54,6 +54,11 @@ def _claude_supports_name():
     return re.search(r"--name(?=[ <=]|$)", _claude_help(), re.M) is not None
 
 
+@lru_cache(maxsize=1)
+def _claude_supports_disallowed_tools():
+    return re.search(r"(?<![\w-])--disallowedTools(?=[ <=]|$)", _claude_help(), re.M) is not None
+
+
 def _main_session_name(repo):
     """Resume-list identity; a label that is empty, sensitive or unreadable never leaks the raw name."""
     from terminal_panel import clean, safe_label
@@ -336,6 +341,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
             command += ["--name", name]
         if _claude_supports_autocompact():
             command += ["--autocompact", str(CLAUDE_AUTOCOMPACT_TOKENS)]
+        if _claude_supports_disallowed_tools():
+            command += ["--disallowedTools=Agent"]
         command += ["--append-system-prompt", instructions]
         if task:
             command += ["--", task]

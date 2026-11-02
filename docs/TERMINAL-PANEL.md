@@ -231,6 +231,7 @@ and that reference, so restarting keeps the same room participant and unread mai
 Resumed Claude mains pass `--system-prompt-snapshot off` so they rebuild their appended
 prompt instead of reusing the stored one; this needs Claude Code 2.1.257 or later.
 When supported by the installed Claude CLI, panel Claude mains also use `--autocompact 300000`.
+When supported, they pass `--disallowedTools=Agent` to route delegation through the panel.
 After `/clear`, restart and explicit resume follow the participant's current
 bound session; the original join boundary and mailbox remain intact.
 Codex starts with its existing flags; a recorded native session can be resumed.
