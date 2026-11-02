@@ -14214,7 +14214,7 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     esac
     retry_status=0
     FIXTURE_EXIT="$fixture_exit" FIXTURE_GUARD="$fixture_guard" FIXTURE_CASE="$retry_case" \
-      OMS_PEER_INTERACTIVE="$fixture_interactive" OMS_PANEL_DISPATCH="$fixture_panel" \
+      OMS_PEER_INTERACTIVE="$fixture_interactive" OMS_PANEL_DISPATCH="$fixture_panel" OMS_PANEL_ROLE=worker \
       OMS_ATTEMPT_ID="$fixture_attempt" OMS_MODEL_EXPLICIT=gpt-6.1-sol OMS_AGENT=codex \
       bash -c '. "$1/scripts/lib/peer-common.sh"
         fixture_dir="$2"
@@ -16788,6 +16788,7 @@ test_update_refreshes_providers_by_default_and_tools_on_request() {
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$project/scripts/lib/install-lifecycle-lock.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/harness-residue.sh" "$project/scripts/lib/harness-residue.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor install-autoupdate uninstall-autoupdate install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
@@ -16871,6 +16872,7 @@ test_update_auto_refreshes_only_installed_codex_plugin() {
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$project/scripts/lib/install-lifecycle-lock.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/harness-residue.sh" "$project/scripts/lib/harness-residue.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor install-autoupdate uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
@@ -17799,6 +17801,7 @@ test_update_preserves_auto_update_mode() {
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$project/scripts/lib/install-lifecycle-lock.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/harness-residue.sh" "$project/scripts/lib/harness-residue.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
