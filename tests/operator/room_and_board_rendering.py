@@ -797,16 +797,18 @@ assert panel.work_split_cells(("left", 190, False), 120) == 99, "narrow windows 
 assert panel.split_cells(("left", 40, True), 220) == 88 and panel.split_cells(("left", 25, False), 50) == 25
 assert panel.split_cells(("left", 5, False), 100) == 20 and panel.split_cells(("left", 95, False), 100) == 79
 assert panel.split_cells(("left", 30, False), 30) == 15
-def board_calls(display, terminal=None, percent="", failed=False, main_watch=False):
+def board_calls(display, terminal=None, percent="", failed=False, main_watch=False, version="tmux 3.4"):
+    import panel_layout
+    panel_layout._TMUX_PERCENT.clear()
     def answer(command, **kwargs):
         is_geometry = "display-message" in command
-        return subprocess.CompletedProcess(command, int(failed and is_geometry), display if is_geometry else "%2" if "-P" in command else "", "")
+        return subprocess.CompletedProcess(command, int(failed and is_geometry), display if is_geometry else version if "-V" in command else "%2" if "-P" in command else "", "")
     with patch.dict(os.environ, {"OMS_PANEL_BOARD_PERCENT": percent}), \
             patch.object(panel, "terminal_window", return_value=terminal), \
             patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
             patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
         panel.board_split("%1", Path("/repo"), "board", main_watch=main_watch)
-    return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0]]
+    return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0] and "-V" not in call.args[0]]
 def left_split(width):
     return ["split-window", "-f", "-h", "-b", "-l", width, "-t", "%1", "-c", "/repo", "board"]
 record_left = ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:56c"]
@@ -845,6 +847,13 @@ assert board_calls("80 24 0 $1\tcodex\t", terminal=(157, 131)) == [
 assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 assert board_calls("") == [left_split("28%")]
+for old in ("tmux 3.0a", "tmux 2.9", "tmux", "tmux unknown"):
+    assert board_calls("", version=old) == [left_split("22")], "old or unparseable tmux gets cells of 80x24: " + old
+    assert board_calls("80 24 0 $1\tcodex\t", terminal=(200, 50), version=old) == [record_left, left_split("56")], old
+for new in ("tmux 3.1", "tmux next-3.4", "tmux master", "tmux openbsd-7.3", "tmux 3.4"):
+    assert board_calls("", version=new) == [left_split("28%")], new
+assert board_calls("", version="tmux 3.0a", terminal=None)[0][5] == "22" and board_calls("120 50 0 $1\tcodex\t", version="tmux 3.0a")[0][4] == "-l"
+assert all("-p" not in call for version in ("tmux 3.0a", "tmux 3.4") for call in board_calls("", version=version))
 assert board_calls("broken geometry", failed=True) == [left_split("28%")]
 # A detached session still reports tmux's 80x24: the attaching terminal sizes the board and the record.
 assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [

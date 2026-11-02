@@ -1357,7 +1357,7 @@ In tmux it opens a popup that takes one question and runs
 `oms panel --dispatch advisor --main PARTICIPANT` without the
 watcher's inherited caller identity; the dispatch re-proves that main is live,
 and the answer returns to that main's room mail. Outside tmux the board shows
-the command instead. Popups need tmux 3.2 or newer; when the popup cannot open,
+the command instead. The board split sizes the pane in cells; only a detached or unmeasured window uses `-l N%`, and only on tmux 3.1 or newer (probed once with `tmux -V`; older or unparseable versions get cells of the best known size). `-p` is never used because tmux 3.3/3.4 mis-parse it. Popups need tmux 3.2 or newer; when the popup cannot open,
 the board says so and the control menu's `a Advisor` remains. A failed call keeps
 the popup open with its exit status. Selecting or clicking never calls a model. A prompt-less
 `--dispatch advisor` on a terminal asks its question interactively.

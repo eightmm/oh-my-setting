@@ -22,6 +22,24 @@ def tmux_command(*args):
     return ["tmux"] + list(args)
 
 
+_TMUX_PERCENT = []
+
+
+def tmux_percent_size():
+    """True when this tmux takes `-l N%` (3.1+, master/next); older or unparseable versions need cells.
+    Probed once per process. `-p` is no substitute: tmux 3.3/3.4 reads its value from `-l`."""
+    if not _TMUX_PERCENT:
+        try:
+            out = subprocess.run(tmux_command("-V"), capture_output=True, text=True, check=False, timeout=3,
+                                 stdin=subprocess.DEVNULL).stdout.replace("\r", "").strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        found = re.search(r"([0-9]+)\.([0-9]+)", out)
+        _TMUX_PERCENT.append((int(found.group(1)), int(found.group(2))) >= (3, 1) if found
+                             else bool(re.search(r"\b(master|next)\b", out)))
+    return _TMUX_PERCENT[0]
+
+
 def shell_command(command):
     # tmux shell-command is a shell string, unlike the native subprocess argv.
     return "exec " + " ".join(shlex.quote(str(arg)) for arg in command)
@@ -226,7 +244,8 @@ def board_split(pane, repo, command, main_watch=False):
             orientation = "top" if top_fits else "left"
     if mode == "overview" and orientation == "left":
         share = OVERVIEW_SHARE
-    width = "%d%%" % share
+    # `-l N%` needs tmux 3.1+; older or unprobeable tmux gets cells of the default 80x24 window instead.
+    size = ["-l", "%d%%" % share] if tmux_percent_size() else ["-l", str(max(1, share * (24 if orientation == "top" else 80) // 100))]
     if available:
         axis = available[1] if orientation == "top" else available[0]
         default = BOARD_HEIGHT_SHARE if orientation == "top" else (BOARD_SHARE if mode == "overview" else share)
@@ -245,14 +264,15 @@ def board_split(pane, repo, command, main_watch=False):
             cells = min(cells, axis - 1 - NATIVE_MIN)
         record_cells = work_split_cells((orientation, base_cells, False), axis)
         percent = max(1, min(99, (200 * cells + axis) // (2 * axis)))
-        width = str(cells) if sized and attached else "%d%%" % percent
+        # A detached session resizes when it attaches, so percent scales better there; old tmux gets cells.
+        size = ["-l", str(cells)] if sized and attached or not tmux_percent_size() else ["-l", "%d%%" % percent]
         if sized and session and parts[1] != "control" and (stored is None or stored[2]):
             value = top_text(record_cells) if orientation == "top" else split_text(record_cells)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_split", value),
                            check=False, timeout=3, stdin=subprocess.DEVNULL)
     # -f keeps the board spanning the full window axis beside a reader pane.
     direction = "-v" if orientation == "top" else "-h"
-    split = tmux_command("split-window", "-f", direction, "-b", "-l", width, "-t", pane, "-c", str(repo), command)
+    split = tmux_command("split-window", "-f", direction, "-b", *size, "-t", pane, "-c", str(repo), command)
     if main_watch:
         split[2:2] = ["-P", "-F", "#{pane_id}"]
     result = subprocess.run(split, check=True, capture_output=main_watch, text=main_watch)
