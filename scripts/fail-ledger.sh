@@ -453,11 +453,19 @@ now = time.time()
 head = os.environ.get("OMS_HEAD") or ""
 show_fp = os.environ.get("OMS_SHOW") or ""
 
+def head_of(r):
+    # "" when the row names no commit: legacy rows and non-git roots
+    # ("non-git") have nothing to compare, so each stays its own head.
+    h = str(r.get("state_fingerprint") or "").split(":", 1)[0]
+    ok = h == "unborn" or (bool(h) and all(c in "0123456789abcdefABCDEF" for c in h))
+    return h if ok else ""
+
 def stale_head(r):
-    # One failure against another commit is evidence about a tree that is
-    # gone; a recurrence across commits is the tree-independent kind.
-    fp = str(r.get("state_fingerprint") or "")
-    return bool(head and fp) and fp.split(":", 1)[0] != head
+    # Failures against another commit are evidence about a tree that is
+    # gone; a recurrence across distinct commits is the tree-independent kind.
+    # A retry on the same old commit is one observation, however often repeated.
+    h = head_of(r)
+    return bool(head and h) and h != head
 
 # Retirement predicate, textually identical in fail-ledger.sh (record's repeat
 # count, check, list), gc.sh's failure compaction, state.sh (both its
@@ -530,12 +538,13 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     fp = r.get("fingerprint")
     if fp not in agg:
         agg[fp] = {"count": 0, "last": None, "resolved": False, "how": None,
-                   "expired": 0, "last_expired": None}
+                   "expired": 0, "last_expired": None, "heads": set()}
         order.append(fp)
     ev = r.get("event")
     if ev == "resolved":
         agg[fp]["resolved"] = True
         agg[fp]["count"] = 0
+        agg[fp]["heads"] = set()
         agg[fp]["how"] = r.get("how")
         agg[fp]["expired"] = 0
         agg[fp]["last_expired"] = None
@@ -548,6 +557,9 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         else:
             agg[fp]["count"] += 1
             agg[fp]["last"] = r
+            # A row without a state fingerprint is its own head, so legacy
+            # rows keep counting as separate recurrences.
+            agg[fp]["heads"].add(head_of(r) or "row:%d" % agg[fp]["count"])
         agg[fp]["resolved"] = False
         agg[fp]["how"] = None
 if invalid:
@@ -586,7 +598,7 @@ for fp in order:
         row["attention"] = "retiring"
         row["actionable"] = False
         row["retiring"] = True
-    elif row["count"] < 2 and stale_head(last):
+    elif len(d["heads"]) < 2 and stale_head(last):
         row["attention"] = "stale"
         row["actionable"] = False
         row["retiring"] = False

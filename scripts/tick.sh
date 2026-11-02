@@ -363,7 +363,7 @@ except (OSError, ValueError, KeyError, TypeError):
     while IFS= read -r failure_fingerprint; do
       [ -n "$failure_fingerprint" ] || continue
       if bounded "$oms" fail-ledger --repo "$root" resolve --fingerprint "$failure_fingerprint" \
-        --how "retired by oms tick: one failure on a commit older than ${FAILURE_STALE_DAYS}d with no recurrence" >/dev/null 2>&1; then
+        --how "retired by oms tick: failures on a single commit older than ${FAILURE_STALE_DAYS}d with no recurrence on another commit" >/dev/null 2>&1; then
         failures_retired=$((failures_retired + 1))
       fi
     done < <(printf '%s\n' "$failure_candidates")

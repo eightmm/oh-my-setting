@@ -108,7 +108,7 @@ path = sys.argv[1]
 now = datetime.datetime.now(datetime.timezone.utc)
 foreign_state = "0" * 40 + ":" + "a" * 64 + ":" + "b" * 64
 
-def failure(fingerprint, age_days, kind="cmd"):
+def failure(fingerprint, age_days, kind="cmd", state=foreign_state):
     return {
         "schema": 2,
         "event": "fail",
@@ -118,14 +118,16 @@ def failure(fingerprint, age_days, kind="cmd"):
         "kind": kind,
         "cmd": "fixture " + fingerprint,
         "exit": 1,
-        "state_fingerprint": foreign_state,
+        "state_fingerprint": state,
     }
 
 rows = [
     failure("1111111111111111", 15),
     failure("2222222222222222", 1),
-    failure("3333333333333333", 16),
+    failure("3333333333333333", 16, state="1" * 40 + ":" + "a" * 64 + ":" + "b" * 64),
     failure("3333333333333333", 15),
+    failure("5555555555555555", 15),
+    failure("5555555555555555", 15),
     failure("4444444444444444", 0, "hook"),
 ]
 with open(path, "w", encoding="utf-8", newline="\n") as handle:
@@ -357,9 +359,26 @@ PY
 # --- sweep: one default sweep settles both a supersession and a stale row ----
 y="$TMP/both-at-once"; make_committed_repo "$y"; make_superseded_artifacts_and_stale_failures "$y"
 out="$("$TICK" run --repo "$y")"
-printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=1 failures_retired=1' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=1 failures_retired=2' ||
   fail "one sweep must report both counters at once: $out"
 grep -q 'retired by oms tick' "$y/.oms/failures.jsonl" || fail "the retirement must carry the tick provenance"
+
+# --- sweep: repeated failures outside git have no commit to age against -----
+ng="$TMP/non-git-failures"; mkdir -p "$ng/.oms"
+python3 - "$ng/.oms/failures.jsonl" <<'PY'
+import datetime, json, sys
+ts = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    for _ in range(2):
+        handle.write(json.dumps({"schema": 2, "event": "fail", "ts": ts, "agent": "codex",
+                                 "fingerprint": "6666666666666666", "kind": "cmd", "cmd": "fixture",
+                                 "exit": 1, "state_fingerprint": "non-git"}) + "\n")
+PY
+out="$("$TICK" run --repo "$ng")"
+printf '%s' "$out" | grep >/dev/null 'failures_retired=0' ||
+  fail "repeated non-git failures must not be retired as stale: $out"
+"$ROOT/scripts/fail-ledger.sh" --repo "$ng" show --fingerprint 6666666666666666 --json |
+  grep >/dev/null '"attention": "actionable"' || fail "repeated non-git failures must stay actionable"
 
 # --- sweep: superseded artifacts and stale one-shot failures settle safely --
 x="$TMP/superseded-and-stale"; make_committed_repo "$x"; make_superseded_artifacts_and_stale_failures "$x"
@@ -382,7 +401,7 @@ PY
 out="$("$TICK" run --repo "$x")"
 printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=0' ||
   fail "an already-resolved superseded artifact must be idempotent: $out"
-printf '%s' "$out" | grep >/dev/null 'failures_retired=1' ||
+printf '%s' "$out" | grep >/dev/null 'failures_retired=2' ||
   fail "one old stale one-shot failure must retire: $out"
 "$ROOT/scripts/fail-ledger.sh" --repo "$x" list --unresolved --json > "$TMP/superseded-unresolved.json"
 python3 - "$x/.oms/tick/last.json" "$x/.oms/artifacts/index.jsonl" "$x/.oms/failures.jsonl" "$TMP/superseded-unresolved.json" <<'PY' || fail "superseded and stale sweep evidence is wrong"
@@ -394,7 +413,7 @@ artifacts = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if
 ledger = [json.loads(line) for line in open(sys.argv[3], encoding="utf-8") if line.strip()]
 unresolved = {row["fingerprint"]: row for row in json.load(open(sys.argv[4], encoding="utf-8"))["failures"]}
 assert receipt["artifacts_superseded"] == 0 and receipt["artifact_supersede_rc"] == 0, receipt
-assert receipt["failures_retired"] == 1, receipt
+assert receipt["failures_retired"] == 2, receipt
 assert len([row for row in artifacts if row.get("kind") == "artifact-resolution" and
             row.get("resolves_event_id") == "evt_superseded_failure"]) == 1, artifacts
 assert any(row.get("event") == "resolved" and row.get("fingerprint") == "1111111111111111"
@@ -403,6 +422,8 @@ assert set(unresolved) == {"2222222222222222", "3333333333333333", "444444444444
 assert unresolved["2222222222222222"]["attention"] == "stale", unresolved
 assert unresolved["3333333333333333"]["count"] == 2 and unresolved["3333333333333333"]["attention"] == "actionable", unresolved
 assert unresolved["4444444444444444"]["attention"] == "retiring", unresolved
+assert any(row.get("event") == "resolved" and row.get("fingerprint") == "5555555555555555"
+           for row in ledger), "two retries on one old commit must retire as stale"
 PY
 out="$("$TICK" run --repo "$x")"
 printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=0' ||
