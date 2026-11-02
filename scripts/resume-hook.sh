@@ -298,7 +298,10 @@ try:
                         if git("rev-parse", "--verify", "-q", "refs/remotes/" + n)), None))
     def ahead(branch):
         base = git("rev-parse", "--abbrev-ref", branch + "@{u}") or default
-        count = git("rev-list", "--count", "%s..refs/heads/%s" % (base, branch)) if base else None
+        # Patch-id equivalence drops commits that landed under another SHA (regraft,
+        # cherry-pick); merges have no patch-id and always count.
+        count = git("rev-list", "--cherry-pick", "--right-only", "--count",
+                    "%s...refs/heads/%s" % (base, branch)) if base else None
         return (int(count), base) if count and count.isdigit() and int(count) else None
     here = git("symbolic-ref", "--short", "HEAD")
     parts, seen = [], set()

@@ -1947,7 +1947,7 @@ test_resume_hook_reads_utf8_repo() {
 # no ahead commits stay silent.
 test_resume_hook_shows_previous_room_and_unpublished_work() {
   local repo="$TMP/resume-digest" remote="$TMP/resume-digest-remote.git" out
-  local long
+  local long regraft
 
   mkdir -p "$repo/.oms"
   git -C "$repo" init -q -b main
@@ -1990,15 +1990,27 @@ PY
   git -C "$repo" -c user.email=test@example.com -c user.name=Test commit -q --allow-empty -m two
   git -C "$repo" worktree add -q -b side "$TMP/resume-digest-side" main
   git -C "$TMP/resume-digest-side" -c user.email=test@example.com -c user.name=Test commit -q --allow-empty -m side
+  git -C "$repo" worktree add -q -b landed "$TMP/resume-digest-landed" main
+  printf 'landed\n' >"$TMP/resume-digest-landed/landed.txt"
+  git -C "$TMP/resume-digest-landed" add landed.txt
+  git -C "$TMP/resume-digest-landed" -c user.email=test@example.com -c user.name=Test commit -q -m landed
+  regraft="$(git -C "$repo" -c user.email=test@example.com -c user.name=Test commit-tree 'landed^{tree}' -p main -m regraft)"
+  git -C "$repo" push -q origin "$regraft:refs/heads/main" 2>/dev/null
+  git -C "$repo" fetch -q origin
+  git -C "$repo" worktree add -q -b merged "$TMP/resume-digest-merged" main
+  git -C "$TMP/resume-digest-merged" -c user.email=test@example.com -c user.name=Test merge -q --no-ff -m merge origin/main
   out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | bash "$ROOT/scripts/resume-hook.sh")"
-  grep -Fq -- '- unpublished: 2 commit(s) on feature not on origin/main; other worktrees: side(1)' <<<"$out" ||
-    fail "an upstream-less branch must count against the default branch: $out"
+  grep -Fq -- '- unpublished: 2 commit(s) on feature not on origin/main; other worktrees: merged(1), side(1)' <<<"$out" ||
+    fail "an upstream-less branch and an unpublished merge must count against the default branch: $out"
+  grep -Fq 'landed(' <<<"$out" && fail "a commit landed under another SHA is not unpublished: $out"
   grep -Fq "$TMP" <<<"$out" && fail "no path may leak: $out"
   git -C "$repo" push -q origin feature
   git -C "$repo" branch -q --set-upstream-to=origin/feature feature
   out="$(cd "$TMP" && printf '{"cwd":"%s"}' "$repo" | bash "$ROOT/scripts/resume-hook.sh")"
   grep -Fq 'on feature' <<<"$out" && fail "a pushed branch is not unpublished: $out"
   git -C "$repo" worktree remove --force "$TMP/resume-digest-side"
+  git -C "$repo" worktree remove --force "$TMP/resume-digest-landed"
+  git -C "$repo" worktree remove --force "$TMP/resume-digest-merged"
 }
 
 test_panel_main_activity
