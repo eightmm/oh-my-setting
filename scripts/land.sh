@@ -52,7 +52,9 @@ outside the repo:
   sibling live autopilot runs (proposing, proposal-review, driving) in sibling
           worktrees are reported at intake and waited for before push, up to
           --sibling-wait seconds (default 1800; 0 checks once and blocks at
-          once, it does not skip: --ignore-siblings skips)
+          once, it does not skip: --ignore-siblings skips); with --wait the same
+          budget also retries an install deferred by live workers (update.sh
+          exit 76) every 15s, counted from the first deferral
 Status probes the land lock without taking it and reports active true|false|
 null (null: cannot tell). A receipt that says running proves nothing; active
 does. Text status prints the lock observation explicitly. With --active-exit,
@@ -765,7 +767,19 @@ run_job() {
       return $?
     fi
     rc=0
-    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
+    local deferred_at="" poll_left poll_step
+    while :; do
+      rc=0
+      OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
+      [ "$rc" -eq 76 ] && [ "$WAIT" -eq 1 ] || break
+      [ -n "$deferred_at" ] || deferred_at="$(date +%s)"
+      poll_left=$(( SIBLING_WAIT - ($(date +%s) - deferred_at) ))
+      [ "$poll_left" -gt 0 ] || break
+      poll_step=15
+      [ "$poll_left" -ge "$poll_step" ] || poll_step="$poll_left"
+      printf 'install deferred (live workers); rechecking in %ss (%ss of --sibling-wait left)\n' "$poll_step" "$poll_left" >> "$LOG"
+      sleep "$poll_step"
+    done
     case "$rc" in
       0) update_reason=installed ;;
       76) update_reason=deferred-live-workers ;;
@@ -1015,6 +1029,7 @@ job=("$ROOT/scripts/land.sh" --run-job "$STAMP" --repo "$REPO" --remote "$REMOTE
 [ -z "$HANDOFF_TO" ] || job+=(--handoff-receipt-to "$HANDOFF_TO")
 [ -z "$SYNC_TO" ] || job+=(--sync-shared "$SYNC_TO")
 [ "$UPDATE" -eq 1 ] || job+=(--no-update)
+[ "$WAIT" -eq 0 ] || job+=(--wait)
 [ "$IGNORE_SIBLINGS" -eq 0 ] || job+=(--ignore-siblings)
 if [ "$WAIT" -eq 1 ]; then
   rc=0

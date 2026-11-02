@@ -555,6 +555,10 @@ cat > "$install/scripts/update.sh" <<'EOF'
 #!/usr/bin/env bash
 echo update >> "$OMS_TEST_LAND_EVENTS"
 [ "$OH_MY_SETTING_UPDATE_EXPECTED_TARGET" = "$(git -C "$OMS_TEST_LAND_REPO" rev-parse HEAD)" ] || exit 43
+if [ -n "${OMS_TEST_UPDATE_76_ONCE:-}" ] && [ ! -e "$OMS_TEST_UPDATE_76_ONCE" ]; then
+  : > "$OMS_TEST_UPDATE_76_ONCE"
+  exit 76
+fi
 [ "${OMS_TEST_UPDATE_RC:-42}" != 0 ] || {
   # Advance the disposable installed Git state while retaining this stub updater.
   root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -1295,7 +1299,7 @@ mkdir -p "$repo/.github/workflows"
 printf 'on: push\n' > "$repo/.github/workflows/test.yml"
 git -C "$repo" add .github/workflows/test.yml
 gate 'echo update failure probe; echo "check: ok"'
-if OMS_TEST_UPDATE_RC=76 OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
+if OMS_TEST_UPDATE_RC=76 OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 --sibling-wait 0 \
   --handoff-receipt-to "$handoff" > "$TMP/update-failed.out" 2>&1; then
   fail "installation failure was reported as a successful landing"
 fi
@@ -1311,6 +1315,15 @@ assert len(matches) == 1, matches
 r = matches[0]
 assert r["state"] == "failed" and r["push"]["rc"] == 0 and r["update"]["rc"] == 76 and r["update"]["reason"] == "deferred-live-workers", r
 PY
+
+# --wait with a sibling-wait budget retries a deferred install; exhaustion keeps the failure.
+: > "$TMP/events"
+if OMS_TEST_UPDATE_RC=76 OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
+  --sibling-wait 2 > "$TMP/update-budget.out" 2>&1; then
+  fail "an exhausted install wait was reported as success"
+fi
+grep -q 'pushed; CI passed; installation deferred (live workers)' "$TMP/update-budget.out" || fail "exhausted install wait lost the deferral message"
+[ "$(grep -c '^update$' "$TMP/events")" -ge 2 ] || fail "install wait did not retry update: $(cat "$TMP/events")"
 
 # Retry the already-pushed commit: neither its gate nor successful CI repeats.
 : > "$TMP/events"
@@ -1342,6 +1355,19 @@ OMS_TEST_CI_RC=4 OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/resume-rollback.out" 2>&1 ||
   fail "rolled-back installation did not resume"
 [ "$(cat "$TMP/events")" = update ] || fail "old receipt hid installation rollback"
+: > "$TMP/events"
+# A deferred install recovers within one --wait run once the workers are gone.
+git -C "$install" update-ref HEAD "$(git -C "$repo" rev-parse HEAD^)"
+rm -f "$TMP/update-once"
+OMS_TEST_UPDATE_76_ONCE="$TMP/update-once" OMS_TEST_UPDATE_RC=0 OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 --sibling-wait 5 > "$TMP/update-later.out" 2>&1 ||
+  fail "install wait did not recover after workers finished: $(cat "$TMP/update-later.out")"
+python3 - "$receipt_dir" "$(git -C "$repo" rev-parse HEAD)" <<'PY' || fail "install-wait receipt is wrong"
+import json, pathlib, sys
+rows = [json.loads(p.read_text()) for p in pathlib.Path(sys.argv[1]).glob("*.json")]
+r = [x for x in rows if x.get("sha") == sys.argv[2]][0]
+assert r["state"] == "passed" and r["update"]["rc"] == 0 and r["update"]["reason"] == "installed", r
+PY
 : > "$TMP/events"
 
 # A different gate or destination cannot borrow a prior successful receipt:
