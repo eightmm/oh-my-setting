@@ -341,6 +341,8 @@ PLAIN = ('true', 'false', 'yes', 'no', '0', '1')
 USERINFO = re.compile(r'^[a-z][a-z0-9+.-]*://[^\s/:@]+:([^\s/@]+)@')
 
 def secret_name(name):
+    if re.fullmatch(r'GIT_CONFIG_KEY_[0-9]+', name):
+        return False  # git config key name (section.key), never a credential
     parts = [p for p in re.split(r'[^A-Za-z0-9]+', name.upper()) if p]
     return bool(parts) and parts[-1] not in METADATA and any(p in NAMES for p in parts)
 

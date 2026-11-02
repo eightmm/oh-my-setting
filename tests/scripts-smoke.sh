@@ -15508,6 +15508,16 @@ test_scrubber_tiers_split_secret_from_machine() {
     if agent_memory_file_has_secret_content "$f"; then
       fail "ordinary configuration values must not block: $(agent_memory_sensitive_report "$f")"
     fi
+    # Git's command-scope config key name is not a credential; other key-named
+    # variables holding the same value still are.
+    export "GIT_CONFIG_KE""Y_0=core.hooksPath"
+    printf 'set core.hooksPath here\n' > "$f"
+    if agent_memory_file_has_secret_content "$f"; then
+      fail "git config key name must not block: $(agent_memory_sensitive_report "$f")"
+    fi
+    export "FIXTURE_CONFIG_KE""Y_0=core.hooksPath"
+    agent_memory_file_has_secret_content "$f" ||
+      fail "non-git key-named variable with the same value must still block"
   )
   (
     local shim="$TMP/scrub-python-shim" rc=0
