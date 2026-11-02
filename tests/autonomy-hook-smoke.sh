@@ -1693,6 +1693,114 @@ assert room.participant(room.status(repo, "late-room"), "late-main")["consumer"]
 PY
 }
 
+# The panel main must not move the canonical checkout while OMS calls are live:
+# the worker guard stops every live worker when that index or a ref changes.
+test_git_move_guard_denies_canonical_with_live_calls() {
+  local hook="$ROOT/scripts/git-move-guard-hook.sh"
+  local base="$TMP/git-move-guard" main linked entry dead_pid rc cmd
+  local git_c=(git -c user.email=t@example.test -c user.name=t)
+
+  main="$base/main"
+  linked="$base/linked"
+  mkdir -p "$base"
+  git init -q "$main"
+  "${git_c[@]}" -C "$main" commit -q --allow-empty -m init
+  git -C "$main" worktree add -q "$linked" -b linked
+  entry="$main/.oms/locks/canonical-sync.d/call-1"
+  mkdir -p "$entry"
+  printf '%s\n' "$$" > "$entry/pid"
+  printf '%s\n' "$(. "$ROOT/scripts/lib/file-lock.sh"; oms_file_lock_process_start_token "$$")" > "$entry/process-start"
+
+  # payload CWD COMMAND -> $base/payload; guard CWD COMMAND [env...] -> hook status.
+  # A file, not a pipe: the hook may exit before it reads the payload.
+  payload() {
+    OMS_GMG_CWD="$1" OMS_GMG_COMMAND="$2" python3 -c '
+import json, os
+print(json.dumps({"cwd": os.environ["OMS_GMG_CWD"], "tool_name": "Bash",
+                  "tool_input": {"command": os.environ["OMS_GMG_COMMAND"]}}))
+' > "$base/payload"
+  }
+  guard() {
+    local cwd="$1" command="$2"
+    shift 2
+    payload "$cwd" "$command"
+    env -u OMS_HARNESS_CHILD OMS_PANEL_MAIN_ATTEMPT=attempt OMS_PANEL_SESSION=oms-fixture "$@" \
+      bash "$hook" < "$base/payload" 2> "$base/err"
+  }
+
+  rc=0; guard "$main" "git merge --ff-only topic" || rc=$?
+  [ "$rc" = 2 ] || fail "a live call must deny a merge in the canonical checkout (rc=$rc)"
+  grep -Fq "1 live OMS call(s)" "$base/err" && grep -Fq "oms sync-shared" "$base/err" ||
+    fail "the deny names the live count and the safe path: $(cat "$base/err")"
+  grep -Fq "$TMP" "$base/err" && fail "the deny must not leak a path"
+
+  for cmd in "git checkout -b x" "git switch topic" "git reset --hard" "git commit -m 'a; b'" \
+    "git stash" "git stash pop" "git rebase main" "git cherry-pick abc" "git am p.mbox" \
+    "git revert HEAD" "git pull" "git restore --staged f" "git -c core.x=1 merge x" \
+    "git status && git merge x" "git fetch; git commit -m x" "git log | cat || git reset" \
+    "/usr/bin/git merge x"; do
+    rc=0; guard "$main" "$cmd" || rc=$?
+    [ "$rc" = 2 ] || fail "'$cmd' in the canonical checkout must deny (rc=$rc)"
+  done
+  for cmd in "cd $main && git merge x" "cd /tmp && cd $main && git merge x"; do
+    rc=0; guard "$base" "$cmd" || rc=$?
+    [ "$rc" = 2 ] || fail "'cd <canonical> && git ...' must deny (rc=$rc)"
+  done
+
+  rc=0; guard /tmp "git -C $main merge topic" || rc=$?
+  [ "$rc" = 2 ] || fail "git -C <canonical> from another cwd must deny (rc=$rc)"
+  rc=0; guard /tmp "git -C $linked -C $main/. merge topic" || rc=$?
+  [ "$rc" = 2 ] || fail "the last -C wins (rc=$rc)"
+
+  for cmd in "git status" "git log --grep=merge" "git diff" "git fetch" "git stash list" \
+    "git stash show" "git restore f" "git branch" "echo \"git commit\"" "echo git merge" \
+    "ls -la" "git commit-tree HEAD^{tree}" "git merge-base a b" "git"; do
+    rc=0; guard "$main" "$cmd" || rc=$?
+    [ "$rc" = 0 ] || fail "'$cmd' must be allowed in the canonical checkout (rc=$rc)"
+  done
+
+  rc=0; guard "$linked" "git merge topic" || rc=$?
+  [ "$rc" = 0 ] || fail "a linked worktree is always allowed (rc=$rc)"
+  rc=0; guard "$base" "git -C $linked commit -m x" || rc=$?
+  [ "$rc" = 0 ] || fail "git -C <linked> is allowed (rc=$rc)"
+  rc=0; guard "$base" "cd $main && cd $linked && git merge x" || rc=$?
+  [ "$rc" = 0 ] || fail "the last cd decides the target (rc=$rc)"
+  rc=0; guard "$base" 'git -C "$NO_SUCH_VARIABLE" merge x' || rc=$?
+  [ "$rc" = 0 ] || fail "an unresolvable target fails open (rc=$rc)"
+
+  # Not a panel main: one environment check, never a deny.
+  payload "$main" "git merge x"
+  rc=0; env -u OMS_PANEL_MAIN_ATTEMPT -u OMS_HARNESS_CHILD OMS_PANEL_SESSION=oms-fixture \
+    bash "$hook" < "$base/payload" || rc=$?
+  [ "$rc" = 0 ] || fail "a session without the panel-main attempt is never denied (rc=$rc)"
+  rc=0; guard "$main" "git merge x" OMS_HARNESS_CHILD=1 || rc=$?
+  [ "$rc" = 0 ] || fail "a harness child is never denied (rc=$rc)"
+  rc=0; guard "$main" "git merge x" OMS_PANEL_SESSION=other-session || rc=$?
+  [ "$rc" = 0 ] || fail "a non-oms panel session is never denied (rc=$rc)"
+
+  # Malformed payloads fail open.
+  for cmd in "" "not json" "{}" '{"tool_input":{"command":["git merge"]}}' '{"cwd":"/nonexistent","tool_input":{"command":"git merge x"}}'; do
+    printf '%s' "$cmd" > "$base/payload"
+    rc=0; env -u OMS_HARNESS_CHILD OMS_PANEL_MAIN_ATTEMPT=attempt OMS_PANEL_SESSION=oms-fixture \
+      bash "$hook" < "$base/payload" 2>/dev/null || rc=$?
+    [ "$rc" = 0 ] || fail "malformed payload '$cmd' must fail open (rc=$rc)"
+  done
+
+  # A dead owner is not a live call; a malformed entry stays live.
+  (exit 0) & dead_pid=$!
+  wait "$dead_pid" || true
+  printf '%s\n' "$dead_pid" > "$entry/pid"
+  rc=0; guard "$main" "git merge x" || rc=$?
+  [ "$rc" = 0 ] || fail "an entry whose process is gone must allow (rc=$rc)"
+  rm -rf "$entry"
+  rc=0; guard "$main" "git merge x" || rc=$?
+  [ "$rc" = 0 ] || fail "no live entries must allow (rc=$rc)"
+  mkdir -p "$entry"
+  rc=0; guard "$main" "git merge x" || rc=$?
+  [ "$rc" = 2 ] || fail "an unreadable entry counts as live (rc=$rc)"
+  rm -rf "$base"
+}
+
 test_panel_main_activity() {
   python3 - "$ROOT/scripts/lib" "$TMP" <<'PYTEST'
 import json
@@ -2014,6 +2122,7 @@ PY
 }
 
 test_panel_main_activity
+test_git_move_guard_denies_canonical_with_live_calls
 test_classifier_boundaries
 test_peer_tail_is_bounded
 test_explicit_goal_rotation

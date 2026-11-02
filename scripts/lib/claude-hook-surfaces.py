@@ -17,7 +17,7 @@ import shlex
 SCRIPTS = frozenset((
     "skill-router.sh", "turn-guard.sh", "fail-ledger-hook.sh",
     "syntax-guard-hook.sh", "tier-guard-hook.sh", "precompact-handoff.sh",
-    "resume-hook.sh", "telemetry-hook.sh",
+    "resume-hook.sh", "telemetry-hook.sh", "git-move-guard-hook.sh",
 ))
 
 

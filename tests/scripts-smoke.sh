@@ -38540,6 +38540,7 @@ check-python
 connect-services
 detect-project-style
 fail-ledger-hook
+git-move-guard-hook
 generate-slurm-reference
 import-agent-result
 install-autoupdate

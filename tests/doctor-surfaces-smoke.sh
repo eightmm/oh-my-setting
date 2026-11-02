@@ -16,8 +16,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The expected surface list, recorded. Both literals move together or the gate
 # below fails; see test_expected_surface_list_is_bump_gated.
-EXPECTED_HOOKS_SCHEMA=6
-EXPECTED_SURFACES_SHA256=8d0399de923e607798e9bd3ccc62d1066f31e8fe0d261421848385731052fcbe
+EXPECTED_HOOKS_SCHEMA=7
+EXPECTED_SURFACES_SHA256=119ca83c12125bc1a21600966b0a27a3587c8826f7cfd69bed074d895ecaf041
 
 fail() {
   echo "FAIL: $*" >&2
@@ -154,6 +154,7 @@ pairs = [(s["event"], s["script"]) for s in doc["surfaces"]]
 # named here so a refactor cannot quietly drop them from the expected list.
 assert ("SessionEnd", "precompact-handoff.sh") in pairs, pairs
 assert ("PostToolUse", "fail-ledger-hook.sh") in pairs, pairs
+assert ("PreToolUse", "git-move-guard-hook.sh") in pairs, pairs
 assert ("UserPromptSubmit", "skill-router.sh") in pairs, pairs
 assert ("PreToolUse", "tier-guard-hook.sh") not in pairs, pairs
 assert ("PostToolUse", "telemetry-hook.sh") not in pairs, pairs
@@ -275,7 +276,12 @@ commands = [h.get("command", "") for entries in hooks.values()
             for entry in entries for h in entry.get("hooks", [])]
 assert not any("old oms" in c for c in commands), commands
 assert "SubagentStop" not in hooks, hooks
-assert hooks["PreToolUse"] == before["PreToolUse"][1:], hooks["PreToolUse"]
+# before["PreToolUse"] = [the current Bash guard, the retired owned row, an unverifiable root]
+assert hooks["PreToolUse"] == [
+    {"matcher": "Bash",
+     "hooks": [{"type": "command", "command": own("git-move-guard-hook.sh"), "timeout": 5}]},
+    before["PreToolUse"][2],
+], hooks["PreToolUse"]
 assert not any("telemetry-hook.sh" in h["command"]
                for entry in hooks["PostToolUse"] for h in entry["hooks"]), hooks
 assert {"hooks": [{"type": "command", "command": "echo user-post-hook"}]} in hooks["PostToolUse"]

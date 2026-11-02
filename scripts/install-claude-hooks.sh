@@ -59,7 +59,7 @@ claude_auto_compact_supported() {
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=6
+HOOKS_SCHEMA=7
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
@@ -74,6 +74,13 @@ PostToolUseFailure|fail-ledger-hook.sh|Bash|5
 # to stay readable. Same matcher and ceiling; a repo with no failure history
 # costs one stat.
 PostToolUse|fail-ledger-hook.sh|Bash|5
+
+# A panel main that moves the index or refs of the canonical checkout (merge,
+# checkout, commit...) while OMS calls are live makes the worker guard stop
+# every one of them. The hook denies that for a panel main only (every other
+# session exits on one environment check) and points at `oms sync-shared`.
+# Matcher-scoped to Bash; a 5s ceiling bounds the git lookups behind a deny.
+PreToolUse|git-move-guard-hook.sh|Bash|5
 
 # A file that does not parse after an edit is reported in the same turn, as
 # feedback, never a block. Matcher-scoped to the edit tools (the matcher may
