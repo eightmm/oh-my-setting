@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The panel plan hint keeps a recent registered goal whose tasks are all
+  closed: it names the goal and suggests `oms agent-plan add` for the next
+  task, and `init` only when the goal is complete, instead of reporting no
+  active goal (which pushed `init` and a new plan lineage).
 - `patch-admit` runs every git call on its admission and floor worktrees
   (apply, ls-tree, show, cat-file, clean) without global/system config,
   fsmonitor or hooks, so a caller's global clean filter never runs on
