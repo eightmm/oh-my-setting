@@ -367,7 +367,9 @@ if [ "$apply_ok" = 1 ]; then
     # The apply into the worktree must succeed, otherwise the syntax/verify
     # gates below would run against the UNPATCHED tree and pass vacuously. Gate
     # 1 only checks apply against HEAD; the worktree tree state can still differ.
-    if git -C "$worktree" apply --binary "$PATCH" >/dev/null 2>&1; then
+    if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+      GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+      -c core.fsmonitor=false -C "$worktree" apply --binary "$PATCH" >/dev/null 2>&1; then
     # git apply --numstat is TAB-delimited (add<TAB>del<TAB>path); split on the
     # tab so a path containing spaces is not truncated (which would silently
     # skip its syntax/verifier check).
@@ -431,7 +433,9 @@ PY
       # by file: --repo is arbitrary, and a few thousand paths would exceed the
       # per-string environment limit the other gates never approach.
       base_files="$worktree_parent/base-files.txt"
-      git -C "$worktree" -c core.quotePath=false ls-tree -r --name-only HEAD > "$base_files" 2>/dev/null || true
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c core.quotePath=false \
+        -C "$worktree" ls-tree -r --name-only HEAD > "$base_files" 2>/dev/null || true
       structure_detail="$(OMS_CHANGED="$changed_files" OMS_BASE_FILE="$base_files" OMS_WORKTREE="$worktree" python3 - <<'PY'
 import os
 changed=[x for x in os.environ.get("OMS_CHANGED","").split("\n") if x]
@@ -538,8 +542,10 @@ import subprocess
 
 wt = os.environ["OMS_WORKTREE"]
 def base(path):
-    result = subprocess.run(["git", "-C", wt, "show", "HEAD:" + path],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                             "-C", wt, "show", "HEAD:" + path],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
     return result.stdout if result.returncode == 0 else None
 
 # Pure reader operands are data; tools that load programs need a broader surface.
@@ -933,12 +939,16 @@ for t in tests:
           "$floor_worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
           floor_worktree_created=1
           oms_seed_local_agent_files "$REPO" "$floor_worktree"
-          if git -C "$floor_worktree" apply --binary "$PATCH" >/dev/null 2>&1; then
+          if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+            -c core.fsmonitor=false -C "$floor_worktree" apply --binary "$PATCH" >/dev/null 2>&1; then
             floor_restore_ok=1
             floor_restore_detail=""
             while IFS= read -r f; do
               [ -n "$f" ] || continue
-              if git -C "$floor_worktree" cat-file -e "HEAD:$f" >/dev/null 2>&1; then
+              if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false \
+                -C "$floor_worktree" cat-file -e "HEAD:$f" >/dev/null 2>&1; then
                 if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
                   GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
                   -c core.fsmonitor=false -C "$floor_worktree" checkout \
@@ -952,7 +962,9 @@ for t in tests:
                   break
                 fi
               else
-                if ! git -C "$floor_worktree" clean -fdx -- "$f" >/dev/null 2>&1 ||
+                if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                  GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false \
+                  -C "$floor_worktree" clean -fdx -- "$f" >/dev/null 2>&1 ||
                   [ -e "$floor_worktree/$f" ] || [ -L "$floor_worktree/$f" ]; then
                   floor_restore_ok=0
                   floor_restore_detail="could not remove added surface path: $f"

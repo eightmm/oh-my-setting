@@ -32029,30 +32029,35 @@ test_patch_admit_worktrees_suppress_checkout_hooks() {
   local hook_dir="$TMP/admit-checkout-hook-bin"
   local marker="$TMP/admit-checkout-hook-fired"
   local global_config="$TMP/admit-checkout-hook.gitconfig"
-  local out
+  local shim_dir="$TMP/admit-checkout-hook-shim"
+  local git_log="$TMP/admit-checkout-hook-git.log"
+  local out line
 
   make_committed_repo "$project"
   mkdir -p "$project/tests"
   printf 'base test surface\n' > "$project/tests/hook-smoke.txt"
-  git -C "$project" add tests/hook-smoke.txt
+  printf 'tests/hook-smoke.txt filter=hostile\n' > "$project/.gitattributes"
+  git -C "$project" add tests/hook-smoke.txt .gitattributes
   git -C "$project" commit -qm 'test surface'
   git -C "$project" checkout -qb candidate
   printf 'candidate test surface\n' >> "$project/tests/hook-smoke.txt"
-  printf 'tests/hook-smoke.txt filter=hostile\n' > "$project/.gitattributes"
-  git -C "$project" add .gitattributes
   git -C "$project" commit -qam 'change test surface'
   git -C "$project" diff main candidate > "$project/change.patch"
   git -C "$project" checkout -q main
   git -C "$project" branch -q -D candidate
 
+  # Git runs hooks and filters with the cwd of the git call, so the marker is
+  # written only from an admission or floor worktree (mktemp parent
+  # oh-my-setting-admit.XXXXXX, worktree wt-XXXXXX). Gate 1 reads the user's own
+  # base file, so a filter run there is not an admission worktree execution.
   mkdir -p "$hook_dir"
   cat > "$hook_dir/post-checkout" <<EOF
 #!/usr/bin/env bash
-: > "$marker"
+case "\$PWD" in */oh-my-setting-admit.*/wt-*) : > "$marker" ;; esac
 EOF
   cat > "$hook_dir/filter-command" <<EOF
 #!/usr/bin/env bash
-: > "$marker"
+case "\$PWD" in */oh-my-setting-admit.*/wt-*) : > "$marker" ;; esac
 cat
 EOF
   cat > "$global_config" <<EOF
@@ -32063,12 +32068,42 @@ EOF
   chmod +x "$hook_dir/post-checkout" "$hook_dir/filter-command"
   git -C "$project" config --local core.hooksPath "$hook_dir"
 
-  out="$(GIT_CONFIG_GLOBAL="$global_config" "$ROOT/scripts/patch-admit.sh" \
+  # Records every git call aimed at an admission worktree (mktemp parent
+  # oh-my-setting-admit.XXXXXX, worktree wt-XXXXXX) with the trust-relevant
+  # environment, so a call that skips the hardened prefix fails by name rather
+  # than only when a filter happens to fire.
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/git" <<'EOF'
+#!/usr/bin/env bash
+prev=""
+for arg in "$@"; do
+  case "$prev:$arg" in
+    -C:*/oh-my-setting-admit.*/wt-*)
+      printf '%s|%s|%s\n' "${GIT_CONFIG_GLOBAL-unset}" "${GIT_CONFIG_NOSYSTEM-unset}" "$*" >> "$ADMIT_SHIM_LOG"
+      ;;
+  esac
+  prev="$arg"
+done
+exec "$ADMIT_REAL_GIT" "$@"
+EOF
+  chmod +x "$shim_dir/git"
+
+  out="$(ADMIT_REAL_GIT="$(command -v git)" ADMIT_SHIM_LOG="$git_log" \
+    PATH="$shim_dir:$PATH" GIT_CONFIG_GLOBAL="$global_config" \
+    "$ROOT/scripts/patch-admit.sh" \
     --repo "$project" --patch "$project/change.patch" --verify true \
     --allow-restructure 2>&1)" ||
     fail "patch admission with a normal hooksPath should succeed: $out"
   [ ! -e "$marker" ] ||
     fail "admission worktree lifecycle executed a checkout hook or global filter"
+  [ -s "$git_log" ] && grep -q ' apply ' "$git_log" ||
+    fail "git shim recorded no admission worktree apply: $(cat "$git_log" 2>/dev/null)"
+  while IFS= read -r line; do
+    case "$line" in
+      '/dev/null|1|'*) ;;
+      *) fail "admission worktree git call is not hardened: $line" ;;
+    esac
+  done < "$git_log"
   contains "$out" 'patch-admit: ADMIT' ||
     fail "hook-suppression fixture did not reach an admitted verdict: $out"
 }
