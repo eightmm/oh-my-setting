@@ -11,7 +11,8 @@ from panel_view import (_RenderReport, amount, token_amount, token_pair, _usage_
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
                         judgment_tag, judgment_tone, call_ending, ending_tag, call_tone, _render_report, freeze_report)
 
-DECIDED = frozenset({"completed", "accepted", "rejected"})
+# "admitted": the owner's --accept committed the patch in a clone and its land is pending; not an owner outcome.
+DECIDED = frozenset({"completed", "accepted", "rejected", "admitted"})
 
 
 def room_ids(room):
@@ -509,7 +510,7 @@ def elapsed(ts):
 
 def end_words(call, hint):
     if call.get("_decided"):
-        return "decided"
+        return "admitted · awaiting land" if call.get("decision") == "admitted" else "decided"
     ending = call_ending(call)
     if ending:
         words = ending.replace("_", " ")
@@ -1208,7 +1209,8 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     row = next((r for r in rows if member.get("task_id") and r.get("task_id") == member["task_id"]), rows[0])
     answer = readable(latest_answer({"rows": [row]}), paragraphs=True)
     outcome = {"accepted": "Accepted by its main", "completed": "Completed; the main recorded a summary",
-               "failed": "Marked failed by its main"}.get(row.get("outcome"), "Not reviewed by its main yet")
+               "failed": "Marked failed by its main"}.get(
+                   row.get("outcome"), "Admitted · awaiting land" if row.get("admitted") else "Not reviewed by its main yet")
     check = mapping(row.get("verification")).get("status")
     lines += ["", outcome + " · " + ("checks %s" % str(check).replace("_", " ") if check else "no checks run")]
     # The changed files are a bounded summary of the outcome: they come before long prose, which pages below.
@@ -2172,6 +2174,8 @@ def acceptance_mark(call):
         return ""
     if call.get("decision") == "accepted":
         return " [accepted]"
+    if call.get("decision") == "admitted":
+        return " [admitted · awaiting land]"
     if call.get("_decided") or call.get("decision") == "completed":
         return " [main decided]"
     return ""  # Past holds settled calls only; one awaiting its main stays on the board

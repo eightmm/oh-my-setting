@@ -3344,6 +3344,12 @@ prefix_execution = Path(accept_call("scratch-worktree", "add", "--owner-pid", st
 accept_call("panel", *accept_options, execution=prefix_execution, env=prefix_env)
 prefix_first_sha = subprocess.check_output(["git", "-C", str(prefix_execution), "rev-parse", "HEAD"],
                                           text=True).strip()
+# The clone's accept leaves one content-free panel-accept row in the canonical index the board reads.
+prefix_accepts = [json.loads(line) for line in (prefix_repo / ".oms/artifacts/index.jsonl").read_text().splitlines()
+                  if '"panel-accept"' in line]
+assert len(prefix_accepts) == 1 and prefix_accepts[0]["task_id"] == "accept-task", prefix_accepts
+assert prefix_accepts[0]["patch_sha256"] == accept_digest and prefix_first_sha.startswith(prefix_accepts[0]["base_sha"]), prefix_accepts
+assert prefix_accepts[0].get("attempt_id") and prefix_accepts[0].get("exit") == 0, prefix_accepts
 for sibling, contents in (("breaks-first", "broken\n"), ("independent", "old\naccepted\n")):
     sibling_verify = "test -f sibling.txt"
     accept_call("agent-plan", "add", "--id", sibling, "--title", sibling,
@@ -3713,7 +3719,10 @@ for failed_stage in ("commit", "plan review"):
         recovery_commands = failure_message.split(
             "Recovery after confirming the reviewed bytes are still present; do not reapply:\n", 1)[1].splitlines()
         assert len(recovery_commands) == 1 and "_accept_recover" in recovery_commands[0]
+        accept_rows = lambda: (failure_repo / ".oms/artifacts/index.jsonl").read_text().count('"panel-accept"')
+        rows_before = accept_rows()
         subprocess.run(["bash", "-c", recovery_commands[0]], env=failure_env, check=True)
+        assert accept_rows() == rows_before + 1, "recovered accept left no canonical panel-accept row"
         assert json.loads(accept_call("agent-plan", "show", "--id", "accept-task", execution=failure_repo,
                                       env=failure_env).stdout)["state"] == "review"
 accepted = accept_call("panel", *accept_options, execution=accept_execution)
@@ -5034,6 +5043,27 @@ with patch.dict(os.environ, environment, clear=True):
             {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-b", "patch": "b.patch", "patch_sha256": patch_b},
             {"task_id": "patch-pending", "kind": "patch-land", "attempt_id": "main-attempt", "patch_sha256": patch_b}])):
         assert saved.pending_admissions(project, ["patch-pending"]) == set()
+    # An accept in a clone leaves one canonical panel-accept row: admitted and awaiting land, not pending.
+    delegate_b = {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-b", "patch": "b.patch", "patch_sha256": patch_b}
+    accept_b = {"task_id": "patch-pending", "kind": "panel-accept", "attempt_id": "attempt-b", "patch_sha256": patch_b, "ts": "2026-11-02T00:00:00Z"}
+    for records, pending, waiting in (
+            ([delegate_b], {"patch-pending"}, set()),
+            ([delegate_b, accept_b], set(), {"patch-pending"}),
+            ([delegate_b, dict(accept_b, attempt_id="attempt-other")], {"patch-pending"}, set()),
+            ([delegate_b, dict(accept_b, patch_sha256=patch_a)], {"patch-pending"}, set()),
+            ([delegate_b, accept_b, {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-c", "patch": "c.patch", "patch_sha256": "c" * 64}],
+             {"patch-pending"}, set()),
+            ([delegate_b, accept_b, {"task_id": "patch-pending", "kind": "patch-land", "patch_sha256": patch_b}], set(), set())):
+        with patch.object(saved, "_records", return_value=([], records)):
+            assert saved.pending_admissions(project, ["patch-pending"]) == pending, records
+            assert saved.admitted_awaiting_land(project, ["patch-pending", "../bad"]) == waiting, records
+    newer = {"attempt_id": "attempt-d", "task_id": "patch-pending", "created_at": "2026-11-02T00:00:01Z", "refs": {"panel_access": "write"}}
+    for attempt, waiting in ((newer, set()), (dict(newer, created_at="2026-11-02T00:00:00Z"), set()),
+                             (dict(newer, created_at="2026-11-01T00:00:00Z"), {"patch-pending"}),
+                             (dict(newer, refs={"panel_access": "read"}), {"patch-pending"}),
+                             (dict(newer, attempt_id="attempt-b"), {"patch-pending"})):
+        with patch.object(saved, "_records", return_value=([attempt], [delegate_b, accept_b])):
+            assert saved.admitted_awaiting_land(project, ["patch-pending"]) == waiting, attempt
     paged = [dict(a, parent_attempt_id="mine-main") for a in noise]
     foreign_owner = {"kind": "panel-result", "task_id": "foreign-owner", "ts": "2025-01-01"}
     with patch.object(saved, "_records", return_value=(paged, [foreign_owner])), \

@@ -701,6 +701,10 @@ def snapshot(repo, room_id=None, _tick=None):
                     if waiting:
                         state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True, _tick=_tick).items()
                                               if outcome in DECIDED | {"failed"}}
+                        # Committed by the owner's --accept in a clone, land pending: settled like a decision, labelled apart.
+                        from panel_results import admitted_awaiting_land
+                        for ident in admitted_awaiting_land(repo, waiting, _tick=_tick):
+                            state["finalized"].setdefault(ident, "admitted")
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 state["awaiting_admission"] = awaiting_admission(repo, state, _tick=_tick)

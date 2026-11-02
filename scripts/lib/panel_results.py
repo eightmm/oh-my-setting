@@ -1335,6 +1335,29 @@ def _accept_record(snapshot, base, tree, commit):
             'tree': tree, 'base': base, 'review_gate': snapshot['review_gate']}
 
 
+def _record_accept(repo, execution, owner, snapshot, patch_path, commit):
+    """Append the content-free `panel-accept` row to the canonical index the board reads.
+
+    The row carries task, plan, worker attempt, patch digest (from the patch bytes) and the short commit
+    (base_sha, resolved in the clone). The commit is already published locally, so a failed append only
+    leaves the board on "awaiting decision"; a killed append leaves no row."""
+    task, worker = snapshot['task'], snapshot['worker']
+    env = {k: v for k, v in os.environ.items() if not k.startswith('OMS_INDEX_')}
+    for name in ('OMS_LAST_ATTEMPT_ID', 'OMS_OPERATION_ID', 'OMS_HARNESS_CALL_ID'):
+        env.pop(name, None)
+    env.update(OMS_TASK_ID=task['id'], OMS_ATTEMPT_ID=worker['attempt_id'],  # the writer derives attempt_id from OMS_ATTEMPT_ID
+               OMS_INDEX_PLAN_ID=task['plan_id'], OMS_INDEX_BASE_REPO=str(execution))
+    try:
+        result = subprocess.run(
+            ['bash', '-c', '. "$1"; ma_append_artifact_index "$2" panel-accept "$3" 0 "" "$4" "" "" "" "$5"',
+             'panel-accept', str(ROOT / 'scripts/lib/peer-common.sh'), str(repo), owner, str(patch_path), commit],
+            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is None or result.returncode:
+        print('warning: accept record not written to the board index', file=sys.stderr)
+
+
 def _accepted_prefix(repo, execution, landings):
     """Canonical accepts in this clone's unpublished first-parent lineage."""
     if (os.environ.get('OMS_HARNESS_CHILD') == '1' or
@@ -1595,6 +1618,10 @@ def _accept_recover(args):
         record = _accept_record(snapshot, args['base'], args['tree'], commit)
         _plan_command(execution, 'review', '--id', task_id, '--lease-id', task['lease_id'],
                       '--artifact', candidate['artifact'], '--patch', candidate['patch'], panel_accept=record)
+        with tempfile.TemporaryDirectory(prefix='oms-panel-accept-recover-') as directory:
+            patch_path = Path(directory) / 'candidate.patch'
+            patch_path.write_bytes(verified_patch(repo, candidate))
+            _record_accept(repo, execution, owner, snapshot, patch_path, commit)
         return commit
 
 
@@ -1789,6 +1816,7 @@ def accept(repo, owner, task_id, message, verify, expected_patch_sha256=None, ex
                                   panel_accept=record)
                 except (OSError, ValueError, subprocess.SubprocessError) as error:
                     raise _AcceptAuthorityChanged('plan review compare-and-set failed: %s' % error) from error
+                _record_accept(repo, execution, owner, snapshot, patch_path, committed)
             except _AcceptAuthorityChanged as error:
                 head = committed or _git(execution, 'rev-parse', 'HEAD').decode().strip()
                 recovery = _accept_recovery(snapshot, repo, execution, owner, task_id, verify, message,
@@ -2138,24 +2166,21 @@ SHA256 = re.compile(r'[0-9a-f]{64}')
 EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
 
 
-def pending_admissions(repo, task_ids, _tick=None):
-    """Recorded patches without admission; capped evidence stays conservatively pending.
-
-    This is an inbox hint, not verified patch or acceptance evidence. No artifact
-    bytes are read. At the latest-300-attempt or possible index-retention
-    boundary (1000 events), a task with
-    no retained record rows stays pending because its evidence may be outside
-    coverage. Retained non-patch rows alone do not imply a pending patch.
-    """
+def _admission_scan(repo, task_ids, _tick=None):
+    """(pending, awaiting_land) task sets from one read of the retained records."""
     wanted = {ident for ident in task_ids if isinstance(ident, str) and ID.fullmatch(ident)}
     if not wanted:
-        return set()
+        return set(), set()
     if _tick is not None:
         attempts, rows = _tick.records()
     else:
         from panel_cache import read_shared
         attempts, rows = read_shared(repo, 'result-records', lambda: _records(repo))
-    patches, admitted, seen = set(), set(), set()
+    return _scan_admissions(attempts, rows, wanted)
+
+
+def _scan_admissions(attempts, rows, wanted):
+    patches, admitted, seen, accepted = set(), set(), set(), {}
     for row in rows:
         ident, kind = row.get('task_id'), row.get('kind')
         if not isinstance(ident, str) or ident not in wanted:
@@ -2166,12 +2191,49 @@ def pending_admissions(repo, task_ids, _tick=None):
         digest = digest if isinstance(digest, str) and SHA256.fullmatch(digest) and digest != EMPTY_SHA256 else None
         if kind in ('patch-admit', 'patch-land'):
             admitted.add((ident, digest))
+        elif kind == 'panel-accept' and digest:
+            accepted[(ident, digest, row.get('attempt_id'))] = row.get('ts') or ''
         elif kind in ('ask', 'call', 'consult', 'delegate', 'review', 'ask-synthesis') and row.get('patch'):
-            patches.add((ident, digest))
+            patches.add((ident, digest, row.get('attempt_id')))
     if len(attempts) >= 300 or len(rows) >= 1000:
-        patches.update((ident, None) for ident in wanted - seen)
-    return {ident for ident, digest in patches if not any(
-        task == ident and (digest is None or done is None or done == digest) for task, done in admitted)}
+        patches.update((ident, None, None) for ident in wanted - seen)
+    landed = lambda ident, digest: any(
+        task == ident and (digest is None or done is None or done == digest) for task, done in admitted)
+    # An accept record settles only the patch of its own attempt: a later round's patch is new bytes or a new attempt.
+    pending = {ident for ident, digest, attempt in patches
+               if not landed(ident, digest) and (ident, digest, attempt) not in accepted}
+    waiting = {}
+    for (ident, digest, attempt), stamp in accepted.items():
+        if ident not in pending and not landed(ident, digest):
+            waiting[ident] = max(waiting.get(ident, ''), stamp)
+    for attempt in attempts:
+        ident = attempt.get('task_id')
+        if (ident in waiting and attempt.get('refs', {}).get('panel_access') == 'write'
+                and not any(key[0] == ident and key[2] == attempt.get('attempt_id') for key in accepted)
+                and str(attempt.get('created_at') or '') >= waiting[ident]):  # second precision: same second is newer
+            del waiting[ident]
+    return pending, set(waiting)
+
+
+def pending_admissions(repo, task_ids, _tick=None):
+    """Recorded patches without admission; capped evidence stays conservatively pending.
+
+    This is an inbox hint, not verified patch or acceptance evidence. No artifact
+    bytes are read. At the latest-300-attempt or possible index-retention
+    boundary (1000 events), a task with
+    no retained record rows stays pending because its evidence may be outside
+    coverage. Retained non-patch rows alone do not imply a pending patch.
+    A patch the owner's `--accept` committed in a clone is not pending: see admitted_awaiting_land.
+    """
+    return _admission_scan(repo, task_ids, _tick)[0]
+
+
+def admitted_awaiting_land(repo, task_ids, _tick=None):
+    """Tasks whose current patch `--accept` committed locally and no passed land has covered yet.
+
+    The record is the canonical `panel-accept` index row written by accept(): task, worker attempt,
+    exact patch digest and the short local commit. It is a board hint, not acceptance evidence."""
+    return _admission_scan(repo, task_ids, _tick)[1]
 
 
 def settled_pending_admissions(repo, task_ids, _tick=None, _outcomes=None):
@@ -2431,7 +2493,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                        ((result or {}).get('summary') or '').split('\n')[0], 160),
                        'model': clean(metadata.get('panel_model'), 160), 'role': metadata.get('panel_role'),
                        'location': metadata.get('panel_location'), 'process_state': last.get('state'),
-                       'outcome': result.get('outcome') if result else None, 'verification': (result or {}).get('verification'),
+                       'outcome': result.get('outcome') if result else None,
+                       'admitted': not result and ident in _scan_admissions(attempts, rows, {ident})[1], 'verification': (result or {}).get('verification'),
                        'acceptance': bool(result and result.get('outcome') == 'accepted'),
                        'summary': result.get('summary') if result else None,
                        'revision': result.get('revision') if result else None,

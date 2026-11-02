@@ -3301,4 +3301,25 @@ assert json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project
 assert json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
     "--host", "herdr", "--dry-run"]))["host"] == "herdr"
 
+# A task the owner's --accept committed in a clone reads "admitted · awaiting land", off the backlog, until decided.
+import room_view as admitted_room_view
+from review_backlog import counts as admitted_backlog
+def admitted_board(finalized, access="read"):
+    return {"room": {"id": "r1", "participants": [
+                {"participant": "m1", "role": "main", "joined": True, "provider": "codex"},
+                {"participant": "w1", "role": "worker", "joined": True, "provider": "claude", "parent": "m1"}]},
+            "attempts": {"recent": [], "active_recent": [{"attempt_id": "a1", "task_id": "t1", "state": "review",
+                "updated_at": "2026-11-02T00:00:00Z", "panel": {"room_id": "r1", "room_participant": "w1", "role": "worker"},
+                "refs": {"panel_access": access}}]},
+            "plan": {"tasks": [{"id": "t1", "state": "review", "claimed_by_participant": "m1"}]},
+            "finalized": finalized, "awaiting_admission": []}
+for finalized, calls, backlog in (({}, "review", {"m1": 1}), ({"t1": "admitted"}, "past", {}), ({"t1": "rejected"}, "past", {})):
+    admitted_report = admitted_board(finalized)
+    admitted_call = next(m for m in admitted_room_view.nodes(admitted_report) if m["role"] == "worker")
+    assert admitted_room_view.call_classifier(admitted_report)(admitted_call) == calls, (finalized, admitted_call)
+    assert admitted_backlog(admitted_report) == backlog, (finalized, admitted_backlog(admitted_report))
+assert admitted_room_view.acceptance_mark({"decision": "admitted"}) == " [admitted · awaiting land]"
+assert admitted_room_view.end_words({"_decided": True, "decision": "admitted"}, "") == "admitted · awaiting land"
+assert admitted_room_view.end_words({"_decided": True, "decision": "rejected"}, "") == "decided"
+
 # End simulated owners before each real native-start phase; no fixture CLI remains running here.

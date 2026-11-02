@@ -1949,7 +1949,7 @@ def render_results(report, width=100, compact=False, heading=None):
             check = verify_stage.get("state")
         outcome = {"accepted": "Accepted by its main", "completed": "Completed; the main recorded a summary",
                    "failed": "Marked failed by its main", "rejected": "Rejected by its main"}.get(
-                       row.get("outcome"), "Not reviewed by its main yet")
+                       row.get("outcome"), "Admitted · awaiting land" if row.get("admitted") else "Not reviewed by its main yet")
         check_state = {"verify failed": "failed", "verify timed out": "timed out",
                        "timed_out": "timed out", "timed out": "timed out"}.get(check, check)
         if check_state in ("passed", "failed", "timed out"):
