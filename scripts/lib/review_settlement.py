@@ -132,6 +132,29 @@ def _apply(repo, attempt, target, code, task, revision, reason=None):
         raise ValueError(clean(result.stderr, 180))
 
 
+def _landing(repo, artifacts, attempt):
+    """Latest verified patch-land of this attempt's exact patch bytes; the join mirrors panel_results._admission."""
+    task = attempt.get("task_id")
+    patches = [r for r in artifacts if r.get("kind") == "delegate" and r.get("attempt_id") == attempt.get("attempt_id")
+               and r.get("task_id") == task and r.get("patch_sha256")]
+    if not patches or patches[-1].get("exit") != 0:
+        return None
+    patch = patches[-1]
+    matches = [r for r in artifacts if r.get("kind") == "patch-land" and r.get("exit") == 0
+               and type(r.get("verify_exit")) is int and r["verify_exit"] == 0
+               and (not r.get("task_id") or r.get("task_id") == task)
+               and r.get("patch_sha256") == patch["patch_sha256"]
+               and (not patch.get("plan_id") or r.get("plan_id") == patch["plan_id"])]
+    if not matches:
+        return None
+    try:
+        if saved._relative(repo, patch["patch"], saved.PATCH_MAX)["sha256"] != patch["patch_sha256"]:
+            return None
+    except (KeyError, ValueError, OSError, TypeError):
+        return None
+    return matches[-1]
+
+
 def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=None, apply=False,
             legacy_parents=None, standalone_older_than=None, aged_days=None, standalone_mode=False):
     report = {"candidates": [], "pending": [], "errors": [], "applied": [], "superseded": [], "terminal": 0, "executes": apply}
@@ -157,6 +180,7 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
     for attempt in attempts:
         ident, task = attempt["attempt_id"], attempt.get("task_id", "")
         refs = attempt.get("refs", {})
+        aged = aged_days is not None
         standalone = ((standalone_mode or standalone_older_than is not None)
                       and attempt.get("parent_attempt_id") not in by_id
                       and attempt.get("tool") != "panel-main"
@@ -169,12 +193,16 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
             continue
         decision = decisions.get(task)
         chosen = ident in explicit
-        aged = aged_days is not None
+        # In standalone mode, landing these exact bytes is the owner's acceptance decision.
+        landing = _landing(repo, artifacts, attempt) if standalone and not chosen else None
+        landed = landing is not None
+        if landed:
+            decision = ({"outcome": "accepted", "revision": landing["patch_sha256"]}, landing)
         if not chosen and not standalone and not decision and not aged:
             continue
-        superseding = chosen or standalone or aged
+        superseding = chosen or ((standalone or aged) and not landed)
         aged_state = attempt.get("state") if aged and attempt.get("state") in {"review", "blocked"} else "review"
-        selection_reason = (("aged %s without owner decision (%g days)" % (aged_state, aged_days)) if aged
+        selection_reason = ("landed_patch" if landed else ("aged %s without owner decision (%g days)" % (aged_state, aged_days)) if aged
                             else "aged standalone review" if standalone else reason)
         if superseding:
             target, code, rev = "cancelled", "owner_superseded", hashlib.sha256(selection_reason.encode()).hexdigest()[:24]
@@ -185,7 +213,7 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
         age = _age(state_since.get((ident, aged_state)))
         item = {"attempt": ident, "task": task, "state": attempt.get("state"),
                 "age_in_review_seconds": age,
-                "selection_reason": ("aged_%s_without_owner_decision" % aged_state) if aged else "aged_standalone_review" if standalone else (
+                "selection_reason": "landed_patch" if landed else ("aged_%s_without_owner_decision" % aged_state) if aged else "aged_standalone_review" if standalone else (
                     "owner_selected" if chosen else "finalized_" + payload["outcome"]),
                 "target_state": target, "reason_code": code}
         if superseding:
@@ -206,7 +234,7 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
             pending_reason = "rework" if target is None else "aged_days_required" if chosen and attempt.get("state") == "blocked" else "not_in_review"
             report["pending"].append(dict(item, pending_reason=pending_reason))
             continue
-        if aged or standalone:
+        if (aged or standalone) and not landed:
             threshold = aged_days if aged else standalone_older_than
             item["aged_days" if aged else "older_than_days"] = threshold
             if age is None or age <= threshold * 86400:
@@ -215,13 +243,14 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
         if not superseding:
             # As in completed_tasks: only a same-named task of the current plan
             # supersedes the decided generation; a retired plan's tasks keep it.
-            if plan_unreadable:
-                report["pending"].append(dict(item, pending_reason="plan_unreadable"))
-                continue
-            current = saved._plan_bindings(repo, {task}).get(task)
-            if current is not None and payload.get("plan_binding") != current:
-                report["pending"].append(dict(item, pending_reason="stale_generation"))
-                continue
+            if not landed:
+                if plan_unreadable:
+                    report["pending"].append(dict(item, pending_reason="plan_unreadable"))
+                    continue
+                current = saved._plan_bindings(repo, {task}).get(task)
+                if current is not None and payload.get("plan_binding") != current:
+                    report["pending"].append(dict(item, pending_reason="stale_generation"))
+                    continue
             # Review entry is when the owner could have seen this attempt;
             # older records without that event retain the creation-time guard.
             # Both ledgers use second-resolution UTC timestamps, so equality
@@ -238,7 +267,7 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
         try:
             if standalone and (refs.get("panel_room_participant") or refs.get("panel_room_id")):
                 member, room_id = refs.get("panel_room_participant"), refs.get("panel_room_id")
-                if aged or not member or not room_id or not _exit_proven(repo, attempt, artifacts):
+                if (aged and not landed) or not member or not room_id or not _exit_proven(repo, attempt, artifacts):
                     report["pending"].append(dict(item, pending_reason="exit_unknown"))
                     continue
                 import dispatch_supervisor as dispatch_store
@@ -252,7 +281,7 @@ def _settle(repo, attempts, artifacts, parents, decisions, explicit=(), reason=N
                             {"participant": member, "parent": anchor["call"]["parent"]}):
                         report["pending"].append(dict(item, pending_reason="exit_unknown"))
                         continue
-            elif not aged and not _stopped(repo, attempt, attempts, artifacts):
+            elif (landed or not aged) and not _stopped(repo, attempt, attempts, artifacts):
                 report["pending"].append(dict(item, pending_reason="exit_unknown"))
                 continue
             stopped = True

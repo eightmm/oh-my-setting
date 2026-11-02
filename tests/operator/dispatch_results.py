@@ -2452,6 +2452,7 @@ def check_room_bound_standalone(project, standalone_attempt, indexed_exit):
             assert not result["candidates"] and result["pending"][0]["pending_reason"] == expected, result
 
 check_room_bound_standalone(project, standalone_attempt, indexed_exit)
+
 # The explicit seven-day policy covers undecided legacy work and missing exits.
 # Append through the lifecycle API with a controlled event clock, never rewrite
 # the fixture ledger; a later review entry must replace the earlier review age.
@@ -2572,6 +2573,92 @@ for ident in (undecided, unproven_worker):
     assert final["refs"]["owner_superseded_reason"] == "aged review without owner decision (7 days)", final
 assert not json.loads(call(legacy_aged_args + ["--apply"]))["applied"]
 assert not json.loads(call(aged_standalone_args + ["--apply"]))["applied"]
+def exercise_landed_standalone_review():
+    """A standalone review whose exact patch bytes landed settles as the owner's decision."""
+    import hashlib
+    patch_ref = ".oms/artifacts/delegate/settlement-landed.patch"
+    (project / patch_ref).parent.mkdir(parents=True, exist_ok=True)
+    (project / patch_ref).write_bytes(b"settlement landed patch bytes\n")
+    sha = hashlib.sha256((project / patch_ref).read_bytes()).hexdigest()
+    other_sha = "b" * 64
+    stamp = "2999-01-01T00:00:00Z"
+    def state_of(ident):
+        return json.loads(call(event_command + ["show", "--attempt", ident, "--json"]))["state"]
+    def fixture(task, plan_id=None):
+        ident = settlement_worker(task, legacy=True)
+        attempts, artifacts = saved._records(project, full=True)
+        attempt = next(a for a in attempts if a["attempt_id"] == ident)
+        proof = next(r for r in artifacts if r.get("attempt_id") == ident and r.get("kind") == "delegate")
+        # The fixture's delegate row inherits a plan id from the environment; pin it either way.
+        row = {k: v for k, v in dict(proof, patch=patch_ref, patch_sha256=sha).items() if k != "plan_id"}
+        return attempt, dict(row, plan_id=plan_id) if plan_id else row
+    def land(**extra):
+        return dict(dict(kind="patch-land", task_id="", patch_sha256=sha, exit=0, verify_exit=0, ts=stamp), **extra)
+    def run(attempt, rows, parents=(), **kwargs):
+        kwargs.setdefault("standalone_mode", True)
+        kwargs.setdefault("aged_days", 7)
+        return review_settlement._settle(project, [attempt], rows, set(parents), {}, **kwargs)
+    landed, landed_delegate = fixture("settlement-landed-task")
+    # Dry run in every standalone selection mode lists it as the accepted-patch outcome.
+    for mode in ({}, {"aged_days": None, "standalone_older_than": 1}):
+        preview = run(landed, [landed_delegate, land()], **mode)
+        assert [r["attempt"] for r in preview["candidates"]] == [landed["attempt_id"]], preview
+        row = preview["candidates"][0]
+        assert (row["target_state"], row["reason_code"], row["selection_reason"]) == \
+            ("done", "owner_accepted", "landed_patch"), preview
+        assert not preview["applied"] and state_of(landed["attempt_id"]) == "review", preview
+    # Owner mode never widens to a foreign standalone attempt because its bytes landed.
+    foreign = run(landed, [landed_delegate, land()], parents={"owner-main"}, standalone_mode=False, aged_days=None)
+    assert not foreign["candidates"] and not foreign["pending"] and not foreign["applied"], foreign
+    # Only a successful, verified patch-land of the same task and bytes counts.
+    for refused in (land(kind="patch-admit"), land(kind="patch-admit", verify_exit=0), land(exit=1),
+                    land(verify_exit=1), land(patch_sha256=other_sha), land(exit=None),
+                    land(kind="delegate"), land(task_id="another-task")):
+        report = run(landed, [landed_delegate, refused])
+        assert not [c for c in report["candidates"] if c["selection_reason"] == "landed_patch"] \
+            and not report["applied"], (refused, report)
+    unverified = land()
+    del unverified["verify_exit"]
+    assert not [c for c in run(landed, [landed_delegate, unverified])["candidates"]
+                if c["selection_reason"] == "landed_patch"]
+    assert run(landed, [landed_delegate, land(task_id=landed["task_id"])])["candidates"][0]["selection_reason"] == "landed_patch"
+    # A patch file that no longer hashes to the recorded bytes is no landing evidence.
+    assert not [c for c in run(landed, [dict(landed_delegate, patch="missing.patch"), land()])["candidates"]
+                if c["selection_reason"] == "landed_patch"]
+    # Landing rows older than review entry cannot decide a re-entered review.
+    stale = run(landed, [landed_delegate, land(ts="2000-01-01T00:00:00Z")])
+    assert not stale["candidates"] and stale["pending"][0]["pending_reason"] == "newer_than_decision", stale
+    # A failed delegate exit never matches, even when its bytes landed.
+    assert not run(landed, [dict(landed_delegate, exit=1), land()])["candidates"]
+    # Plan-bound delegates need the landing row's plan to match.
+    def landed_only(report):
+        return [c for c in report["candidates"] if c["selection_reason"] == "landed_patch"]
+    bound, bound_delegate = fixture("settlement-landed-plan-task", "plan_" + "1" * 32)
+    assert not landed_only(run(bound, [bound_delegate, land()]))
+    assert not landed_only(run(bound, [bound_delegate, land(plan_id="plan_" + "2" * 32)]))
+    assert landed_only(run(bound, [bound_delegate, land(plan_id="plan_" + "1" * 32)]))
+    # Different bytes or a failed landing never settle as done.
+    pending, pending_delegate = fixture("settlement-unlanded-task")
+    for rows in ([pending_delegate, land(patch_sha256=other_sha)], [pending_delegate, land(exit=1)], [pending_delegate]):
+        assert not landed_only(run(pending, rows)), rows
+    assert state_of(pending["attempt_id"]) == "review"
+    # Apply moves it to done with the owner-accepted reason; a rerun is a no-op.
+    report = run(landed, [landed_delegate, land()], apply=True)
+    assert report["applied"] == [landed["attempt_id"]] and not report["errors"], report
+    final = json.loads(call(event_command + ["show", "--attempt", landed["attempt_id"], "--json"]))
+    assert final["state"] == "done" and final["reason_code"] == "owner_accepted", final
+    assert not run(dict(landed, state="done"), [landed_delegate, land()], apply=True)["applied"]
+    call(event_command + ["transition", "--attempt", pending["attempt_id"], "--state", "cancelled"])
+    call(event_command + ["transition", "--attempt", bound["attempt_id"], "--state", "cancelled"])
+    # A parentless blocked attempt stays out of reach, as before.
+    blocked = settlement_worker("settlement-standalone-blocked-task", legacy=True, review=False, exit_proof=False)
+    settlement_transition(blocked, "blocked")
+    attempts, _ = saved._records(project, full=True)
+    blocked_attempt = next(a for a in attempts if a["attempt_id"] == blocked)
+    assert not run(blocked_attempt, [])["candidates"] and state_of(blocked) == "blocked"
+    call(event_command + ["transition", "--attempt", blocked, "--state", "cancelled"])
+exercise_landed_standalone_review()
+
 for extra in (["--legacy"], ["--legacy-older-than", "1"], ["--standalone"], ["--older-than", "1"],
               ["--standalone", "--older-than", "nan"], ["--standalone", "--older-than", "inf"],
               ["--standalone", "--older-than", "0"], ["--standalone", "--older-than", "-1"],
