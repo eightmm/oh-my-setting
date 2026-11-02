@@ -2078,6 +2078,24 @@ for new_owner, harness in (("pi", "pi"), ("antigravity", "agy"), ("codex", "pi")
     assert owner_worker_state["state"] == "done", (new_owner, owner_worker_state, owner_result["settlement"], settled_owner)
     call(event_command + ["transition", "--attempt", owner_main, "--state", "cancelled"])
     room.append(project, owner_room, {"kind": "leave", "participant": owner_main}, "Fixture main stopped")
+summary_target = temporary / "summary-symlink-target.txt"
+summary_target.write_text("Real summary.\n")
+summary_link = temporary / "summary-symlink.txt"
+summary_link.symlink_to(summary_target)
+try:
+    saved._safe_summary(summary_link, project)
+except ValueError as error:
+    assert "summary file unavailable or unsafe" in str(error), error
+else:
+    raise AssertionError("a symlinked summary file was accepted")
+summary_invalid = temporary / "summary-invalid-utf8.txt"
+summary_invalid.write_bytes(b"\xff\xfe")
+try:
+    saved._safe_summary(summary_invalid, project)
+except ValueError as error:
+    assert "process substitution" not in str(error), error
+else:
+    raise AssertionError("a non-UTF-8 summary file was accepted")
 for invalid_owner in ("", "unknown", "agy", 0, None, []):
     try:
         saved.finalize(project, invalid_owner, "invalid-owner", str(summary), "completed")
@@ -5272,7 +5290,7 @@ with patch.dict(os.environ, environment, clear=True):
                 saved.finalize(project, "codex", "bad-result", str(link), "completed")
             raise AssertionError("linked summary accepted")
         except ValueError:
-            assert "panel evidence must be a regular non-symlink, non-hard-linked file" in error_text.getvalue(), error_text.getvalue()
+            assert "summary file must be a regular non-symlink, non-hard-linked file" in error_text.getvalue(), error_text.getvalue()
     except (OSError, NotImplementedError):
         if os.name != "nt":
             raise

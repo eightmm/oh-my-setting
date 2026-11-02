@@ -183,12 +183,12 @@ def _contains_outbound_machine_path(value):
             re.search(r'(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s]+|\\\\[^\\/]+[\\/][^\s]+', value) is not None)
 
 
-def _read(repo, relative, maximum=MAX_RESULT, missing=False):
+def _read(repo, relative, maximum=MAX_RESULT, missing=False, label='panel evidence'):
     try:
-        return DURABLE['read_no_follow'](str(repo), relative, 'panel evidence',
+        return DURABLE['read_no_follow'](str(repo), relative, label,
                                           missing_ok=missing, max_bytes=maximum)
     except SystemExit as error:
-        raise ValueError('panel evidence unavailable or unsafe') from error
+        raise ValueError('%s unavailable or unsafe' % label) from error
 
 
 def _relative(repo, value, maximum=1024 * 1024):
@@ -204,7 +204,12 @@ def _safe_summary(path, repo):
     if not path.is_absolute():
         path = repo / path
     root = path.parent.resolve(strict=True)
-    text = _read(root, path.name, MAX_SUMMARY).decode('utf-8')
+    try:
+        data = _read(root, path.name, MAX_SUMMARY, label='summary file')
+    except ValueError as error:
+        raise ValueError('summary file unavailable or unsafe: use a regular file '
+                         '(process substitution, symlinks and hard links are refused)') from error
+    text = data.decode('utf-8')
     if not text.strip() or '\0' in text:
         raise ValueError('summary is empty or contains NUL')
     screen = subprocess.run(['bash', '-c', '. "$1"; grep -Eiq "$(agent_memory_sensitive_re)"',
