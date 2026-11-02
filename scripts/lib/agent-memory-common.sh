@@ -340,9 +340,10 @@ METADATA = {
 PLAIN = ('true', 'false', 'yes', 'no', '0', '1')
 USERINFO = re.compile(r'^[a-z][a-z0-9+.-]*://[^\s/:@]+:([^\s/@]+)@')
 
-def secret_name(name):
-    if re.fullmatch(r'GIT_CONFIG_KEY_[0-9]+', name):
-        return False  # git config key name (section.key), never a credential
+def secret_name(name, value=''):
+    # A git config key name is not a credential unless a URL subsection carries userinfo.
+    if re.fullmatch(r'GIT_CONFIG_KEY_[0-9]+', name) and '@' not in value:
+        return False
     parts = [p for p in re.split(r'[^A-Za-z0-9]+', name.upper()) if p]
     return bool(parts) and parts[-1] not in METADATA and any(p in NAMES for p in parts)
 
@@ -356,7 +357,7 @@ def usable(v):
 needles = {}
 for name, value in os.environ.items():
     value = value.strip()
-    if value and usable(value) and secret_name(name):
+    if value and usable(value) and secret_name(name, value):
         needles.setdefault(value, name)
     m = USERINFO.match(value)
     if m and len(m.group(1)) >= 8 and m.group(1).lower() not in PLAIN:

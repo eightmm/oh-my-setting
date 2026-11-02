@@ -15518,6 +15518,11 @@ test_scrubber_tiers_split_secret_from_machine() {
     export "FIXTURE_CONFIG_KE""Y_0=core.hooksPath"
     agent_memory_file_has_secret_content "$f" ||
       fail "non-git key-named variable with the same value must still block"
+    unset "FIXTURE_CONFIG_KE""Y_0"
+    export "GIT_CONFIG_KE""Y_1=url.https://fixtureuserinfo@example.invalid/.insteadOf"
+    printf 'url.https://fixtureuserinfo@example.invalid/.insteadOf\n' > "$f"
+    agent_memory_file_has_secret_content "$f" ||
+      fail "a git config key carrying URL userinfo must still block"
   )
   (
     local shim="$TMP/scrub-python-shim" rc=0
