@@ -869,11 +869,18 @@ def _empty_salvaged_attempt(repo, worker, rows):
         return False
 
 
-def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None):
+def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None, rows=()):
     """Account for discarded retries without treating failure as admission."""
     from review_settlement import _participant_parents
 
     superseded, selected, landed, lineages = [], [], [], {}
+    clean = {r.get('attempt_id') for r in rows if r.get('kind') == 'delegate' and r.get('exit') == 0
+             and r.get('patch') and r.get('patch_sha256')}
+
+    def reached(position):
+        # A clean delegate patch from this attempt, or from a continue chain that starts at it.
+        return any(workers[end].get('attempt_id') in clean and (end == position or _continues(workers, position, end))
+                   for end in range(position, len(workers)))
     for index, worker in enumerate(workers):
         replacement = None
         reason = None
@@ -885,7 +892,7 @@ def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None):
         # Fresh retries need every failed scope entry verbatim in the later scope.
         if (not replacement and not admissions[index] and worker.get('task_id') and worker.get('parent_attempt_id')
                 and worker.get('state') in {'failed', 'timed_out', 'cancelled', 'abandoned'}):
-            for later, admission in zip(workers[index + 1:], admissions[index + 1:]):
+            for position, (later, admission) in enumerate(zip(workers[index + 1:], admissions[index + 1:]), index + 1):
                 parent = later.get('parent_attempt_id')
                 anchor = main_id or parent
                 if anchor not in lineages:
@@ -895,7 +902,7 @@ def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None):
                                             if main.get('provider') == owner else set())
                     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                         lineages[anchor] = set()
-                if (admission and later.get('task_id') == worker['task_id']
+                if ((admission or reached(position)) and later.get('task_id') == worker['task_id']
                         and ((parent == worker.get('parent_attempt_id') and (not main_id or parent == main_id))
                              or {parent, worker.get('parent_attempt_id')} <= lineages[anchor])
                         and later.get('refs', {}).get('panel_purpose') == worker.get('refs', {}).get('panel_purpose')
@@ -982,7 +989,7 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
                       and a.get('refs', {}).get('panel_role') == 'worker'],
                      key=lambda a: (a.get('created_at', ''), a['attempt_id']))
     admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
-    selected, admissions, superseded = _write_candidates(repo, workers, admissions, attempts, owner, main_id)
+    selected, admissions, superseded = _write_candidates(repo, workers, admissions, attempts, owner, main_id, rows)
     candidates = [(worker, admission) for worker, admission in zip(selected, admissions)
                   if admission or not _empty_salvaged_attempt(repo, worker, rows)]
     selected = [worker for worker, _ in candidates]
@@ -2396,17 +2403,58 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                              later.get('attempt_id') in call_ids and _continues(matching, index, end)
                              for end, later in enumerate(matching) if end > index)}
         calls_by_stage = {'implement': [], 'verify': [], 'review': [], 'main_decision': []}
+        order = {a.get('attempt_id'): pos for pos, a in enumerate(matching) if a.get('attempt_id')}
+        # A later write round with the same purpose and a covering scope retires earlier failures
+        # (fresh re-dispatch after salvage); this is the condition _write_candidates applies.
+        won = {'implement': set(), 'verify': set()}
+        scopes = {}
+
+        def owns(attempt):
+            if attempt not in scopes:
+                try:
+                    scopes[attempt] = _worker_owns(repo, matching[order[attempt]])
+                except (OSError, ValueError, TypeError):
+                    scopes[attempt] = []
+            return scopes[attempt]
+
+        def writer(attempt):
+            refs = matching[order[attempt]].get('refs', {})
+            return refs.get('panel_access') == 'write' and refs.get('panel_role') == 'worker'
+
+        for call in calls:
+            attempt_id_ = call.get('attempt_id')
+            if attempt_id_ in superseded_ids or attempt_id_ not in order or call.get('kind') != 'delegate' or not writer(attempt_id_):
+                continue
+            if call.get('verify_exit') == 0:
+                won['verify'].add(attempt_id_)
+            if call.get('exit') == 0:
+                won['implement'].add(attempt_id_)
+
+        def retired(call, stage):
+            attempt_id_ = call.get('attempt_id')
+            if attempt_id_ not in order or not writer(attempt_id_):
+                return False
+            purpose = matching[order[attempt_id_]].get('refs', {}).get('panel_purpose')
+            old = owns(attempt_id_)
+            return bool(old) and any(
+                order[later] > order[attempt_id_]
+                and matching[order[later]].get('refs', {}).get('panel_purpose') == purpose
+                and all(path in owns(later) for path in old)
+                for later in won[stage])
+
         for call in calls:
             if call.get('attempt_id') in superseded_ids:
                 call['superseded'] = True
                 continue
             if call.get('verify_exit') is not None:
-                if call.get('verify_exit') == 0 or call.get('attempt_id') not in continued_ids:
+                if (call.get('verify_exit') == 0 or (call.get('attempt_id') not in continued_ids
+                        and not retired(call, 'verify'))):
                     calls_by_stage['verify'].append(dict(call, stage_exit=call.get('verify_exit')))
             stage = ('review' if call.get('kind') == 'review' else
                      'implement' if call.get('kind') in ('delegate', 'call', 'ask', 'consult') else None)
             if stage and (stage == 'review' or call.get('exit') in (None, 0)
-                          or call.get('attempt_id') not in continued_ids):
+                          or (call.get('attempt_id') not in continued_ids
+                              and not retired(call, stage))):
                 calls_by_stage[stage].append(call)
         review_records = [(position, row) for position, row in enumerate(indexed)
                           if row.get('kind') in ('review', 'review-outcome')

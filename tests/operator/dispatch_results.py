@@ -74,6 +74,60 @@ def exercise_continued_stage_rollup(repo):
     with patch.object(saved, "_records", return_value=(attempts[:2], verify_calls)):
         row = saved.results(repo, task_id=task)["rows"][0]
     assert row["stages"]["verify"]["state"] == "passed", row
+    # A fresh write re-dispatch (no panel_continues) that succeeds retires the earlier failure; a later failure does not.
+    write = {"panel_access": "write", "panel_role": "worker", "panel_purpose": "implement"}
+    fresh = [dict(attempts[0], refs=dict(write)), dict(attempts[1], refs=dict(write)),
+             dict(attempts[2], refs=dict(write, panel_continues="round-2"))]
+
+    def rollup(attempt_list, call_list, scopes=None):
+        scope = lambda _repo, worker: (scopes or {}).get(worker["attempt_id"], ["value.txt"])
+        with patch.object(saved, "_records", return_value=(attempt_list, call_list)), \
+                patch.object(saved, "_worker_owns", side_effect=scope):
+            return saved.results(repo, task_id=task)["rows"][0]
+
+    for exits, state in (((1, 0, 0), "passed"), ((1, 1, 0), "passed"), ((0, 0, 1), "failed"),
+                         ((0, 1, 1), "failed"), ((1, 1, 1), "failed"), ((0, 1, 0), "passed")):
+        rounds = [dict(task_id=task, kind="delegate", attempt_id="round-%s" % (n + 1), exit=e, verify_exit=e)
+                  for n, e in enumerate(exits)]
+        row = rollup(fresh, rounds)
+        assert row["stages"]["implement"]["state"] == state, (exits, row)
+        assert row["stages"]["verify"]["state"] == state, (exits, row)
+        assert (row["next_action"] == "retry implement") == (state == "failed"), (exits, row)
+    # Only a later write round with the same purpose and a covering scope retires a failure.
+    failed = dict(task_id=task, kind="delegate", attempt_id="round-1", exit=1, verify_exit=1)
+    ok = lambda ident: dict(failed, attempt_id=ident, exit=0, verify_exit=0)
+    advisor = dict(attempts[1], refs={"panel_access": "read", "panel_role": "advisor", "panel_purpose": "advise"})
+    sibling = dict(attempts[1], refs=dict(write))
+    for later, later_call, scopes in (
+            (advisor, dict(ok("round-2"), kind="call"), None),
+            (advisor, ok("round-2"), None),
+            (dict(advisor, refs=dict(advisor["refs"], panel_purpose="implement")), dict(ok("round-2"), kind="call"), None),
+            (sibling, ok("round-2"), {"round-1": ["a.txt"], "round-2": ["b.txt"]}),
+            (sibling, ok("round-2"), {"round-1": []}),
+            (dict(sibling, refs=dict(write, panel_purpose="other")), ok("round-2"), None)):
+        row = rollup([dict(attempts[0], refs=dict(write)), later], [failed, later_call], scopes)
+        assert row["stages"]["implement"]["state"] == "failed", (later, row)
+        assert row["next_action"] == "retry implement", (later, row)
+    row = rollup([dict(attempts[0], refs=dict(write)), sibling], [failed, ok("round-2")],
+                 {"round-1": ["a.txt"], "round-2": ["a.txt", "b.txt"]})
+    assert row["stages"]["implement"]["state"] == "passed", row
+    # Round 1 failed and salvaged, round 2 fresh, round 3 continues round 2: accept sees round 3 only.
+    def worker(n, state="done", refs=None):
+        return dict(task_id=task, attempt_id="round-%s" % n, parent_attempt_id="main", state=state,
+                    created_at="2026-11-02T00:00:0%sZ" % n, refs=refs or {"panel_purpose": "implement"})
+    def delegate(n, code):
+        return dict(kind="delegate", task_id=task, attempt_id="round-%s" % n, exit=code,
+                    patch="p%s.patch" % n, patch_sha256="d" * 63 + str(n))
+    first, second = worker(1, state="failed"), worker(2)
+    third = worker(3, refs={"panel_purpose": "implement", "panel_continues": "round-2"})
+    with patch.object(saved, "_worker_owns", return_value=["value.txt"]):
+        chosen, _, dropped = saved._write_candidates(repo, [first, second, third], [None] * 3, [], "codex",
+                                                    rows=[delegate(1, 1), delegate(2, 0), delegate(3, 0)])
+        assert chosen == [third] and len(dropped) == 2, (chosen, dropped)
+        for rows in ([delegate(1, 1), delegate(2, 1), delegate(3, 1)], [delegate(1, 1)],
+                     [dict(delegate(2, 0), patch=None)]):
+            chosen, _, dropped = saved._write_candidates(repo, [first, second], [None] * 2, [], "codex", rows=rows)
+            assert chosen == [first, second] and not dropped, (rows, chosen)
 
 
 def exercise_pi_cooldown_routing():
