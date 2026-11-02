@@ -450,13 +450,14 @@ unresolved_only = os.environ.get("OMS_UNRESOLVED") == "1"
 as_json = os.environ.get("OMS_JSON") == "1"
 ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 now = time.time()
-head = os.environ.get("OMS_HEAD") or ""
+# An unborn repo reads "HEAD\nunborn" here and in each fingerprint (git echoes HEAD).
+head = (os.environ.get("OMS_HEAD") or "").rsplit("\n", 1)[-1]
 show_fp = os.environ.get("OMS_SHOW") or ""
 
 def head_of(r):
     # "" when the row names no commit: legacy rows and non-git roots
     # ("non-git") have nothing to compare, so each stays its own head.
-    h = str(r.get("state_fingerprint") or "").split(":", 1)[0]
+    h = str(r.get("state_fingerprint") or "").split(":", 1)[0].rsplit("\n", 1)[-1]
     ok = h == "unborn" or (bool(h) and all(c in "0123456789abcdefABCDEF" for c in h))
     return h if ok else ""
 
