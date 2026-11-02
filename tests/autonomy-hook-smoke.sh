@@ -2109,7 +2109,7 @@ PY
   git -C "$TMP/resume-digest-merged" -c user.email=test@example.com -c user.name=Test merge -q --no-ff -m merge origin/main
   # A merge-only branch whose content is upstream is absent where git has merge-tree
   # (>= 2.38); older git keeps counting merges, so the fixtures branch on availability.
-  if git merge-tree --write-tree HEAD HEAD >/dev/null 2>&1; then merged_part=""
+  if git -C "$repo" merge-tree --write-tree main main >/dev/null 2>&1; then merged_part=""
   else merged_part="merged(1), "; fi
   git -C "$repo" worktree add -q -b evil "$TMP/resume-digest-evil" main
   git -C "$TMP/resume-digest-evil" -c user.email=test@example.com -c user.name=Test merge -q --no-ff --no-commit origin/main

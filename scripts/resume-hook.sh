@@ -6,7 +6,8 @@ set -uo pipefail
 # verify), newest handoff digest, and unresolved failures. Everything here is
 # read from .oms state that was scrubbed at write time. Its only write is the
 # regenerable autopilot shadow-judgment row, which is ambient to the check
-# gate; receipts, claims, and every other surface stay untouched.
+# gate; receipts, claims, and every other surface stay untouched (the digest's
+# `git merge-tree --write-tree` adds only unreferenced loose objects).
 # Best-effort by contract: a hook that blocks session start costs more than a
 # missing resume line, so every failure path exits 0. OMS_RESUME_HOOK=0
 # disables; harness children stay silent (their parent already has context).

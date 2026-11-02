@@ -8,6 +8,37 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The fail-ledger counts a recurrence by distinct commits: a fingerprint retried
+  only on one old commit goes stale and retires on TTL instead of staying
+  actionable at every session start. Rows without a git head stay actionable.
+- `oms panel` shows a task accepted locally with `--accept` as "admitted ·
+  awaiting land" and drops it from the review backlog; a different attempt or
+  patch digest stays pending.
+- Plan-task fallback refusals name their repair: `patch-land --plan-task` on a
+  running task names `oms agent-plan review --artifact --patch`, and owner
+  finalize names `--plan-task` or `--accept` when the landing is not bound to
+  the plan.
+- `oms panel --results` reports the stage of a task's latest write round, so a
+  passed retry no longer shows the earlier round's failure, and `--accept`
+  takes a fresh retry whose failed predecessor it supersedes.
+- `oms panel --settle-review --standalone` settles a standalone review attempt
+  as accepted when a verified `patch-land` of its exact patch bytes (same task,
+  same plan, bytes still on disk) exists; admissions and unverified landings do
+  not count, and owner-mode settlement is unchanged.
+- `tests/operator-tools-smoke.sh --section NAME --case CASE` runs one
+  `# BEGIN`/`# END` marked case of a Python section with the section's
+  imports and definitions; `--self-check` fails when a case loads a name the
+  kept source does not bind.
+- Plain `oms patch-land` still never commits, and now says so: after `LANDED`
+  it prints "applied to the working tree (uncommitted); commit it, then: oms
+  land --repo REPO" on stderr (not for `oms panel --accept`, which commits).
+- The `oms peer-review --gate` verify defaults to a 20m timeout like panel
+  dispatch and patch-admit verifies; `OMS_PEER_VERIFY_TIMEOUT` still overrides.
+- `--scope` on `oms panel --continue` adds to the inherited scope instead of
+  replacing it, and a plan-bound write dispatch with `--scope` declares the
+  plan task's allowed paths too, so acceptance no longer refuses the task's
+  own files. Plan paths that are not valid scopes, or a union over the scope
+  limit, fall back to the explicit scopes with a note.
 - `oms land --wait` retries an installation deferred by live delegated workers
   (update exit 76) every 15 seconds, within the `--sibling-wait` budget, and
   logs each wait. Without `--wait`, or once the budget is spent, it keeps the
@@ -23,7 +54,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   Any mismatch runs the verifier as before.
 - The resume digest counts unpublished commits by patch-id, so commits that
   reached the default branch under another SHA (regraft, cherry-pick) are no
-  longer listed as unpublished; merge commits still count.
+  longer listed as unpublished. A branch whose only unpublished commits are
+  merges is hidden when its merged tree equals the default branch's tree (git
+  2.38+ `merge-tree`); a merge that adds content still counts.
 - CI focused lane 2 moves six light stages to lane 3, cutting its predicted
   wall time from about 1380s to 1210s.
 - Read-only delegate reports no longer append "Repository changed during the
