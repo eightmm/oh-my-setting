@@ -886,4 +886,27 @@ out="$(floor_proposal "grep -q ok docs/other.md && bash tests/suite.sh")"
 printf '%s' "$out" | grep >/dev/null -F 'proposal applied' ||
   fail "reading an unmodified path must stay admissible: $out"
 
+# Informational land hint: affected suites absent from --verify are named on
+# stderr; a verify that already names them stays silent. Verdict is unchanged.
+hint_repo="$TMP/hint-repo"
+mkdir -p "$hint_repo/scripts" "$hint_repo/tests"
+git -C "$hint_repo" init -q -b main
+git -C "$hint_repo" config user.email test@example.com
+git -C "$hint_repo" config user.name test
+printf '#!/usr/bin/env bash\necho one\n' > "$hint_repo/scripts/widget.sh"
+printf '#!/usr/bin/env bash\nbash scripts/widget.sh\n' > "$hint_repo/tests/widget-smoke.sh"
+printf '#!/usr/bin/env bash\ntrue\n' > "$hint_repo/tests/other-smoke.sh"
+git -C "$hint_repo" add -A
+git -C "$hint_repo" commit -qm init
+printf '#!/usr/bin/env bash\necho two\n' > "$hint_repo/scripts/widget.sh"
+git -C "$hint_repo" diff > "$TMP/hint.patch"
+git -C "$hint_repo" checkout -q -- scripts/widget.sh
+"$ADMIT" --repo "$hint_repo" --patch "$TMP/hint.patch" --verify 'bash tests/other-smoke.sh' \
+  --report "$TMP/hint-a.md" >/dev/null 2>"$TMP/hint-a.err" || { cat "$TMP/hint-a.err" >&2; fail "hint case should admit"; }
+contains "$TMP/hint-a.err" "note: land will also run 1 affected suite(s) not in --verify: tests/widget-smoke.sh"
+contains "$TMP/hint-a.md" "Patch admission: ADMIT"
+"$ADMIT" --repo "$hint_repo" --patch "$TMP/hint.patch" --verify 'bash tests/widget-smoke.sh' \
+  --report "$TMP/hint-b.md" >/dev/null 2>"$TMP/hint-b.err" || { cat "$TMP/hint-b.err" >&2; fail "hint case b should admit"; }
+! grep -Fq "land will also run" "$TMP/hint-b.err" || fail "no note when --verify names the consumer"
+
 echo "patch-admit-verifier-floor-smoke: ok"

@@ -867,6 +867,45 @@ PY
       record "verify" "SKIP" "no --verify and no base scripts/check.sh"
     fi
 
+    # Informational: name affected suites that --verify skips so they do not
+    # first fail at the land gate. The graph needs a Git range, so the applied
+    # tree becomes an unreferenced commit via a throwaway index; the trusted
+    # harness graph reads it, never the candidate's scripts. Fail-open.
+    if [ "$VERIFY_EXIT" = 0 ] && [ "$VERIFICATION" = command ] &&
+      [ -x "$ROOT/scripts/graph.sh" ] && command -v timeout >/dev/null 2>&1; then
+      hint_idx="$worktree_parent/hint-index"
+      hint_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$worktree" "$@"; }
+      hint_tests=""
+      if GIT_INDEX_FILE="$hint_idx" hint_git read-tree HEAD >/dev/null 2>&1 &&
+        GIT_INDEX_FILE="$hint_idx" hint_git add -A >/dev/null 2>&1 &&
+        hint_tree="$(GIT_INDEX_FILE="$hint_idx" hint_git write-tree 2>/dev/null)" &&
+        hint_head="$(hint_git rev-parse HEAD 2>/dev/null)" &&
+        hint_commit="$(GIT_AUTHOR_NAME=oms GIT_AUTHOR_EMAIL=oms@localhost GIT_COMMITTER_NAME=oms GIT_COMMITTER_EMAIL=oms@localhost \
+          hint_git commit-tree "$hint_tree" -p "$hint_head" -m admit 2>/dev/null)" &&
+        hint_json="$(timeout 60 bash "$ROOT/scripts/graph.sh" project affected --repo "$worktree" \
+          --base "$hint_head" --head "$hint_commit" \
+          --guard 'scripts/graph.sh' --guard 'scripts/lib/oms_graph/**' --guard 'tests/graph-smoke.sh' \
+          --runnable 'tests/operator/*' --json 2>/dev/null)"; then
+        hint_tests="$(printf '%s' "$hint_json" | OMS_VERIFY_CMD="$VERIFY" python3 -c '
+import json, os, sys
+try:
+    tests = json.load(sys.stdin).get("tests") or []
+except Exception:
+    sys.exit(0)
+verify = os.environ.get("OMS_VERIFY_CMD", "")
+for t in tests:
+    path = t.get("path") if isinstance(t, dict) else t
+    if isinstance(path, str) and path and path not in verify:
+        print(path)
+' 2>/dev/null | tr -d '\r')" || hint_tests=""
+      fi
+      rm -f "$hint_idx"
+      if [ -n "$hint_tests" ]; then
+        hint_n="$(printf '%s\n' "$hint_tests" | grep -c .)"
+        echo "note: land will also run $hint_n affected suite(s) not in --verify: $(printf '%s\n' "$hint_tests" | head -5 | tr '\n' ' ' | sed 's/ $//')" >&2
+      fi
+    fi
+
     # If any automatic verification surface changed, apply the complete patch
     # to a second worktree at the same HEAD, restore only that surface from the
     # base, and run the baseline command. Product changes remain in place, so
