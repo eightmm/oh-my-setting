@@ -8,6 +8,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `patch-admit` runs every git call on its admission and floor worktrees
+  (apply, ls-tree, show, cat-file, clean) without global/system config,
+  fsmonitor or hooks, so a caller's global clean filter never runs on
+  candidate bytes; the checkout-hook test checks each call with a git shim
+  instead of relying on a filter firing by timing. The gate-1 `apply --check`
+  against the user's own repository keeps the user's config.
+- `agent-plan finish` accepts a fix-forward land for tasks whose work landed in
+  an earlier push that failed CI: the landed range extends back over pushed,
+  never-passed lands. A receipt whose gate, push and CI succeeded but whose
+  install was deferred is now named as such, with the retry.
 - `patch-admit` names, on one stderr note after a passing verify, the affected
   suites (Project Graph selection) that the `--verify` command does not run,
   so a consumer suite no longer fails first at the land gate. Informational:
