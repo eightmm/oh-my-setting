@@ -1830,6 +1830,79 @@ def _resolve_failed_outcomes(repo, owner, task_id, relative, outcome, revision):
             raise ValueError('artifact-index resolve failed (exit %s): %s' % (result.returncode, result.stderr.strip()))
 
 
+def _admitted_patch_bytes(repo, admission):
+    """The admitted patch bytes, or None when they no longer match the recorded digest."""
+    path = admission.get('patch')
+    try:
+        if (isinstance(path, str) and path.startswith('.oms/landing-patches/')
+                and path.count('/') == 2 and path.endswith('.patch')):
+            # Landing publications are hard links owned by the capture store.
+            data = runpy.run_path(str(ROOT / 'scripts/lib/landing-capture.py'))['read_patch'](
+                str(repo), path, PATCH_MAX)
+        else:
+            if _relative(repo, path, PATCH_MAX)['sha256'] != admission.get('patch_sha256'):
+                return None
+            data = _read(repo, path, PATCH_MAX)
+    except (OSError, ValueError, SystemExit):
+        return None
+    return data if hashlib.sha256(data).hexdigest() == admission.get('patch_sha256') else None
+
+
+def _reusable_admission(repo, execution, rows, admissions, task_id, verify):
+    """Return the admission report path when a clean landed tree is exactly the admitted base + patch.
+
+    Every admission must qualify with an indexed ADMIT report for this very
+    verifier command; any doubt returns None and finalize runs the verifier.
+    Reuse certifies that the verifier passed at admission on an identical
+    tree, not in this checkout's environment: the harness, environment and
+    ignored files are not compared.
+    """
+    if not verify or not admissions or not all(admissions):
+        return None
+    command_sha = hashlib.sha256(verify.encode()).hexdigest()
+    try:
+        if _git(execution, 'status', '--porcelain', '--untracked-files=all').strip():
+            return None
+        head_tree = _git(execution, 'rev-parse', 'HEAD^{tree}').decode().strip()
+        reports = []
+        for admission in admissions:
+            data = _admitted_patch_bytes(repo, admission)
+            try:
+                refs = _automatic_admission_evidence(repo, rows, [admission], task_id)
+            except ValueError:
+                return None
+            if data is None or len(refs) != 1:
+                return None
+            text = _read(repo, refs[0]['path'], MAX_RESULT).decode('utf-8', 'replace')
+            # Only the header block is the harness's; later sections quote candidate output.
+            pairs = re.findall(r'^- (\w+): (\S+)\s*$', text.split('\n## ', 1)[0], re.M)
+            fields = dict(pairs)
+            if (not text.startswith('# Patch admission: ADMIT') or len(fields) != len(pairs)
+                    or fields.get('verification') != 'command'
+                    or fields.get('verify_sha256') != command_sha
+                    or fields.get('patch_sha') != admission['patch_sha256'][:16]
+                    or not re.fullmatch(r'[0-9a-f]{4,40}', fields.get('base', ''))):
+                return None
+            base = _git(execution, 'rev-parse', '--verify', '--quiet',
+                        fields['base'] + '^{commit}').decode().strip()
+            reports.append((refs[0]['path'], base, data))
+        # Chained patches would need each tree in turn; a single admitted patch is the common case.
+        if len(reports) != 1:
+            return None
+        path, base, data = reports[0]
+        with tempfile.TemporaryDirectory(prefix='oms-reuse-') as scratch:
+            env = dict(os.environ, GIT_INDEX_FILE=os.path.join(scratch, 'index'))
+            _git(execution, 'read-tree', base, env=env)
+            applied = subprocess.run(['git', '-C', str(execution), 'apply', '--cached'], input=data, env=env,
+                                     capture_output=True, check=False, timeout=60)
+            if applied.returncode:
+                return None
+            expected = _git(execution, 'write-tree', env=env).decode().strip()
+        return path if expected == head_tree else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify, verify_timeout, execution):
     main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
     with _lock(repo):
@@ -1850,29 +1923,26 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
                 if not admission:
                     continue
                 path = admission.get('patch')
+                data = _admitted_patch_bytes(repo, admission)
+                if data is None:
+                    continue
                 try:
-                    if (isinstance(path, str) and path.startswith('.oms/landing-patches/')
-                            and path.count('/') == 2 and path.endswith('.patch')):
-                        # Landing publications are hard links owned by the capture store.
-                        data = runpy.run_path(str(ROOT / 'scripts/lib/landing-capture.py'))['read_patch'](
-                            str(repo), path, PATCH_MAX)
-                    else:
-                        if _relative(repo, path, PATCH_MAX)['sha256'] != admission.get('patch_sha256'):
-                            continue
-                        data = _read(repo, path, PATCH_MAX)
-                    if hashlib.sha256(data).hexdigest() != admission.get('patch_sha256'):
-                        continue
                     check = subprocess.run(['git', 'apply', '--check'], cwd=str(execution), input=data,
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                            check=False, timeout=60)
-                except (OSError, ValueError, SystemExit, subprocess.SubprocessError):
+                except (OSError, subprocess.SubprocessError):
                     continue
                 if check.returncode == 0:
                     raise ValueError('landed patch %s applies cleanly to the verifier checkout; finalize from '
                                      'the checkout containing the landing (--repo WORKTREE) or after landing and syncing'
                                      % path)
     verification = {'status': 'not_run'}
-    if verify:
+    reused = (_reusable_admission(repo, execution, rows, admissions, task_id, verify)
+              if outcome == 'accepted' and verify else None)
+    if reused:
+        verification = {'status': 'passed', 'exit': 0, 'command_sha256': hashlib.sha256(verify.encode()).hexdigest(),
+                        'reused_admission': reused}
+    elif verify:
         # Output remains local; a verifier transcript is never exported as a summary.
         verified = (_run_verifier(repo, verify, verify_timeout) if execution == repo
                     else _run_verifier(execution, verify, verify_timeout, evidence_repo=repo))

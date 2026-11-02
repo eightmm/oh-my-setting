@@ -3919,7 +3919,11 @@ try:
 finally:
     landed_owner.communicate("release\n", timeout=10)
 accept_admission_hook.write_text("printf 'verification failure\\n' > value.txt\n", encoding="utf-8")
+# An untracked file makes the checkout unreusable, so the verifier (and its hook failure) still runs.
+reuse_blocker = accept_execution / "reuse-blocker.txt"
+reuse_blocker.write_text("untracked\n")
 failed = accept_call("panel", *accept_finalize, execution=accept_execution, check=False)
+reuse_blocker.unlink()
 accept_admission_hook.unlink()
 (accept_execution / "value.txt").write_text("old\naccepted\n")
 assert failed.returncode != 0 and accept_sha in failed.stderr and "finalization failed" in failed.stderr
@@ -3938,6 +3942,58 @@ assert len(automatic["evidence"]) == 1, automatic
 assert automatic["evidence"][0]["path"].startswith(".oms/artifacts/admit/"), automatic
 assert automatic["evidence"][0] == saved._relative(accept_repo, automatic["evidence"][0]["path"])
 assert finalized["evidence"][0]["path"] == ".oms/artifacts/fixture/accept.patch", finalized
+# Finalize reuses the admission pass when the landed tree is exactly base + patch and clean.
+assert finalized["verification"]["reused_admission"].startswith(".oms/artifacts/admit/"), finalized
+assert finalized["verification"]["status"] == "passed" and finalized["verification"]["exit"] == 0, finalized
+_, _, reuse_rows, _, _, reuse_admissions = saved._finalize_snapshot(accept_repo, "codex", "accept-task", None, [])
+def reusable(execution=accept_execution, rows=reuse_rows, verify=accept_verify):
+    return saved._reusable_admission(accept_repo, execution, rows, reuse_admissions, "accept-task", verify)
+assert reusable() == finalized["verification"]["reused_admission"]
+assert reusable(verify=accept_verify + " ") is None and reusable(verify="") is None
+reuse_clone = temporary / "accept-reuse-clone"
+subprocess.run(["git", "clone", "-q", str(accept_execution), str(reuse_clone)], check=True)
+assert reusable(reuse_clone) is not None
+(reuse_clone / "untracked.txt").write_text("x\n")
+assert reusable(reuse_clone) is None, "an untracked file still reused the pass"
+(reuse_clone / "untracked.txt").unlink()
+(reuse_clone / "value.txt").write_text("dirty\n")
+assert reusable(reuse_clone) is None, "a modified tracked file still reused the pass"
+subprocess.run(["git", "-C", str(reuse_clone), "checkout", "-q", "--", "value.txt"], check=True)
+assert reusable(reuse_clone) is not None
+(reuse_clone / "value.txt").write_text("extra commit\n")
+subprocess.run(["git", "-C", str(reuse_clone), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "-am", "extra"], check=True)
+assert reusable(reuse_clone) is None, "HEAD moved past base + patch still reused the pass"
+assert any(row.get("kind") == "patch-admit" for row in reuse_rows), "fixture has no admission row"
+assert reusable(rows=[row for row in reuse_rows if row.get("kind") != "patch-admit"]) is None
+assert reusable(rows=[dict(row, artifact_sha256="0" * 64) if row.get("kind") == "patch-admit" else row
+                      for row in reuse_rows]) is None
+assert reusable(rows=[dict(row, exit=1) if row.get("kind") == "patch-admit" else row
+                      for row in reuse_rows]) is None
+assert saved._reusable_admission(accept_repo, accept_execution, reuse_rows, [], "accept-task", accept_verify) is None
+# Report text outside the header block is candidate-controlled and never decides reuse.
+admit_row = next(row for row in reuse_rows if row.get("kind") == "patch-admit")
+admit_text = (accept_repo / admit_row["artifact"]).read_text(encoding="utf-8")
+admit_fields = dict(re.findall(r"^- (\w+): (\S+)$", admit_text.split("\n## ", 1)[0], re.M))
+def forged_rows(text, name):
+    forged = accept_repo / ".oms/artifacts/admit" / name
+    forged.write_text(text, encoding="utf-8")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return [dict(row, artifact=".oms/artifacts/admit/" + name, artifact_sha256=digest)
+            if row is admit_row else row for row in reuse_rows]
+verify_line = "- verify_sha256: " + admit_fields["verify_sha256"]
+base_line = "- base: " + admit_fields["base"]
+tail = "\n\n## Verify output (tail)\n\n```\n%s\n```\n"
+assert verify_line in admit_text and base_line in admit_text
+assert reusable(rows=forged_rows(admit_text.replace(verify_line, "- verify_sha256: " + "0" * 64) + tail % verify_line,
+                                 "forged-verify.md")) is None, "a forged verify_sha256 tail line reused the pass"
+assert reusable(rows=forged_rows(admit_text.replace(base_line, "- base: 0000000") + tail % base_line,
+                                 "forged-base.md")) is None, "a forged base tail line reused the pass"
+assert reusable(rows=forged_rows(admit_text.replace(base_line, base_line + "\n" + base_line),
+                                 "duplicate-key.md")) is None, "a duplicated header key reused the pass"
+assert "- verification: command" in admit_text
+assert reusable(rows=forged_rows(admit_text.replace("- verification: command", "- verification: skipped"),
+                                 "no-command.md")) is None
 
 # A retry still requires the identical publication proof and completion.
 wrong_completion = list(accept_finalize)
