@@ -1864,7 +1864,8 @@ for task_id, explicit_room, writing, continuing, form in (
         request = ["bash", str(panel.ENTRY), "panel", "--repo", str(other_project), "--owner", "claude",
                    "--brief-file", cross_brief.name, "--continue", task_id]
         if form == "override":
-            request += ["--verify", cross_verify + '; echo override >> "$PANEL_TEST_VERIFY_LOG"']
+            request += ["--verify", cross_verify + '; echo override >> "$PANEL_TEST_VERIFY_LOG"',
+                        "--scope", "extra.txt"]  # a continuation's --scope adds to the inherited scope
         if form == "role":
             # Naming only the role still inherits access, scope, verify and workload.
             request += ["--dispatch", "worker"]
@@ -1917,7 +1918,8 @@ for task_id, explicit_room, writing, continuing, form in (
     state = room.status(project, shared)
     enrolled = room.participant(state, observed["participant"])
     assert enrolled["parent"] == room_owner and enrolled["role"] == "worker", enrolled
-    assert enrolled["owns"] == (["value.txt"] if writing else []), enrolled
+    assert enrolled["owns"] == ((["value.txt", "extra.txt"] if form in ("override", "route", "role") else ["value.txt"])
+                                if writing else []), enrolled
     messages = state["messages"]
     assert any(m["recipient"] == observed["participant"] and m["text"].startswith("Assigned:") for m in messages), messages
     assert any(m["sender"] == observed["participant"] and m["recipient"] == room_owner
@@ -3268,6 +3270,23 @@ scoped_call = [p for p in room.status(project, shared)["participants"]
                if p["participant"].startswith("call-") and p["role"] != "reviewer"][-1]
 assert scoped_call["owns"] == ["scripts/lib", "docs"] and scoped_call["parent"] == room_owner, scoped_call
 room.append(project, shared, {"kind": "leave", "participant": scoped_call["participant"]}, "Left")
+# A plan-bound dispatch with --scope owns the plan task's allowed paths plus the scope; plan paths never fail it.
+many_paths = ",".join("plan/p%d" % number for number in range(16))
+for plan_id, allowed_paths, expected_owns, note in (
+        ("scoped-plan-task", "docs/plan-owned.md", ["scripts/lib", "docs", "docs/plan-owned.md"], False),
+        ("scoped-plan-slash", "docs/,./x/y.md", ["scripts/lib", "docs", "x/y.md"], False),
+        ("scoped-plan-bad", "docs/ok.md,../escape", ["scripts/lib", "docs"], True),
+        ("scoped-plan-many", many_paths, ["scripts/lib", "docs"], True)):
+    call(plan_cli + ["add", "--id", plan_id, "--title", "Plan-bound scope", "--allowed", allowed_paths])
+    plan_bound = subprocess.run(scoped_dispatch.args[:-1] + ["--task-id", plan_id],
+                                env=dict(room_env, PANEL_TEST_MODE="write"), capture_output=True, text=True, timeout=90)
+    assert plan_bound.returncode == 0, (plan_id, plan_bound)
+    assert ("Plan allowed paths not added" in plan_bound.stderr) == note, (plan_id, plan_bound.stderr)
+    plan_call = [p for p in room.status(project, shared)["participants"]
+                 if p["participant"].startswith("call-") and p["role"] != "reviewer"][-1]
+    assert plan_call["owns"] == expected_owns, (plan_id, plan_call)
+    room.append(project, shared, {"kind": "leave", "participant": plan_call["participant"]}, "Left")
+shutil.rmtree(project / ".oms/plan")
 with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner}):
     room.scope(project, shared, room_owner, [])
 for who in ("scope-advisor", "scope-live", "scope-done"):

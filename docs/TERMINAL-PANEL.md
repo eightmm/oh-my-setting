@@ -844,7 +844,9 @@ become a refactorer), while reviewer, verifier, security-auditor, critic and the
 read-only roles never resume. The short form `oms panel --repo . --owner claude
 --continue TASK_ID --brief-file next.md` takes the role, `--access write`, workload, every
 `--scope` and `--verify` from the task's newest recorded write dispatch in this main's
-lineage; any flag you pass overrides its recorded value, and a task with no recoverable
+lineage; any flag you pass overrides its recorded value, except that `--scope` adds to the
+inherited scope (a plan-bound dispatch's declared scope also covers the plan task's allowed
+paths), and a task with no recoverable
 write dispatch is refused with a message to pass `--dispatch ROLE`. It finds the latest worker of that task owned by this
 main, and starts a new run in a new worktree at the current HEAD that resumes
 the worker's native session (recorded as `refs.native_session` in the attempt,

@@ -454,7 +454,7 @@ def main(argv=None):
             # An explicit route (--to/--model) is incompatible with a capability tier.
             if not (args.to or args.model):
                 args.workload = args.workload or inherited["workload"]
-            args.scope = args.scope or inherited["scope"] or None
+            args.scope = list(dict.fromkeys((inherited["scope"] or []) + (args.scope or []))) or None
             args.verify = args.verify or inherited["verify"]
         elif not args.dispatch:
             parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no "
