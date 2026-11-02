@@ -1421,12 +1421,16 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   # (position mod 4). operator-tools alone sets the longest lane, so CI lane 2
   # carries it plus light stages only, and the other heavy stages are split
   # evenly over lanes 1, 3 and 4. Costs are mean slow-stage seconds of four
-  # main CI runs on 2026-10-26: operator-tools 870, goal-drive-recovery-1 289,
-  # patch-admit-verifier-floor 278, autopilot 217, goal-drive-recovery-2 186,
-  # autonomy-plan-run 177, graph 170, draft-pr 164, the rest under 115 (stages
-  # not named in slow-stage lines count as under 20). Predicted heavy-stage
-  # totals per CI lane 1..4: 779, 870, 788, 789s; the eight local lanes:
-  # 382, 870, 438, 402, 397, 0, 350, 387s. Re-derive when a heavy suite is added
+  # main CI runs on 2026-10-30 and 2026-11-02: operator-tools mean 1125 (985-
+  # 1276), goal-drive-recovery-1 351, autopilot 363, patch-admit-verifier-floor
+  # 218, graph 201, goal-drive-recovery-2 150, draft-pr 140, autonomy-plan-run
+  # 251, the rest under 115 (stages not named in slow-stage lines count as
+  # under 20). Six light stages (state-surfaces, durable-writers, debate-delta,
+  # lifecycle-events, lifecycle-hardening, council-failure-symmetry) sit in
+  # lane 3 slots, trading places with near-zero stages, to unload lane 2.
+  # Predicted stage-sum means per CI lane 1..4: 1021, 1208, 1065, 1159s (lane 2
+  # was 1381 before the swap); the eight local lanes are not re-derived.
+  # Re-derive when a heavy suite is added
   # or one changes by minutes: assign by cost to the lightest lane that still
   # has a slot, balance the k/k+4 pairs, then list lane 1..8, 1..8, ... The
   # Linux-only stages close the list, so the other hosts keep the same lanes
@@ -1444,7 +1448,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage patch-land-approval bash tests/patch-land-approval-smoke.sh
   stage land bash tests/land-smoke.sh
   stage runtime-core bash tests/runtime-core-smoke.sh
-  stage state-surfaces bash tests/state-surfaces-smoke.sh
+  stage context-core bash tests/context-core-smoke.sh
   stage draft-pr bash tests/draft-pr-smoke.sh
   stage graph bash tests/graph-smoke.sh
   stage autonomy-hook bash tests/autonomy-hook-smoke.sh
@@ -1452,7 +1456,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage tick bash tests/tick-smoke.sh
   stage source-distribution bash tests/source-distribution-smoke.sh
   stage atomic-state bash tests/atomic-state-smoke.sh
-  stage durable-writers bash tests/durable-writers-contract-smoke.sh
+  stage artifact-supersession bash tests/artifact-supersession-smoke.sh
   stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
   stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
   stage autonomy-verification bash tests/autonomy-verification-smoke.sh
@@ -1464,16 +1468,16 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   # gate could not see was the one that broke. 30s buys that back.
   stage install-lifecycle bash tests/install-lifecycle-smoke.sh
   stage lifecycle-provider-integration bash tests/lifecycle-provider-integration-smoke.sh
-  stage debate-delta bash tests/debate-delta-smoke.sh
-  stage artifact-supersession bash tests/artifact-supersession-smoke.sh
+  stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
+  stage durable-writers bash tests/durable-writers-contract-smoke.sh
   stage install-lifecycle-lock bash tests/install-lifecycle-lock-smoke.sh
   stage panel-controls bash tests/panel-controls-smoke.sh
-  stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
   stage tool-lock bash tests/tool-lock-smoke.sh
+  stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
   stage work-journal bash tests/work-journal-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
-  stage lifecycle-events bash tests/lifecycle-events-smoke.sh
-  stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
+  stage advisor-session bash tests/advisor-session-smoke.sh
+  stage debate-delta bash tests/debate-delta-smoke.sh
   stage turn-guard-fuse bash tests/turn-guard-fuse-smoke.sh
   stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh
   stage codex-hud-config bash tests/codex-hud-config-smoke.sh
@@ -1488,16 +1492,16 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage provider-registry bash tests/provider-registry-smoke.sh
   stage prompt-budget bash tests/prompt-budget-smoke.sh
   stage tsp-queue bash tests/tsp-queue-smoke.sh
-  stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
-  stage context-core bash tests/context-core-smoke.sh
+  stage seat-reliability bash tests/seat-reliability-smoke.sh
+  stage state-surfaces bash tests/state-surfaces-smoke.sh
   stage provider-permissions-mcp-boundary bash tests/provider-permissions-mcp-boundary-smoke.sh
   stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
   stage platform-portability bash tests/platform-portability-smoke.sh
-  stage seat-reliability bash tests/seat-reliability-smoke.sh
+  stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
   stage supervisor bash tests/supervisor-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh
-  stage advisor-session bash tests/advisor-session-smoke.sh
+  stage lifecycle-events bash tests/lifecycle-events-smoke.sh
   # panel jobs need Linux subreaper+pidfd and a POSIX pty; other hosts keep the
   # core lifecycle without them rather than counting a missing native proof.
   if [ "$(uname -s 2>/dev/null)" = Linux ]; then
