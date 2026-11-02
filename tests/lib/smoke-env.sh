@@ -5,6 +5,8 @@ unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID OMS_TASK_ID OMS_ATTEMPT_ID
 unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID
 # An admission or gate verify budget set by the caller is not the fixtures' own.
 unset OMS_PEER_VERIFY_TIMEOUT
+# Runtime seat-wall and worker-guard knobs of an accepting caller are not the fixtures' own.
+unset OMS_PEER_TIMEOUT OMS_PEER_PRINT_TIMEOUT OMS_WORKER_GUARD_STRICT OMS_WORKER_GUARD_OFF
 unset NVM_BIN NVM_DIR
 # Match CI's hermetic Git configuration. Fixtures that need commits must set
 # their own identity; ambient developer identity must never make them pass.

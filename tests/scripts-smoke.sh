@@ -18147,13 +18147,16 @@ set -eu
 [ -z "${OMS_ROOM_ID:-}" ] && [ -z "${OMS_ROOM_PARTICIPANT:-}" ] &&
   [ -z "${OMS_ROOM_REPO:-}" ] && [ -z "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" ] &&
   [ -z "${OMS_PANEL_CONTINUATION:-}" ] && [ -z "${OMS_PANEL_ACCEPT_RECORD_JSON:-}" ] &&
-  [ -z "${OMS_HARNESS_DELEGATE_DEPTH:-}" ]
+  [ -z "${OMS_HARNESS_DELEGATE_DEPTH:-}" ] && [ -z "${OMS_PEER_TIMEOUT:-}" ] &&
+  [ -z "${OMS_PEER_PRINT_TIMEOUT:-}" ] && [ -z "${OMS_WORKER_GUARD_STRICT:-}" ] &&
+  [ -z "${OMS_WORKER_GUARD_OFF:-}" ]
 SH
   chmod +x "$checker"
   OMS_ROOM_ID=outer-room OMS_ROOM_PARTICIPANT=outer-main OMS_ROOM_REPO="$TMP/outer" \
     OMS_ROOM_ADMITTED_PARTICIPANT=outer-main OMS_HARNESS_DELEGATE_DEPTH=1 \
     OMS_PANEL_CONTINUATION=outer-continuation OMS_PANEL_ACCEPT_RECORD_JSON='{}' \
-    OMS_SHELLCHECK_BIN="$checker" OMS_LINT_JOBS_MAX=1 \
+    OMS_PEER_TIMEOUT=30m OMS_PEER_PRINT_TIMEOUT=30m OMS_WORKER_GUARD_STRICT=1 \
+    OMS_WORKER_GUARD_OFF=0 OMS_SHELLCHECK_BIN="$checker" OMS_LINT_JOBS_MAX=1 \
     bash "$ROOT/scripts/check.sh" --lint-only > "$TMP/room-env-gate.log" 2>&1 ||
     fail "gate leaked the invoker's room identity into fixture tools"
 }
