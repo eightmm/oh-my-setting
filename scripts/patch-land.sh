@@ -135,6 +135,7 @@ Sequence: main tree must be clean -> patch-admit returns ADMIT -> git apply
 is recorded in the shared fail-ledger (fingerprint = patch content hash) so a
 later agent is warned before re-landing the same patch; a subsequent
 successful land resolves it.
+patch-land never commits: commit the applied tree yourself, then publish with oms land.
 EOF
 }
 
@@ -1695,3 +1696,6 @@ else
 fi
 
 echo "LANDED"
+if [ -z "$PANEL_ACCEPT" ]; then
+  echo "patch-land: applied to the working tree (uncommitted); commit it, then: oms land --repo $(printf '%q' "$REPO")" >&2
+fi

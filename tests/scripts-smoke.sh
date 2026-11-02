@@ -25207,6 +25207,7 @@ PY
     >"$out2" 2>"$err2" || fail "admissible retry should land"
   assert_file_contains "$err2" "rejected before"
   assert_file_contains "$out2" "LANDED"
+  assert_file_contains "$err2" "(uncommitted); commit it, then: oms land --repo"
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) | grep -F "patch-land REJECT" > /dev/null &&
     fail "successful land should resolve the recorded rejection"
   assert_file_contains "$project/file.txt" "change"
