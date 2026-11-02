@@ -388,7 +388,7 @@ for owner in panel.PROVIDERS:
     assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
 with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
     claude_stub = Path(help_dir) / "claude"
-    claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--autocompact <auto|tokens>' '--disallowedTools <tools...>'\n")
+    claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--autocompact <auto|tokens>' '  --disallowedTools, --disallowed-tools <tools...>'\n")
     claude_stub.chmod(0o700)
     old_path = os.environ.get("PATH", "")
     bash_dir = os.path.dirname(shutil.which("bash"))

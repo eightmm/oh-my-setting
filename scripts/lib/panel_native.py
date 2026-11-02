@@ -56,7 +56,7 @@ def _claude_supports_name():
 
 @lru_cache(maxsize=1)
 def _claude_supports_disallowed_tools():
-    return re.search(r"(?<![\w-])--disallowedTools(?=[ <=]|$)", _claude_help(), re.M) is not None
+    return re.search(r"(?<![\w-])--disallowedTools(?=[ ,<=]|$)", _claude_help(), re.M) is not None
 
 
 def _main_session_name(repo):

@@ -27,7 +27,7 @@ treat a live one as harness lifecycle instead of a Git metadata violation.
 add prints the new worktree path. Its marker stays live while the owner
 process runs: by default the nearest ancestor that is not a shell (the agent
 session invoking it), or --owner-pid PID. After the owner exits the worktree is
-ordinary harness residue that doctor/gc cleanup removes.
+ordinary harness residue that oms cleanup --apply removes.
 remove accepts only a worktree this command created; --force also discards
 uncommitted changes in it.
 Workers (OMS_HARNESS_CHILD=1 or a nonzero OMS_HARNESS_DELEGATE_DEPTH) are
