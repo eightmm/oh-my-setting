@@ -1521,7 +1521,7 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
 
 
 def panel_main_hint(payload: dict[str, Any]) -> str:
-    """Keep the role brief, restoring Codex/Pi rules once per context generation."""
+    """Keep the role brief, restoring Codex/Claude/Pi rules once per context generation."""
     if (payload.get("hook_event_name") or payload.get("hookEventName")) != "UserPromptSubmit":
         return ""
     if not is_panel_main():
@@ -1537,10 +1537,12 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
             + ("your system prompt." if agent == "claude" else "this context."))
     path = None
     state = {}
-    if agent == "codex":
+    if agent in ("codex", "claude"):
         path = resume_pending_path(payload)
         state = load_state(path) if path else {}
-        if not state.get("delivered"):
+        if agent == "claude" and not state:
+            path = None  # Claude is marked only by SessionStart; an unmarked session keeps the pointer.
+        if not state.get("delivered") and (path or agent == "codex"):
             base = panel_main_base(payload, room)
             source = state.get("source")
             if source in ("compact", "clear", "resume"):
@@ -2981,7 +2983,7 @@ def cmd_relay_hint(_: argparse.Namespace) -> int:
         print(hint)
     if (is_panel_main() and (payload.get("hook_event_name") or payload.get("hookEventName")) == "SessionStart"
             and payload.get("source") in ("startup", "compact", "clear", "resume")):
-        if payload_agent(payload) == "codex":
+        if payload_agent(payload) in ("codex", "claude"):
             # The same marker tracks initial delivery and resets after context loss.
             # Codex/Pi can drop SessionStart output; only a non-skipped prompt consumes it.
             with contextlib.suppress(Exception):

@@ -1478,7 +1478,18 @@ for command in ("route", "panel-hook"):
         again = prompt_hook()
         assert "control-tower main:" in again and "You are a control-tower main" not in again, again
         assert "resumed after" not in again, again
-    assert "your system prompt" in prompt_hook(agent="claude")
+    assert "your system prompt" in prompt_hook(agent="claude"), "an unmarked Claude session keeps the pointer"
+    # A Claude main gets the full rules once per context generation too, marked by SessionStart.
+    for source in ("startup", "compact"):
+        start(source, session=session, OMS_HOOK_AGENT="claude")
+        assert "[oms panel]" not in prompt_hook("<task-notification>done</task-notification>", agent="claude")
+        text = prompt_hook(agent="claude")
+        assert "You are a control-tower main" in text, (source, text)
+        assert ("resumed after compact" in text) == (source == "compact"), (source, text)
+        again = prompt_hook(agent="claude")
+        assert "your system prompt" in again and "You are a control-tower main" not in again, again
+    start("startup", session=session, OMS_HOOK_AGENT="claude", OMS_PANEL_MAIN_ATTEMPT="")
+    assert "[oms panel]" not in prompt_hook(agent="claude", OMS_PANEL_MAIN_ATTEMPT=""), "non-panel Claude got panel text"
     assert "[oms panel]" not in prompt_hook("<task-notification>done</task-notification>", agent="claude")
     assert "[oms panel]" not in prompt_hook(OMS_PANEL_MAIN_ATTEMPT=""), "non-main received a reminder"
 os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
