@@ -938,6 +938,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
             prompt = prompt.replace("End with exactly one final line:", prior + "\n\nEnd with exactly one final line:")
         verifier = _review_verifier(repo, room_id, member, caller, task_id)
         manual_notice = False
+        attempt = None
         unconfirmed = ("Task %s has a write patch that could not launch automatic review; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                        % task_id)
         try:
@@ -1029,7 +1030,9 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
             # Completion needs the durable manual-review notice; without it the claim stays retryable.
             auto_review_done = manual_notice
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-            _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+            if attempt is None or attempt >= 2:
+                # A first launch failure is retried by the next reconcile; mail only when none remains.
+                _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
             print("OMS automatic review unavailable for task %s: %s" % (task_id, clean(str(error), 180)),
                   file=sys.stderr)
             # Preflight/dispatch failures with no launch evidence retain their bounded retry.

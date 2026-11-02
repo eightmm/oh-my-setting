@@ -542,6 +542,8 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
             patch.object(panel, "work_repository", return_value=worker_execution_repo), \
             patch.dict(os.environ, room_env, clear=True):
         panel.deliver_result(project, shared, preflight_call, room_owner, auto_task, 0)
+        assert not any(m["id"] == "judgment-" + preflight_call for m in room.status(project, shared)["messages"])
+        panel.deliver_result(project, shared, preflight_call, room_owner, auto_task, 0)
     preflight_review = next(row["room_event"] for row in room.records(project, shared)
                             if row.get("room_event", {}).get("kind") == "review-dispatch"
                             and row["room_event"].get("patch_sha256") == preflight_digest)
@@ -858,6 +860,38 @@ retry_events = [row["room_event"] for row in room.records(project, shared)
                 if row.get("room_event", {}).get("kind") in {"review-dispatch", "review-dispatch-failed"}
                 and row["room_event"].get("patch_sha256") == retry_digest]
 assert [event["kind"] for event in retry_events] == ["review-dispatch", "review-dispatch-failed", "review-dispatch"]
+# A retryable launch failure sends no manual-review mail; the mail comes once no retry remains.
+mail_call = fixture_call_id("launch-failure-mail")
+mail_attempt = dict(retry_attempt, attempt_id="attempt-" + mail_call,
+    refs=dict(retry_attempt["refs"], panel_room_participant=mail_call))
+mail_patch = auto_patch + b"# mail digest\n"
+mail_index = dict(retry_index, attempt_id=mail_attempt["attempt_id"],
+                  patch_sha256=hashlib.sha256(mail_patch).hexdigest())
+room.join(project, shared, mail_call, "codex", "worker", parent=room_owner)
+panel._prepare_dispatch_call(project, shared, mail_call, room_owner,
+                             "test -f scripts/fixture.py", worker_execution_repo)
+def fail_always(*args, **kwargs):
+    if args[8]:
+        return run_dispatch(*args, **kwargs)
+    raise OSError("fixture launch failure")
+def launch_mail():
+    # status() keeps only the last 12 messages; read the full projection.
+    return [m for m in room.project(room.records(project, shared))["messages"]
+            if m["id"] == "judgment-" + mail_call and "could not launch" in m["text"]]
+with patch.object(panel_result_store, "_records", return_value=([mail_attempt], [mail_index])), \
+        patch.object(panel_result_store, "verified_patch", return_value=mail_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fail_always), \
+        patch.object(panel, "work_repository", return_value=worker_execution_repo), \
+        patch.object(panel, "provider_catalog", return_value=catalog_rows), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, mail_call, room_owner, auto_task, 0)
+    assert not launch_mail(), launch_mail()
+    panel.deliver_result(project, shared, mail_call, room_owner, auto_task, 0)
+    assert len(launch_mail()) == 1, launch_mail()
+    panel.deliver_result(project, shared, mail_call, room_owner, auto_task, 0)
+    assert len(launch_mail()) == 1, launch_mail()
 for reviewer_label, answer, exit_status, expected in (
         ("review-gate-fail", "Findings: checked.\nGATE: fail", 0, "Review gate failed"),
         ("review-gate-pass", "Findings: checked.\nGATE: pass", 0, "owner finalization"),
