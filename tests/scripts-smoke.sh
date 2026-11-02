@@ -3676,6 +3676,32 @@ assert seats == {"claude": "pass", "antigravity": "fail"}, seats
 assert "gate_verify_exit" in review, review
 PY
     fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
+
+  # The gate verify budget defaults to 20m; an explicit environment value wins.
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  rc=0
+  env -u OMS_PEER_VERIFY_TIMEOUT HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts-default" \
+    --providers claude \
+    --no-diff \
+    --gate \
+    --verify 'printf "budget=%s\n" "$OMS_PEER_VERIFY_TIMEOUT"' \
+    --prompt "Default verify budget" >"$project/out-default" 2>&1 || rc=$?
+  [ "$rc" = "0" ] || fail "default-budget gate should pass, got $rc: $(cat "$project/out-default")"
+  assert_one_artifact_contains "$project/artifacts-default" '_verify-*.md' 'budget=20m'
+
+  rc=0
+  OMS_PEER_VERIFY_TIMEOUT=5m HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts-explicit" \
+    --providers claude \
+    --no-diff \
+    --gate \
+    --verify 'printf "budget=%s\n" "$OMS_PEER_VERIFY_TIMEOUT"' \
+    --prompt "Explicit verify budget" >"$project/out-explicit" 2>&1 || rc=$?
+  [ "$rc" = "0" ] || fail "explicit-budget gate should pass, got $rc: $(cat "$project/out-explicit")"
+  assert_one_artifact_contains "$project/artifacts-explicit" '_verify-*.md' 'budget=5m'
 }
 
 test_prompt_takers_refuse_a_mistyped_option() {

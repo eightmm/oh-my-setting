@@ -862,6 +862,9 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
       printf '## Output\n\n'
     } > "$gate_verify_temp"
     gate_verify_started="$(date +%s)"
+    # The gate verify defaults to 20m like panel and patch-admit verifies;
+    # an explicit OMS_PEER_VERIFY_TIMEOUT still wins.
+    gate_verify_budget="${OMS_PEER_VERIFY_TIMEOUT:-20m}"
     set +e
     (
       cd "$MA_READ_SOURCE_REPO" || exit 1
@@ -891,13 +894,13 @@ $(compgen -e)
 EOF
         printf 'unset owner environment: %s\n' "${verify_unset:-none}"
       fi
-      run_verify_with_timeout bash -c "$VERIFY_CMD"
+      OMS_PEER_VERIFY_TIMEOUT="$gate_verify_budget" run_verify_with_timeout bash -c "$VERIFY_CMD"
     ) >> "$gate_verify_temp" 2>&1
     gate_verify_exit=$?
     gate_verify_seconds=$(( $(date +%s) - gate_verify_started ))
     set -e
     if [ "$gate_verify_exit" -eq 124 ]; then
-      printf '\n\n## Timeout\n\n%s\n' "$(ma_verify_timeout_note "$gate_verify_exit")" >> "$gate_verify_temp"
+      printf '\n\n## Timeout\n\n%s\n' "$(OMS_PEER_VERIFY_TIMEOUT="$gate_verify_budget" ma_verify_timeout_note "$gate_verify_exit")" >> "$gate_verify_temp"
     fi
     printf '\n\n## Exit\n\n%s\n' "$gate_verify_exit" >> "$gate_verify_temp"
   fi
@@ -1185,7 +1188,7 @@ print(json.dumps({
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass (${gate_verify_seconds}s)"
       else
-        timeout_note="$(ma_verify_timeout_note "$gate_verify_exit")"
+        timeout_note="$(OMS_PEER_VERIFY_TIMEOUT="$gate_verify_budget" ma_verify_timeout_note "$gate_verify_exit")"
         echo "gate verify: fail (exit $gate_verify_exit, ${gate_verify_seconds}s${timeout_note:+; $timeout_note}) -> $gate_verify_artifact"
       fi
   fi
