@@ -1731,8 +1731,11 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     if goal and not tasks:
         return " [oms plan] Goal: %s · registered goal awaiting tasks — add tasks with oms agent-plan add; never use init (init replaces plan_id and clears the acceptance command)." % goal
     all_closed = bool(tasks) and all(t.get("state") in ("done", "cancelled") for t in tasks)
-    if (not goal or all_closed or (stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds)):
+    if (not goal or (stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds)):
         return panel_no_goal_hint(repo, data, tasks)
+    # A recent goal whose tasks are all closed may continue: add the next task, do not re-init.
+    if all_closed:
+        return " [oms plan] Goal: %s · all %d tasks closed — if this goal continues, add the next task with oms agent-plan add; if it is complete, register the next goal with oms agent-plan init --goal TEXT (init archives this plan)." % (goal, len(tasks))
     done = {t["id"] for t in tasks if t.get("state") == "done"}
     ready_hint = panel_next_ready_hint(tasks, payload_agent(payload))
     cancelled = sum(1 for task in tasks if task.get("state") == "cancelled")

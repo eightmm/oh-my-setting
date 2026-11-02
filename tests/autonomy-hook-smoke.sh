@@ -1124,8 +1124,8 @@ long_id = hook_state.panel_no_goal_hint(repo, {"goal": "previous goal text"}, [
 assert "autogoal-1028" in long_id and "…" not in long_id
 plan_path.write_text(json.dumps({"goal": "Closed goal", "tasks": [{"id": "closed", "state": "done"}]}))
 closed_hint = hook_state.panel_plan_hint(payload("tower"))
-assert "No active goal" in closed_hint and "previous goal: Closed goal" in closed_hint, closed_hint
-assert "unfinished:" not in closed_hint, closed_hint
+assert "Goal: Closed goal" in closed_hint and "all 1 tasks closed" in closed_hint and "oms agent-plan add" in closed_hint, closed_hint
+assert "No active goal" not in closed_hint and "unfinished:" not in closed_hint, closed_hint
 plan_path.write_text(json.dumps({"goal": "", "tasks": [{"id": "pending", "title": "Pending", "state": "ready"}]}))
 missing_goal = hook_state.panel_plan_hint(payload("tower"))
 assert "No active goal" in missing_goal and "pending: Pending" in missing_goal, missing_goal
