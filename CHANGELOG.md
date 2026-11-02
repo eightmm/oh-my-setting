@@ -8,6 +8,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `patch-admit` names, on one stderr note after a passing verify, the affected
+  suites (Project Graph selection) that the `--verify` command does not run,
+  so a consumer suite no longer fails first at the land gate. Informational:
+  the verdict, exit code and receipts are unchanged, and a graph error prints
+  nothing.
+- An unsafe `panel --finalize --summary-file` (process substitution, symlink
+  or hard link) is refused as a summary file with the reason, instead of as
+  "panel evidence unavailable or unsafe"; an undecodable regular file keeps its
+  own error.
+- The write-worker revert check names the operator single-case path
+  (`operator-tools-smoke.sh --section S --case NAME`), so proving a new
+  operator test fails no longer reruns its whole section.
 - The fail-ledger counts a recurrence by distinct commits: a fingerprint retried
   only on one old commit goes stale and retires on TTL instead of staying
   actionable at every session start. Rows without a git head stay actionable.
