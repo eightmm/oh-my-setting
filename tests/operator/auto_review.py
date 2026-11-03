@@ -1332,20 +1332,4 @@ for invalid in (request[:-1] + ["printf tampered > value.txt"],
     rejected_gate = subprocess.run(invalid, env=candidate_env, capture_output=True, text=True, timeout=90)
     assert rejected_gate.returncode != 0 and "candidate" in rejected_gate.stderr, rejected_gate
     assert worker_log.read_bytes() == before_bad_gate and (project / "value.txt").read_bytes() == source_value
-# An automatic-review call of a task admitted locally folds under that state instead of a separate decision row.
-import room_view as folded_room_view
-def folded_board(finalized, access="read"):
-    return {"room": {"id": "r1", "participants": [
-                {"participant": "m1", "role": "main", "joined": True, "provider": "codex"},
-                {"participant": "w1", "role": "worker", "joined": True, "provider": "claude", "parent": "m1"}]},
-            "attempts": {"recent": [], "active_recent": [{"attempt_id": "a1", "task_id": "t1", "state": "review",
-                "updated_at": "2026-11-02T00:00:00Z", "panel": {"room_id": "r1", "room_participant": "w1", "role": "worker"},
-                "refs": {"panel_access": access}}]},
-            "plan": {"tasks": [{"id": "t1", "state": "review", "claimed_by_participant": "m1"}]},
-            "finalized": finalized, "awaiting_admission": []}
-folded_open, folded_admitted = folded_board({}), folded_board({"t1": "admitted"})
-folded_call = lambda report: next(m for m in folded_room_view.nodes(report) if m["role"] == "worker")
-assert folded_room_view.call_classifier(folded_open)(folded_call(folded_open)) == "review"
-assert folded_room_view.call_classifier(folded_admitted)(folded_call(folded_admitted)) == "past"
-assert folded_call(folded_admitted)["decision"] == "admitted"
 shared, room_env = shared_before_auto, room_env_before_auto

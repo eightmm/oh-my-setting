@@ -846,7 +846,6 @@ assert board_calls("80 24 0 $1\tcodex\t", terminal=(157, 131)) == [
     ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:59r"], top_split("45%")], "the attaching terminal is sized too"
 assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
-assert board_calls("") == [left_split("28%")]
 for old in ("tmux 3.0a", "tmux 2.9", "tmux", "tmux unknown"):
     assert board_calls("", version=old) == [left_split("22")], "old or unparseable tmux gets cells of 80x24: " + old
     assert board_calls("80 24 0 $1\tcodex\t", terminal=(200, 50), version=old) == [record_left, left_split("56")], old

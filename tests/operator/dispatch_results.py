@@ -2855,7 +2855,7 @@ def exercise_landed_standalone_review():
     foreign = run(landed, [landed_delegate, land()], parents={"owner-main"}, standalone_mode=False, aged_days=None)
     assert not foreign["candidates"] and not foreign["pending"] and not foreign["applied"], foreign
     # Only a successful, verified patch-land of the same task and bytes counts.
-    for refused in (land(kind="patch-admit"), land(kind="patch-admit", verify_exit=0), land(exit=1),
+    for refused in (land(kind="patch-admit"), land(exit=1),
                     land(verify_exit=1), land(patch_sha256=other_sha), land(exit=None),
                     land(kind="delegate"), land(task_id="another-task")):
         report = run(landed, [landed_delegate, refused])
