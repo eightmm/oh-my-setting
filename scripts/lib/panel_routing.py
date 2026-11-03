@@ -232,8 +232,62 @@ def public_candidates(candidates, repo):
     return candidates
 
 
+def running_accounts(provider, repo):
+    """Count live panel workers in the repository ledger, across its rooms."""
+    if repo is None:
+        return {}
+    from terminal_panel import events
+    try:
+        rows = json.loads(events(repo, "list", "--json", output=True))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return {}
+    import dispatch_supervisor
+    counts = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        refs = row.get("refs") or {}
+        if (not isinstance(refs, dict)
+                or (refs.get("panel_provider") or row.get("provider")) != provider
+                or refs.get("panel_role") not in {"worker", "researcher", "advisor", "reviewer"}
+                or row.get("state") not in {"queued", "starting", "working", "running",
+                                           "waiting_input", "waiting_approval", "verifying"}):
+            continue
+        ident = refs.get("panel_account")
+        if not ident and refs.get("panel_room_participant"):
+            try:
+                anchor = dispatch_supervisor.read(repo, refs["panel_room_participant"] + "-launch.json")
+                ident = anchor["route"]["account"]
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        if isinstance(ident, str):
+            counts[ident] = counts.get(ident, 0) + 1
+    return counts
+
+
+def resolve_provider_account(route, provider_status=None, repo=None, config=None, explicit=False):
+    """Select a runtime account; tier configuration continues to reject account fields."""
+    provider = route["provider"]
+    if provider != "codex":
+        return dict(route)
+    from provider_accounts import load_accounts, select_account
+    config = load_accounts() if config is None else config
+    settings = config["providers"].get(provider)
+    if not config["configured"] or settings is None:
+        return dict(route)
+    row = provider_status.get(provider, {}) if isinstance(provider_status, dict) else {}
+    readings = row.get("accounts") if isinstance(row, dict) else None
+    selected, reason = select_account(provider, route["model"], readings=readings,
+        running=running_accounts(provider, repo) if settings["policy"] == "spread" and not explicit else None,
+        config=config, explicit=explicit)
+    if selected is None:
+        raise ValueError("no eligible Codex account: " + reason)
+    return dict(route, account=selected["id"], account_reason=reason)
+
+
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
-             recent=None, writer=None, catalogs=None, owner_model=None, repo=None, check_visibility=True, preferred=None):
+             recent=None, writer=None, catalogs=None, owner_model=None, repo=None, check_visibility=True,
+             preferred=None, resolve_accounts=True):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
     recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task.
@@ -292,6 +346,43 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         if not eligible:
             raise refused
         usable = eligible
+    account_usage = {}
+    if resolve_accounts and any(candidate["provider"] == "codex" for candidate in usable):
+        from provider_accounts import account_weekly_used, load_accounts
+        from panel_metrics import account_readings
+        config_error = None
+        try:
+            config = load_accounts()
+        except ValueError as error:
+            config, config_error = None, error
+        if config_error or config["configured"] and "codex" in config["providers"]:
+            readings = dict(provider_status or {})
+            row = readings.get("codex")
+            row = dict(row) if isinstance(row, dict) else {}
+            if config is not None and not isinstance(row.get("accounts"), dict):
+                row["accounts"] = account_readings("codex", config=config)
+            readings["codex"] = row
+            eligible, refused = [], None
+            for candidate in usable:
+                resolved = dict(candidate)
+                if candidate["provider"] == "codex":
+                    if config_error:
+                        refused = config_error
+                        continue
+                    resolved["model"] = routable_route_model("codex", candidate["model"],
+                        (catalogs or {}).get("codex", []))
+                    try:
+                        resolved = resolve_provider_account(resolved, readings, repo, config)
+                    except ValueError as error:
+                        refused = error
+                        continue
+                    account_usage["codex"] = account_weekly_used(
+                        row["accounts"].get(resolved["account"], {}))
+                eligible.append(resolved)
+            if not eligible:
+                raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left or no eligible account; %s"
+                                 % (tier, refused))
+            usable = eligible
     if several:
         # Exact-model providers have no weekly quota; retain their tier positions for reads.
         available, used_by = [], {}
@@ -300,7 +391,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             if provider in EXACT_MODEL_PROVIDERS:
                 available.append(candidate)
                 continue
-            used = weekly_used(provider_status, provider)
+            used = account_usage.get(provider) if provider in account_usage else weekly_used(provider_status, provider)
             if used is None or used < 90:
                 available.append(candidate)
                 used_by[provider] = used
@@ -356,7 +447,7 @@ def model_family(owner, model):
     return result.stdout.replace("\r", "").strip() if result.returncode == 0 else "unknown"
 
 
-def alternate_route(route, installed=None, provider_status=None, repo=None):
+def alternate_route(route, installed=None, provider_status=None, repo=None, resolve_accounts=True):
     """Return the first eligible alternate provider from this exact tier, if any."""
     tier = route.get("workload")
     if tier not in TIERS:
@@ -364,7 +455,7 @@ def alternate_route(route, installed=None, provider_status=None, repo=None):
     candidates = [candidate for candidate in policy()["tiers"][tier]
                   if candidate["provider"] != route.get("provider")
                   and (installed is None or candidate["provider"] in installed)
-                  and (weekly_used(provider_status, candidate["provider"]) or 0) < 90
+                  and (candidate["provider"] == "codex" or (weekly_used(provider_status, candidate["provider"]) or 0) < 90)
                   and not daily_capped(provider_status, candidate)]
     if route.get("role") in INDEPENDENT or KINDS.get(route.get("role")) == "advisor":
         candidates = [candidate for candidate in candidates if candidate["provider"] in MODEL_IDS]
@@ -373,6 +464,21 @@ def alternate_route(route, installed=None, provider_status=None, repo=None):
                       if route_family(candidate["provider"], candidate["model"])
                       and route_family(candidate["provider"], candidate["model"])[0] in RESEARCH_FAMILIES]
     candidates = public_candidates(candidates, repo)
+    eligible = []
+    for candidate in candidates:
+        if candidate["provider"] == "codex":
+            try:
+                from provider_accounts import load_accounts
+                config = load_accounts()
+                if (not config["configured"] or "codex" not in config["providers"]) and (
+                        weekly_used(provider_status, "codex") or 0) >= 90:
+                    continue
+                if resolve_accounts:
+                    candidate = resolve_provider_account(candidate, provider_status, repo, config)
+            except ValueError:
+                continue
+        eligible.append(candidate)
+    candidates = eligible
     if not candidates:
         return None
     return dict(candidates[0], effort=route.get("effort"), role=route.get("role"),

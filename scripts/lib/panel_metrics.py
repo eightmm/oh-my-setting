@@ -13,7 +13,7 @@ import time
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
-from dashboard_projection import mapping, number
+from dashboard_projection import clean, mapping, number
 from call_ending import call_ending
 from panel_view import TERMINAL_STATES
 
@@ -124,7 +124,7 @@ def numeric_reading(text, provider):
 
 CODEX_WEEK_SECONDS = 10080 * 60
 CODEX_TAIL_BYTES = 256 * 1024
-_CODEX_QUOTA_CACHE = (None, ({}, None))
+_CODEX_QUOTA_CACHE = {}
 
 
 def _codex_session_file(home):
@@ -159,11 +159,10 @@ def _codex_session_file(home):
     return max(files, key=lambda path: path.stat().st_mtime_ns) if files else None
 
 
-def codex_weekly_reading(now, *, detail=False):
+def codex_weekly_reading(now, *, detail=False, home=None):
     """Use only the newest log's bounded quota tail, rechecking expiry on cache hits."""
-    global _CODEX_QUOTA_CACHE
     try:
-        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+        home = Path(home if home is not None else os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         path = _codex_session_file(home)
         if path is None:
             return {}
@@ -171,7 +170,7 @@ def codex_weekly_reading(now, *, detail=False):
         if not stat.S_ISREG(info.st_mode) or now - info.st_mtime > CODEX_WEEK_SECONDS:
             return {}
         key = (str(path), info.st_ino, info.st_mtime_ns, info.st_size)
-        cached_key, cached_reading = _CODEX_QUOTA_CACHE
+        cached_key, cached_reading = _CODEX_QUOTA_CACHE.get(str(home), (None, ({}, None)))
         limits, observed = cached_reading
         if key != cached_key:
             limits = {}
@@ -200,7 +199,7 @@ def codex_weekly_reading(now, *, detail=False):
                                      else payload.get("rate_limits"))
                     observed = _stamp(row.get("timestamp"))
                     break
-            _CODEX_QUOTA_CACHE = (key, (limits, observed))
+            _CODEX_QUOTA_CACHE[str(home)] = (key, (limits, observed))
         for name in ("primary", "secondary"):
             window = mapping(limits.get(name))
             if window.get("window_minutes") != 10080:
@@ -214,6 +213,21 @@ def codex_weekly_reading(now, *, detail=False):
         return {}
     except (OSError, ValueError, TypeError, OverflowError, RuntimeError):
         return {}
+
+
+def account_readings(provider, config=None, now=None):
+    from provider_accounts import account_home_error, load_accounts
+    config = load_accounts() if config is None else config
+    now = time.time() if now is None else now
+    output = {}
+    for entry in config["providers"].get(provider, {}).get("accounts", []):
+        error = account_home_error(entry)
+        if error:
+            output[entry["id"]] = {"weekly_used": None, "error": error}
+            continue
+        reading = codex_weekly_reading(now, home=entry["home"], detail=True) if provider == "codex" else {}
+        output[entry["id"]] = dict(reading, weekly_used=reading.get("used"))
+    return output
 
 
 def _codex_auto_weekly(now):
@@ -338,6 +352,17 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
         if provider == "codex":
             row.update(codex_weekly_reading(now))
             row.update(native_models=current, native_model_checked=repo is not None)
+            from provider_accounts import load_accounts
+            try:
+                config = load_accounts()
+                if config["configured"] and provider in config["providers"]:
+                    row["accounts"] = account_readings(provider, config, now)
+                    errors = [ident + ": " + item["error"] for ident, item in row["accounts"].items()
+                              if item.get("error")]
+                    if errors:
+                        row["accounts_error"] = "; ".join(errors)
+            except ValueError as error:
+                row["accounts_error"] = str(error)
         if selected:
             main = selected[0]
             native = current.get(main["participant"], {})
@@ -1080,6 +1105,8 @@ def usage_line(report, width=100, unicode=True):
     parts = []
     for provider, title in (("claude", "Claude"), ("codex", "Codex")):
         row = mapping(mapping(report.get("provider_status")).get(provider))
+        if row.get("accounts_error"):
+            title += " accounts: " + clean(row["accounts_error"], 160)
         week_used, context_left = percent(row.get("weekly_used")), percent(row.get("context_left"))
         week = None if week_used is None else 100 - week_used
         context = None if context_left is None else 100 - context_left

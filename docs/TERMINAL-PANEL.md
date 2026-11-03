@@ -688,6 +688,81 @@ Set `OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1` for a dispatch to allow public-only routes
 
 Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 
+
+Provider accounts are configured machine-wide in
+`${XDG_CONFIG_HOME:-~/.config}/oh-my-setting/provider-accounts.json`.
+A relative `XDG_CONFIG_HOME` is ignored in favor of `~/.config`. This user-local
+file applies to every project. Homes must be absolute directories. For example,
+replace these placeholders with two separately entitled Codex CLI homes, listing
+the credit workspace before the Pro subscription:
+
+```json
+{
+  "schema": 1,
+  "providers": {
+    "codex": {
+      "policy": "ordered",
+      "accounts": [
+        {"id": "credits", "home": "/path/to/codex-credits"},
+        {"id": "pro", "home": "/path/to/codex-pro"}
+      ]
+    }
+  }
+}
+```
+
+Provider names must occur in the routing policy. Only Codex accounts are enabled;
+Claude and Pi entries are rejected with `accounts for PROVIDER are not supported yet`.
+The home-variable table in `scripts/lib/provider_accounts.py` maps Codex to
+`CODEX_HOME`; Claude's `CLAUDE_CONFIG_DIR` and Pi's `PI_CODING_AGENT_DIR` remain
+disabled until independent CLI homes are verified. Account entries have only
+`id` and `home` fields. Unknown keys, duplicate IDs or physical homes (including
+across providers), malformed configuration and non-absolute homes are errors.
+IDs use 1–64 lowercase letters, digits, underscores or hyphens, beginning with a
+letter or digit. Invalid configuration excludes Codex from tier selection while
+other providers remain available. A missing or unavailable directory is reported
+per account and that account is skipped. Panel collection retains both provider
+rows and shows configuration/home errors on the Codex usage line through
+`accounts_error`; account readings and individual errors are under `accounts`.
+
+Per-provider policy defaults to `ordered`, selecting the first eligible account.
+Each account is ineligible at 90% weekly usage during tier selection, including
+when Codex is the sole provider; missing, stale or malformed readings remain
+eligible. Codex remains a candidate while any account can serve the requested
+model. Only model slugs are read from each home's `models_cache.json` (at most
+4 MiB): a readable list omitting the requested model excludes that account and
+appears in `account_reason`. Missing, unreadable or malformed caches leave support
+unknown and eligible. No other home files are inspected beyond the existing
+bounded session-log reader.
+
+`spread` selects the eligible account with the most measured quota left, placing
+unknown quota after measured readings. Ties use fewer live OMS workers for that
+provider/account in the current repository's panel attempt records (using the
+launch decision when the attempt has no `panel_account` ref), then list order.
+Two unknown readings use the same worker-count tie break. This is best-effort:
+there is no reservation store, so same-instant decisions can select the same
+account before either worker appears in the records. Other projects share the
+configuration but their workers are outside this repository's count.
+
+An explicit `--to codex --model MODEL` keeps its existing quota bypass: account
+selection uses the first eligible account, falling back to the current default
+home if all configured accounts are unavailable, exhausted or omit that model.
+It never refuses an explicit model target because account selection found no
+eligible account.
+
+Runtime routes carry `account` and `account_reason`. The route line includes
+`codex account=credits (selected; runs under the current home) / MODEL / EFFORT / ACCESS`.
+The private dispatch launch anchor retains that decision under `route` without
+storing the home. With no configuration file (or no Codex entry), existing routing
+and display behavior is unchanged; the implicit default home is `CODEX_HOME` or
+`~/.codex`. Account fields remain invalid in `config/panel-routing.json`.
+
+This routing stage records a selection only; children still use the current home.
+Child-home selection, binding attempts and native continuation, and capacity-error
+overflow are separate execution work. The workspace balance is the upstream hard
+spending limit; v1 has no OMS money cap or strict-cap ledger. Routing alone does
+not implement overflow after a capacity error, or install OMS into multiple homes.
+
 Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. A recorded Pi provider failure can fall back once to an eligible tier candidate, provided a write leaves the worktree unchanged; policy refusals and verification failures do not trigger fallback. An OpenRouter free-model daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only trigger the one-time fallback. Judge tier allocation stays on Claude or Codex; an explicit `--to` may select another provider.
 
 | Tier | Configured model candidates (effort) |

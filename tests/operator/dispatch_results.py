@@ -5544,3 +5544,377 @@ with tempfile.TemporaryDirectory() as slot_runtime:
         del os.environ["XDG_RUNTIME_DIR"], os.environ["OMS_VERIFY_SLOTS"]
         if inherited_slot is not None:
             os.environ["OMS_VERIFY_SLOT_HELD"] = inherited_slot
+
+# BEGIN Provider account routing
+
+def exercise_provider_account_routing():
+    import provider_accounts as accounts
+    import panel_metrics as metrics
+    import panel_routing as routing
+    import panel_dispatch as dispatch
+    from contextlib import redirect_stdout
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+        base = Path(directory)
+        config_root = base / "config"
+        config_path = config_root / "oh-my-setting/provider-accounts.json"
+        config_path.parent.mkdir(parents=True)
+        homes = [base / name for name in ("credits", "pro")]
+        for home in homes:
+            home.mkdir()
+        value = {"policy": "ordered", "accounts": [
+            {"id": home.name, "home": str(home)} for home in homes]}
+        now = time.time()
+
+        def configure(data=None, root=None):
+            config_path.write_text(json.dumps(root if root is not None else {
+                "schema": 1, "providers": {"codex": value if data is None else data}}))
+
+        def quota(index, used, reset=None):
+            day = homes[index] / "sessions/2026/11/03"
+            day.mkdir(parents=True, exist_ok=True)
+            log = day / "rollout-account.jsonl"
+            log.write_text(json.dumps({"timestamp": "2026-11-03T00:00:00Z", "payload": {
+                "rate_limits": {"primary": {"used_percent": used, "window_minutes": 10080,
+                    "resets_at": now + 3600 if reset is None else reset}}}}) + "\n")
+            return log
+
+        def choose(model="gpt-6.1-sol", status=None):
+            return accounts.select_account("codex", model, readings=status, config=accounts.load_accounts())
+
+        def route():
+            return routing.allocate("claude", role="builder", tier="deep", access="write",
+                                    installed={"codex"}, repo=base)
+
+        def refused(data, message):
+            configure(data)
+            try:
+                accounts.load_accounts()
+            except ValueError as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError("invalid account configuration accepted")
+
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_root), "CODEX_HOME": str(homes[0])}):
+            legacy = route()
+            assert "account" not in legacy
+            assert routing.allocate("claude", role="builder", tier="deep", access="write",
+                installed={"codex"}, provider_status={"codex": {"weekly_used": 99}}, repo=base) == legacy
+            loaded = accounts.load_accounts()
+            assert not loaded["configured"] and loaded["providers"]["codex"]["accounts"][0]["id"] == "default"
+            assert loaded["providers"]["codex"]["accounts"][0]["home"] == str(homes[0].resolve())
+            configure(root={"schema": 1, "providers": {}})
+            assert route() == legacy
+            assert accounts.select_account("codex", "gpt-6.1-sol")[0] is None
+            with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+                assert "accounts" not in metrics.collect({}, now=now)["codex"]
+            configure()
+            quota(0, 50)
+            quota(1, 20)
+            assert route()["account"] == "credits"
+            for malformed in (None, [], 0):
+                assert routing.allocate("claude", role="builder", tier="deep", access="write",
+                    installed={"codex"}, provider_status={"codex": malformed}, repo=base)["account"] == "credits"
+            assert accounts.select_account("codex", "gpt-6.1-sol", readings=[])[0]["id"] == "credits"
+            for used, expected in ((0, "credits"), (89, "credits"), (90, "pro"), (100, "pro"),
+                                   (None, "credits"), ("bad", "credits")):
+                quota(0, used)
+                assert route()["account"] == expected, used
+            stale = quota(0, 99)
+            os.utime(stale, (now - metrics.CODEX_WEEK_SECONDS - 1,) * 2)
+            assert route()["account"] == "credits"
+            quota(0, 99, reset=now)
+            assert route()["account"] == "credits"
+            quota(0, 99)
+            quota(1, 99)
+            try:
+                route()
+                raise AssertionError("exhausted sole Codex provider was selected")
+            except ValueError as error:
+                assert "weekly quota" in str(error), error
+            explicit_peer = dict(provider="codex", binary="codex", installed=True, exact_model_override=True,
+                                 access=["read", "write"], models=["gpt-6.1-sol"])
+            with patch("terminal_panel.provider_catalog", return_value=[explicit_peer]):
+                explicit = dispatch.selected_route("claude", "builder", None, "write", None,
+                    target="codex", model="gpt-6.1-sol", repo=base)
+            assert explicit["account"] == "default" and "explicit" in explicit["account_reason"]
+            for usage in (90, 100):
+                quota(0, usage)
+                quota(1, usage)
+                with patch("terminal_panel.provider_catalog", return_value=[explicit_peer]):
+                    assert dispatch.selected_route("claude", "builder", None, "write", None,
+                        target="codex", model="gpt-6.1-sol", repo=base)["account"] == "default"
+            quota(0, 99)
+            quota(1, 20)
+            chosen = route()
+            assert chosen["account"] == "pro"
+            fallback = routing.alternate_route(dict(chosen, provider="claude"), {"codex"}, repo=base)
+            assert fallback["account"] == "pro"
+            deferred = routing.alternate_route(dict(chosen, provider="claude"), {"codex"},
+                provider_status={"codex": {"weekly_used": 99}}, repo=base, resolve_accounts=False)
+            assert deferred["provider"] == "codex" and "account" not in deferred
+            selected, _ = accounts.select_account("codex", "gpt-6.1-sol", readings={
+                "credits": {"weekly_used": 99, "resets_at": now}, "pro": {"weekly_used": 50}}, now=now)
+            assert selected["id"] == "credits"
+            expired = {"credits": {"weekly_used": 99, "resets_at": now - 1},
+                       "pro": {"weekly_used": 99, "resets_at": now + 3600}}
+            selected_route = routing.allocate("claude", role="builder", tier="deep", access="write",
+                installed={"codex", "claude"}, provider_status={"codex": {"accounts": expired},
+                    "claude": {"weekly_used": 80}}, repo=base)
+            assert selected_route["provider"] == "codex" and selected_route["account"] == "credits"
+            readings = metrics.account_readings("codex", now=now)
+            assert readings["credits"]["weekly_used"] == 99 and readings["pro"]["weekly_used"] == 20
+            with patch.object(metrics.os, "open", side_effect=AssertionError("cached log reread")):
+                assert metrics.codex_weekly_reading(now, home=homes[0])["weekly_used"] == 99
+                assert metrics.codex_weekly_reading(now, home=homes[1])["weekly_used"] == 20
+            with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+                row = metrics.collect({}, now=now)["codex"]
+            assert row["weekly_used"] == 99 and row["accounts"] == readings
+            value["policy"] = "spread"
+            configure()
+            quota(0, 50)
+            quota(1, 10)
+            assert route()["account"] == "pro"
+            quota(1, 50)
+            assert route()["account"] == "credits"
+            worker = {"provider": "codex", "state": "running", "refs": {
+                "panel_role": "worker", "panel_account": "credits"}}
+            with patch("terminal_panel.events", return_value=json.dumps([worker])):
+                assert route()["account"] == "pro"
+            for state in ("queued", "starting", "working", "waiting_input", "waiting_approval", "verifying"):
+                with patch("terminal_panel.events", return_value=json.dumps([dict(worker, state=state)])):
+                    assert route()["account"] == "pro"
+            for state in ("done", "failed", "cancelled"):
+                with patch("terminal_panel.events", return_value=json.dumps([dict(worker, state=state)])):
+                    assert route()["account"] == "credits"
+            # Missing readings rank after measured quota; two unknowns still split by running count.
+            selected, reason = accounts.select_account("codex", "gpt-6.1-sol", readings={},
+                running={"credits": 1}, config=accounts.load_accounts())
+            assert selected["id"] == "pro" and "spread" in reason
+            value["policy"] = "ordered"
+            configure()
+            cache = homes[0] / "models_cache.json"
+            cache.write_text(json.dumps({"models": [{"slug": "gpt-6.1-sol"}]}))
+            selected, reason = choose("gpt-6.1-terra")
+            assert selected["id"] == "pro" and "credits" in reason and "cached model list" in reason
+            assert choose()[0]["id"] == "credits"
+            for body in ("{", "null", '{"models":null}', '{"models":[{}]}'):
+                cache.write_text(body)
+                assert choose()[0]["id"] == "credits"
+            cache.write_text('{"models":[]}')
+            assert choose()[0]["id"] == "pro"
+            (homes[1] / "models_cache.json").write_text('{"models":[]}')
+            assert choose()[0] is None
+            with patch("terminal_panel.provider_catalog", return_value=[explicit_peer]):
+                assert dispatch.selected_route("claude", "builder", None, "write", None,
+                    target="codex", model="gpt-6.1-sol", repo=base)["account"] == "default"
+            assert routing.alternate_route(dict(chosen, provider="claude"), {"codex"}, repo=base) is None
+            try:
+                routing.resolve_provider_account(legacy, repo=base)
+                raise AssertionError("unsupported model account selected")
+            except ValueError as error:
+                assert "cached model list" in str(error)
+            (homes[1] / "models_cache.json").unlink()
+            cache.write_bytes(b"")
+            assert choose()[0]["id"] == "credits"
+            payload = json.dumps({"models": [{"slug": "gpt-6.1-sol"}]}).encode()
+            cache.write_bytes(payload + b" " * (4 * 1024 * 1024 - len(payload)))
+            assert accounts.model_slugs(homes[0]) == {"gpt-6.1-sol"}
+            with cache.open("ab") as stream:
+                stream.write(b" ")
+            assert accounts.model_slugs(homes[0]) is None
+            with patch.object(accounts.os, "open", side_effect=PermissionError):
+                assert accounts.model_slugs(homes[0]) is None
+            cache.unlink()
+            # Tier config remains provider-only; runtime account fields cannot enter it.
+            assert not routing.valid_route(dict(provider="codex", model="gpt-6.1-sol", effort="high", account="credits"))
+            peer = dict(provider="codex", binary="codex", installed=True, exact_model_override=True,
+                        access=["read", "write"], models=["gpt-6.1-sol"])
+            with patch("terminal_panel.provider_catalog", return_value=[peer]):
+                selected = dispatch.selected_route("claude", "builder", None, "write", None,
+                                                   target="codex", model="gpt-6.1-sol", repo=base)
+            assert selected["account"] == "credits"
+            cache.write_text(json.dumps({"models": [{"slug": "gpt-6-luna"}]}))
+            with patch("terminal_panel.provider_catalog", return_value=[peer]):
+                selected = dispatch.selected_route("claude", "builder", "deep", "write", None, repo=base)
+            assert selected["account"] == "pro" and "cached model list" in selected["account_reason"]
+            cache.write_text(json.dumps({"models": [{"slug": "gpt-6.2-sol"}]}))
+            (homes[1] / "models_cache.json").write_text('{"models":[]}')
+            next_peer = dict(peer, models=["gpt-6.2-sol"])
+            claude = dict(legacy, provider="claude", model="claude-opus-5-5", access="read", purpose="explain")
+            with patch("terminal_panel.selected_route", return_value=claude), \
+                    patch("terminal_panel.child_environment", return_value={}), \
+                    patch("terminal_panel.routing_status", return_value={}), \
+                    patch("terminal_panel.provider_catalog", return_value=[next_peer]), \
+                    patch("terminal_panel.run_dispatch", side_effect=lambda *args, **kwargs: args[-2]):
+                alternate = dispatch.dispatch(project, "claude", "builder", "deep", "read", None, prompt="inspect")
+            assert alternate["model"] == "gpt-6.2-sol" and alternate["account"] == "credits"
+            (homes[1] / "models_cache.json").unlink()
+            cache.unlink()
+            # The existing launch anchor carries the decision without changing the child environment.
+            member = "call-accounts-" + uuid.uuid4().hex[:12]
+            call_record = dispatch._prepare_dispatch_call(project, "account-room", member, "main", route=selected)
+            anchor = dispatch.dispatch_store.read(project, member + "-launch.json")
+            assert anchor["route"]["account"] == "pro" and "home" not in anchor["route"]
+            assert dispatch._dispatch_call_record(project, "account-room", {"participant": member, "parent": "main"}) == call_record
+            live = dict(worker, state="working", refs={"panel_role": "worker", "panel_room_participant": member})
+            with patch("terminal_panel.events", return_value=json.dumps([live])):
+                assert routing.running_accounts("codex", project) == {"pro": 1}
+            try:
+                dispatch._prepare_dispatch_call(project, "account-room", member, "main", route=selected)
+                raise AssertionError("a second writer replaced the launch")
+            except (OSError, ValueError):
+                pass
+            interrupted = "call-accounts-" + uuid.uuid4().hex[:12]
+            with patch.object(dispatch.dispatch_store, "write", side_effect=ValueError("interrupted")):
+                try:
+                    dispatch._prepare_dispatch_call(project, "account-room", interrupted, "main", route=selected)
+                    raise AssertionError("interrupted launch succeeded")
+                except ValueError:
+                    pass
+            assert dispatch._dispatch_call_record(project, "account-room", {"participant": interrupted, "parent": "main"}) is None
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                dispatch.run_dispatch(base, "claude", "builder", "read", "inspect", None, None, "accounts",
+                    True, None, dict(legacy, account="credits", access="read", purpose="explain"), None, None, None)
+            assert json.loads(stream.getvalue())["route"]["account"] == "credits"
+            assert dispatch.route_label(dict(provider="codex", account="credits")) == "codex account=credits (selected; runs under the current home)"
+            assert dispatch.route_label({"provider": "codex"}) == "codex"
+            configure(dict(value, policy="spread"))
+            selected, _ = choose(status={"credits": {"weekly_used": 0}, "pro": {"weekly_used": None}})
+            assert selected["id"] == "credits"
+            without_policy = dict(value)
+            without_policy.pop("policy")
+            configure(without_policy)
+            assert accounts.load_accounts()["providers"]["codex"]["policy"] == "ordered"
+            for data, message in (
+                (dict(value, extra=True), "unknown"),
+                (dict(value, policy=""), "policy"),
+                (dict(value, policy="invalid"), "policy"),
+                (dict(value, policy=0), "policy"),
+                (dict(value, accounts=[]), "non-empty"),
+                (dict(value, accounts=None), "non-empty"),
+                (dict(value, accounts=0), "non-empty"),
+                (dict(value, accounts=[dict(value["accounts"][0], extra=True)]), "unknown"),
+                (dict(value, accounts=[dict(value["accounts"][0], kind="other")]), "unknown"),
+                (dict(value, accounts=[dict(value["accounts"][0], home="relative")]), "absolute"),
+                (dict(value, accounts=[dict(value["accounts"][0], home="")]), "absolute"),
+                (dict(value, accounts=[dict(value["accounts"][0], home=None)]), "absolute"),
+                (dict(value, accounts=[dict(value["accounts"][0], id="")]), "id"),
+                (dict(value, accounts=[dict(value["accounts"][0], id=0)]), "id"),
+                (dict(value, accounts=[dict(value["accounts"][0], id="../bad")]), "id"),
+                (dict(value, accounts=[value["accounts"][0]] * 2), "duplicate"),
+                (dict(value, accounts=[value["accounts"][0], dict(value["accounts"][1], home=str(homes[0]))]), "duplicate")):
+                refused(data, message)
+            for root, message in (
+                ({"schema": True, "providers": {}}, "schema"),
+                ({"schema": 0, "providers": {}}, "schema"),
+                ({}, "schema"),
+                ([], "unknown"),
+                ({"schema": 1, "providers": {}, "extra": 1}, "unknown"),
+                ({"schema": 1, "providers": []}, "providers"),
+                ({"schema": 1, "providers": 0}, "providers"),
+                ({"schema": 1, "providers": None}, "providers"),
+                ({"schema": 1, "providers": {"codex": {}}}, "non-empty"),
+                ({"schema": 1, "providers": {"codex": []}}, "unknown"),
+                ({"schema": 1, "providers": {"unknown": value}}, "unknown provider"),
+                ({"schema": 1, "providers": {"claude": value}}, "accounts for claude are not supported yet"),
+                ({"schema": 1, "providers": {"pi": value}}, "accounts for pi are not supported yet")):
+                configure(root=root)
+                try:
+                    accounts.load_accounts()
+                    raise AssertionError("invalid provider accounts accepted")
+                except ValueError as error:
+                    assert message in str(error), error
+            # The global uniqueness rule also applies once another provider is enabled.
+            enabled = dict(accounts.PROVIDER_HOMES, claude=("CLAUDE_CONFIG_DIR", True))
+            with patch.object(accounts, "PROVIDER_HOMES", enabled):
+                for entry in (value["accounts"][0], dict(value["accounts"][1], id="credits"),
+                              dict(value["accounts"][0], id="other")):
+                    configure(root={"schema": 1, "providers": {
+                        "codex": {"accounts": [value["accounts"][0]]}, "claude": {"accounts": [entry]}}})
+                    try:
+                        accounts.load_accounts()
+                        raise AssertionError("cross-provider duplicate accepted")
+                    except ValueError as error:
+                        assert "duplicate" in str(error), error
+                configure(root={"schema": 1, "providers": {
+                    "codex": {"accounts": [value["accounts"][0]]},
+                    "claude": {"accounts": [value["accounts"][1]]}}})
+                assert set(accounts.load_accounts()["providers"]) == {"codex", "claude"}
+            configure(dict(value, accounts=[dict(value["accounts"][0], id="x" * 64)]))
+            assert accounts.load_accounts()["providers"]["codex"]["accounts"][0]["id"] == "x" * 64
+            refused(dict(value, accounts=[dict(value["accounts"][0], id="x" * 65)]), "id")
+            alias = base / "alias"
+            try:
+                alias.symlink_to(homes[0], target_is_directory=True)
+            except OSError:
+                pass
+            else:
+                refused(dict(value, accounts=[value["accounts"][0], dict(value["accounts"][1], home=str(alias))]), "duplicate")
+            # Relative XDG roots are ignored, including when the relative path exists.
+            fallback_home = base / "fallback-home"
+            fallback_config = fallback_home / ".config/oh-my-setting/provider-accounts.json"
+            fallback_config.parent.mkdir(parents=True)
+            fallback_config.write_text(json.dumps({"schema": 1, "providers": {"codex": value}}))
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": "relative"}), \
+                    patch.object(accounts.Path, "home", return_value=fallback_home):
+                assert accounts.load_accounts()["configured"]
+            try:
+                accounts.load_accounts("relative")
+                raise AssertionError("relative explicit config path accepted")
+            except ValueError as error:
+                assert "absolute" in str(error)
+            configure(dict(value, accounts=[dict(value["accounts"][0], home=str(config_path))]))
+            bad_home = accounts.load_accounts()["providers"]["codex"]["accounts"][0]
+            assert "directory" in bad_home["error"]
+            config_path.write_text("{")
+            try:
+                accounts.load_accounts()
+                raise AssertionError("malformed configuration accepted")
+            except ValueError as error:
+                assert "invalid provider accounts configuration" in str(error)
+            with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+                status = metrics.collect({}, now=now)
+            assert "invalid provider accounts configuration" in status["codex"]["accounts_error"]
+            assert "Claude" in metrics.usage_line({"provider_status": status})
+            assert "accounts:" in metrics.usage_line({"provider_status": status})
+            assert routing.allocate("codex", role="builder", tier="deep", access="write",
+                installed={"claude"}, repo=base)["provider"] == "claude"
+            assert routing.allocate("codex", role="builder", tier="deep", access="write",
+                installed={"claude", "codex"}, repo=base)["provider"] == "claude"
+            try:
+                route()
+                raise AssertionError("invalid config allowed a Codex route")
+            except ValueError as error:
+                assert "invalid provider accounts configuration" in str(error)
+            assert routing.resolve_provider_account({"provider": "claude"}) == {"provider": "claude"}
+            assert routing.alternate_route(dict(legacy, provider="pi"), {"claude"}, repo=base)["provider"] == "claude"
+            assert routing.alternate_route(dict(legacy, provider="claude"), {"codex"}, repo=base) is None
+            configure()
+            shutil.rmtree(homes[0])
+            with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+                status = metrics.collect({}, now=now)
+            assert "credits" in status["codex"]["accounts_error"]
+            assert "directory" in status["codex"]["accounts"]["credits"]["error"]
+            assert "credits" in metrics.usage_line({"provider_status": status})
+            assert route()["account"] == "pro"
+            assert routing.allocate("codex", role="builder", tier="deep", access="write",
+                installed={"claude"}, repo=base)["provider"] == "claude"
+            shutil.rmtree(homes[1])
+            assert accounts.select_account("codex", "gpt-6.1-sol")[0] is None
+            try:
+                route()
+                raise AssertionError("missing account homes were selected")
+            except ValueError as error:
+                assert "directory" in str(error), error
+            config_path.write_text('{"schema":1,"schema":1}')
+            try:
+                accounts.load_accounts()
+                raise AssertionError("duplicate JSON keys accepted")
+            except ValueError as error:
+                assert "duplicate" in str(error)
+
+exercise_provider_account_routing()
+# END Provider account routing

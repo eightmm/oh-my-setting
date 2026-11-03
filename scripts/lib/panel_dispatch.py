@@ -270,7 +270,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         return dict(route, effort=effort) if effort else route
     visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
     route = allocate(owner, role, None, access, purpose, owner_model=owner_model, repo=visibility_repo_resolved,
-                     check_visibility=not bool(model))
+                     check_visibility=not bool(model), resolve_accounts=False)
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
     peer = provider_catalog(target)[0]
@@ -286,7 +286,9 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
     if peer["provider"] == "codex" and model not in MODEL_IDS["codex"] and not (
             route_family("codex", model) and model in peer.get("catalog_models", peer.get("models", []))):
         raise ValueError("Codex workers require a known versioned Astra, Sol, Terra or Luna model")
-    return dict(route, provider=peer["provider"], binary=peer["binary"], model=model, effort=effort)
+    from panel_routing import resolve_provider_account
+    return resolve_provider_account(dict(route, provider=peer["provider"], binary=peer["binary"],
+                                       model=model, effort=effort), routing_readings, repo, explicit=True)
 
 
 def _patch_in_head(repo, body, reverse=True, with_error=False):
@@ -880,7 +882,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         if not target:
             remaining = {candidate["provider"] for candidate in policy()["tiers"][route["workload"]]}
             while remaining:
-                fallback = alternate_route(route, installed=remaining, provider_status=readings or {}, repo=repo)
+                fallback = alternate_route(route, installed=remaining, provider_status=readings or {}, repo=repo,
+                                           resolve_accounts=False)
                 if not fallback:
                     break
                 remaining.discard(fallback["provider"])
@@ -892,6 +895,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                         fallback["model"] = routable_route_model(
                             fallback["provider"], fallback["model"],
                             peer.get("catalog_models", peer.get("models", [])))
+                        from panel_routing import resolve_provider_account
+                        fallback = resolve_provider_account(fallback, readings, repo)
                         break
                     else:
                         fallback = None
@@ -1626,7 +1631,7 @@ def _dispatch_verifier(repo, room_id, member, caller, task_id=None):
 
 
 def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution_repo=None, rework=None,
-                           task_id=None):
+                           task_id=None, route=None):
     from terminal_panel import DURABLE, _dispatch_call_path, _write_brief_artifact
     call = {"schema": 2, "kind": "oms-panel-call", "room": room_id, "participant": member,
             "parent": caller, "nonce": uuid.uuid4().hex,
@@ -1644,6 +1649,9 @@ def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution
     except SystemExit as error:
         raise ValueError("dispatch launch record refused") from error
     anchor = {"call": call, "generation": dispatch_store.generation(path)}
+    if route and route.get("account"):
+        anchor["route"] = {key: route[key] for key in
+                           ("provider", "model", "account", "account_reason") if key in route}
     if verify:
         anchor["verify"] = verify
     if execution_repo:
@@ -1696,7 +1704,7 @@ def _dispatch_call_record(repo, room_id, member):
                                                     or not os.path.isabs(call["control_root"]))
                     or "task_id" in call and (not isinstance(call["task_id"], str)
                                                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", call["task_id"]))
-                    or set(anchor) - {"call", "generation", "verify", "execution_repo", "rework"}
+                    or set(anchor) - {"call", "generation", "verify", "execution_repo", "rework", "route"}
                     or "rework" in anchor and not _valid_rework_context(anchor["rework"], name)
                     or "verify" in anchor and (not isinstance(anchor["verify"], str) or not anchor["verify"].strip())
                     or "execution_repo" in anchor and (not isinstance(anchor["execution_repo"], str)
@@ -2248,6 +2256,11 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
         raise ValueError(clean(result.stderr or result.stdout, 300))
 
 
+def route_label(route):
+    return route["provider"] + (" account=" + route["account"] + " (selected; runs under the current home)"
+                                if route.get("account") else "")
+
+
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
                  candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None,
@@ -2507,7 +2520,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if alias:
         env["OMS_PANEL_ALIAS"] = alias
     argv[argv.index("--repo") + 1] = str(execution)
-    print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
+    print("%s / %s -> %s / %s / %s / %s" % (owner, role, route_label(route), route["model"],
                                             route["effort"] or "native-settings", access) +
           " task_id=" + task_id, flush=True)
     status, process, identity = 1, None, None
@@ -2553,7 +2566,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             rework = (dict(role=role, scope=scopes or [], workload=route["workload"],
                            brief=_read_dispatch_brief(recorded_brief).decode("utf-8")) if access == "write" else None)
             launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
-                                             task_id=task_id)
+                                             task_id=task_id, **({"route": route} if route.get("account") else {}))
             env["XDG_STATE_HOME"] = dispatch_store.pinned_state_home(repo, control_member)
             command = argv
             if launch and launch["backend"] == "subreaper":
