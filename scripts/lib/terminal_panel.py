@@ -99,8 +99,6 @@ from panel_dispatch import moved_main
 from panel_dispatch import scope_overlaps
 from panel_dispatch import dispatch
 from panel_dispatch import _validate_dispatch_verifier
-from panel_dispatch import _read_suite
-from panel_dispatch import _uses_smoke_runner
 from panel_dispatch import plan_link
 from panel_dispatch import _read_dispatch_brief
 from panel_dispatch import continuation_defaults

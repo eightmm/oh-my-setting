@@ -2,7 +2,7 @@
 
 from typing import NamedTuple
 from pathlib import Path
-from verify_selectors import _read_suite, _uses_smoke_runner, validate_verify_selectors
+from verify_selectors import validate_verify_selectors
 import dispatch_supervisor as dispatch_store
 import hashlib
 import io
