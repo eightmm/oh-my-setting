@@ -12361,6 +12361,10 @@ test_agent_plan_lint_verify_matches_admission_floor() {
   assert_file_contains "$project/sel7-err" "warning: unknown verify selector: --verify names missing suite file: tests/missing-suite.sh"
   sel_add sel8 'pytest --only test_no_such_function && npm test && make test && cargo test && go test'
   [ ! -s "$project/sel8-err" ] || fail "native runners must stay unvalidated: $(cat "$project/sel8-err")"
+  sel_add sel9 'bash tests/operator-tools-smoke.sh --section room-protocol'
+  assert_file_contains "$project/sel9-err" "did you mean: core/room-protocol"
+  sel_add sel10 'bash tests/scripts-smoke.sh --only test_status_shows_active_task_stat'
+  assert_file_contains "$project/sel10-err" "did you mean: test_status_shows_active_task_state"
   # Drift guard: the static parse must agree with the runner's own markers.
   python3 -B - "$ROOT" <<'PY' || fail "static operator case names drifted from runner.case_markers"
 import importlib.util, os, sys

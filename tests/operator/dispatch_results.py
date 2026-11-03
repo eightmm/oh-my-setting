@@ -1111,6 +1111,17 @@ with patch.dict(os.environ, {"PYTHONPATH": str(Path(root) / "scripts/lib")}):
 assert dispatch_verify("python3 -m scripts.lib.surely_missing_module_xyz") == ""
 assert not (sentinel_root / "sentinelpkg" / "ran").exists(), "probe executed package initialization"
 # BEGIN verify selector validation
+for option, typo, expected in (
+        ("--section", "room-protocol", "core/room-protocol"),
+        ("--case", "reviewed-result acceptance compositio", "reviewed-result acceptance composition")):
+    command = "bash tests/operator-tools-smoke.sh "
+    if option == "--case":
+        command += "--section dispatch-results "
+    try:
+        panel._validate_dispatch_verifier(root, command + option + " " + shlex.quote(typo))
+        raise AssertionError("unknown selector was accepted: " + typo)
+    except ValueError as error:
+        assert "did you mean: " + expected in str(error), error
 for case in ("no such case", "", "0", "reviewed-result acceptance composition (invalid suffix)."):
     try:
         panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section dispatch-results --case "

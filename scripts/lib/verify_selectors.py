@@ -1,5 +1,6 @@
 """Static OMS suite-selector validation shared by planning and dispatch."""
 import ast
+import difflib
 import os
 from pathlib import Path
 import re
@@ -63,6 +64,17 @@ def _uses_smoke_runner(suite, target):
         return "run-smoke-shard.sh" in target.read_text(encoding="utf-8")
     except OSError:
         return False
+
+
+def _selector_suggestions(name, valid):
+    if not valid:
+        return []
+    components = [value.rsplit("/", 1)[-1] for value in valid]
+    close_components = difflib.get_close_matches(name, components, n=len(components))
+    candidates = [value for component in close_components for value in valid
+                  if value.rsplit("/", 1)[-1] == component]
+    candidates += difflib.get_close_matches(name, valid, n=len(valid))
+    return list(dict.fromkeys(candidates))[:3]
 
 
 def validate_verify_selectors(repo, verify, continuation_patch=None, patch_repo=None):
@@ -169,6 +181,13 @@ def validate_verify_selectors(repo, verify, continuation_patch=None, patch_repo=
                 requested = [selector]
             unknown = [name for name in requested if name not in valid]
             if unknown:
-                raise ValueError("unknown %s value(s): %s; valid names: %s" %
-                                 (option, ", ".join(unknown), ", ".join(valid)))
+                hints = []
+                for name in unknown:
+                    matches = _selector_suggestions(name, valid)
+                    if matches:
+                        label = "%s: " % name if len(unknown) > 1 else ""
+                        hints.append("%sdid you mean: %s" % (label, ", ".join(matches)))
+                hint = "; " + "; ".join(hints) if hints else ""
+                raise ValueError("unknown %s value(s): %s%s; valid names: %s" %
+                                 (option, ", ".join(unknown), hint, ", ".join(valid)))
             cursor += 2
