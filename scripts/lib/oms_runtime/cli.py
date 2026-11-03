@@ -168,10 +168,15 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
                     value = targets.add(repo, args.name, args.ssh_alias, args.workdir)
                 elif args.target_action == 'remove':
                     value = targets.remove(repo, args.name)
+                elif args.target_action in ('status', 'sync'):
+                    value = targets.inspect_target(repo, args.name, sync=args.target_action == 'sync',
+                                                   sha=getattr(args, 'sha', None), timeout_seconds=args.timeout)
                 else:
                     value = targets.listing(repo)
                 emit(value, args.pretty)
-                return 0
+                if value.get('reason') == 'unknown-target':
+                    return 2
+                return 0 if value.get('ok', True) else 3
             if getattr(args, 'target', None) is not None:
                 if args.profile != 'remote':
                     raise CoreError('--target requires the remote backend')

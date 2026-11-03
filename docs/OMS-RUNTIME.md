@@ -516,6 +516,89 @@ The image, container daemon, and host kernel remain operator trust boundaries.
 
 ### `remote`
 
+#### Same-path git targets
+
+SSH targets use the same physically resolved home-relative repository path on
+both hosts: local `~/git/proj` maps to remote `~/git/proj`. Repositories outside
+HOME cannot be registered. New records accept only `~/REL`; optional `--workdir`
+must equal that computed path. Legacy absolute records remain listable, but
+status/sync return `legacy-absolute` with remove/add guidance.
+
+```bash
+oms runtime backend target add cluster --ssh-alias cluster
+oms runtime backend target list
+oms runtime backend target status cluster
+oms runtime backend target sync cluster
+oms runtime backend target sync cluster --sha FULL_COMMIT_SHA
+oms runtime backend target sync cluster --timeout 3600
+oms runtime backend target remove cluster
+```
+
+Status makes one SSH call and returns the resolved remote absolute
+`workdir`, `exists`, `is_git`, `origin_matches`, `head`, `branch`, `clean`, and
+`untracked`. These host paths stay out of portable capsules and outbound logs.
+Status is write-free with Git 2.15 or newer, which honors `GIT_OPTIONAL_LOCKS`;
+older Git may refresh the index while inspecting it.
+Sync moves code only through the project's network origin: push first. It
+fetches locally before resolving the requested SHA, then fetches the remote
+branch from its own origin and proves the requested SHA is on that branch. A missing checkout is
+cloned at its registered path. If the requested SHA is older than the branch
+tip, the clone is created and then refused as `behind`, with `before_sha` null.
+An existing checkout must have a matching origin,
+the same branch, and no tracked or staged modifications. Untracked files are
+reported but do not block unless Git would overwrite them. Tracked type changes
+are allowed, including directory-to-file replacements, provided the directory
+contains no additional ignored or untracked files. Added paths and parent files
+that would overwrite ignored or untracked data are refused, including rename
+and copy destinations.
+Older or divergent SHAs are refused; success requires exact HEAD equality.
+JSON sync results include `before_sha`, `after_sha`, `ok`, and `reason`.
+Full SHAs may be 40 or 64 hex characters; SHA-256 repositories require Git
+support on both hosts. Target trees with filenames containing newlines are
+refused as unsafe before SSH (exit 2), allowing portable line-based collision
+checks without `xargs -0`.
+
+Failure reasons are `unknown-target`, `missing`, `not-git`, `dirty`, `diverged`, `behind`,
+`foreign-origin`, `wrong-branch`, `unpushed`, `auth`, `no-network`,
+`would-overwrite-ignored`, `would-overwrite-untracked`, `legacy-absolute`, and
+`timeout`. An unregistered name returns `unknown-target` and exits 2; `missing` means a registered checkout
+is absent. Other target failures exit 3. Invalid command arguments or registry
+data exit 2. Legacy records include the full fix command:
+`oms runtime backend target remove NAME && oms runtime backend target add NAME --ssh-alias A`.
+Origin identity compares
+host/owner/repository across SSH and HTTPS, strips `.git`, folds host case, and
+also folds GitHub owner/repository case. SSH config aliases compare literally.
+
+Transport uses batch SSH with `-a -o ClearAllForwardings=yes` to disable agent
+and configured port forwarding, normal host-key verification, a fixed script,
+and quoted positional arguments. Status defaults to 120 seconds; sync defaults
+to 1800 seconds. Both accept `--timeout SECONDS`, an integer from 10 through
+7200. The selected budget applies to each local Git call and the SSH wait.
+Remote clone, fetch, and merge use the same budget with `timeout` when available;
+otherwise those remote steps are unbounded. A timeout reports
+`reason: timeout` and `state_unknown: true`: the remote sync may still complete
+after a timeout. Run `target status` before retrying.
+Local Git receives `/dev/null` as stdin, disables terminal prompting, and starts
+in a new session without a controlling terminal. OMS does not set
+`GIT_SSH_COMMAND`, preserving Git's configured SSH selection, including
+`core.sshCommand` and `GIT_SSH` for per-repository deploy keys.
+Git subcommands receive `/dev/null` as stdin so they and their hooks cannot
+consume the script. A fixed response sentinel separates login banners from
+the result; missing or malformed responses fail closed.
+Remote Git uses `GIT_OPTIONAL_LOCKS=0` and `GIT_LITERAL_PATHSPECS=1` so filenames
+are treated literally; Git 1.8.3 or newer is required.
+`OMS_SSH_BIN` overrides the SSH executable for test stubs. Authentication and
+network failures are reported without fallback copying or agent forwarding.
+There are no staging repositories or alternate checkouts. A timed-out operation
+may leave partial Git state; retry refuses unsafe state and never cleans
+it automatically. Concurrent syncs rely on Git's own locks and may refuse;
+there is no OMS lock or scheduler-job gate. Sync while jobs run can mix code
+under them; jobs should record `git rev-parse HEAD` in their outputs.
+
+Delegated children remain limited to `target list`. Status/sync are checkout
+management; `backend check remote --target NAME` stays offline and command
+execution still reports “SSH target execution is not yet supported”.
+
 The adapter receives one JSON request on stdin. It owns authentication,
 transport, isolation, cancellation, and cleanup. A response must bind the exact
 `operation_id` and set boolean `accepted`. An accepted response must also carry

@@ -39311,7 +39311,7 @@ test_runtime_backend_target_registry() {
   local project="$TMP/runtime-targets"
   mkdir -p "$project"
   python3 - "$ROOT" "$project" <<'PY'
-import contextlib, copy, io, json, os, pathlib, subprocess, sys
+import contextlib, copy, io, json, os, pathlib, signal, subprocess, sys, time
 from unittest.mock import patch
 
 root, repo = map(pathlib.Path, sys.argv[1:])
@@ -39320,6 +39320,9 @@ from oms_runtime import capsule
 from oms_runtime.cli import main
 from oms_runtime.common import pretty_json
 
+os.environ["HOME"] = str(repo.parent)
+expected_dir = "~/" + repo.name
+call_timeout = int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "120"))
 os.environ["OMS_LOCK_DIR"] = str(repo.parent / "target-locks")
 registry = repo / ".oms" / "runtime" / "targets.json"
 
@@ -39342,33 +39345,32 @@ assert not (repo / ".oms").exists(), "listing created state"
 assert "unknown remote target" in call("target", "remove", "missing", rc=2)
 assert not (repo / ".oms").exists(), "unknown removal created state"
 assert "read-only" in call("target", "add", "sample", "--ssh-alias", "sample-host",
-                           "--workdir", "/work/sample", rc=2, child=True)
+                           "--workdir", expected_dir, rc=2, child=True)
 assert not registry.exists(), "child mutation created registry"
 
 for value in ("", "-host", "user@host", "host:22", "host name", "host\n", "é", "x" * 65):
-    call("target", "add", "sample", "--ssh-alias=" + value, "--workdir", "/work/sample", rc=2)
-    call("target", "add", "--ssh-alias", "sample-host", "--workdir", "/work/sample", "--", value, rc=2)
-for value in ("", "0", "relative", "~/work", "C:/work", "/work\n", "/work\x00",
+    call("target", "add", "sample", "--ssh-alias=" + value, "--workdir", expected_dir, rc=2)
+    call("target", "add", "--ssh-alias", "sample-host", "--workdir", expected_dir, "--", value, rc=2)
+for value in ("", "0", "relative", "~", "~user/x", "~/../x", "~/", "~/x/../y", "/absolute", "C:/work", "/work\n", "/work\x00",
               "/work\t", "/work\x7f", "/work/" + "pass" + "word" + chr(61) + "value"):
     # NUL is exercised in-process; it cannot be represented in process argv.
     call("target", "add", "sample", "--ssh-alias", "sample-host", "--workdir=" + value, rc=2)
 for option in ("--identity-file", "--ssh-option", "--adapter"):
-    call("target", "add", "sample", "--ssh-alias", "sample-host", "--workdir", "/work/sample",
+    call("target", "add", "sample", "--ssh-alias", "sample-host", "--workdir", expected_dir,
          option, "unexpected", rc=2)
 assert not registry.exists(), "invalid input created registry"
 
-expected = {"ssh_alias": "sample-host", "workdir": "/work/sample"}
-assert call("target", "add", "sample", "--ssh-alias", expected["ssh_alias"],
-            "--workdir", expected["workdir"])["targets"] == {"sample": expected}
+expected = {"ssh_alias": "sample-host", "workdir": expected_dir}
+assert call("target", "add", "sample", "--ssh-alias", expected["ssh_alias"])["targets"] == {"sample": expected}
 saved = registry.read_bytes()
 assert "already exists" in call("target", "add", "sample", "--ssh-alias", "other-host",
-                               "--workdir", "/other", rc=2)
+                               "--workdir", expected_dir, rc=2)
 assert call("target", "list", child=True)["targets"] == {"sample": expected}
 for name in ("0", "n" * 64):
-    call("target", "add", name, "--ssh-alias", name, "--workdir", "/")
+    call("target", "add", name, "--ssh-alias", name, "--workdir", expected_dir)
     call("target", "remove", name)
 assert registry.read_bytes() == saved
-for action in (("add", "child", "--ssh-alias", "child-host", "--workdir", "/work"),
+for action in (("add", "child", "--ssh-alias", "child-host", "--workdir", expected_dir),
                ("remove", "sample")):
     assert "read-only" in call("target", *action, rc=2, child=True)
 assert registry.read_bytes() == saved, "child mutation changed registry"
@@ -39415,28 +39417,28 @@ bad.append({"schema": 1, "targets": {"-bad": expected}})
 for raw in [b"", b"{broken", b"\xff"] + [json.dumps(row).encode() for row in bad]:
     registry.write_bytes(raw)
     call("target", "list", rc=2)
-    call("target", "add", "new", "--ssh-alias", "new-host", "--workdir", "/new", rc=2)
+    call("target", "add", "new", "--ssh-alias", "new-host", "--workdir", expected_dir, rc=2)
     call("target", "remove", "sample", rc=2)
     assert call("check", "remote", "--target", "sample", rc=3)["target_valid"] is False
     assert registry.read_bytes() == raw, "malformed state was overwritten"
 registry.write_bytes(saved)
 
 edge = copy.deepcopy(targets.listing(repo))
-edge["targets"]["edge"] = {"ssh_alias": "edge-host", "workdir": "/edge"}
+edge["targets"]["edge"] = {"ssh_alias": "edge-host", "workdir": expected_dir}
 size = len(pretty_json(edge))
 for limit in (0, size - 1):
     with patch.object(targets, "MAX_STATE_BYTES", limit):
-        call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+        call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", expected_dir, rc=2)
     assert registry.read_bytes() == saved
 with patch.object(targets, "MAX_STATE_BYTES", size):
-    assert call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge") == edge
+    assert call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", expected_dir) == edge
     assert call("target", "list") == edge
 call("target", "remove", "edge")
 assert registry.read_bytes() == saved
 
 with patch("oms_runtime.common.os.replace", side_effect=OSError("interrupted replacement")):
     assert "cannot update" in call("target", "add", "edge", "--ssh-alias", "edge-host",
-                                   "--workdir", "/edge", rc=2)
+                                   "--workdir", expected_dir, rc=2)
 assert registry.read_bytes() == saved
 assert not list(registry.parent.glob(".targets.json.*")), "failed replacement leaked temporary state"
 
@@ -39447,9 +39449,9 @@ def interrupted_after_replace(source, destination):
     replace(source, destination)
     raise OSError("interrupted after replacement")
 with patch("oms_runtime.common.os.replace", side_effect=interrupted_after_replace):
-    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", expected_dir, rc=2)
 assert call("target", "list") == edge
-call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", expected_dir, rc=2)
 call("target", "remove", "edge")
 
 outside = repo.parent / "outside-targets.json"
@@ -39468,7 +39470,7 @@ for kind in ("file", "runtime", "state"):
         link.rmdir()
     link.symlink_to(destination, target_is_directory=kind != "file")
     call("target", "list", rc=2)
-    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", expected_dir, rc=2)
     call("target", "remove", "sample", rc=2)
     assert call("check", "remote", "--target", "sample", rc=3)["target_valid"] is False
     assert (destination if kind == "file" else destination / relative).read_bytes() == saved
@@ -39479,7 +39481,7 @@ for kind in ("file", "runtime", "state"):
 registry.parent.mkdir(parents=True, exist_ok=True)
 registry.mkdir()
 call("target", "list", rc=2)
-call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", expected_dir, rc=2)
 registry.rmdir()
 registry.write_bytes(saved)
 
@@ -39490,35 +39492,611 @@ for parent in (registry.parent, repo / ".oms"):
         parent.rmdir()
     parent.write_text("not a directory", encoding="utf-8")
     call("target", "list", rc=2)
-    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", "/edge", rc=2)
+    call("target", "add", "edge", "--ssh-alias", "edge-host", "--workdir", expected_dir, rc=2)
     call("target", "remove", "sample", rc=2)
     assert parent.read_text(encoding="utf-8") == "not a directory"
     parent.unlink()
     registry.parent.mkdir(parents=True)
     registry.write_bytes(saved)
 
+subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
 def parallel(actions, expected_codes):
     command = [sys.executable, str(root / "scripts" / "lib" / "oms_core.py"), "--repo", str(repo), "backend", "target"]
     environment = dict(os.environ, OMS_HARNESS_CHILD="")
     children = [subprocess.Popen(command + list(args), env=environment, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True) for args in actions]
-    results = [(child.communicate(timeout=30), child.returncode) for child in children]
+    results = [(child.communicate(timeout=call_timeout), child.returncode) for child in children]
     assert sorted(code for _, code in results) == sorted(expected_codes), results
 
-parallel([("add", "parallel" + str(i), "--ssh-alias", "host", "--workdir", "/work") for i in range(4)], [0] * 4)
+parallel([("add", "parallel" + str(i), "--ssh-alias", "host", "--workdir", expected_dir) for i in range(4)], [0] * 4)
 assert len(call("target", "list")["targets"]) == 5
 parallel([("remove", "parallel" + str(i)) for i in range(4)], [0] * 4)
-parallel([("add", "same", "--ssh-alias", "host", "--workdir", "/work")] * 2, [0, 2])
+parallel([("add", "same", "--ssh-alias", "host", "--workdir", expected_dir)] * 2, [0, 2])
 assert set(call("target", "list")["targets"]) == {"sample", "same"}
 call("target", "remove", "same")
 assert registry.read_bytes() == saved
 if os.name == "posix":
     assert registry.stat().st_mode & 0o777 == 0o600
 
+# Malformed stored paths must fail independently of add's same-path comparison.
+for invalid in ("~", "~/", "~user/x", "~/../x", "~/a/../b", "~/a//b", "~/a/./b", "~/a\u0085b",
+                "~/a\n", "~/" + "pass" + "word" + chr(61) + "value"):
+    try:
+        targets._record({"ssh_alias": "host", "workdir": invalid})
+    except targets.CoreError:
+        continue
+    raise AssertionError(invalid)
+for remote in ("git@GitHub.COM:Owner/Repo.git", "ssh://git@github.com/owner/repo",
+               "https://github.com/OWNER/REPO.GIT"):
+    assert targets._identity(remote) == "github.com/owner/repo"
+assert targets._identity("git@ClusterAlias:Owner/Repo.git") == "clusteralias/Owner/Repo"
+for remote in ("", "relative", "file:///fixture.git", "https://host/owner", "https://host/a/b/c",
+               "ssh://other@host/a/b", "https://host/a/b?extra", "git@host:a/../b"):
+    try:
+        targets._identity(remote)
+    except targets.CoreError:
+        continue
+    raise AssertionError(remote)
+
+# Physical HOME determines the only new path; older absolute state is listable.
+with patch.dict(os.environ, {"HOME": str(repo / "elsewhere")}):
+    assert "outside HOME" in call("target", "add", "outside", "--ssh-alias", "host", rc=2)
+with patch.dict(os.environ, {"HOME": str(repo)}):
+    call("target", "add", "home-root", "--ssh-alias", "host", rc=2)
+linked_home = repo.parent / "linked-home"
+linked_home.symlink_to(repo.parent, target_is_directory=True)
+with patch.dict(os.environ, {"HOME": str(linked_home)}):
+    assert call("target", "add", "physical", "--ssh-alias", "host")["targets"]["physical"]["workdir"] == expected_dir
+call("target", "remove", "physical")
+linked_home.unlink()
+for action in ("status", "sync"):
+    assert "read-only" in call("target", action, "sample", rc=2, child=True)
+    assert call("target", action, "missing", rc=2)["reason"] == "unknown-target"
+legacy = copy.deepcopy(targets.listing(repo))
+legacy["targets"]["legacy"] = {"ssh_alias": "host", "workdir": "/legacy"}
+registry.write_bytes(pretty_json(legacy))
+assert "legacy" in call("target", "list")["targets"]
+for action in ("status", "sync"):
+    row = call("target", action, "legacy", rc=3)
+    assert row["reason"] == "legacy-absolute" and row["fix"] == "oms runtime backend target remove legacy && oms runtime backend target add legacy --ssh-alias host"
+registry.write_bytes(saved)
+
+# SSH executes the fixed script against a separate HOME. Fixture-only Git URL
+# rewriting supplies local transport without allowing local origins in OMS.
+remote_home = repo.parent / "remote home"
+remote_home.mkdir()
+stub = repo.parent / "ssh-stub"
+stub.write_text("#!" + sys.executable + "\n" + r"""
+import os, subprocess, sys
+assert sys.argv[1:8] == ['-a', '-o', 'ClearAllForwardings=yes', '-o', 'BatchMode=yes', '--', 'sample-host'], sys.argv
+assert sys.argv[8:11] == ['sh', '-s', '--'], sys.argv
+sys.stdout.write('login banner\nOMS_TARGET_V1\nmore banner without newline')
+sys.stdout.flush()
+with open(os.environ['OMS_TEST_SSH_CALLS'], 'a') as log:
+    log.write('call\n')
+os.environ['HOME'] = os.environ['OMS_TEST_REMOTE_HOME']
+os.environ.pop('GIT_LITERAL_PATHSPECS', None)
+if os.environ.get('OMS_TEST_REMOTE_PATH'):
+    os.environ['PATH'] = os.environ['OMS_TEST_REMOTE_PATH'] + os.pathsep + os.environ['PATH']
+if os.environ.get('OMS_TEST_REMOTE_ORIGIN'):
+    os.environ['GIT_CONFIG_KEY_0'] = 'url.' + os.environ['OMS_TEST_REMOTE_ORIGIN'] + '.insteadOf'
+if os.environ.get('OMS_TEST_REMOTE_LASTPIPE'):
+    sys.argv[8:9] = ['bash', '-O', 'lastpipe']
+sys.exit(subprocess.call(' '.join(sys.argv[8:]), shell=True, executable='/bin/sh'))
+""")
+stub.chmod(0o700)
+call_log = repo.parent / "ssh-calls"
+bare = repo.parent / "origin.git"
+subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+origin = "https://example.test/team/project.git"
+environment = {"OMS_SSH_BIN": str(stub), "OMS_TEST_REMOTE_HOME": str(remote_home),
+               "OMS_TEST_SSH_CALLS": str(call_log), "GIT_CONFIG_COUNT": "1",
+               "GIT_CONFIG_KEY_0": "url." + bare.as_uri() + ".insteadOf", "GIT_CONFIG_VALUE_0": origin}
+
+def git(where, *args, rc=0):
+    process = subprocess.run(["git", "-C", str(where), *args], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, timeout=call_timeout)
+    assert process.returncode == rc, (args, process.stdout, process.stderr)
+    return process.stdout.strip().rstrip("\r")
+
+def commit(text, filename="tracked"):
+    (repo / filename).write_text(text)
+    git(repo, "add", "--", filename)
+    git(repo, "commit", "-qm", text)
+    return git(repo, "rev-parse", "HEAD")
+
+with patch.dict(os.environ, environment):
+    git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+    first = commit("first")
+    git(repo, "remote", "add", "origin", origin)
+    assert call("target", "status", "sample", rc=3)["reason"] == "missing"
+    assert call("target", "sync", "sample", rc=3)["reason"] == "unpushed"
+    git(repo, "push", "-u", "origin", "main")
+    remote_repo = remote_home / repo.name
+    assert not remote_repo.exists()
+    row = call("target", "sync", "sample")
+    assert row["before_sha"] is None and row["after_sha"] == first and row["reason"] is None, row
+    def snapshot():
+        return {path.relative_to(remote_repo): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in remote_repo.rglob("*") if path.is_file()}
+    unchanged = snapshot()
+    count = len(call_log.read_text().splitlines())
+    row = call("target", "status", "sample")
+    assert snapshot() == unchanged, "status wrote remote state"
+    assert row["reason"] is None, row
+    assert len(call_log.read_text().splitlines()) == count + 1
+    assert row["exists"] and row["is_git"] and row["origin_matches"] and row["clean"], row
+    assert row["head"] == first and row["branch"] == "main" and not row["untracked"]
+    assert row["workdir"] == str(remote_repo.resolve())
+    if os.name == "posix":
+        # Wait for the grandchild before forcing a short transport deadline.
+        tools = repo.parent / "slow target tools"
+        tools.mkdir()
+        descendant = tools / "descendant"
+        slow = tools / "git"
+        slow.write_text("#!" + sys.executable + "\n" + r"""
+import os, subprocess, sys
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'])
+with open(os.environ['OMS_TEST_DESCENDANT'], 'w') as output:
+    output.write(str(child.pid))
+child.wait()
+""")
+        slow.chmod(0o700)
+        actual_popen = subprocess.Popen
+        actual_killpg = os.killpg
+        for transport in ("git", "ssh"):
+            spawned = []
+            def spawn_ready(command, *args, **kwargs):
+                process = actual_popen(command, *args, **kwargs)
+                if command[0] != ("git" if transport == "git" else str(slow)):
+                    return process
+                spawned.append(process)
+                communicate = process.communicate
+                first_communication = True
+                def ready_communicate(input=None, timeout=None):
+                    nonlocal first_communication
+                    if first_communication:
+                        first_communication = False
+                        deadline = time.monotonic() + call_timeout
+                        while not descendant.exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        assert descendant.exists(), "grandchild did not start"
+                        return communicate(input=input, timeout=0.01)
+                    return communicate(input=input, timeout=timeout)
+                process.communicate = ready_communicate
+                return process
+            slow_env = {"OMS_TEST_DESCENDANT": str(descendant)}
+            if transport == "git":
+                slow_env["PATH"] = str(tools) + os.pathsep + os.environ["PATH"]
+            else:
+                slow_env["OMS_SSH_BIN"] = str(slow)
+            def exited_group(group, sig):
+                actual_killpg(group, sig)
+                raise ProcessLookupError("group already exited")
+            try:
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ, slow_env))
+                    stack.enter_context(patch.object(targets.subprocess, "Popen", side_effect=spawn_ready))
+                    if transport == "ssh":
+                        stack.enter_context(patch.object(targets.os, "killpg", side_effect=exited_group))
+                    row = call("target", "status", "sample", "--timeout", "10", rc=3)
+                assert row["reason"] == "timeout" and row["state_unknown"] is True, row
+                pid = int(descendant.read_text())
+                deadline = time.monotonic() + call_timeout
+                while True:
+                    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                           stdout=subprocess.PIPE, text=True, timeout=call_timeout).stdout.strip()
+                    if not state or state.startswith("Z"):
+                        break
+                    assert time.monotonic() < deadline, (transport, "grandchild survived", pid, state)
+                    time.sleep(0.01)
+                assert all(process.poll() is not None for process in spawned), "direct child was not reaped"
+            finally:
+                for process in spawned:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=call_timeout)
+                if descendant.exists():
+                    try:
+                        os.kill(int(descendant.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    descendant.unlink()
+    row = call("target", "sync", "sample", "--sha", first)
+    assert row["before_sha"] == row["after_sha"] == first
+    stale = repo.parent / "stale.git"
+    git(repo, "clone", "--bare", str(bare), str(stale))
+    second = commit("second")
+    assert call("target", "sync", "sample", rc=3)["reason"] == "unpushed"
+    assert git(remote_repo, "rev-parse", "HEAD") == first
+    git(repo, "push", "origin", "main")
+    with patch.dict(os.environ, {"OMS_TEST_REMOTE_ORIGIN": stale.as_uri()}):
+        row = call("target", "sync", "sample", rc=3)
+        assert row["reason"] == "unpushed" and "push first" in row["message"], row
+    (remote_repo / "tracked").write_text("dirty")
+    assert not call("target", "status", "sample")["clean"]
+    assert call("target", "sync", "sample", rc=3)["reason"] == "dirty"
+    (remote_repo / "tracked").write_text("first")
+    (remote_repo / "extra").write_text("untracked")
+    assert call("target", "status", "sample")["untracked"]
+    row = call("target", "sync", "sample")
+    assert row["before_sha"] == first and row["after_sha"] == second, row
+    assert (remote_repo / "extra").read_text() == "untracked"
+    assert call("target", "sync", "sample", "--sha", first, rc=3)["reason"] == "behind"
+    (remote_repo / "tracked").write_text("staged")
+    git(remote_repo, "add", "tracked")
+    assert call("target", "sync", "sample", rc=3)["reason"] == "dirty"
+    git(remote_repo, "commit", "-qm", "remote commit")
+    third = commit("third")
+    git(repo, "push", "origin", "main")
+    assert call("target", "sync", "sample", rc=3)["reason"] == "diverged"
+    git(remote_repo, "checkout", "-qb", "other", second)
+    row = call("target", "sync", "sample", rc=3)
+    assert row["reason"] == "wrong-branch" and "other" in row["message"] and "main" in row["message"]
+    # Preserve the divergent checkout; create a distinct project with shell quotes.
+    spaced = repo.parent / "project ' spaced"
+    subprocess.run(["git", "clone", "-q", "--branch", "main", origin, str(spaced)], check=True)
+    original_repo = repo
+    repo = spaced
+    call("target", "add", "sample", "--ssh-alias", "sample-host")
+    row = call("target", "sync", "sample", "--sha", second, rc=3)
+    assert row["reason"] == "behind" and row["before_sha"] is None and row["head"] == third, row
+    row = call("target", "sync", "sample")
+    remote_spaced = remote_home / spaced.name
+    hook = remote_spaced / ".git" / "hooks" / "post-merge"
+    hook.write_text("#!/bin/sh\ncat > .git/oms-hook-stdin\n")
+    hook.chmod(0o700)
+    assert row["after_sha"] == third and remote_spaced.is_dir(), row
+    git(repo, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    for variant in ("git@GitHub.COM:Owner/Repo.git", "ssh://git@github.com/owner/repo",
+                    "https://github.com/OWNER/REPO.GIT"):
+        git(remote_spaced, "remote", "set-url", "origin", variant)
+        assert call("target", "status", "sample")["origin_matches"]
+    git(repo, "remote", "set-url", "origin", origin)
+    git(remote_spaced, "remote", "set-url", "origin", "git@elsewhere:team/project.git")
+    assert call("target", "sync", "sample", rc=3)["reason"] == "foreign-origin"
+    assert call("target", "status", "sample", rc=3)["reason"] == "foreign-origin"
+    git(remote_spaced, "remote", "set-url", "origin", "git@example.test:team/project.git")
+    assert call("target", "status", "sample")["origin_matches"]
+    git(remote_spaced, "remote", "set-url", "origin", origin)
+    (remote_spaced / ".git" / "info" / "exclude").write_text("collision\n")
+    (remote_spaced / "collision").write_text("keep ignored")
+    commit("new tracked file", "collision")
+    git(repo, "push", "origin", "main")
+    assert call("target", "sync", "sample", rc=3)["reason"] == "would-overwrite-ignored"
+    assert (remote_spaced / "collision").read_text() == "keep ignored"
+    (remote_spaced / "collision").unlink()
+    assert call("target", "sync", "sample")["after_sha"] == git(repo, "rev-parse", "HEAD")
+    assert (remote_spaced / ".git" / "oms-hook-stdin").read_bytes() == b"", "git hook consumed script input"
+    # Rename detection must not hide an ignored destination from collision checks.
+    git(repo, "mv", "tracked", "renamed ignored")
+    git(repo, "commit", "-qm", "rename tracked file")
+    git(repo, "push", "origin", "main")
+    ignored = remote_spaced / "renamed ignored"
+    ignored.write_text("preserve rename destination")
+    with (remote_spaced / ".git" / "info" / "exclude").open("a") as excluded:
+        excluded.write("renamed ignored\n")
+    with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_1": "diff.renames",
+                                 "GIT_CONFIG_VALUE_1": "true"}):
+        try:
+            row = call("target", "sync", "sample", rc=3)
+        finally:
+            assert ignored.read_text() == "preserve rename destination", "ignored rename destination overwritten"
+        assert row["reason"] == "would-overwrite-ignored", row
+    ignored.unlink()
+    call("target", "sync", "sample")
+    for parent_name, ignored_parent in (("ignored parent", True), ("untracked parent", False)):
+        parent = repo / parent_name
+        (parent / "inner").mkdir(parents=True)
+        commit("nested addition", parent_name + "/inner/leaf")
+        git(repo, "push", "origin", "main")
+        obstacle = remote_spaced / parent_name
+        obstacle.write_text("preserve parent file")
+        if ignored_parent:
+            with (remote_spaced / ".git" / "info" / "exclude").open("a") as excluded:
+                excluded.write(parent_name + "\n")
+        expected_reason = "would-overwrite-ignored" if ignored_parent else "would-overwrite-untracked"
+        for lastpipe in ("", "1"):
+            with patch.dict(os.environ, {"OMS_TEST_REMOTE_LASTPIPE": lastpipe}):
+                row = call("target", "sync", "sample", rc=3)
+            assert row["reason"] == expected_reason, row
+            assert obstacle.read_text() == "preserve parent file"
+        obstacle.unlink()
+        with patch.dict(os.environ, {"OMS_TEST_REMOTE_LASTPIPE": "1"}):
+            call("target", "sync", "sample")
+    # A tracked file replaced by a directory remains a valid fast-forward.
+    commit("tracked parent", "tracked parent")
+    git(repo, "push", "origin", "main")
+    call("target", "sync", "sample")
+    git(repo, "rm", "tracked parent")
+    (repo / "tracked parent").mkdir()
+    commit("replacement child", "tracked parent/leaf")
+    git(repo, "push", "origin", "main")
+    call("target", "sync", "sample")
+    # The inverse tracked transition must also fast-forward without data loss.
+    git(repo, "rm", "-r", "tracked parent")
+    commit("directory replaced by file", "tracked parent")
+    git(repo, "push", "origin", "main")
+    call("target", "sync", "sample")
+    assert (remote_spaced / "tracked parent").read_text() == "directory replaced by file"
+    (repo / "protected directory").mkdir()
+    commit("tracked child", "protected directory/leaf")
+    git(repo, "push", "origin", "main")
+    call("target", "sync", "sample")
+    git(repo, "rm", "-r", "protected directory")
+    commit("directory replacement", "protected directory")
+    git(repo, "push", "origin", "main")
+    for extra, ignored_extra in (("ignored extra", True), ("untracked extra", False)):
+        inside = remote_spaced / "protected directory" / extra
+        inside.write_text("preserve directory contents")
+        if ignored_extra:
+            with (remote_spaced / ".git" / "info" / "exclude").open("a") as excluded:
+                excluded.write("protected directory/" + extra + "\n")
+        row = call("target", "sync", "sample", rc=3)
+        expected_reason = "would-overwrite-ignored" if ignored_extra else "would-overwrite-untracked"
+        assert row["reason"] == expected_reason, row
+        assert inside.read_text() == "preserve directory contents"
+        inside.unlink()
+    call("target", "sync", "sample")
+    assert (remote_spaced / "protected directory").is_file()
+    # SSH starts a fresh environment: literal pathspecs must be enabled remotely.
+    literal_name = ":(glob)literal*"
+    with patch.dict(os.environ, {"GIT_LITERAL_PATHSPECS": "1"}):
+        (repo / literal_name).mkdir()
+        commit("literal tracked child", literal_name + "/leaf")
+        git(repo, "push", "origin", "main")
+        call("target", "sync", "sample")
+        git(repo, "rm", "-r", "--", literal_name)
+        commit("literal directory replacement", literal_name)
+        git(repo, "push", "origin", "main")
+        inside = remote_spaced / literal_name / "ignored extra"
+        inside.write_text("preserve literal path contents")
+        with (remote_spaced / ".git" / "info" / "exclude").open("a") as excluded:
+            excluded.write(literal_name + "/ignored extra\n")
+        try:
+            row = call("target", "sync", "sample", rc=3)
+        finally:
+            assert inside.read_text() == "preserve literal path contents"
+        assert row["reason"] == "would-overwrite-ignored", row
+        inside.unlink()
+        call("target", "sync", "sample")
+    # ff-only success alone must not certify the requested commit.
+    with patch.object(targets, "_REMOTE_SCRIPT", targets._REMOTE_SCRIPT.replace(
+            'limited_git merge --ff-only "$sha" >/dev/null 2>&1', 'true')):
+        fourth = commit("fourth")
+        git(repo, "push", "origin", "main")
+        assert call("target", "sync", "sample", rc=3)["reason"] == "diverged"
+    assert call("target", "sync", "sample")["after_sha"] == fourth
+    unsafe = "unsafe\nname"
+    commit("unsafe filename", unsafe)
+    git(repo, "push", "origin", "main")
+    ssh_calls = call_log.read_text()
+    assert "unsafe" in call("target", "sync", "sample", rc=2)
+    assert call_log.read_text() == ssh_calls, "unsafe path reached SSH"
+    git(repo, "rm", "--", unsafe)
+    git(repo, "commit", "-qm", "remove unsafe filename")
+    git(repo, "push", "origin", "main")
+    call("target", "sync", "sample")
+
+    # A pushed object absent locally must become usable through the initial fetch.
+    publisher = repo.parent / "publisher"
+    git(repo, "clone", "--branch", "main", origin, str(publisher))
+    (publisher / "published").write_text("published elsewhere")
+    git(publisher, "add", "published")
+    git(publisher, "commit", "-qm", "publish elsewhere")
+    git(publisher, "push", "origin", "main")
+    pushed = git(publisher, "rev-parse", "HEAD")
+    git(repo, "cat-file", "-e", pushed, rc=1)
+    actual_run = targets._run
+    events = []
+    recorded_local = {}
+    git(repo, "config", "core.sshCommand", "fixture-ssh-command")
+    def inspect_local_git(command, **kwargs):
+        if command[:3] == ["git", "-C", str(repo)]:
+            assert kwargs["stdin"] == subprocess.DEVNULL
+            assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+            for key, value in (("SSH_ASKPASS_REQUIRE", "never"), ("GIT_ASKPASS", "false")):
+                assert kwargs["env"].get(key) == value, (key, kwargs["env"].get(key))
+            assert "GIT_SSH_COMMAND" not in kwargs["env"], "fetch overrides repository SSH configuration"
+            assert kwargs["start_new_session"] is True
+            events.append(tuple(command[3:]))
+        result = actual_run(command, **kwargs)
+        recorded_local[tuple(command)] = result
+        return result
+    with patch.dict(os.environ):
+        os.environ.pop("GIT_SSH_COMMAND", None)
+        with patch.object(targets, "_run", side_effect=inspect_local_git):
+            assert call("target", "sync", "sample", "--sha", pushed)["after_sha"] == pushed
+    assert events.index(("fetch", "origin")) < events.index(("rev-parse", "--verify", pushed + "^{commit}"))
+    custom_command = "ssh -o BatchMode=yes -o ConnectTimeout=9"
+    custom_environment = {"GIT_SSH_COMMAND": custom_command, "GIT_SSH": "fixture-ssh"}
+    custom_environment.update({"SSH_ASKPASS_REQUIRE": "force", "GIT_ASKPASS": "fixture-gui"})
+    with patch.dict(os.environ, custom_environment):
+        with patch.object(targets, "_run", return_value=subprocess.CompletedProcess([], 0, "", "")) as process:
+            targets._git(repo, "rev-parse", "HEAD")
+            assert process.call_args.kwargs["env"]["GIT_SSH_COMMAND"] == custom_command
+            assert process.call_args.kwargs["env"]["GIT_SSH"] == "fixture-ssh"
+            assert process.call_args.kwargs["env"]["SSH_ASKPASS_REQUIRE"] in ("never",)
+            assert process.call_args.kwargs["env"]["GIT_ASKPASS"] in ("false",)
+    assert git(repo, "config", "--get", "core.sshCommand") == "fixture-ssh-command"
+
+    # Timeout support is optional remotely; test both routes without long waits.
+    remote_tools = repo.parent / "remote tools"
+    remote_tools.mkdir()
+    timeout_stub = remote_tools / "timeout"
+    timeout_log = repo.parent / "timeout-calls"
+    timeout_stub.write_text("#!/bin/sh\n" + r"""
+[ "$1" = "${OMS_TEST_EXPECT_TIMEOUT:-1800}" ] || exit 2
+shift
+printf '%s\n' "$2" >> "$OMS_TEST_TIMEOUT_CALLS"
+if [ "$2" = "$OMS_TEST_TIMEOUT_STEP" ]; then exit 124; fi
+exec "$@"
+""")
+    timeout_stub.chmod(0o700)
+    timeout_env = {"OMS_TEST_REMOTE_PATH": str(remote_tools), "OMS_TEST_TIMEOUT_CALLS": str(timeout_log),
+                   "OMS_TEST_TIMEOUT_STEP": "fetch"}
+    with patch.dict(os.environ, timeout_env):
+        row = call("target", "sync", "sample", "--sha", pushed, rc=3)
+        assert row["reason"] == "timeout" and row["state_unknown"] is True, row
+    with patch.dict(os.environ, dict(timeout_env, OMS_TEST_TIMEOUT_STEP="merge")):
+        row = call("target", "sync", "sample", "--sha", pushed, rc=3)
+        assert row["reason"] == "timeout" and row["state_unknown"] is True, row
+    with patch.dict(os.environ, dict(timeout_env, OMS_TEST_TIMEOUT_STEP="")):
+        assert call("target", "sync", "sample", "--sha", pushed)["after_sha"] == pushed
+    with patch.dict(os.environ, dict(timeout_env, OMS_TEST_TIMEOUT_STEP="", OMS_TEST_EXPECT_TIMEOUT="7200")):
+        assert call("target", "sync", "sample", "--sha", pushed, "--timeout", "7200")["after_sha"] == pushed
+    clone_local = repo.parent / "clone timeout"
+    git(repo, "clone", "--branch", "main", origin, str(clone_local))
+    repo = clone_local
+    call("target", "add", "sample", "--ssh-alias", "sample-host")
+    with patch.dict(os.environ, dict(timeout_env, OMS_TEST_TIMEOUT_STEP="clone")):
+        row = call("target", "sync", "sample", "--sha", pushed, rc=3)
+        assert row["reason"] == "timeout" and row["state_unknown"] is True, row
+    assert not (remote_home / repo.name).exists()
+    with patch.dict(os.environ, dict(timeout_env, OMS_TEST_TIMEOUT_STEP="")):
+        assert call("target", "sync", "sample", "--sha", pushed)["after_sha"] == pushed
+    repo = spaced
+    assert {"clone", "fetch", "merge"}.issubset(timeout_log.read_text().splitlines())
+    without_timeout = targets._REMOTE_SCRIPT.replace("command -v timeout", "command -v oms-timeout-unavailable")
+    with patch.object(targets, "_REMOTE_SCRIPT", without_timeout):
+        assert call("target", "sync", "sample", "--sha", pushed)["after_sha"] == pushed
+
+    repo = original_repo
+    for malformed in ("", "0", "HEAD", "a" * 39, "a" * 41, "z" * 40, "a" * 63, "a" * 65, "z" * 64):
+        call("target", "sync", "sample", "--sha=" + malformed, rc=2)
+    for width in (40, 64):
+        assert call("target", "sync", "sample", "--sha", "0" * width, rc=3)["reason"] == "unpushed"
+    for bad_origin in (str(bare), bare.as_uri(), "", "https://user@example.test/team/project.git"):
+        git(repo, "remote", "set-url", "origin", bad_origin)
+        assert call("target", "sync", "sample", rc=3)["reason"] == "foreign-origin"
+    git(repo, "remote", "set-url", "origin", origin)
+    repo = spaced
+    for diagnostic, category in (("Permission denied", "auth"), ("Connection refused", "no-network")):
+        failing_script = targets._REMOTE_SCRIPT.replace(
+            'network limited_git fetch origin "+refs/heads/$wanted:refs/remotes/origin/$wanted"',
+            "network sh -c 'echo " + diagnostic + " >&2; exit 1'")
+        with patch.object(targets, "_REMOTE_SCRIPT", failing_script):
+            row = call("target", "sync", "sample", rc=3)
+            assert row["reason"] == category, row
+    repo = original_repo
+    actual_run = targets._run
+    for error, reason in (("Permission denied", "auth"), ("Could not resolve hostname", "no-network")):
+        def transport(command, **kwargs):
+            if command[0] == str(stub):
+                return subprocess.CompletedProcess(command, 255, "", error)
+            return actual_run(command, **kwargs)
+        with patch.object(targets, "_run", side_effect=transport):
+            assert call("target", "status", "sample", rc=3)["reason"] == reason
+    valid_fields = ["", str(remote_repo), "true", "true", "true", first, "main", "true", "false", "", ""]
+    invalid_responses = [(0, value) for value in ("", "banner only\n", "\0" * 11,
+                                                 "\nOMS_TARGET_V1\n")]
+    for field, value in ((0, "corrupted"), (0, "dirty"), (2, "maybe"), (1, "relative"),
+                         (5, "a" * 39), (9, "not-sha"), (10, "0")):
+        malformed_fields = list(valid_fields)
+        malformed_fields[field] = value
+        invalid_responses.append((0, "\nOMS_TARGET_V1\n" + "\0".join(malformed_fields) + "\0"))
+    valid_wire = "\nOMS_TARGET_V1\n" + "\0".join(valid_fields) + "\0"
+    invalid_responses.extend(((3, valid_wire), (255, valid_wire), (0, valid_wire[:-1])))
+    for response_code, response in invalid_responses:
+        def malformed_transport(command, **kwargs):
+            if command[0] == str(stub):
+                return subprocess.CompletedProcess(command, response_code, response, "")
+            return actual_run(command, **kwargs)
+        with patch.object(targets, "_run", side_effect=malformed_transport):
+            row = call("target", "status", "sample", rc=3)
+            assert row["reason"] == "no-network" and not row["ok"], row
+    # Replay observed Git replies to exercise timeout edges without real waits.
+    repo = spaced
+    timeout_fields = list(valid_fields)
+    timeout_fields[1] = str(remote_spaced)
+    for index in (5, 9, 10):
+        timeout_fields[index] = pushed
+    timeout_wire = "\nOMS_TARGET_V1\n" + "\0".join(timeout_fields) + "\0"
+    for action, default_budget in (("status", 120), ("sync", 1800)):
+        for selected in (None, 10, 7200):
+            expected_budget = default_budget if selected is None else selected
+            def budget_transport(command, **kwargs):
+                assert kwargs["timeout"] == expected_budget, (command, kwargs["timeout"], expected_budget)
+                if command[0] == str(stub):
+                    assert command[-1] == str(expected_budget), command
+                    return subprocess.CompletedProcess(command, 0, timeout_wire, "")
+                return recorded_local[tuple(command)]
+            arguments = ["target", action, "sample"]
+            if action == "sync":
+                arguments.extend(("--sha", pushed))
+            if selected is not None:
+                arguments.extend(("--timeout", str(selected)))
+            with patch.object(targets, "_run", side_effect=budget_transport):
+                assert call(*arguments)["ok"]
+        for invalid in ("", "0", "9", "7201", "-1", "1.5", "malformed"):
+            with patch.object(targets, "_run", side_effect=AssertionError("invalid timeout launched process")):
+                call("target", action, "sample", "--timeout=" + invalid, rc=2)
+        assert "read-only" in call("target", action, "sample", "--timeout", "7200", child=True, rc=2)
+    for invalid in (False, "10", 10.5):
+        try:
+            targets.inspect_target(repo, "sample", timeout_seconds=invalid)
+        except targets.CoreError as error:
+            assert "timeout" in str(error)
+        else:
+            raise AssertionError(invalid)
+    repo = original_repo
+    def timed_out(command, **kwargs):
+        if command[0] == str(stub):
+            assert kwargs["timeout"] == 120 and kwargs["input"] == targets._REMOTE_SCRIPT
+            assert kwargs["start_new_session"] is True
+            raise subprocess.TimeoutExpired("ssh", 120)
+        return actual_run(command, **kwargs)
+    with patch.object(targets, "_run", side_effect=timed_out):
+        row = call("target", "status", "sample", rc=3)
+        assert row["reason"] == "timeout" and row["state_unknown"] is True, row
+    with patch.dict(os.environ, {"OMS_SSH_BIN": str(repo.parent / "missing-ssh")}):
+        assert call("target", "status", "sample", rc=3)["reason"] == "no-network"
+    with patch.dict(os.environ, {"OMS_TEST_REMOTE_HOME": ""}):
+        assert call("target", "status", "sample", rc=3)["reason"] == "not-git"
+    non_git = repo.parent / "not-git"
+    non_git.mkdir()
+    repo = non_git
+    call("target", "add", "sample", "--ssh-alias", "sample-host")
+    git(non_git, "init", "-q")
+    git(non_git, "remote", "add", "origin", origin)
+    git(non_git, "fetch", "origin")
+    git(non_git, "checkout", "-qb", "main", "origin/main")
+    (remote_home / non_git.name).mkdir()
+    assert call("target", "status", "sample", rc=3)["reason"] == "not-git"
+    assert call("target", "sync", "sample", rc=3)["reason"] == "not-git"
+    assert not list((remote_home / non_git.name).iterdir())
+    repo = original_repo
+    bare256 = repo.parent / "origin256.git"
+    git(repo, "init", "--bare", "--object-format=sha256", str(bare256))
+    repo = repo.parent / "project256"
+    repo.mkdir()
+    git(repo, "init", "--object-format=sha256")
+    git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+    commit256 = commit("sha256 first")
+    assert len(commit256) == 64
+    origin256 = "https://sha256.example.test/team/project.git"
+    git(repo, "remote", "add", "origin", origin256)
+    call("target", "add", "sample", "--ssh-alias", "sample-host")
+    with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "url." + bare256.as_uri() + ".insteadOf",
+                                 "GIT_CONFIG_VALUE_0": origin256}):
+        git(repo, "push", "origin", "main")
+        row = call("target", "sync", "sample", "--sha", commit256)
+        assert row["after_sha"] == commit256 and row["before_sha"] is None, row
+        assert call("target", "status", "sample")["head"] == commit256
+        next256 = commit("sha256 advance")
+        git(repo, "push", "origin", "main")
+        row = call("target", "sync", "sample", "--sha", next256)
+        assert row["before_sha"] == commit256 and row["after_sha"] == next256, row
+    repo = original_repo
+assert registry.read_bytes() == saved
+
 output = repo.parent / "targets-capsule.json"
 capsule.export(repo, output)
 portable = output.read_text(encoding="utf-8")
-assert all(value not in portable for value in ("targets.json", "ssh_alias", "sample-host", "/work/sample"))
+assert all(value not in portable for value in ("targets.json", "ssh_alias", "sample-host", expected_dir, str(remote_home)))
 assert capsule.verify(output)["valid"] is True
 assert capsule.import_capsule(repo, output)["authority_transfer"] is False
 assert registry.read_bytes() == saved

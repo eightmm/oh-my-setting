@@ -99,15 +99,22 @@ def build_parser() -> argparse.ArgumentParser:
     target = backend_sub.add_parser('target', help='local SSH target metadata; never exported in capsules',
                                     description='Stored in .oms/runtime/targets.json, excluded from capsules. '
                                     'Existing names are refused; remove before adding a replacement. '
-                                    'SSH execution is not yet supported.', parents=[shared_options])
+                                    'Status and git sync use SSH; command execution is not yet supported.', parents=[shared_options])
     target_sub = target.add_subparsers(dest='target_action', required=True)
     target_add = target_sub.add_parser('add', help='register metadata only; validates alias syntax without reading SSH config', parents=[shared_options])
     target_add.add_argument('name', help='unique local name with the same syntax as --ssh-alias')
     target_add.add_argument('--ssh-alias', required=True, help='1..64 letters, digits, dots, underscores or hyphens; starts with a letter or digit')
-    target_add.add_argument('--workdir', required=True, help='absolute POSIX directory on the remote host')
+    target_add.add_argument('--workdir', help='optional ~/REL; must equal the resolved local repository path under HOME')
     target_sub.add_parser('list', help='read local targets without creating state', parents=[shared_options])
     target_remove = target_sub.add_parser('remove', help='remove one existing local target', parents=[shared_options])
     target_remove.add_argument('name')
+    for action in ('status', 'sync'):
+        item = target_sub.add_parser(action, help='inspect checkout' if action == 'status' else 'clone or fast-forward through origin; push first', parents=[shared_options])
+        item.add_argument('name')
+        item.add_argument('--timeout', type=int, default=120 if action == 'status' else 1800,
+                          help='timeout in seconds, 10..7200; default: %(default)s')
+        if action == 'sync':
+            item.add_argument('--sha', help='full 40- or 64-hex commit SHA already pushed to origin; defaults to HEAD')
     for action in ('describe', 'check'):
         item = backend_sub.add_parser(action, parents=[shared_options])
         item.add_argument('profile', choices=('trusted-local', 'isolated', 'remote'))
