@@ -8,6 +8,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms init` suggests the repository's own test command (`scripts/check.sh`,
+  then pytest, npm, make, cargo, go, or a `<your test command>` placeholder)
+  read from its files without running anything, and states which features
+  need a confirmed `PROJECT.md` or an agent-plan.
+- Managed terminal refusals print a fixed failure category on a second line.
+- The delegation reference states that worker and admission verify run in a
+  fresh tree without untracked `.venv/` or `node_modules/`, and that the
+  `oms land` gate clone seeds nothing.
 - A council synthesis shares its quote bytes across seats so the whole file
   fits the 64 KiB panel reader; when seats outnumber the budget the later ones
   keep a one-line pointer to their full answer. An oversized synthesis now
