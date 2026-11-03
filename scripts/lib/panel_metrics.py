@@ -546,6 +546,31 @@ def _attempt_history(repo):
     return list(attempts.values()), incomplete
 
 
+def direct_work_counts(repo):
+    """Retained panel-main hook counters, independent of transcript or metrics time windows."""
+    from hook_state import DIRECT_KINDS, load_state
+    from panel_results import DURABLE
+    counts, sessions = dict.fromkeys(DIRECT_KINDS, 0), 0
+    relative = ".oms/hooks/sessions"
+    try:
+        leaf = DURABLE["canonical_repo_path"](str(repo), relative + "/.direct-work-metrics", "direct work metrics", False)
+        folder = os.path.dirname(leaf)
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if not re.fullmatch(r"[0-9a-f]{32}\.direct-work\.json", entry.name) or not entry.is_file(follow_symlinks=False):
+                    continue
+                row = load_state(Path(entry.path))
+                recorded = row.get("counts")
+                if not isinstance(recorded, dict) or any(type(recorded.get(kind)) is not int or recorded[kind] < 0 for kind in DIRECT_KINDS):
+                    continue
+                for kind in DIRECT_KINDS:
+                    counts[kind] += recorded[kind]
+                sessions += 1
+    except (OSError, ValueError, SystemExit):
+        return {"counts": None, "sessions": 0}
+    return {"counts": counts if sessions else None, "sessions": sessions}
+
+
 def aggregate(repo, since=None, now=None):
     """Aggregate bounded recorded evidence read only.
 
@@ -981,6 +1006,7 @@ def aggregate(repo, since=None, now=None):
                 "incomplete": bool(incomplete)}
     metric_scope = {"since": since, "until": until, "coverage": coverage}
     return {"schema": 1, "kind": "oms-panel-metrics", "since": since, "until": until,
+            "direct_work": direct_work_counts(repo),
             "window": {"since": since, "until": until}, "coverage": coverage,
             "preflight": {"tasks": len(preflight_ids), "attempts": sum(
                 str(row.get("task_id", "")).startswith("preflight-") for row in attempts)},
@@ -1048,6 +1074,9 @@ def metrics_text(report):
         model_parts.append("+%d more" % (len(models) - 8))
     return "\n".join(line for line in (
         "Panel metrics (since %s; until %s)" % (report.get("since") or "all retained", report.get("until", "unknown")),
+        "main direct work (retained hook sessions; unfiltered by --since): " + (
+            ", ".join("%s=%d" % (kind, report["direct_work"]["counts"][kind]) for kind in ("edit", "write", "run"))
+            if report.get("direct_work", {}).get("counts") is not None else "not recorded"),
         "coverage: %s attempts, %s artifact events (limits %s/%s); plan tasks without an observed write attempt=%d%s" % (
             report.get("coverage", {}).get("attempts_observed", "?"),
             report.get("coverage", {}).get("artifact_events_observed", "?"),

@@ -16,8 +16,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The expected surface list, recorded. Both literals move together or the gate
 # below fails; see test_expected_surface_list_is_bump_gated.
-EXPECTED_HOOKS_SCHEMA=7
-EXPECTED_SURFACES_SHA256=119ca83c12125bc1a21600966b0a27a3587c8826f7cfd69bed074d895ecaf041
+EXPECTED_HOOKS_SCHEMA=8
+EXPECTED_SURFACES_SHA256=3cc3f2cf77f84796bf614d4adb0de5fdbd5178dd1928393b2b3dd12228764250
 
 fail() {
   echo "FAIL: $*" >&2

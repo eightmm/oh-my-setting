@@ -2142,6 +2142,199 @@ PY
   git -C "$repo" worktree remove --force "$TMP/resume-digest-evil"
 }
 
+test_panel_direct_work() {
+  python3 - "$ROOT" "$TMP" <<'PYTEST'
+import concurrent.futures
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from unittest.mock import patch
+
+root, tmp = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / "scripts/lib"))
+import hook_state
+import panel_metrics
+repo = tmp / "direct-work"
+repo.mkdir()
+(repo / ".git").mkdir()
+(repo / "src").mkdir()
+(repo / "src/job.py").touch()
+(repo / "src/check.sh").touch()
+(repo / "scratchpad").mkdir()
+integration = repo / "oh-my-setting-scratch.fixture"
+(integration / "wt-fixture").mkdir(parents=True)
+(integration / ".oh-my-setting-tmp").touch()
+outside = tmp / "outside"
+outside.mkdir()
+(repo / "linked").symlink_to(outside, target_is_directory=True)
+env = dict(os.environ, OMS_PANEL_MAIN_ATTEMPT="direct-main", OMS_PANEL_SESSION="oms-direct",
+           OMS_HARNESS_CHILD="0", OMS_HARNESS_DELEGATE_DEPTH="0", OMS_ROOM_REPO=str(repo),
+           CLAUDE_PROJECT_DIR=str(repo))
+env.pop("OMS_HOOK_PAYLOAD", None)
+hook = root / "scripts/panel-direct-work-hook.sh"
+payload = dict(cwd=str(repo), session_id="direct-main", hook_event_name="PostToolUse")
+timeout = float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "30"))
+
+def call(tool="Edit", value=None, **overrides):
+    row = dict(payload, tool_name=tool, tool_input=value or {"file_path": str(repo / "src/job.py")})
+    result = subprocess.run(["bash", str(hook)], input=json.dumps(row), text=True,
+                            capture_output=True, env=dict(env, **overrides), timeout=timeout)
+    assert result.returncode == 0 and not result.stderr, result
+    if result.stdout:
+        output = json.loads(result.stdout)
+        assert set(output) == {"hookSpecificOutput"}, output
+        assert output["hookSpecificOutput"]["hookEventName"] == "PostToolUse", output
+        return output["hookSpecificOutput"]["additionalContext"]
+    return ""
+
+assert not call(OMS_PANEL_MAIN_ATTEMPT="")
+assert not call(OMS_PANEL_SESSION="ordinary")
+assert not call(OMS_HARNESS_CHILD="1")
+assert not (repo / ".oms").exists()
+assert not call()
+assert not call("Write")
+feedback = call("NotebookEdit", {"notebook_path": str(repo / "src/job.ipynb")})
+assert "3 direct work calls" in feedback and "3 edits" in feedback and "job.py" in feedback, feedback
+assert "oms panel --dispatch builder" in feedback and "say which applies" in feedback, feedback
+state_path = repo / ".oms/hooks/sessions" / (hook_state.session_hash(payload) + ".direct-work.json")
+
+def state():
+    return json.loads(state_path.read_text())
+
+def bash(command):
+    return call("Bash", {"command": command})
+
+assert state()["counts"] == {"edit": 3, "write": 0, "run": 0}
+assert state()["since_dispatch"] == state()["counts"]
+ignored = ["CHANGELOG.md", "VERSION", "package.json", "manifest.json", "scratchpad/note.py",
+           "oh-my-setting-scratch.fixture/wt-fixture/job.py",
+           "linked/job.py", str(outside / "job.py"), str(Path(env["TMPDIR"]) / "job.py"),
+           str(Path(env["HOME"]) / ".claude/memory/note.md")]
+for name in ignored:
+    assert not call(value={"file_path": name}), name
+for command in ("", "oms panel --status", "oms peer-review --verify 'pytest tests/'",
+                "oms panel --dispatch builder --prompt 'python src/job.py'",
+                "git status", "git diff > /dev/null", "cat src/job.py", "sed -n '1,2p' src/job.py",
+                "rg python src", "echo 'python src/job.py'", "echo '>' src/job.py",
+                "echo 'oms panel --dispatch builder'", "echo x 2> src/job.py",
+                "sed -i 's/x/y/' VERSION", "git apply --check changes.patch",
+                "echo x > VERSION", "cat <<'PY'\npython src/job.py\nPY", "python --version",
+                "bash -n src/check.sh", "python -c 'print(1)'", "unknown src/job.py",
+                "python 'unterminated"):
+    assert not bash(command), command
+# The dispatch in the ignore table resets the streak, retaining lifetime counts.
+assert state()["counts"]["edit"] == 3 and sum(state()["since_dispatch"].values()) == 0
+direct = ["sed -i 's/x/y/' src/job.py", "perl -pi -e 's/x/y/' src/job.py",
+          "echo x > src/job.py", "cat <<'PY' > src/job.py\nx\nPY", "echo x | tee -a src/job.py",
+          "git apply changes.patch", "python src/job.py", "pytest tests/", "torchrun src/job.py",
+          "bash src/check.sh", "sbatch job.sh", "srun python train.py", "ssh machine 'squeue'",
+          "while true; do squeue; done", "cd src && python job.py", "python -m pytest tests/"]
+for index, command in enumerate(direct, 1):
+    feedback = bash(command)
+    assert bool(feedback) == (index in (3, 8, 16)), (index, command, feedback)
+assert state()["counts"] == {"edit": 3, "write": 6, "run": 10}, state()
+with patch.dict(os.environ, env), patch.object(hook_state, "declared_status", return_value={"text": "active", "ts": hook_state.utc_now()}):
+    hint = hook_state.panel_status_hint(payload, "direct-room")
+    assert "direct work since last dispatch: 16" in hint, hint
+    prompt = dict(payload, hook_event_name="UserPromptSubmit", prompt="continue")
+    for _ in range(2):
+        assert "direct work since last dispatch: 16" in hook_state.panel_main_hint(prompt)
+for total in range(17, 25):
+    assert bool(bash("python -m src.job")) == (total == 24)
+for dispatch in ("oms panel --dispatch builder --brief-file F", "oms panel --council --prompt P",
+                 "oms panel --continue attempt", "oms peer-delegate --to codex"):
+    assert not bash(dispatch)
+    assert sum(state()["since_dispatch"].values()) == 0
+    assert not call()
+assert state()["counts"]["edit"] == 7
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    list(pool.map(lambda _: call(), range(8)))
+assert state()["counts"]["edit"] == 15, state()
+lock = state_path.parent / ("." + state_path.stem + ".lockdir")
+lock.mkdir()
+before = state_path.read_bytes()
+assert not call() and state_path.read_bytes() == before
+os.utime(lock, (0, 0))
+call()
+assert state()["counts"]["edit"] == 16 and not lock.exists()
+for length in (0, 44, 45, 46):
+    name = "n" * length + ".py"
+    call(value={"file_path": name})
+    assert len(state()["files"][-1]) <= 48
+call(value={"file_path": "한글.py"})
+assert state()["files"][-1] == "__.py"
+before = state_path.read_bytes()
+for invalid in ("", None, [], {}):
+    assert not call(value={"file_path": invalid})
+assert state_path.read_bytes() == before
+stored = state_path.read_text()
+assert str(repo) not in stored and "command" not in stored and "tool_input" not in stored, stored
+assert set(state()) == {"schema", "counts", "since_dispatch", "files"}, state()
+summary = panel_metrics.direct_work_counts(repo)
+assert summary["counts"] == state()["counts"] and summary["sessions"] == 1, summary
+report = panel_metrics.aggregate(repo)
+assert report["direct_work"] == summary, report
+assert "main direct work" in panel_metrics.metrics_text(report)
+state_path.write_text('{"counts":"bad","since_dispatch":-1,"files":{}}')
+assert not call()
+assert state()["counts"] == {"edit": 1, "write": 0, "run": 0}
+state_path.write_text('{')
+assert panel_metrics.direct_work_counts(repo)["counts"] is None
+assert "not recorded" in panel_metrics.metrics_text(panel_metrics.aggregate(repo))
+state_path.unlink()
+state_path.symlink_to(repo / "src/job.py")
+assert not call()
+assert state_path.is_symlink() and (repo / "src/job.py").read_text() == ""
+state_path.unlink()
+for raw in ("{", "[]", "null", '{"tool_input":[]}'):
+    result = subprocess.run(["bash", str(hook)], input=raw, text=True, capture_output=True,
+                            env=env, timeout=timeout)
+    assert result.returncode == 0 and not result.stdout and not result.stderr, result
+assert not state_path.exists()
+assert panel_metrics.direct_work_counts(repo)["counts"] is None
+assert not bash("oms panel --dispatch builder")
+assert state()["counts"] == {"edit": 0, "write": 0, "run": 0}
+assert panel_metrics.direct_work_counts(repo)["counts"] == state()["counts"]
+assert "edit=0, write=0, run=0" in panel_metrics.metrics_text(panel_metrics.aggregate(repo))
+PYTEST
+}
+
+test_panel_direct_work_install() {
+  python3 - "$ROOT" "$TMP" <<'PYTEST'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+root, tmp = map(Path, sys.argv[1:])
+home = tmp / "direct-install"
+home.mkdir()
+settings = home / "settings.json"
+env = dict(os.environ, HOME=str(home), OMS_INSTALL_RECEIPT=str(home / "receipt.json"),
+           OMS_LOCK_DIR=str(home / "locks"), OMS_INSTALL_LOCK_HELD="1")
+timeout = float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "30"))
+installer = ["bash", str(root / "scripts/install-claude-hooks.sh")]
+expected = json.loads(subprocess.check_output(installer + ["--print-expected"], env=env, text=True, timeout=timeout))
+rows = [row for row in expected["surfaces"] if row["script"] == "panel-direct-work-hook.sh"]
+assert len(rows) == 1 and rows[0]["event"] == "PostToolUse" and rows[0]["timeout"] == 5, rows
+assert rows[0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit|Bash", rows
+for _ in range(2):
+    subprocess.run(installer + ["--settings", str(settings)], env=env, check=True,
+                   stdout=subprocess.DEVNULL, timeout=timeout)
+hooks = json.loads(settings.read_text())["hooks"]
+installed = [h for entry in hooks["PostToolUse"] for h in entry["hooks"] if "panel-direct-work-hook.sh" in h["command"]]
+assert len(installed) == 1, installed
+subprocess.run(installer + ["--remove", "--settings", str(settings)], env=env, check=True,
+               stdout=subprocess.DEVNULL, timeout=timeout)
+assert "panel-direct-work-hook.sh" not in settings.read_text(), settings.read_text()
+PYTEST
+}
+
+test_panel_direct_work
+test_panel_direct_work_install
 test_panel_main_activity
 test_git_move_guard_denies_canonical_with_live_calls
 test_classifier_boundaries
