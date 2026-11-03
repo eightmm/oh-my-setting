@@ -30,6 +30,8 @@ for provider in (*panel.PROVIDERS, "pi", "opencode", "grok", "agy", "vibe", "oms
     executable = binary / provider
     executable.write_text('''#!/usr/bin/env bash
 set -eu
+# agy answers arrive in its --output-format json envelope.
+emit() { if [ "${0##*/}" = agy ]; then python3 -c 'import json,sys; print(json.dumps({"conversation_id": "fixture", "status": "SUCCESS", "response": sys.stdin.read(), "usage": {}}))'; else cat; fi; }
 case "${1:-}:${2:-}" in
   --version:|--help:|exec:--help|--no-auto-update:version|--no-auto-update:--help) printf 'fixture CLI 1.0 --effort low medium high --config\\n'; exit 0 ;;
 esac
@@ -101,10 +103,10 @@ LEASEWAIT
     printf 'outside worker\\n' >> "$PANEL_TEST_PRIMARY"
   fi
   if [ "${OMS_PANEL_PURPOSE:-}" = advise ]; then
-    printf 'Answer: inspected source.\nAlternatives: separate panels.\nEvidence: value.txt exists.\nCounterargument: retained history is bounded.\nRisks: delivery can fail.\nRecommendation: owner records evidence.\nVerification: inspect source.\nChanged from previous round: none.\nRemaining disagreements: none.\n'
+    printf 'Answer: inspected source.\nAlternatives: separate panels.\nEvidence: value.txt exists.\nCounterargument: retained history is bounded.\nRisks: delivery can fail.\nRecommendation: owner records evidence.\nVerification: inspect source.\nChanged from previous round: none.\nRemaining disagreements: none.\n' | emit
     exit 0
   fi
-  printf 'Answer: inspected the bounded repository task.\\nGATE: pass\\n'
+  printf 'Answer: inspected the bounded repository task.\\nGATE: pass\\n' | emit
 else
   python3 - "$@" <<'INNER'
 import json, os, sys
