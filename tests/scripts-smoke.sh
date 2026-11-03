@@ -9084,6 +9084,14 @@ PYMODE
     cmp -s "$plan_file" "$TMP/amend-refusal" || fail "refused amendment changed plan: $mode"
   done
   cp "$TMP/amend-before" "$plan_file"
+  plan_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$plan_file" | tr -d '\r')"
+  task_sha="$("$plan" --repo "$project" show --id amendable | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_sha256"])' | tr -d '\r')"
+  for field in --allowed --verify; do
+    if "$plan" --repo "$project" amend --id amendable --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" "$field" '' --reason widen >/dev/null 2>&1; then
+      fail "amendment removed a limit with empty $field"
+    fi
+    cmp -s "$plan_file" "$TMP/amend-before" || fail "empty $field amendment changed plan"
+  done
   python3 - "$plan_file" <<'PYCLEAN'
 import json, sys
 p = sys.argv[1]

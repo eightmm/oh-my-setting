@@ -1348,6 +1348,8 @@ if act == "amend":
     allowed = ([clean_rel(item, "allowed path") for item in split_list(env("OMS_ALLOWED"))]
                if env("OMS_ALLOWED_SET") == "1" else before["allowed_paths"])
     verify = env("OMS_VERIFY") if env("OMS_VERIFY_SET") == "1" else before["verify"]
+    if (before["allowed_paths"] and not allowed) or (before["verify"].strip() and not verify.strip()):
+        die("amend cannot remove a task's path limits or its verify")
     reject_controls(verify, "task verify")
     warn_unknown_selectors(verify)
     hits = floor_incompatible_reads(verify, allowed)
