@@ -1,10 +1,13 @@
 import json
+import contextlib
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,10 +99,14 @@ class DecisionsTests(unittest.TestCase):
         self.assertIn('not set', missing.stderr)
         self.assertIn('oms decide --set-' + 'key', missing.stderr)
         self.assertFalse((Path(self.tmp.name) / 'state').exists())
+        directory = Path(self.tmp.name) / 'config/oh-my-setting'
+        directory.mkdir(parents=True, mode=0o755)
+        directory.chmod(0o755)
         result = self.run_cli(
             '--set-key', **{'stdin': self.private + '\n'})
         self.assertEqual(result.returncode, 0, result.stderr)
-        path = Path(self.tmp.name) / 'config/oh-my-setting'
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        path = directory
         path = path / (
             'openai-decisions.key')
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
@@ -108,9 +115,33 @@ class DecisionsTests(unittest.TestCase):
         self.assertIn('0600', status.stdout)
         self.assertNotIn(self.private, status.stdout + status.stderr)
         path.chmod(0o644)
+        status = self.run_cli(
+            '--key-status')
+        self.assertEqual(status.returncode, 1)
+        self.assertIn('present 0644', status.stdout)
+        self.assertIn('chmod 600 ' + str(path), status.stdout)
         result = self.run_cli(*self.question())
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(Handler.requests, [])
+        self.assertIn('chmod 600 ' + str(path), result.stderr)
+        path.chmod(0o600)
+        directory.chmod(0o755)
+        self.assertEqual(self.run_cli('--key-status').returncode, 0)
+        self.assertEqual(self.run_cli(*self.question()).returncode, 0)
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+        result = self.run_cli(
+            '--set-key', **{'stdin': 'x' * 4096 + '\n'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(path.stat().st_size, 4096)
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.run_cli(*self.question()).returncode, 0)
+        result = self.run_cli(
+            '--set-key', **{'stdin': 'x' * 4096 + '\r\n'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_cli(
+            '--set-key', **{'stdin': 'x' * 4097 + '\n'})
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(path.stat().st_size, 4096)
         self.env['XDG_CONFIG_HOME'] = ''
         result = self.run_cli(
             '--set-key', **{'stdin': self.private + '\n'})
@@ -272,6 +303,118 @@ class DecisionsTests(unittest.TestCase):
             self.assertNotEqual(self.run_cli(*self.question()).returncode, 0)
         self.assertNotEqual(self.run_cli('--input', 'x', '--predicate', 'p', '--instructions', '').returncode, 0)
         self.assertNotEqual(self.run_cli(*self.question(), '--timeout', '0').returncode, 0)
+
+    def test_security_boundaries(self):
+        del self.env['OMS_OPENAI_DECISIONS_' + 'KEY']
+        self.env['OMS_OPENAI_BASE_URL'] = 'https://example.invalid/v1'
+        result = self.run_cli(*self.question())
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('base URL', result.stderr)
+        self.env['OMS_OPENAI_BASE_URL'] = 'http://127.0.0.1:%d/v1' % self.server.server_port
+        config = Path(self.env['XDG_CONFIG_HOME'])
+        config.mkdir()
+        target = Path(self.tmp.name) / 'target'
+        target.mkdir(mode=0o700)
+        directory = config / 'oh-my-setting'
+        directory.symlink_to(target, target_is_directory=True)
+        self.assertEqual(self.run_cli('--set-key', **{'stdin': self.private}).returncode, 2)
+        self.assertEqual(self.run_cli(*self.question()).returncode, 2)
+        directory.unlink()
+        directory.mkdir(mode=0o700)
+        path = directory / 'openai-decisions.'
+        path = path.with_name(path.name + 'k' + 'ey')
+        path.symlink_to(target / 'missing')
+        self.assertEqual(self.run_cli('--set-key', **{'stdin': self.private}).returncode, 2)
+        self.assertEqual(self.run_cli(*self.question()).returncode, 2)
+        path.unlink()
+        self.assertEqual(self.run_cli('--set-key', **{'stdin': 'bad token'}).returncode, 2)
+        self.env.update({'OMS_OPENAI_DECISIONS_' + 'KEY': 'bad token'})
+        self.assertEqual(self.run_cli(*self.question()).returncode, 2)
+        result = self.run_cli('--input-file', '-', '--predicate', 'p', '--instructions', 'x', '--dry-run', stdin='x' * (4 * 1024 * 1024 + 1))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('4 MiB', result.stderr)
+        self.env.update({'OMS_OPENAI_DECISIONS_' + 'KEY': self.private})
+        Handler.answer['answers'][0]['choice'] = {'nested': self.private}
+        result = self.run_cli(*self.question(), '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.private, result.stdout)
+
+    def test_security_limit_edges_and_terminal(self):
+        path = Path(self.tmp.name) / 'large'
+        path.write_bytes(b'x' * (4 * 1024 * 1024 + 1))
+        result = self.run_cli('--input-file', str(path), '--predicate', 'p', '--instructions', 'x', '--dry-run')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--input-file exceeds 4 MiB', result.stderr)
+        spec = importlib.util.spec_from_file_location('decisions', ROOT / 'scripts/lib/openai_decisions.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        import io
+        for limit, label in ((module.AUTH_LIMIT, 'key'), (module.INPUT_LIMIT, 'input')):
+            self.assertEqual(len(module.read_bounded(io.BytesIO(b'x' * limit), limit, label)), limit)
+            with self.assertRaises(module.ClientError):
+                module.read_bounded(io.BytesIO(b'x' * (limit + 1)), limit, label)
+            self.assertEqual(module.read_bounded(io.BytesIO(b''), limit, label), '')
+        for value in ('', 'bad token', 'bad/token', '한'):
+            with self.assertRaises(module.ClientError):
+                module.validate_auth(value)
+        self.assertEqual(module.validate_auth('a._-9'), 'a._-9')
+        self.assertEqual(len(module.validate_auth('x' * module.AUTH_LIMIT)), module.AUTH_LIMIT)
+        with self.assertRaises(module.ClientError):
+            module.validate_auth('x' * (module.AUTH_LIMIT + 1))
+        for url, valid in (('https://api.openai.com/v1', True),
+                           ('https://api.openai.com/v1/', False),
+                           ('https://example.invalid/v1', False),
+                           ('http://[::1]:123/v1', True),
+                           ('https://localhost/v1', True),
+                           ('http://127.0.0.1.evil/v1', False),
+                           ('http://localhost/v1?x=1', False), ('', False)):
+            with mock.patch.dict(os.environ, {'OMS_OPENAI_BASE_URL': url}):
+                if valid:
+                    self.assertTrue(module.base_url().endswith('/decisions'))
+                else:
+                    with self.assertRaises(module.ClientError):
+                        module.base_url()
+        directory = Path(self.tmp.name) / 'private'
+        directory.mkdir(mode=0o700)
+        module.check_directory(directory)
+        directory.chmod(0o750)
+        module.check_directory(directory)
+        directory.chmod(0o700)
+        stored = directory / 'entry'
+        stored.write_text('valid')
+        stored.chmod(0o640)
+        with self.assertRaises(module.ClientError):
+            module.check_target(stored)
+        stored.chmod(0o600)
+        module.check_target(stored)
+        stored.chmod(0o400)
+        with self.assertRaises(module.ClientError) as error:
+            module.check_target(stored)
+        self.assertIn('chmod 600 ' + str(stored), str(error.exception))
+        stored.chmod(0o600)
+        with mock.patch.object(module, 'owned', return_value=False):
+            self.assertIn(str(stored), module.file_issue(stored.lstat(), stored))
+        output = io.StringIO()
+        with mock.patch.object(module, 'auth_path', return_value=stored), \
+                mock.patch.object(module, 'owned', side_effect=[True, False]), \
+                mock.patch.object(module.sys, 'argv', ['decide', '--key-status']), \
+                mock.patch('builtins.open', side_effect=AssertionError('unexpected read')), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(module.run(), 1)
+        self.assertIn('present 0600', output.getvalue())
+        self.assertIn(str(stored), output.getvalue())
+        with mock.patch.object(module.sys.stdin, 'isatty', return_value=True), mock.patch.object(module.sys.stdin, 'fileno', side_effect=ValueError):
+            with self.assertRaises(module.ClientError):
+                module.prompt_auth()
+        for args, label in ((['--input-file', str(path), '--predicate', 'p', '--instructions', 'x'], '--input-file'),
+                            (['--input', 'x', '--questions-file', str(path)], '--questions-file')):
+            result = self.run_cli(*args, '--dry-run')
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(label + ' exceeds 4 MiB', result.stderr)
+        path.write_text('é' * (module.INPUT_LIMIT // 2), encoding='utf-8')
+        result = self.run_cli('--input-file', str(path), '--predicate', 'p', '--instructions', 'x', '--dry-run')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('serialized request exceeds 8 MiB', result.stderr)
 
 
 if __name__ == '__main__':

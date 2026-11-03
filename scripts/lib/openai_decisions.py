@@ -2,19 +2,25 @@
 import argparse
 import datetime
 import decimal
-import getpass
 import json
 import math
 import os
 import re
 from pathlib import Path
+import re
+import shlex
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+
+INPUT_LIMIT = 4 * 1024 * 1024
+AUTH_LIMIT = 4 * 1024
+REQUEST_LIMIT = 8 * 1024 * 1024
 
 
 class ClientError(Exception):
@@ -115,28 +121,129 @@ def classify_task():
 
 
 def validate_auth(value):
-    if not value or not value.isascii() or any(ord(c) < 33 or ord(c) > 126 for c in value):
-        raise ClientError('key must be a single non-empty printable token')
+    if len(value.encode('utf-8')) > AUTH_LIMIT:
+        raise ClientError('key exceeds 4 KiB limit')
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', value):
+        raise ClientError('key must contain only letters, digits, dot, underscore or hyphen')
     return value
 
 
+def read_bounded(handle, limit, label):
+    data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ClientError(label + ' exceeds ' + ('4 KiB' if limit == AUTH_LIMIT else '4 MiB') + ' limit')
+    return data.decode('utf-8')
+
+
+def owned(info):
+    return not hasattr(os, 'getuid') or info.st_uid == os.getuid()
+
+
+def file_issue(info, path):
+    name = shlex.quote(str(path))
+    if not stat.S_ISREG(info.st_mode):
+        return 'replace %s with a regular non-symlink file owned by the current user; chmod 600 %s' % (name, name)
+    if not owned(info):
+        return 'change the owner of %s to the current user; chmod 600 %s' % (name, name)
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        return 'run chmod 600 %s' % name
+    return None
+
+
+def check_private(info, path):
+    issue = file_issue(info, path)
+    if issue:
+        raise ClientError(issue)
+
+
+def check_directory(path, create=False):
+    name = shlex.quote(str(path))
+    if create:
+        try:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except FileExistsError:
+            pass
+        except OSError:
+            raise ClientError('verify %s is a real directory owned by the current user; chmod 700 %s' % (name, name)) from None
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or not owned(info):
+        raise ClientError('replace %s with a real directory owned by the current user; chmod 700 %s' % (name, name))
+    if create and stat.S_IMODE(info.st_mode) != 0o700:
+        try:
+            fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_DIRECTORY', 0))
+        except OSError:
+            raise ClientError('verify the directory %s is owned by the current user; chmod 700 %s' % (name, name)) from None
+        try:
+            current = os.fstat(fd)
+            if not stat.S_ISDIR(current.st_mode) or not owned(current) or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise ClientError('verify the directory %s is owned by the current user; chmod 700 %s' % (name, name))
+            try:
+                os.fchmod(fd, 0o700)
+            except OSError:
+                raise ClientError('verify the directory %s is owned by the current user; chmod 700 %s' % (name, name)) from None
+        finally:
+            os.close(fd)
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or not owned(info) or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ClientError('verify the directory %s is owned by the current user; chmod 700 %s' % (name, name))
+
+
+def check_target(path):
+    try:
+        check_private(path.lstat(), path)
+    except FileNotFoundError:
+        pass
+
+
 def prompt_auth():
-    return getpass.getpass('Decisions key: ') if sys.stdin.isatty() else sys.stdin.read().removesuffix('\n').removesuffix('\r')
+    if sys.stdin.isatty():
+        try:
+            import termios
+        except ImportError:
+            raise ClientError('cannot disable terminal echo') from None
+        try:
+            fd = sys.stdin.fileno()
+            original = termios.tcgetattr(fd)
+            settings = original[:]
+            settings[3] &= ~termios.ECHO
+            termios.tcsetattr(fd, termios.TCSAFLUSH, settings)
+        except (termios.error, OSError, ValueError):
+            raise ClientError('cannot disable terminal echo') from None
+        try:
+            print('Decisions key: ', **{'end': '', 'file': sys.stderr, 'flush': True})
+            data = sys.stdin.buffer.readline(AUTH_LIMIT + 1)
+            if len(data) > AUTH_LIMIT:
+                raise ClientError('key exceeds 4 KiB limit')
+            return data.decode('utf-8').removesuffix('\n').removesuffix('\r')
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSAFLUSH, original)
+            except termios.error:
+                raise ClientError('cannot restore terminal settings') from None
+            finally:
+                print(file=sys.stderr)
+    data = sys.stdin.buffer.read(AUTH_LIMIT + 2)
+    data = data.removesuffix(b'\n').removesuffix(b'\r')
+    if len(data) > AUTH_LIMIT:
+        raise ClientError('key exceeds 4 KiB limit')
+    return data.decode('utf-8')
 
 
 def save_auth():
     value = prompt_auth()
     validate_auth(value)
     path = auth_path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    check_directory(path.parent, create=True)
+    check_target(path)
     fd, name = tempfile.mkstemp(prefix='.decisions-', dir=str(path.parent))
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            handle.write(value + '\n')
+            handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
+        check_directory(path.parent, create=True)
+        check_target(path)
         os.replace(name, path)
     finally:
         if os.path.exists(name):
@@ -151,12 +258,17 @@ def get_auth():
         return validate_auth(value)
     path = auth_path()
     try:
-        mode = path.stat().st_mode
+        check_directory(path.parent)
+        check_private(path.lstat(), path)
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
     except FileNotFoundError:
-        raise ClientError('key is not set; run oms decide --set-key') from None
-    if mode & 0o077:
-        raise ClientError('key file must not be readable by group or others')
-    return validate_auth(path.read_text(encoding='utf-8').rstrip('\r\n'))
+        raise ClientError('key is not set at %s; run oms decide --set-key' % shlex.quote(str(path))) from None
+    except OSError:
+        name = shlex.quote(str(path))
+        raise ClientError('verify %s is a regular non-symlink file owned by the current user; chmod 600 %s' % (name, name)) from None
+    with os.fdopen(fd, 'rb') as handle:
+        check_private(os.fstat(handle.fileno()), path)
+        return validate_auth(read_bounded(handle, AUTH_LIMIT, 'key').rstrip('\r\n'))
 
 
 def question_list(value):
@@ -190,8 +302,8 @@ def base_url():
     parsed = urllib.parse.urlsplit(value)
     if parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname:
         raise ClientError('invalid base URL')
-    if parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost')):
-        raise ClientError('base URL requires HTTPS or loopback HTTP')
+    if value != 'https://api.openai.com/v1' and not (parsed.scheme in ('http', 'https') and parsed.hostname in ('127.0.0.1', '::1', 'localhost')):
+        raise ClientError('base URL must be the production API or loopback')
     return value.rstrip('/') + '/decisions'
 
 
@@ -224,7 +336,7 @@ def reserve(body, cap):
 
 
 def run():
-    parser = argparse.ArgumentParser(description='Ask the OpenAI Decisions API.')
+    parser = argparse.ArgumentParser(description='Ask the OpenAI Decisions API. The daily cap is a cooperative estimate: the state directory and OMS_DECIDE_DAILY_USD are caller-controlled.')
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--set-key', **{'action': 'store_true'})
     group.add_argument('--key-status', **{'action': 'store_true'})
@@ -256,7 +368,17 @@ def run():
         return 0
     if args.key_status:
         path = auth_path()
-        print('present %04o' % (path.stat().st_mode & 0o777) if path.exists() else 'absent')
+        try:
+            check_directory(path.parent)
+            info = path.lstat()
+            issue = file_issue(info, path)
+            if not stat.S_ISREG(info.st_mode):
+                raise ClientError(issue)
+            print('present %04o%s' % (stat.S_IMODE(info.st_mode), ' (unsafe: %s)' % issue if issue else ''))
+            if issue:
+                return 1
+        except FileNotFoundError:
+            print('absent')
         return 0
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise ClientError('timeout must be positive and finite')
@@ -265,7 +387,11 @@ def run():
     input_value = args.input
     if args.input_file is not None:
         try:
-            input_value = sys.stdin.read() if args.input_file == '-' else Path(args.input_file).read_text(encoding='utf-8')
+            if args.input_file == '-':
+                input_value = read_bounded(sys.stdin.buffer, INPUT_LIMIT, 'stdin')
+            else:
+                with open(args.input_file, 'rb') as handle:
+                    input_value = read_bounded(handle, INPUT_LIMIT, '--input-file')
         except OSError:
             raise ClientError('cannot read --input-file') from None
         try:
@@ -282,7 +408,8 @@ def run():
         if args.option or args.instructions is not None:
             raise ClientError('shorthand options cannot accompany questions file')
         try:
-            question_text = Path(args.questions_file).read_text(encoding='utf-8')
+            with open(args.questions_file, 'rb') as handle:
+                question_text = read_bounded(handle, INPUT_LIMIT, '--questions-file')
         except OSError:
             raise ClientError('cannot read --questions-file') from None
         rows = json.loads(question_text)
@@ -302,6 +429,8 @@ def run():
             raise ClientError('options require a choice question')
         rows = [row]
     body = json.dumps({'model': 'gpt-6-luna', 'input': input_value, 'questions': question_list(rows)}, ensure_ascii=True).encode()
+    if len(body) > REQUEST_LIMIT:
+        raise ClientError('serialized request exceeds 8 MiB limit')
     if args.dry_run:
         print(body.decode())
         return 0
