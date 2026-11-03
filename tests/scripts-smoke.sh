@@ -7067,6 +7067,21 @@ test_agent_plan_dag_and_ready() {
     fail "duplicate task id must be rejected"
   fi
 
+  # A repeated list option must fail, not silently keep only the last value.
+  out="$("$SH" --repo "$d" add --id P5 --title y --depends P1 --allowed a --allowed b 2>&1)" \
+    && fail "repeated --allowed must be rejected"
+  case "$out" in
+    *"--allowed given twice; pass one comma-separated list"*) ;;
+    *) fail "repeated --allowed message missing, got: $out" ;;
+  esac
+  "$SH" --repo "$d" add --id P5 --title y --depends P1 --depends P2 >/dev/null 2>&1 \
+    && fail "repeated --depends must be rejected"
+  "$SH" --repo "$d" add --id P5 --title y --depends P1 --forbidden a --forbidden b >/dev/null 2>&1 \
+    && fail "repeated --forbidden must be rejected"
+  # The rejected adds left no P5 behind, so the comma form can still add it.
+  "$SH" --repo "$d" add --id P5 --title y --depends P1,P2 --allowed a,b --forbidden c,d >/dev/null \
+    || fail "comma-separated list form must still add a task"
+
   out="$("$SH" --repo "$d" ready)"
   [ "$out" = "P1" ] || fail "only P1 should be ready, got: $out"
 
