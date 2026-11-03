@@ -2223,7 +2223,9 @@ for command in ("", "oms panel --status", "oms peer-review --verify 'pytest test
                 "sed -i 's/x/y/' VERSION", "git apply --check changes.patch",
                 "echo x > VERSION", "cat <<'PY'\npython src/job.py\nPY", "python --version",
                 "bash -n src/check.sh", "python -c 'print(1)'", "unknown src/job.py",
-                "python 'unterminated"):
+                "python 'unterminated", 'git log --format="%h -> %s" -5',
+                "rg --regexp='x > y' src", "echo a\\>src/job.py", "git apply -h",
+                "git apply --help"):
     assert not bash(command), command
 # The dispatch in the ignore table resets the streak, retaining lifetime counts.
 assert state()["counts"]["edit"] == 3 and sum(state()["since_dispatch"].values()) == 0

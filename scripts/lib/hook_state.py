@@ -13,7 +13,6 @@ import itertools
 import json
 import os
 import re
-import shlex
 import signal
 import shutil
 import stat
@@ -1507,20 +1506,64 @@ def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
         match = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line.replace("<<<", ""))
         if match:
             delimiter = match.group(2)
-    lexer = shlex.shlex("\n".join(lines), posix=False, punctuation_chars=";&|()<>\n")
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
-    segments, words = [], []
-    for raw in lexer:
-        operator = bool(re.fullmatch(r"[;&|()<>\n]+", raw))
-        if operator and any(ch in raw for ch in ";&|()\n") and raw not in (">&", "<&"):
-            if words:
-                segments.append(words)
-                words = []
+    # Operators count only outside quotes and escapes, so `--format="a > b"`
+    # or `rg 'x > y'` never looks like a redirection.
+    segments, words, value, operator, have, quote = [], [], "", "", False, None
+    text, index = "\n".join(lines), 0
+
+    def flush():
+        nonlocal value, operator, have
+        if operator:
+            if any(ch in operator for ch in ";&|()\n") and operator not in (">&", "<&"):
+                if words:
+                    segments.append(list(words))
+                    words.clear()
+            else:
+                words.append((operator, True))
+        elif have:
+            words.append((value, False))
+        value, operator, have = "", "", False
+
+    while index < len(text):
+        ch = text[index]
+        index += 1
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                value += ch
             continue
-        quoted = raw.startswith(("'", '"'))
-        value = shlex.split(raw)[0] if quoted else raw
-        words.append((value, operator))
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\" and index < len(text) and text[index] in '"\\$`':
+                value += text[index]
+                index += 1
+            else:
+                value += ch
+            continue
+        if ch in ";&|()<>\n":
+            if not operator:
+                flush()
+            operator += ch
+            continue
+        if operator:
+            flush()
+        if ch in " \t\r":
+            flush()
+        elif ch == "\\":
+            if index < len(text):
+                value += text[index]
+                index += 1
+            have = True
+        elif ch in "'\"":
+            quote, have = ch, True
+        else:
+            value += ch
+            have = True
+    if quote is not None:
+        raise ValueError("unterminated quote")
+    flush()
     if words:
         segments.append(words)
     return segments
@@ -1575,7 +1618,7 @@ def classify_direct_work(payload: dict[str, Any], repo: Path) -> tuple[str, str]
             if any(names):
                 result = ("write", next(name for name in names if name))
         elif exe == "git" and args and args[0] == "apply":
-            if not any(arg in ("--check", "--stat", "--numstat", "--summary") for arg in args):
+            if not any(arg in ("--check", "--stat", "--numstat", "--summary", "-h", "--help") for arg in args):
                 name = direct_repo_file(".git-apply", repo, cwd)
                 if name:
                     result = ("write", "")
