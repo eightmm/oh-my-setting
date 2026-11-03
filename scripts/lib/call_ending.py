@@ -14,8 +14,10 @@ def call_ending(call):
         return "guard_stop"
     if state == "cancelled" or code in {129, 130, 143} or reason in {"cancelled_by_owner", "manual_clear"}:
         return "cancelled"
-    if state == "timed_out" or code == 124:
+    if state == "timed_out":
         return "timed_out"
+    if code == 124:
+        return "provider_error" if call.get("provider_error_exit") is not None else "timed_out"
     verify = call.get("verify_exit")
     if verify == 124 and (reason == "verification_failed" or code == 0):
         return "verify_timed_out"

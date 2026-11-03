@@ -296,6 +296,7 @@ assert call_ending(dict(ending_members["verify-result"], state="done")) == "veri
 assert call_ending(dict(ending_members["verify-result"], verify_exit=None, reason_code="verification_failed")) == "verify_failed"
 assert call_ending(dict(ending_members["verify-result"], verify_exit=124, reason_code="verification_failed")) == "verify_timed_out"
 assert call_ending(dict(ending_members["provider-empty"], artifact=".oms/artifacts/output.md", provider_error_exit=3)) == "provider_error"
+assert call_ending(dict(ending_members["timeout-exit"], state="failed", exit=124, provider_error_exit=124)) == "provider_error"
 assert call_ending(dict(ending_members["cancel-exit"], state="working")) is None
 ending_queue = attention_items(ending_fixture)
 assert {item["cls"] for item in ending_queue} == {"failed", "guard_stop", "timed_out", "verify_failed", "verify_timed_out", "provider_error", "decide"}, ending_queue
