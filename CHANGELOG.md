@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Global rules: on servers and clusters agents use the one checkout at the
+  local `~`-relative path and move code only through git and the project's
+  remote, with no copied trees, alternate checkouts or per-run code
+  directories. The Slurm overlay keeps outputs and data in gitignored paths or
+  declared scratch and asks before creating a new location.
 - Panel routing reads an optional machine-local
   `~/.config/oh-my-setting/provider-accounts.json` listing several Codex
   accounts (`ordered` or `spread` policy). Tier selection skips an account at

@@ -6,6 +6,9 @@
 - Use `sbatch` for batch jobs and allocated `srun` interactively.
 - Job scripts enter `$SLURM_SUBMIT_DIR`, fail fast, and write job-specific logs.
 - Record job ID, command, config, seed, commit, checkpoints, and logs.
+- Keep outputs, checkpoints and data in the checkout's gitignored paths or the
+  cluster's declared scratch (such as `$SCRATCH`); if neither exists, ask
+  before creating a location.
 - Refresh private cluster data with `oms snapshot --cluster`; never commit or
   share it.
 - Use `oms job-digest` for long logs and `oms run-reconcile` for finished jobs.
