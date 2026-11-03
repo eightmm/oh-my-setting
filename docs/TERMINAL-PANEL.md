@@ -976,9 +976,9 @@ front doors. `--workload routine` selects the routine pair (Sonnet, Terra); the 
 `deep` adds the deep pair (Opus, Sol), while `frontier` combines the deep pair with
 the frontier pair (Fable, Astra). Seats come from the `tiers` routes in `config/panel-routing.json`: routine uses the routine tier, deep uses the deep and routine tiers, and frontier uses the deep and frontier tiers, so the seat set depends on `--workload`, not a fixed list. Each tier covers both families. One rebuttal round
 means four primary calls for routine and eight for deep or frontier before optional seats; two rounds
-mean six and twelve respectively. An installed Antigravity seat with the configured catalog model joins when it fits the 12-primary-call budget. Format repair can add one call per
+mean six and twelve respectively. An installed Antigravity seat with the configured catalog model joins when it fits the 12-primary-call budget. This extra seat uses the `provider:model=NAME:optional` syntax; if it fails, the council records the failure and continues without it. Format repair can add one call per
 primary call. `--dry-run` exposes both counts without executing a model. Every
-selected seat must complete to report council success; failed seats remain
+required seat must complete to report council success; failed seats remain
 visible and the owner still decides the outcome. All seats are read-only. There
 is no model fallback or additional synthesis-model call.
 

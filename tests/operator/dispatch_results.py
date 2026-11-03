@@ -2041,7 +2041,7 @@ for installed, models, rounds, workload, included, note in (
     with patch.object(panel, "policy", return_value=extra_policy), \
             patch.object(panel, "provider_catalog", return_value=[row]), redirect_stderr(output):
         argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
-    assert ("antigravity:model=gemini-3.1-pro-high" in argv[argv.index("--providers") + 1]) == included
+    assert ("antigravity:model=gemini-3.1-pro-high:optional" in argv[argv.index("--providers") + 1]) == included
     assert note in output.getvalue(), output.getvalue()
 import panel_routing
 for failure in (ValueError("unavailable"), subprocess.TimeoutExpired("catalog", 1), OSError("unavailable")):
@@ -2093,6 +2093,22 @@ for council_value in (None, {"extra": []}, {"extra": [extra_route]}):
         candidate["council"] = council_value
     with patch.object(panel_routing.Path, "read_text", return_value=json.dumps(candidate)):
         assert panel_routing.policy()["council"]["extra"] == (council_value or {"extra": []})["extra"]
+class CouncilStarted(Exception):
+    pass
+advertised = io.StringIO()
+with patch.object(panel, "policy", return_value=extra_policy), \
+        patch.object(panel, "provider_catalog", return_value=[{"provider": "antigravity", "installed": True, "models": [extra_route["model"]]}]), \
+        patch.object(panel, "child_environment", return_value={}), \
+        patch.object(panel.room, "resolve", return_value=None), \
+        patch.object(panel, "events", side_effect=CouncilStarted), redirect_stdout(advertised):
+    try:
+        panel.council(project, "codex", "extra-seat", "Compare", "Compare")
+    except CouncilStarted:
+        pass
+    else:
+        raise AssertionError("council did not start")
+assert "gemini-3.1-pro-high" in advertised.getvalue(), advertised.getvalue()
+assert ":optional" not in advertised.getvalue(), advertised.getvalue()
 # END council extra seats
 
 # Keep the subprocess council independent of any installed provider catalog.

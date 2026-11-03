@@ -303,6 +303,105 @@ PY
     fail "an exit-0 non-answer is not a failed command: $(cat "$project/.oms/failures.jsonl")"
 }
 
+test_optional_timeout_skips_debate() {
+  local project="$TMP/optional" bin_dir="$TMP/optional/bin" rc=0 synth list verb
+  make_repo "$project"
+  mkdir -p "$project/home"
+  write_stubs "$bin_dir"
+  for verb in review consult; do
+    rc=0
+    if [ "$verb" = review ]; then
+      HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" OMS_AGENT=claude OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+        "$ROOT/scripts/peer-review.sh" --repo "$project" --providers codex:optional --prompt test \
+        > "$project/reject-out" 2> "$project/reject-err" || rc=$?
+    else
+      HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" OMS_AGENT=claude OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+        "$ROOT/scripts/consult.sh" --repo "$project" --to codex:optional --prompt test \
+        > "$project/reject-out" 2> "$project/reject-err" || rc=$?
+    fi
+    [ "$rc" = 2 ] || fail "$verb must reject optional target, got $rc"
+    grep -Fq ':optional' "$project/reject-err" || fail "$verb rejection must name :optional"
+  done
+  rc=0
+  HOME="$project/home" NVM_DIR="$project/home/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --artifact-dir "$project/artifacts" \
+    --providers codex:optional,claude,antigravity --debate 1 --require-complete \
+    --no-memory --no-task --no-ml-context --prompt 'Optional council' \
+    > "$project/out" 2> "$project/err" || rc=$?
+  [ "$rc" = 0 ] || fail "optional timeout must not fail completion: $(cat "$project/err")"
+  synth="$(ls "$project/artifacts/"_synthesis-*.md)"
+  [ "$(grep -Fc 'codex seat failed (optional): timeout' "$synth")" = 1 ] || fail 'optional failure label missing or repeated'
+  [ "$(find "$project/artifacts" -name 'codex-*.md' | wc -l | tr -d ' ')" = 1 ] || fail 'optional seat called again'
+  rc="$(run_council "$project" "$bin_dir" required-history "$project/required-out" "$project/required-err")"
+  [ "$rc" = 0 ] || fail 'required timeout council failed'
+  list="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list)"
+  printf '%s\n' "$list" | grep -Fq 'count=2' || fail "required and optional failures need one history: $list"
+  [ "$(printf '%s\n' "$list" | grep -c 'count=')" = 1 ] || fail 'seat history split by optional marker'
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    REPO="$project" MA_KIND=ask DRY_RUN=0
+    if ma_seat_has_unresolved_failures codex:optional; then
+      fail 'optional seat failed to find required history'
+    fi
+    ma_resolve_seat_recovery codex:optional
+    ma_seat_has_unresolved_failures codex || fail 'optional recovery failed to resolve required history'
+  )
+
+  HOME="$project/home" NVM_DIR="$project/home/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --artifact-dir "$project/models" \
+    --providers codex:model=one:optional,codex:model=two:optional,claude \
+    --no-memory --no-task --no-ml-context --prompt 'Optional models' \
+    > "$project/models-out" 2> "$project/models-err" || fail 'model seats must not fail council'
+  synth="$(ls "$project/models/"_synthesis-*.md)"
+  grep -Fq 'codex:model=one seat failed (optional): timeout' "$synth" || fail 'first model label missing'
+  grep -Fq 'codex:model=two seat failed (optional): timeout' "$synth" || fail 'second model label missing'
+
+  project="$TMP/optional-debate"
+  bin_dir="$project/bin"
+  make_repo "$project"
+  mkdir -p "$project/home"
+  write_stubs "$bin_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
+cat > /dev/null
+if [ -f "$HOME/called" ]; then exit 42; fi
+: > "$HOME/called"
+printf 'Verdict: ROUND-ONE-OPINION is supported by evidence. Risks are bounded.\n'
+EOF
+  chmod +x "$bin_dir/codex"
+  rc=0
+  HOME="$project/home" NVM_DIR="$project/home/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --artifact-dir "$project/artifacts" \
+    --providers codex:optional,claude,antigravity --debate 1 --require-complete \
+    --no-memory --no-task --no-ml-context --prompt 'Optional debate failure' \
+    > "$project/out" 2> "$project/err" || rc=$?
+  [ "$rc" = 0 ] || fail "optional debate failure must not fail completion: $(cat "$project/err")"
+  grep -Fq 'summary: 3/3 providers succeeded (1 dropped during debate)' "$project/out" || fail 'debate drop missing from summary'
+  grep -Fq 'codex:optional (optional)' "$project/err" || fail 'debate drop not marked optional'
+  synth="$(ls "$project/artifacts/"_synthesis-*.md)"
+  grep -Fq 'codex seat failed (optional): exit 42' "$synth" || fail 'debate failure label missing'
+  grep -Fq 'ROUND-ONE-OPINION' "$synth" || fail 'last good optional answer missing'
+
+  rc=0
+  HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-ask.sh" \
+    --repo "$project" --providers codex:optional,claude:optional --prompt test \
+    > "$project/all-out" 2> "$project/all-err" || rc=$?
+  [ "$rc" = 2 ] || fail "all optional seats must be refused, got $rc"
+  grep -Fq 'at least one required seat' "$project/all-err" || fail 'all-optional refusal missing'
+  for targets in 'codex:optional' '' '0' 'codex:bad'; do
+    rc=0
+    HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-ask.sh" \
+      --repo "$project" --providers "$targets" --prompt test \
+      > "$project/edge-out" 2> "$project/edge-err" || rc=$?
+    [ "$rc" = 2 ] || fail "invalid target list $targets returned $rc"
+  done
+}
+
+test_optional_timeout_skips_debate
 test_dead_seat_reaches_every_ledger
 test_dry_run_records_no_durable_failure
 test_failed_single_call_is_recorded_like_a_seat

@@ -2486,7 +2486,7 @@ ma_thread_append_nonanswer() {
 # advise threshold; the exit rides in --summary. Best-effort by construction — a
 # council must not fail because its bookkeeping did.
 ma_record_seat_failure() {
-  local provider="$1" status="$2" evidence guard_reason="${3:-}"
+  local provider="${1%:optional}" status="$2" evidence guard_reason="${3:-}"
 
   # A dry run never called the provider. Durable failure memory must not carry a
   # failure that never happened.
@@ -2533,7 +2533,7 @@ EOF
 # gained a commit, so the seat read ignores state. Quiet by design — callers
 # decide what the history means at their site.
 ma_seat_has_unresolved_failures() {
-  local provider="$1"
+  local provider="${1%:optional}"
   local status=0
 
   "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" check \
@@ -2566,7 +2566,7 @@ ma_warn_known_seat_failures() {
 # Resolve only when an unresolved row exists, so routine successes do not grow
 # the ledger by one bookkeeping row per call.
 ma_resolve_seat_recovery() {
-  local provider="$1"
+  local provider="${1%:optional}"
   local status=0
 
   [ "${DRY_RUN:-0}" != "1" ] || return 0
@@ -4027,6 +4027,8 @@ ma_normalize_provider_list() {
   local canonical
   local seen=","
   local output=""
+  local required=0
+  local mode="${2:-}"
   local -a provider_list
 
   IFS=',' read -r -a provider_list <<< "$raw"
@@ -4037,14 +4039,20 @@ ma_normalize_provider_list() {
     # the same model is one voice however it was spelled. Different models of
     # one provider are allowed — that is the panel — and family accounting is
     # what keeps their agreement honest.
-    canonical="$(ma_target_canonical "$entry")" || return 2
+    canonical="$(ma_target_canonical "$entry" "$mode")" || return 2
+    case "$canonical" in *:optional) ;; *) required=1 ;; esac
+    entry="${canonical%:optional}"
     case "$seen" in
-      *",$canonical,"*) echo "error: duplicate target: $canonical" >&2; return 2 ;;
+      *",$entry,"*) echo "error: duplicate target: $canonical" >&2; return 2 ;;
     esac
-    seen="$seen$canonical,"
+    seen="$seen$entry,"
     if [ -n "$output" ]; then output="$output,$canonical"; else output="$canonical"; fi
   done
   [ -n "$output" ] || { echo "error: no providers selected" >&2; return 2; }
+  if [ "$mode" = ask ] && [ "$required" = 0 ]; then
+    echo "error: at least one required seat is needed" >&2
+    return 2
+  fi
   printf '%s\n' "$output"
 }
 
@@ -4979,8 +4987,9 @@ ma_target_provider() {
 }
 
 ma_target_model() {
-  local spec="${1#*:}"
-  [ "$spec" != "$1" ] || { printf '\n'; return 0; }
+  local target="${1%:optional}"
+  local spec="${target#*:}"
+  [ "$spec" != "$target" ] || { printf '\n'; return 0; }
   case "$spec" in
     model=?*) printf '%s\n' "${spec#model=}" ;;
     *) printf '\n' ;;
@@ -4988,14 +4997,18 @@ ma_target_model() {
 }
 
 ma_target_validate() {
-  local spec="${1#*:}"
+  local target="${1%:optional}"
+  local spec="${target#*:}"
   local provider
+  case "$1" in
+    *:optional) [ "${2:-}" = ask ] || { echo "error: :optional is supported only by peer-ask" >&2; return 2; } ;;
+  esac
   provider="$(ma_target_provider "$1")"
   oms_provider_normalize "$provider" >/dev/null 2>&1 || {
     echo "error: unsupported provider: $provider" >&2
     return 2
   }
-  [ "$spec" = "$1" ] && return 0
+  [ "$spec" = "$target" ] && return 0
   case "$spec" in
     model=?*) ;;
     *) echo "error: target must be PROVIDER or PROVIDER:model=NAME: $1" >&2; return 2 ;;
@@ -5005,10 +5018,11 @@ ma_target_validate() {
 ma_target_canonical() {
   local provider model
 
-  ma_target_validate "$1" || return $?
+  ma_target_validate "$1" "${2:-}" || return $?
   provider="$(ma_target_provider "$1")"
   model="$(ma_target_model "$1")"
-  printf '%s\n' "$provider${model:+:model=$model}"
+  case "$1" in *:optional) printf '%s\n' "$provider${model:+:model=$model}:optional" ;;
+    *) printf '%s\n' "$provider${model:+:model=$model}" ;; esac
 }
 
 # The second argument may be a model name with spaces or punctuation; the
@@ -5063,6 +5077,7 @@ ma_answered_families() {
   local i provider selected family families=""
 
   for i in "${!provider_names[@]}"; do
+    [ -z "${seat_optional_failure[i]:-}" ] || continue
     # alive alone undercounted: a two-family debate that lost one seat in
     # its final round reported "1 family — treat agreement as replication"
     # about a synthesis that held both families' answers. Round-1 failures
@@ -5386,12 +5401,13 @@ ma_run_round1() {
   seat_quality=()
   seat_reason=()
   seat_exit=()
+  seat_optional_failure=()
 
   IFS=',' read -r -a provider_list <<< "$PROVIDERS"
   for provider in "${provider_list[@]}"; do
     provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
     [ -n "$provider" ] || continue
-    ma_target_validate "$provider" || exit $?
+    ma_target_validate "$provider" "${MA_KIND:-}" || exit $?
     total=$((total + 1))
     # Include the model label so a panel that asks one CLI twice does not write
     # both answers to the same name.
@@ -5418,6 +5434,14 @@ ma_run_round1() {
       alive[i]=0
       # shellcheck disable=SC2034 # read by the caller to type its thread turn
       seat_exit[i]="$rc"
+      case "${provider_names[i]}" in
+        *:optional)
+          seat_optional_failure[i]="exit $rc"
+          [ "$rc" -ne 124 ] || seat_optional_failure[i]=timeout
+          quality="$(oms_panel_provider_error_scan "${artifacts[i]}" "$(ma_target_provider "${provider_names[i]}")")"
+          [ -z "$quality" ] || seat_optional_failure[i]="$quality"
+          ;;
+      esac
       # A seat that died gets the same bookkeeping as one that answered. Counting
       # it here is what lets the summary name it: before this, a timed-out seat
       # appeared in no list at all, only as the silent differential in
@@ -5452,6 +5476,7 @@ ma_run_round1() {
     nonanswers=$((nonanswers + 1))
     nonanswer_names+=("${provider_names[i]}")
     seat_quality[i]="$quality"
+    case "${provider_names[i]}" in *:optional) seat_optional_failure[i]="$quality" ;; esac
     echo "note: ${provider_names[i]} did not really answer ($quality)" >&2
     if [ "$quality" = blocked ]; then
       seat_reason[i]="$(ma_answer_block_reason "${artifacts[i]}")"
@@ -5841,6 +5866,14 @@ ma_run_debate_rounds() {
       fi
       # Drop failed provider from later rounds; keep its last good answer.
       alive[i]=0
+      case "${provider_names[i]}" in
+        *:optional)
+          seat_optional_failure[i]="${quality:-exit $rc}"
+          [ "$rc" -ne 124 ] || seat_optional_failure[i]=timeout
+          dropped=$((dropped + 1))
+          dropped_names+=("${provider_names[i]} (optional)")
+          continue ;;
+      esac
       dropped=$((dropped + 1))
       dropped_names+=("${provider_names[i]}")
     done
@@ -5944,7 +5977,14 @@ ma_write_synthesis() {
       "operator prompt" "OMS_PROMPT_QUOTE_BYTES" head
     printf '\n```\n\n'
     for i in "${!artifacts[@]}"; do
-      printf '## %s\n\n' "${provider_names[i]}"
+      if [ -n "${seat_optional_failure[i]:-}" ]; then
+        printf '## %s seat failed (optional): %s\n\n' "${provider_names[i]%:optional}" "${seat_optional_failure[i]}"
+        if [ "${seat_exit[i]:-0}" != 0 ] || [ -n "${seat_quality[i]:-}" ]; then
+          continue
+        fi
+      else
+        printf '## %s\n\n' "${provider_names[i]}"
+      fi
       # This loop walks every seat, alive or not, so a dropped seat's body would
       # still be read here as one more opinion. Name it instead of pasting it.
       # A seat that died in round 1 (timeout, kill, provider error) left
@@ -6028,18 +6068,38 @@ ma_print_run_summary() {
 # Automatic consumers need every final seat, not just a useful partial quorum.
 # Inspect engine state; quoted answers cannot attest to their own completion.
 ma_council_complete() {
-  local i
-  [ "${total:-0}" -gt 0 ] && [ "${ok:-0}" -eq "$total" ] || return 1
+  local i required_total="${total:-0}" required_ok="${ok:-0}"
+  [ "${total:-0}" -gt 0 ] || return 1
   [ "${#provider_names[@]}" -eq "$total" ] || return 1
   for i in "${!provider_names[@]}"; do
+    case "${provider_names[i]}" in
+      *:optional)
+        required_total=$((required_total - 1))
+        if [ "${seat_exit[i]:-0}" = 0 ] && [ -z "${seat_quality[i]:-}" ]; then
+          required_ok=$((required_ok - 1))
+        fi
+        continue ;;
+    esac
     [ "${alive[i]:-0}" = 1 ] && [ "${seat_exit[i]:-1}" = 0 ] &&
       [ -z "${seat_quality[i]:-}" ] || return 1
   done
+  [ "$required_ok" -eq "$required_total" ]
 }
 
 ma_quorum_exit() {
-  local families
+  local families quorum_ok="$ok" quorum_total="$total" i optional_seen=0
 
+  for i in "${!provider_names[@]}"; do
+    case "${provider_names[i]}" in
+      *:optional)
+        optional_seen=1
+        quorum_total=$((quorum_total - 1))
+        if [ "${seat_exit[i]:-0}" = 0 ] && [ -z "${seat_quality[i]:-}" ]; then
+          quorum_ok=$((quorum_ok - 1))
+        fi ;;
+    esac
+  done
+  [ "$optional_seen" = 1 ] || { quorum_ok="$ok"; quorum_total="$total"; }
   ma_print_run_summary
   families="$(ma_answered_families)"
   if [ "$ok" -gt 0 ]; then
@@ -6048,11 +6108,11 @@ ma_quorum_exit() {
       echo "warning: every answer came from one model family; treat agreement as replication, not corroboration" >&2
     fi
   fi
-  if [ "$ok" -eq 0 ]; then
+  if [ "$quorum_ok" -eq 0 ]; then
     echo "warning: no external $MA_KIND providers succeeded" >&2
     exit 1
   fi
-  if [ "$total" -ge 2 ] && [ "$ok" -lt 2 ]; then
+  if [ "$quorum_total" -ge 2 ] && [ "$quorum_ok" -lt 2 ]; then
     echo "warning: external $MA_KIND quorum not met; synthesize with current-agent local ${MA_QUORUM_FALLBACK:-$MA_KIND}" >&2
     exit 1
   fi

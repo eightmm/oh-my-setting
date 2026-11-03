@@ -2827,10 +2827,10 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
         elif (len(seats) + 1) * (rounds + 1) > 12:
             reason = "%s seats x %s rounds exceeds the 12-call budget" % (len(seats) + 1, rounds + 1)
         else:
-            seats.append(extra)
+            seats.append(dict(extra, optional=True))
             continue
         print("council: %s seat skipped: %s" % (provider, reason), file=sys.stderr)
-    targets = ",".join(item["provider"] + ":model=" + item["model"] for item in seats)
+    targets = ",".join(item["provider"] + ":model=" + item["model"] + (":optional" if item.get("optional") else "") for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),
             "--providers", targets, "--debate", str(rounds), "--deliberation",
             "--require-complete", "--no-task", "--no-memory", "--reasoning-effort", "high", "--prompt", prompt]
@@ -2885,7 +2885,7 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
                OMS_PANEL_LABEL=safe_label(label))
     print("council: %s seats / %s families / %s primary calls + up to %s format repairs / %s" %
           (len(seats), families, primary_calls, primary_calls,
-           ", ".join(seat.split(":model=", 1)[1] for seat in seats)), flush=True)
+           ", ".join((seat[:-9] if seat.endswith(":optional") else seat).split(":model=", 1)[1] for seat in seats)), flush=True)
     refs = ["start", "--provider", owner, "--tool", "panel-council", "--task-id", task_id,
             "--ref", "panel_role=advisor", "--ref", "panel_owner=" + owner,
             "--ref", "panel_label=" + safe_label(label), "--ref", "panel_purpose=advise",

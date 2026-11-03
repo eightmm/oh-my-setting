@@ -53,6 +53,7 @@ Options:
                        Codex/Claude/Antigravity council; optional agents are
                        available when explicitly named.
                        An entry may carry a model (codex:model=NAME) to pin it.
+                       Append :optional to tolerate a failed seat; at least one seat must be required.
                        Answers from one provider share a model family, which
                        the reported family count makes explicit.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/ask.
@@ -73,7 +74,7 @@ Options:
   --deliberation       Require evidence, alternatives, counterargument and checks
                        from every seat; task JSON alone is not a deliberation.
                        Requires --debate; implies --require-complete.
-  --require-complete   Fail unless every seat completes the final round.
+  --require-complete   Fail unless every required seat completes the final round.
                        Partial quorum remains available without this flag.
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
@@ -108,7 +109,7 @@ validate_provider_list() {
   # Tiers first, then normalize: expansion produces the targets, normalization
   # canonicalizes the agy alias and rejects the same target twice.
   expanded="$(ma_expand_targets "$PROVIDERS")" || exit $?
-  normalized="$(ma_normalize_provider_list "$expanded")" || exit $?
+  normalized="$(ma_normalize_provider_list "$expanded" ask)" || exit $?
   PROVIDERS="$normalized"
 }
 
