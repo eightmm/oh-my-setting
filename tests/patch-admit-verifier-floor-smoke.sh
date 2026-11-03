@@ -765,6 +765,186 @@ rc=0
 contains "$TMP/new-test-bypass.md" 'verify: PASS'
 contains "$TMP/new-test-bypass.md" 'verify-floor: FAIL'
 
+# BEGIN candidate-only-targets
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/pytest" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+for path in "$@"; do python3 "$path"; done
+EOF
+cat > "$TMP/bin/node" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+[ "$1" = --test ]
+shift
+[ "$#" -gt 0 ]
+for path in "$@"; do [ -f "$path" ]; done
+EOF
+chmod +x "$TMP/bin/pytest" "$TMP/bin/node"
+export PATH="$TMP/bin:$PATH"
+printf 'assert True\n' > "$repo/tests/test_existing.py"
+cat > "$repo/tests/scripts-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+# run-smoke-shard.sh
+test_unused() { :; }
+test_existing() { grep -qx good src/value.txt; }
+# SMOKE_TEST_CALLS_BEGIN
+"$2"
+# SMOKE_TEST_CALLS_END
+EOF
+cat > "$repo/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+case "${1:-fast}" in
+  fast) . tests/check-helper.sh; verify_product ;;
+  *) exit 2 ;;
+esac
+EOF
+cp "$ROOT/tests/run-smoke-shard.sh" "$repo/tests/run-smoke-shard.sh"
+mkdir -p "$repo/tests/operator"
+printf 'SECTIONS = [("unit", 0, "cases.py")]\n' > "$repo/tests/operator/runner.py"
+printf '# BEGIN old case\n# END old case\n' > "$repo/tests/operator/cases.py"
+cat > "$repo/tests/operator-tools-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+[ "$1" = --section ] && [ "$2" = unit ] && [ "$3" = --case ]
+grep -Fxq "# BEGIN $4" tests/operator/cases.py
+EOF
+printf 'console.log("base");\n' > "$repo/tests/app.test.js"
+printf 'console.log("base");\n' > "$repo/tests/other.test.js"
+git -C "$repo" add tests/test_existing.py tests/scripts-smoke.sh scripts/check.sh tests/operator tests/operator-tools-smoke.sh tests/run-smoke-shard.sh tests/app.test.js tests/other.test.js
+git -C "$repo" commit -qm target-fixtures
+printf 'assert True\n' > "$repo/tests/test_new.py"
+git -C "$repo" add -N tests/test_new.py
+python3 - "$ROOT/scripts/lib" "$repo" <<'PYTARGETS'
+import sys
+sys.path.insert(0, sys.argv[1])
+from verify_selectors import candidate_only_targets
+repo = sys.argv[2]
+changed = {"tests/test_new.py"}
+for command in ("pytest tests/test_new.py", "pytest -v tests/test_new.py", "node --test tests/test_new.py"):
+    assert candidate_only_targets(repo, command, changed), command
+for command in ("pytest", "pytest ''", "pytest --bad tests/test_new.py", "pytest tests/test_new.py tests/test_existing.py",
+                "node --test tests/test_new.py tests/test_existing.py", "pytest tests/test_new.py; true",
+                "jest tests/*.py", "jest tests/test_new.py", "vitest tests/test_new.py",
+                "vitest run tests/test_new.py", "node --test",
+                "node --test -v tests/test_new.py", "node --test --version tests/test_new.py",
+                "node --test -h tests/test_new.py", "node --test --help tests/test_new.py",
+                "node --test -e tests/test_new.py", "node --test -p tests/test_new.py",
+                "node --test --check tests/test_new.py", "node --test -q tests/test_new.py"):
+    assert not candidate_only_targets(repo, command, changed), command
+PYTARGETS
+git -C "$repo" diff > "$TMP/target-new.patch"
+git -C "$repo" reset -q HEAD -- tests/test_new.py
+rm "$repo/tests/test_new.py"
+"$ADMIT" --repo "$repo" --patch "$TMP/target-new.patch" --verify 'pytest tests/test_new.py' --report "$TMP/target-new.md" >/dev/null 2>&1 || fail "new pytest target should be admissible"
+contains "$TMP/target-new.md" 'candidate-only'
+contains "$TMP/target-new.md" 'tests/test_new.py'
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/target-new.patch" --verify 'pytest tests/test_new.py tests/test_existing.py' --report "$TMP/target-mixed.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "mixed pytest targets must retain their floor"
+contains "$TMP/target-mixed.md" 'verify-floor: FAIL'
+printf 'console.log("new");\n' > "$repo/tests/new.test.js"
+git -C "$repo" add -N tests/new.test.js
+git -C "$repo" diff > "$TMP/target-node-new.patch"
+git -C "$repo" reset -q HEAD -- tests/new.test.js
+rm "$repo/tests/new.test.js"
+"$ADMIT" --repo "$repo" --patch "$TMP/target-node-new.patch" --verify 'node --test tests/new.test.js' --report "$TMP/target-node-new.md" >/dev/null 2>&1 || fail "new node test should be admissible"
+contains "$TMP/target-node-new.md" 'candidate-only: PASS'
+contains "$TMP/target-node-new.md" 'verify: PASS'
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/target-node-new.patch" --verify 'node --test tests/new.test.js tests/app.test.js' --report "$TMP/target-node-mixed.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "mixed node tests must retain their floor"
+contains "$TMP/target-node-mixed.md" 'verify-floor: FAIL'
+awk '/^# SMOKE_TEST_CALLS_BEGIN$/ { print "test_new() { :; }" } { print }' "$repo/tests/scripts-smoke.sh" > "$TMP/selector-suite"
+cat "$TMP/selector-suite" > "$repo/tests/scripts-smoke.sh"
+git -C "$repo" diff > "$TMP/target-selector.patch"
+git -C "$repo" checkout -q -- tests/scripts-smoke.sh
+"$ADMIT" --repo "$repo" --patch "$TMP/target-selector.patch" --verify 'bash tests/scripts-smoke.sh --only test_new' --allow-verifier-change --report "$TMP/target-selector.md" >/dev/null 2>&1 || fail "new smoke selector should be admissible"
+contains "$TMP/target-selector.md" 'candidate-only'
+contains "$TMP/target-selector.md" 'test_new'
+printf 'test_late() { return 37; }\n' >> "$repo/tests/scripts-smoke.sh"
+python3 - "$ROOT/scripts/lib" "$repo" <<'PYLATE'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from verify_selectors import candidate_only_targets
+repo = sys.argv[2]
+path = Path(repo) / "tests/scripts-smoke.sh"
+source = path.read_text()
+begin = "# SMOKE_TEST_CALLS_BEGIN"
+end = "# SMOKE_TEST_CALLS_END"
+for suite in ("tests/scripts-smoke.sh", "tests/run-smoke-shard.sh"):
+    command = "bash %s --only test_late" % suite
+    assert not candidate_only_targets(repo, command, {"tests/scripts-smoke.sh"}), command
+    leading = source.replace("test_late() { return 37; }\n", "").replace(begin, "test_late() { return 37; }\n" + begin)
+    path.write_text(leading)
+    assert candidate_only_targets(repo, command, {"tests/scripts-smoke.sh"}), command
+    for broken in (leading.replace(begin, ""), leading.replace(end, ""),
+                   leading.replace(begin, begin + "\n" + begin),
+                   leading.replace(begin, "TEMP_MARKER").replace(end, begin).replace("TEMP_MARKER", end),
+                   leading.replace("test_late() {", "test_late(){"),
+                   *(source.replace(begin, "# x " + separator + "test_late() {\n" + begin)
+                     for separator in ("\x0c", "\x0b", "\r", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"))):
+        path.write_text(broken)
+        assert not candidate_only_targets(repo, command, {"tests/scripts-smoke.sh"}), command
+    path.write_text(source)
+PYLATE
+python3 - "$repo/tests/scripts-smoke.sh" <<'PYFORMFEED'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+source = path.read_text()
+path.write_text(source.replace("# SMOKE_TEST_CALLS_BEGIN", "# x \x0ctest_late() {\n# SMOKE_TEST_CALLS_BEGIN"))
+PYFORMFEED
+git -C "$repo" diff > "$TMP/target-late.patch"
+git -C "$repo" checkout -q -- tests/scripts-smoke.sh
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/target-late.patch" --verify 'bash tests/run-smoke-shard.sh --only test_late' --report "$TMP/target-late.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "uninvoked late smoke definition must retain the floor"
+contains "$TMP/target-late.md" 'verify: PASS'
+contains "$TMP/target-late.md" 'verify-floor: FAIL'
+
+printf '# BEGIN new case\n# END new case\n' >> "$repo/tests/operator/cases.py"
+python3 - "$ROOT/scripts/lib" "$repo" <<'PYCASE'
+import sys
+sys.path.insert(0, sys.argv[1])
+from verify_selectors import candidate_only_targets
+repo = sys.argv[2]
+changed = {"tests/operator/cases.py"}
+command = "bash tests/operator-tools-smoke.sh --section unit --case 'new case'"
+assert candidate_only_targets(repo, command, changed)
+for command in ("bash tests/operator-tools-smoke.sh --section unit --case 'old case'",
+                "bash tests/operator-tools-smoke.sh --section missing --case 'new case'",
+                "bash tests/operator-tools-smoke.sh --section unit --case ''"):
+    assert not candidate_only_targets(repo, command, changed), command
+PYCASE
+git -C "$repo" diff > "$TMP/target-operator.patch"
+git -C "$repo" checkout -q -- tests/operator/cases.py
+"$ADMIT" --repo "$repo" --patch "$TMP/target-operator.patch" --verify "bash tests/operator-tools-smoke.sh --section unit --case 'new case'" --report "$TMP/target-operator.md" >/dev/null 2>&1 || fail "new operator case should be admissible"
+contains "$TMP/target-operator.md" 'candidate-only: PASS'
+contains "$TMP/target-operator.md" 'verify: PASS'
+contains "$TMP/target-operator.md" 'verify-floor: PASS'
+for node_file in app other; do
+  printf 'console.log("changed");\n' > "$repo/tests/$node_file.test.js"
+  git -C "$repo" diff > "$TMP/target-node.patch"
+  git -C "$repo" checkout -q -- "tests/$node_file.test.js"
+  for node_verify in "node --test tests/$node_file.test.js" 'node --test tests/app.test.js tests/other.test.js'; do
+    rc=0
+    "$ADMIT" --repo "$repo" --patch "$TMP/target-node.patch" --verify "$node_verify" --report "$TMP/target-node.md" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 1 ] || fail "existing node test must require verifier consent: $node_file"
+    contains "$TMP/target-node.md" 'verifier: FAIL'
+    contains "$TMP/target-node.md" '--allow-verifier-change'
+  done
+done
+printf 'bad\n' > "$repo/src/value.txt"
+git -C "$repo" diff > "$TMP/target-existing.patch"
+git -C "$repo" checkout -q -- src/value.txt
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/target-existing.patch" --verify 'bash tests/scripts-smoke.sh --only test_existing' --report "$TMP/target-existing.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "existing smoke selector must still reject broken product"
+# END candidate-only-targets
+
 # Worktree creation/checkouts can invoke worker-planted fsmonitor or content
 # filters under the admitting parent's authority. Refuse executable Git config
 # before the first such Git operation; the marker proves refusal came first.

@@ -532,7 +532,7 @@ EOF
     if [ -n "$VERIFY" ] && command -v python3 >/dev/null 2>&1; then
       scan_surface() {
         OMS_VERIFY="$VERIFY" OMS_BATCH_PREFIX="$batch_prefix" OMS_CHANGED="$changed_files" OMS_WORKTREE="$worktree" \
-          OMS_ACCEPTANCE_FILES="$ACCEPTANCE_FILES" python3 - <<'SURFACE_PY'
+          OMS_ACCEPTANCE_FILES="$ACCEPTANCE_FILES" OMS_SELECTOR_LIB="$ROOT_LIB" python3 - <<'SURFACE_PY'
 import json
 import os
 import posixpath
@@ -662,7 +662,15 @@ def commands(command, cwd="", candidate_eligible=True):
                 continue
             if "-m" in args or not args or args[0] == "-":
                 continue
-            target = next((arg for arg in args if not arg.startswith("-")), "")
+            if executable == "node" and "--test" in args:
+                for arg in args:
+                    if not arg.startswith("-"):
+                        operand_path = resolve(arg, cwd)
+                        if operand_path:
+                            named.add(operand_path)
+                target = ""
+            else:
+                target = next((arg for arg in args if not arg.startswith("-")), "")
         path = resolve(target, cwd) if target else ""
         if path:
             named.add(path)
@@ -696,7 +704,15 @@ for f in os.environ["OMS_CHANGED"].split("\n"):
     if (direct or common or explicit) and old is not None:
         print("verifier\t" + f)
 if len(new_only) == 1:
-    print("candidate-only\t" + new_only[0])
+    print("candidate-only\t" + new_only[0] + " (file added by patch)")
+else:
+    import sys
+    sys.path.insert(0, os.environ["OMS_SELECTOR_LIB"])
+    from verify_selectors import candidate_only_targets
+    targets = candidate_only_targets(wt, os.environ["OMS_VERIFY"],
+                                     set(os.environ["OMS_CHANGED"].split("\n")))
+    if targets:
+        print("candidate-only\t" + "; ".join(targets))
 SURFACE_PY
       }
       surface_scan="$(scan_surface)"
@@ -713,6 +729,7 @@ SURFACE_PY
     candidate_only="$(surface_rows candidate-only)"
     if [ -n "$candidate_only" ]; then
       floor_verify="$BASE_VERIFY"
+      record "candidate-only" "PASS" "$candidate_only"
     fi
     # --- Gate 3b: the patch must not quietly weaken the tests ---------------
     # Gate 3a protects the verify *entrypoint*, which leaves the other way to
