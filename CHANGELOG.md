@@ -8,6 +8,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms agent-plan add` and proposal application warn when a task verify names
+  an operator `--section`/`--case` or a smoke `--only` test that does not exist,
+  listing valid names; the task is still added, since it may create that test.
+  The check parses the test files statically and never runs repository code.
+- A `--finalize --landed-commit` refusal for a commit without its own land
+  receipt says to pass the full head SHA that `oms land` pushed, and `oms panel
+  --accept` prints the matching `Then: oms panel --finalize` line.
 - The panel plan hint keeps a recent registered goal whose tasks are all
   closed: it names the goal and suggests `oms agent-plan add` for the next
   task, and `init` only when the goal is complete, instead of reporting no
