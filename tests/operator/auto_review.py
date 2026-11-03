@@ -265,7 +265,8 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert dispatch_args[2:4] == ("reviewer", "read")
     assert dispatch_args[10]["workload"] == "deep", dispatch_args[10]
     assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
-    assert set(dispatch_kwargs) == {"candidate", "routing_report", "routing_repo", "fallback_decision"}, dispatch_kwargs
+    assert set(dispatch_kwargs) == {"candidate", "routing_report", "routing_repo", "fallback_decision",
+                                 "route_provenance"}, dispatch_kwargs
     assert dispatch_kwargs["fallback_decision"] == "alternate-not-routable", dispatch_kwargs
     assert dispatch_args[16] is None, dispatch_args
     assert dispatch_kwargs["candidate"] == {"patch": auto_patch_path, "sha256": auto_digest,

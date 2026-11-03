@@ -805,7 +805,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     inherited_model = False
     model_explicit = bool(target and model)
     effort_explicit = effort is not None
-    if continue_task:
+    if continue_task and not target and not model:
         from terminal_panel import _dispatch_call_record, _rework_history, owning_attempt, repository, resolve_call_alias
         history_repo = repository(dispatch_env["OMS_ROOM_REPO"]) if dispatch_env.get("OMS_ROOM_REPO") else repo
         resolved_task = resolve_call_alias(history_repo, room_id, continue_task)
@@ -815,8 +815,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         if history:
             last = history[-1]
             refs = last.get("refs", {})
-            if not target and not model:
-                preferred = refs.get("panel_provider") or last.get("provider")
+            preferred = refs.get("panel_provider") or last.get("provider")
             parent = next((row for row in history_rows
                             if row.get("attempt_id") == last.get("parent_attempt_id")), {})
             member = refs.get("panel_room_participant")
@@ -828,7 +827,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                     anchor = dispatch_store.read(history_repo, member + "-launch.json")
                     provenance = anchor.get("route", {}) if isinstance(anchor, dict) else {}
                     if isinstance(provenance, dict):
-                        if (not target and not model and not workload_explicit and provenance.get("model_explicit") is True
+                        if (not workload_explicit and provenance.get("model_explicit") is True
                                 and isinstance(refs.get("panel_model"), str) and refs["panel_model"]
                                 and isinstance(preferred, str) and preferred):
                             target, model, workload = preferred, refs["panel_model"], None
