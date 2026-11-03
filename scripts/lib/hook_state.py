@@ -1555,6 +1555,13 @@ def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
                         break
             heredocs.clear()
             continue
+        if ch == "#" and not have:
+            # An unquoted `#` starting a word comments out the rest of the line.
+            if operator:
+                flush()
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
         if operator.endswith("<<") and ch == "-":
             operator += ch
             continue
