@@ -40764,6 +40764,8 @@ case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; ex
 prompt="$(cat)"
 printf 'call\n' >> "$STUB_DIR/calls"
 case "$prompt" in
+  *"# Wave digest"*)
+    printf '%s' "$prompt" | python3 -c 'import json,re,sys,pathlib; p=sys.stdin.read(); c=re.search(r"cand_[0-9a-f]+",p).group(); d=re.search(r"receipt=([0-9a-f]{64})",p).group(1); f=pathlib.Path(sys.argv[1])/"mode"; mode=f.read_text() if f.exists() else ""; good={"text":"useful note","candidates":[c],"receipts":[d]}; bad=[{"text":"bad id","candidates":["unknown"],"receipts":[d]},{"text":"bad receipt","candidates":[c],"receipts":["0"*64]}]; body= ("["*2000+"0"+"]"*2000) if mode=="deep" else json.dumps(([dict(good,text=chr(0xd83d)),good] if mode=="surrogate" else [good]*6000 if mode=="many" else [good]+bad)); print("```json\n"+body+"\n```")' "$STUB_DIR" ;;
   *MARK_BROKEN*) echo "route broke"; exit 42 ;;
   *MARK_PASS*) printf 'try this\n```patch\n'; cat "$STUB_DIR/pass.patch"; printf '```\n' ;;
   *MARK_TAMPER*) printf '```patch\n'; cat "$STUB_DIR/tamper.patch"; printf '```\n' ;;
@@ -40798,6 +40800,13 @@ def attempt(target, *args):
 r = run(m, '--dry-run'); assert r.returncode == 0, r.stderr
 out = json.loads(r.stdout); assert out['campaign_id'] and out['totals']['planned_seat_calls'] == 1
 assert out['groups'][0]['routes'][0]['cap_source'] == 'global'
+for route in (None, {}, {'provider':'codex', 'model':''}, {'provider':'unknown', 'model':'x'},
+              {'provider':'cursor', 'model':'x', 'effort':'high'}, {'provider':'codex', 'model':'provider-default'}):
+    bad=copy.deepcopy(m); bad['consolidator']=route
+    assert run(bad,'--dry-run').returncode == 2, route
+valid=copy.deepcopy(m); valid['consolidator']={'provider':'codex', 'model':'x'}
+assert run(valid,'--dry-run').returncode == 0
+path.write_text(json.dumps(m))
 assert not (repo/'.oms').exists()
 sub = repo/'nested'; sub.mkdir()
 subrun = subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--campaign',str(path),'--dry-run'],cwd=sub,capture_output=True,text=True)
@@ -41046,6 +41055,18 @@ def rows(m, where=repo):
 def calls(): return len((stub/'calls').read_text().split()) if (stub/'calls').exists() else 0
 def kinds(r): return [x['type'] for x in r]
 
+# A live ledger is readable without taking its events lock and without writes.
+import importlib.util
+spec = importlib.util.spec_from_file_location('pc_status', root/'scripts/lib/problem_campaign.py')
+pc_status = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc_status)
+live = manifest([group('a', 'MARK_WRONG', 'live')])
+directory, _ = pc_status.initialize(repo, live, repo)
+before_events = (directory/'events.jsonl').read_bytes()
+with pc_status.locked(directory):
+    r = go(live, {'OMS_HARNESS_CHILD': '1'}, repo, '--status')
+assert r.returncode == 0 and 'running' in r.stdout and 'last_event=campaign_started' in r.stdout, (r.stdout, r.stderr)
+assert (directory/'events.jsonl').read_bytes() == before_events
+
 # Two groups: one route fails (seat_failed, skipped), the other solves. Exit 0, winner recorded.
 solve = manifest([group('a', 'MARK_BROKEN', 'm1'), group('b', 'MARK_PASS', 'm2')])
 before = calls()
@@ -41058,12 +41079,151 @@ assert [x['verdict'] for x in verdict] == ['pass'], verdict
 done = [x for x in ev if x['type'] == 'campaign_solved']
 assert len(done) == 1 and done[0]['candidate'] == verdict[0]['id'] and len(done[0]['sha256']) == 64, done
 assert 'solved' in r.stdout and done[0]['candidate'] in r.stdout, r.stdout
+assert 'final_receipt' in done[0] and 'oms patch-admit --repo' in r.stdout, (done, r.stdout)
+assert go(solve, {'OMS_HARNESS_CHILD': '1'}, repo, '--status').returncode == 0
 assert ev[0]['type'] == 'campaign_started' and 'started_at' in ev[0]
 assert 'scratch' not in git('worktree', 'list') and len(git('worktree', 'list').splitlines()) == 1
 spent = calls(); assert spent - before == 2, (before, spent)
 # Resume of a solved campaign re-prints the winner and spends nothing.
 r = go(solve); assert r.returncode == 0 and done[0]['candidate'] in r.stdout, r.stdout
 assert calls() == spent and kinds(rows(solve)).count('reservation') == 2
+
+# Status must not start a campaign or require parent authority.
+missing = manifest([group('a', 'MARK_WRONG', 'missing')])
+r = go(missing, {'OMS_HARNESS_CHILD': '1'}, repo, '--status')
+assert r.returncode == 2 and 'unknown argument' not in r.stderr, r.stderr
+assert go(solve, None, repo, '--status', '--dry-run').returncode == 2
+cid = hashlib.sha256(json.dumps(solve, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:16]
+handoff = json.loads((repo/'.oms/plan/campaigns'/cid/'handoff.json').read_text())
+assert handoff['sha256'] == done[0]['sha256'] and handoff['final_receipt']['verdict'] == 'pass'
+assert handoff['command'] in r.stdout or handoff['command'] in go(solve, None, repo, '--status').stdout
+
+# Malformed and oversized consolidations are counted and the next wave runs.
+for mode, accepted, rejected in [('surrogate', 1, 1), ('deep', 0, 1), ('many', 32, 5968)]:
+    (stub/'mode').write_text(mode)
+    m = manifest([group('a', 'MARK_WRONG', mode)], max_waves=2, stall_waves=2)
+    m['consolidator'] = {'provider': 'codex', 'model': 'm2'}
+    r = go(m); assert r.returncode == 3, (mode, r.stdout, r.stderr)
+    ev = rows(m)
+    records = [x for x in ev if x['type'] == 'consolidation_recorded']
+    assert len(records) == 1 and len(records[0]['claims']) == accepted and records[0]['rejected_count'] == rejected, records
+    assert sum(x['type'] == 'wave_completed' for x in ev) == 2
+(stub/'mode').unlink()
+
+# Cite only receipts present in the ledger and feed accepted notes into wave two.
+cons = manifest([group('a', 'MARK_WRONG', 'm1')], max_waves=2, stall_waves=2)
+cons['consolidator'] = {'provider': 'codex', 'model': 'm2'}
+r = go(cons); assert r.returncode == 3, (r.stdout, r.stderr)
+ev = rows(cons)
+assert sum(x.get('kind') == 'consolidator' for x in ev if x['type'] == 'reservation') == 1
+records = [x for x in ev if x['type'] == 'consolidation_recorded']
+assert len(records) == 1 and records[0]['rejected_count'] == 2 and len(records[0]['claims']) == 1, records
+cid = hashlib.sha256(json.dumps(cons, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:16]
+prompt = (repo/'.oms/artifacts/campaigns'/cid/'seats/w2-a-0/prompt.md').read_text()
+assert 'Unverified notes' in prompt and 'useful note' in prompt and 'bad id' not in prompt
+assert 'Earlier candidates of this approach (verdicts only)' not in prompt
+assert not any(x.get('kind') == 'consolidator' for x in rows(solve) if x['type'] == 'reservation')
+
+# No call is useful at a stall or when the seat allowance is already exhausted.
+for stop_budget, reason in [({'stall_waves': 1}, 'stall'), ({'total_calls': 3}, 'budget')]:
+    stopped = manifest([group('a', 'MARK_WRONG', reason)], max_waves=2, **stop_budget)
+    stopped['consolidator'] = {'provider': 'codex', 'model': 'm2'}
+    r = go(stopped); assert r.returncode == 3, (r.stdout, r.stderr)
+    ev = rows(stopped)
+    assert not any(x.get('kind') == 'consolidator' for x in ev if x['type'] == 'reservation'), ev
+    assert ev[-1]['reason'] == reason, ev[-1]
+
+last = manifest([group('a', 'MARK_WRONG', 'last')], max_waves=1, stall_waves=1)
+last['consolidator'] = {'provider': 'codex', 'model': 'm2'}
+assert go(last).returncode == 3
+assert not any(x.get('kind') == 'consolidator' for x in rows(last) if x['type'] == 'reservation')
+limited = manifest([group('a', 'MARK_WRONG', 'limited')], max_waves=2, stall_waves=2,
+                   per_provider={'codex': {'calls': 1, 'concurrency': 1}})
+limited['consolidator'] = {'provider': 'codex', 'model': 'm2'}
+assert go(limited).returncode == 3
+assert not any(x.get('kind') == 'consolidator' for x in rows(limited) if x['type'] == 'reservation')
+
+# A deadline crossed by the wave cannot trigger another provider call.
+from unittest import mock
+deadline = manifest([group('a', 'MARK_WRONG', 'deadline')])
+deadline['consolidator'] = {'provider': 'codex', 'model': 'm2'}
+deadline_dir, _ = pc_status.initialize(repo, deadline, repo)
+with mock.patch.object(pc_status.Controller, 'wave', return_value=None), \
+     mock.patch.object(pc_status.Controller, 'remaining', side_effect=[1, 0]):
+    assert pc_status.run_campaign(repo, repo, deadline_dir, deadline, pc_status.time.time()) == 3
+ev = pc_status.Ledger(deadline_dir).events()
+assert ev[-1]['reason'] == 'deadline' and not any(x['type'] == 'reservation' for x in ev)
+
+# A failed consolidator is recorded and does not stop the next wave.
+failed_cons = manifest([group('a', 'MARK_WRONG', 'm1')], max_waves=2, stall_waves=2)
+failed_cons['consolidator'] = {'provider': 'claude', 'model': 'm2'}
+r = go(failed_cons); assert r.returncode == 3, (r.stdout, r.stderr)
+ev = rows(failed_cons)
+assert sum(x['type'] == 'wave_completed' for x in ev) == 2
+assert any(x['type'] == 'seat_failed' and x['group'] == 'consolidator' for x in ev)
+
+# Validate empty, malformed and boundary-size claims using ledger-bound receipts.
+claim_manifest = manifest([group('a', 'MARK_WRONG', 'claims')], total_calls=20)
+claim_manifest['consolidator'] = {'provider': 'codex', 'model': 'claims'}
+claim_dir, _ = pc_status.initialize(repo, claim_manifest, repo)
+ctl = pc_status.Controller(repo, repo, claim_dir, claim_manifest)
+ctl.ledger.emit('candidate_recorded', id='cand_test')
+ctl.ledger.emit('candidate_verdict', id='cand_test', receipt_sha256='a'*64)
+for index, (body, accepted, rejected) in enumerate([
+        ('[]', 0, 0), ('not json', 0, 1),
+        (json.dumps([{'text':'x'*4096,'candidates':['cand_test'],'receipts':['a'*64]}]), 1, 0),
+        (json.dumps([{'text':'x'*4097,'candidates':['cand_test'],'receipts':['a'*64]}]), 0, 1)]):
+    ctl.call = lambda *args, body=body: ('ok', '```json\n'+body+'\n```\n')
+    ctl.consolidate(index+1, pc_status.time.time())
+    row = [x for x in ctl.ledger.events() if x['type'] == 'consolidation_recorded'][-1]
+    assert len(row['claims']) == accepted and row['rejected_count'] == rejected, row
+
+good = {'text':'x', 'candidates':['cand_test'], 'receipts':['a'*64]}
+for count in (0, 32, 33):
+    body = json.dumps([good]*count)
+    ctl.call = lambda *args, body=body: ('ok', '```json\n'+body+'\n```\n')
+    ctl.consolidate(10+count, pc_status.time.time())
+    row = [x for x in ctl.ledger.events() if x['type'] == 'consolidation_recorded'][-1]
+    assert len(row['claims']) == min(count, 32) and row['rejected_count'] == max(0, count-32), row
+# The serialized note budget includes citation bytes and JSON framing.
+base_claims = [dict(good, text='') for _ in range(4)]
+room = pc_status.DIGEST_CAP - len(json.dumps(base_claims, ensure_ascii=False).encode())
+for item in base_claims:
+    amount = min(4096, room)
+    item['text'] = 'x'*amount
+    room -= amount
+assert room == 0
+for extra, accepted, rejected in [(0, 4, 0), (1, 3, 1)]:
+    sample = copy.deepcopy(base_claims)
+    sample[-1]['text'] += 'x'*extra
+    ctl.call = lambda *args, sample=sample: ('ok', '```json\n'+json.dumps(sample)+'\n```\n')
+    ctl.consolidate(40+extra, pc_status.time.time())
+    row = [x for x in ctl.ledger.events() if x['type'] == 'consolidation_recorded'][-1]
+    assert len(row['claims']) == accepted and row['rejected_count'] == rejected, row
+
+large = dict(good, candidates=['cand_test']*300, receipts=['a'*64]*300)
+ctl.call = lambda *args: ('ok', '```json\n'+json.dumps([large])+'\n```\n')
+ctl.consolidate(44, pc_status.time.time())
+row = [x for x in ctl.ledger.events() if x['type'] == 'consolidation_recorded'][-1]
+assert row['claims'] == [] and row['rejected_count'] == 1
+
+def broken_call(*args):
+    raise ValueError('failure')
+ctl.call = broken_call
+ctl.consolidate(45, pc_status.time.time())
+assert any(x['type'] == 'seat_failed' and x.get('wave') == 45 for x in ctl.ledger.events())
+legacy = {'type':'consolidation_recorded', 'claims':[dict(good, text='x'*4096)]*10}
+prompt, _ = ctl.prompt(claim_manifest['groups'][0], [legacy])
+notes = prompt.split('# Unverified notes with citations\n', 1)[1].strip()
+assert len(notes.encode()) <= pc_status.DIGEST_CAP and len(json.loads(notes)) == 3
+
+# The second verification consumes an external fixture already removed by the first.
+marker = stub/'one-pass'; marker.touch()
+retry = manifest([group('a', 'MARK_PASS', 'm1')], max_waves=1, stall_waves=1)
+retry['verify']['command'] = 'test -f %s && rm %s && bash check.sh' % (marker, marker)
+r = go(retry); assert r.returncode == 3, (r.stdout, r.stderr)
+ev = rows(retry)
+assert 'final_verify_failed' in kinds(ev) and 'campaign_solved' not in kinds(ev), ev
 
 # A patch that edits a pinned verifier input is refused; stall_waves ends it.
 tamper = manifest([group('a', 'MARK_TAMPER', 'm1')], max_waves=3, stall_waves=2)
@@ -41134,6 +41294,8 @@ assert go(bad, None, repo, '--dry-run').returncode == 0
 # A scratch checkout shares the owner checkout's ledger.
 scratch = pathlib.Path(subprocess.check_output(['bash', str(root/'scripts/scratch-worktree.sh'), 'add', '--repo', str(repo), '--owner-pid', str(os.getpid())], text=True, env=env).strip())
 try:
+    r = go(solve, {'OMS_HARNESS_CHILD': '1'}, scratch, '--status')
+    assert r.returncode == 0 and done[0]['candidate'] in r.stdout, (r.stdout, r.stderr)
     linked = manifest([group('a', 'MARK_NONE', 'm1')], max_waves=1, stall_waves=1)
     r = go(linked, None, scratch); assert r.returncode == 3, (r.stdout, r.stderr)
     assert 'candidate_rejected' in kinds(rows(linked)) and not (scratch/'.oms/plan/campaigns').exists()

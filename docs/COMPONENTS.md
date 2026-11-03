@@ -1057,8 +1057,11 @@ budgets. Routes without a provider-specific cap use the global caps. A `pi` rout
 needs `public_data: true`, a `cursor` route takes no `effort`, and any `effort`
 must be one `oms agent-call` accepts. A route `model` follows the same rules (at most 160 characters, no control characters, not `provider-default`). Dry-run reserves one consolidator call per
 wave in its totals and caps planned seats to fit; the total budget must cover
-those consolidator calls. v1 runs no consolidator seat: that headroom is never
-spent, and seat reservations stop at `total_calls` minus `max_waves`.
+those consolidator calls. Without a `consolidator` route the headroom remains
+unspent; seat reservations stop at `total_calls` minus `max_waves`. An optional
+`consolidator` uses the same route validation as group routes and reserves and
+settles one call from that headroom after an unsolved wave only when another
+wave can run with seat budget and a live route.
 
 Without `--dry-run`, the command requires a clean tracked tree and an owner
 (a harness child is refused before any state is written), then initializes or
@@ -1071,7 +1074,14 @@ per seat. A seat is reserved before its call and settled after; reservations
 count against the lifetime cap even if interrupted. Replies are parsed into
 sha256-named candidate artifacts (fenced blocks tagged with an allowed format);
 malformed replies record `candidate_rejected`. Later waves show a seat's group a
-digest of its earlier candidates' ids, routes and verdicts only. A failed route
+digest of its earlier candidates' ids, routes, verdicts and receipt digests.
+The consolidator receives those digests, never seat transcripts, and returns a
+fenced JSON list of claims with `text`, `candidates` and `receipts`. Only claims
+whose candidate IDs and corresponding receipt digests match the ledger are
+recorded; rejected claims are counted. At most 32 claims and 16 KiB of claim
+text and encoded claims are accepted. The next wave receives at most 16 KiB of
+accepted claims as unverified notes with citations; they never change verdicts or promote a winner.
+A failed consolidator records `seat_failed` and exploration continues. A failed route
 (provider error, timeout, print-timeout stop) records `seat_failed` and is skipped
 for the rest of the campaign; a provider's call cap records `route_exhausted`;
 `total_calls` records `budget_exhausted`. A seat whose artifact is missing or unreadable is a failed seat. An outbound-scrubber refusal (exit 3 with the scrubber's `SKIPPED` marker in the artifact; other exit 3 is a provider error) stops the
@@ -1082,7 +1092,12 @@ candidate is applied in a scratch checkout of the base, refused with
 against every pinned digest, then verified with the manifest command under the
 smaller of the two timeouts (process group killed on timeout). Verdicts are
 `pass`, `fail`, `timeout`, `error` or `unverified` (text and counterexample, never
-promoted). The first pass records `campaign_solved` and exits 0. Otherwise the run
+promoted). On a pass the controller applies the exact bytes to a fresh base
+checkout, checks the pinned digests again and reruns the verifier. A failed final
+check records `final_verify_failed` and exploration continues. A second pass
+records `campaign_solved` with both receipts, writes `handoff.json` next to the
+ledger and, for a patch, prints an `oms patch-admit` command. It never admits,
+commits or lands automatically. Otherwise the run
 stops on `deadline` (counted from `started_at`), `budget`, `max_waves`, `stall`
 (`stall_waves` waves without a pass; v1 has no partial score) or `routes_exhausted`
 and exits 3; refusals exit 2. Every controller event carries `ts` (reservation and settlement rows do not); a ledger without `started_at` counts its deadline from the resuming run. Re-running the same
@@ -1090,7 +1105,10 @@ manifest resumes from the ledger: a solved or stopped campaign prints its summar
 and spends nothing, an interrupted wave re-runs in full, and settled and
 unsettled reservations stay spent. One controller runs a campaign at a time.
 The saved manifest supplies the ledger budget. Campaign mode accepts only
-`--repo`, `--campaign` and `--dry-run`.
+`--repo`, `--campaign`, `--dry-run` and `--status`. `--status` is read-only,
+does not take the controller lock, and works for a harness child; it prints the
+state, waves, call budgets, last event, winner and handoff command if available.
+It exits 2 if no ledger exists and cannot be combined with `--dry-run`.
 
 `oms autopilot --max-parallel-tasks N` binds an immutable width of 1..4
 (default 1); standalone `oms goal-drive` accepts the same flag. Propose/run

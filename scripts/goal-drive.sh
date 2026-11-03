@@ -49,6 +49,7 @@ PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
 EXPECTED_REF=""
 CAMPAIGN=""
 CAMPAIGN_DRY_RUN=0
+CAMPAIGN_STATUS=0
 CAMPAIGN_CONFLICT=""
 GOAL_HELP=0
 COMMIT_TASK=""
@@ -58,7 +59,7 @@ COMMIT_RECEIPT_SHA=""
 
 usage() {
   cat <<'EOF'
-Usage: goal-drive.sh [--campaign FILE [--dry-run]] [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID]
+Usage: goal-drive.sh [--campaign FILE [--dry-run|--status]] [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID]
                      [--contract-id OWNER_ID]
                      [--auto-repair] [--retry-known] [--model MODEL]
                      [--fallback-model MODEL] [--reasoning-effort E]
@@ -78,6 +79,7 @@ it parked; a later run whose acceptance passes resolves those park rows.
 
   --campaign FILE  Initialize or resume a problem campaign and run its waves.
   --dry-run        Validate and print the normalized campaign without writing.
+  --status         Read the campaign ledger without changing it.
   --repo PATH     Repository (default: current directory). Tree must be clean.
   --to PROVIDER   Default worker for tasks without an assignment (default: codex).
   --max-cycles N  Hard task-attempt cap (default 3, max 10).
@@ -112,12 +114,13 @@ goal_provider_phase_wall() {  # seconds
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repo|--campaign|--dry-run) ;;
+    --repo|--campaign|--dry-run|--status) ;;
     *) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:-$1}" ;;
   esac
   case "$1" in
     --campaign) [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--campaign requires a file"; CAMPAIGN="$2"; shift 2 ;;
     --dry-run) CAMPAIGN_DRY_RUN=1; shift ;;
+    --status) CAMPAIGN_STATUS=1; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --to) [ "$#" -ge 2 ] || fail "--to requires a provider"; PROVIDER="$2"; shift 2 ;;
     --max-parallel-tasks) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---max-parallel-tasks}";
@@ -163,10 +166,16 @@ done
 
 if [ -n "$CAMPAIGN" ]; then
   [ -z "$CAMPAIGN_CONFLICT" ] || fail "--campaign cannot be combined with $CAMPAIGN_CONFLICT"
+  [ "$CAMPAIGN_DRY_RUN" -eq 0 ] || [ "$CAMPAIGN_STATUS" -eq 0 ] || fail "--dry-run and --status are mutually exclusive"
   REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
   REPO="$(cd "${REPO//$'\r'/}" && pwd -P)" || fail "bad --repo"
   if [ "$CAMPAIGN_DRY_RUN" -eq 1 ]; then
     exec python3 "$ROOT/scripts/lib/problem_campaign.py" --repo "$REPO" --campaign "$CAMPAIGN" --dry-run
+  fi
+  if [ "$CAMPAIGN_STATUS" -eq 1 ]; then
+    STATE_REPO="$(OMS_HARNESS_CHILD=0 OMS_HARNESS_DELEGATE_DEPTH=0 oms_state_root "$REPO")" || fail "bad --repo"
+    STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the campaign state repository"
+    exec python3 "$ROOT/scripts/lib/problem_campaign.py" --repo "$REPO" --state-repo "$STATE_REPO" --campaign "$CAMPAIGN" --status
   fi
   oms_git_assert_plain_index "$REPO" || fail "campaign requires a plain index"
   git -c core.fsmonitor=false -C "$REPO" diff --quiet -- || fail "campaign requires a clean tracked tree"
@@ -178,6 +187,7 @@ if [ -n "$CAMPAIGN" ]; then
 fi
 [ "$GOAL_HELP" -eq 0 ] || { usage; exit 0; }
 [ "$CAMPAIGN_DRY_RUN" -eq 0 ] || fail "--dry-run requires --campaign"
+[ "$CAMPAIGN_STATUS" -eq 0 ] || fail "--status requires --campaign"
 
 case "$CONTRACT_ID" in
   "") ;;

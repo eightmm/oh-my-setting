@@ -7,7 +7,7 @@ initialize(repo, manifest) validates and creates/resumes a campaign; it returns
 its directory and projection. Ledger(directory) loads the authoritative budget
 and routes from its digest-bound saved manifest; it exposes reserve, settle,
 spent and remaining. Reservations count forever even if unsettled.
-All ledger transitions are serialized by the campaign lock.
+All ledger transitions are serialized by the campaign lock; status reads without it.
 """
 import argparse
 import concurrent.futures
@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shlex
 import stat
 import subprocess
 import sys
@@ -103,7 +104,7 @@ def provider_names():
 
 def validate(repo, manifest, _saved_providers=None):
     repo = Path(repo).resolve(strict=True)
-    obj(manifest, ('problem','base','verify','candidate_formats','groups','budget','public_data'), ('problem','base','verify','candidate_formats','groups','budget'), 'manifest')
+    obj(manifest, ('problem','base','verify','candidate_formats','groups','budget','public_data','consolidator'), ('problem','base','verify','candidate_formats','groups','budget'), 'manifest')
     if 'public_data' in manifest and type(manifest['public_data']) is not bool:
         error('public_data must be a boolean')
     p = obj(manifest['problem'], ('file','sha256'), ('file','sha256'), 'problem')
@@ -136,6 +137,20 @@ def validate(repo, manifest, _saved_providers=None):
         integer(cap['calls'],1,200,'provider calls'); integer(cap['concurrency'],1,16,'provider concurrency')
     verifier = obj(b['verifier'], ('concurrency','timeout_s','max_artifact_bytes'), ('concurrency','timeout_s','max_artifact_bytes'), 'verifier budget')
     integer(verifier['concurrency'],1,4,'verifier concurrency'); integer(verifier['timeout_s'],1,3600,'verifier timeout_s'); integer(verifier['max_artifact_bytes'],1,1073741824,'max_artifact_bytes')
+    def validate_route(route):
+        obj(route, ('provider','model','effort'), ('provider','model'), 'route')
+        if not isinstance(route['provider'],str) or route['provider'] not in providers: error('unknown provider: %s' % route['provider'])
+        string(route['model'],'model',256)
+        if len(route['model']) > 160 or re.search('[\x00-\x1f\x7f]', route['model']) or route['model'] == 'provider-default':
+            error('route model must be at most 160 characters, without control characters, and not provider-default')
+        if route['provider'] == 'pi' and manifest.get('public_data') is not True:
+            error('pi routes are public-data only: set public_data to true')
+        if 'effort' in route:
+            if route['provider'] == 'cursor': error('cursor routes have no effort control')
+            if route['effort'] not in EFFORTS: error('route effort must be one of: ' + ', '.join(EFFORTS))
+        return dict(route, cap_source='provider' if route['provider'] in caps else 'global')
+    if 'consolidator' in manifest:
+        validate_route(manifest['consolidator'])
     groups = manifest['groups']
     if not isinstance(groups,list) or not 1 <= len(groups) <= 8: error('groups must contain 1..8 groups')
     normalized_groups = []
@@ -145,19 +160,7 @@ def validate(repo, manifest, _saved_providers=None):
         if not isinstance(g['id'],str) or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,63}',g['id']) or g['id'] in ids: error('group id must be a unique safe slug')
         ids.add(g['id']); string(g['formulation'],'formulation'); integer(g['k'],1,8,'group k')
         if not isinstance(g['routes'],list) or not 1 <= len(g['routes']) <= 64: error('routes must contain 1..64 routes')
-        routes = []
-        for route in g['routes']:
-            obj(route, ('provider','model','effort'), ('provider','model'), 'route')
-            if not isinstance(route['provider'],str) or route['provider'] not in providers: error('unknown provider: %s' % route['provider'])
-            string(route['model'],'model',256)
-            if len(route['model']) > 160 or re.search('[\x00-\x1f\x7f]', route['model']) or route['model'] == 'provider-default':
-                error('route model must be at most 160 characters, without control characters, and not provider-default')
-            if route['provider'] == 'pi' and manifest.get('public_data') is not True:
-                error('pi routes are public-data only: set public_data to true')
-            if 'effort' in route:
-                if route['provider'] == 'cursor': error('cursor routes have no effort control')
-                if route['effort'] not in EFFORTS: error('route effort must be one of: ' + ', '.join(EFFORTS))
-            routes.append(dict(route, cap_source='provider' if route['provider'] in caps else 'global'))
+        routes = [validate_route(route) for route in g['routes']]
         normalized_groups.append(dict(g, routes=routes))
     canonical = json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')
     cid = hashlib.sha256(canonical).hexdigest()[:16]
@@ -244,6 +247,7 @@ class Ledger:
             error('campaign manifest digest mismatch')
         self.budget = manifest['budget']
         self.providers = {route['provider'] for group in manifest['groups'] for route in group['routes']}
+        if 'consolidator' in manifest: self.providers.add(manifest['consolidator']['provider'])
 
     def _rows(self):
         path = self.directory / 'events.jsonl'
@@ -294,7 +298,8 @@ class Ledger:
             if provider not in self.providers or kind not in KINDS: error('invalid provider or kind')
             active = [r for key,r in reservations.items() if key not in settled]
             caps = self.budget.get('per_provider',{}).get(provider,{})
-            if len(reservations) >= (self.budget['total_calls'] if limit is None else min(self.budget['total_calls'], limit)): raise BudgetRefused('total_calls exhausted', True)
+            if (len(reservations) >= self.budget['total_calls'] or
+                    (limit is not None and sum(r['kind'] == kind for r in reservations.values()) >= limit)): raise BudgetRefused('total_calls exhausted', True)
             if sum(r['provider']==provider for r in reservations.values()) >= caps.get('calls',self.budget['total_calls']): raise BudgetRefused('provider calls exhausted')
             if len(active) >= self.budget['max_concurrent']: raise BudgetRefused('max_concurrent exhausted')
             if sum(r['provider']==provider for r in active) >= caps.get('concurrency',self.budget['max_concurrent']): raise BudgetRefused('provider concurrency exhausted')
@@ -340,6 +345,7 @@ def initialize(repo, manifest, state_repo=None):
     if saved == canonical_input:
         saved_providers = {route['provider'] for group in manifest['groups'] for route in group['routes']}
         saved_providers.update(manifest['budget'].get('per_provider', {}))
+        if 'consolidator' in manifest: saved_providers.add(manifest['consolidator']['provider'])
     projection, canonical = validate(repo, manifest, saved_providers)
     relative = '.oms/plan/campaigns/' + projection['campaign_id'] + '/manifest.json'
     target = Path(durable_call(_durable.canonical_repo_path, str(state), relative, label='campaign', create_parent=True))
@@ -363,6 +369,8 @@ def initialize(repo, manifest, state_repo=None):
 
 CANDIDATE_CAP = 4
 DIGEST_CAP = 16 * 1024
+CLAIM_CAP = 32
+CLAIM_TEXT_CAP = 16 * 1024
 TAIL_CAP = 2048
 SEAT_WALL = 1200
 EXTENSIONS = {'patch': 'patch', 'lean': 'lean', 'text': 'txt', 'counterexample': 'txt'}
@@ -437,6 +445,7 @@ class Controller:
         self.dead, self.dead_providers = set(), set()
         caps = self.budget.get('per_provider', {})
         providers = {r['provider'] for g in manifest['groups'] for r in g['routes']}
+        if 'consolidator' in manifest: providers.add(manifest['consolidator']['provider'])
         self.sems = {p: threading.BoundedSemaphore(caps.get(p, {}).get('concurrency', self.budget['max_concurrent'])) for p in providers}
         self.seat_limit = self.budget['total_calls'] - self.budget['max_waves']
         self.stop = threading.Event()
@@ -465,7 +474,7 @@ class Controller:
         for r in rows:
             if r.get('type') == 'candidate_recorded' and r.get('group') == gid:
                 v = verdicts.get(r['id'], {})
-                lines.append('%s wave=%s route=%s/%s format=%s verdict=%s exit=%s\n' % (r['id'], r['wave'], r['route'][0], r['route'][1], r['format'], v.get('verdict', 'none'), v.get('exit_code', '-')))
+                lines.append('%s wave=%s route=%s/%s format=%s verdict=%s exit=%s\n' % (r['id'], r['wave'], r['route'][0], r['route'][1], r['format'], v.get('verdict', 'none'), v.get('exit_code', '-')) + 'receipt=%s\n' % v.get('receipt_sha256', '-'))
                 ids.append(r['id'])
         while lines and len(''.join(lines).encode()) > DIGEST_CAP:
             lines.pop(0); ids.pop(0)
@@ -477,7 +486,17 @@ class Controller:
         text = ['# Problem', problem, '', '# Approach', group['formulation'], '', '# Reply format',
                 'Reply with up to %d candidates, each in one fenced block whose tag is its format. Allowed formats: %s.' % (CANDIDATE_CAP, ', '.join(self.formats)),
                 'Use a unified diff against the repository root for patch and lean candidates, for example a block opened with three backticks and the word patch.']
-        if digest: text += ['', '# Earlier candidates of this approach (verdicts only)', digest]
+        if digest: text += ['', '# Earlier candidates of this approach', digest]
+        notes = [r for r in rows if r.get('type') == 'consolidation_recorded']
+        if notes and isinstance(notes[-1].get('claims'), list):
+            bounded = []
+            for claim in notes[-1]['claims']:
+                try:
+                    payload = json.dumps(bounded + [claim], ensure_ascii=False)
+                    if len(payload.encode('utf-8')) <= DIGEST_CAP: bounded.append(claim)
+                except (TypeError, ValueError, UnicodeError, RecursionError):
+                    continue
+            if bounded: text += ['', '# Unverified notes with citations', json.dumps(bounded, ensure_ascii=False)]
         return '\n'.join(text) + '\n', parents
 
     def call(self, route, seat_dir, prompt_file, started):
@@ -554,6 +573,60 @@ class Controller:
         self.ledger.settle(rid, 'ok')
         return made
 
+    def consolidate(self, wave, started):
+        route = self.manifest.get('consolidator')
+        if not route or self.remaining(started) <= 0: return
+        label = [route['provider'], route['model'], route.get('effort', '')]
+        try:
+            rid = self.ledger.reserve(route['provider'], 'consolidator')['id']
+        except BudgetRefused as refusal:
+            self.ledger.emit('seat_failed', wave=wave, group='consolidator', route=label, error=refusal.reason)
+            return
+        try:
+            rows = self.ledger.events()
+            digests = [self.digest(rows, g['id'])[0] for g in self.manifest['groups']]
+            prompt = ('# Wave digest\n' + ''.join(digests) +
+                      '\nReply with exactly one fenced json block containing a list of claims with text, candidates and receipts arrays. Cite matching candidate ids and receipt digests.\n')
+            path = self.put('.oms/artifacts/campaigns/%s/consolidator/w%d/prompt.md' % (self.cid, wave), prompt.encode())
+            status, text = self.call(route, path.parent, path, started)
+            if status != 'ok':
+                self.ledger.emit('seat_failed', wave=wave, group='consolidator', route=label, error=text, reservation=rid)
+                self.ledger.settle(rid, status)
+                if status == 'refused': self.halt('outbound_refused')
+                return
+            blocks = parse_candidates(text, ['json'])
+            try:
+                claims = json.loads(blocks[0][1]) if len(blocks) == 1 and blocks[0][0] == 'json' else None
+            except (ValueError, TypeError, RecursionError):
+                claims = None
+            if not isinstance(claims, list): claims = [None]
+            candidates = {r['id'] for r in rows if r.get('type') == 'candidate_recorded'}
+            recorded = {r['id']: r.get('receipt_sha256') for r in rows if r.get('type') == 'candidate_verdict' and r.get('id') in candidates}
+            accepted, rejected, text_bytes = [], 0, 0
+            for claim in claims:
+                try:
+                    valid = (isinstance(claim, dict) and set(claim) == {'text', 'candidates', 'receipts'} and
+                             isinstance(claim['text'], str) and claim['text'].strip() and
+                             isinstance(claim['candidates'], list) and claim['candidates'] and
+                             isinstance(claim['receipts'], list) and len(claim['candidates']) == len(claim['receipts']) and
+                             all(isinstance(cid, str) and isinstance(receipt, str) and recorded.get(cid) == receipt and receipt is not None
+                                 for cid, receipt in zip(claim['candidates'], claim['receipts'])))
+                    size = len(claim['text'].encode('utf-8')) if valid else 0
+                    payload_size = len(json.dumps(accepted + [claim], ensure_ascii=False).encode('utf-8')) if valid else 0
+                    valid = (valid and size <= 4096 and len(accepted) < CLAIM_CAP and
+                             text_bytes + size <= CLAIM_TEXT_CAP and payload_size <= DIGEST_CAP)
+                except (TypeError, ValueError, UnicodeError, RecursionError):
+                    valid = False
+                if valid:
+                    accepted.append(claim)
+                    text_bytes += size
+                else: rejected += 1
+            self.ledger.emit('consolidation_recorded', wave=wave, claims=accepted, rejected_count=rejected)
+            self.ledger.settle(rid, 'ok')
+        except Exception as exc:
+            self.ledger.emit('seat_failed', wave=wave, group='consolidator', route=label, error=type(exc).__name__, reservation=rid)
+            self.ledger.settle(rid, 'error')
+
     def evaluate(self, cand):
         if cand['format'] not in ('patch', 'lean'): return {'verdict': 'unverified'}
         rel = '.oms/artifacts/campaigns/%s/%s.%s' % (self.cid, cand['sha256'], EXTENSIONS[cand['format']])
@@ -611,8 +684,13 @@ class Controller:
             verdicts = list(pool.map(self.evaluate, cands))
         winner = None
         for cand, v in zip(cands, verdicts):
-            self.ledger.emit('candidate_verdict', id=cand['id'], **v)
-            if v['verdict'] == 'pass' and winner is None: winner = (cand, v)
+            receipt = dict(v, candidate=cand['id'], sha256=cand['sha256'], base=self.manifest['base'])
+            receipt_sha256 = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            self.ledger.emit('candidate_verdict', id=cand['id'], receipt=receipt, receipt_sha256=receipt_sha256, **v)
+            if v['verdict'] == 'pass' and winner is None:
+                final = self.evaluate(cand)
+                if final['verdict'] == 'pass': winner = (cand, receipt, dict(final, candidate=cand['id'], sha256=cand['sha256'], base=self.manifest['base']))
+                else: self.ledger.emit('final_verify_failed', id=cand['id'], receipt=final)
         if self.stop_reason is None: self.ledger.emit('wave_completed', wave=wave, candidates=len(cands))
         return winner
 
@@ -630,6 +708,7 @@ class Controller:
             self.cid, 'solved' if solved else 'stopped (%s)' % stopped['reason'], sum(r.get('type') == 'wave_completed' for r in rows),
             spent['total_calls'], self.budget['total_calls'], left['total_calls'],
             ','.join('%s:%d' % kv for kv in sorted(counts.items())) or '-', solved['candidate'] if solved else '-'))
+        if solved and solved.get('command'): print(solved['command'])
         return code
 
 
@@ -642,7 +721,7 @@ def run_campaign(repo, state, directory, manifest, now):
         if stopped: return ctl.summary(rows, 2 if stopped.get('reason') == 'outbound_refused' else 3)
         ctl.ledger.abandon_unsettled()
         for r in rows:
-            if r.get('type') == 'seat_failed': ctl.dead.add(tuple(r['route']))
+            if r.get('type') == 'seat_failed' and r.get('group') != 'consolidator': ctl.dead.add(tuple(r['route']))
             elif r.get('type') == 'route_exhausted': ctl.dead_providers.add(r['provider'])
         started = epoch(rows[0]['started_at']) if rows[0].get('started_at') else now
         wave = sum(r.get('type') == 'wave_completed' for r in rows) + 1
@@ -654,12 +733,32 @@ def run_campaign(repo, state, directory, manifest, now):
             ctl.stop, ctl.stop_reason = threading.Event(), None
             winner = ctl.wave(wave, started)
             if winner:
-                cand, verdict = winner
-                ctl.finish('campaign_solved', candidate=cand['id'], sha256=cand['sha256'], receipt={'verdict': 'pass', 'exit_code': verdict['exit_code'], 'base': manifest['base']})
+                cand, receipt, final_receipt = winner
+                artifact = ctl.state / ('.oms/artifacts/campaigns/%s/%s.%s' % (ctl.cid, cand['sha256'], EXTENSIONS[cand['format']]))
+                command = 'oms patch-admit --repo %s --patch %s --verify %s' % tuple(shlex.quote(str(x)) for x in (ctl.repo, artifact, manifest['verify']['command'])) if cand['format'] == 'patch' else ''
+                handoff = {'candidate': str(artifact), 'sha256': cand['sha256'], 'base': manifest['base'], 'verify': manifest['verify']['command'], 'receipt': receipt, 'final_receipt': final_receipt, 'command': command}
+                ctl.put('.oms/plan/campaigns/%s/handoff.json' % ctl.cid, (json.dumps(handoff, sort_keys=True) + '\n').encode())
+                ctl.finish('campaign_solved', candidate=cand['id'], sha256=cand['sha256'], receipt=receipt, final_receipt=final_receipt, command=command)
                 return ctl.summary(ctl.ledger.events(), 0)
             if ctl.stop_reason: reason = ctl.stop_reason; break
             if wave >= budget['max_waves']: break
             if wave >= budget['stall_waves']: reason = 'stall'; break
+            if ctl.remaining(started) <= 0: reason = 'deadline'; break
+            reservations = [r for r in ctl.ledger.events() if r.get('type') == 'reservation']
+            route = manifest.get('consolidator')
+            seat_room = sum(r.get('kind') == 'seat' for r in reservations) < ctl.seat_limit
+            call_room = len(reservations) + 1 < budget['total_calls']
+            available = False
+            if route and seat_room and call_room:
+                caps = budget.get('per_provider', {})
+                for group in manifest['groups']:
+                    for candidate_route in ctl.live(group):
+                        provider = candidate_route['provider']
+                        spent = sum(r['provider'] == provider for r in reservations)
+                        spent += int(provider == route['provider'])
+                        if spent < caps.get(provider, {}).get('calls', budget['total_calls']): available = True
+            if available: ctl.consolidate(wave, started)
+            if ctl.stop_reason: reason = ctl.stop_reason; break
             wave += 1
         ctl.finish('campaign_stopped', reason=reason)
         return ctl.summary(ctl.ledger.events(), 2 if reason == 'outbound_refused' else 3)
@@ -667,7 +766,7 @@ def run_campaign(repo, state, directory, manifest, now):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--repo',required=True); parser.add_argument('--campaign',required=True); parser.add_argument('--dry-run',action='store_true'); parser.add_argument('--state-repo')
+    parser.add_argument('--repo',required=True); parser.add_argument('--campaign',required=True); parser.add_argument('--dry-run',action='store_true'); parser.add_argument('--status',action='store_true'); parser.add_argument('--state-repo')
     args = parser.parse_args()
     try:
         with open(args.campaign, encoding='utf-8') as stream:
@@ -680,6 +779,33 @@ def main():
                 result[key] = value
             return result
         manifest = json.loads(data, object_pairs_hook=pairs)
+        if args.status:
+            if args.dry_run: error('--dry-run and --status are mutually exclusive')
+            if not args.state_repo: error('--state-repo is required')
+            canonical = json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')
+            cid = hashlib.sha256(canonical).hexdigest()[:16]
+            directory = Path(args.state_repo).resolve() / '.oms/plan/campaigns' / cid
+            ledger = Ledger(directory)
+            for attempt in range(3):
+                try:
+                    rows = ledger._rows()
+                    break
+                except ValueError as exc:
+                    if attempt == 2 or 'durable storage validation failed' not in str(exc): raise
+            reservations = [r for r in rows if r.get('type') == 'reservation']
+            solved = next((r for r in rows if r.get('type') == 'campaign_solved'), None)
+            stopped = next((r for r in reversed(rows) if r.get('type') == 'campaign_stopped'), None)
+            state = 'solved' if solved else 'stopped (%s)' % stopped['reason'] if stopped else 'running'
+            print('campaign %s: %s waves=%d calls=%d/%d remaining=%d last_event=%s winner=%s' %
+                  (cid, state, sum(r.get('type') == 'wave_completed' for r in rows), len(reservations),
+                   ledger.budget['total_calls'], max(0, ledger.budget['total_calls'] - len(reservations)),
+                   rows[-1]['type'], solved['candidate'] if solved else '-'))
+            for provider in sorted(ledger.providers):
+                count = sum(r.get('provider') == provider for r in reservations)
+                cap = ledger.budget.get('per_provider', {}).get(provider, {}).get('calls', ledger.budget['total_calls'])
+                print('provider %s: calls=%d/%d remaining=%d' % (provider, count, cap, max(0, cap-count)))
+            if solved and solved.get('command'): print(solved['command'])
+            return 0
         if args.dry_run:
             projection, _ = validate(args.repo,manifest)
             print(json.dumps(projection, sort_keys=True, indent=2))
