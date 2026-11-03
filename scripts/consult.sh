@@ -52,6 +52,8 @@ Options:
   --prompt TEXT        The question. A bare argument works too.
   --prompt-file PATH   Read the question from a file.
   --repo PATH          Repo for context and state. Default: PWD.
+  --repo-context       Attach sanitized git status only.
+  --diff               Attach sanitized git status and diff.
   --artifact-dir PATH  Answer artifacts. Default: REPO/.oms/artifacts/consult.
   --to TARGET          Ask this target instead of the automatic pick. Repeatable.
                        TARGET is PROVIDER or PROVIDER:model=NAME for an exact
@@ -89,6 +91,8 @@ fail() { echo "error: $*" >&2; exit 2; }
 # packet stays on: it frames what is being worked on, not what was concluded.
 INCLUDE_MEMORY=0
 INCLUDE_TASK=1
+INCLUDE_STATUS=0
+INCLUDE_DIFF=0
 DRY_RUN=0
 
 while [ "$#" -gt 0 ]; do
@@ -96,6 +100,8 @@ while [ "$#" -gt 0 ]; do
     --prompt) [ "$#" -ge 2 ] || fail "--prompt requires text"; PROMPT="$2"; shift 2 ;;
     --prompt-file) [ "$#" -ge 2 ] || fail "--prompt-file requires a path"; PROMPT_FILE="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
+    --repo-context) INCLUDE_STATUS=1; shift ;;
+    --diff) INCLUDE_STATUS=1; INCLUDE_DIFF=1; shift ;;
     --artifact-dir) [ "$#" -ge 2 ] || fail "--artifact-dir requires a path"; ARTIFACT_DIR="$2"; shift 2 ;;
     --to)
       [ "$#" -ge 2 ] || fail "--to requires a target"
@@ -147,6 +153,32 @@ if [ "$EXPLICIT_MODEL_OPTION" -eq 1 ]; then
 fi
 
 oms_require_peer_owner || exit $?
+
+artifact_dir_tmp="$(mktemp -d)" || fail "mktemp failed"
+trap 'rm -rf "$artifact_dir_tmp"' EXIT
+original_question=""
+if [ "$INCLUDE_STATUS" -eq 1 ]; then
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
+  original_question="$artifact_dir_tmp/original-question"
+  if [ -n "$PROMPT_FILE" ]; then cat "$PROMPT_FILE" > "$original_question"
+  else printf '%s\n' "$PROMPT" > "$original_question"; fi
+  context_prompt="$artifact_dir_tmp/question"
+  cat "$original_question" > "$context_prompt"
+  printf '\nGit status:\n' >> "$context_prompt"
+  ma_safe_status "$REPO" >> "$context_prompt" || fail "git status failed for $REPO"
+  if [ "$INCLUDE_DIFF" -eq 1 ]; then
+    printf '\nDiff:\n' >> "$context_prompt"
+    diff_rc=0
+    ma_safe_diff "$REPO" >> "$context_prompt" || diff_rc=$?
+    case "$diff_rc" in
+      0) ;;
+      3) echo 'external consult skipped: sensitive-looking diff content detected' >&2; exit 3 ;;
+      4) echo 'external consult skipped: sensitive-content scan failed' >&2; exit 3 ;;
+      *) fail "git diff failed for $REPO" ;;
+    esac
+  fi
+  PROMPT_FILE="$context_prompt"
+fi
 
 CONSULT_PROVIDER_PREFERENCE=""
 if [ "${#TARGETS_EXPLICIT[@]}" -eq 0 ] && [ "$ALL" -eq 0 ] &&
@@ -214,7 +246,8 @@ call_one() {
   fi
   args+=(${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"})
 
-  ma_call_read_peer "$artifact_out" "$DRY_RUN" "${args[@]}" || rc=$?
+  OMS_THREAD_RECORD_QUESTION_FILE="$original_question" \
+    ma_call_read_peer "$artifact_out" "$DRY_RUN" "${args[@]}" || rc=$?
   # Present only this call's answer, never a replay of unrelated thread turns.
   if [ "$rc" -eq 0 ] && [ "$QUIET" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] &&
      [ "${OH_MY_SETTING_CALL_DRY_RUN:-0}" != 1 ] && [ -s "$artifact_out" ]; then
@@ -324,7 +357,8 @@ usable=0
 if [ "${#targets[@]}" -gt 1 ]; then
   question_turn="$(agent_memory_mktemp)" || question_turn=""
   if [ -n "$question_turn" ]; then
-    if [ -n "$PROMPT_FILE" ]; then cat "$PROMPT_FILE" > "$question_turn"
+    if [ -n "$original_question" ]; then cat "$original_question" > "$question_turn"
+    elif [ -n "$PROMPT_FILE" ]; then cat "$PROMPT_FILE" > "$question_turn"
     else printf '%s\n' "$PROMPT" > "$question_turn"; fi
     bash "$THREAD_SH" --repo "$REPO" --id "$thread" append --role question \
       --text-file "$question_turn" >/dev/null 2>&1 &&
@@ -332,9 +366,6 @@ if [ "${#targets[@]}" -gt 1 ]; then
     rm -f "$question_turn"
   fi
 fi
-artifact_dir_tmp="$(mktemp -d)" || fail "mktemp failed"
-trap 'rm -rf "$artifact_dir_tmp"' EXIT
-
 if [ "${#targets[@]}" -eq 1 ]; then
   if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
     call_one "${targets[0]}" "$artifact_dir_tmp/0" || status=$?

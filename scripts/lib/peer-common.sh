@@ -2402,6 +2402,9 @@ ma_thread_append() {
   local model="${6:-}" artifact="${7:-}" quality="${8:-}"
   local args
 
+  if [ "$role" = question ] && [ -n "${OMS_THREAD_RECORD_QUESTION_FILE:-}" ]; then
+    text_file="$OMS_THREAD_RECORD_QUESTION_FILE"
+  fi
   [ -n "$thread" ] || return 0
   [ -s "$text_file" ] || return 0
   ma_thread_ensure "$repo" "$thread" || return 0

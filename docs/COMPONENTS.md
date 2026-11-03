@@ -370,6 +370,10 @@ preview/import flow for bundles. Automatic draft generation is not required.
 | Diff review | `oms peer-review --gate` | Verdicts plus mechanical backstop |
 | High-risk decision | `oms advise` | Adversarial recommendation |
 
+`oms consult --repo-context` attaches sanitized git status to that question;
+`--diff` also attaches the sanitized, budgeted diff. Follow-up questions retain
+the thread and attach fresh repository context only when requested.
+
 Blocking review gates default to 192 KiB; set `OMS_PROMPT_DIFF_BYTES` to raise the
 complete-diff budget, increasing prompt usage and provider cost.
 

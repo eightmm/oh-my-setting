@@ -4996,7 +4996,7 @@ test_peer_review_secret_diff_skips_external() {
     -c user.email=test@example.com \
     -c user.name='Test User' \
     commit -m init >/dev/null
-  printf 'api_%s = "not-real"\n' 'key' >> "$project/file.txt"
+  printf 'api_%s%s = "not-real"\n' 'ke' 'y' >> "$project/file.txt"
 
   if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
@@ -5467,7 +5467,7 @@ test_peer_ask_secret_diff_skips_external() {
     -c user.email=test@example.com \
     -c user.name='Test User' \
     commit -m init >/dev/null
-  printf 'api_%s = "not-real"\n' 'key' >> "$project/file.txt"
+  printf 'api_%s%s = "not-real"\n' 'ke' 'y' >> "$project/file.txt"
 
   if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
@@ -29672,15 +29672,17 @@ test_consult_asks_a_peer_and_keeps_the_thread() {
   local out id
 
   make_committed_repo "$project"
+  printf 'changed split policy\n' >> "$project/file.txt"
   mkdir -p "$bin_dir"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/codex"
   chmod +x "$bin_dir/codex"
 
   out="$(cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
     OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
-    "$ROOT/scripts/consult.sh" --repo "$project" "which split policy?" --quiet)" ||
+    "$ROOT/scripts/consult.sh" --repo "$project" --diff "which split policy?" --quiet)" ||
     fail "consult should succeed: $out"
   contains "$out" 'thread: ' || fail "consult should report its thread: $out"
+  assert_one_artifact_contains "$project/.oms/artifacts/consult" '*which-split-policy*.md' '+changed split policy'
 
   id="$("$ROOT/scripts/thread.sh" --repo "$project" current)"
   [ -n "$id" ] || fail "consult should leave a current thread"
@@ -29689,6 +29691,7 @@ import json, sys
 turns = json.load(sys.stdin)["turns"]
 roles = [t["role"] for t in turns]
 assert "question" in roles and "answer" in roles, roles
+assert [t["text"] for t in turns if t["role"] == "question"] == ["which split policy?"]
 answer = [t for t in turns if t["role"] == "answer"][0]
 # The peer must not be the caller: that is what makes it a second opinion.
 assert answer.get("provider") != "claude", answer
@@ -29700,6 +29703,36 @@ assert answer.get("provider") != "claude", answer
     "$ROOT/scripts/consult.sh" --repo "$project" "and for the test split?" --quiet >/dev/null )
   [ "$("$ROOT/scripts/thread.sh" --repo "$project" current)" = "$id" ] ||
     fail "a follow-up consult should stay in the same thread"
+  if grep -Fq '+changed split policy' "$project"/.oms/artifacts/consult/*and-for-the-test-split*.md; then
+    fail "a follow-up should not replay the previous diff"
+  fi
+
+  printf 'panel question\n' > "$TMP/consult-question"
+  ( cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
+    OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+    "$ROOT/scripts/consult.sh" --repo "$project" --new-thread --to codex --to claude \
+      --diff --prompt-file "$TMP/consult-question" --dry-run --quiet >/dev/null )
+  "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
+import json, sys
+turns = json.load(sys.stdin)["turns"]
+assert [t["text"] for t in turns if t["role"] == "question"] == ["panel question"]
+' || fail "panel should record the original question only"
+
+  ( cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
+    OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+    "$ROOT/scripts/consult.sh" --repo "$project" --new-thread --repo-context 'status only' --quiet >/dev/null )
+  assert_one_artifact_contains "$project/.oms/artifacts/consult" '*status-only*.md' 'file.txt'
+  if grep -Fq '+changed split policy' "$project"/.oms/artifacts/consult/*status-only*.md; then
+    fail "status-only context should omit the diff"
+  fi
+
+  printf 'api_%s = "not-real"\n' 'key' >> "$project/file.txt"
+  if ( cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
+    OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+    "$ROOT/scripts/consult.sh" --repo "$project" --diff 'blocked diff' --quiet >"$TMP/consult-blocked" 2>&1 ); then
+    fail "sensitive diff should block consult"
+  fi
+  assert_file_contains "$TMP/consult-blocked" 'sensitive-looking diff content detected'
 }
 
 test_consult_rejects_conflicting_targets() {
