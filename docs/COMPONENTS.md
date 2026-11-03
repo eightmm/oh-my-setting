@@ -417,6 +417,17 @@ is the shared preflight, not a lock across an entire provider call.
 There is one parallel council, not a separate sequential scheduler, persistent
 provider session, token stream, or mid-generation interruption.
 
+`oms panel --council --lenses correctness,security,compatibility` assigns one
+blind seat per unique `[a-z0-9-]+` name of 1..32 characters, cycling over the
+selected workload's exact council routes. It requires 2..12 seats, two provider families and
+`--rounds 0` (the default with lenses). Fresh run threads and distinct seat
+identities keep repeated targets apart through prompts, artifacts, repairs,
+thread turns and local synthesis. Zero rebuttals retain the full deliberation
+output contract. Failed and byte-budget-omitted seats remain labelled; the
+12-primary-call budget and existing transport apply. Ordinary councils retain
+their existing behavior without this panel-only flag. `--rounds` requires
+`--council`, including an explicit `--rounds 1`.
+
 Claude read calls retain public assistant text from `stream-json --verbose`
 alongside the terminal result, so a closing remark cannot erase earlier
 evidence. User/tool/thinking/subagent events are not answers; absent terminal

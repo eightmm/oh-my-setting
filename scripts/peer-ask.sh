@@ -25,6 +25,9 @@ INCLUDE_ML_CONTEXT=0
 DEBATE=0
 REQUIRE_COMPLETE=0
 MA_DELIBERATION=0
+# Internal panel metadata; the public lens option belongs to panel --council.
+MA_COUNCIL_LENSES="${OMS_COUNCIL_LENSES:-}"
+MA_COUNCIL_LENS_NAMES=()
 HYPOTHESIS_PRESET=0
 EXPORT_ONLY=0
 MODEL=""
@@ -107,9 +110,9 @@ validate_provider_list() {
   local normalized
   local expanded
   # Tiers first, then normalize: expansion produces the targets, normalization
-  # canonicalizes the agy alias and rejects the same target twice.
+  # canonicalizes aliases. Lens assignments are checked against the final list below.
   expanded="$(ma_expand_targets "$PROVIDERS")" || exit $?
-  normalized="$(ma_normalize_provider_list "$expanded" ask)" || exit $?
+  normalized="$(ma_normalize_provider_list "$expanded" ask "${MA_COUNCIL_LENSES:+lenses}")" || exit $?
   PROVIDERS="$normalized"
 }
 
@@ -154,7 +157,7 @@ write_prompt() {
       cat "$diff_file"
       printf '\n'
     fi
-    if [ "$DEBATE" -gt 0 ]; then
+    if [ "$DEBATE" -gt 0 ] || [ "$MA_DELIBERATION" = 1 ]; then
       ma_debate_output_contract
     else
       printf '\nUnless the question explicitly requests another format, use these sections:\n'
@@ -245,6 +248,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--debate requires round count"
       case "$2" in
         1|2|3) DEBATE="$2" ;;
+        0) [ -n "$MA_COUNCIL_LENSES" ] || fail "--debate must be 1-3"; DEBATE=0 ;;
         *) fail "--debate must be 1-3" ;;
       esac
       shift 2
@@ -284,7 +288,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$MA_DELIBERATION" = 1 ]; then
-  [ "$DEBATE" -gt 0 ] || fail "--deliberation requires --debate"
+  [ "$DEBATE" -gt 0 ] || [ -n "$MA_COUNCIL_LENSES" ] || fail "--deliberation requires --debate"
   MA_DEBATE_SECTIONS=$'Answer:\nAlternatives:\nEvidence:\nCounterargument:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:'
 fi
 if [ "$REQUIRE_COMPLETE" = 1 ] && { [ "$EXPORT_ONLY" = 1 ] || [ "$DRY_RUN" = 1 ]; }; then
@@ -295,6 +299,20 @@ if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 validate_provider_list
+if [ -n "$MA_COUNCIL_LENSES" ]; then
+  python3 - "$MA_COUNCIL_LENSES" "$PROVIDERS" <<'PY_LENSES' || exit 2
+import re, sys
+names, targets = sys.argv[1].split(","), sys.argv[2].split(",")
+if not (2 <= len(names) <= 12 and len(names) == len(targets)
+        and len(set(names)) == len(names)
+        and all(re.fullmatch(r"[a-z0-9-]{1,32}", name) for name in names)):
+    raise SystemExit("error: invalid panel council lenses or seat assignments (names require 1..32 characters)")
+PY_LENSES
+  [ "$DEBATE" = 0 ] && [ "$MA_DELIBERATION" = 1 ] && [ "$EXPORT_ONLY" = 0 ] ||
+    fail "panel council lenses require zero-round deliberation with live answers"
+  IFS=',' read -r -a MA_COUNCIL_LENS_NAMES <<< "$MA_COUNCIL_LENSES"
+  unset OMS_RESUME_SESSION OMS_PANEL_FALLBACK_PROVIDER OMS_PANEL_FALLBACK_MODEL OMS_PANEL_FALLBACK_EFFORT
+fi
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -400,7 +418,7 @@ if [ -n "$THREAD_ID" ] && [ "$EXPORT_ONLY" -eq 0 ]; then
   echo "thread: $THREAD_ID"
 fi
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$status_file" "$diff_file"
-if [ -n "$THREAD_ID" ]; then
+if [ -n "$THREAD_ID" ] && [ -z "$MA_COUNCIL_LENSES" ]; then
   thread_prompt="$(agent_memory_mktemp)" || thread_prompt=""
   if [ -n "$thread_prompt" ]; then
     { ma_write_thread_context "$REPO" "$THREAD_ID"; cat "$prompt_file"; } > "$thread_prompt"

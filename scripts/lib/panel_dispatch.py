@@ -2920,9 +2920,20 @@ def _print_dispatch_next_ready(repo, owner):
         pass
 
 
-def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workload="deep"):
+def council_command(repo, prompt, task_id, label, thread=None, rounds=None, workload="deep", lenses=None):
     from terminal_panel import ENTRY, MAX_PROMPT, PROVIDERS, policy, safe_label
-    if not 1 <= rounds <= 2:
+    rounds = (0 if lenses is not None else 1) if rounds is None else rounds
+    if lenses is not None:
+        names = lenses.split(",")
+        if any(not re.fullmatch(r"[a-z0-9-]{1,32}", name) for name in names):
+            raise ValueError("council lenses must match [a-z0-9-]+ with 1..32 characters per name")
+        if not 2 <= len(names) <= 12:
+            raise ValueError("council lenses require 2..12 seats")
+        if len(set(names)) != len(names):
+            raise ValueError("council lenses must be unique")
+        if rounds != 0:
+            raise ValueError("council --lenses requires --rounds 0")
+    elif not 1 <= rounds <= 2:
         raise ValueError("council rounds must be 1 or 2")
     if not task_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
         raise ValueError("council needs a valid task ID")
@@ -2971,28 +2982,37 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
                 seats.append(dict(extra, model=model, optional=True))
                 continue
         print("council: %s seat skipped: %s" % (provider, reason), file=sys.stderr)
+    if lenses is not None:
+        seats = [seats[index % len(seats)] for index in range(len(names))]
+        if len({item["provider"] for item in seats}) < 2:
+            raise ValueError("council tier must include two independent provider families")
     targets = ",".join(item["provider"] + ":model=" + item["model"] + (":optional" if item.get("optional") else "") for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),
             "--providers", targets, "--debate", str(rounds), "--deliberation",
             "--require-complete", "--no-task", "--no-memory", "--reasoning-effort", "high", "--prompt", prompt]
-    thread = thread or "panel-council-" + uuid.uuid5(uuid.NAMESPACE_URL, task_id).hex[:24]
-    if thread:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", thread):
-            raise ValueError("invalid council thread ID")
-        argv += ["--thread", thread]
+    if thread and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", thread):
+        raise ValueError("invalid council thread ID")
+    if lenses is not None:
+        thread = (thread or "panel-council")[:126] + "-" + uuid.uuid4().hex
+    else:
+        thread = thread or "panel-council-" + uuid.uuid5(uuid.NAMESPACE_URL, task_id).hex[:24]
+    argv += ["--thread", thread]
     return argv
 
 
-def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False, workload="deep"):
+def council(repo, owner, task_id, label, prompt, thread=None, rounds=None, dry_run=False, workload="deep", lenses=None):
     from terminal_panel import MAIN_OWNERS, active_mains, child_environment, council_command, events, safe_label, provider_catalog
     from terminal_panel import update_activity
     if owner not in MAIN_OWNERS:
         owner = provider_catalog(owner)[0]["provider"]
-    argv = council_command(repo, prompt, task_id, label, thread, rounds, workload)
+    if lenses is None:
+        argv = council_command(repo, prompt, task_id, label, thread, rounds, workload)
+    else:
+        argv = council_command(repo, prompt, task_id, label, thread, rounds, workload, lenses=lenses)
     # Advertise the seats actually launched: route tiers may hold fewer or more than two entries.
     seats = argv[argv.index("--providers") + 1].split(",")
     families = len({seat.split(":", 1)[0] for seat in seats})
-    primary_calls = len(seats) * (rounds + 1)
+    primary_calls = len(seats) * (int(argv[argv.index("--debate") + 1]) + 1)
     if dry_run:
         print(json.dumps({"schema": 1, "kind": "oms-panel-council-plan", "argv": argv,
                           "seats": len(seats), "families": families, "primary_calls": primary_calls,
@@ -3000,6 +3020,9 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
                           "executes": False}))
         return 0
     env = child_environment(owner, repo)
+    env.pop("OMS_COUNCIL_LENSES", None)
+    if lenses is not None:
+        env["OMS_COUNCIL_LENSES"] = lenses
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     room_id = room.resolve(repo, env.get("OMS_ROOM_ID"))
     if room_id:

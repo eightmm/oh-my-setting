@@ -2407,7 +2407,7 @@ ma_thread_ensure() {
 ma_thread_append() {
   local repo="$1" thread="$2" role="$3" text_file="$4" provider="${5:-}"
   local model="${6:-}" artifact="${7:-}" quality="${8:-}"
-  local args
+  local args seat_text=""
 
   if [ "$role" = question ] && [ -n "${OMS_THREAD_RECORD_QUESTION_FILE:-}" ]; then
     text_file="$OMS_THREAD_RECORD_QUESTION_FILE"
@@ -2421,6 +2421,11 @@ ma_thread_append() {
   if [ "$role" = answer ] && [ -z "$quality" ] && [ -n "$artifact" ] && [ -f "$artifact" ]; then
     quality="$(ma_answer_quality "$artifact")"
   fi
+  if [ -n "${MA_COUNCIL_SEAT:-}" ] && [ "$role" != question ]; then
+    seat_text="$(agent_memory_mktemp)" || return 0
+    { printf '%s\n\n' "$MA_COUNCIL_SEAT"; cat "$text_file"; } > "$seat_text"
+    text_file="$seat_text"
+  fi
   args=(--repo "$repo" --id "$thread" append --role "$role" --text-file "$text_file")
   [ -z "$provider" ] || args+=(--provider "$provider")
   [ -z "$model" ] || args+=(--model "$model")
@@ -2428,8 +2433,9 @@ ma_thread_append() {
   [ -z "$quality" ] || args+=(--quality "$quality")
   bash "$(ma_scripts_dir)/thread.sh" "${args[@]}" >/dev/null 2>&1 || {
     echo "note: thread turn not recorded (see $thread)" >&2
-    return 0
   }
+  [ -z "$seat_text" ] || rm -f "$seat_text"
+  return 0
 }
 
 # Record a completed call as question + answer turns. The answer goes through
@@ -2494,6 +2500,7 @@ ma_thread_append_nonanswer() {
 # council must not fail because its bookkeeping did.
 ma_record_seat_failure() {
   local provider="${1%:optional}" status="$2" evidence guard_reason="${3:-}"
+  local seat_label="${4:-$provider}"
 
   # A dry run never called the provider. Durable failure memory must not carry a
   # failure that never happened.
@@ -2522,14 +2529,14 @@ EOF
     "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
       --cmd "peer-${MA_KIND:-call} read guard" --exit "$status" \
       --failure-code read_guard_changed \
-      --summary "read guard rejected completed $provider answer: $guard_reason" \
+      --summary "read guard rejected completed $seat_label answer: $guard_reason" \
       --next "a concurrent writer (often the owner's finalize) changed protected state; re-run the review" \
       >/dev/null 2>&1 || true
     return 0
   fi
   "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
     --cmd "peer-${MA_KIND:-call} seat $provider" --exit "$status" \
-    --summary "$provider ${MA_KIND:-call} seat returned no answer (exit $status)" \
+    --summary "$seat_label ${MA_KIND:-call} seat returned no answer (exit $status)" \
     --next "check the provider CLI, raise OMS_PEER_TIMEOUT, or drop the seat" \
     >/dev/null 2>&1 || true
 }
@@ -4026,8 +4033,9 @@ PY
   return "$status"
 }
 
-# Return a canonical comma list with one independent entry per provider.
-# agy is an alias for antigravity, not another quorum member.
+# Return canonical targets; agy is an alias, not another quorum member.
+# Ask lens mode permits repeats, then validates one lens per normalized target
+# before dispatch. Other callers retain duplicate-target refusal.
 ma_normalize_provider_list() {
   local raw="$1"
   local entry
@@ -4050,7 +4058,10 @@ ma_normalize_provider_list() {
     case "$canonical" in *:optional) ;; *) required=1 ;; esac
     entry="${canonical%:optional}"
     case "$seen" in
-      *",$entry,"*) echo "error: duplicate target: $canonical" >&2; return 2 ;;
+      *",$entry,"*)
+        if [ "$mode" != ask ] || [ "${3:-}" != lenses ]; then
+          echo "error: duplicate target: $canonical" >&2; return 2
+        fi ;;
     esac
     seen="$seen$entry,"
     if [ -n "$output" ]; then output="$output,$canonical"; else output="$canonical"; fi
@@ -5210,8 +5221,15 @@ PY_SEAT
   fi
 
   status=0
+  # Keep exact council target history alongside the routed runner's CLI health.
+  if [ -n "$target_model" ]; then
+    ma_warn_known_seat_failures "$target" "$artifact"
+  fi
   ma_run_routed_provider "$provider" read "$prompt_file" "$artifact" "$(ma_read_source_repo "${REPO:-$PWD}")" \
     "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}" || status=$?
+  if [ "$status" -eq 0 ] && [ -n "$target_model" ] && [ "${OMS_MODEL_FALLBACK_USED:-0}" != 1 ]; then
+    ma_resolve_seat_recovery "$target"
+  fi
 
   # A panel provider fallback ran the call elsewhere; the row names who answered.
   provider="${OMS_PROVIDER_SELECTED:-$provider}"
@@ -5323,9 +5341,24 @@ ma_council_answer_artifact() {
   if [ -f "$repair" ]; then printf '%s\n' "$repair"; else printf '%s\n' "$1"; fi
 }
 
+ma_council_seat_label() {
+  local index="$1" target="${2:-${provider_names[$1]}}"
+  if [ -n "${MA_COUNCIL_LENSES:-}" ]; then
+    printf 'seat-%02d (lens: %s, target: %s)\n' "$((index + 1))" "${MA_COUNCIL_LENS_NAMES[index]}" "$target"
+  else
+    printf '%s\n' "$target"
+  fi
+}
+
 # Thread publication happens in the completing child, not in PID wait order.
 ma_council_call() {
   local rc=0 quality tmp missing repair rejected quote prompt cap quote_bytes repair_rc=0
+  local MA_COUNCIL_SEAT="${4:-}"
+  local seat_lens="${5:-}"
+  if [ -n "$MA_COUNCIL_SEAT" ]; then
+    local OMS_PANEL_LABEL="$MA_COUNCIL_SEAT"
+    export OMS_PANEL_LABEL
+  fi
   run_provider "$1" "$2" "$3" || rc=$?
   quality=""
   if [ "${MA_DELIBERATION:-0}" = 1 ] ||
@@ -5349,6 +5382,9 @@ ma_council_call() {
         OMS_PROMPT_QUOTE_BYTES="$((quote_bytes + 4096))" ma_sanitize_quoted_output < "$quote" > "$tmp"
         prompt="$(agent_memory_mktemp)" || { rm -f "$quote" "$tmp"; return 2; }
         {
+          if [ -n "$MA_COUNCIL_SEAT" ]; then
+            printf '%s\nReview only through the %s lens.\n\n' "$MA_COUNCIL_SEAT" "$seat_lens"
+          fi
           printf 'Deliberation repair: your previous answer is missing these required headings:\n%s\n\n' "$missing"
           printf 'Restate the same conclusions under every heading below, in order. Do not add new claims.\n'
           printf 'Answer:\nAlternatives:\nEvidence:\nCounterargument:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:\n\n'
@@ -5391,6 +5427,7 @@ ma_council_call() {
 # seat_quality, seat_reason, seat_exit.
 ma_run_round1() {
   local provider artifact i provider_list quality rc guard_reason evidence_file
+  local seat_id seat_label seat_prompt seat_lens
   if [ "${DEBATE:-0}" -gt 0 ]; then
     ma_prepare_council_context || return 2
   fi
@@ -5419,7 +5456,22 @@ ma_run_round1() {
     # Include the model label so a panel that asks one CLI twice does not write
     # both answers to the same name.
     artifact="$ARTIFACT_DIR/$(ma_target_label "$provider" "$(ma_target_model "$provider")")-$slug-$timestamp.md"
-    ma_council_call "$provider" "$prompt_file" "$artifact" &
+    seat_label=""
+    seat_lens=""
+    seat_prompt="$prompt_file"
+    if [ -n "${MA_COUNCIL_LENSES:-}" ]; then
+      printf -v seat_id 'seat-%02d' "$total"
+      seat_label="$(ma_council_seat_label "$((total - 1))" "$provider")"
+      seat_lens="${MA_COUNCIL_LENS_NAMES[total - 1]}"
+      seat_prompt="$OMS_LIB_TMPDIR/$seat_id.prompt"
+      {
+        printf '%s\nReview only through the %s lens. This is a blind opening; do not consult other seats.\n\n' \
+          "$seat_label" "$seat_lens"
+        cat "$prompt_file"
+      } > "$seat_prompt"
+      artifact="$ARTIFACT_DIR/$seat_id-${MA_COUNCIL_LENS_NAMES[total - 1]}-$(basename "$artifact")"
+    fi
+    ma_council_call "$provider" "$seat_prompt" "$artifact" "$seat_label" "$seat_lens" &
     pids+=("$!")
     artifacts+=("$artifact")
     provider_names+=("$provider")
@@ -5454,7 +5506,7 @@ ma_run_round1() {
       # appeared in no list at all, only as the silent differential in
       # "2/3 providers succeeded".
       failed=$((failed + 1))
-      failed_names+=("${provider_names[i]} (exit $rc)")
+      failed_names+=("$(ma_council_seat_label "$i") (exit $rc)")
       guard_reason=""
       [ ! -s "${artifacts[i]}.read-guard" ] || guard_reason="$(head -n 1 "${artifacts[i]}.read-guard" | tr -d '\r')"
       evidence_file="${artifacts[i]}.outbound-evidence"
@@ -5464,7 +5516,7 @@ ma_run_round1() {
       else
         MA_OUTBOUND_EVIDENCE=""
       fi
-      ma_record_seat_failure "${provider_names[i]}" "$rc" "$guard_reason"
+      ma_record_seat_failure "${provider_names[i]}" "$rc" "$guard_reason" "${MA_COUNCIL_LENSES:+$(ma_council_seat_label "$i")}"
       MA_OUTBOUND_EVIDENCE=""
       continue
     fi
@@ -5481,13 +5533,13 @@ ma_run_round1() {
     # count that includes a non-answer is the lie this check exists to stop.
     alive[i]=0
     nonanswers=$((nonanswers + 1))
-    nonanswer_names+=("${provider_names[i]}")
+    nonanswer_names+=("$(ma_council_seat_label "$i")")
     seat_quality[i]="$quality"
     case "${provider_names[i]}" in *:optional) seat_optional_failure[i]="$quality" ;; esac
-    echo "note: ${provider_names[i]} did not really answer ($quality)" >&2
+    echo "note: $(ma_council_seat_label "$i") did not really answer ($quality)" >&2
     if [ "$quality" = blocked ]; then
       seat_reason[i]="$(ma_answer_block_reason "${artifacts[i]}")"
-      echo "note: ${provider_names[i]} said: ${seat_reason[i]}" >&2
+      echo "note: $(ma_council_seat_label "$i") said: ${seat_reason[i]}" >&2
     fi
   done
 }
@@ -5985,12 +6037,12 @@ ma_write_synthesis() {
     printf '\n```\n\n'
     for i in "${!artifacts[@]}"; do
       if [ -n "${seat_optional_failure[i]:-}" ]; then
-        printf '## %s seat failed (optional): %s\n\n' "${provider_names[i]%:optional}" "${seat_optional_failure[i]}"
+        printf '## %s seat failed (optional): %s\n\n' "$(ma_council_seat_label "$i" "${provider_names[i]%:optional}")" "${seat_optional_failure[i]}"
         if [ "${seat_exit[i]:-0}" != 0 ] || [ -n "${seat_quality[i]:-}" ]; then
           continue
         fi
       else
-        printf '## %s\n\n' "${provider_names[i]}"
+        printf '## %s\n\n' "$(ma_council_seat_label "$i")"
       fi
       # This loop walks every seat, alive or not, so a dropped seat's body would
       # still be read here as one more opinion. Name it instead of pasting it.
@@ -6026,7 +6078,7 @@ ma_write_synthesis() {
         printf '_final answer after debate_\n\n'
       fi
       if [ "$quoted" -ge "$quote_limit" ]; then
-        printf 'seat %s: answer omitted by the synthesis byte budget; full answer: %s\n\n' "${provider_names[i]}" "$pointer"
+        printf 'seat %s: answer omitted by the synthesis byte budget; full answer: %s\n\n' "$(ma_council_seat_label "$i")" "$pointer"
         continue
       fi
       quoted=$((quoted + 1))
@@ -6034,7 +6086,7 @@ ma_write_synthesis() {
       if grep -Fq '[TRUNCATED: provider output omitted ' "$quote"; then
         printf '[Full answer: %s]\n' "$pointer"
       fi
-      ma_untrusted_block "${provider_names[i]}" "peer answer" < "$quote"
+      ma_untrusted_block "$(ma_council_seat_label "$i")" "peer answer" < "$quote"
       printf '\n'
     done
   } > "$rendered"

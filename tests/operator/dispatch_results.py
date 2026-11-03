@@ -2318,6 +2318,186 @@ for options in ([], ["--prompt", ""], ["--prompt", "\n"],
     assert result.returncode != 0, result
 # END council prompt defaults
 
+# BEGIN council lens seats
+lens_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
+             "--owner", "codex", "--task-id", "lens-council", "--label", "Lens review",
+             "--prompt", "Compare options.", "--workload", "routine"]
+lens_env = dict(environment, OMS_RESUME_SESSION="old-session", OMS_PANEL_FALLBACK_PROVIDER="codex",
+                OMS_PANEL_FALLBACK_MODEL="gpt-6-luna", OMS_PANEL_FALLBACK_EFFORT="low")
+for key in ("OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT",
+            "OMS_COUNCIL_LENSES"):
+    lens_env.pop(key, None)
+(capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
+default_plan = json.loads(call(lens_args + ["--dry-run"], lens_env))
+assert default_plan["primary_calls"] == 4 and default_plan["seats"] == 2
+for size in (2, 3, 12):
+    names = ",".join("lens-%s" % n for n in range(size))
+    plan = json.loads(call(lens_args + ["--lenses", names, "--dry-run"], lens_env))
+    assert (plan["seats"], plan["families"], plan["primary_calls"]) == (size, 2, size), plan
+    argv = plan["argv"]
+    assert argv[argv.index("--debate") + 1] == "0", argv
+    targets = argv[argv.index("--providers") + 1].split(",")
+    assert targets == ["claude:model=claude-sonnet-5-5", "codex:model=gpt-6.1-terra"] * (size // 2) + (
+        ["claude:model=claude-sonnet-5-5"] if size % 2 else []), targets
+boundary_plan = json.loads(call(lens_args + ["--lenses", "a," + "b" * 32, "--dry-run"], lens_env))
+assert boundary_plan["seats"] == boundary_plan["primary_calls"] == 2
+for tier in ("deep", "frontier"):
+    base_plan = json.loads(call(lens_args + ["--workload", tier, "--dry-run"], lens_env))
+    lens_plan = json.loads(call(lens_args + ["--workload", tier, "--lenses", "a,b,c,d,e", "--dry-run"], lens_env))
+    base_argv, lens_argv = base_plan["argv"], lens_plan["argv"]
+    base_targets = base_argv[base_argv.index("--providers") + 1].split(",")
+    assert lens_argv[lens_argv.index("--providers") + 1].split(",") == base_targets + base_targets[:1]
+extra_policy = deepcopy(panel.policy())
+extra_policy["council"] = {"extra": [{"provider": "antigravity", "model": "gemini-3.1-pro-high", "effort": "high"}]}
+with patch.object(panel, "policy", return_value=extra_policy), patch.object(panel, "provider_catalog", return_value=[
+        {"provider": "antigravity", "installed": True, "models": ["gemini-3.1-pro-high"]}]):
+    argv = panel.council_command(project, "Compare", "lens", "Lens", workload="routine", lenses="a,b,c,d,e")
+    targets = argv[argv.index("--providers") + 1].split(",")
+    assert targets == ["claude:model=claude-sonnet-5-5", "codex:model=gpt-6.1-terra",
+                       "antigravity:model=gemini-3.1-pro-high:optional",
+                       "claude:model=claude-sonnet-5-5", "codex:model=gpt-6.1-terra"], targets
+before_calls = worker_log.read_bytes() if worker_log.exists() else b""
+attempt_log = project / ".oms/lifecycle/events.jsonl"
+before_attempts = attempt_log.read_bytes() if attempt_log.exists() else b""
+for options, message in ((["--lenses", ""], "lenses"), (["--lenses", "one"], "2..12"),
+                         (["--lenses", "a," + "b" * 33], "32"),
+                         (["--lenses", ",".join("lens-%s" % n for n in range(13))], "2..12"),
+                         (["--lenses", "one,one"], "unique"),
+                         (["--lenses", "one,UPPER"], "[a-z0-9-]+"),
+                         (["--lenses", "one,,two"], "[a-z0-9-]+"),
+                         (["--lenses", "one,two,"], "[a-z0-9-]+"),
+                         (["--lenses", "one,two", "--rounds", "1"], "--rounds 0"),
+                         (["--lenses", "one,two", "--rounds", "bad"], "invalid int")):
+    result = subprocess.run(lens_args + options, env=lens_env, capture_output=True, text=True,
+                            timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+    assert result.returncode != 0 and message in result.stderr, result
+assert (worker_log.read_bytes() if worker_log.exists() else b"") == before_calls
+assert (attempt_log.read_bytes() if attempt_log.exists() else b"") == before_attempts
+single_family = deepcopy(panel.policy())
+single_family["tiers"]["routine"] = single_family["tiers"]["routine"][:1]
+with patch.object(panel, "policy", return_value=single_family):
+    try:
+        panel.council_command(project, "Compare", "lens", "Lens", workload="routine", lenses="one,two")
+        raise AssertionError("one-family lens council accepted")
+    except ValueError as error:
+        assert "two independent provider families" in str(error), error
+for options in (["--lenses", "one,two"], ["--rounds", "1"]):
+    no_council = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project)] + options,
+                                env=lens_env, capture_output=True, text=True)
+    assert no_council.returncode != 0 and "--council" in no_council.stderr
+duplicate = subprocess.run(["bash", str(panel.ENTRY), "peer-ask", "--repo", str(project),
+                            "--providers", "codex,codex", "--prompt", "Compare"],
+                           env=lens_env, capture_output=True, text=True)
+assert duplicate.returncode != 0 and "duplicate target" in duplicate.stderr, duplicate
+internal_peer = ["bash", str(panel.ENTRY), "peer-ask", "--repo", str(project), "--prompt", "Compare",
+                 "--providers", "claude,codex", "--debate", "0", "--deliberation"]
+for value, options in (("", []), ("one", []), ("one,two,three", []), ("one,one", []),
+                       ("a," + "b" * 33, []), ("one,two,three", ["--providers", "claude,,codex"]),
+                       ("one,two", ["--providers", "routine"]),
+                       ("one,UPPER", []), ("one,two", ["--debate", "1"]),
+                       ("one,two", ["--export-only"]), ("one,two", ["--dry-run"])):
+    rejected = subprocess.run(internal_peer + options, env=dict(lens_env, OMS_COUNCIL_LENSES=value),
+                              capture_output=True, text=True)
+    assert rejected.returncode != 0, rejected
+assert (worker_log.read_bytes() if worker_log.exists() else b"") == before_calls
+assert (attempt_log.read_bytes() if attempt_log.exists() else b"") == before_attempts
+threads = []
+for run_lenses in (("correctness", "security", "compatibility"), ("correctness", "security", "c" * 32)):
+    output = call(lens_args + ["--lenses", ",".join(run_lenses), "--rounds", "0",
+                              "--thread", "lens-prefix"], lens_env)
+    thread_id = next(line.removeprefix("thread: ") for line in output.splitlines() if line.startswith("thread: "))
+    assert thread_id.startswith("lens-prefix-") and thread_id not in threads, output
+    threads.append(thread_id)
+    rows = [json.loads(line) for line in (project / ".oms/threads" / (thread_id + ".jsonl")).read_text().splitlines()]
+    answers = [row for row in rows if row["role"] == "answer"]
+    assert len(answers) == 3, rows
+    paths = [Path(row["artifact"]) for row in answers]
+    paths = [path if path.is_absolute() else project / path for path in paths]
+    assert len(set(paths)) == 3, paths
+    for index, lens in enumerate(run_lenses, 1):
+        seat = "seat-%02d" % index
+        path = next(path for path in paths if seat + "-" + lens in path.name)
+        prompt = path.read_text().split("## Prompt\n", 1)[1].split("## Output\n", 1)[0]
+        assert "Review only through the %s lens" % lens in prompt, prompt
+        assert "Evidence:" in prompt and "Counterargument:" in prompt, prompt
+        assert "inspected source" not in prompt and "Prior thread" not in prompt, prompt
+        turn = next(row for row in answers if seat in row["text"])
+        assert lens in turn["text"] and ("claude:model=" if index % 2 else "codex:model=") in turn["text"], turn
+    synthesis_path = Path(next(line.removeprefix("synthesis: ") for line in output.splitlines() if line.startswith("synthesis: ")))
+    synthesis = synthesis_path.read_text()
+    assert len(synthesis_path.read_bytes()) <= 65536
+    assert all("seat-%02d" % n in synthesis and lens in synthesis for n, lens in enumerate(run_lenses, 1)), synthesis
+lens_binary = temporary / "lens-bin"
+lens_binary.mkdir()
+lens_calls = temporary / "lens-calls.jsonl"
+for provider in ("claude", "codex"):
+    executable = lens_binary / provider
+    executable.write_text('''#!/usr/bin/env python3
+import json, os, sys
+assert "resume" not in sys.argv and "--resume" not in sys.argv, sys.argv
+if "--help" in sys.argv or "--version" in sys.argv:
+    print("fixture --effort low medium high --config")
+    raise SystemExit(0)
+prompt = sys.stdin.read()
+with open(os.environ["LENS_CALLS"], "a") as stream:
+    stream.write(json.dumps(prompt) + "\\n")
+if "lens: security," in prompt or (os.environ.get("LENS_FORCE_FALLBACK") and "gpt-6.1-terra" in sys.argv):
+    print("selected model is at capacity")
+    raise SystemExit(7)
+sections = ["Answer", "Alternatives", "Evidence", "Counterargument", "Risks", "Recommendation",
+            "Verification", "Changed from previous round", "Remaining disagreements"]
+if "lens: compatibility," in prompt and "Deliberation repair:" not in prompt:
+    sections.remove("Evidence")
+for section in sections:
+    print(section + ": retained fixture conclusion.")
+''')
+    executable.chmod(0o755)
+failed_run = subprocess.run(lens_args + ["--lenses", "correctness,security,compatibility"],
+                            env=dict(lens_env, PATH=str(lens_binary) + os.pathsep + lens_env["PATH"],
+                                     LENS_CALLS=str(lens_calls)), capture_output=True, text=True,
+                            timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+assert failed_run.returncode != 0, failed_run
+failures = [json.loads(line) for line in (project / ".oms/failures.jsonl").read_text().splitlines()]
+security_failure = next(row for row in reversed(failures) if "lens: security," in row.get("summary", ""))
+assert security_failure["cmd"] == "peer-ask seat codex:model=gpt-6.1-terra", security_failure
+assert "seat-02" in security_failure["summary"], security_failure
+prompts = [json.loads(line) for line in lens_calls.read_text().splitlines()]
+assert len(prompts) == 4, prompts
+repair_prompt = next(prompt for prompt in prompts if "Deliberation repair:" in prompt)
+assert "seat-03 (lens: compatibility, target: claude:model=claude-sonnet-5-5)" in repair_prompt
+assert "Review only through the compatibility lens" in repair_prompt
+synthesis_path = Path(next(line.removeprefix("synthesis: ") for line in failed_run.stdout.splitlines()
+                           if line.startswith("synthesis: ")))
+synthesis = synthesis_path.read_text()
+assert "seat-02 (lens: security, target: codex:model=gpt-6.1-terra)" in synthesis and "no answer:" in synthesis
+thread_id = next(line.removeprefix("thread: ") for line in failed_run.stdout.splitlines() if line.startswith("thread: "))
+rows = [json.loads(line) for line in (project / ".oms/threads" / (thread_id + ".jsonl")).read_text().splitlines()]
+assert any(row["role"] == "note" and "seat-02" in row["text"] and "security" in row["text"] for row in rows)
+repaired = next(row for row in rows if row["role"] == "answer" and "seat-03" in row["text"])
+assert "seat-03-compatibility" in repaired["artifact"] and repaired["artifact"].endswith("-repair.md"), repaired
+assert "seat-02" in failed_run.stderr and "security" in failed_run.stderr, failed_run
+check_history = ["bash", str(panel.ENTRY), "fail-ledger", "--repo", str(project), "check", "--ignore-state",
+                 "--cmd", "peer-ask seat codex:model=gpt-6.1-terra"]
+unresolved = subprocess.run(check_history, env=lens_env, capture_output=True, text=True)
+assert unresolved.returncode == 3, unresolved
+fallback_run = subprocess.run(["bash", str(panel.ENTRY), "peer-ask", "--repo", str(project),
+                               "--providers", "codex:model=gpt-6.1-terra", "--fallback-model", "gpt-6-luna",
+                               "--prompt", "Compare options."],
+                              env=dict(lens_env, PATH=str(lens_binary) + os.pathsep + lens_env["PATH"],
+                                       LENS_CALLS=str(lens_calls), LENS_FORCE_FALLBACK="1", OMS_RESUME_SESSION=""),
+                              capture_output=True, text=True,
+                              timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+assert fallback_run.returncode == 0, fallback_run
+still_unresolved = subprocess.run(check_history, env=lens_env, capture_output=True, text=True)
+assert still_unresolved.returncode == 3, still_unresolved
+recovered_run = subprocess.run(lens_args, env=lens_env, capture_output=True, text=True,
+                               timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+assert recovered_run.returncode == 0, recovered_run
+assert "codex:model=gpt-6.1-terra ask seat has unresolved no-answer history" in recovered_run.stderr, recovered_run
+recovered = subprocess.run(check_history, env=lens_env, capture_output=True, text=True)
+assert recovered.returncode == 0, recovered
+# END council lens seats
+
 # Keep the subprocess council independent of any installed provider catalog.
 (capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
 # The council reuses the peer front door: seats over two families, explicit rounds,

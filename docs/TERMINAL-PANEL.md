@@ -1128,6 +1128,23 @@ required seat must complete to report council success; failed seats remain
 visible and the owner still decides the outcome. All seats are read-only. There
 is no model fallback after a seat launches or additional synthesis-model call.
 
+For blind lens reviews, add `--lenses correctness,security,compatibility` to
+`oms panel --council`. Each unique comma-separated name of 1..32 characters
+matching `[a-z0-9-]+` gets one seat; 2..12 seats are required. Assignments cycle over the exact
+routes selected by `--workload`, including any eligible optional route, and
+are frozen before dispatch. At least two provider families must be assigned.
+Lens mode defaults to `--rounds 0` and rejects every other round count: there
+are no rebuttals, but every opening still requires the deliberation evidence,
+alternatives, counterargument and verification sections. Each run uses a fresh
+thread; `--thread ID` supplies its prefix. Seat IDs, lenses and targets identify
+prompts, artifacts, repairs and thread turns even when targets repeat.
+Failure history stays keyed by the provider target; summaries retain the seat
+and lens labels so later calls can warn about failures and clear them on recovery.
+Synthesis remains local and labels every seat, including failures and answers
+omitted by the existing byte budget. Without `--lenses`, the council keeps its
+ordinary routes, thread behavior and one-round default. `--rounds` requires
+`--council`, including an explicit `--rounds 1`.
+
 The board's bottom is one box whose top edge is a tab strip: Log, Detail, Plan,
 Messages, Past and Attention, which stay even when empty, plus Debate while a debate exists. The selected tab is bracketed; a `•` after Debate marks a
 debate running or finished since the tab was last opened, a number after

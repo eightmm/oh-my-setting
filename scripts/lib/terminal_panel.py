@@ -372,8 +372,9 @@ def main(argv=None):
     parser.add_argument("--scope", action="append", metavar="PATH",
                         help="repeatable repo-relative scope a write worker declares; overlaps warn, never lock")
     parser.add_argument("--council", action="store_true", help="run the two-family debate (deep tier by default)")
-    parser.add_argument("--rounds", type=int, default=1, help="council debate rounds, 1 or 2")
-    parser.add_argument("--thread", help="council thread ID")
+    parser.add_argument("--rounds", type=int, help="council debate rounds, 1 or 2; --lenses requires 0 (default with lenses)")
+    parser.add_argument("--lenses", help="--council only: 2..12 unique comma-separated names [a-z0-9-]+, 1..32 characters each; one blind seat each")
+    parser.add_argument("--thread", help="council thread ID; a fresh thread prefix with --lenses")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
     parser.add_argument("--salvage", metavar="TASK_ID", help="capture a stopped worker's kept worktree for owner review")
     parser.add_argument("--mail", metavar="PARTICIPANT", help="read messages addressed to one main in --room")
@@ -547,8 +548,10 @@ def main(argv=None):
             parser.error(str(error))
     if args.label and not (args.dispatch or args.council):
         parser.error("--label requires --dispatch or --council")
-    if (args.rounds != 1 or args.thread) and not args.council:
-        parser.error("--rounds and --thread require --council")
+    if (args.rounds is not None or args.thread or args.lenses is not None) and not args.council:
+        parser.error("--rounds, --thread and --lenses require --council")
+    if args.rounds is None:
+        args.rounds = 0 if args.lenses is not None else 1
     if (args.summary_file or args.outcome or args.evidence or args.notify or args.verify_timeout is not None) and not args.finalize:
         parser.error("finalization options require --finalize")
     if args.retry_delivery and not args.task_id:
@@ -737,14 +740,14 @@ def main(argv=None):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     result = council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
-                                     args.thread, args.rounds, True, args.workload or "deep")
+                                     args.thread, args.rounds, True, args.workload or "deep", lenses=args.lenses)
                 if output.getvalue():
                     plan = json.loads(output.getvalue())
                     plan.update(task_id=args.task_id, label=args.label)
                     print(json.dumps(plan, ensure_ascii=False))
                 return result
             return council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
-                           args.thread, args.rounds, False, args.workload or "deep")
+                           args.thread, args.rounds, False, args.workload or "deep", lenses=args.lenses)
         if args.mail:
             participant = room.identifier(args.mail, "participant")
 
