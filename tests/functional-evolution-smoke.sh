@@ -705,7 +705,18 @@ for event in ("SessionStart", "SessionEnd"):
 for event in ("PostToolUse", "SubagentStop"):
     commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
     assert not any("telemetry-hook" in command for command in commands), (event, commands)
-assert sum(len(entry.get("hooks", [])) for entries in hooks.values() for entry in entries) == 7, hooks
+expected = {
+    "UserPromptSubmit": [("", "skill-router")],
+    "Stop": [("", "turn-guard")],
+    "PreCompact": [("", "precompact-handoff codex")],
+    "SessionStart": [("", "resume-hook"), ("", "telemetry-hook")],
+    "PostToolUse": [("apply_patch", "syntax-guard-hook"), ("Bash|apply_patch", "panel-direct-work-hook")],
+    "SessionEnd": [("", "telemetry-hook")],
+}
+actual = {event: [(entry.get("matcher", ""), h.get("command", "").split('harness-hook.sh" ', 1)[-1])
+                  for entry in entries for h in entry.get("hooks", [])]
+          for event, entries in hooks.items()}
+assert actual == expected, actual
 PY
 }
 

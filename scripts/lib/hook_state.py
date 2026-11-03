@@ -1604,6 +1604,14 @@ def classify_direct_work(payload: dict[str, Any], repo: Path) -> tuple[str, str]
     if tool in DIRECT_EDIT_TOOLS:
         name = direct_repo_file(data.get("file_path") or data.get("notebook_path"), repo, cwd)
         return ("edit", name) if name else None
+    if tool == "apply_patch":
+        command = data.get("command")
+        if isinstance(command, str):
+            for header in re.finditer(r"^\*\*\* (?:Add File|Update File|Move to|Delete File): ([^\r\n]+)\r?$", command, re.MULTILINE):
+                name = direct_repo_file(header.group(1), repo, cwd)
+                if name:
+                    return ("edit", name)
+        return None
     if tool != "Bash" or not isinstance(data.get("command"), str):
         return None
     try:

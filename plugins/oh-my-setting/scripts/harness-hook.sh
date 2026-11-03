@@ -2,7 +2,12 @@
 set -euo pipefail
 
 tool="${1:-}"
-case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook|syntax-guard-hook|telemetry-hook) ;; *) exit 0 ;; esac
+case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook|syntax-guard-hook|panel-direct-work-hook|telemetry-hook) ;; *) exit 0 ;; esac
+if [ "$tool" = panel-direct-work-hook ]; then
+  # Advisory setup failures stay silent, including fatal nounset errors.
+  exec 2>/dev/null
+  trap 'exit 0' EXIT
+fi
 payload="$(cat)"
 # Only the Codex plugin dispatches here; Codex SessionStart carries no turn_id.
 export OMS_HOOK_AGENT="${OMS_HOOK_AGENT:-codex}"

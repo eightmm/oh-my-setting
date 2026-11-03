@@ -2178,14 +2178,19 @@ hook = root / "scripts/panel-direct-work-hook.sh"
 payload = dict(cwd=str(repo), session_id="direct-main", hook_event_name="PostToolUse")
 timeout = float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "30"))
 
-def call(tool="Edit", value=None, **overrides):
+def call(tool="Edit", value=None, *, via_plugin=False, **overrides):
     row = dict(payload, tool_name=tool, tool_input=value or {"file_path": str(repo / "src/job.py")})
-    result = subprocess.run(["bash", str(hook)], input=json.dumps(row), text=True,
+    command = ["bash", str(hook)]
+    if via_plugin:
+        command = ["bash", str(root / "plugins/oh-my-setting/scripts/harness-hook.sh"), "panel-direct-work-hook"]
+        overrides.update(OH_MY_SETTING_DIR=str(root), CLAUDE_PLUGIN_ROOT=str(root / "plugins/oh-my-setting"))
+    result = subprocess.run(command, input=json.dumps(row), text=True,
                             capture_output=True, env=dict(env, **overrides), timeout=timeout)
     assert result.returncode == 0 and not result.stderr, result
     if result.stdout:
         output = json.loads(result.stdout)
         assert set(output) == {"hookSpecificOutput"}, output
+        assert set(output["hookSpecificOutput"]) == {"hookEventName", "additionalContext"}, output
         assert output["hookSpecificOutput"]["hookEventName"] == "PostToolUse", output
         return output["hookSpecificOutput"]["additionalContext"]
     return ""
@@ -2308,6 +2313,42 @@ assert not bash("oms panel --dispatch builder")
 assert state()["counts"] == {"edit": 0, "write": 0, "run": 0}
 assert panel_metrics.direct_work_counts(repo)["counts"] == state()["counts"]
 assert "edit=0, write=0, run=0" in panel_metrics.metrics_text(panel_metrics.aggregate(repo))
+# Codex supplies shell commands and patch headers in tool_input.command.
+payload["turn_id"] = "codex-direct-turn"
+before = state_path.read_bytes()
+for overrides in ({"OMS_PANEL_MAIN_ATTEMPT": ""}, {"OMS_PANEL_SESSION": "ordinary"}, {"OMS_HARNESS_CHILD": "1"}):
+    assert not call("apply_patch", {"command": "*** Add File: src/change.py"}, **overrides)
+    assert state_path.read_bytes() == before, overrides
+for index, header in enumerate(("Add File", "Update File", "Move to", "Delete File"), 1):
+    command = "*** Begin Patch\n*** %s: src/change.py\n*** End Patch" % header
+    feedback = call("apply_patch", {"command": command})
+    assert state()["counts"] == {"edit": index, "write": 0, "run": 0}, (header, state())
+    assert bool(feedback) == (index == 3), (header, feedback)
+    if feedback:
+        assert "3 direct work calls" in feedback and "3 edits" in feedback, feedback
+        assert "change.py" in feedback, feedback
+before = state_path.read_bytes()
+for command in ("", 0, None, [], {}, "*** Begin Patch\n*** End Patch",
+                "*** Update File: ", "*** Update File src/change.py", "+*** Add File: src/change.py",
+                "*** Delete File: linked/change.py", "*** Add File: VERSION"):
+    assert not call("apply_patch", {"command": command}), command
+    assert state_path.read_bytes() == before, command
+command = ("*** Begin Patch\n*** Update File: src/job.py\n*** Move to: src/moved.py\n"
+           "@@\n-old\n+new\n*** Delete File: src/check.sh\n*** End Patch").replace("\n", "\r\n")
+assert not call("apply_patch", {"command": command})
+assert state()["counts"]["edit"] == 5, state()
+assert not bash("echo x > src/job.py")
+assert state()["counts"] == {"edit": 5, "write": 1, "run": 0}, state()
+# The plugin bridge identifies Codex even when the payload has no turn_id.
+payload.pop("turn_id")
+assert not call("Bash", {"command": "oms panel --dispatch builder"}, via_plugin=True)
+assert sum(state()["since_dispatch"].values()) == 0, state()
+for index in range(1, 4):
+    feedback = call("apply_patch", {"command": command}, via_plugin=True)
+    assert bool(feedback) == (index == 3), (index, feedback)
+assert "3 direct work calls" in feedback and "3 edits" in feedback, feedback
+assert state()["counts"] == {"edit": 8, "write": 1, "run": 0}, state()
+assert panel_metrics.direct_work_counts(repo) == {"counts": state()["counts"], "sessions": 1}
 PYTEST
 }
 
