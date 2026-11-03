@@ -39,7 +39,11 @@ _PROJECT_ATTEMPTS = None
 MAX_STREAM = 16 * 1024 * 1024
 SEGMENT_BYTES = 256 * 1024
 MAX_PREFIX_CACHE = 64 * 1024 * 1024
+MAX_COMPLETION_PINS = 8192
 ROOM_STAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z')
+COMPLETION_OBJECT_PATH = re.compile(
+    r'\.oms/plan/(?:completion-captures|completion-prefixes|completion-segments|completions)/([0-9a-f]{64})\.(?:json|jsonl|bin)')
+COMPLETION_DIRECTORIES = ('completion-captures', 'completion-prefixes', 'completion-segments', 'completions')
 
 
 def fail(message):
@@ -233,17 +237,237 @@ def captured_stream_raw(repo, item):
     return raw
 
 
+def completion_references(value):
+    """Yield every completion-store path held anywhere in value, in dict keys,
+    values and list items alike. Content-addressed names carry their own digest."""
+    if isinstance(value, dict):
+        path = value.get('path')
+        if isinstance(path, str) and any(path.startswith('.oms/plan/' + name + '/')
+                                         for name in COMPLETION_DIRECTORIES):
+            yield {'path': path, 'sha256': value.get('sha256')}
+        for key, child in value.items():
+            yield from completion_references(key)
+            yield from completion_references(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from completion_references(child)
+    elif isinstance(value, str):
+        match = COMPLETION_OBJECT_PATH.fullmatch(value)
+        if match:
+            yield {'path': value, 'sha256': match.group(1)}
+
+
+def completion_pins(repo, cutoff=None, temporary=None):
+    rel = '.oms/plan/completion-pins'
+    folder = Path(DURABLE['canonical_repo_path'](repo, rel + '/probe', 'completion pins')).parent
+    if not folder.exists():
+        return {}, {}
+    parent = folder.stat()
+    pins = {}
+    scanned_bytes = 0
+    for entry in folder.iterdir():
+        path = rel + '/' + entry.name
+        if re.fullmatch(r'\.[0-9a-f]{32}\.json\.tmp\.[0-9]+\.[A-Za-z0-9]+', entry.name):
+            info = entry.lstat()
+            if not DURABLE['safe_regular'](info):
+                fail('unsafe completion pin temporary file: ' + path)
+            if temporary is not None and cutoff is not None and info.st_mtime < cutoff:
+                temporary[path] = info
+            continue
+        if len(pins) >= MAX_COMPLETION_PINS or not re.fullmatch(r'[0-9a-f]{32}\.json', entry.name):
+            fail('unknown or oversized completion pin namespace: ' + path)
+        info = entry.lstat()
+        raw = read(repo, path)
+        scanned_bytes += len(raw)
+        if scanned_bytes > MAX_PREFIX_CACHE:
+            fail('completion pin metadata bound exceeded')
+        value = parsed(raw)
+        keys(value, ('schema', 'lease_id', 'objects'))
+        if (type(value['schema']) is not int or value['schema'] != 1 or
+                not isinstance(value['lease_id'], str) or
+                not re.fullmatch(r'lease_[0-9a-f]{32}', value['lease_id']) or
+                not isinstance(value['objects'], list)):
+            fail('invalid completion pin')
+        for ref in value['objects']:
+            keys(ref, ('path', 'sha256'))
+            relative(ref['path'])
+            digest(ref['sha256'])
+            if next(completion_references(ref), None) != ref:
+                fail('invalid pinned completion reference')
+        pins[path] = (info, value)
+    return pins, {rel: parent}
+
+
+def completion_pin_lease_path(lease_id):
+    if not isinstance(lease_id, str) or not re.fullmatch(r'lease_[0-9a-f]{32}', lease_id):
+        fail('invalid completion pin lease')
+    return '.oms/plan/completion-pin-leases/' + lease_id + '.json'
+
+
+def completion_pin_ids(raw, path):
+    try:
+        value = parsed(raw)
+        keys(value, ('schema', 'pins'))
+    except (ValueError, TypeError) as exc:
+        fail('invalid completion pin lease index: ' + path + ': ' + str(exc))
+    if (type(value['schema']) is not int or value['schema'] != 1 or
+            not isinstance(value['pins'], list) or len(value['pins']) > MAX_COMPLETION_PINS or
+            any(not isinstance(ident, str) or not re.fullmatch(r'[0-9a-f]{32}', ident)
+                for ident in value['pins']) or len(set(value['pins'])) != len(value['pins'])):
+        fail('invalid completion pin lease index: ' + path)
+    return value['pins']
+
+
+def write_completion_pin(repo, lease_id, snapshot, bundle=None):
+    ident = os.environ.get('OMS_COMPLETION_PIN_ID', '')
+    if not re.fullmatch(r'[0-9a-f]{32}', ident):
+        fail('invalid completion transaction identity')
+    if not isinstance(lease_id, str) or not re.fullmatch(r'lease_[0-9a-f]{32}', lease_id):
+        fail('invalid completion pin lease')
+    # The snapshot stores requirement evidence paths as keys, losing their refs.
+    held = [snapshot, bundle]
+    held.append(os.environ.get('OMS_COMPLETION_BUNDLE', ''))  # may itself be a completion-store object
+    value = dict(schema=1, lease_id=lease_id, objects=list(completion_references(held)))
+    raw = encoded(value)
+    lease_path = completion_pin_lease_path(lease_id)
+    def register(old):
+        identities = completion_pin_ids(old, lease_path) if old else []
+        if ident in identities:
+            fail('duplicate completion transaction identity: ' + lease_path)
+        if len(identities) >= MAX_COMPLETION_PINS:
+            fail('completion pin lease index bound exceeded: ' + lease_path)
+        return encoded(dict(schema=1, pins=identities + [ident]))
+    DURABLE['atomic_mutate'](lease_path, register, repo, missing_ok=True, create_parent=True,
+                             max_input=MAX_JSON, max_output=MAX_JSON, label='completion pin lease index')
+    DURABLE['atomic_mutate']('.oms/plan/completion-pins/' + ident + '.json', lambda old: raw, repo,
+                             missing_ok=True, create_parent=True, expected_exists=False,
+                             max_output=MAX_JSON, label='completion pin')
+
+
+@contextlib.contextmanager
+def checked_completion_paths(repo, objects, parents):
+    with contextlib.ExitStack() as stack:
+        descriptors, checked = {}, []
+        for path in sorted(objects):
+            target = Path(DURABLE['canonical_repo_path'](repo, path, 'completion collection ' + path))
+            parent = path.rsplit('/', 1)[0]
+            if os.name == 'nt':
+                if not DURABLE['same_file'](target.parent.stat(), parents[parent]):
+                    fail('completion collection namespace changed: ' + path)
+                named = target.lstat()
+                fd = None
+            else:
+                if parent not in descriptors:
+                    fd = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+                                 getattr(os, 'O_NOFOLLOW', 0))
+                    stack.callback(os.close, fd)
+                    if not DURABLE['same_file'](os.fstat(fd), parents[parent]):
+                        fail('completion collection namespace changed: ' + path)
+                    descriptors[parent] = fd
+                fd = descriptors[parent]
+                named = os.stat(target.name, dir_fd=fd, follow_symlinks=False)
+            if not DURABLE['_snapshot_matches'](objects[path], named):
+                fail('completion collection object changed: ' + path)
+            checked.append((fd, target))
+        def remove(published=False):
+            for fd, target in checked:
+                try:
+                    if fd is None:
+                        os.unlink(target)
+                    else:
+                        os.unlink(target.name, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    prefix = 'change already published; ' if published else ''
+                    fail(prefix + 'cannot remove ' + str(target) + ': ' + str(exc) +
+                         '; correct the filesystem error and retry oms gc --apply')
+        yield remove
+
+
+def delete_completion_paths(repo, objects, parents, dry_run=False):
+    with checked_completion_paths(repo, objects, parents) as remove:
+        if not dry_run:
+            remove()
+
+
+@contextlib.contextmanager
+def completion_pin_cleanup(repo, lease_id=None, ident=None, lease_ids=()):
+    if ident is not None and not re.fullmatch(r'[0-9a-f]{32}', ident):
+        fail('invalid completion transaction identity')
+    paths = ['.oms/plan/completion-pins/' + ident + '.json'] if ident is not None else []
+    owners = {}
+    for lease in list(lease_ids) + ([lease_id] if lease_id is not None else []):
+        lease_path = completion_pin_lease_path(lease)
+        try:
+            target = Path(DURABLE['canonical_repo_path'](repo, lease_path, 'completion pin lease index ' + lease_path))
+            if target.exists():
+                for value in completion_pin_ids(read(repo, lease_path), lease_path):
+                    path = '.oms/plan/completion-pins/' + value + '.json'
+                    if path in owners and owners[path] != lease:
+                        fail('conflicting completion pin lease index: ' + lease_path)
+                    owners[path] = lease
+                    paths.append(path)
+                paths.append(lease_path)
+        except (ValueError, OSError, SystemExit) as exc:
+            fail('cannot prepare completion pin cleanup for ' + lease_path + ': ' + str(exc))
+    objects, parents = {}, {}
+    for path in paths:
+        try:
+            target = Path(DURABLE['canonical_repo_path'](repo, path, 'completion pin ' + path))
+            if not target.exists():
+                continue
+            objects[path] = target.lstat()
+            parent = target.parent.stat()
+            if not parent.st_mode & 0o222 or not os.access(target.parent, os.W_OK):
+                fail('completion pin parent is not writable: ' + path)
+            parents[path.rsplit('/', 1)[0]] = parent
+            if path in owners:
+                value = parsed(read(repo, path))
+                if not isinstance(value, dict) or value.get('lease_id') != owners[path]:
+                    fail('completion pin lease mismatch: ' + path)
+        except (ValueError, OSError, SystemExit) as exc:
+            fail('cannot prepare completion pin cleanup for ' + path + ': ' + str(exc))
+    with checked_completion_paths(repo, objects, parents) as remove:
+        yield remove
+
+
+def remove_completion_pins(repo, lease_id=None, ident=None, published=False):
+    with completion_pin_cleanup(repo, lease_id, ident) as remove:
+        remove(published=published)
+
+
+def legacy_completion_veto(repo, leases):
+    rel = '.oms/delegations'
+    folder = Path(DURABLE['canonical_repo_path'](repo, rel + '/probe', 'completion worker markers')).parent
+    if not folder.exists():
+        return False
+    for index, entry in enumerate(folder.iterdir()):
+        if index >= MAX_COMPLETION_PINS:
+            fail('completion worker marker scan bound exceeded')
+        if not entry.name.endswith('.json'):
+            continue
+        marker = parsed(read(repo, rel + '/' + entry.name, 64 * 1024))
+        if not isinstance(marker, dict) or not isinstance(marker.get('lease_id', ''), str):
+            fail('invalid completion worker marker: ' + rel + '/' + entry.name)
+        # Legacy markers cannot prove a binding to another transaction's pin.
+        if marker.get('lease_id') in leases:
+            return True
+    return False
+
+
 def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
     """Collect aged unreferenced captures under the completion/plan writer locks.
 
-    A verifier releases its locks between preflight and finalize. Any unsettled
-    leased task therefore vetoes collection, regardless of apparent lease age.
+    Transaction pins protect verifiers between preflight and finalize. An
+    unsettled lease without a pin or with a legacy worker marker retains the veto.
     Approval markers and receipts remain roots, including receipts whose plan
     publication failed. Unknown or unsafe input aborts before any deletion.
     """
     if os.unlink not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
         return []  # Keep everything where descriptor-relative deletion is unavailable.
     plan_raw = read(repo, '.oms/plan/tasks.json', missing=True)
+    plan, leases, known_leases = {}, set(), set()
     if plan_raw:
         plan = parsed(plan_raw)
         if not isinstance(plan, dict):
@@ -251,11 +475,16 @@ def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
         tasks = plan.get('tasks')
         if not isinstance(tasks, dict) or any(not isinstance(task, dict) for task in tasks.values()):
             fail('invalid plan during capture collection')
-        if any(task.get('lease_id') and task.get('state') not in ('done', 'cancelled')
-               for task in tasks.values()):
-            return []
+        leases = {task['lease_id'] for task in tasks.values()
+                  if task.get('lease_id') and task.get('state') not in ('done', 'cancelled')}
+        known_leases = {task['lease_id'] for task in tasks.values() if task.get('lease_id')}
+    temporary = {}
+    pins, pin_parents = completion_pins(repo, cutoff, temporary)
+    if leases and (leases - {value['lease_id'] for info, value in pins.values()} or
+                   legacy_completion_veto(repo, leases)):
+        return []
     objects, values, roots, parents = {}, {}, set(), {}
-    directories = ('completion-captures', 'completion-prefixes', 'completion-segments', 'completions')
+    directories = COMPLETION_DIRECTORIES
     scanned_bytes = 0
     for directory in directories:
         rel = '.oms/plan/' + directory
@@ -289,18 +518,16 @@ def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
                     roots.add(path)  # Bearer approvals and unknown captures are never transient.
 
     def references(value):
-        if isinstance(value, dict):
-            path = value.get('path')
-            if isinstance(path, str) and any(path.startswith('.oms/plan/' + name + '/') for name in directories):
-                if path not in objects or value.get('sha256') != Path(path).name.split('.')[0]:
-                    fail('missing or malformed retained completion reference')
-                yield path
-            for child in value.values():
-                yield from references(child)
-        elif isinstance(value, list):
-            for child in value:
-                yield from references(child)
+        for ref in completion_references(value):
+            path = ref['path']
+            if path not in objects or ref['sha256'] != Path(path).name.split('.')[0]:
+                fail('missing or malformed retained completion reference')
+            yield path
 
+    # Writers bypassing the shared plan lock can replace the plan after this scan.
+    roots.update(references(plan))
+    for info, value in pins.values():
+        roots.update(references(value['objects']))
     kept, pending = set(), list(roots)
     while pending:
         path = pending.pop()
@@ -315,27 +542,42 @@ def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
             values[path] = parsed(raw)
         pending.extend(references(values.get(path)))
     candidates = sorted(set(objects) - kept)
-    # Resolve every namespace and compare every generation before deleting any.
-    with contextlib.ExitStack() as stack:
-        descriptors, checked = {}, []
-        for path in candidates:
-            target = Path(DURABLE['canonical_repo_path'](repo, path, 'completion collection'))
-            parent = path.rsplit('/', 1)[0]
-            if parent not in descriptors:
-                fd = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
-                             getattr(os, 'O_NOFOLLOW', 0))
-                stack.callback(os.close, fd)
-                if not DURABLE['same_file'](os.fstat(fd), parents[parent]):
-                    fail('completion collection namespace changed')
-                descriptors[parent] = fd
-            fd = descriptors[parent]
-            if not DURABLE['_snapshot_matches'](objects[path], os.stat(target.name, dir_fd=fd, follow_symlinks=False)):
-                fail('completion collection object changed')
-            checked.append((fd, target.name))
-        if not dry_run:
-            for fd, name in checked:
-                os.unlink(name, dir_fd=fd)
-    return candidates
+    stale = {path: info for path, (info, value) in pins.items()
+             if value['lease_id'] not in known_leases and info.st_mtime < cutoff}
+    parents.update(pin_parents)
+    selected = {path: objects[path] for path in candidates}
+    selected.update(stale)
+    selected.update(temporary)
+    lease_rel = '.oms/plan/completion-pin-leases'
+    lease_folder = Path(DURABLE['canonical_repo_path'](repo, lease_rel + '/probe', 'completion pin lease index')).parent
+    if lease_folder.exists():
+        parents[lease_rel] = lease_folder.stat()
+        lease_count = 0
+        for entry in lease_folder.iterdir():
+            path = lease_rel + '/' + entry.name
+            if re.fullmatch(r'\.lease_[0-9a-f]{32}\.json\.tmp\.[0-9]+\.[A-Za-z0-9]+', entry.name):
+                info = entry.lstat()
+                if not DURABLE['safe_regular'](info):
+                    fail('unsafe completion pin index temporary file: ' + path)
+                if info.st_mtime < cutoff:
+                    selected[path] = info
+                continue
+            lease_count += 1
+            if lease_count > MAX_COMPLETION_PINS:
+                fail('oversized completion pin lease index namespace: ' + path)
+            if not re.fullmatch(r'lease_[0-9a-f]{32}\.json', entry.name):
+                fail('unknown completion pin lease index entry: ' + path)
+            raw = read(repo, path)
+            scanned_bytes += len(raw)
+            if scanned_bytes > MAX_PREFIX_CACHE:
+                fail('completion pin lease index metadata bound exceeded: ' + path)
+            identities = completion_pin_ids(raw, path)
+            info = entry.lstat()
+            if info.st_mtime < cutoff and (entry.stem not in known_leases or
+                    not any('.oms/plan/completion-pins/' + ident + '.json' in pins for ident in identities)):
+                selected[path] = info
+    delete_completion_paths(repo, selected, parents, dry_run)
+    return sorted(selected)
 
 
 def room_records(records, room, content_sha=None):
@@ -1987,6 +2229,7 @@ def run(context):
                 receipt['snapshot'] != snapshot or receipt['completion_kind'] != KINDS[action]):
             fail('prior receipt preconditions changed')
     if phase == 'preflight':
+        write_completion_pin(state_repo, bundle['lease_id'], snapshot, bundle)
         print(json.dumps({'bundle_sha256': bundle_sha, 'snapshot': snapshot, 'resume': bool(prior)}))
         return
     if phase != 'finalize':
@@ -2008,7 +2251,9 @@ def run(context):
                       git_common_sha256=namespace(repo), snapshot=neutral_snapshot(snapshot), verification=verification,
                       bundle_path=os.environ['OMS_COMPLETION_BUNDLE'], approve_invocation_sha256=sha(shlex.join(
                           approval_argv(state_repo, repo, bundle, bundle_sha, os.environ['OMS_COMPLETION_BUNDLE'])).encode()))
-        ref = immutable_object(state_repo, '.oms/plan/completion-captures', encoded(marker), '.json', MAX_JSON)
+        with completion_pin_cleanup(state_repo, ident=os.environ.get('OMS_COMPLETION_PIN_ID', '')) as remove_pin:
+            ref = immutable_object(state_repo, '.oms/plan/completion-captures', encoded(marker), '.json', MAX_JSON)
+            remove_pin(published=True)
         print(encoded({'kind': 'oms-main-read-approved', 'approval': ref}).decode(), end='')
         return
     if not prior:
@@ -2035,8 +2280,10 @@ def run(context):
         if old != plan_raw:
             fail('plan CAS drift before publication')
         return new_plan
-    DURABLE['atomic_mutate']('.oms/plan/tasks.json', publish, state_repo,
-                             max_output=MAX_JSON, label='completion plan')
+    with completion_pin_cleanup(state_repo, ident=os.environ.get('OMS_COMPLETION_PIN_ID', '')) as remove_pin:
+        DURABLE['atomic_mutate']('.oms/plan/tasks.json', publish, state_repo,
+                                 max_output=MAX_JSON, label='completion plan')
+        remove_pin(published=True)
     print('plan: %s %s' % (task['id'], KINDS[action]))
 
 
@@ -2109,6 +2356,13 @@ if __name__ == '__main__':
             locked_plan(sys.argv[2:])
         elif sys.argv[1:] == ['--resume']:
             print(1 if transaction_snapshot()['resume'] else 0)
+        elif len(sys.argv) == 3 and sys.argv[1] == '--remove-pin':
+            published = os.environ.get('OMS_COMPLETION_PUBLISHED') == '1'
+            try:
+                remove_completion_pins(os.path.realpath(sys.argv[2]),
+                                       ident=os.environ.get('OMS_COMPLETION_PIN_ID', ''), published=published)
+            except (ValueError, OSError, SystemExit) as exc:
+                fail(('completion result already published; ' if published else '') + str(exc))
         else:
             fail('verifier phase must run through agent-plan authority context')
     except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:

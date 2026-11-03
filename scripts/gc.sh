@@ -59,7 +59,12 @@ or aged snapshot), terminal/draft executor souls, retired failure rows
 (resolved, or automatic hook rows past OMS_HOOK_FAIL_TTL — the same predicate
 fail-ledger reads with), closed conversation threads, closed work rooms and empty
 rooms without joined participants (unread room mail is always retained),
-unreferenced completion captures/prefixes/segments when no unsettled lease exists;
+unreferenced completion captures/prefixes/segments outside plan, receipt and
+transaction-pin roots (pins include validated requirement evidence; an unsettled
+lease without a pin or with a legacy worker marker defers collection);
+stale transaction pins and unused lease indexes after --days, retaining pinned
+objects for that sweep;
+interrupted pin-write temporary files after --days (unknown entries defer collection);
 dispatch-log/activity pairs with recorded exits, stopped processes and settled
 terminal attempts, excluding the latest attempt of unfinished plan tasks.
 Dispatch cleanup reports pair/file counts and bytes, and defers while delegation
@@ -122,8 +127,8 @@ note_remove() {  # note_remove KIND PATH
 }
 
 # Completion preflights publish immutable captures before all checks finish.
-# Reuse the writer lock order; any unsettled lease vetoes collection while a
-# verifier might be running between its preflight and finalize transactions.
+# Reuse the writer lock order; durable transaction pins retain snapshots while
+# verifiers run outside the locks. Unpinned leases and legacy markers retain the veto.
 completion_capture_gc_locked() {
   python3 - "$ROOT_LIB/plan-completion.py" "$STATE_ROOT" "$DAYS" "$DRY_RUN" <<'PY'
 import runpy
@@ -133,7 +138,13 @@ try:
     collect = runpy.run_path(sys.argv[1])["collect_abandoned_prefixes"]
     paths = collect(sys.argv[2], time.time() - int(sys.argv[3]) * 86400, sys.argv[4] == "1")
     for path in paths:
-        print("- completion-provenance: " + path)
+        if path.startswith('.oms/plan/completion-pins/'):
+            kind = 'completion-pin-temp' if path.rsplit('/', 1)[1].startswith('.') else 'completion-pin'
+        elif path.startswith('.oms/plan/completion-pin-leases/'):
+            kind = 'completion-pin-index'
+        else:
+            kind = 'completion-provenance'
+        print('- ' + kind + ': ' + path)
 except (OSError, ValueError, KeyError, TypeError, RecursionError, SystemExit) as exc:
     print("gc: completion capture collection skipped: %s" % exc, file=sys.stderr)
 PY
@@ -145,7 +156,8 @@ completion_capture_gc_marker_lock() {
   oms_try_file_lock "$OMS/delegations/.marker-set-lock-target" completion_capture_gc_plan_lock
 }
 if [ -d "$OMS/plan/completion-captures" ] || [ -d "$OMS/plan/completion-prefixes" ] ||
-   [ -d "$OMS/plan/completion-segments" ]; then
+   [ -d "$OMS/plan/completion-segments" ] || [ -d "$OMS/plan/completion-pins" ] ||
+   [ -d "$OMS/plan/completion-pin-leases" ]; then
   completion_gc_out=""
   completion_gc_status=0
   completion_gc_out="$(oms_try_file_lock "$OMS/landings.jsonl" completion_capture_gc_marker_lock)" ||
@@ -154,7 +166,10 @@ if [ -d "$OMS/plan/completion-captures" ] || [ -d "$OMS/plan/completion-prefixes
     0)
       [ -z "$completion_gc_out" ] || printf '%s\n' "$completion_gc_out"
       while IFS= read -r completion_gc_line; do
-        case "$completion_gc_line" in '- completion-provenance: '*) removed=$((removed + 1)) ;; esac
+        case "$completion_gc_line" in
+          '- completion-provenance: '*|'- completion-pin: '*|'- completion-pin-temp: '*|'- completion-pin-index: '*)
+            removed=$((removed + 1)) ;;
+        esac
       done <<< "$completion_gc_out"
       ;;
     75) echo "- completion-provenance: skipped while a writer holds the file" ;;

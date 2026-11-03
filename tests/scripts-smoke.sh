@@ -8844,6 +8844,38 @@ test_agent_plan_lifecycle_receipt_history() {
   local completion_repo="$TMP/completion-receipt-history"
   make_committed_repo "$completion_repo"
   { agent_plan_lifecycle_completion_prelude; cat <<'PY'
+# Requirement evidence may cite an older prefix absent from the new snapshot's
+# provenance. Zero-day GC during verification must retain it through finalize.
+completion_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+requirement_prefix = completion_core['immutable_object'](str(repo), '.oms/plan/completion-prefixes',
+    b'{"requirement":"older prefix"}\n', '.jsonl', completion_core['MAX_JSON'])
+unrelated_prefix = completion_core['immutable_object'](str(repo), '.oms/plan/completion-prefixes',
+    b'{"unrelated":"older prefix"}\n', '.jsonl', completion_core['MAX_JSON'])
+for item in (requirement_prefix, unrelated_prefix):
+    os.utime(repo / item['path'], (1, 1))
+verification_source = (repo / 'verify.sh').read_bytes()
+(repo / 'verify.sh').write_text('''bash "$OMS_FIXTURE_GC_SCRIPT" --repo . --days 0 --apply > .oms/requirement-gc.out
+python3 - <<'CHECK'
+import json
+from pathlib import Path
+bundle = json.loads(Path('.oms/artifacts/completion-bundle.json').read_bytes())
+evidence = bundle['requirements'][0]['evidence'][-1]
+assert Path(evidence['path']).is_file(), 'GC removed in-flight requirement evidence'
+CHECK
+''')
+requirement_bundle = setup()
+requirement_bundle['requirements'][0]['evidence'].append(requirement_prefix)
+# Keep the producer's lifecycle stream through GC's separate zero-day compactor.
+retention_child = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'retention-fixture',
+    '--parent-attempt-id', requirement_bundle['research']['attempt_id'], '--then', 'starting', '--then', 'working')
+invoke(requirement_bundle, extra={'OMS_FIXTURE_GC_SCRIPT': str(root / 'scripts/gc.sh')})
+call('agent-events.sh', 'transition', '--attempt', retention_child, '--state', 'verifying', '--then', 'review', '--then', 'done')
+assert (repo / requirement_prefix['path']).is_file()
+assert not (repo / unrelated_prefix['path']).exists(), 'requirement pin vetoed unrelated collection'
+requirement_done = plan()['tasks'][requirement_bundle['task_id']]
+requirement_receipt = json.loads((repo / requirement_done['completion_receipt']['path']).read_bytes())
+assert requirement_prefix in requirement_receipt['bundle']['requirements'][0]['evidence']
+(repo / 'verify.sh').write_bytes(verification_source)
 # Historical reader probes start from independently accepted reports.
 main_report = setup(main_report=True)
 invoke(main_report, action='accept-main-research')
@@ -24372,7 +24404,7 @@ PYROOM
   local completion_project="$TMP/gc-completion-captures"
   make_committed_repo "$completion_project"
   python3 - "$ROOT" "$completion_project" <<'PYCAPTURE'
-import copy, json, os, runpy, subprocess, sys, time
+import copy, json, os, runpy, stat, subprocess, sys, time
 from pathlib import Path
 root, repo = map(Path, sys.argv[1:])
 sys.path.insert(0, str(root / 'scripts/lib'))
@@ -24436,9 +24468,228 @@ if os.unlink not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
 (repo / 'capture-gc-supported').touch()
 plan_path = repo / '.oms/plan/tasks.json'
 plan_path.write_text(json.dumps(dict(tasks=dict(active=dict(state='blocked', lease_id='lease')))))
-cutoff = time.time() - 86400
+cutoff = float(int(time.time()) - 86400)
 assert core['collect_abandoned_prefixes'](str(repo), cutoff) == [], 'unsettled lease lost its preflight'
+lease = 'lease_' + '1' * 32
+pin_id = '2' * 32
+pin_path = repo / '.oms/plan/completion-pins' / (pin_id + '.json')
+os.environ['OMS_COMPLETION_PIN_ID'] = pin_id
+pin_path.parent.mkdir(exist_ok=True)
+with os.fdopen(os.open(str(pin_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as handle:
+    handle.write(core['encoded'](dict(schema=1, lease_id=lease, objects=[proofs[2]['capture']])))
+assert stat.S_IMODE(pin_path.stat().st_mode) == 0o600
+plan_path.write_text(json.dumps(dict(tasks=dict(active=dict(state='review', lease_id=lease)),
+                                     retained=proofs[6])))
+# Legacy markers have no per-transaction pin binding. A different transaction's
+# pin for this lease cannot prove the legacy verifier's older capture is safe.
+marker_dir = repo / '.oms/delegations'
+marker_dir.mkdir(exist_ok=True)
+marker = marker_dir / 'legacy-completion.json'
+marker_raw = core['encoded'](dict(schema=3, id='legacy-completion', task_id='active',
+                                lease_id=lease, pid=os.getpid()))
+marker.write_bytes(marker_raw)
+assert core['collect_abandoned_prefixes'](str(repo), cutoff) == [], 'one pin bypassed legacy transaction veto'
+assert core['collect_abandoned_prefixes'](str(repo), time.time(), False) == [], 'zero-day apply bypassed legacy veto'
+assert (repo / proofs[3]['capture']['path']).exists(), 'legacy transaction lost its unpinned capture'
+marker.write_bytes(core['encoded'](dict(lease_id='lease_' + '9' * 32)))
+assert proofs[3]['capture']['path'] in core['collect_abandoned_prefixes'](str(repo), cutoff), 'unrelated marker vetoed collection'
+for malformed in (b'', b'{', b'[]', core['encoded'](dict(lease_id=[]))):
+    marker.write_bytes(malformed)
+    try:
+        core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('malformed legacy marker authorized collection')
+    assert (repo / proofs[3]['capture']['path']).exists()
+unrelated_marker = core['encoded'](dict(lease_id='lease_' + '9' * 32))
+for size in (64 * 1024, 64 * 1024 + 1):
+    marker.write_bytes(unrelated_marker + b' ' * (size - len(unrelated_marker)))
+    try:
+        core['collect_abandoned_prefixes'](str(repo), cutoff)
+    except (ValueError, SystemExit):
+        assert size > 64 * 1024, 'marker at the byte limit refused'
+    else:
+        assert size == 64 * 1024, 'oversized marker authorized collection'
+    assert (repo / proofs[3]['capture']['path']).exists()
+marker.write_bytes(unrelated_marker)
+marker_scope = core['collect_abandoned_prefixes'].__globals__
+marker_limit = marker_scope['MAX_COMPLETION_PINS']
+try:
+    for limit in (1, 0):
+        marker_scope['MAX_COMPLETION_PINS'] = limit
+        try:
+            assert not core['legacy_completion_veto'](str(repo), {lease})
+        except ValueError:
+            assert limit == 0
+        else:
+            assert limit == 1, 'marker scan exceeded its bound'
+finally:
+    marker_scope['MAX_COMPLETION_PINS'] = marker_limit
+    marker.unlink()
+marker_scope['MAX_COMPLETION_PINS'] = 0
+try:
+    assert not core['legacy_completion_veto'](str(repo), {lease}), 'empty marker set vetoed collection'
+finally:
+    marker_scope['MAX_COMPLETION_PINS'] = marker_limit
+# Retention is structural: completion-store paths held as dict keys (approval
+# evidence identities) or as a transaction's own bundle file stay reachable.
+def aged_object(directory, ext, payload):
+    ref = core['immutable_object'](str(repo), '.oms/plan/' + directory, payload, ext, core['MAX_JSON'])
+    os.utime(repo / ref['path'], (1, 1))
+    return ref
+keyed = aged_object('completion-segments', '.bin', b'evidence only named by an approval key')
+bundle_file = aged_object('completion-prefixes', '.json', core['encoded'](dict(bundle='file')))
+orphan = aged_object('completion-segments', '.bin', b'unreferenced control')
+approval = core['immutable_object'](str(repo), '.oms/plan/completion-captures', core['encoded'](dict(
+    kind='oms-main-read-approval-v1', snapshot=dict(evidence_identities={keyed['path']: 'identity'}))), '.json', core['MAX_JSON'])
+os.utime(repo / approval['path'], (1, 1))
+bundle_env = os.environ.get('OMS_COMPLETION_BUNDLE')
+bundle_pin = 'b' * 32
+os.environ['OMS_COMPLETION_PIN_ID'] = bundle_pin
+os.environ['OMS_COMPLETION_BUNDLE'] = bundle_file['path']
+core['write_completion_pin'](str(repo), 'lease_' + '5' * 32, {})
+swept = core['collect_abandoned_prefixes'](str(repo), cutoff)
+assert orphan['path'] in swept, 'control object was not collectable'
+assert keyed['path'] not in swept, 'approval evidence keyed by path lost its capture'
+assert bundle_file['path'] not in swept, 'transaction pin lost its own bundle file'
+core['remove_completion_pins'](str(repo), ident=bundle_pin)
+if bundle_env is None:
+    del os.environ['OMS_COMPLETION_BUNDLE']
+else:
+    os.environ['OMS_COMPLETION_BUNDLE'] = bundle_env
+os.environ['OMS_COMPLETION_PIN_ID'] = pin_id
+assert bundle_file['path'] in core['collect_abandoned_prefixes'](str(repo), cutoff), 'bundle file kept without a pin'
+for ref in (keyed, bundle_file, orphan, approval):
+    (repo / ref['path']).unlink()
+expected = core['collect_abandoned_prefixes'](str(repo), cutoff)
+assert proofs[3]['capture']['path'] in expected, 'unrelated pinned lease vetoed collection'
+assert proofs[2]['capture']['path'] not in expected, 'pin lost its capture'
+assert proofs[6]['capture']['path'] not in expected, 'current plan lost its capture'
+zero = core['collect_abandoned_prefixes'](str(repo), time.time())
+assert proofs[2]['capture']['path'] not in zero, 'zero-day sweep lost a live pin'
+assert proofs[6]['capture']['path'] not in zero, 'zero-day sweep lost a plan root'
+unknown = pin_path.parent / 'unrecognized-entry'
+unknown.write_bytes(b'unknown')
+try:
+    core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+except ValueError as error:
+    assert str(unknown.relative_to(repo)) in str(error), error
+else:
+    raise AssertionError('unknown pin entry authorized collection')
+assert (repo / proofs[3]['capture']['path']).exists(), 'unknown entry allowed partial deletion'
+gc_cli = ['bash', str(root / 'scripts/gc.sh'), '--repo', str(repo)]
+result = subprocess.run(gc_cli + ['--days', '1', '--apply'], capture_output=True, text=True,
+                        check=True, timeout=int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert 'completion capture collection skipped' in result.stderr and str(unknown.relative_to(repo)) in result.stderr
+unknown.unlink()
+temporary = pin_path.parent / ('.' + 'a' * 32 + '.json.tmp.1.x')
+temporary.write_bytes(b'interrupted pin write')
+os.utime(temporary, (cutoff, cutoff))
+assert str(temporary.relative_to(repo)) not in core['collect_abandoned_prefixes'](str(repo), cutoff), 'temp at cutoff collected'
+assert len(core['completion_pins'](str(repo))[0]) == 1, 'temporary file counted as a pin'
+os.utime(temporary, (1, 1))
+assert str(temporary.relative_to(repo)) in core['collect_abandoned_prefixes'](str(repo), cutoff)
+outside_temp = repo / 'outside-temp'
+outside_temp.write_bytes(b'keep outside pin namespace')
+temporary.unlink()
+temporary.symlink_to(outside_temp)
+try:
+    core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+except ValueError as error:
+    assert str(temporary.relative_to(repo)) in str(error), error
+else:
+    raise AssertionError('linked pin temp authorized collection')
+assert outside_temp.read_bytes() == b'keep outside pin namespace'
+temporary.unlink()
+temporary.write_bytes(b'interrupted pin write')
+os.utime(temporary, (1, 1))
+orphan = core['immutable_object'](str(repo), '.oms/plan/completion-prefixes', b'{"orphan":1}\n', '.json', core['MAX_JSON'])
+os.utime(repo / orphan['path'], (1, 1))
+plan_path.write_text(json.dumps(dict(tasks=dict(active=dict(state='review', lease_id=lease)),
+                                     retained=[proof for index, proof in enumerate(proofs) if index != 2])))
+result = subprocess.run(['bash', str(root / 'scripts/gc.sh'), '--repo', str(repo), '--days', '0', '--apply'],
+               check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+               timeout=int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert not (repo / orphan['path']).exists(), 'live pinned lease retained unrelated garbage'
+assert (repo / proofs[2]['capture']['path']).exists(), 'zero-day apply lost a pinned capture'
+assert not temporary.exists(), 'aged interrupted pin write survived gc'
+assert b'- completion-pin-temp: ' in result.stdout, result.stdout
 plan_path.write_text(json.dumps(dict(tasks={})))
+os.utime(pin_path, (cutoff, cutoff))
+assert str(pin_path.relative_to(repo)) not in core['collect_abandoned_prefixes'](str(repo), cutoff), 'pin at cutoff collected'
+os.utime(pin_path, (1, 1))
+plan_path.write_text(json.dumps(dict(tasks=dict(active=dict(state='done', lease_id=lease)))))
+assert str(pin_path.relative_to(repo)) not in core['collect_abandoned_prefixes'](str(repo), cutoff), 'extant terminal lease pin collected'
+plan_path.write_text(json.dumps(dict(tasks={})))
+stale = core['collect_abandoned_prefixes'](str(repo), cutoff)
+assert str(pin_path.relative_to(repo)) in stale, 'aged stale pin retained'
+assert proofs[2]['capture']['path'] not in stale, 'stale pin objects collected in same pass'
+assert pin_path.exists(), 'dry run deleted stale pin'
+result = subprocess.run(gc_cli + ['--days', '1'], capture_output=True, text=True, check=True,
+                        timeout=int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert '- completion-pin: ' + str(pin_path.relative_to(repo)) in result.stdout, result.stdout
+assert '- completion-provenance: ' + str(pin_path.relative_to(repo)) not in result.stdout, result.stdout
+saved_pin = pin_path.read_bytes()
+pin_scope = core['completion_pins'].__globals__
+for limit in (len(saved_pin), len(saved_pin) - 1, 0):
+    original_limit = pin_scope['MAX_PREFIX_CACHE']
+    pin_scope['MAX_PREFIX_CACHE'] = limit
+    try:
+        try:
+            core['completion_pins'](str(repo))
+        except ValueError:
+            assert limit < len(saved_pin), 'equal metadata bound refused'
+        else:
+            assert limit == len(saved_pin), 'oversized pin metadata accepted'
+    finally:
+        pin_scope['MAX_PREFIX_CACHE'] = original_limit
+other_pin = pin_path.with_name('5' * 32 + '.json')
+other_pin.write_bytes(saved_pin)
+original_limit = pin_scope['MAX_COMPLETION_PINS']
+try:
+    for limit in (2, 1, 0):
+        pin_scope['MAX_COMPLETION_PINS'] = limit
+        try:
+            core['completion_pins'](str(repo))
+        except ValueError:
+            assert limit < 2, 'equal pin count bound refused'
+        else:
+            assert limit == 2, 'oversized pin count accepted'
+finally:
+    pin_scope['MAX_COMPLETION_PINS'] = original_limit
+    other_pin.unlink()
+for raw in (b'', b'{', b'{}', core['encoded'](dict(schema=1, lease_id=lease, objects=[{}])),
+            core['encoded'](dict(schema=1, lease_id='malformed', objects=[])),
+            core['encoded'](dict(schema=1, lease_id=lease, objects=[dict(path='../outside', sha256='0' * 64)]))):
+    pin_path.write_bytes(raw)
+    try:
+        core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+    except (ValueError, KeyError, TypeError):
+        pass
+    else:
+        raise AssertionError('malformed pin authorized deletion')
+    assert (repo / proofs[3]['capture']['path']).exists()
+outside = repo / 'outside-pin.json'
+outside.write_bytes(saved_pin)
+pin_path.unlink()
+pin_path.symlink_to(outside)
+try:
+    core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+except (ValueError, SystemExit):
+    pass
+else:
+    raise AssertionError('linked pin authorized collection')
+assert outside.read_bytes() == saved_pin and (repo / proofs[3]['capture']['path']).exists()
+pin_path.unlink()
+pin_path.write_bytes(saved_pin)
+os.utime(pin_path, (1, 1))
+plan_path.write_text(json.dumps(dict(tasks={}, retained=[proof for index, proof in enumerate(proofs) if index != 2])))
+core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+assert not pin_path.exists(), 'aged stale pin survived apply'
+assert (repo / proofs[2]['capture']['path']).exists(), 'stale pin did not protect its objects through apply'
+plan_path.write_text(json.dumps(dict(tasks={})))
+assert proofs[2]['capture']['path'] in core['collect_abandoned_prefixes'](str(repo), cutoff), 'stale objects not eligible next pass'
 expected = core['collect_abandoned_prefixes'](str(repo), cutoff)
 assert proofs[3]['capture']['path'] in expected
 assert legacy['capture']['path'] not in expected and proofs[1]['capture']['path'] not in expected
@@ -24474,6 +24725,188 @@ PYRETAINED
     "$ROOT/scripts/gc.sh" --repo "$completion_project" --days 1 > "$completion_project/again.out" 2>&1
     ! grep -Fq -- '- completion-provenance: .oms/' "$completion_project/again.out" || fail "capture GC was not idempotent"
   fi
+
+  local pin_project="$TMP/gc-completion-pins"
+  make_committed_repo "$pin_project"
+  { agent_plan_lifecycle_completion_prelude; cat <<'PYPINS'
+pin_dir = repo / '.oms/plan/completion-pins'
+pin_dir.mkdir(exist_ok=True)
+leftover = pin_dir / ('.' + 'a' * 32 + '.json.tmp.1.x')
+leftover.write_bytes(b'interrupted pin write')
+(repo / 'verify.sh').write_text('''python3 - <<'PY'
+import json, os, stat
+from pathlib import Path
+pins = list(Path('.oms/plan/completion-pins').glob('*.json'))
+assert len(pins) == 1, pins
+pin = json.loads(pins[0].read_bytes())
+assert pin['lease_id'] == os.environ['OMS_LEASE_ID'] and pin['objects']
+if os.name != 'nt':
+    assert stat.S_IMODE(pins[0].stat().st_mode) == 0o600
+assert all(Path(ref['path']).is_file() for ref in pin['objects'])
+PY
+test ! -f .oms/fail-verifier
+''')
+bundle = setup()
+invoke(bundle)
+assert not list(pin_dir.glob('*.json')), 'finalize left its transaction pin'
+assert leftover.is_file(), 'completion removed an unrelated temp file'
+bundle = setup()
+(repo / '.oms/fail-verifier').touch()
+invoke(bundle, ok=False)
+assert not list(pin_dir.glob('*.json')), 'verifier failure left its transaction pin'
+(repo / '.oms/fail-verifier').unlink()
+completion = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+os.environ['OMS_COMPLETION_PIN_ID'] = '3' * 32
+completion['write_completion_pin'](str(repo), bundle['lease_id'], {})
+first_pin = pin_dir / ('3' * 32 + '.json')
+saved_pin = first_pin.read_bytes()
+try:
+    completion['write_completion_pin'](str(repo), bundle['lease_id'], {})
+except (ValueError, SystemExit):
+    pass
+else:
+    raise AssertionError('duplicate transaction overwrote a pin')
+assert first_pin.read_bytes() == saved_pin
+os.environ['OMS_COMPLETION_PIN_ID'] = '4' * 32
+completion['write_completion_pin'](str(repo), bundle['lease_id'], {})
+assert len(list(pin_dir.glob('*.json'))) == 2, 'concurrent transactions overwrote a pin'
+custom_plan = repo / '.oms/plan/custom.json'
+custom = plan()
+custom['tasks'] = {bundle['task_id']: custom['tasks'][bundle['task_id']]}
+custom_plan.write_text(json.dumps(custom))
+ap('release', '--file', str(custom_plan), '--id', bundle['task_id'], '--lease-id', bundle['lease_id'])
+assert len(list(pin_dir.glob('*.json'))) == 2, 'custom plan settlement removed active-plan pins'
+lease_path = completion['completion_pin_lease_path'](bundle['lease_id'])
+lease_index = repo / lease_path
+saved_index = lease_index.read_bytes()
+stable = plan_path.read_bytes()
+lease_index.write_bytes(b'{')
+error = ap('release', '--id', bundle['task_id'], '--lease-id', bundle['lease_id'], ok=False)
+assert 'plan unchanged' in error and lease_path in error and 'Traceback' not in error, error
+assert plan_path.read_bytes() == stable, 'invalid own index refused after publication'
+lease_index.write_bytes(saved_index)
+if os.name != 'nt':
+    first_pin.unlink()
+    first_pin.symlink_to(leftover)
+    try:
+        error = ap('release', '--id', bundle['task_id'], '--lease-id', bundle['lease_id'], ok=False)
+        assert 'plan unchanged' in error and str(first_pin.relative_to(repo)) in error, error
+        assert plan_path.read_bytes() == stable and leftover.read_bytes() == b'interrupted pin write'
+    finally:
+        first_pin.unlink()
+        first_pin.write_bytes(saved_pin)
+        first_pin.chmod(0o600)
+if os.name != 'nt':
+    pin_dir.chmod(0o500)
+    try:
+        error = ap('release', '--id', bundle['task_id'], '--lease-id', bundle['lease_id'], ok=False)
+        assert 'plan unchanged' in error and 'completion-pins/' in error and 'Traceback' not in error, error
+        assert plan_path.read_bytes() == stable, 'unwritable pin parent refused after publication'
+    finally:
+        pin_dir.chmod(0o700)
+from unittest.mock import patch
+with completion['completion_pin_cleanup'](str(repo), ident='3' * 32) as remove:
+    with patch.object(os, 'unlink', side_effect=PermissionError('simulated cleanup failure')):
+        try:
+            remove(published=True)
+        except ValueError as error:
+            assert 'change already published' in str(error) and str(first_pin) in str(error), error
+        else:
+            raise AssertionError('failed post-publication cleanup reported success')
+ap('release', '--id', bundle['task_id'], '--lease-id', bundle['lease_id'])
+assert not list(pin_dir.glob('*.json')), 'lease settlement left transaction pins'
+assert not lease_index.exists(), 'lease settlement left its own index'
+assert leftover.is_file(), 'release removed an unrelated temp file'
+ap('claim', '--id', bundle['task_id'], '--provider', 'codex', '--ttl', '0')
+claimed = plan()['tasks'][bundle['task_id']]
+os.environ['OMS_COMPLETION_PIN_ID'] = '7' * 32
+completion['write_completion_pin'](str(repo), claimed['lease_id'], {})
+ap('reclaim', '--ttl', '0')
+assert plan()['tasks'][bundle['task_id']]['state'] == 'ready', 'reclaim failed with a leftover temp file'
+assert not list(pin_dir.glob('*.json')) and leftover.is_file(), 'reclaim did not isolate its pin cleanup'
+completion['remove_completion_pins'](str(repo), ident='7' * 32)
+completion['remove_completion_pins'](str(repo), ident='7' * 32)
+os.environ['OMS_COMPLETION_PIN_ID'] = '6' * 32
+with patch.object(os, 'replace', side_effect=OSError('interrupted pin publication')):
+    try:
+        completion['write_completion_pin'](str(repo), bundle['lease_id'], {})
+    except OSError:
+        pass
+    else:
+        raise AssertionError('failed rename published a transaction pin')
+assert list(pin_dir.iterdir()) == [leftover], 'failed atomic publication left pin files'
+for ident in ('', 'malformed'):
+    os.environ['OMS_COMPLETION_PIN_ID'] = ident
+    try:
+        completion['write_completion_pin'](str(repo), bundle['lease_id'], {})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('invalid transaction identity published a pin')
+index_scope = completion['completion_pin_ids'].__globals__
+old_limit = index_scope['MAX_COMPLETION_PINS']
+try:
+    for limit, count in ((0, 0), (0, 1), (2, 2), (2, 3)):
+        index_scope['MAX_COMPLETION_PINS'] = limit
+        raw = completion['encoded'](dict(schema=1, pins=[str(number) * 32 for number in range(count)]))
+        try:
+            completion['completion_pin_ids'](raw, lease_path)
+        except ValueError:
+            assert count > limit
+        else:
+            assert count <= limit
+finally:
+    index_scope['MAX_COMPLETION_PINS'] = old_limit
+try:
+    for limit in (0, 2):
+        index_scope['MAX_COMPLETION_PINS'] = limit
+        raw = completion['encoded'](dict(schema=1, pins=[str(number) * 32 for number in range(limit)]))
+        lease_index.write_bytes(raw)
+        os.environ['OMS_COMPLETION_PIN_ID'] = '8' * 32
+        try:
+            completion['write_completion_pin'](str(repo), bundle['lease_id'], {})
+        except ValueError as error:
+            assert lease_path in str(error), error
+        else:
+            raise AssertionError('lease index writer exceeded its bound')
+        assert lease_index.read_bytes() == raw and not (pin_dir / ('8' * 32 + '.json')).exists()
+finally:
+    index_scope['MAX_COMPLETION_PINS'] = old_limit
+    lease_index.unlink()
+for raw in (b'', b'{', b'{}', completion['encoded'](dict(schema=1, pins=['malformed']))):
+    try:
+        completion['completion_pin_ids'](raw, lease_path)
+    except ValueError as error:
+        assert lease_path in str(error), error
+    else:
+        raise AssertionError('malformed lease index accepted')
+lease_dir = repo / '.oms/plan/completion-pin-leases'
+index_temp = lease_dir / ('.lease_' + 'b' * 32 + '.json.tmp.1.x')
+index_temp.write_bytes(b'interrupted lease index write')
+os.utime(index_temp, (1, 1))
+for path in lease_dir.glob('*.json'):
+    os.utime(path, (1, 1))
+if os.unlink in os.supports_dir_fd and os.stat in os.supports_dir_fd:
+    try:
+        for limit in (0, 1):
+            index_scope['MAX_COMPLETION_PINS'] = limit
+            try:
+                completion['collect_abandoned_prefixes'](str(repo), int(time.time()) - 86400)
+            except ValueError as error:
+                assert limit == 0 and 'lease index namespace' in str(error), error
+            else:
+                assert limit == 1, 'lease index namespace exceeded its bound'
+    finally:
+        index_scope['MAX_COMPLETION_PINS'] = old_limit
+gc_result = call('gc.sh', '--days', '1', '--apply')
+if os.unlink in os.supports_dir_fd and os.stat in os.supports_dir_fd:
+    assert not index_temp.exists(), 'aged interrupted index write survived gc'
+    assert '- completion-pin-index: ' in gc_result, gc_result
+    assert not list(lease_dir.iterdir()), 'empty aged lease indexes survived gc'
+assert leftover.is_file(), 'gc deleted a young interrupted pin write'
+print('completion pins: preflight publication, finalize, failure and lease settlement passed')
+PYPINS
+  } | python3 - "$ROOT" "$pin_project"
 
   # No marker and a verified dead marker permit normal cleanup. Every
   # ambiguous marker shape defers both transient operations byte-for-byte.

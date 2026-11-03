@@ -825,6 +825,22 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
   export OMS_COMPLETION_PHASE
   completion_snapshot_file="$(mktemp)" || fail "cannot create completion snapshot"
   trap 'rm -f "$completion_snapshot_file"' EXIT
+  OMS_COMPLETION_PIN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)' | tr -d '\r')" ||
+    fail "cannot create completion transaction identity"
+  export OMS_COMPLETION_PIN_ID
+  completion_published=0
+  completion_remove_pin() {
+    OMS_COMPLETION_PUBLISHED="$completion_published" \
+      python3 "$ROOT/scripts/lib/plan-completion.py" --remove-pin "$completion_py_state_repo"
+  }
+  completion_cleanup() {
+    local completion_status="$?"
+    oms_with_file_lock "$completion_state_repo/.oms/plan/tasks.json" completion_remove_pin ||
+      completion_status=2
+    rm -f "$completion_snapshot_file"
+    exit "$completion_status"
+  }
+  trap completion_cleanup EXIT
   OMS_COMPLETION_SNAPSHOT_FILE="$(python_path_for_host "$completion_snapshot_file")" ||
     fail "cannot normalize completion snapshot path"
   export OMS_COMPLETION_SNAPSHOT_FILE
@@ -839,8 +855,12 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
   export OMS_COMPLETION_VERIFICATION
   OMS_COMPLETION_PHASE=finalize
   export OMS_COMPLETION_PHASE
-  completion_run_locked
-  exit $?
+  if completion_run_locked; then
+    completion_published=1
+    exit 0
+  else
+    exit $?
+  fi
 fi
 
 if [ "$ACTION" = retire ]; then

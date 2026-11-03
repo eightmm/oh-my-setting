@@ -43,6 +43,7 @@ def die(msg):
 
 _completion_module = None
 _unverified_completions = set()
+_settled_completion_leases = set()
 
 def completion_module():
     global _completion_module
@@ -111,14 +112,29 @@ def ensure_plan_id(d):
     return value
 
 def save(d):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(d, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)   # atomic
-    except Exception:
-        os.unlink(tmp); raise
+    with contextlib.ExitStack() as stack:
+        cleanups = []
+        if (_settled_completion_leases and same_absolute_path(path, canonical_plan) and
+                os.path.lexists(os.path.join(state_repo(), ".oms", "plan", "completion-pin-leases"))):
+            try:
+                cleanups.append(stack.enter_context(completion_module()["completion_pin_cleanup"](
+                    state_repo(), lease_ids=sorted(_settled_completion_leases))))
+            except (ValueError, OSError, SystemExit) as exc:
+                die("plan unchanged; " + str(exc))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(d, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            os.unlink(tmp); raise
+        for remove in cleanups:
+            try:
+                remove(published=True)
+            except (ValueError, OSError, SystemExit) as exc:
+                die("plan change already published to " + path + "; " + str(exc))
+        _settled_completion_leases.clear()
 
 def exact_task_sha256(task):
     raw = json.dumps(task, sort_keys=True, ensure_ascii=False,
@@ -510,6 +526,8 @@ def owner_id():
     return value
 
 def clear_claim(t):
+    if t.get("lease_id"):
+        _settled_completion_leases.add(t["lease_id"])
     t.update(state="ready", provider="", ttl="", claimed_at="", reason="",
              lease_id="", autopilot_owner_id="")
     t.pop("claimed_by_participant", None)
