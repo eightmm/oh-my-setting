@@ -23688,6 +23688,16 @@ test_oms_init_seeds_and_guides() {
     fail "init should show a valid named manifest check command"
   contains "$out" "oms data-manifest leakage --name <manifest>" ||
     fail "init should show a valid named leakage command"
+  contains "$out" '--verify "<your test command>"' ||
+    fail "init should use a placeholder without a recognized runner: $out"
+  contains "$out" "Before claiming done: '<your test command>'." ||
+    fail "init should use the placeholder in the final hint: $out"
+  contains "$out" 'Feature readiness: council and panel workers need no PROJECT.md.' ||
+    fail "init should explain council and panel readiness: $out"
+  contains "$out" 'autopilot needs a confirmed PROJECT.md.' ||
+    fail "init should explain autopilot readiness: $out"
+  contains "$out" 'goal-drive needs an agent-plan with verify commands and a clean tree.' ||
+    fail "init should explain goal-drive readiness: $out"
   # Idempotent and migratory: a Markdown-only project gets its derived index
   # back on the next init without changing the source.
   rm -f "$project/.oms/memory/memory.sqlite3"
@@ -23698,6 +23708,55 @@ test_oms_init_seeds_and_guides() {
     fail "an idempotent init should report the existing tick registration: $out"
   [ "$(grep -Fxc "$project" "$registry")" = 1 ] ||
     fail "an idempotent init should not duplicate the registry entry"
+
+  local runners="$TMP/oms-init-runners" scenario expected
+  make_committed_repo "$runners"
+  for scenario in check pyproject pytest_ini python_tests npm make cargo go empty malformed no_test non_python; do
+    rm -f "$runners/scripts/check.sh" "$runners/pyproject.toml" "$runners/pytest.ini" \
+      "$runners/tests/test_example.py" "$runners/package.json" "$runners/Makefile" \
+      "$runners/Cargo.toml" "$runners/go.mod"
+    expected='<your test command>'
+    case "$scenario" in
+      check)
+        mkdir -p "$runners/scripts"
+        printf 'exit 97\n' > "$runners/scripts/check.sh"
+        printf '{"scripts":{"test":"exit 97"}}\n' > "$runners/package.json"
+        expected='bash scripts/check.sh' ;;
+      pyproject) touch "$runners/pyproject.toml"; expected=pytest ;;
+      pytest_ini) touch "$runners/pytest.ini"; expected=pytest ;;
+      python_tests)
+        mkdir -p "$runners/tests"
+        touch "$runners/tests/test_example.py"
+        printf '{"scripts":{"test":"exit 97"}}\n' > "$runners/package.json"
+        expected=pytest ;;
+      npm)
+        printf '{"scripts":{"test":"exit 97"}}\n' > "$runners/package.json"
+        printf 'test:\n\texit 97\n' > "$runners/Makefile"
+        expected='npm test' ;;
+      make)
+        printf 'test:\n\texit 97\n' > "$runners/Makefile"
+        touch "$runners/Cargo.toml"
+        expected='make test' ;;
+      cargo)
+        touch "$runners/Cargo.toml" "$runners/go.mod"
+        expected='cargo test' ;;
+      go) touch "$runners/go.mod"; expected='go test ./...' ;;
+      empty) touch "$runners/package.json" ;;
+      malformed) printf '{broken\n' > "$runners/package.json" ;;
+      no_test)
+        printf '{"scripts":{"build":"exit 97"}}\n' > "$runners/package.json"
+        printf 'testing:\n\texit 97\n' > "$runners/Makefile" ;;
+      non_python)
+        mkdir -p "$runners/tests"
+        touch "$runners/tests/example.ts" ;;
+    esac
+    out="$(cd "$runners" && "$ROOT/scripts/init.sh")" ||
+      fail "init should inspect $scenario without running a verifier"
+    contains "$out" "--verify \"$expected\"" ||
+      fail "init should suggest $expected for $scenario: $out"
+    contains "$out" "Before claiming done: '$expected'." ||
+      fail "init should reuse $expected in the final hint for $scenario: $out"
+  done
 }
 
 test_gc_closes_stale_open_run() {

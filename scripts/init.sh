@@ -126,6 +126,25 @@ task_state="none"
 plan_state="none"
 [ -f "$OMS/plan/tasks.json" ] && plan_state="present"
 
+# Suggest only a runner indicated by repository files; never execute it.
+verify_command='<your test command>'
+if [ -f "$STATE_ROOT/scripts/check.sh" ]; then
+  verify_command='bash scripts/check.sh'
+elif [ -f "$STATE_ROOT/pyproject.toml" ] || [ -f "$STATE_ROOT/pytest.ini" ] ||
+  { [ -d "$STATE_ROOT/tests" ] &&
+    find "$STATE_ROOT/tests" -type f -name '*.py' -print | grep . >/dev/null; }; then
+  verify_command='pytest'
+elif [ -f "$STATE_ROOT/package.json" ] &&
+  grep -q '"test"[[:space:]]*:' "$STATE_ROOT/package.json"; then
+  verify_command='npm test'
+elif [ -f "$STATE_ROOT/Makefile" ] && grep -q '^test[[:space:]]*:' "$STATE_ROOT/Makefile"; then
+  verify_command='make test'
+elif [ -f "$STATE_ROOT/Cargo.toml" ]; then
+  verify_command='cargo test'
+elif [ -f "$STATE_ROOT/go.mod" ]; then
+  verify_command='go test ./...'
+fi
+
 echo "oms init: $STATE_ROOT (style=$style, memory=$mem_state, rules=$rules_state, spec=$spec_display)"
 echo "oms init: tick registry $tick_state"
 [ "$private_state" = "just-hidden" ] &&
@@ -158,7 +177,7 @@ case "$rules_state" in
 esac
 echo "- Run 'oms state' to see task/plan/board/runs at a glance."
 if [ "$task_state" = "none" ]; then
-  echo "- No active task: 'oms agent-task init --goal \"...\" --verify \"bash scripts/check.sh\"'."
+  echo "- No active task: 'oms agent-task init --goal \"...\" --verify \"$verify_command\"'."
 else
   echo "- An active task exists: 'oms agent-task context' to resume it."
 fi
@@ -178,4 +197,7 @@ if [ "$private_state" = "exposed" ]; then
 elif [ "$private_state" = "n/a" ]; then
   echo "- Not a git repo yet: after 'git init', re-run 'oms init' so the agent files stay out of the history."
 fi
-echo "- Before claiming done: 'bash scripts/check.sh' (if present) or the project's verify."
+echo "- Before claiming done: '$verify_command'."
+echo "Feature readiness: council and panel workers need no PROJECT.md."
+echo "  autopilot needs a confirmed PROJECT.md."
+echo "  goal-drive needs an agent-plan with verify commands and a clean tree."

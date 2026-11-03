@@ -316,6 +316,8 @@ oms project-doctor .
 oms project-private --check
 ```
 
+Council and panel workers need no `PROJECT.md`; autopilot needs a confirmed `PROJECT.md`; goal-drive needs an agent-plan with verify commands and a clean tree. `oms init` suggests verification from existing repository files (check.sh, pytest, npm, make, Cargo, then Go), or `<your test command>` when no runner is recognized.
+
 ## Local skills and optional bundle operations
 
 Skills load in three layers: general-purpose skills everywhere,
