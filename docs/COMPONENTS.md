@@ -1566,6 +1566,14 @@ provider system instructions and user-owned settings are not replaced.
 
 ### Decisions API
 
+Automatic task classification is off by default. `oms decide --auto task-classify on`
+enables it; use `off` to disable it or `status` to see the setting and whether a
+key is configured. When enabled, a parent `oms agent-plan add` without `--role`
+sends the title, allowed paths and verify command to OpenAI in one request for a
+panel role and workload suggestion. The suggestion is stored with the task and
+shown when ready; it never dispatches a worker. Failures leave task creation
+unchanged and print a short skip message.
+
 `oms decide --input TEXT --choice NAME --option VALUE=DESCRIPTION --option VALUE=DESCRIPTION --instructions TEXT`
 asks one choice question; `--predicate NAME --instructions TEXT` asks a predicate.
 For choice, predicate or score questions together, pass `--questions-file PATH`

@@ -144,6 +144,86 @@ class DecisionsTests(unittest.TestCase):
         path.write_text('not json')
         self.assertNotEqual(self.run_cli('--input', 'x', '--questions-file', str(path), '--dry-run').returncode, 0)
 
+    def test_auto_config(self):
+        path = Path(self.tmp.name) / 'config/oh-my-setting/decide.json'
+        path.parent.mkdir(parents=True)
+        path.write_text('{"other": 7}')
+        status = self.run_cli('--auto', 'task-classify', 'status')
+        self.assertIn('off', status.stdout)
+        self.assertNotIn(self.private, status.stdout + status.stderr)
+        self.assertEqual(self.run_cli('--auto', 'task-classify', 'on').returncode, 0)
+        self.assertEqual(json.loads(path.read_text())['other'], 7)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertIn('on', self.run_cli('--auto', 'task-classify', 'status').stdout)
+        self.assertEqual(self.run_cli('--auto', 'task-classify', 'off').returncode, 0)
+        self.assertIn('off', self.run_cli('--auto', 'task-classify', 'status').stdout)
+        self.assertNotEqual(self.run_cli('--auto', 'task-classify', 'bad').returncode, 0)
+        del self.env['OMS_OPENAI_DECISIONS_' + 'KEY']
+        self.assertIn('not configured', self.run_cli('--auto', 'task-classify', 'status').stdout)
+        path.write_text('{bad')
+        self.assertNotEqual(self.run_cli('--auto', 'task-classify', 'on').returncode, 0)
+        self.assertEqual(path.read_text(), '{bad')
+
+    def test_auto_plan_add(self):
+        repo = Path(self.tmp.name) / 'repo'
+        repo.mkdir()
+        def plan(*args):
+            return subprocess.run(['bash', str(ROOT / 'scripts/agent-plan.sh'), '--repo', str(repo), *args],
+                                  text=True, capture_output=True, env=self.env, timeout=25)
+        self.assertEqual(plan('init', '--goal', 'test').returncode, 0)
+        self.assertEqual(self.run_cli('--auto', 'task-classify', 'on').returncode, 0)
+        Handler.answer['answers'] = [dict(name='role', type='choice', choice='builder', confidence=0.81),
+                                     dict(name='workload', type='choice', choice='routine', confidence=0.9)]
+        result = plan('add', '--id', 'one', '--title', 'Fix it', '--allowed', 'src', '--verify', 'true')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        task = json.loads((repo / '.oms/plan/tasks.json').read_text())['tasks']['one']
+        self.assertEqual(task['role'], '')
+        self.assertEqual(task['role_suggestion']['role'], 'builder')
+        self.assertEqual(len(Handler.requests), 1)
+        request = Handler.requests[0]
+        self.assertEqual(json.loads(request['input']), {'title': 'Fix it', 'allowed_paths': ['src'], 'verify': 'true'})
+        self.assertEqual([q['name'] for q in request['questions']], ['role', 'workload'])
+        self.assertEqual(task['role_suggestion']['workload_probability'], 0.9)
+        shown = plan('show', '--id', 'one')
+        self.assertEqual(json.loads(shown.stdout)['role_suggestion'], task['role_suggestion'])
+        Handler.status = 500
+        result = plan('add', '--id', 'two', '--title', 'another')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('plan: role suggestion skipped (', result.stderr)
+        count = len(Handler.requests)
+        self.assertEqual(plan('add', '--id', 'three', '--title', 'explicit', '--role', 'builder').returncode, 0)
+        self.assertEqual(self.run_cli('--auto', 'task-classify', 'off').returncode, 0)
+        self.assertEqual(plan('add', '--id', 'four', '--title', 'off').returncode, 0)
+        self.assertEqual(len(Handler.requests), count)
+        self.assertEqual(self.run_cli('--auto', 'task-classify', 'on').returncode, 0)
+        for env_name, value in (('OMS_HARNESS_CHILD', '1'), ('OMS_HARNESS_DELEGATE_DEPTH', '1')):
+            self.env[env_name] = value
+            child = plan('add', '--id', env_name.lower(), '--title', 'child')
+            self.assertEqual(child.returncode, 2 if env_name == 'OMS_HARNESS_CHILD' else 0, child.stderr)
+            del self.env[env_name]
+        self.assertEqual(len(Handler.requests), count)
+        Handler.status = 200
+        for index, probability in enumerate((None, -0.01, 1.01, 'bad', 0, 1)):
+            Handler.answer['answers'][0]['confidence'] = probability
+            result = plan('add', '--id', 'prob' + str(index), '--title', 'edge')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual('skipped' in result.stderr, index < 4)
+        Handler.answer['answers'][0] = {'name': 'role', 'type': 'refusal'}
+        result = plan('add', '--id', 'refused', '--title', 'refused')
+        self.assertIn('skipped (refusal)', result.stderr)
+        self.env['OMS_DECIDE_DAILY_USD'] = '0'
+        result = plan('add', '--id', 'capped', '--title', 'capped')
+        self.assertIn('skipped (cap)', result.stderr)
+        del self.env['OMS_DECIDE_DAILY_USD']
+        Handler.answer['answers'][0] = dict(name='role', type='choice', choice='unknown', confidence=0.8)
+        result = plan('add', '--id', 'invalid', '--title', 'invalid')
+        self.assertIn('plan: role suggestion skipped (', result.stderr)
+        self.assertEqual(result.returncode, 0)
+        del self.env['OMS_OPENAI_DECISIONS_' + 'KEY']
+        result = plan('add', '--id', 'missing', '--title', 'missing')
+        self.assertIn('plan: role suggestion skipped (', result.stderr)
+        self.assertEqual(result.returncode, 0)
+
     def test_dispatcher(self):
         result = subprocess.run(['bash', str(ROOT / 'scripts/oms'), 'decide', '--help'],
                                 capture_output=True, text=True, env=self.env, timeout=20)

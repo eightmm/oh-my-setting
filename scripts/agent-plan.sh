@@ -63,6 +63,8 @@ AMEND_OTHER_OPTION=0
 ACCEPT=""
 REUSE_PASS_RUN=""
 ROLE=""
+ROLE_SET=0
+ROLE_SUGGESTION=""
 ASSIGNMENT="{}"
 STATE_FILTER=""
 CLAIM=0
@@ -347,7 +349,7 @@ while [ "$#" -gt 0 ]; do
     --assignment) [ "$#" -ge 2 ] || fail "--assignment requires JSON"; ASSIGNMENT="$2"; shift 2 ;;
     --depends) [ "$#" -ge 2 ] || fail "--depends requires list"; [ "$DEPENDS_SET" = 0 ] || fail "--depends given twice; pass one comma-separated list \"p1,p2\""; DEPENDS="$2"; DEPENDS_SET=1; shift 2 ;;
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires list"; [ "$ALLOWED_SET" = 0 ] || fail "--allowed given twice; pass one comma-separated list \"p1,p2\""; ALLOWED="$2"; ALLOWED_SET=1; shift 2 ;;
-    --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
+    --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; ROLE_SET=1; shift 2 ;;
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; [ "$FORBIDDEN_SET" = 0 ] || fail "--forbidden given twice; pass one comma-separated list \"p1,p2\""; FORBIDDEN="$2"; FORBIDDEN_SET=1; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; VERIFY_SET=1; shift 2 ;;
     --reuse-pass) [ "$#" -ge 2 ] || fail "--reuse-pass requires a run id"; REUSE_PASS_RUN="$2"; shift 2 ;;
@@ -1420,6 +1422,12 @@ print(json.dumps(row, ensure_ascii=False))
   rm -f "$out_tmp"
   exit 0
 fi
+
+# The optional network call must finish before the plan writer lock is acquired.
+if [ "$ACTION" = add ] && [ "$ROLE_SET" = 0 ] && [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ]; then
+  ROLE_SUGGESTION="$(python3 "$ROOT/scripts/lib/openai_decisions.py" --classify-task)" || ROLE_SUGGESTION=""
+fi
+export OMS_ROLE_SUGGESTION="$ROLE_SUGGESTION"
 
 # Serialize the read-decide-write section against other agents. Recovery also
 # freezes worker-marker publication while it judges liveness, in the global

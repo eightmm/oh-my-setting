@@ -6,8 +6,10 @@ import getpass
 import json
 import math
 import os
+import re
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -26,6 +28,90 @@ class CapError(ClientError):
 def auth_path():
     config = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
     return config / 'oh-my-setting' / 'openai-decisions.key'
+
+
+def config_path():
+    return auth_path().parent / 'decide.json'
+
+
+def read_config():
+    try:
+        data = json.loads(config_path().read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict) or type(data.get('task-classify', False)) is not bool:
+        raise ClientError('invalid automatic decisions config')
+    return data
+
+
+def auto_config(action):
+    data = read_config()
+    if action == 'status':
+        try:
+            get_auth()
+            configured = True
+        except (ClientError, OSError, UnicodeError):
+            configured = False
+        print('task-classify: %s; key: %s' % ('on' if data.get('task-classify', False) else 'off',
+                                              'configured' if configured else 'not configured'))
+        return
+    data['task-classify'] = action == 'on'
+    path = config_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.decide-', dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def classify_task():
+    try:
+        if not read_config().get('task-classify', False):
+            return
+        get_auth()
+        from panel_routing import policy, TIERS
+        roles = policy()['roles']
+        questions = [
+            {'name': 'role', 'type': 'choice', 'instructions': 'Choose the best panel role.',
+             'choices': [{'value': role, 'description': role} for role in roles]},
+            {'name': 'workload', 'type': 'choice',
+             'instructions': 'Choose task complexity: light is a mechanical edit with an exact spec; routine is a bounded reversible change; deep is multi-file or unclear logic; frontier is architecture or a trust boundary.',
+             'choices': [{'value': tier, 'description': tier} for tier in TIERS]},
+        ]
+        task = json.dumps({'title': os.environ.get('OMS_TITLE', ''),
+                           'allowed_paths': [x for x in re.split(r'[,\s]+', os.environ.get('OMS_ALLOWED', '')) if x],
+                           'verify': os.environ.get('OMS_VERIFY', '')})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'questions.json'
+            path.write_text(json.dumps(questions), encoding='utf-8')
+            result = subprocess.run([sys.executable, __file__, '--input', task, '--questions-file', str(path),
+                                     '--json', '--timeout', '10'], capture_output=True, text=True, timeout=14)
+        if result.returncode:
+            category = {3: 'refusal', 4: 'cap'}.get(result.returncode, 'request')
+            raise ClientError(category)
+        answers = {row['name']: row for row in json.loads(result.stdout)}
+        role, workload = answers['role'], answers['workload']
+        if role['choice'] not in roles or workload['choice'] not in TIERS:
+            raise ValueError('choice')
+        probabilities = [role['confidence'], workload['confidence']]
+        if any(isinstance(p, bool) or not isinstance(p, (float, int)) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities):
+            raise ValueError('confidence')
+        print(json.dumps({'role': role['choice'], 'workload': workload['choice'],
+                          'role_probability': probabilities[0], 'workload_probability': probabilities[1],
+                          'source': 'openai-decisions', 'model': 'gpt-6-luna'}))
+    except subprocess.TimeoutExpired:
+        print('plan: role suggestion skipped (timeout)', file=sys.stderr)
+    except (ClientError, OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+        category = str(exc) if str(exc) in ('refusal', 'cap', 'request') else 'unavailable'
+        print('plan: role suggestion skipped (%s)' % category, file=sys.stderr)
 
 
 def validate_auth(value):
@@ -142,6 +228,8 @@ def run():
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--set-key', **{'action': 'store_true'})
     group.add_argument('--key-status', **{'action': 'store_true'})
+    group.add_argument('--auto', nargs=2, metavar=('FEATURE', 'ACTION'))
+    group.add_argument('--classify-task', action='store_true', help=argparse.SUPPRESS)
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument('--input')
     inputs.add_argument('--input-file')
@@ -155,6 +243,14 @@ def run():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--timeout', type=float, default=60)
     args = parser.parse_args()
+    if args.auto:
+        if args.auto[0] != 'task-classify' or args.auto[1] not in ('on', 'off', 'status'):
+            raise ClientError('expected --auto task-classify on|off|status')
+        auto_config(args.auto[1])
+        return 0
+    if args.classify_task:
+        classify_task()
+        return 0
     if args.set_key:
         save_auth()
         return 0

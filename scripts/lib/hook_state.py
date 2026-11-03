@@ -1646,10 +1646,30 @@ def panel_next_ready_hint(tasks: list[dict[str, Any]], provider: str) -> str:
                   if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
     if not ready:
         return ""
+    from panel_routing import policy, TIERS
+    try:
+        roles = policy()["roles"]
+    except (OSError, ValueError, TypeError, KeyError):
+        roles = {}
     task_id = plain_line(ready["id"], 40)
+    explicit = ready.get("role")
+    role = explicit if isinstance(explicit, str) and re.fullmatch(r"[A-Za-z0-9._-]+", explicit) else "ROLE"
+    extra = ""
+    suggestion = ready.get("role_suggestion")
+    if role == "ROLE" and not explicit and isinstance(suggestion, dict):
+        suggested = suggestion.get("role")
+        workload = suggestion.get("workload")
+        probability = suggestion.get("role_probability")
+        if (isinstance(suggested, str) and suggested in roles and isinstance(workload, str)
+                and workload in TIERS and isinstance(probability, (int, float))
+                and not isinstance(probability, bool) and 0 <= probability <= 1):
+            role = suggested
+            if roles[role]["tier"] != workload:
+                extra = " --workload " + workload
+            extra += " (suggested %s/%s %.2f)" % (role, workload, probability)
     return ("next ready: %s %s → oms agent-plan claim --id %s --provider %s; "
-            "oms panel --dispatch ROLE --owner %s --task-id %s" % (
-                task_id, plain_line(ready.get("title"), 40), task_id, provider, provider, task_id))
+            "oms panel --dispatch %s --owner %s --task-id %s%s" % (
+                task_id, plain_line(ready.get("title"), 40), task_id, provider, role, provider, task_id, extra))
 
 
 def panel_previous_plan(repo: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:

@@ -1150,6 +1150,17 @@ free = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPr
 assert "[oms plan] Goal: Ship the shared plan board" in free and "1 of 3 verified · 1 cancelled" in free, free
 assert "yours:" not in free and "next ready: t2 Wire banner → oms agent-plan claim --id t2 --provider claude" in free, free
 assert "claim the next ready task before starting new work" in free and "t3" not in free.split("next ready:")[1], free
+suggested = {"id": "x", "state": "ready", "role_suggestion": {"role": "builder", "workload": "frontier", "role_probability": 0.81}}
+hint = hook_state.panel_next_ready_hint([suggested], "claude")
+assert "--dispatch builder --owner claude --task-id x --workload frontier (suggested builder/frontier 0.81)" in hint, hint
+suggested["role_suggestion"]["workload"] = "routine"
+hint = hook_state.panel_next_ready_hint([suggested], "claude")
+assert "--workload" not in hint and "suggested builder/routine 0.81" in hint, hint
+suggested["role_suggestion"]["role"] = []
+assert "--dispatch ROLE" in hook_state.panel_next_ready_hint([suggested], "claude")
+suggested["role"] = "reviewer"
+hint = hook_state.panel_next_ready_hint([suggested], "claude")
+assert "--dispatch reviewer" in hint and "suggested" not in hint, hint
 assert len(free.split("[oms plan]")[1].split("set your status")[0]) < 420 and "\n" not in free, free
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
            {"id": "t3", "state": "ready"}])
