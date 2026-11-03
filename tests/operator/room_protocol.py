@@ -1033,6 +1033,7 @@ for action in ("native", "council"):
             patch.object(panel.room, "join"), \
             patch.object(panel, "check_legacy_main"), \
             patch.object(panel.subprocess, "Popen", return_value=process), \
+            patch.object(panel, "provider_catalog", return_value=[]), \
             patch.dict(os.environ, environment, clear=True):
         status = panel.run_native("codex", project) if action == "native" else \
             panel.council(project, "codex", "heartbeat-council", "Inspect source", "Compare options")
