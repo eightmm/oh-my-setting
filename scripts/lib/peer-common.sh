@@ -729,6 +729,26 @@ run_with_timeout() {
   ma_run_bounded "${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}" provider "$@"
 }
 
+# A git read tree registers in the repository's admin directory, where every
+# concurrent write worker's guard must classify it. A guard recognises residue
+# only under its own TMPDIR or the delegate worktree root, so the caller's
+# TMPDIR would turn each tree add or remove into a gitmeta violation for the
+# workers; the root is the one base all of them share. Residue validators accept
+# a root only when it is its own physical path, and the default root is private
+# as delegate makes it. Prints the root, or nothing when it cannot be used
+# (the caller then keeps its TMPDIR, where the tree is still reclaimable).
+ma_agy_read_root() {
+  local root physical
+
+  root="$(oms_harness_delegate_worktree_root)"
+  case "$root" in /*) ;; *) return 0 ;; esac
+  [ -d "$root" ] || (umask 077 && mkdir -p "$root") 2>/dev/null || true
+  physical="$(oms_harness_physical_dir "$root" 2>/dev/null || true)"
+  [ -n "$physical" ] && [ "$physical" = "$root" ] || return 0
+  [ -n "${OMS_DELEGATE_WORKTREE_ROOT:-}" ] || chmod 700 "$root" 2>/dev/null || return 0
+  printf '%s\n' "$root"
+}
+
 # Some transports have no enforceable file-write-blocking read flag. Read
 # passes for Antigravity and custom adapters therefore run from an isolated directory: a
 # detached HEAD worktree when the repo is git (same tree view, writes
@@ -738,11 +758,17 @@ run_with_timeout() {
 ma_agy_read_dir() {
   local repo="${1:-}"
   local base
+  local parent="${TMPDIR:-/tmp}"
+  local root
 
+  if [ -n "$repo" ]; then
+    root="$(ma_agy_read_root)"
+    [ -z "$root" ] || parent="$root"
+  fi
   # Prefix is oh-my-setting-* and the dir is marked so a worktree leaked by a
   # signal (Ctrl-C mid-call) is still reclaimable by cleanup.sh / doctor, the
   # same residue path delegate and patch-admit use.
-  base="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-agy-read.XXXXXX")" || return 1
+  base="$(mktemp -d "$parent/oh-my-setting-agy-read.XXXXXX")" || return 1
   # Mark before registering, so a concurrent worker guard sees a marked, live
   # entry at every instant of the add rather than an unexplained new worktree.
   local read_tree="$base/tree-${base##*.}"

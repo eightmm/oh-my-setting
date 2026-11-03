@@ -35617,6 +35617,38 @@ make_live_managed_sibling() {  # make_live_managed_sibling PROJECT SIBLING_PAREN
   } > "$sibling_parent/.oh-my-setting-tmp"
 }
 
+# An Antigravity read seat as its caller runs it: ma_agy_read_dir from the
+# caller's own TMPDIR, held alive by exec so the marker pid stays live until the
+# test kills it. OUT receives "PID TREE" once the tree exists; with `pending`
+# the checkout is then moved aside, the state an add shows before its checkout.
+agy_seat_script() {  # agy_seat_script PATH
+  cat > "$1" <<EOF_SEAT
+#!/usr/bin/env bash
+. "$ROOT/scripts/lib/oms-common.sh"
+. "$ROOT/scripts/lib/peer-common.sh"
+export TMPDIR="\$2"
+tree="\$(ma_agy_read_dir "\$1")" || exit 1
+[ "\${4:-}" != pending ] || mv "\$tree" "\${tree%/*}/pending"
+printf '%s %s\\n' "\$\$" "\$tree" > "\$3"
+exec sleep 600
+EOF_SEAT
+  chmod +x "$1"
+}
+
+agy_seat_wait() {  # agy_seat_wait OUT — bounded by the suite call timeout
+  local out="$1" tries=$(( ${OMS_TEST_CALL_TIMEOUT:-120} * 10 ))
+  while [ ! -s "$out" ] && [ "$tries" -gt 0 ]; do sleep 0.1; tries=$((tries - 1)); done
+  [ -s "$out" ] || fail "agy read seat did not create its tree: $out"
+}
+
+agy_seat_stop() {  # agy_seat_stop OUT PROJECT — kill the holder, drop its residue
+  local out="$1" pid tree
+  read -r pid tree < "$out"
+  kill "$pid" 2>/dev/null || true
+  rm -rf "${tree%/*}"
+  git -C "$2" worktree prune
+}
+
 run_delegate_beside_sibling() {  # run_delegate_beside_sibling PROJECT MANAGED_ROOT WORKER_BODY -> "rc<TAB>output"
   local project="$1"
   local managed_root="$2"
@@ -35657,6 +35689,102 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
     fail "a live sibling mid-removal must not fail the run: $result"
   if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-removal should not be reported as a change: $result"
+  fi
+
+  # An Antigravity seat's tree is built from the caller's TMPDIR, not the
+  # worker's, yet must read like any managed sibling: the seat's own cleanup
+  # and the checkout-first removal window both pass.
+  local seat="$TMP/guard-agy-seat.sh" seat_out seat_tree seat_project seat_root scenario seat_pid
+  agy_seat_script "$seat"
+  for scenario in window cleanup; do
+    seat_project="$TMP/guard-agy-removal-$scenario"
+    seat_root="$TMP/guard-agy-removal-$scenario-root"
+    seat_out="$TMP/guard-agy-removal-$scenario-out"
+    make_guard_repo "$seat_project"
+    mkdir -p "$seat_root" "$seat_root-seat-tmp"
+    OMS_DELEGATE_WORKTREE_ROOT="$seat_root" "$seat" "$seat_project" "$seat_root-seat-tmp" "$seat_out" &
+    agy_seat_wait "$seat_out"
+    read -r _ seat_tree < "$seat_out"
+    case "$seat_tree" in "$seat_root"/oh-my-setting-agy-read.*/tree-*) ;; *)
+      fail "a read seat's tree must sit under the delegate worktree root, not its caller's TMPDIR: $seat_tree" ;;
+    esac
+    case "$scenario" in
+      cleanup) result="$(run_delegate_beside_sibling "$seat_project" "$seat_root" \
+        ". $ROOT/scripts/lib/oms-common.sh; . $ROOT/scripts/lib/peer-common.sh; ma_agy_read_cleanup $seat_project $seat_tree")" ;;
+      *) result="$(run_delegate_beside_sibling "$seat_project" "$seat_root" "rm -rf $seat_tree")" ;;
+    esac
+    [ "${result%%	*}" = 0 ] ||
+      fail "a read seat's tree ($scenario) must not stop a running worker: $result"
+    if contains "$result" 'outside the worktree'; then
+      fail "a read seat's tree ($scenario) should not be reported as a change: $result"
+    fi
+    agy_seat_stop "$seat_out" "$seat_project"
+  done
+
+  # The root must be its own physical, absolute path, as guards and cleanup
+  # require: a linked, link-ancestored or relative root sends the seat back to
+  # its TMPDIR and registers nothing under the link's target.
+  mkdir -p "$TMP/guard-agy-link-real/root"
+  ln -s "$TMP/guard-agy-link-real/root" "$TMP/guard-agy-link-leaf"
+  ln -s "$TMP/guard-agy-link-real" "$TMP/guard-agy-link-parent"
+  for scenario in leaf parent relative; do
+    seat_project="$TMP/guard-agy-link-$scenario-project"
+    seat_out="$TMP/guard-agy-link-$scenario-out"
+    make_guard_repo "$seat_project"
+    mkdir -p "$TMP/guard-agy-link-$scenario-tmp"
+    case "$scenario" in
+      leaf) seat_root="$TMP/guard-agy-link-leaf" ;;
+      parent) seat_root="$TMP/guard-agy-link-parent/root" ;;
+      relative) seat_root="relative-root" ;;
+    esac
+    OMS_DELEGATE_WORKTREE_ROOT="$seat_root" "$seat" "$seat_project" "$TMP/guard-agy-link-$scenario-tmp" "$seat_out" &
+    agy_seat_wait "$seat_out"
+    read -r _ seat_tree < "$seat_out"
+    case "$seat_tree" in "$TMP/guard-agy-link-$scenario-tmp"/oh-my-setting-agy-read.*/tree-*) ;; *)
+      fail "a read seat must keep its TMPDIR when the delegate root is unusable ($scenario): $seat_tree" ;;
+    esac
+    agy_seat_stop "$seat_out" "$seat_project"
+  done
+  [ -z "$(ls "$TMP/guard-agy-link-real/root")" ] && [ ! -e "$ROOT/relative-root" ] && [ ! -e "$PWD/relative-root" ] ||
+    fail "no read tree may register under a linked or relative delegate root"
+
+  # The default root stays private, as delegate makes it, even when it exists.
+  seat_project="$TMP/guard-agy-default-project"
+  seat_out="$TMP/guard-agy-default-out"
+  make_guard_repo "$seat_project"
+  seat_root="$TMP/guard-agy-default-cache/oh-my-setting/worktrees"
+  mkdir -p "$seat_root" "$TMP/guard-agy-default-tmp"
+  chmod 755 "$seat_root"
+  env -u OMS_DELEGATE_WORKTREE_ROOT XDG_CACHE_HOME="$TMP/guard-agy-default-cache" \
+    "$seat" "$seat_project" "$TMP/guard-agy-default-tmp" "$seat_out" &
+  agy_seat_wait "$seat_out"
+  read -r _ seat_tree < "$seat_out"
+  case "$seat_tree" in "$seat_root"/oh-my-setting-agy-read.*/tree-*) ;; *)
+    fail "a read seat must use the default delegate root: $seat_tree" ;;
+  esac
+  [ "$(ls -ld "$seat_root" | cut -c1-10)" = drwx------ ] ||
+    fail "the default delegate root must be private: $(ls -ld "$seat_root")"
+  agy_seat_stop "$seat_out" "$seat_project"
+
+  # A killed seat leaves a dead marker and a registration at the new location;
+  # cleanup reclaims both rather than keeping them as unverifiable.
+  seat_project="$TMP/guard-agy-killed"
+  seat_root="$TMP/guard-agy-killed-root"
+  seat_out="$TMP/guard-agy-killed-out"
+  make_guard_repo "$seat_project"
+  mkdir -p "$seat_root" "$seat_root-seat-tmp"
+  OMS_DELEGATE_WORKTREE_ROOT="$seat_root" "$seat" "$seat_project" "$seat_root-seat-tmp" "$seat_out" &
+  agy_seat_wait "$seat_out"
+  read -r seat_pid seat_tree < "$seat_out"
+  kill -9 "$seat_pid"
+  wait "$seat_pid" 2>/dev/null || true
+  [ -d "$seat_tree" ] || fail "the killed seat's tree should remain until cleanup: $seat_tree"
+  (cd "$seat_project" && OMS_DELEGATE_WORKTREE_ROOT="$seat_root" "$ROOT/scripts/cleanup.sh" --apply >"$seat_out.cleanup" 2>&1) ||
+    fail "cleanup failed on a killed read seat: $(cat "$seat_out.cleanup")"
+  [ ! -e "${seat_tree%/*}" ] ||
+    fail "cleanup must reclaim a killed read seat under the delegate root: $(cat "$seat_out.cleanup")"
+  if git -C "$seat_project" worktree list --porcelain | grep -F "${seat_tree%/*}" >/dev/null; then
+    fail "cleanup must unregister a killed read seat's tree"
   fi
 
   local same_common="$TMP/guard-sibling-commondir-same-common"
@@ -35771,6 +35899,32 @@ mkdir -p $zero_parent && printf 'kind=oh-my-setting-temp\\npid=0\\nrepo=$project
     fail "a complete foreign registration needs no kept marker: $result"
   contains "$result" 'during this run: foreign-worktree' ||
     fail "an invalid kept marker must not hide the foreign registration: $result"
+
+  # A read seat registers its tree mid-run from the caller's own TMPDIR; the
+  # add's checkout-less window passes only for a marked, live tree, and an
+  # unmarked agy-shaped tree in the same window does not.
+  local seat="$TMP/guard-agy-creation-seat.sh" seat_out="$TMP/guard-agy-creation-out" seat_tree
+  agy_seat_script "$seat"
+  mkdir -p "$managed_root-seat-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "OMS_DELEGATE_WORKTREE_ROOT=$managed_root $seat $project $managed_root-seat-tmp $seat_out pending & i=0; while [ ! -s $seat_out ] && [ \$i -lt \$(( \${OMS_TEST_CALL_TIMEOUT:-120} * 10 )) ]; do sleep 0.1; i=\$((i + 1)); done")"
+  agy_seat_wait "$seat_out"
+  read -r _ seat_tree < "$seat_out"
+  case "$seat_tree" in "$managed_root"/oh-my-setting-agy-read.*/tree-*) ;; *)
+    fail "a read seat's tree must sit under the delegate worktree root, not its caller's TMPDIR: $seat_tree" ;;
+  esac
+  agy_seat_stop "$seat_out" "$project"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a read seat's tree mid-creation must not stop a running worker: $result"
+  if contains "$result" 'outside the worktree'; then
+    fail "a read seat's tree mid-creation should not be reported as a change: $result"
+  fi
+  local unmarked_parent="$managed_root/oh-my-setting-agy-read.unmarked"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+mkdir -p $unmarked_parent && git -C $project worktree add --quiet --detach $unmarked_parent/tree-unmarked HEAD && mv $unmarked_parent/tree-unmarked $unmarked_parent/pending")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "an unmarked read tree mid-creation must stop the worker: $result"
 }
 
 # The incident: a parent made a scratch worktree with plain `git worktree add`
@@ -36677,7 +36831,7 @@ test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
   make_guard_repo "$project"
   git -C "$project" worktree add --quiet --detach "$linked" HEAD >/dev/null 2>&1 ||
     fail "could not create the linked checkout fixture"
-  mkdir -p "$managed_root"
+  mkdir -p "$managed_root" "$TMP/agy-other-tmp"
   # The linked checkout predates the run; only the sibling added mid-run is in question.
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
     "mkdir -p $sibling_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$linked\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp && git -C $linked worktree add --quiet --detach $sibling_parent/wt HEAD >/dev/null 2>&1")"
