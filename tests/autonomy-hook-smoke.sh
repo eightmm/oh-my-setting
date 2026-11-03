@@ -2225,7 +2225,7 @@ for command in ("", "oms panel --status", "oms peer-review --verify 'pytest test
                 "bash -n src/check.sh", "python -c 'print(1)'", "unknown src/job.py",
                 "python 'unterminated", 'git log --format="%h -> %s" -5',
                 "rg --regexp='x > y' src", "echo a\\>src/job.py", "git apply -h",
-                "git apply --help"):
+                "git apply --help", "cat <<'123'\npython src/job.py\n123"):
     assert not bash(command), command
 # The dispatch in the ignore table resets the streak, retaining lifetime counts.
 assert state()["counts"]["edit"] == 3 and sum(state()["since_dispatch"].values()) == 0
@@ -2233,18 +2233,22 @@ direct = ["sed -i 's/x/y/' src/job.py", "perl -pi -e 's/x/y/' src/job.py",
           "echo x > src/job.py", "cat <<'PY' > src/job.py\nx\nPY", "echo x | tee -a src/job.py",
           "git apply changes.patch", "python src/job.py", "pytest tests/", "torchrun src/job.py",
           "bash src/check.sh", "sbatch job.sh", "srun python train.py", "ssh machine 'squeue'",
-          "while true; do squeue; done", "cd src && python job.py", "python -m pytest tests/"]
+          "while true; do squeue; done", "cd src && python job.py", "python -m pytest tests/",
+          "seq 10 > src/job.py", "rg '<<EOF' src\npython src/job.py", "cat <<-EOF\n\tx\n\tEOF\npython src/job.py"]
 for index, command in enumerate(direct, 1):
     feedback = bash(command)
     assert bool(feedback) == (index in (3, 8, 16)), (index, command, feedback)
-assert state()["counts"] == {"edit": 3, "write": 6, "run": 10}, state()
+assert state()["counts"] == {"edit": 3, "write": 7, "run": 12}, state()
+# A dispatch line inside a heredoc body (` EOF` does not end it) is text.
+assert not bash("cat <<EOF\n EOF\noms panel --dispatch builder\nEOF")
+assert sum(state()["since_dispatch"].values()) == 19, state()
 with patch.dict(os.environ, env), patch.object(hook_state, "declared_status", return_value={"text": "active", "ts": hook_state.utc_now()}):
     hint = hook_state.panel_status_hint(payload, "direct-room")
-    assert "direct work since last dispatch: 16" in hint, hint
+    assert "direct work since last dispatch: 19" in hint, hint
     prompt = dict(payload, hook_event_name="UserPromptSubmit", prompt="continue")
     for _ in range(2):
-        assert "direct work since last dispatch: 16" in hook_state.panel_main_hint(prompt)
-for total in range(17, 25):
+        assert "direct work since last dispatch: 19" in hook_state.panel_main_hint(prompt)
+for total in range(20, 25):
     assert bool(bash("python -m src.job")) == (total == 24)
 for dispatch in ("oms panel --dispatch builder --brief-file F", "oms panel --council --prompt P",
                  "oms panel --continue attempt", "oms peer-delegate --to codex"):

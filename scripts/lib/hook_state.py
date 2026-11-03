@@ -1495,34 +1495,33 @@ def direct_repo_file(raw: Any, repo: Path, cwd: Path) -> str:
 
 
 def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
-    # Keep quotes on operators so `echo '>' file` cannot look like a write.
-    lines, delimiter = [], None
-    for line in command.splitlines():
-        if delimiter is not None:
-            if line.strip() == delimiter:
-                delimiter = None
-            continue
-        lines.append(line)
-        match = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line.replace("<<<", ""))
-        if match:
-            delimiter = match.group(2)
     # Operators count only outside quotes and escapes, so `--format="a > b"`
-    # or `rg 'x > y'` never looks like a redirection.
-    segments, words, value, operator, have, quote = [], [], "", "", False, None
-    text, index = "\n".join(lines), 0
+    # or `rg 'x > y'` never looks like a redirection. Heredoc bodies are
+    # skipped up to their exact delimiter line, and an IO number counts only
+    # when attached to its redirection (`2>x`, not `seq 10 > x`).
+    segments, words, heredocs = [], [], []
+    value, operator, have, plain, quote, want = "", "", False, True, None, ""
+    text, index = command, 0
 
     def flush():
-        nonlocal value, operator, have
+        nonlocal value, operator, have, plain, want
         if operator:
-            if any(ch in operator for ch in ";&|()\n") and operator not in (">&", "<&"):
+            op = operator.lstrip("0123456789")
+            if op in ("<<", "<<-"):
+                want = op
+            elif any(ch in op for ch in ";&|()") and op not in (">&", "<&"):
                 if words:
                     segments.append(list(words))
                     words.clear()
             else:
                 words.append((operator, True))
         elif have:
-            words.append((value, False))
-        value, operator, have = "", "", False
+            if want:
+                heredocs.append((value, want == "<<-"))
+                want = ""
+            else:
+                words.append((value, False))
+        value, operator, have, plain = "", "", False, True
 
     while index < len(text):
         ch = text[index]
@@ -1542,9 +1541,29 @@ def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
             else:
                 value += ch
             continue
-        if ch in ";&|()<>\n":
+        if ch == "\n":
+            flush()
+            if words:
+                segments.append(list(words))
+                words.clear()
+            for delimiter, tabs in heredocs:
+                while index < len(text):
+                    end = text.find("\n", index)
+                    end = len(text) if end < 0 else end
+                    line, index = text[index:end], end + 1
+                    if (line.lstrip("\t") if tabs else line) == delimiter:
+                        break
+            heredocs.clear()
+            continue
+        if operator.endswith("<<") and ch == "-":
+            operator += ch
+            continue
+        if ch in ";&|()<>":
             if not operator:
-                flush()
+                if have and plain and value.isdigit() and ch in "<>":
+                    operator, value, have = value, "", False
+                else:
+                    flush()
             operator += ch
             continue
         if operator:
@@ -1555,9 +1574,9 @@ def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
             if index < len(text):
                 value += text[index]
                 index += 1
-            have = True
+            have, plain = True, False
         elif ch in "'\"":
-            quote, have = ch, True
+            quote, have, plain = ch, True, False
         else:
             value += ch
             have = True
@@ -1604,7 +1623,7 @@ def classify_direct_work(payload: dict[str, Any], repo: Path) -> tuple[str, str]
                 cwd = (cwd / args[0]).resolve()
             continue
         for index, (word, operator) in enumerate(words[:-1]):
-            if operator and word in (">", ">>") and not (index and values[index - 1].isdigit() and values[index - 1] != "1"):
+            if operator and word in (">", ">>", "1>", "1>>"):
                 name = direct_repo_file(values[index + 1], repo, cwd)
                 if name:
                     result = ("write", name)
