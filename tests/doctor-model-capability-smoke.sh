@@ -374,4 +374,43 @@ got="$(env -u OMS_DOCTOR_PROBE_DIR bash -c '. "$1/scripts/lib/doctor-probe-memo.
 [ "$got" = in-shell ] || fail "an uncached doctor probe left the shell: $got"
 echo 'doctor-probe-once: ok'
 
+age_file() { python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2]); os.utime(sys.argv[1],(t,t))' "$1" "$2"; }
+# Reading a stale catalog starts one detached refresh per day and reports at once.
+lazy_stubs="$TMP/lazy-stubs"; lazy_cap="$TMP/lazy-cap"; lazy_state="$TMP/lazy-state"
+mkdir -p "$lazy_stubs" "$lazy_cap" "$lazy_state"
+cat > "$lazy_stubs/agy" <<EOF_STUB
+#!/usr/bin/env bash
+case "\${1:-}" in
+  models) echo x >> "$TMP/lazy-lists"; printf 'gemini-a\n' ;;
+  *) printf -- '--effort (low, medium, high)\n' ;;
+esac
+EOF_STUB
+chmod +x "$lazy_stubs/agy"
+lazy_models() {
+  PATH="$lazy_stubs:/usr/bin:/bin" OMS_CAPABILITY_DIR="$lazy_cap" XDG_STATE_HOME="$lazy_state" OMS_HARNESS_CHILD="${LAZY_CHILD:-0}" \
+    OMS_CAPABILITY_SETTLE_WAIT=0 "$ROOT/scripts/models.sh" --providers antigravity "$@"
+}
+printf 'old-model\n' > "$lazy_cap/antigravity.models"; age_file "$lazy_cap/antigravity.models" 864000
+lazy_models > "$TMP/lazy1.out"
+grep -Fq 'a background refresh was started' "$TMP/lazy1.out" || fail 'a stale catalog read must announce the background refresh'
+grep -Fq 'catalog age: 864' "$TMP/lazy1.out" || fail 'the current call must report the stale age'
+waited=0
+until grep -Fxq gemini-a "$lazy_cap/antigravity.models" 2>/dev/null; do
+  waited=$((waited + 1)); [ "$waited" -le $(( ${OMS_TEST_CALL_TIMEOUT:-60} * 10 )) ] || fail 'the background refresh never rewrote the catalog'
+  sleep 0.1
+done
+age_file "$lazy_cap/antigravity.models" 864000
+lazy_models --json > "$TMP/lazy2.out"
+! grep -Fq catalog_refresh "$TMP/lazy2.out" || fail 'a second stale read inside a day must not start another refresh'
+sleep 1
+[ "$(wc -l < "$TMP/lazy-lists" | tr -d ' ')" = 1 ] || fail 'the catalog was listed more than once in a day'
+# A harness child never starts one even with a stale stamp and a stale catalog; the same state outside a child does.
+age_file "$lazy_state/oh-my-setting/catalog-refresh.stamp" 172800
+LAZY_CHILD=1 lazy_models > "$TMP/lazy3.out"
+! grep -Fq 'background refresh' "$TMP/lazy3.out" || fail 'a harness child must not start a refresh'
+sleep 1
+[ "$(wc -l < "$TMP/lazy-lists" | tr -d ' ')" = 1 ] || fail 'a harness child listed a catalog'
+lazy_models > "$TMP/lazy4.out"
+grep -Fq 'a background refresh was started' "$TMP/lazy4.out" || fail 'outside a child the same stale state must start a refresh'
+
 echo 'doctor-model-capability-smoke: ok'

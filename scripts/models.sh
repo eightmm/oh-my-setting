@@ -18,6 +18,8 @@ Usage: models.sh [--json] [--refresh] [--providers default|auto|all|CSV]
 
 Show cached provider model catalogs and reasoning-effort capabilities. --refresh
 updates the cache first; without it this command never invokes a provider CLI.
+A catalog older than 7 days instead starts the tick's daily listing refresh
+detached (local listing, no model tokens) and this call reports the cached data.
 The models line is the routable set — the provider's own family at its newest
 generation; previous generations and re-hosted foreign families are listed
 apart and are never chosen unless named with --model.
@@ -56,6 +58,7 @@ oms_provider_selection_discovered_names "$PROVIDERS" > "$provider_names_file" ||
 PROVIDER_NAMES="$(cat "$provider_names_file")"
 rows="$tmp/rows.jsonl"
 : > "$rows"
+stale_catalog=0
 while IFS= read -r provider; do
   [ -n "$provider" ] || continue
   binary="$(oms_provider_binary "$provider")"
@@ -70,6 +73,9 @@ while IFS= read -r provider; do
   oms_provider_supports_model_override "$provider" && model_override=true
   if [ "$REFRESH" -eq 1 ] && [ "$usable" = true ]; then
     oms_capability_refresh "$provider" || true
+  fi
+  if [ "$REFRESH" -eq 0 ] && [ "$present" = true ] && oms_capability_catalog_stale "$provider"; then
+    stale_catalog=1
   fi
   file="$(oms_capability_file "$provider")"
   models_file="$tmp/$provider.models"
@@ -126,10 +132,16 @@ PY
 done <<EOF
 $PROVIDER_NAMES
 EOF
+# A listing older than a week is refreshed in the background (the same daily
+# stamp and lock as the tick); this call reports what is cached and moves on.
+refresh_started=0
+if [ "$stale_catalog" -eq 1 ] && oms_capability_start_stale_refresh; then refresh_started=1; fi
 if [ "$JSON" -eq 1 ]; then
-  python3 - "$rows" <<'PY'
+  python3 - "$rows" "$refresh_started" <<'PY'
 import json, sys
-print(json.dumps({"schema": 1, "providers": [json.loads(x) for x in open(sys.argv[1]) if x.strip()]}, ensure_ascii=False, sort_keys=True))
+out = {"schema": 1, "providers": [json.loads(x) for x in open(sys.argv[1]) if x.strip()]}
+if sys.argv[2] == "1": out["catalog_refresh"] = "started"
+print(json.dumps(out, ensure_ascii=False, sort_keys=True))
 PY
 else
   python3 - "$rows" <<'PY'
@@ -156,4 +168,5 @@ for raw in open(sys.argv[1]):
     print("catalog age: %s" % (str(row["catalog_age_seconds"]) + "s" if row["catalog_age_seconds"] is not None else "unknown"))
     print("snapshot age: %s" % (str(row["snapshot_age_seconds"]) + "s" if row["snapshot_age_seconds"] is not None else "unknown"))
 PY
+  [ "$refresh_started" -eq 0 ] || echo "note: a catalog is older than 7 days; a background refresh was started (local listing, no model tokens)"
 fi

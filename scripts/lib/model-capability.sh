@@ -558,3 +558,74 @@ oms_capability_model_efforts() {
   done < "$file"
   return 1
 }
+
+# Freshness of provider model listings does not depend on the optional hourly
+# trigger. One shared, bounded refresh (a local CLI listing, no model call) is
+# run by `tick.sh run` and `tick.sh refresh-catalogs`, and a read of a catalog
+# older than seven days starts the latter detached. All of them claim the same
+# daily stamp under the same lock, so they never run twice.
+OMS_CAPABILITY_CATALOG_MAX_AGE=604800
+OMS_CAPABILITY_REFRESH_PERIOD=86400
+
+oms_capability_refresh_stamp() {
+  printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/catalog-refresh.stamp"
+}
+
+# Exit 0 when PATH is missing or at least SECONDS old.
+oms_capability_older_than() {
+  python3 - "$1" "$2" <<'PYAGE'
+import os, sys, time
+try: age = time.time() - os.stat(sys.argv[1]).st_mtime
+except OSError: age = float('inf')
+sys.exit(0 if age >= int(sys.argv[2]) else 1)
+PYAGE
+}
+
+# Claim the daily attempt before probing so a crash or failed listing does not
+# cause hourly retries. The lock serializes concurrent callers on this machine.
+oms_capability_refresh_stale_catalogs() (
+  local stamp provider
+  if ! command -v oms_hold_file_lock >/dev/null 2>&1; then
+    # shellcheck source=scripts/lib/file-lock.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/file-lock.sh"
+  fi
+  stamp="$(oms_capability_refresh_stamp)"
+  mkdir -p "${stamp%/*}" || exit 0
+  oms_hold_file_lock "$stamp" 8 || exit 0
+  trap oms_release_held_file_lock EXIT
+  oms_capability_older_than "$stamp" "$OMS_CAPABILITY_REFRESH_PERIOD" || exit 0
+  touch "$stamp" || exit 0
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    oms_provider_supports_model_listing "$provider" || continue
+    if oms_capability_older_than "$(oms_capability_cache_dir)/$provider.models" "$OMS_CAPABILITY_CATALOG_MAX_AGE"; then
+      oms_capability_refresh "$provider" >/dev/null 2>&1 || true
+    fi
+  done <<EOF_NAMES
+$(oms_provider_discovered_names)
+EOF_NAMES
+)
+
+# Exit 0 when PROVIDER has a catalog on disk that listing can refresh and that
+# is past the age limit. A provider never probed has no catalog to age.
+oms_capability_catalog_stale() {
+  local catalog
+  oms_provider_supports_model_listing "$1" || return 1
+  catalog="$(oms_capability_cache_dir)/$1.models"
+  [ -f "$catalog" ] || return 1
+  oms_capability_older_than "$catalog" "$OMS_CAPABILITY_CATALOG_MAX_AGE"
+}
+
+# Start the shared refresh detached unless today's attempt was already claimed.
+# Exit 0 means a refresh was started; the caller never waits for it. A harness
+# child cannot mutate host state, so it never starts one.
+oms_capability_start_stale_refresh() {
+  local tick
+  [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || return 1
+  oms_capability_older_than "$(oms_capability_refresh_stamp)" "$OMS_CAPABILITY_REFRESH_PERIOD" || return 1
+  tick="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/tick.sh"
+  [ -x "$tick" ] || return 1
+  "$tick" refresh-catalogs </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  return 0
+}

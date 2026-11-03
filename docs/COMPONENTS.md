@@ -539,7 +539,12 @@ capability snapshot. `oms models` reads the cache; `oms models --refresh` and
 `oms model-doctor` perform explicit probes. `oms models` reports catalog age
 separately from snapshot age. The hourly tick checks installed provider catalogs
 at most once daily and refreshes listings older than seven days; a failed listing
-keeps the previous catalog and is retried no earlier than the next day.
+keeps the previous catalog and is retried no earlier than the next day. Hosts
+without the trigger heal on read: `oms models` (the read behind `oms panel --providers` and dispatch routing)
+finding an installed provider's catalog older than seven days starts
+`oms tick refresh-catalogs` detached, behind the same daily stamp and lock, so
+the two never both run; the call reports the cached data plus a one-line note
+(`catalog_refresh: started` in `--json`) and a harness child never starts one.
 Cached catalog reads separate tab-delimited model IDs from display labels and
 discard listing banners, so labels cannot leak into automatic recovery routes.
 

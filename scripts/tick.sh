@@ -23,6 +23,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 usage() {
   cat <<'EOF'
 Usage: tick.sh run [--repo PATH ...] [--dry-run]
+       tick.sh refresh-catalogs
        tick.sh register|unregister [--repo PATH]
        tick.sh install [--method auto|systemd|cron] [--dry-run]
        tick.sh uninstall [--dry-run]
@@ -35,6 +36,9 @@ run        Sweep the given repos, or every registered one: journal and CI sync,
            At most daily, refresh installed provider catalogs older than 7 days.
            Each completed sweep gets .oms/tick/last.json. A repo under
            verification or another sweep is deferred until a later tick.
+refresh-catalogs
+           Run only that catalog refresh (same daily stamp and lock). Reading a
+           catalog older than 7 days starts it detached when no tick trigger runs.
 register   Add a repo (default: PWD, git-root anchored) to the registry;
            install registers PWD when it is an adopted repo.
 install    Register the hourly trigger; uninstall removes only a unit this
@@ -69,7 +73,7 @@ DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 METHOD=auto
 MODE="${1:-}"; [ "$#" -eq 0 ] || shift
 REPOS=()
-case "$MODE" in run|register|unregister|install|uninstall|status) ;; -h|--help|"") usage; exit 0 ;;
+case "$MODE" in run|refresh-catalogs|register|unregister|install|uninstall|status) ;; -h|--help|"") usage; exit 0 ;;
   *) echo "error: unknown mode: $MODE" >&2; usage >&2; exit 2 ;; esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -396,41 +400,23 @@ PY
   echo "swept $root: journal=$journal reconcile=$reconcile gc=$gc threads_closed=${#closed[@]} tasks_closed=$tasks_closed plans_retired=$plans_retired artifacts_resolved=$artifacts_resolved artifacts_superseded=$artifacts_superseded failures_retired=$failures_retired"
 }
 
-# Claim the daily attempt before probing so a crash or failed listing does not
-# cause hourly retries. The lock serializes concurrent ticks on this machine.
-refresh_catalogs() (
-  local stamp provider catalog
-  stamp="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/catalog-refresh.stamp"
-  mkdir -p "${stamp%/*}" || exit 0
-  oms_hold_file_lock "$stamp" 8 || exit 0
-  trap oms_release_held_file_lock EXIT
-  if ! python3 - "$stamp" 86400 <<'PYAGE'
-import os, sys, time
-try: age = time.time() - os.stat(sys.argv[1]).st_mtime
-except OSError: age = float('inf')
-sys.exit(0 if age >= int(sys.argv[2]) else 1)
-PYAGE
-  then exit 0; fi
-  touch "$stamp" || exit 0
+dry_run_catalogs() {  # the refresh's own selection, with no stamp, state or probe
+  local provider
+  oms_capability_older_than "$(oms_capability_refresh_stamp)" "$OMS_CAPABILITY_REFRESH_PERIOD" || return 0
   while IFS= read -r provider; do
     [ -n "$provider" ] || continue
     oms_provider_supports_model_listing "$provider" || continue
-    catalog="$(oms_capability_cache_dir)/$provider.models"
-    if python3 - "$catalog" 604800 <<'PYAGE'
-import os, sys, time
-try: age = time.time() - os.stat(sys.argv[1]).st_mtime
-except OSError: age = float('inf')
-sys.exit(0 if age > int(sys.argv[2]) else 1)
-PYAGE
-    then oms_capability_refresh "$provider" >/dev/null 2>&1 || true; fi
-  done <<EOF
+    if oms_capability_older_than "$(oms_capability_cache_dir)/$provider.models" "$OMS_CAPABILITY_CATALOG_MAX_AGE"; then
+      echo "would refresh catalog: $provider"
+    fi
+  done <<EOF_NAMES
 $(oms_provider_discovered_names)
-EOF
-)
+EOF_NAMES
+}
 
 run_tick() {
   local root
-  [ "$DRY_RUN" = 1 ] || refresh_catalogs
+  if [ "$DRY_RUN" = 1 ]; then dry_run_catalogs; else oms_capability_refresh_stale_catalogs; fi
   if [ "${#REPOS[@]}" -eq 0 ] && [ -f "$REGISTRY" ]; then
     while IFS= read -r root; do [ -n "$root" ] && REPOS+=("$root"); done < "$REGISTRY"
   fi
@@ -524,6 +510,9 @@ status_tick() {
 
 case "$MODE" in
   run) run_tick ;;
+  refresh-catalogs)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || { echo "error: a harness child cannot refresh parent-owned catalogs; return the request to the parent agent" >&2; exit 2; }
+    if [ "$DRY_RUN" = 1 ]; then dry_run_catalogs; else oms_capability_refresh_stale_catalogs; fi ;;
   register) register_repo "${REPOS[0]:-$PWD}" ;;
   unregister) unregister_repo "${REPOS[0]:-$PWD}" ;;
   install) install_tick ;;

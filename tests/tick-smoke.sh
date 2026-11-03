@@ -519,4 +519,61 @@ printf '%s' "$st" | grep >/dev/null 'timer: none' || fail "status must report no
 "$TICK" unregister --repo "$b" >/dev/null
 "$TICK" run | grep 'nothing registered' > /dev/null || fail "an empty registry must say so"
 
+# The catalog refresh is shared: `refresh-catalogs` and the sweep claim one daily
+# stamp, and only a listing older than seven days is asked for again.
+cap="$TMP/cap-tick"; stubs="$TMP/stubs-tick"; stamp="$TMP/state/oh-my-setting/catalog-refresh.stamp"
+mkdir -p "$cap" "$stubs"
+cat > "$stubs/agy" <<EOF_STUB
+#!/usr/bin/env bash
+case "\${1:-}" in
+  models) echo x >> "$TMP/agy-lists"; printf 'gemini-a\n' ;;
+  *) printf -- '--effort (low, medium, high)\n' ;;
+esac
+EOF_STUB
+chmod +x "$stubs/agy"
+age() { python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2]); os.utime(sys.argv[1],(t,t))' "$1" "$2"; }
+lists() { if [ -f "$TMP/agy-lists" ]; then wc -l < "$TMP/agy-lists" | tr -d ' '; else echo 0; fi; }
+tick_cat() { PATH="$stubs:/usr/bin:/bin" OMS_CAPABILITY_DIR="$cap" OMS_CAPABILITY_SETTLE_WAIT=0 OMS_CAPABILITY_RPC_WAIT=0 "$TICK" "$@"; }
+printf 'old-model\n' > "$cap/antigravity.models"; age "$cap/antigravity.models" 864000
+age "$stamp" 172800
+tick_cat refresh-catalogs
+[ "$(lists)" = 1 ] && grep -Fxq gemini-a "$cap/antigravity.models" || fail "refresh-catalogs must relist a stale catalog once"
+age "$stamp" 172800
+tick_cat refresh-catalogs
+[ "$(lists)" = 1 ] || fail "a fresh-enough catalog must not be listed again"
+age "$cap/antigravity.models" 864000
+tick_cat refresh-catalogs
+[ "$(lists)" = 1 ] || fail "a claimed daily stamp must stop a second refresh"
+age "$stamp" 172800
+age "$cap/antigravity.models" 864000
+tick_cat run | grep 'nothing registered' > /dev/null || fail "the sweep must still run"
+[ "$(lists)" = 2 ] || fail "the sweep must share the refresh and its stamp: $(lists)"
+
+# --dry-run reports the stale catalog and mutates nothing: no stamp claim, no listing, no catalog change.
+touch "$stamp"; age "$stamp" 172800; age "$cap/antigravity.models" 864000
+before_stamp="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$stamp")"
+before_cat="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$cap/antigravity.models")"
+dry="$(tick_cat run --dry-run)"
+printf '%s' "$dry" | grep -Fq 'would refresh catalog: antigravity' || fail "dry-run must name the stale catalog: $dry"
+[ "$(lists)" = 2 ] || fail "dry-run must not list a catalog"
+[ "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$stamp")" = "$before_stamp" ] || fail "dry-run must not touch the stamp"
+[ "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$cap/antigravity.models")" = "$before_cat" ] || fail "dry-run must not change the catalog"
+rm -f "$stamp"
+tick_cat run --dry-run >/dev/null
+[ ! -e "$stamp" ] || fail "dry-run must not create the stamp"
+
+# The direct verb honors the same dry-run, and a harness child is refused before any mutation.
+touch "$stamp"; age "$stamp" 172800; age "$cap/antigravity.models" 864000
+before_stamp="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$stamp")"
+before_cat="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$cap/antigravity.models")"
+dry="$(tick_cat refresh-catalogs --dry-run)"
+printf '%s' "$dry" | grep -Fq 'would refresh catalog: antigravity' || fail "direct dry-run must name the stale catalog: $dry"
+dry="$(OH_MY_SETTING_DRY_RUN=1 tick_cat refresh-catalogs)"
+printf '%s' "$dry" | grep -Fq 'would refresh catalog: antigravity' || fail "the dry-run environment must be honored: $dry"
+rc=0; out="$(OMS_HARNESS_CHILD=1 tick_cat refresh-catalogs 2>&1)" || rc=$?
+[ "$rc" = 2 ] && printf '%s' "$out" | grep -Fq 'harness child' || fail "a harness child must be refused ($rc): $out"
+[ "$(lists)" = 2 ] || fail "dry-run and child refusal must not list a catalog"
+[ "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$stamp")" = "$before_stamp" ] || fail "dry-run or child refusal touched the stamp"
+[ "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$cap/antigravity.models")" = "$before_cat" ] || fail "dry-run or child refusal changed the catalog"
+
 echo "tick-smoke: ok"
