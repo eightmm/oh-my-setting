@@ -2332,6 +2332,8 @@ worker_worktree_execution_snapshot_sha=""
 worker_source_guard_dir=""
 worker_source_guard_exclude=""
 worker_source_execution_snapshot_sha=""
+worker_receipts_snapshot_sha=""
+worker_source_receipts_snapshot_sha=""
 if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   oms_canonical_call_acquire "$REPO" "${OMS_HARNESS_CALL_ID:-$timestamp}" ||
     fail "canonical checkout sync is busy or call registration failed; retry after sync"
@@ -2383,6 +2385,9 @@ EOF_GUARD_TARGETS
   if delegate_with_worktree_registry_lock "$REPO" \
     delegate_surface_snapshot "$REPO" "$worker_guard_dir" \
     "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
+    worker_receipts_snapshot_sha="$(oms_worker_gitmeta_receipts_fingerprint "$worker_guard_dir")" ||
+      fail "could not freeze gitmeta receipt inventory before provider start"
+    worker_receipts_snapshot_sha="${worker_receipts_snapshot_sha//$'\r'/}"
     if ! oms_git_execution_state_snapshot "$REPO" \
       "$worker_guard_dir/git-execution-state"; then
       fail "could not freeze Git execution config/index state before provider start"
@@ -2413,6 +2418,9 @@ EOF_GUARD_TARGETS
       fi
       oms_git_execution_state_snapshot "$delegate_worktree_repo" \
         "$worker_source_guard_dir/git-execution-state" || fail "could not freeze source Git execution state"
+      worker_source_receipts_snapshot_sha="$(oms_worker_gitmeta_receipts_fingerprint "$worker_source_guard_dir")" ||
+        fail "could not freeze source gitmeta receipt inventory before provider start"
+      worker_source_receipts_snapshot_sha="${worker_source_receipts_snapshot_sha//$'\r'/}"
       worker_source_execution_snapshot_sha="$(oms_sha256_file "$worker_source_guard_dir/git-execution-state")" ||
         fail "could not hash source Git execution state"
     fi
@@ -2482,11 +2490,14 @@ worker_protected_surface_diff() {
   local changed source_changed
   # Provider scratch is private; sibling classification uses the snapshot's base.
   local TMPDIR="$worker_guard_tmp_base"
-  changed="$(delegate_with_worktree_registry_lock "$REPO" \
+  oms_worker_gitmeta_receipts_assert_unchanged "$worker_guard_dir" "$worker_receipts_snapshot_sha" || return 2
+  changed="$(OMS_WG_RECEIPTS_SHA="$worker_receipts_snapshot_sha" delegate_with_worktree_registry_lock "$REPO" \
     oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
     "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
   if [ -n "$worker_source_guard_dir" ]; then
+    oms_worker_gitmeta_receipts_assert_unchanged "$worker_source_guard_dir" "$worker_source_receipts_snapshot_sha" || return 2
     source_changed="$(OMS_WORKER_GUARD_EXCLUDE="$worker_source_guard_exclude" \
+      OMS_WG_RECEIPTS_SHA="$worker_source_receipts_snapshot_sha" \
       delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
       oms_worker_surface_diff "$delegate_worktree_repo" "$worker_source_guard_dir" \
       "" "$worker_guard_worktree_physical")" || return 2

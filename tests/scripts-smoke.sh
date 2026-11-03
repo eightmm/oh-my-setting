@@ -35969,6 +35969,193 @@ test \"\$(git -C $bad_kept/wt rev-parse --git-dir)\" = '$bad_metadata' && printf
     fail "a late sibling on a branch must stay a hard violation: $result"
 }
 
+# A baseline can see a sibling's receipt after its gitmeta scan missed the
+# registration. Exercise the review entrypoint with that real capture order,
+# including a second sibling that completes while the review is running.
+test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
+  local scenario
+  for scenario in forged altered symlink-proof extra-line-proof kept removed \
+    outside-kept outside-removed gitdir commondir config empty-proof zero-proof \
+    malformed-proof missing-proof duplicate fifo-proof directory-proof \
+    source-forged empty-digest zero-digest short-digest long-digest malformed-digest; do
+    (
+      . "$ROOT/scripts/lib/oms-common.sh"
+      . "$ROOT/scripts/lib/peer-common.sh"
+      local project="$TMP/read-admin-$scenario" source="$TMP/read-admin-sources/$scenario"
+      local managed_root="$TMP/read-admin-root-$scenario"
+      local snapshot="$TMP/read-admin-snapshot-$scenario"
+      local sibling_root="$managed_root" metadata slot guard_out guard_rc=0
+      make_guard_repo "$project"
+      make_guard_repo "$source"
+      mkdir -p "$managed_root"
+      case "$scenario" in outside-*) sibling_root="$TMPDIR" ;; esac
+      local anchor="$managed_root/oh-my-setting-delegate.anchor"
+      local kept="$sibling_root/oh-my-setting-delegate.$scenario"
+      local gone="$sibling_root/oh-my-setting-delegate.gone-$scenario"
+      make_live_managed_sibling "$project" "$anchor"
+      export OMS_DELEGATE_WORKTREE_ROOT="$managed_root"
+      REPO="$project" MA_READ_SOURCE_REPO="$source"
+      eval "$(declare -f oms_worker_surface_capture_one |
+        sed '1s/oms_worker_surface_capture_one/read_admin_real_capture/')"
+      oms_worker_surface_capture_one() {
+        read_admin_real_capture "$@" || return
+        if [ "$1" = "$project" ] && [ "$2" = hooks ] && [ ! -d "$kept" ]; then
+          make_live_managed_sibling "$project" "$kept"
+          case "$scenario" in *removed) make_live_managed_sibling "$project" "$gone" ;; esac
+        fi
+      }
+      ma_read_guard_begin "$snapshot" || fail "review sibling snapshot failed ($scenario)"
+      local state_sha="${MA_READ_STATE_RECEIPTS_SHA:-}" source_sha="${MA_READ_SOURCE_RECEIPTS_SHA:-}"
+      [ "${#state_sha}" = 64 ] && [ "${#source_sha}" = 64 ] ||
+        fail "review did not freeze both receipt digests in parent memory"
+      metadata="$(git -C "$kept/wt" rev-parse --git-dir | tr -d '\r')"
+      slot="${metadata##*/}"
+      ! grep -Fq "worktrees/$slot/" "$MA_READ_GUARD_DIR/state/gitmeta" ||
+        fail "late sibling unexpectedly entered the gitmeta baseline"
+      [ -f "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" ] ||
+        fail "late sibling receipt was not captured"
+      case "$scenario" in
+        source-forged)
+          cp -R "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot" \
+            "$MA_READ_GUARD_DIR/source/foreign-worktrees/$slot"
+          ;;
+        empty-digest) MA_READ_STATE_RECEIPTS_SHA="" ;;
+        zero-digest) printf -v MA_READ_STATE_RECEIPTS_SHA '%064d' 0 ;;
+        short-digest) MA_READ_STATE_RECEIPTS_SHA=0 ;;
+        long-digest) printf -v MA_READ_STATE_RECEIPTS_SHA '%065d' 0 ;;
+        malformed-digest) MA_READ_STATE_RECEIPTS_SHA=invalid ;;
+        forged)
+          printf '../../.\n' > "$metadata/commondir"
+          oms_worker_gitmeta_admin_file_identity "$metadata/commondir" \
+            > "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/commondir-identity"
+          ;;
+        altered) printf 'forged log\n' >> "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/log" ;;
+        symlink-proof)
+          mv "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" "$snapshot/physical"
+          ln -s "$snapshot/physical" "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical"
+          ;;
+        extra-line-proof) printf 'extra\n' >> "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" ;;
+        fifo-proof|directory-proof)
+          rm "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical"
+          if [ "$scenario" = fifo-proof ]; then
+            mkfifo "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical"
+          else
+            mkdir "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical"
+          fi
+          ;;
+        *removed)
+          git -C "$project" worktree remove --force "$gone/wt"
+          rm -rf "$gone"
+          ;;
+        gitdir) printf '%s/wt/./.git\n' "$kept" > "$metadata/gitdir" ;;
+        commondir) printf '../../.\n' > "$metadata/commondir" ;;
+        config) printf '[core]\nfsmonitor=unsafe\n' > "$metadata/config.worktree" ;;
+        empty-proof) : > "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" ;;
+        zero-proof) printf '0\n' > "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" ;;
+        malformed-proof) printf '../unproven\n' > "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" ;;
+        missing-proof) rm "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/commondir-identity" ;;
+        duplicate)
+          mkdir -p "$MA_READ_GUARD_DIR/state/foreign-worktrees/duplicate"
+          cp "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" \
+            "$MA_READ_GUARD_DIR/state/foreign-worktrees/duplicate/physical"
+          ;;
+      esac
+      guard_out="$(ma_read_guard_assert 2>&1)" || guard_rc=$?
+      case "$scenario" in
+        kept|removed)
+          [ "$guard_rc" = 0 ] || fail "review rejected managed sibling admin changes ($scenario): $guard_out"
+          # Each assertion recaptures metadata; the first proof must not be
+          # required for a second read of the same surviving registration.
+          ma_read_guard_assert || fail "repeated review assertion rejected managed siblings"
+          if [ "$scenario" = kept ]; then
+            local field value
+            for field in physical path HEAD gitdir commondir-identity; do
+              cp "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/$field" "$snapshot/scalar"
+              for value in '' 0 invalid; do
+                printf '%s\n' "$value" > "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/$field"
+                if oms_worker_gitmeta_receipts_fingerprint "$MA_READ_GUARD_DIR/state" >/dev/null; then
+                  fail "malformed scalar receipt could be frozen ($field: $value)"
+                fi
+              done
+              cp "$snapshot/scalar" "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/$field"
+            done
+            ma_read_guard_assert || fail "restoring exact receipt bytes changed their digest"
+          fi
+          ;;
+        *)
+          [ "$guard_rc" = 2 ] || fail "review accepted unproven admin changes ($scenario): $guard_out"
+          contains "$guard_out" 'gitmeta' || fail "admin rejection lost its surface ($scenario)"
+          ;;
+      esac
+      # Structural validation is independent of the digest mismatch: even a
+      # parent trying to freeze these malformed receipts must refuse them.
+      case "$scenario" in
+        symlink-proof|extra-line-proof|empty-proof|zero-proof|malformed-proof|missing-proof|duplicate|fifo-proof|directory-proof)
+          if oms_worker_gitmeta_receipts_fingerprint "$MA_READ_GUARD_DIR/state" >/dev/null; then
+            fail "malformed receipt inventory could be frozen ($scenario)"
+          fi
+          ;;
+      esac
+    )
+  done
+
+  (
+    . "$ROOT/scripts/lib/oms-common.sh"
+    . "$ROOT/scripts/lib/peer-common.sh"
+    local project="$TMP/read-uncaptured" source="$TMP/read-uncaptured-source"
+    local managed_root="$TMP/read-uncaptured-root" snapshot="$TMP/read-uncaptured-snapshot"
+    local gone="$managed_root/oh-my-setting-delegate.gone" gone_admin="" guard_out guard_rc=0
+    make_guard_repo "$project"
+    make_guard_repo "$source"
+    make_live_managed_sibling "$project" "$managed_root/oh-my-setting-delegate.anchor"
+    export OMS_DELEGATE_WORKTREE_ROOT="$managed_root"
+    REPO="$project" MA_READ_SOURCE_REPO="$source"
+    eval "$(declare -f oms_worker_gitmeta_is_live_managed_worktree |
+      sed '1s/oms_worker_gitmeta_is_live_managed_worktree/uncaptured_real_live/')"
+    oms_worker_gitmeta_is_live_managed_worktree() {
+      if [ "$2" = "$gone_admin/gitdir" ] && [ -d "$gone/wt" ]; then
+        git -C "$project" worktree remove --force "$gone/wt" || return 1
+        rm -rf "$gone"
+        return 1
+      fi
+      uncaptured_real_live "$@"
+    }
+    eval "$(declare -f oms_worker_surface_capture_one |
+      sed '1s/oms_worker_surface_capture_one/uncaptured_real_capture/')"
+    oms_worker_surface_capture_one() {
+      if [ "$1" = "$project" ] && [ "$2" = gitmeta ] && [ -z "$gone_admin" ]; then
+        make_live_managed_sibling "$project" "$gone"
+        gone_admin="$(git -C "$gone/wt" rev-parse --git-dir | tr -d '\r')"
+      fi
+      uncaptured_real_capture "$@"
+    }
+    ma_read_guard_begin "$snapshot" || fail "uncaptured sibling baseline failed"
+    [ ! -e "$MA_READ_GUARD_DIR/state/foreign-worktrees/${gone_admin##*/}" ] ||
+      fail "removed sibling unexpectedly acquired a receipt"
+    guard_out="$(ma_read_guard_assert 2>&1)" || guard_rc=$?
+    [ "$guard_rc" = 2 ] && contains "$guard_out" gitmeta ||
+      fail "review accepted sibling removal without baseline identity proof: $guard_out"
+  )
+
+  local project="$TMP/write-receipt-tamper" managed_root="$TMP/write-receipt-root"
+  local result
+  make_guard_repo "$project"
+  make_live_managed_sibling "$project" "$managed_root/oh-my-setting-delegate.anchor"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" '
+    case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+    found=0
+    for receipt in ../worker-guard/foreign-worktrees/*/physical; do
+      [ -f "$receipt" ] || continue
+      printf "extra\n" >> "$receipt"
+      found=1
+      break
+    done
+    [ "$found" = 1 ] || exit 1
+  ' --allow-no-change)"
+  [ "${result%%$'\t'*}" != 0 ] || fail "write worker accepted altered receipts: $result"
+  contains "$result" 'gitmeta receipt inventory' || fail "write receipt refusal lost its reason: $result"
+}
+
 # The incident: another main's residue cleanup removed a sibling that was
 # already dead and kept at the worker's snapshot. Removing that whole entry is
 # reported softly; strict mode and a partial removal stay hard.

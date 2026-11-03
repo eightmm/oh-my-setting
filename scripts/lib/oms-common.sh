@@ -1430,6 +1430,105 @@ PY
   fi
 }
 
+# Hash the complete private receipt inventory without following links or
+# opening special files. Scalar receipts have exactly one nonempty line;
+# reflogs retain their legitimate empty/multiline representation.
+oms_worker_gitmeta_receipts_fingerprint() {  # BEFORE_DIR
+  python3 - "$1/foreign-worktrees" <<'PY'
+import hashlib, os, re, stat, sys
+
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+def directory(path):
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError()
+    return info
+
+def fingerprint(root):
+    root_info = directory(root)
+    digest = hashlib.sha256()
+    slots = sorted(os.listdir(root), key=os.fsencode)
+    required = {'physical', 'path', 'HEAD', 'gitdir', 'commondir-identity', 'log'}
+    for slot in slots:
+        entry = os.path.join(root, slot)
+        entry_info = directory(entry)
+        names = sorted(os.listdir(entry))
+        if not required <= set(names) <= required | {'ref-log'}:
+            raise ValueError()
+        for name in names:
+            path = os.path.join(entry, name)
+            before = os.lstat(path)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError()
+            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            content = hashlib.sha256()
+            with os.fdopen(os.open(path, flags), 'rb') as stream:
+                if identity(os.fstat(stream.fileno())) != identity(before):
+                    raise ValueError()
+                if name in ('log', 'ref-log'):
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        content.update(chunk)
+                else:
+                    raw = stream.read()
+                    content.update(raw)
+                if identity(os.fstat(stream.fileno())) != identity(before):
+                    raise ValueError()
+            if identity(os.lstat(path)) != identity(before):
+                raise ValueError()
+            if name not in ('log', 'ref-log'):
+                line = raw.replace(b'\r\n', b'\n')
+                if not line.endswith(b'\n') or not line[:-1] or any(
+                        char in line[:-1] for char in (b'\n', b'\r', b'\0')):
+                    raise ValueError()
+                value = os.fsdecode(line[:-1])
+                if name in ('physical', 'path', 'gitdir'):
+                    if not (value.startswith('/') or re.match(r'^[A-Za-z]:/', value)):
+                        raise ValueError()
+                    if name == 'gitdir' and not value.endswith('/.git'):
+                        raise ValueError()
+                elif name == 'commondir-identity':
+                    if not re.fullmatch(r'(?:file|link):[0-9a-f]{64}|missing|other|unreadable', value):
+                        raise ValueError()
+                elif not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}|ref: refs/[^\s]+', value):
+                    raise ValueError()
+            digest.update(os.fsencode(slot) + b'\0' + os.fsencode(name) + b'\0')
+            digest.update(content.digest())
+        if identity(os.lstat(entry)) != identity(entry_info) or sorted(os.listdir(entry)) != names:
+            raise ValueError()
+    if identity(os.lstat(root)) != identity(root_info) or sorted(os.listdir(root), key=os.fsencode) != slots:
+        raise ValueError()
+    print(digest.hexdigest())
+
+try:
+    fingerprint(sys.argv[1])
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
+}
+
+# The caller holds the pre-provider digest in memory; storing it beside the
+# receipts would let a worker replace both the evidence and its supposed proof.
+oms_worker_gitmeta_receipts_assert_unchanged() {  # BEFORE_DIR EXPECTED_SHA
+  local actual expected="${2:-}"
+  case "$expected" in ""|*[!0-9a-f]*)
+    echo 'error: gitmeta receipt inventory digest is invalid' >&2
+    return 2 ;;
+  esac
+  if [ "${#expected}" != 64 ]; then
+    echo 'error: gitmeta receipt inventory digest is invalid' >&2
+    return 2
+  fi
+  actual="$(oms_worker_gitmeta_receipts_fingerprint "$1")" || actual=""
+  actual="${actual//$'\r'/}"
+  if [ "$actual" != "$expected" ]; then
+    echo 'error: gitmeta receipt inventory changed or invalid' >&2
+    return 2
+  fi
+}
+
 oms_worker_surface_diff() {
   local repo="$1"
   local before_dir="$2"
@@ -1440,6 +1539,9 @@ oms_worker_surface_diff() {
   local common
   local surface_git_dir
 
+  if [ -n "${OMS_WG_RECEIPTS_SHA:-}" ]; then
+    oms_worker_gitmeta_receipts_assert_unchanged "$before_dir" "$OMS_WG_RECEIPTS_SHA" || return 2
+  fi
   surface_git_dir="$(oms_worker_surface_git_dir "$repo")"
   : > "$before_dir/gitmeta-managed-added"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
@@ -1586,6 +1688,9 @@ oms_worker_surface_diff() {
     fi
     [ ! -s "$before_dir/current-operation-detail" ] ||
       changed="${changed:+$changed, }current-operation"
+  fi
+  if [ -n "${OMS_WG_RECEIPTS_SHA:-}" ]; then
+    oms_worker_gitmeta_receipts_assert_unchanged "$before_dir" "$OMS_WG_RECEIPTS_SHA" || return 2
   fi
   printf '%s\n' "$changed"
 }
@@ -2263,6 +2368,23 @@ PY
       physical="$OMS_WG_FOREIGN_PHYSICAL"
       for receipt in "$before/foreign-worktrees/"*/physical; do
         [ -f "$receipt" ] || continue
+        # A sibling may register after the baseline gitmeta scan but before
+        # receipt capture. Its own slot is not a duplicate: the reciprocal
+        # identity above and managed root still have to prove that checkout.
+        if [ "$receipt" = "$before/foreign-worktrees/$entry/physical" ]; then
+          oms_worker_gitmeta_receipts_assert_unchanged "$before" "${OMS_WG_RECEIPTS_SHA:-}" || return 1
+          baseline_path="$(sed -n '1p' "$receipt")"
+          baseline_path="${baseline_path//$'\r'/}"
+          [ "$baseline_path" = "$physical" ] &&
+            oms_worker_path_is_managed_foreign_worktree "$physical" "$worker" &&
+            cmp -s "${receipt%/*}/gitdir" "$common/worktrees/$entry/gitdir" || return 1
+          baseline_identity="$(cat "${receipt%/*}/commondir-identity" 2>/dev/null)" || return 1
+          baseline_identity="${baseline_identity//$'\r'/}"
+          current_identity="$(oms_worker_gitmeta_admin_file_identity "$common/worktrees/$entry/commondir")" || return 1
+          [ "$baseline_identity" = "$current_identity" ] &&
+            [ "$current_identity" != unreadable ] || return 1
+          continue
+        fi
         [ "$(cat "$receipt")" != "$physical" ] || return 1
       done
     fi
@@ -3567,6 +3689,8 @@ oms_worker_surface_snapshot_capture_once() {
       printf '%s\n' "$OMS_WG_FOREIGN_PHYSICAL" > "$dir/foreign-worktrees/${entry##*/}/physical"
       printf '%s\n' "$OMS_WG_FOREIGN_PATH" > "$dir/foreign-worktrees/${entry##*/}/path"
       cp "$entry/HEAD" "$entry/gitdir" "$dir/foreign-worktrees/${entry##*/}/" || return 1
+      oms_worker_gitmeta_admin_file_identity "$entry/commondir" \
+        > "$dir/foreign-worktrees/${entry##*/}/commondir-identity" || return 1
       if [ -f "$entry/logs/HEAD" ] && [ ! -L "$entry/logs/HEAD" ]; then
         cp "$entry/logs/HEAD" "$dir/foreign-worktrees/${entry##*/}/log" || return 1
       else

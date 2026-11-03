@@ -118,6 +118,8 @@ ma_read_guard_snapshot_source() {
   oms_git_assert_plain_index "$MA_READ_SOURCE_REPO" || return 2
   # Bind foreign evidence without exempting the source's own managed checkout.
   oms_worker_surface_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source" "$MA_READ_SOURCE_REPO" || return 2
+  MA_READ_SOURCE_RECEIPTS_SHA="$(oms_worker_gitmeta_receipts_fingerprint "$MA_READ_GUARD_DIR/source")" || return 2
+  MA_READ_SOURCE_RECEIPTS_SHA="${MA_READ_SOURCE_RECEIPTS_SHA//$'\r'/}"
   oms_git_execution_state_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source/git-execution-state" || return 2
   MA_READ_SOURCE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/git-execution-state")" || return 2
   head_file="$(git -C "$MA_READ_SOURCE_REPO" rev-parse --git-path HEAD | tr -d '\r')" || return 2
@@ -143,6 +145,8 @@ ma_read_guard_begin() {  # PRIVATE_DIR
   oms_git_assert_plain_index "$REPO" || return 2
   # Only the baseline needs the exclusion: the diff walks baseline rows alone.
   OMS_WG_SKIP_VOLATILE=1 oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" "$MA_READ_SOURCE_REPO" || return 2
+  MA_READ_STATE_RECEIPTS_SHA="$(oms_worker_gitmeta_receipts_fingerprint "$MA_READ_GUARD_DIR/state")" || return 2
+  MA_READ_STATE_RECEIPTS_SHA="${MA_READ_STATE_RECEIPTS_SHA//$'\r'/}"
   oms_git_execution_state_snapshot "$REPO" "$MA_READ_GUARD_DIR/state/git-execution-state" || return 2
   MA_READ_STATE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/state/git-execution-state")" || return 2
   ma_read_guard_snapshot_source
@@ -361,7 +365,7 @@ PY
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
   local root name digest changed surface hard soft execution named
-  local replacement_softened warn_soft
+  local replacement_softened warn_soft receipts_sha
   MA_READ_GUARD_DIAGNOSTIC=""
   ma_read_guard_purge_new_bytecode || return 2
   # A linked source's HEAD also appears in the state's Git metadata. Diagnose
@@ -369,6 +373,9 @@ ma_read_guard_assert() {
   for name in source state; do
     root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA" execution="$MA_READ_SOURCE_REPO"
     [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; }
+    receipts_sha="${MA_READ_STATE_RECEIPTS_SHA:-}"
+    [ "$name" != source ] || receipts_sha="${MA_READ_SOURCE_RECEIPTS_SHA:-}"
+    oms_worker_gitmeta_receipts_assert_unchanged "$MA_READ_GUARD_DIR/$name" "$receipts_sha" || return 2
     oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
     if [ "$name" = source ]; then
       if [ "$(oms_sha256_file "$MA_READ_SOURCE_HEAD_FILE")" != "$MA_READ_SOURCE_HEAD_SHA" ]; then
@@ -396,7 +403,7 @@ ma_read_guard_assert() {
     # reuse stale replacement evidence.
     rm -f "$MA_READ_GUARD_DIR/$name/gitmeta-now" \
       "$MA_READ_GUARD_DIR/$name/gitmeta-managed-replaced" || return 2
-    changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" "" "$execution" | tr -d '\r')" || return 2
+    changed="$(OMS_WG_RECEIPTS_SHA="$receipts_sha" oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" "" "$execution" | tr -d '\r')" || return 2
     hard="" soft=""
     replacement_softened=0
     if [ -s "$MA_READ_GUARD_DIR/$name/state-detail" ]; then
