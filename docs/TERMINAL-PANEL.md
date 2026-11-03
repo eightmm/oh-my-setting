@@ -823,6 +823,12 @@ other providers remain available. A missing or unavailable directory is reported
 per account and that account is skipped. Panel collection retains both provider
 rows and shows configuration/home errors on the Codex usage line through
 `accounts_error`; account readings and individual errors are under `accounts`.
+Where `os.getuid` is available, the resolved home must belong to the current user
+and must not be group/other-writable. Use mode `0700`, or remove group/other write
+bits with `chmod go-w`; ownership errors require restoring ownership or choosing
+a user-owned home. Directory existence is still checked on other platforms.
+Routing, launch and pinned continuation all recheck this validator, so a
+permission change after selection is refused before the launch anchor.
 
 Per-provider policy defaults to `ordered`, selecting the first eligible account.
 Each account is ineligible at 90% weekly usage during tier selection, including
@@ -850,18 +856,44 @@ It never refuses an explicit model target because account selection found no
 eligible account.
 
 Runtime routes carry `account` and `account_reason`. The route line includes
-`codex account=credits (selected; runs under the current home) / MODEL / EFFORT / ACCESS`.
+`codex account=credits (runs under its own home) / MODEL / EFFORT / ACCESS`.
 The private dispatch launch anchor retains that decision under `route` without
-storing the home. With no configuration file (or no Codex entry), existing routing
+storing the home. New account launches also record `account_applied: true` there
+when applying the home to the child's environment. With no configuration file
+(or no Codex entry), existing routing
 and display behavior is unchanged; the implicit default home is `CODEX_HOME` or
 `~/.codex`. Account fields remain invalid in `config/panel-routing.json`.
 
-This routing stage records a selection only; children still use the current home.
-Child-home selection, binding attempts and native continuation, and capacity-error
-overflow are separate execution work. The workspace balance is the upstream hard
-spending limit; v1 has no OMS money cap or strict-cap ledger. Routing alone does
-not implement overflow after a capacity error. Registering an account shares the
-main home's existing OMS setup; it does not install a separate OMS copy.
+At launch, the selected id is resolved again and its directory is rechecked. Only
+the Codex child's `CODEX_HOME` changes; the caller and independently routed calls
+keep their own environment. OMS never reads or transfers account credentials.
+`--continue TASK` reuses the previous write attempt's account when resuming its
+native Codex session. A removed account or missing home refuses native resume
+with the id and recovery instructions: re-register the account, or continue on a
+non-Codex provider using `--to PROVIDER --model MODEL` or a `--workload TIER`
+routed to another provider for a fresh worker. Switching to another provider
+uses the existing summary handoff without the old account.
+Attempts without a recorded account, including implicit default-home selections,
+retain the current home. Selection-only anchors without `account_applied: true`
+and missing or invalid anchors also continue without an account binding under
+the current home. Implicit selections are not recorded as an account in
+new launch anchors. A recorded Codex capacity/usage-limit failure can overflow
+once to the next eligible account serving the same model, provided the failed worker left the
+worktree unchanged. Both launch anchors retain their respective account ids.
+Account overflow is capacity-only; the tier provider fallback remains available
+for provider-down/model-unavailable failures and after the overflow account fails.
+Each fallback is bounded to one use. Policy refusals and verification failures
+never trigger account overflow or provider fallback. The home is rechecked
+before publishing the launch anchor.
+When a primary applies an account home, provider fallback runs as a separate call
+with the parent-derived environment: `CODEX_HOME` returns to the parent's value
+or is absent if the parent left it unset. This also applies after account
+overflow. Once child exit is confirmed, the controller records the withheld
+in-delegate decision as `panel_fallback_decision: deferred` through the existing
+lifecycle metadata writer.
+The workspace balance is the upstream hard spending limit; v1 has no OMS money
+cap or strict-cap ledger. Registering an account shares the main home's existing
+OMS setup; it does not install a separate OMS copy.
 
 Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. A recorded Pi provider failure can fall back once to an eligible tier candidate, provided a write leaves the worktree unchanged; policy refusals and verification failures do not trigger fallback. An OpenRouter free-model daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only trigger the one-time fallback. Judge tier allocation stays on Claude or Codex; an explicit `--to` may select another provider.
 

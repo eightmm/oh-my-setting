@@ -41,13 +41,61 @@ def default_account(provider):
 
 
 def account_home_error(entry):
-    """Recheck the directory so a vanished home cannot become unknown quota."""
+    """Recheck directory ownership and permissions before trusting a profile."""
     try:
-        if Path(entry["home"]).is_dir():
+        info = Path(entry["home"]).resolve().stat()
+        if stat.S_ISDIR(info.st_mode):
+            if hasattr(os, "getuid"):
+                if info.st_uid != os.getuid():
+                    return ("account home must be owned by the current user: " + entry["id"]
+                            + "; restore its ownership or choose a user-owned home")
+                if info.st_mode & 0o022:
+                    return ("account home must not be group/other-writable: " + entry["id"]
+                            + "; run chmod go-w on that home")
             return None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         pass
     return "account home must be an existing directory: " + entry["id"]
+
+
+def implicit_default_account(route):
+    reason = route.get("account_reason")
+    return (route.get("account") == "default" and isinstance(reason, str)
+            and reason.endswith("; default current home"))
+
+
+def route_account_home(route):
+    """Resolve only the recorded id, rechecking its home at the execution boundary."""
+    provider, ident = route.get("provider"), route.get("account")
+    if provider != "codex" or not ident or implicit_default_account(route):
+        return None
+    config = load_accounts()
+    entries = config["providers"].get(provider, {}).get("accounts", []) if config["configured"] else []
+    entry = next((entry for entry in entries if entry["id"] == ident), None)
+    if entry is None:
+        raise ValueError("Codex account is no longer configured: " + ident)
+    error = account_home_error(entry)
+    if error:
+        raise ValueError(error)
+    return Path(entry["home"])
+
+
+def next_account_route(route, readings=None):
+    """Select once from eligible accounts following this id in configuration order."""
+    if route.get("provider") != "codex" or not route.get("account"):
+        return None
+    config = load_accounts()
+    settings = config["providers"].get("codex") if config["configured"] else None
+    if not settings:
+        return None
+    entries = settings["accounts"]
+    index = next((n for n, entry in enumerate(entries) if entry["id"] == route["account"]), len(entries))
+    remaining = entries[index + 1:]
+    if not remaining:
+        return None
+    config = dict(config, providers={"codex": dict(settings, policy="ordered", accounts=remaining)})
+    selected, reason = select_account("codex", route["model"], readings=readings, config=config)
+    return dict(route, account=selected["id"], account_reason="capacity overflow; " + reason) if selected else None
 
 
 def load_accounts(path=None):

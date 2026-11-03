@@ -6172,11 +6172,12 @@ def exercise_provider_account_routing():
             assert alternate["model"] == "gpt-6.2-sol" and alternate["account"] == "credits"
             (homes[1] / "models_cache.json").unlink()
             cache.unlink()
-            # The existing launch anchor carries the decision without changing the child environment.
+            # The existing launch anchor carries the decision without storing its home.
             member = "call-accounts-" + uuid.uuid4().hex[:12]
             call_record = dispatch._prepare_dispatch_call(project, "account-room", member, "main", route=selected)
             anchor = dispatch.dispatch_store.read(project, member + "-launch.json")
             assert anchor["route"]["account"] == "pro" and "home" not in anchor["route"]
+            assert "account_applied" not in anchor["route"]
             assert dispatch._dispatch_call_record(project, "account-room", {"participant": member, "parent": "main"}) == call_record
             live = dict(worker, state="working", refs={"panel_role": "worker", "panel_room_participant": member})
             with patch("terminal_panel.events", return_value=json.dumps([live])):
@@ -6199,7 +6200,7 @@ def exercise_provider_account_routing():
                 dispatch.run_dispatch(base, "claude", "builder", "read", "inspect", None, None, "accounts",
                     True, None, dict(legacy, account="credits", access="read", purpose="explain"), None, None, None)
             assert json.loads(stream.getvalue())["route"]["account"] == "credits"
-            assert dispatch.route_label(dict(provider="codex", account="credits")) == "codex account=credits (selected; runs under the current home)"
+            assert dispatch.route_label(dict(provider="codex", account="credits")) == "codex account=credits (runs under its own home)"
             assert dispatch.route_label({"provider": "codex"}) == "codex"
             configure(dict(value, policy="spread"))
             selected, _ = choose(status={"credits": {"weekly_used": 0}, "pro": {"weekly_used": None}})
@@ -6338,3 +6339,486 @@ def exercise_provider_account_routing():
 
 exercise_provider_account_routing()
 # END Provider account routing
+
+# BEGIN Provider account execution
+def exercise_provider_account_execution():
+    import provider_accounts as accounts
+    import panel_dispatch as dispatch
+    import panel_routing as routing
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory(dir=temporary) as directory:
+        base = Path(directory).resolve()
+        assert project.resolve() not in (base, *base.parents)
+        homes = [base / name for name in ("credits", "pro", "third")]
+        for number, account_home in enumerate(homes):
+            account_home.mkdir()
+            models = ["gpt-6.1-sol"] + (["gpt-6.1-terra"] if number else [])
+            (account_home / "models_cache.json").write_text(json.dumps({"models": [{"slug": model} for model in models]}))
+        config_root = base / "config"
+        config = config_root / "oh-my-setting/provider-accounts.json"
+        config.parent.mkdir(parents=True)
+        value = {"schema": 1, "providers": {"codex": {"accounts": [
+            {"id": account_home.name, "home": str(account_home)} for account_home in homes]}}}
+        seen = base / "homes.jsonl"
+        standin = base / "bin"
+        standin.mkdir()
+        executable = standin / "codex"
+        executable.write_text("#!/usr/bin/env python3\n" + '''import json, os, sys
+from pathlib import Path
+if os.environ.get("OMS_HARNESS_CHILD") == "1":
+    if os.environ.get("OMS_PANEL_ROLE") != "worker":
+        print("Answer: inspected the bounded repository task.\\nGATE: pass")
+        sys.exit(0)
+    home = os.environ.get("CODEX_HOME")
+    provider = Path(sys.argv[0]).name
+    with open(os.environ["ACCOUNT_TEST_SEEN"], "a") as stream:
+        stream.write(json.dumps({"home": home, "provider": provider, "argv": sys.argv[1:]}) + "\\n")
+    mode = os.environ.get("ACCOUNT_TEST_MODE")
+    if provider == "claude" and mode not in ("down", "unavailable", "all-to-provider", "fresh-provider"):
+        print("Error: HTTP 503 service unavailable")
+        sys.exit(1)
+    if provider == "codex" and mode in ("down", "unavailable"):
+        print("Error: HTTP 503 service unavailable" if mode == "down" else "Error: model not found")
+        sys.exit(1)
+    if provider == "codex" and (mode in ("all", "all-to-provider") or mode in ("capacity", "dirty", "policy") and Path(home).name == "credits"):
+        if mode == "dirty":
+            with open("value.txt", "a") as stream:
+                stream.write("changed before capacity failure\\n")
+        print("Error: usage limit; blocked by content filtering" if mode == "policy" else "Error: You've hit your usage limit. Try again later.")
+        sys.exit(1)
+    session = os.environ.get("ACCOUNT_TEST_SESSION")
+    if not session and provider == "codex" and "resume" in sys.argv:
+        resume_args = sys.argv[sys.argv.index("resume") + 1:]
+        session = resume_args[1] if resume_args[0] == "--all" else resume_args[0]
+    if session:
+        with open("value.txt", "a") as stream:
+            stream.write("session fixture change\\n")
+        folder = Path(home) / "sessions/2026/11/03"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / ("rollout-" + session + ".jsonl")).write_text("{}\\n")
+        os.environ["PANEL_TEST_SESSION"] = session
+os.execv(os.environ["ACCOUNT_TEST_ORIGINAL"], [os.environ["ACCOUNT_TEST_ORIGINAL"], *sys.argv[1:]])
+''')
+        executable.chmod(0o755)
+        other = standin / "claude"
+        other.write_text(executable.read_text())
+        other.chmod(0o755)
+        ident = room.create(project, "account-execution", "Account execution fixture")
+        main = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                     "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                     "--ref", "panel_room_id=" + ident, "--then", "starting", "--then", "working"]).strip()
+        legacy_main_join(project, ident, main, "claude", model="claude-opus-5-5")
+        env = dict(environment, OMS_ROOM_ID=ident, OMS_ROOM_REPO=str(project), OMS_ROOM_PARTICIPANT=main,
+                   OMS_PANEL_MAIN_ATTEMPT=main, XDG_CONFIG_HOME=str(config_root), ACCOUNT_TEST_SEEN=str(seen),
+                   ACCOUNT_TEST_ORIGINAL=str(binary / "codex"), PATH=str(standin) + os.pathsep + environment["PATH"])
+        before_review = (project / "value.txt").read_bytes()
+        read_result = subprocess.run([str(executable), "exec", "--sandbox", "read-only"], cwd=str(project),
+            env=dict(env, OMS_HARNESS_CHILD="1", OMS_PANEL_ROLE="reviewer", ACCOUNT_TEST_SESSION=str(uuid.uuid4())),
+            capture_output=True, text=True, timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+        assert read_result.returncode == 0, read_result.stdout + read_result.stderr
+        assert (project / "value.txt").read_bytes() == before_review and not seen.exists(), "review fixture wrote state"
+        request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "builder",
+                   "--owner", "claude", "--access", "write", "--to", "codex", "--model", "gpt-6.1-sol",
+                   "--brief-file", str(brief), "--verify", "true"]
+
+        def run(name, extra=None, model=None, verify=None, continuing=False, route_args=None,
+                legacy_account=False, missing_anchor=None, writable_home=None):
+            argv = list(request)
+            if continuing or route_args:
+                start = argv.index("--to")
+                del argv[start:start + 4]
+            if model:
+                argv[argv.index("--model") + 1] = model
+            if verify:
+                argv[argv.index("--verify") + 1] = verify
+            argv += route_args or []
+            argv += ["--continue" if continuing else "--task-id", name]
+            before = len(seen.read_text().splitlines()) if seen.exists() else 0
+            call_env = dict(env, **(extra or {}))
+            if legacy_account or missing_anchor or writable_home:
+                code = "import sys, terminal_panel\n"
+                if legacy_account:
+                    code += "import provider_accounts\nprovider_accounts.route_account_home = lambda *args, **kwargs: None\n"
+                if missing_anchor:
+                    code += ("import dispatch_supervisor as store\noriginal = store.read\n"
+                             "def read(repo, name):\n"
+                             "    if name == %r: raise FileNotFoundError('fixture anchor unavailable')\n"
+                             "    return original(repo, name)\nstore.read = read\n" % (missing_anchor + "-launch.json"))
+                if writable_home:
+                    code += ("from pathlib import Path\nimport provider_accounts\n"
+                             "original_home = provider_accounts.route_account_home\n"
+                             "def home(route):\n"
+                             "    Path(%r).chmod(0o777)\n    return original_home(route)\n"
+                             "provider_accounts.route_account_home = home\n" % str(writable_home))
+                code += "sys.exit(terminal_panel.main(sys.argv[1:]))\n"
+                argv = [sys.executable, "-c", code, *argv[3:]]
+                call_env["PYTHONPATH"] = str(root / "scripts/lib")
+            result = subprocess.run(argv, env=call_env, cwd=str(project),
+                                    capture_output=True, text=True, timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
+            rows = [json.loads(line) for line in seen.read_text().splitlines()][before:] if seen.exists() else []
+            return result, rows
+
+        def launched(name, expected, **kwargs):
+            result, rows = run(name, **kwargs)
+            if result.returncode not in (0, 6):
+                with patch.dict(os.environ, env):
+                    attempts, indexed = panel_results._records(project, full=True, task_id=name)
+                raise AssertionError((result.stdout + result.stderr,
+                    [row for row in attempts if row.get("task_id") == name], indexed))
+            assert [row["home"] for row in rows] == expected, (rows, result.stdout, result.stderr)
+            return rows
+
+        def owner_env(label):
+            ident = room.create(project, label, "Account fallback and continuation")
+            main = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                "--ref", "panel_room_id=" + ident, "--then", "starting", "--then", "working"]).strip()
+            legacy_main_join(project, ident, main, "claude", model="claude-opus-5-5")
+            return dict(env, OMS_ROOM_ID=ident, OMS_ROOM_PARTICIPANT=main, OMS_PANEL_MAIN_ATTEMPT=main)
+
+        def latest_member(name):
+            attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"], env))
+            return next(row["refs"]["panel_room_participant"] for row in reversed(attempts)
+                        if row.get("task_id") == name and row.get("refs", {}).get("panel_role") == "worker")
+
+        # Separate owners keep successful continuation fixtures outside the earlier cases' review backlog.
+        saved_env = env
+        env = owner_env("account-legacy")
+        config.write_text(json.dumps(value))
+        regressions = []
+        legacy_session = str(uuid.uuid4())
+        launched("account-legacy", [env["CODEX_HOME"]], legacy_account=True,
+                 extra={"ACCOUNT_TEST_SESSION": legacy_session})
+        with patch.dict(os.environ, env):
+            anchor = dispatch.dispatch_store.read(project, latest_member("account-legacy") + "-launch.json")
+        assert anchor["route"]["account"] == "credits" and "account_applied" not in anchor["route"], anchor
+        value["providers"]["codex"]["accounts"].pop(0)
+        config.write_text(json.dumps(value))
+        for missing in (False, True):
+            result, rows = run("account-legacy", continuing=True,
+                route_args=["--to", "codex", "--model", "gpt-6.1-sol"],
+                missing_anchor=latest_member("account-legacy") if missing else None)
+            if (result.returncode not in (0, 6) or [row["home"] for row in rows] != [env["CODEX_HOME"]]
+                    or not rows or legacy_session not in rows[0]["argv"]):
+                regressions.append(("missing anchor" if missing else "selection-only anchor", result.returncode, rows, result.stderr))
+        value["providers"]["codex"]["accounts"].insert(0, {"id": "credits", "home": str(homes[0])})
+        config.write_text(json.dumps(value))
+        env = owner_env("account-regressions")
+        if hasattr(os, "getuid"):
+            homes[0].chmod(0o700)
+            try:
+                result, rows = run("account-insecure-home", writable_home=homes[0])
+                if (result.returncode in (0, 6) or rows or "credits" not in result.stderr
+                        or "chmod go-w" not in result.stderr):
+                    regressions.append(("writable home launch", result.returncode, rows, result.stderr))
+            finally:
+                homes[0].chmod(0o700)
+            launched("account-private-home", [str(homes[0])])
+        original_entries = list(value["providers"]["codex"]["accounts"])
+        value["providers"]["codex"]["accounts"] = original_entries[:1]
+        config.write_text(json.dumps(value))
+        for unset in (False, True):
+            inherited_home = env.pop("CODEX_HOME") if unset else env["CODEX_HOME"]
+            result, rows = run("account-single-fallback-" + str(unset), route_args=["--workload", "deep"],
+                               extra={"ACCOUNT_TEST_MODE": "down"})
+            if (result.returncode not in (0, 6) or [row["provider"] for row in rows] != ["codex", "claude"]
+                    or rows[-1]["home"] != env.get("CODEX_HOME")):
+                regressions.append(("single-account fallback environment", result.returncode, rows, result.stderr))
+            if unset:
+                env["CODEX_HOME"] = inherited_home
+        value["providers"]["codex"]["accounts"] = original_entries
+        config.write_text(json.dumps(value))
+        for mode, expected in (("down", ["codex", "claude"]), ("unavailable", ["codex", "claude"]),
+                               ("all-to-provider", ["codex", "codex", "claude"])):
+            result, rows = run("account-tier-" + mode, route_args=["--workload", "deep"],
+                               extra={"ACCOUNT_TEST_MODE": mode})
+            if (result.returncode not in (0, 6) or [row["provider"] for row in rows] != expected
+                    or any(row["home"] != env.get("CODEX_HOME") for row in rows if row["provider"] != "codex")):
+                regressions.append((mode, result.returncode, rows, result.stderr))
+            attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"], env))
+            first = next(row for row in attempts if row.get("task_id") == "account-tier-" + mode)
+            if first["refs"].get("panel_fallback_decision") != "deferred":
+                regressions.append((mode, "incorrect deferred decision", first["refs"].get("panel_fallback_decision")))
+        Path(env["CODEX_HOME"]).mkdir(parents=True, exist_ok=True)
+        for account_home in homes:
+            (account_home / "models_cache.json").write_text('{"models":[]}')
+        default_session = str(uuid.uuid4())
+        launched("account-default", [env["CODEX_HOME"]], extra={"ACCOUNT_TEST_SESSION": default_session})
+        for number, account_home in enumerate(homes):
+            models = ["gpt-6.1-sol"] + (["gpt-6.1-terra"] if number else [])
+            (account_home / "models_cache.json").write_text(json.dumps({"models": [{"slug": model} for model in models]}))
+        for name in ("account-switch-explicit", "account-switch-workload"):
+            launched(name, [str(homes[0])], extra={"ACCOUNT_TEST_SESSION": str(uuid.uuid4())})
+        value["providers"]["codex"]["accounts"].pop(0)
+        config.write_text(json.dumps(value))
+        result, rows = run("account-switch-explicit", continuing=True,
+                           route_args=["--to", "codex", "--model", "gpt-6.1-sol"])
+        if (result.returncode == 0 or rows or "non-Codex provider" not in result.stderr
+                or "routed to another provider" not in result.stderr):
+            regressions.append(("same-provider refusal recovery", result.returncode, rows, result.stderr))
+        for name, options in (("account-switch-explicit", ["--to", "claude", "--model", "claude-opus-5-5"]),
+                              ("account-switch-workload", ["--workload", "frontier"])):
+            result, rows = run(name, continuing=True, route_args=options, extra={"ACCOUNT_TEST_MODE": "fresh-provider"})
+            if (result.returncode not in (0, 6) or [row["provider"] for row in rows] != ["claude"]
+                    or "earlier worker ran on codex, not claude" not in result.stderr):
+                regressions.append((name, result.returncode, rows, result.stderr))
+        result, rows = run("account-default", continuing=True)
+        if (result.returncode not in (0, 6) or [row["home"] for row in rows] != [env["CODEX_HOME"]]
+                or not rows or default_session not in rows[0]["argv"]):
+            regressions.append(("default continuation", result.returncode, rows, result.stderr))
+        value["providers"]["codex"]["accounts"].insert(0, {"id": "credits", "home": str(homes[0])})
+        config.write_text(json.dumps(value))
+        env = saved_env
+        assert not regressions, regressions
+
+        # The absent configuration and an empty provider map preserve the caller's home.
+        config.unlink()
+        launched("account-no-config", [env["CODEX_HOME"]])
+        inherited_home = env.pop("CODEX_HOME")
+        launched("account-no-home-variable", [None])
+        env["CODEX_HOME"] = inherited_home
+        config.write_text(json.dumps({"schema": 1, "providers": {}}))
+        launched("account-no-entry", [env["CODEX_HOME"]])
+        config.write_text(json.dumps(value))
+        launched("account-model", [str(homes[1])], model="gpt-6.1-terra")
+        # A fallback into Codex gets its own launch environment instead of inheriting the failed provider's.
+        before = len(seen.read_text().splitlines())
+        with patch.dict(os.environ, env), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            primary = routing.allocate("codex", role="builder", tier="deep", access="write", installed={"claude"})
+            fallback = dict(primary, provider="codex", binary="codex", model="gpt-6.1-sol", account="credits")
+            result = dispatch.run_dispatch(project, "claude", "builder", "write", None, str(brief), "true",
+                "account-provider-fallback", False, None, primary, None, None, [], fallback=fallback)
+        rows = [json.loads(line) for line in seen.read_text().splitlines()][before:]
+        assert result == 6 and [row["home"] for row in rows] == [env["CODEX_HOME"], str(homes[0])], (result, rows)
+        attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"], env))
+        first = next(row for row in attempts if row.get("task_id") == "account-provider-fallback")
+        assert first["refs"].get("panel_fallback_decision") == "deferred", first
+        before = len(seen.read_text().splitlines())
+        with patch.dict(os.environ, dict(env, ACCOUNT_TEST_MODE="down")), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            primary = routing.allocate("claude", role="builder", tier="deep", access="write", installed={"codex"})
+            unbound = {key: value for key, value in primary.items() if key not in ("account", "account_reason")}
+            result = dispatch.run_dispatch(project, "claude", "builder", "write", None, str(brief), "true",
+                "account-unbound-codex-fallback", False, None, primary, None, None, [], fallback=unbound,
+                account_overflow=False)
+        rows = [json.loads(line) for line in seen.read_text().splitlines()][before:]
+        assert result != 0 and [row["home"] for row in rows] == [str(homes[0]), env["CODEX_HOME"]], (result, rows)
+        launched("account-overflow", [str(homes[0]), str(homes[1])], extra={"ACCOUNT_TEST_MODE": "capacity"})
+        attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"], env))
+        overflow = [row for row in attempts if row.get("task_id") == "account-overflow"]
+        with patch.dict(os.environ, env):
+            anchors = [dispatch.dispatch_store.read(project, row["refs"]["panel_room_participant"] + "-launch.json") for row in overflow]
+        assert [anchor["route"]["account"] for anchor in anchors] == ["credits", "pro"], anchors
+        assert all("home" not in anchor["route"] for anchor in anchors)
+        assert all(anchor["route"].get("account_applied") is True for anchor in anchors)
+        for mode, expected in (("all", homes[:2]), ("dirty", homes[:1]), ("policy", homes[:1])):
+            result, rows = run("account-stop-" + mode, extra={"ACCOUNT_TEST_MODE": mode})
+            assert result.returncode != 0 and [row["home"] for row in rows] == [str(home) for home in expected], (mode, result.stdout, result.stderr, rows)
+        session = str(uuid.uuid4())
+        launched("account-ordered", [str(homes[0])], extra={"ACCOUNT_TEST_SESSION": session})
+        # Fresh quota/model selection would choose another account, but native resume keeps its home.
+        (homes[0] / "models_cache.json").write_text('{"models":[]}')
+        rows = launched("account-ordered", [str(homes[0])], continuing=True)
+        assert session in rows[0]["argv"] and "resume" in rows[0]["argv"], rows
+        attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"], env))
+        resumed = [row for row in attempts if row.get("task_id") == "account-ordered"
+                   and row.get("refs", {}).get("panel_role") == "worker"]
+        assert resumed[-1]["refs"].get("native_session") == session, resumed
+        value["providers"]["codex"]["accounts"] = value["providers"]["codex"]["accounts"][1:]
+        config.write_text(json.dumps(value))
+        result, rows = run("account-ordered", continuing=True)
+        assert result.returncode != 0 and all(part in result.stderr for part in (
+            "credits", "configured", "re-register", "--to", "--model", "--workload")) and not rows, result.stdout + result.stderr
+        value["providers"]["codex"]["accounts"].insert(0, {"id": "credits", "home": str(homes[0])})
+        config.write_text(json.dumps(value))
+        (homes[0] / "models_cache.json").write_text('{"models":[{"slug":"gpt-6.1-sol"}]}')
+        result, rows = run("account-verify", verify="exit 7", extra={"PANEL_TEST_MODE": "write"})
+        assert result.returncode != 0 and [row["home"] for row in rows] == [str(homes[0])], result.stdout + result.stderr
+        # Recheck after selection; missing homes and removed ids fail before any child is launched.
+        route = {"provider": "codex", "account": "credits", "model": "gpt-6.1-sol"}
+        with patch.dict(os.environ, env):
+            assert accounts.route_account_home(route) == homes[0]
+        shutil.rmtree(homes[0])
+        result, rows = run("account-ordered", continuing=True)
+        assert result.returncode != 0 and "credits" in result.stderr and "directory" in result.stderr and not rows, result.stdout + result.stderr
+        assert accounts.route_account_home({"provider": "claude", "account": "credits"}) is None
+        assert accounts.route_account_home({"provider": "codex"}) is None
+
+        configured = accounts.load_accounts(config)
+        candidate = dict(route, account="pro")
+        with patch.object(accounts, "load_accounts", return_value=configured):
+            assert accounts.next_account_route(candidate, readings={})["account"] == "third"
+            for ident in ("third", "removed", "", None):
+                assert accounts.next_account_route(dict(candidate, account=ident), readings={}) is None
+            for used, expected in ((0, True), (89, True), (90, False), (100, False), ("bad", True)):
+                assert bool(accounts.next_account_route(candidate, readings={"third": {"weekly_used": used}})) is expected
+            assert accounts.next_account_route(dict(candidate, model="unsupported"), readings={}) is None
+        with patch.object(accounts, "load_accounts", return_value={"configured": False, "providers": {}}):
+            assert accounts.next_account_route(candidate) is None
+
+exercise_provider_account_execution()
+# END Provider account execution
+
+# BEGIN Provider account retry evidence
+def exercise_account_retry_evidence():
+    import panel_dispatch as dispatch
+    import panel_results
+    import provider_accounts as accounts
+    from tempfile import TemporaryDirectory
+    from types import SimpleNamespace
+    with TemporaryDirectory(dir=temporary) as directory:
+        home = Path(directory)
+        entry = {"id": "credits", "home": str(home)}
+        if hasattr(os, "getuid"):
+            try:
+                for mode, unsafe in ((0o700, False), (0o755, False), (0, False),
+                                     (0o702, True), (0o720, True), (0o777, True)):
+                    home.chmod(mode)
+                    error = accounts.account_home_error(entry)
+                    assert bool(error) is unsafe, (mode, error)
+                    if unsafe:
+                        assert "credits" in error and "chmod go-w" in error, error
+                home.chmod(0o700)
+                with patch.object(accounts.os, "getuid", return_value=home.stat().st_uid + 1):
+                    error = accounts.account_home_error(entry)
+                    assert error and "credits" in error and "ownership" in error, error
+                home.chmod(0o777)
+                platform = SimpleNamespace(**{key: value for key, value in vars(os).items() if key != "getuid"})
+                with patch.object(accounts, "os", platform):
+                    assert accounts.account_home_error(entry) is None
+            finally:
+                home.chmod(0o700)
+    attempt = {"attempt_id": "failed", "task_id": "overflow", "reason_code": "provider_failed", "refs": {
+        "panel_room_participant": "worker", "provider_error": "capacity", "provider_error_provider": "codex",
+        "provider_error_exit": "1"}}
+    indexed = {"attempt_id": "failed", "verify_exit": 0}
+    with patch.object(panel, "events", return_value=json.dumps([attempt])) as writer:
+        assert dispatch._record_deferred_fallback(project, "overflow", set(), "worker")
+        first_write = writer.call_args
+        assert "panel_fallback_decision=deferred" in first_write.args
+        assert "--idempotency-key" in first_write.args and "failed" in first_write.args[-1]
+        assert dispatch._record_deferred_fallback(project, "overflow", set(), "worker")
+        assert writer.call_args == first_write
+        for rows in ([], [attempt, attempt], [None], [{}], [dict(attempt, attempt_id=[])],
+                     [dict(attempt, attempt_id="")], [dict(attempt, refs=None)]):
+            writer.reset_mock()
+            writer.return_value = json.dumps(rows)
+            assert not dispatch._record_deferred_fallback(project, "overflow", set(), "worker"), rows
+            assert writer.call_count == 1
+        writer.return_value = json.dumps([attempt])
+        assert not dispatch._record_deferred_fallback(project, "overflow", {"failed"}, "worker")
+        assert not dispatch._record_deferred_fallback(project, "overflow", set(), "other")
+    with patch.object(panel_results, "_records", return_value=([attempt], [indexed])) as records, \
+            patch.object(panel_results, "verified_patch", return_value=b"") as content:
+        def admitted(access="write", before=None, member="worker"):
+            return dispatch._account_capacity_retry(project, "overflow", before or set(), member, access)
+        assert admitted() and admitted("read")
+        assert not admitted(before={"failed"}) and not admitted(member="other")
+        for rows, calls in (([], [indexed]), ([attempt, attempt], [indexed]), ([attempt], []), ([attempt], [indexed, indexed])):
+            records.return_value = rows, calls
+            assert not admitted()
+        records.return_value = [attempt], [indexed]
+        for code in (None, "", "bad", "0", 0, True, -1, 256):
+            with patch.dict(attempt["refs"], provider_error_exit=code):
+                assert not admitted(), code
+        for code in (1, "1", 255, "255"):
+            with patch.dict(attempt["refs"], provider_error_exit=code):
+                assert admitted(), code
+        for key, values in (("provider_error", (None, "policy", "model_unavailable", "provider_down")),
+                            ("provider_error_provider", (None, "claude"))):
+            for value in values:
+                with patch.dict(attempt["refs"], {key: value}):
+                    assert not admitted()
+        with patch.dict(attempt, reason_code="verification_failed"):
+            assert not admitted()
+        for key, values in (("verify_exit", (False, -1, 1, 7, 124, 125, "0", "bad")),
+                            ("fallback_reason", ("policy-declined", "capacity-dirty-worktree", "capacity")),
+                            ("fallback_used", (True,)), ("guard", ("blocked",))):
+            for value in values:
+                with patch.dict(indexed, {key: value}):
+                    assert not admitted(), (key, value)
+        for code in (None, 0):
+            with patch.dict(indexed, verify_exit=code):
+                assert admitted()
+        for category in ("capacity", "model_unavailable", "provider_down"):
+            with patch.dict(attempt["refs"], provider_error_provider="claude", provider_error=category):
+                assert dispatch._account_capacity_retry(project, "overflow", set(), "worker", "write", "claude")
+            with patch.dict(attempt["refs"], provider_error=category):
+                assert dispatch._account_capacity_retry(project, "overflow", set(), "worker", "write", capacity_only=False)
+        with patch.dict(indexed, fallback_reason="model-unavailable"), patch.dict(attempt["refs"], provider_error="model_unavailable"):
+            assert dispatch._account_capacity_retry(project, "overflow", set(), "worker", "write", capacity_only=False)
+        content.return_value = b"changed"
+        assert not admitted()
+    implicit = {"provider": "codex", "account": "default", "account_reason": "explicit target; default current home"}
+    assert accounts.implicit_default_account(implicit)
+    assert accounts.route_account_home(implicit) is None
+    for reason in (None, "", 0, False, [], {}, "ordered", "default current home"):
+        assert not accounts.implicit_default_account(dict(implicit, account_reason=reason))
+    assert not accounts.implicit_default_account(dict(implicit, account="configured"))
+    previous = {"attempt_id": "worker", "parent_attempt_id": "main", "provider": "codex", "refs": {
+        "panel_room_participant": "call-legacy", "panel_account": "credits", "native_session": "native-session"}}
+    reached = RuntimeError("fixture reached results")
+    with patch.object(panel, "work_repository", side_effect=Path), \
+            patch.object(panel, "owning_attempt", return_value=["main"]), \
+            patch.object(panel, "events", return_value=json.dumps([{"attempt_id": "main", "terminal": False}, previous])), \
+            patch.object(panel, "_rework_history", return_value=[previous]), \
+            patch.object(panel, "results", side_effect=reached) as result_view:
+        outcomes = [(error("fixture anchor unavailable"), False) for error in (OSError, ValueError, KeyError, TypeError)]
+        outcomes += [(value, False) for value in (None, {}, [], {"route": None}, {"route": []},
+            {"route": {"account": "credits"}})]
+        outcomes += [({"route": {"account": "credits", "account_applied": value}}, False)
+                     for value in (None, False, 0, 1, "true", [], {})]
+        outcomes += [({"route": {"account": value, "account_applied": True}}, False)
+                     for value in (None, "", 0, [], {})]
+        outcomes.append(({"route": {"account": "credits", "account_applied": True}}, True))
+        failures = []
+        for outcome, applied in outcomes:
+            options = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+            with patch.object(dispatch.dispatch_store, "read", **options):
+                route = {"provider": "codex", "account": "pro", "account_reason": "ordered"}
+                try:
+                    dispatch.continuation(project, "claude", None, "account-anchor", route, brief, {})
+                    raise AssertionError("continuation skipped results")
+                except RuntimeError as error:
+                    assert error is reached, error
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    failures.append((type(error).__name__, "anchor read escaped"))
+                    continue
+                if bool(route.get("account")) is not applied:
+                    failures.append((outcome, "incorrect account binding"))
+        result_view.side_effect = None
+        result_view.return_value = {"rows": []}
+        with patch.object(dispatch.dispatch_store, "read", return_value={"route": {"account": "credits", "account_applied": True}}), \
+                patch.object(panel_results, "_records", return_value=([], [])), \
+                patch.object(accounts, "route_account_home", side_effect=ValueError("no longer configured: credits")):
+            try:
+                dispatch.continuation(project, "claude", None, "account-anchor", {"provider": "codex"}, brief, {})
+                raise AssertionError("removed account resumed")
+            except ValueError as error:
+                if "non-Codex provider" not in str(error) or "routed to another provider" not in str(error):
+                    failures.append((str(error), "incorrect recovery advice"))
+        assert not failures, failures
+    from panel_routing import allocate
+    route = dict(allocate("claude", role="worker", tier="deep", access="read", installed={"codex"},
+                          resolve_accounts=False), account="missing")
+    with patch.dict(os.environ, {"OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}), \
+            patch.object(panel, "child_environment", return_value={}), \
+            patch.object(dispatch.room, "resolve", return_value=None), \
+            patch.object(panel, "plan_link", return_value=None), \
+            patch.object(panel, "_print_dispatch_next_ready"), \
+            patch.object(panel, "_prepare_dispatch_call", side_effect=AssertionError("anchor preceded home check")) as anchor, \
+            patch.object(accounts, "next_account_route", return_value=None, create=True), \
+            patch.object(accounts, "route_account_home", side_effect=ValueError("invalid home: missing"), create=True):
+        try:
+            dispatch.run_dispatch(project, "claude", "worker", "read", "Inspect.", None, None,
+                                  "account-invalid-home", False, None, route, None, None, [])
+            raise AssertionError("invalid home launched")
+        except ValueError as error:
+            assert "invalid home: missing" in str(error), error
+        assert not anchor.called
+
+exercise_account_retry_evidence()
+# END Provider account retry evidence

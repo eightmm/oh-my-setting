@@ -441,6 +441,26 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     if not all(historical_worker_exited(row) for row in earlier):
         raise ValueError("historical worker exit is unconfirmed for task %s; continuation refused" % task_id)
     last = earlier[-1]
+    refs = last.get("refs", {})
+    member = refs.get("panel_room_participant")
+    try:
+        anchor = dispatch_store.read(repo, member + "-launch.json") if member else None
+        recorded_route = anchor.get("route", {}) if isinstance(anchor, dict) else {}
+        if not isinstance(recorded_route, dict):
+            recorded_route = {}
+    except (OSError, ValueError, KeyError, TypeError):
+        recorded_route = {}
+    recorded_account = recorded_route.get("account") if recorded_route.get("account_applied") is True else None
+    if not isinstance(recorded_account, str):
+        recorded_account = None
+    ran = refs.get("panel_provider") or last.get("provider")
+    from provider_accounts import implicit_default_account
+    if ran != "codex" or implicit_default_account(recorded_route):
+        recorded_account = None
+    if ran == route["provider"] == "codex" and not recorded_account:
+        # Older attempts belong to the caller's home even when routing now selects an account.
+        route.pop("account", None)
+        route.pop("account_reason", None)
     session = last.get("refs", {}).get("native_session")
     found = results(repo, task_id)["rows"]
     call = next((c for c in reversed(found[0].get("calls", []) if found else [])
@@ -657,8 +677,23 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     # A provider fallback swaps the attempt's provider after its row was written; the session belongs to
     # the provider that actually ran.
     ran = last.get("refs", {}).get("panel_provider") or last.get("provider")
-    resume = session if (session and ran == route["provider"]
-                         and session_stored(route["provider"], session)) else None
+    if session and ran == route["provider"] == "codex" and recorded_account:
+        from provider_accounts import route_account_home
+        from panel_chats import _codex_rollouts
+        pinned = dict(route, account=recorded_account, account_reason="continued account")
+        try:
+            account_home = route_account_home(pinned)
+        except ValueError as error:
+            raise ValueError("cannot resume Codex account %s: %s; re-register the account, or continue on a "
+                             "non-Codex provider (--to PROVIDER --model MODEL or --workload TIER routed to "
+                             "another provider) for a fresh worker"
+                             % (recorded_account, error)) from error
+        stored = any(session in path.name for path in _codex_rollouts(account_home))
+        if stored:
+            route.update(account=recorded_account, account_reason="continued account")
+    else:
+        stored = bool(session and ran == route["provider"] and session_stored(route["provider"], session))
+    resume = session if session and ran == route["provider"] and stored else None
     if resume:
         if route["provider"] == "codex":
             usage = call.get("provider_usage")
@@ -1719,6 +1754,8 @@ def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution
     if route and route.get("account"):
         recorded_route.update({key: route[key] for key in
                                ("provider", "model", "account", "account_reason") if key in route})
+        if route.get("account_applied") is True:
+            recorded_route["account_applied"] = True
     if route_provenance is not None or recorded_route:
         anchor["route"] = recorded_route
     if verify:
@@ -2326,14 +2363,64 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 
 
 def route_label(route):
-    return route["provider"] + (" account=" + route["account"] + " (selected; runs under the current home)"
+    return route["provider"] + (" account=" + route["account"] + " (runs under its own home)"
                                 if route.get("account") else "")
+
+
+def _new_dispatch_attempt(attempts, task_id, before, member):
+    attempts = [row for row in attempts if isinstance(row, dict)
+                and isinstance(row.get("attempt_id"), str) and row["attempt_id"] and row["attempt_id"] not in before
+                and isinstance(row.get("refs", {}), dict)
+                and row.get("task_id") == task_id
+                and (not member or row.get("refs", {}).get("panel_room_participant") == member)]
+    return attempts[0] if len(attempts) == 1 else None
+
+
+def _record_deferred_fallback(repo, task_id, before, member):
+    """Annotate the one settled child through the existing metadata writer."""
+    from terminal_panel import events
+    attempt = _new_dispatch_attempt(json.loads(events(repo, "list", "--json", output=True)), task_id, before, member)
+    if attempt is None:
+        return False
+    events(repo, "usage", "--attempt", attempt["attempt_id"], "--actor", "provider-router",
+           "--ref", "panel_fallback_decision=deferred",
+           "--idempotency-key", "panel-fallback-deferred-" + attempt["attempt_id"])
+    return True
+
+
+def _account_capacity_retry(repo, task_id, before, member, access, provider="codex", capacity_only=True):
+    """Require the existing recorded classification and an unchanged, digest-verified patch."""
+    import panel_results
+    attempts, indexed = panel_results._records(repo, full=True, task_id=task_id)
+    attempt = _new_dispatch_attempt(attempts, task_id, before, member)
+    if attempt is None:
+        return False
+    refs = attempt.get("refs", {})
+    code = refs.get("provider_error_exit")
+    if isinstance(code, str) and re.fullmatch(r"[1-9][0-9]{0,2}", code):
+        code = int(code)
+    categories = ("capacity",) if provider == "codex" and capacity_only else ("capacity", "model_unavailable", "provider_down")
+    if (refs.get("provider_error") not in categories or refs.get("provider_error_provider") != provider
+            or type(code) is not int or not 0 < code <= 255
+            or attempt.get("reason_code") != "provider_failed"):
+        return False
+    calls = [row for row in indexed if row.get("attempt_id") == attempt["attempt_id"]]
+    if len(calls) != 1:
+        return False
+    call = calls[0]
+    verified = call.get("verify_exit")
+    reasons = ("", "capacity-no-fallback") if capacity_only else ("", "capacity-no-fallback", "model-unavailable", "model-safeguard")
+    if (call.get("fallback_reason", "") not in reasons or call.get("fallback_used")
+            or call.get("guard") or (verified is not None and (type(verified) is not int or verified != 0))):
+        return False
+    return access != "write" or panel_results.verified_patch(repo, call) == b""
 
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
                  candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None,
-                 routing_report=None, routing_repo=None, fallback_decision=None, route_provenance=None):
+                 routing_report=None, routing_repo=None, fallback_decision=None, route_provenance=None,
+                 account_overflow=True):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
     from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
@@ -2344,6 +2431,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     from terminal_panel import child_environment, deliver_result, events, moved_main, native_repository
     from terminal_panel import plan_link, repository, routed_command, scope_overlaps, snapshot
     from terminal_panel import work_repository
+    from provider_accounts import implicit_default_account, next_account_route
+    if implicit_default_account(route):
+        route = {key: value for key, value in route.items() if key not in ("account", "account_reason")}
     source_repo = repo
     if os.environ.get("OMS_ROOM_REPO"):
         repo = repository(os.environ["OMS_ROOM_REPO"])
@@ -2392,6 +2482,13 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
     env = child_environment(owner, repo)
+    account_fallback = bool(fallback and fallback.get("account") and fallback["provider"] == "codex")
+    overflow = next_account_route(route) if account_overflow and not resume and route.get("account") else None
+    deferred_fallback = bool(overflow or account_fallback
+                             or (route["provider"] == "codex" and route.get("account") and fallback))
+    before_accounts = set()
+    if deferred_fallback:
+        before_accounts = {row["attempt_id"] for row in json.loads(events(repo, "list", "--json", output=True))}
     env.pop("OMS_RESUME_USAGE_BASELINE", None)
     if resume_usage_baseline:
         env["OMS_RESUME_USAGE_BASELINE"] = resume_usage_baseline
@@ -2420,8 +2517,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"], OMS_PANEL_STRATEGY=route["role"],
                OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
-    env["OMS_PANEL_FALLBACK_DECISION"] = "selected" if fallback else (fallback_decision or "no-eligible-alternate")
-    if fallback:
+    env["OMS_PANEL_FALLBACK_DECISION"] = ("deferred" if deferred_fallback else
+        "selected" if fallback else (fallback_decision or "no-eligible-alternate"))
+    if fallback and not deferred_fallback:
         env.update(OMS_PANEL_FALLBACK_PROVIDER=fallback["provider"],
                    OMS_PANEL_FALLBACK_MODEL=fallback["model"],
                    OMS_PANEL_FALLBACK_EFFORT=fallback["effort"] or "")
@@ -2631,9 +2729,16 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 recorded_brief = repo / recorded_brief
             rework = (dict(role=role, scope=scopes or [], workload=route["workload"],
                            brief=_read_dispatch_brief(recorded_brief).decode("utf-8")) if access == "write" else None)
+            if "peer-delegate" in argv and os.environ.get("OMS_GRAPH_AUTOBUILD", "1") != "0":
+                _prepare_panel_graph(repo)
+            from provider_accounts import PROVIDER_HOMES, route_account_home
+            account_home = route_account_home(route)
+            if account_home is not None:
+                env[PROVIDER_HOMES[route["provider"]][0]] = str(account_home)
+            applied_route = dict(route, account_applied=True) if account_home is not None else route
             launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
                                              task_id=task_id, route_provenance=route_provenance,
-                                             **({"route": route} if route.get("account") else {}))
+                                             **({"route": applied_route} if route.get("account") else {}))
             env["XDG_STATE_HOME"] = dispatch_store.pinned_state_home(repo, control_member)
             command = argv
             if launch and launch["backend"] == "subreaper":
@@ -2641,8 +2746,6 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 command = [sys.executable, str(Path(__file__).with_name("dispatch_supervisor.py")),
                            str(repo), control_member, digest] + argv
             output_log, output_fd = _dispatch_output_log(repo, control_member)
-            if "peer-delegate" in argv and os.environ.get("OMS_GRAPH_AUTOBUILD", "1") != "0":
-                _prepare_panel_graph(repo)
             process = subprocess.Popen(command, cwd=str(execution), env=env, start_new_session=os.name == "posix",
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             output_tail, output_lock = bytearray(), threading.Lock()
@@ -2745,6 +2848,12 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 except (OSError, ValueError):
                     exit_verified = False
                     print("OMS call exit record unavailable; non-terminal scopes remain reserved.", file=sys.stderr)
+            if exit_verified and deferred_fallback:
+                try:
+                    if not _record_deferred_fallback(repo, task_id, before_accounts, member):
+                        raise ValueError("unique dispatch attempt unavailable")
+                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                    print("OMS deferred fallback decision unavailable.", file=sys.stderr)
             if member and exit_verified:
                 deliver_result(repo, room_id, member, caller, task_id, status)
             elif member and process is None and spawn_failed:
@@ -2775,6 +2884,26 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 signal.signal(number, previous)
     if shutdown is not None:
         raise shutdown
+    if status and status != 130 and exit_verified and deferred_fallback:
+        retry_route, retry_fallback = None, None
+        try:
+            retry = _account_capacity_retry(repo, task_id, before_accounts, member, access, route["provider"])
+            if retry and overflow:
+                retry_route = next_account_route(route)
+                retry_fallback = fallback
+            if retry_route is None and fallback and _account_capacity_retry(
+                    repo, task_id, before_accounts, member, access, route["provider"], capacity_only=False):
+                retry_route = fallback
+                retry_fallback = None
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            retry_route = None
+        if retry_route:
+            return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id, False,
+                                label, retry_route, main, None, scopes, work_repo, alias=alias, fallback=retry_fallback,
+                                candidate=candidate, continuation_patch=continuation_patch,
+                                continue_call=True, routing_report=routing_report, routing_repo=routing_repo,
+                                fallback_decision="no-eligible-alternate", route_provenance=route_provenance,
+                                account_overflow=False)
     if exit_verified:
         _print_dispatch_next_ready(repo, owner)
     return status
