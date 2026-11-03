@@ -415,6 +415,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms goal-drive --campaign FILE [--dry-run]` starts a problem campaign: it
+  validates a strict manifest (problem and checker digests, base commit,
+  approach groups with exact routes, lifetime call, concurrency, deadline and
+  wave caps), keeps digest-bound state under `.oms/plan/campaigns/<id>/`, and
+  holds a locked reserve/settle budget ledger whose limits come from the saved
+  manifest. Waves are not implemented yet, so a non-dry run stops with exit 2.
+- `oms panel --council` adds an installed Antigravity read seat from
+  `council.extra` in the routing policy when the 12-call budget permits; a
+  missing or unavailable seat is skipped with a stderr note.
+
 - `oms runtime backend target add|list|remove` keeps local SSH target
   metadata (alias and absolute workdir only) in `.oms/runtime/targets.json`,
   never in capsules. `backend check remote --target NAME` is an offline report
