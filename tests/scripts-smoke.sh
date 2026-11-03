@@ -9041,6 +9041,56 @@ test_agent_plan_cancellation_is_closed_not_verified_and_cas_fenced() {
   local plan_file decision plan_sha task_sha lease state out state_json runtime_json tamper
   make_committed_repo "$project"
   "$plan" --repo "$project" init --goal cancellation >/dev/null
+  "$plan" --repo "$project" add --id amendable --title amendable --allowed src --verify 'true' >/dev/null
+  plan_file="$project/.oms/plan/tasks.json"
+  plan_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$plan_file" | tr -d '\r')"
+  task_sha="$("$plan" --repo "$project" show --id amendable | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_sha256"])' | tr -d '\r')"
+  out="$("$plan" --repo "$project" amend --id amendable --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" --allowed 'src,tests' --verify 'bash tests/check.sh' --reason correction)" || fail "valid amendment failed"
+  "$plan" --repo "$project" show --id amendable > "$project/amended.json"
+  python3 - "$project/amended.json" "$task_sha" "$out" <<'PYAMEND' || fail "amendment evidence is incorrect"
+import json, sys
+t = json.load(open(sys.argv[1], encoding='utf-8'))
+assert t['allowed_paths'] == ['src', 'tests'] and t['verify'] == 'bash tests/check.sh'
+assert t['task_sha256'] != sys.argv[2] and t['task_sha256'] in sys.argv[3]
+h = t['history'][-1]
+assert h['kind'] == 'amended' and h['reason'] == 'correction' and h['ts']
+assert h['before'] == {'allowed_paths': ['src'], 'verify': 'true'}
+assert h['after'] == {'allowed_paths': ['src', 'tests'], 'verify': 'bash tests/check.sh'}
+PYAMEND
+  cp "$plan_file" "$TMP/amend-before"
+  plan_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$plan_file" | tr -d '\r')"
+  if "$plan" --repo "$project" amend --id amendable --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" --verify true --reason stale >/dev/null 2>&1; then
+    fail "stale amendment accepted"
+  fi
+  cmp -s "$plan_file" "$TMP/amend-before" || fail "stale amendment changed plan"
+  task_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["task_sha256"])' "$project/amended.json" | tr -d '\r')"
+  for mode in invalid leased done; do
+    cp "$TMP/amend-before" "$plan_file"
+    python3 - "$plan_file" "$mode" <<'PYMODE'
+import json, sys
+path, mode = sys.argv[1:]
+doc = json.load(open(path, encoding='utf-8'))
+task = doc['tasks']['amendable']
+if mode == 'leased': task['lease_id'] = 'lease_example'
+if mode == 'done': task['state'] = 'done'
+with open(path, 'w', encoding='utf-8') as f: json.dump(doc, f)
+PYMODE
+    plan_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$plan_file" | tr -d '\r')"
+    task_sha="$("$plan" --repo "$project" show --id amendable | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_sha256"])' | tr -d '\r')"
+    cp "$plan_file" "$TMP/amend-refusal"
+    if "$plan" --repo "$project" amend --id amendable --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" --verify 'grep text src' --reason correction >/dev/null 2>&1; then
+      fail "amendment accepted $mode"
+    fi
+    cmp -s "$plan_file" "$TMP/amend-refusal" || fail "refused amendment changed plan: $mode"
+  done
+  cp "$TMP/amend-before" "$plan_file"
+  python3 - "$plan_file" <<'PYCLEAN'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding='utf-8'))
+d['tasks'].pop('amendable')
+with open(p, 'w', encoding='utf-8') as f: json.dump(d, f)
+PYCLEAN
   "$plan" --repo "$project" add --id rejected --title rejected >/dev/null
   "$plan" --repo "$project" add --id dependent --title dependent --depends rejected >/dev/null
   decision="$project/decision.md"

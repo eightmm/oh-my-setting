@@ -1310,6 +1310,60 @@ if act == "apply-proposal":
     print("plan: proposal applied %s" % ",".join(seen))
     sys.exit(0)
 
+if act == "amend":
+    i = require_id()
+    t = tasks.get(i)
+    if not t:
+        die("no such task: %s" % i)
+    canonical = os.path.join(state_repo(), ".oms", "plan", "tasks.json")
+    try:
+        parent_info = os.lstat(os.path.dirname(canonical))
+        target_info = os.lstat(path)
+    except OSError as exc:
+        die("cannot inspect canonical amendment plan: %s" % exc)
+    if (not same_absolute_path(path, canonical) or
+            not same_absolute_path(os.path.realpath(path), canonical) or
+            not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode) or
+            not stat.S_ISREG(target_info.st_mode) or stat.S_ISLNK(target_info.st_mode)):
+        die("amend requires the canonical repo-local plan file")
+    raw = read_regular_bytes(path, "active plan", 1024 * 1024)
+    if hashlib.sha256(raw).hexdigest() != env("OMS_EXPECTED_PLAN_SHA256"):
+        die("active plan changed after amendment was reviewed")
+    if exact_task_sha256(t) != env("OMS_EXPECTED_TASK_SHA256"):
+        die("task changed after amendment was reviewed")
+    if d.get("project_contract") is not None:
+        die("proposal-bound tasks cannot be amended")
+    if t.get("state") not in ("ready", "blocked") or t.get("lease_id"):
+        die("amend requires an unleased ready or blocked task")
+    markers = load_worker_markers()
+    if any(not worker_marker_is_typed(marker) for marker in markers):
+        die("worker marker set is malformed or unproven; amendment refused")
+    for marker in markers:
+        marker_task = marker.get("task_id")
+        if (marker_task == i or (not marker_task and marker.get("access") != "read")) and marker_pid_alive(marker):
+            die("live worker marker prevents amendment")
+    reason = env("OMS_REASON")
+    reject_controls(reason, "amendment reason")
+    before = {key: t.get(key, [] if key == "allowed_paths" else "") for key in ("allowed_paths", "verify")}
+    allowed = ([clean_rel(item, "allowed path") for item in split_list(env("OMS_ALLOWED"))]
+               if env("OMS_ALLOWED_SET") == "1" else before["allowed_paths"])
+    verify = env("OMS_VERIFY") if env("OMS_VERIFY_SET") == "1" else before["verify"]
+    reject_controls(verify, "task verify")
+    warn_unknown_selectors(verify)
+    hits = floor_incompatible_reads(verify, allowed)
+    if hits:
+        die("floor_incompatible_verifier: task verify reads %s (%s)" % hits[0])
+    history = t.get("history", [])
+    if not isinstance(history, list):
+        die("task history must be a list")
+    after = {"allowed_paths": allowed, "verify": verify}
+    t.update(after)
+    history.append({"kind": "amended", "before": before, "after": after, "reason": reason, "ts": ts})
+    t["history"] = history
+    save(d)
+    print(exact_task_sha256(t))
+    sys.exit(0)
+
 if act == "add":
     try:
         assignment = validate_assignment(json.loads(env("OMS_TASK_ASSIGNMENT")))

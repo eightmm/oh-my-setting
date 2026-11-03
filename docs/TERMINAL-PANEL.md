@@ -108,6 +108,8 @@ marker proves its owner is live. `oms land` keeps successful push and CI evidenc
 records `update.reason: deferred-live-workers`, and prints a retry command. Under `--wait`, `oms land` rechecks the deferred installation every 15 seconds until the workers finish or `--sibling-wait` (default 1800 seconds) expires, so no manual retry is needed. Without `--wait`, the run does not recheck; rerun the printed retry command (which includes `--wait`) to resume installation. Auto-update records the deferral as skipped. This
 check does not detect a worker that starts after installation begins.
 
+The owner can correct an unleased ready or blocked task with `oms agent-plan amend --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA [--allowed "p1,p2"] [--verify CMD] --reason TEXT`. It records the old and new fields in task history and prints the new task SHA. Live workers and proposal-bound tasks prevent amendment; dependents keep their existing links.
+
 For a goal bounded by `PROJECT.md`, the main reads the user's request scope,
 `PROJECT.md` and its References before planning. It proposes bounded tasks with
 `oms plan-from-spec`, reviews the proposal, and applies the reviewed bytes with

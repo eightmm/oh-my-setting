@@ -58,6 +58,8 @@ DEPENDS_SET=0
 ALLOWED_SET=0
 FORBIDDEN_SET=0
 VERIFY=""
+VERIFY_SET=0
+AMEND_OTHER_OPTION=0
 ACCEPT=""
 REUSE_PASS_RUN=""
 ROLE=""
@@ -160,6 +162,9 @@ Commands:
                                      recomputed from the landed tree; all
                                      other entries keep their frozen hashes,
                                      and each refreeze appends a typed row.
+  amend --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
+        [--allowed "p1,p2"] [--verify CMD] --reason TEXT
+                                     Parent-only amendment of an inactive task.
   cancel --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
          --expected-state ready|blocked --expected-lease-id TOKEN|none
          --operator-consent cancel --reason TEXT
@@ -292,6 +297,10 @@ while [ "$#" -gt 0 ]; do
     --*) COMPLETION_OTHER_OPTION=1 ;;
   esac
   case "$1" in
+    --repo|--id|--expected-plan-sha256|--expected-task-sha256|--allowed|--verify|--reason) ;;
+    --*) AMEND_OTHER_OPTION=1 ;;
+  esac
+  case "$1" in
     --repo|--id|--all-inactive|--expected-plan-sha256|--expected-task-sha256|--expected-state|--expected-lease-id|--operator-consent|--reason|--decision-artifact|--expected-decision-artifact-sha256) ;;
     --*) CANCEL_OTHER_OPTION=1 ;;
   esac
@@ -340,7 +349,7 @@ while [ "$#" -gt 0 ]; do
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires list"; [ "$ALLOWED_SET" = 0 ] || fail "--allowed given twice; pass one comma-separated list \"p1,p2\""; ALLOWED="$2"; ALLOWED_SET=1; shift 2 ;;
     --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; [ "$FORBIDDEN_SET" = 0 ] || fail "--forbidden given twice; pass one comma-separated list \"p1,p2\""; FORBIDDEN="$2"; FORBIDDEN_SET=1; shift 2 ;;
-    --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
+    --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; VERIFY_SET=1; shift 2 ;;
     --reuse-pass) [ "$#" -ge 2 ] || fail "--reuse-pass requires a run id"; REUSE_PASS_RUN="$2"; shift 2 ;;
     --accept) [ "$#" -ge 2 ] || fail "--accept requires command"; ACCEPT="$2"; shift 2 ;;
     --accept-files) [ "$#" -ge 2 ] || fail "--accept-files requires a value"; ACCEPT_FILES="$2"; shift 2 ;;
@@ -394,7 +403,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify|cancel)
+    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify|cancel|amend)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -422,6 +431,15 @@ case "$ACTION" in
       fail "$ACTION requires the complete plan/task/lease/state and bundle CAS"
     [ "$COMPLETION_OTHER_OPTION" = 0 ] ||
       fail "completion options cannot be mixed with legacy actions/landing options"
+    ;;
+  amend)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] || fail "amend is parent-only"
+    [ -n "$ID" ] && [ -n "$REASON" ] && [ "${#REASON}" -le 500 ] &&
+      { [ "$ALLOWED_SET" = 1 ] || [ "$VERIFY_SET" = 1 ]; } &&
+      [ "$AMEND_OTHER_OPTION" = 0 ] && [ "$PLAN_FILE_SET" = 0 ] || fail "amend requires id, reason and allowed or verify"
+    for digest in "$EXPECTED_PLAN_SHA256" "$EXPECTED_TASK_SHA256"; do
+      [ "${#digest}" -eq 64 ] && [ "${digest#*[!0-9a-f]}" = "$digest" ] || fail "amend requires lowercase plan and task SHA-256"
+    done
     ;;
   cancel)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
@@ -485,16 +503,16 @@ STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
 STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the plan's repository"
 PLAN_FILE="${PLAN_FILE:-$STATE_REPO/.oms/plan/tasks.json}"
 PLAN_LOCK_FILE=""
-if [ "$ACTION" = cancel ]; then
+if [ "$ACTION" = cancel ] || [ "$ACTION" = amend ]; then
   [ "$PLAN_FILE" = "$STATE_REPO/.oms/plan/tasks.json" ] ||
-    fail "cancel is valid only for the canonical repo-local plan"
+    fail "$ACTION is valid only for the canonical repo-local plan"
   [ -f "$PLAN_FILE" ] && [ ! -L "$PLAN_FILE" ] ||
-    fail "cancel requires an existing regular canonical plan"
+    fail "$ACTION requires an existing regular canonical plan"
   scan="$(mktemp)" || fail "mktemp failed"
   printf '%s\n' "$REASON" > "$scan"
   if agent_memory_file_has_secret_content "$scan"; then
     rm -f "$scan"
-    fail "cancellation reason looks sensitive; keep credentials and machine paths out of shared state"
+    fail "$ACTION reason looks sensitive; keep credentials and machine paths out of shared state"
   fi
   rm -f "$scan"
 fi
@@ -549,7 +567,7 @@ if [ "$ACTION" = lint-verify ]; then
 fi
 
 case "$ACTION" in
-  init|retire|apply-proposal|add|cancel)
+  init|retire|apply-proposal|add|cancel|amend)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
       fail "$ACTION is parent-only; a harness child cannot change plan topology"
     ;;
@@ -678,7 +696,7 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_EXPECTED_REVIEW_LEASE_ID_SET="$EXPECTED_REVIEW_LEASE_ID_SET" \
   OMS_EXPECTED_LANDING_RECEIPT_SHA256_SET="$EXPECTED_LANDING_RECEIPT_SHA256_SET" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
-  OMS_VERIFY="$VERIFY" OMS_ACCEPT="$ACCEPT" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
+  OMS_VERIFY="$VERIFY" OMS_VERIFY_SET="$VERIFY_SET" OMS_ALLOWED_SET="$ALLOWED_SET" OMS_ACCEPT="$ACCEPT" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
   OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW" \
   OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON" OMS_CLAIM_TTL="$CLAIM_TTL" \
   OMS_EXPECTED_PROPOSAL_SHA256="$EXPECTED_PROPOSAL_SHA256" \
@@ -906,7 +924,7 @@ if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISREG(target_info.st_mode):
     raise SystemExit(2)
 PY
     fail "acceptance requires a safe repo-local plan file"
-elif [ "$ACTION" != retire ] && [ "$ACTION" != cancel ] && [ "$PLAN_READ_ONLY" = 0 ]; then
+elif [ "$ACTION" != retire ] && [ "$ACTION" != cancel ] && [ "$ACTION" != amend ] && [ "$PLAN_READ_ONLY" = 0 ]; then
   mkdir -p "$(dirname "$PLAN_FILE")"
   agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
 fi
@@ -1417,7 +1435,7 @@ case "$ACTION" in
       plan_run
     fi
     ;;
-  recover-lease|recover-owner|cancel)
+  recover-lease|recover-owner|cancel|amend)
     plan_run_with_marker_and_plan_locks
     ;;
   *) plan_run_with_plan_lock ;;
