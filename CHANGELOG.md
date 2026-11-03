@@ -8,6 +8,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms goal-drive --campaign` runs seat waves through `agent-call`, verifies
+  each candidate in a scratch checkout, and stops on a solve, the budget, the
+  deadline or a stalled wave; a missing artifact or an older ledger row no
+  longer aborts the campaign.
+- `oms gc` reclaims aged dispatch logs of finished, settled calls; live,
+  unsettled or unproven calls keep theirs, and a file a concurrent transcript
+  prune already removed counts as gone rather than as a failed unlink.
+- `oms runtime-backend target status|sync` keep a remote checkout at the same
+  `~`-relative path and move it only by git over ssh. Sync refuses a dirty,
+  diverged or differently branched remote and any untracked or ignored file
+  it would overwrite; ssh never prompts, per-repository `core.sshCommand`
+  stays in force, and a timeout (status 120 s, sync 1800 s, `--timeout
+  10..7200`) kills the whole process group. `target add` now refuses an
+  absolute `--workdir`.
+- The dispatch scope-overlap warning skips calls the board already shows as
+  settled, so admitted or superseded patches stop warning.
+- TERMINAL-PANEL documents that council seats follow the `--workload` tiers
+  and that `oms land --wait` retries a deferred installation itself.
 - Global rules: on servers and clusters agents use the one checkout at the
   local `~`-relative path and move code only through git and the project's
   remote, with no copied trees, alternate checkouts or per-run code
