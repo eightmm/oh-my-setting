@@ -416,9 +416,14 @@ try:
                 tmux('bind-key', '-T', record['key_table'], key,
                      *workspaces._key_command(repo, record['id'], record['state_home'], action))
 
-        untampered = controls(origin_pane)
-        check(untampered.returncode == 0, 'untampered key bindings refused: ' + (untampered.stdout + untampered.stderr)[-400:])
+        def controls_seen():
+            run = controls(origin_pane)
+            return run.returncode, (run.stdout + run.stderr)[-400:]
+
+        settle(controls_seen, lambda seen: seen[0] == 0, 'untampered key bindings refused')
         press(b'\x1b[15~')
+        settle(lambda: (client_session(), active_pane('origin')), lambda seen: seen == ('origin', origin_pane),
+               'F5 after the untampered check did not return to the origin pane')
         good_f5 = workspaces._key_command(repo, record['id'], record['state_home'], 'origin')
         good_f4 = workspaces._key_command(repo, record['id'], record['state_home'], 'focus')
         for name, change in (
@@ -432,8 +437,10 @@ try:
             refused = controls(origin_pane)
             restore()
             check(refused.returncode == 1 and len(workspace_rows()) == 1, name + ' was accepted')
-        check(controls(origin_pane).returncode == 0, 'restored key bindings refused')
+        settle(controls_seen, lambda seen: seen[0] == 0, 'restored key bindings refused')
         press(b'\x1b[15~')
+        settle(lambda: (client_session(), active_pane('origin')), lambda seen: seen == ('origin', origin_pane),
+               'F5 after the restored check did not return to the origin pane')
 
         # Flagged workers cannot drive the callbacks, and refuse before any navigation.
         tmux('select-window', '-t', shell_window)
