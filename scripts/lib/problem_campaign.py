@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Problem campaign core.
 
+Waves: Controller runs seats through agent-call and verifies candidates locally.
 validate(repo, manifest) returns the normalized projection and canonical bytes.
 initialize(repo, manifest) validates and creates/resumes a campaign; it returns
 its directory and projection. Ledger(directory) loads the authoritative budget
@@ -9,6 +10,7 @@ spent and remaining. Reservations count forever even if unsettled.
 All ledger transitions are serialized by the campaign lock.
 """
 import argparse
+import concurrent.futures
 import contextlib
 import functools
 import hashlib
@@ -17,9 +19,13 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import uuid
 
 sys.dont_write_bytecode = True
@@ -28,6 +34,20 @@ _spec = importlib.util.spec_from_file_location('durable_jsonl', ROOT / 'scripts/
 _durable = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_durable)
 KINDS = ('seat', 'consolidator', 'verifier', 'repair', 'final')
+EFFORTS = ('auto', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+
+
+class BudgetRefused(ValueError):
+    """A reservation the ledger refused; terminal means no later call can succeed."""
+
+    def __init__(self, reason, terminal=False):
+        super().__init__(reason)
+        self.reason = reason
+        self.terminal = terminal
+
+
+def utc_now():
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 
 def error(message):
@@ -83,7 +103,9 @@ def provider_names():
 
 def validate(repo, manifest, _saved_providers=None):
     repo = Path(repo).resolve(strict=True)
-    obj(manifest, ('problem','base','verify','candidate_formats','groups','budget'), ('problem','base','verify','candidate_formats','groups','budget'), 'manifest')
+    obj(manifest, ('problem','base','verify','candidate_formats','groups','budget','public_data'), ('problem','base','verify','candidate_formats','groups','budget'), 'manifest')
+    if 'public_data' in manifest and type(manifest['public_data']) is not bool:
+        error('public_data must be a boolean')
     p = obj(manifest['problem'], ('file','sha256'), ('file','sha256'), 'problem')
     digest_file(repo, p['file'], p['sha256'], 'problem')
     base = manifest['base']
@@ -128,7 +150,13 @@ def validate(repo, manifest, _saved_providers=None):
             obj(route, ('provider','model','effort'), ('provider','model'), 'route')
             if not isinstance(route['provider'],str) or route['provider'] not in providers: error('unknown provider: %s' % route['provider'])
             string(route['model'],'model',256)
-            if 'effort' in route: string(route['effort'],'effort',64)
+            if len(route['model']) > 160 or re.search('[\x00-\x1f\x7f]', route['model']) or route['model'] == 'provider-default':
+                error('route model must be at most 160 characters, without control characters, and not provider-default')
+            if route['provider'] == 'pi' and manifest.get('public_data') is not True:
+                error('pi routes are public-data only: set public_data to true')
+            if 'effort' in route:
+                if route['provider'] == 'cursor': error('cursor routes have no effort control')
+                if route['effort'] not in EFFORTS: error('route effort must be one of: ' + ', '.join(EFFORTS))
             routes.append(dict(route, cap_source='provider' if route['provider'] in caps else 'global'))
         normalized_groups.append(dict(g, routes=routes))
     canonical = json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')
@@ -144,8 +172,21 @@ def validate(repo, manifest, _saved_providers=None):
 @contextlib.contextmanager
 def locked(directory):
     path = directory / 'events.lock'
+    dir_info = os.lstat(directory)
+    if not stat.S_ISDIR(dir_info.st_mode) or _durable.is_reparse(dir_info):
+        error('campaign state must be a real directory')
+    dir_fd = None
+    if os.name != 'nt':
+        dir_fd = os.open(str(directory), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+        if not _durable.same_file(dir_info, os.fstat(dir_fd)):
+            os.close(dir_fd)
+            error('campaign state directory changed')
     flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-    fd = os.open(str(path), flags, 0o600)
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except BaseException:
+        if dir_fd is not None: os.close(dir_fd)
+        raise
     acquired = False
     try:
         info = os.fstat(fd)
@@ -160,11 +201,20 @@ def locked(directory):
             import fcntl
             fcntl.flock(fd,fcntl.LOCK_EX)
         acquired = True
+        named_dir = os.lstat(directory)
+        named_lock = os.lstat(path)
+        if (not stat.S_ISDIR(named_dir.st_mode) or _durable.is_reparse(named_dir) or
+                not _durable.same_file(dir_info, named_dir) or
+                (dir_fd is not None and not _durable.same_file(os.fstat(dir_fd), named_dir)) or
+                not _durable.safe_regular(named_lock) or
+                not _durable.same_file(os.fstat(fd), named_lock)):
+            error('campaign lock or state directory changed while acquiring lock')
         yield
     finally:
         if os.name == 'nt' and acquired:
             os.lseek(fd,0,0); msvcrt.locking(fd,msvcrt.LK_UNLCK,1)
         os.close(fd)
+        if dir_fd is not None: os.close(dir_fd)
 
 
 def append(directory, event):
@@ -212,10 +262,12 @@ class Ledger:
         reservations, settled = {}, set()
         for row in self._rows():
             if not isinstance(row, dict): error('invalid campaign event')
+            if not isinstance(row.get('type'), str): error('invalid campaign event type')
             if row.get('type') == 'reservation':
                 rid = row.get('id')
                 if (not isinstance(rid, str) or not re.fullmatch('res_[0-9a-f]{32}', rid) or
-                        rid in reservations or row.get('provider') not in self.providers or
+                        rid in reservations or not isinstance(row.get('provider'), str) or
+                        row.get('provider') not in self.providers or not isinstance(row.get('kind'), str) or
                         row.get('kind') not in KINDS):
                     error('invalid reservation event')
                 reservations[rid] = row
@@ -235,20 +287,38 @@ class Ledger:
         spent = self.spent()
         return {'total_calls': max(0,self.budget['total_calls']-spent['total_calls']), 'per_provider':{p:max(0,c['calls']-spent['per_provider'].get(p,0)) for p,c in self.budget.get('per_provider',{}).items()}}
 
-    def reserve(self, provider, kind):
+    def reserve(self, provider, kind, limit=None):
+        """Return {'id': ...} or raise BudgetRefused; limit caps lifetime reservations."""
         with locked(self.directory):
             reservations, settled = self._view()
-            if provider not in self.providers or kind not in KINDS: return 'invalid provider or kind'
+            if provider not in self.providers or kind not in KINDS: error('invalid provider or kind')
             active = [r for key,r in reservations.items() if key not in settled]
             caps = self.budget.get('per_provider',{}).get(provider,{})
-            if len(reservations) >= self.budget['total_calls']: return 'total_calls exhausted'
-            if sum(r['provider']==provider for r in reservations.values()) >= caps.get('calls',self.budget['total_calls']): return 'provider calls exhausted'
-            if len(active) >= self.budget['max_concurrent']: return 'max_concurrent exhausted'
-            if sum(r['provider']==provider for r in active) >= caps.get('concurrency',self.budget['max_concurrent']): return 'provider concurrency exhausted'
-            if kind == 'verifier' and sum(r['kind']=='verifier' for r in active) >= self.budget['verifier']['concurrency']: return 'verifier concurrency exhausted'
+            if len(reservations) >= (self.budget['total_calls'] if limit is None else min(self.budget['total_calls'], limit)): raise BudgetRefused('total_calls exhausted', True)
+            if sum(r['provider']==provider for r in reservations.values()) >= caps.get('calls',self.budget['total_calls']): raise BudgetRefused('provider calls exhausted')
+            if len(active) >= self.budget['max_concurrent']: raise BudgetRefused('max_concurrent exhausted')
+            if sum(r['provider']==provider for r in active) >= caps.get('concurrency',self.budget['max_concurrent']): raise BudgetRefused('provider concurrency exhausted')
+            if kind == 'verifier' and sum(r['kind']=='verifier' for r in active) >= self.budget['verifier']['concurrency']: raise BudgetRefused('verifier concurrency exhausted')
             rid = 'res_' + uuid.uuid4().hex
             append(self.directory, {'type':'reservation','id':rid,'provider':provider,'kind':kind})
-            return rid
+            return {'id': rid}
+
+    def events(self):
+        with locked(self.directory):
+            self._view()
+            return self._rows()
+
+    def emit(self, kind, **fields):
+        with locked(self.directory):
+            self._view()
+            append(self.directory, dict(fields, type=kind, ts=utc_now()))
+
+    def abandon_unsettled(self):
+        """A killed controller leaves open reservations: they stay spent but stop holding concurrency."""
+        with locked(self.directory):
+            reservations, settled = self._view()
+            for rid in reservations:
+                if rid not in settled: append(self.directory, {'type':'settled','id':rid,'outcome':'abandoned'})
 
     def settle(self, reservation_id, outcome):
         string(outcome,'outcome',256)
@@ -259,39 +329,345 @@ class Ledger:
             return True
 
 
-def initialize(repo, manifest):
+def initialize(repo, manifest, state_repo=None):
     repo = Path(repo).resolve(strict=True)
+    state = Path(state_repo or repo).resolve(strict=True)
     canonical_input = json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')
     campaign_id = hashlib.sha256(canonical_input).hexdigest()[:16]
     saved_path = '.oms/plan/campaigns/' + campaign_id + '/manifest.json'
-    saved = durable_call(_durable.read_no_follow, str(repo), saved_path, label='campaign manifest', missing_ok=True)
+    saved = durable_call(_durable.read_no_follow, str(state), saved_path, label='campaign manifest', missing_ok=True)
     saved_providers = None
     if saved == canonical_input:
         saved_providers = {route['provider'] for group in manifest['groups'] for route in group['routes']}
         saved_providers.update(manifest['budget'].get('per_provider', {}))
     projection, canonical = validate(repo, manifest, saved_providers)
     relative = '.oms/plan/campaigns/' + projection['campaign_id'] + '/manifest.json'
-    target = Path(durable_call(_durable.canonical_repo_path, str(repo), relative, label='campaign', create_parent=True))
+    target = Path(durable_call(_durable.canonical_repo_path, str(state), relative, label='campaign', create_parent=True))
     directory = target.parent
     with locked(directory):
-        existing = durable_call(_durable.read_no_follow, str(repo), str(target), label='campaign manifest', missing_ok=True)
+        existing = durable_call(_durable.read_no_follow, str(state), str(target), label='campaign manifest', missing_ok=True)
         if not existing and not os.path.lexists(target):
             subprocess.run([sys.executable, str(ROOT/'scripts/lib/durable-jsonl.py'), '--label', 'campaign manifest', 'write', str(target)], input=canonical, check=True)
         elif existing != canonical:
             error('campaign manifest differs from existing bytes')
         events = directory/'events.jsonl'
-        raw = durable_call(_durable.read_no_follow, str(repo), str(events), label='events.jsonl', missing_ok=True)
+        raw = durable_call(_durable.read_no_follow, str(state), str(events), label='events.jsonl', missing_ok=True)
+        now = utc_now()
         if raw is None or raw == b'':
-            append(directory, {'type':'campaign_started','base':manifest['base'], 'problem':manifest['problem'], 'verify':manifest['verify'], 'budget':manifest['budget']})
+            append(directory, {'type':'campaign_started','base':manifest['base'], 'problem':manifest['problem'], 'verify':manifest['verify'], 'budget':manifest['budget'], 'started_at':now, 'ts':now})
         else:
             Ledger(directory)._view()
-            append(directory, {'type':'campaign_resumed'})
+            append(directory, {'type':'campaign_resumed','ts':now})
     return directory, projection
+
+
+CANDIDATE_CAP = 4
+DIGEST_CAP = 16 * 1024
+TAIL_CAP = 2048
+SEAT_WALL = 1200
+EXTENSIONS = {'patch': 'patch', 'lean': 'lean', 'text': 'txt', 'counterexample': 'txt'}
+_OUTBOUND = re.compile(r'^SKIPPED: outbound provider context contains sensitive-looking content', re.M)
+_STREAM_CUT = re.compile(r'^stop-reason: provider=antigravity reason=stream_truncated', re.M)
+
+
+def epoch(text):
+    import calendar
+    return calendar.timegm(time.strptime(text, '%Y-%m-%dT%H:%M:%SZ'))
+
+
+def route_key(route):
+    return (route['provider'], route['model'], route.get('effort', ''))
+
+
+def parse_candidates(text, formats):
+    """Fenced blocks tagged with a format; an unclosed block is dropped."""
+    found, current = [], None
+    for line in text.splitlines():
+        if current is None:
+            match = re.fullmatch(r'```([A-Za-z]+)[ \t]*', line)
+            if match: current = (match.group(1).lower(), [])
+        elif line.rstrip() == '```':
+            found.append((current[0], '\n'.join(current[1]) + '\n')); current = None
+        else:
+            current[1].append(line)
+    return found
+
+
+def patch_paths(data):
+    """Every path a patch touches, from git's own parse of it."""
+    out = subprocess.run(['git', 'apply', '--numstat', '-z', '-'], input=data, capture_output=True, cwd=tempfile.gettempdir())
+    if out.returncode != 0: error('patch does not parse')
+    tokens, paths, i = out.stdout.split(b'\0'), [], 0
+    while i < len(tokens) and tokens[i]:
+        parts = tokens[i].split(b'\t', 2)
+        if len(parts) != 3: error('patch does not parse')
+        if parts[2] == b'':
+            paths += tokens[i + 1:i + 3]; i += 3
+        else:
+            paths.append(parts[2]); i += 1
+    return [os.path.normpath(p.decode('utf-8', 'replace')).casefold() for p in paths]
+
+
+@contextlib.contextmanager
+def running(directory):
+    fd = os.open(str(directory / 'controller.lock'), os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            error('campaign is already running')
+        yield
+    finally:
+        os.close(fd)
+
+
+class Controller:
+    def __init__(self, repo, state, directory, manifest):
+        self.repo, self.state, self.manifest = repo, state, manifest
+        self.ledger = Ledger(directory)
+        self.cid = directory.name
+        self.budget = manifest['budget']
+        self.formats = manifest['candidate_formats']
+        self.mu = threading.Lock()
+        self.dead, self.dead_providers = set(), set()
+        caps = self.budget.get('per_provider', {})
+        providers = {r['provider'] for g in manifest['groups'] for r in g['routes']}
+        self.sems = {p: threading.BoundedSemaphore(caps.get(p, {}).get('concurrency', self.budget['max_concurrent'])) for p in providers}
+        self.seat_limit = self.budget['total_calls'] - self.budget['max_waves']
+        self.stop = threading.Event()
+        self.stop_reason = None
+
+    def put(self, relative, data):
+        path = durable_call(_durable.canonical_repo_path, str(self.state), relative, label='campaign artifact', create_parent=True)
+        subprocess.run([sys.executable, str(ROOT/'scripts/lib/durable-jsonl.py'), '--label', 'campaign artifact', 'write', path], input=data, check=True)
+        return Path(path)
+
+    def halt(self, reason):
+        with self.mu:
+            if self.stop_reason is None: self.stop_reason = reason
+        self.stop.set()
+
+    def remaining(self, started):
+        return started + self.budget['deadline_s'] - time.time()
+
+    def live(self, group):
+        with self.mu:
+            return [r for r in group['routes'] if route_key(r) not in self.dead and r['provider'] not in self.dead_providers]
+
+    def digest(self, rows, gid):
+        lines, ids = [], []
+        verdicts = {r['id']: r for r in rows if r.get('type') == 'candidate_verdict'}
+        for r in rows:
+            if r.get('type') == 'candidate_recorded' and r.get('group') == gid:
+                v = verdicts.get(r['id'], {})
+                lines.append('%s wave=%s route=%s/%s format=%s verdict=%s exit=%s\n' % (r['id'], r['wave'], r['route'][0], r['route'][1], r['format'], v.get('verdict', 'none'), v.get('exit_code', '-')))
+                ids.append(r['id'])
+        while lines and len(''.join(lines).encode()) > DIGEST_CAP:
+            lines.pop(0); ids.pop(0)
+        return ''.join(lines), ids
+
+    def prompt(self, group, rows):
+        problem = (self.repo / self.manifest['problem']['file']).read_text(encoding='utf-8', errors='replace')
+        digest, parents = self.digest(rows, group['id'])
+        text = ['# Problem', problem, '', '# Approach', group['formulation'], '', '# Reply format',
+                'Reply with up to %d candidates, each in one fenced block whose tag is its format. Allowed formats: %s.' % (CANDIDATE_CAP, ', '.join(self.formats)),
+                'Use a unified diff against the repository root for patch and lean candidates, for example a block opened with three backticks and the word patch.']
+        if digest: text += ['', '# Earlier candidates of this approach (verdicts only)', digest]
+        return '\n'.join(text) + '\n', parents
+
+    def call(self, route, seat_dir, prompt_file, started):
+        cmd = ['bash', str(ROOT/'scripts/agent-call.sh'), '--repo', str(self.repo), '--artifact-dir', str(seat_dir), '--to', route['provider'], '--model', route['model']]
+        if route.get('effort'): cmd += ['--reasoning-effort', route['effort']]
+        cmd += ['--prompt-file', str(prompt_file)]
+        env = dict(os.environ, OMS_PEER_TIMEOUT='%ds' % max(1, int(min(self.remaining(started), SEAT_WALL))))
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        paths = [l[10:].strip() for l in proc.stdout.splitlines() if l.startswith('artifact: ')]
+        text, unreadable = '', False
+        if len(paths) == 1:
+            spec = importlib.util.spec_from_file_location('peer_artifacts', ROOT / 'scripts/lib/peer_artifacts.py')
+            module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            try:
+                text = module.artifact_sections(Path(paths[0]))[0]
+            except OSError:
+                unreadable = True
+        if proc.returncode == 0:
+            if len(paths) != 1 or unreadable: return 'failed', 'agent-call left no readable artifact'
+            if _STREAM_CUT.search(text): return 'failed', 'provider stopped at its print timeout'
+            return 'ok', text
+        if proc.returncode == 3 and _OUTBOUND.search(text): return 'refused', 'outbound scrubber refused the prompt'
+        if proc.returncode == 124: return 'failed', 'timeout'
+        return 'failed', ('exit %d: %s' % (proc.returncode, (text or proc.stderr).strip()))[:500]
+
+    def seat(self, wave, group, index, started, rows):
+        while not self.stop.is_set():
+            live = self.live(group)
+            if not live: return []
+            route = live[((wave - 1) * group['k'] + index) % len(live)]
+            with self.sems[route['provider']]:
+                if self.stop.is_set(): return []
+                if self.remaining(started) <= 0: self.halt('deadline'); return []
+                try:
+                    rid = self.ledger.reserve(route['provider'], 'seat', self.seat_limit)['id']
+                except BudgetRefused as refusal:
+                    if refusal.terminal:
+                        self.ledger.emit('budget_exhausted', wave=wave, reason=refusal.reason); self.halt('budget'); return []
+                    if refusal.reason != 'provider calls exhausted': error('controller bug: ' + refusal.reason)
+                    with self.mu: self.dead_providers.add(route['provider'])
+                    self.ledger.emit('route_exhausted', provider=route['provider'], group=group['id'], wave=wave)
+                    continue
+                try:
+                    return self.run_seat(wave, group, index, route, rid, started, rows)
+                except BaseException:
+                    self.ledger.settle(rid, 'error'); raise
+        return []
+
+    def run_seat(self, wave, group, index, route, rid, started, rows):
+        base = '.oms/artifacts/campaigns/%s/seats/w%d-%s-%d' % (self.cid, wave, group['id'], index)
+        prompt, parents = self.prompt(group, rows)
+        prompt_file = self.put(base + '/prompt.md', prompt.encode('utf-8'))
+        status, text = self.call(route, prompt_file.parent, prompt_file, started)
+        label = [route['provider'], route['model'], route.get('effort', '')]
+        if status == 'refused':
+            self.ledger.settle(rid, 'refused'); self.halt('outbound_refused'); return []
+        if status == 'failed':
+            with self.mu: self.dead.add(route_key(route))
+            self.ledger.emit('seat_failed', wave=wave, group=group['id'], route=label, error=text, reservation=rid)
+            self.ledger.settle(rid, 'failed'); return []
+        made, blocks = [], parse_candidates(text, self.formats)
+        limit = min(self.budget['verifier']['max_artifact_bytes'], 1024 * 1024 - 1)
+        if not blocks: self.ledger.emit('candidate_rejected', wave=wave, group=group['id'], route=label, reason='no candidate block')
+        for n, (fmt, body) in enumerate(blocks):
+            data = body.encode('utf-8')
+            reason = ('too many candidates' if n >= CANDIDATE_CAP else 'format not allowed: ' + fmt if fmt not in self.formats else
+                      'empty candidate' if not body.strip() else 'candidate too large' if len(data) > limit else '')
+            if reason:
+                self.ledger.emit('candidate_rejected', wave=wave, group=group['id'], route=label, reason=reason); continue
+            digest = hashlib.sha256(data).hexdigest()
+            self.put('.oms/artifacts/campaigns/%s/%s.%s' % (self.cid, digest, EXTENSIONS[fmt]), data)
+            cand = {'id': 'cand_' + uuid.uuid4().hex[:16], 'group': group['id'], 'wave': wave, 'route': label, 'parents': parents, 'format': fmt, 'sha256': digest, 'size': len(data)}
+            self.ledger.emit('candidate_recorded', **cand); made.append(cand)
+        self.ledger.settle(rid, 'ok')
+        return made
+
+    def evaluate(self, cand):
+        if cand['format'] not in ('patch', 'lean'): return {'verdict': 'unverified'}
+        rel = '.oms/artifacts/campaigns/%s/%s.%s' % (self.cid, cand['sha256'], EXTENSIONS[cand['format']])
+        data = durable_call(_durable.read_no_follow, str(self.state), rel, label='campaign artifact')
+        if hashlib.sha256(data).hexdigest() != cand['sha256']: return {'verdict': 'error', 'reason': 'artifact digest mismatch'}
+        verify, pinned = self.manifest['verify'], [self.manifest['problem']] + self.manifest['verify']['inputs']
+        try:
+            touched = patch_paths(data)
+        except ValueError as exc:
+            return {'verdict': 'error', 'reason': str(exc)}
+        protected = {os.path.normpath(x['file' if 'file' in x else 'path']).casefold() for x in pinned}
+        if protected & set(touched): return {'verdict': 'error', 'reason': 'verifier-tamper'}
+        scripts = ROOT / 'scripts/scratch-worktree.sh'
+        scratch = subprocess.check_output(['bash', str(scripts), 'add', '--repo', str(self.repo), '--base', self.manifest['base'], '--owner-pid', str(os.getpid())], text=True).strip().replace('\r', '')
+        try:
+            for step in (['--check'], []):
+                done = subprocess.run(['git', '-C', scratch, 'apply'] + step + ['-'], input=data, capture_output=True)
+                if done.returncode != 0: return {'verdict': 'error', 'reason': 'patch does not apply'}
+            try:
+                for x in pinned:
+                    digest_file(Path(scratch).resolve(), x['file' if 'file' in x else 'path'], x['sha256'], 'pinned input')
+            except ValueError as exc:
+                return {'verdict': 'error', 'reason': 'verifier-tamper' if 'digest mismatch' in str(exc) else str(exc)}
+            return self.run_verify(scratch, min(verify['timeout_s'], self.budget['verifier']['timeout_s']))
+        finally:
+            subprocess.run(['bash', str(scripts), 'remove', '--repo', str(self.repo), '--force', scratch], capture_output=True)
+
+    def run_verify(self, scratch, timeout):
+        # A file, not a pipe: a background child holding the pipe cannot stall the read.
+        with tempfile.TemporaryFile() as sink:
+            proc = subprocess.Popen(['bash', '-c', self.manifest['verify']['command']], cwd=scratch, stdout=sink, stderr=subprocess.STDOUT, start_new_session=True)
+            verdict = None
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                verdict = 'timeout'
+            if os.name != 'nt':
+                try: os.killpg(proc.pid, signal.SIGKILL)
+                except OSError: pass
+            elif verdict: proc.kill()
+            proc.wait()
+            size = sink.seek(0, 2)
+            sink.seek(max(0, size - TAIL_CAP))
+            out = sink.read()
+        return {'verdict': verdict or ('pass' if proc.returncode == 0 else 'fail'), 'exit_code': proc.returncode, 'tail': out.decode('utf-8', 'replace')}
+
+    def wave(self, wave, started):
+        self.ledger.emit('wave_started', wave=wave)
+        rows = self.ledger.events()
+        order = [(g, i) for i in range(max(g['k'] for g in self.manifest['groups'])) for g in self.manifest['groups'] if i < g['k']]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.budget['max_concurrent']) as pool:
+            made = [f.result() for f in [pool.submit(self.seat, wave, g, i, started, rows) for g, i in order]]
+        cands = [c for part in made for c in part]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.budget['verifier']['concurrency']) as pool:
+            verdicts = list(pool.map(self.evaluate, cands))
+        winner = None
+        for cand, v in zip(cands, verdicts):
+            self.ledger.emit('candidate_verdict', id=cand['id'], **v)
+            if v['verdict'] == 'pass' and winner is None: winner = (cand, v)
+        if self.stop_reason is None: self.ledger.emit('wave_completed', wave=wave, candidates=len(cands))
+        return winner
+
+    def finish(self, kind, **fields):
+        self.ledger.emit(kind, **fields)
+
+    def summary(self, rows, code):
+        spent, left = self.ledger.spent(), self.ledger.remaining()
+        counts = {}
+        for r in rows:
+            if r.get('type') == 'candidate_verdict': counts[r['verdict']] = counts.get(r['verdict'], 0) + 1
+        solved = next((r for r in rows if r.get('type') == 'campaign_solved'), None)
+        stopped = next((r for r in reversed(rows) if r.get('type') == 'campaign_stopped'), None)
+        print('campaign %s: %s waves=%d calls=%d/%d remaining=%d verdicts=%s winner=%s' % (
+            self.cid, 'solved' if solved else 'stopped (%s)' % stopped['reason'], sum(r.get('type') == 'wave_completed' for r in rows),
+            spent['total_calls'], self.budget['total_calls'], left['total_calls'],
+            ','.join('%s:%d' % kv for kv in sorted(counts.items())) or '-', solved['candidate'] if solved else '-'))
+        return code
+
+
+def run_campaign(repo, state, directory, manifest, now):
+    ctl = Controller(Path(repo).resolve(), Path(state).resolve(), directory, manifest)
+    with running(directory):
+        rows = ctl.ledger.events()
+        if any(r.get('type') == 'campaign_solved' for r in rows): return ctl.summary(rows, 0)
+        stopped = next((r for r in rows if r.get('type') == 'campaign_stopped'), None)
+        if stopped: return ctl.summary(rows, 2 if stopped.get('reason') == 'outbound_refused' else 3)
+        ctl.ledger.abandon_unsettled()
+        for r in rows:
+            if r.get('type') == 'seat_failed': ctl.dead.add(tuple(r['route']))
+            elif r.get('type') == 'route_exhausted': ctl.dead_providers.add(r['provider'])
+        started = epoch(rows[0]['started_at']) if rows[0].get('started_at') else now
+        wave = sum(r.get('type') == 'wave_completed' for r in rows) + 1
+        budget = manifest['budget']
+        reason = 'max_waves'
+        while wave <= budget['max_waves']:
+            if ctl.remaining(started) <= 0: reason = 'deadline'; break
+            if not any(ctl.live(g) for g in manifest['groups']): reason = 'routes_exhausted'; break
+            ctl.stop, ctl.stop_reason = threading.Event(), None
+            winner = ctl.wave(wave, started)
+            if winner:
+                cand, verdict = winner
+                ctl.finish('campaign_solved', candidate=cand['id'], sha256=cand['sha256'], receipt={'verdict': 'pass', 'exit_code': verdict['exit_code'], 'base': manifest['base']})
+                return ctl.summary(ctl.ledger.events(), 0)
+            if ctl.stop_reason: reason = ctl.stop_reason; break
+            if wave >= budget['max_waves']: break
+            if wave >= budget['stall_waves']: reason = 'stall'; break
+            wave += 1
+        ctl.finish('campaign_stopped', reason=reason)
+        return ctl.summary(ctl.ledger.events(), 2 if reason == 'outbound_refused' else 3)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--repo',required=True); parser.add_argument('--campaign',required=True); parser.add_argument('--dry-run',action='store_true')
+    parser.add_argument('--repo',required=True); parser.add_argument('--campaign',required=True); parser.add_argument('--dry-run',action='store_true'); parser.add_argument('--state-repo')
     args = parser.parse_args()
     try:
         with open(args.campaign, encoding='utf-8') as stream:
@@ -308,9 +684,13 @@ def main():
             projection, _ = validate(args.repo,manifest)
             print(json.dumps(projection, sort_keys=True, indent=2))
             return 0
-        initialize(args.repo,manifest)
-        error('campaign waves are not implemented yet')
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        if os.environ.get('OMS_HARNESS_CHILD') == '1' or os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') not in ('', '0'):
+            error('a harness child cannot run campaign waves; the owner runs them')
+        if not args.state_repo: error('--state-repo is required')
+        now = time.time()  # deadline origin for core-era ledgers without started_at
+        directory, _ = initialize(args.repo, manifest, args.state_repo)
+        return run_campaign(args.repo, args.state_repo, directory, manifest, now)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print('error: %s' % exc, file=sys.stderr)
         return 2
 

@@ -39594,10 +39594,27 @@ PY
 
 test_goal_drive_problem_campaign() {
   local project="$TMP/problem-campaign"
+  local stub="$TMP/campaign-stub"
   make_committed_repo "$project"
-  python3 -B - "$ROOT" "$project" <<'PY'
+  mkdir -p "$stub/bin" "$stub/home"
+  printf '#!/usr/bin/env bash\nSTUB_DIR=%q\n' "$stub" > "$stub/bin/codex"
+  cat >> "$stub/bin/codex" <<'STUB'
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
+prompt="$(cat)"
+printf 'call\n' >> "$STUB_DIR/calls"
+case "$prompt" in
+  *MARK_BROKEN*) echo "route broke"; exit 42 ;;
+  *MARK_PASS*) printf 'try this\n```patch\n'; cat "$STUB_DIR/pass.patch"; printf '```\n' ;;
+  *MARK_TAMPER*) printf '```patch\n'; cat "$STUB_DIR/tamper.patch"; printf '```\n' ;;
+  *MARK_WRONG*) printf '```patch\n'; cat "$STUB_DIR/wrong.patch"; printf '```\n' ;;
+  *) echo "no idea" ;;
+esac
+STUB
+  chmod +x "$stub/bin/codex"
+  python3 -B - "$ROOT" "$project" "$stub" <<'PY'
 import copy, hashlib, importlib.util, json, pathlib, subprocess, sys, concurrent.futures
-root, repo = map(pathlib.Path, sys.argv[1:])
+root, repo, stub = map(pathlib.Path, sys.argv[1:])
+import os
 problem = repo / 'problem.txt'
 problem.write_text('problem\n')
 digest = hashlib.sha256(problem.read_bytes()).hexdigest()
@@ -39609,9 +39626,14 @@ m = {'problem': {'file':'problem.txt','sha256':digest}, 'base':base,
      'budget':{'max_concurrent':2,'total_calls':2,'deadline_s':60,'max_waves':1,'stall_waves':1,
                'verifier':{'concurrency':1,'timeout_s':1,'max_artifact_bytes':1}}}
 path = repo / 'campaign.json'
+env = {k: v for k, v in os.environ.items() if k not in ('OMS_HARNESS_CHILD', 'OMS_HARNESS_DELEGATE_DEPTH')}
+env.update(PATH=str(stub/'bin')+':/usr/bin:/bin', HOME=str(stub/'home'), NVM_DIR=str(stub/'home/.nvm'), OMS_DELEGATE_WORKTREE_ROOT=str(stub/'managed'))
 def run(manifest, *args):
     path.write_text(json.dumps(manifest))
-    return subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--repo',str(repo),'--campaign',str(path),*args],capture_output=True,text=True)
+    return subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--repo',str(repo),'--campaign',str(path),*args],capture_output=True,text=True,env=env)
+def attempt(target, *args):
+    try: return target.reserve(*args)['id']
+    except module.BudgetRefused as refusal: return refusal.reason
 r = run(m, '--dry-run'); assert r.returncode == 0, r.stderr
 out = json.loads(r.stdout); assert out['campaign_id'] and out['totals']['planned_seat_calls'] == 1
 assert out['groups'][0]['routes'][0]['cap_source'] == 'global'
@@ -39686,17 +39708,17 @@ assert 'campaign requires a clean tracked tree' in run(m).stderr
 subprocess.run(['git','-C',str(repo),'reset','--',dirty],check=True,stdout=subprocess.DEVNULL)
 tracked.write_bytes(original)
 path.write_text(json.dumps(m))
-r=subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--repo',str(sub),'--campaign',str(path)],capture_output=True,text=True)
-assert r.returncode == 2 and 'campaign waves are not implemented yet' in r.stderr, r.stderr
+r=subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--repo',str(sub),'--campaign',str(path)],capture_output=True,text=True,env=env)
+assert r.returncode == 3 and 'stopped (max_waves)' in r.stdout, (r.stdout, r.stderr)
 assert not (sub/'.oms').exists()
-r=run(m); assert r.returncode == 2 and 'campaign waves are not implemented yet' in r.stderr, r.stderr
+r=run(m); assert r.returncode == 3 and 'stopped (max_waves)' in r.stdout, r.stdout
 state=repo/'.oms/plan/campaigns'/out['campaign_id']
 spec=importlib.util.spec_from_file_location('problem_campaign', root/'scripts/lib/problem_campaign.py')
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 ledger=module.Ledger(state)
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-    ids=list(pool.map(lambda _: ledger.reserve('codex','seat'), range(4)))
-assert sum(isinstance(x,str) and x.startswith('res_') for x in ids) == 2, ids
+    ids=list(pool.map(lambda _: attempt(ledger,'codex','seat'), range(4)))
+assert sum(x.startswith('res_') for x in ids) == 1, ids
 assert ledger.spent()['total_calls'] == 2
 try:
     module.Ledger(state, dict(m['budget'], total_calls=200))
@@ -39705,7 +39727,7 @@ except TypeError:
     pass
 assert module.Ledger(state).remaining()['total_calls'] == 0
 ledger.budget['total_calls'] = 200
-assert ledger.reserve('codex','seat') == 'total_calls exhausted'
+assert attempt(ledger,'codex','seat') == 'total_calls exhausted'
 original_name=module.os.name
 original_safe=module._durable.safe_regular
 try:
@@ -39743,33 +39765,219 @@ try:
     raise AssertionError('durable error accepted')
 except ValueError:
     pass
-r=run(m); assert r.returncode == 2
+r=run(m); assert r.returncode == 3
 rows=[json.loads(line) for line in (state/'events.jsonl').read_text().splitlines()]
 assert rows[-1]['type'] == 'campaign_resumed' and ledger.remaining()['total_calls'] == 0
-assert ledger.reserve('codex','seat') == 'total_calls exhausted'
+assert attempt(ledger,'codex','seat') == 'total_calls exhausted'
 reservation = next(x for x in ids if x.startswith('res_'))
 assert ledger.settle(reservation, 'done') is True
 assert ledger.settle(reservation, 'done') is False
-assert ledger.reserve('codex','seat') == 'total_calls exhausted'
+assert attempt(ledger,'codex','seat') == 'total_calls exhausted'
 other=copy.deepcopy(m)
 other['budget'].update(total_calls=4, max_concurrent=2, per_provider={'codex':{'calls':2,'concurrency':1}})
 other['groups'][0]['routes'].append({'provider':'claude','model':'example'})
-r=run(other); assert r.returncode == 2
+module.initialize(repo,other)
 other_id=module.validate(repo,other)[0]['campaign_id']
 limited=module.Ledger(repo/'.oms/plan/campaigns'/other_id)
-a=limited.reserve('codex','seat'); assert a.startswith('res_')
-assert limited.reserve('codex','seat') == 'provider concurrency exhausted'
+a=limited.reserve('codex','seat')['id']
+assert attempt(limited,'codex','seat') == 'provider concurrency exhausted'
 assert limited.settle(a,'ok')
-b=limited.reserve('codex','seat'); assert b.startswith('res_')
-assert limited.reserve('codex','seat') == 'provider calls exhausted'
-assert limited.reserve('unknown','seat') == 'invalid provider or kind'
-assert limited.reserve('codex','wrong') == 'invalid provider or kind'
-v=limited.reserve('claude','verifier'); assert v.startswith('res_')
-assert limited.reserve('claude','verifier') == 'max_concurrent exhausted'
+b=limited.reserve('codex','seat')['id']
+assert attempt(limited,'codex','seat') == 'provider calls exhausted'
+for bad_args in (('unknown','seat'),('codex','wrong')):
+    try:
+        limited.reserve(*bad_args)
+        raise AssertionError('invalid reservation accepted')
+    except module.BudgetRefused:
+        raise AssertionError('invalid request is not a budget refusal')
+    except ValueError:
+        pass
+v=limited.reserve('claude','verifier')['id']
+assert attempt(limited,'claude','verifier') == 'max_concurrent exhausted'
 assert limited.settle(b,'ok')
-assert limited.reserve('claude','verifier') == 'verifier concurrency exhausted'
+assert attempt(limited,'claude','verifier') == 'verifier concurrency exhausted'
 problem.write_text('changed')
 assert 'problem digest mismatch' in run(m).stderr
+PY
+  python3 -B - "$ROOT" "$TMP" <<'PY'
+import importlib.util, json, pathlib, sys
+from unittest import mock
+root, tmp = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('campaign_lock_probe', root/'scripts/lib/problem_campaign.py')
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+directory = tmp/'campaign-lock-probe'; directory.mkdir()
+manifest = {'budget': {}, 'groups': [{'routes': [{'provider': 'codex'}]}]}
+raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
+import hashlib
+directory = directory/hashlib.sha256(raw).hexdigest()[:16]; directory.mkdir()
+(directory/'manifest.json').write_bytes(raw)
+start = {'type': 'campaign_started', 'budget': {}}
+invalid = {'type': 'reservation', 'id': 'res_' + 'a'*32, 'provider': [], 'kind': 'seat'}
+(directory/'events.jsonl').write_text('\n'.join(map(json.dumps, (start, invalid)))+'\n')
+try:
+    mod.Ledger(directory).spent()
+    raise AssertionError('malformed event accepted')
+except ValueError:
+    pass
+import os
+if os.name == 'nt':
+    sys.exit(0)
+import fcntl
+real_flock = fcntl.flock
+def replace_lock(fd, action):
+    if action == fcntl.LOCK_EX:
+        os.unlink(directory/'events.lock')
+        (directory/'events.lock').touch()
+    return real_flock(fd, action)
+with mock.patch.object(fcntl, 'flock', replace_lock):
+    try:
+        with mod.locked(directory):
+            raise AssertionError('replaced lock accepted')
+    except ValueError:
+        pass
+def replace_directory(fd, action):
+    if action == fcntl.LOCK_EX:
+        directory.rename(directory.with_name('moved'))
+        directory.mkdir()
+        (directory/'events.lock').touch()
+    return real_flock(fd, action)
+with mock.patch.object(fcntl, 'flock', replace_directory):
+    try:
+        with mod.locked(directory):
+            raise AssertionError('replaced directory accepted')
+    except ValueError:
+        pass
+PY
+  local waves="$TMP/campaign-waves"
+  make_committed_repo "$waves"
+  python3 -B - "$ROOT" "$waves" "$stub" <<'PY'
+import copy, hashlib, json, os, pathlib, subprocess, sys
+root, repo, stub = map(pathlib.Path, sys.argv[1:])
+def git(*a, cwd=repo): return subprocess.check_output(['git', '-C', str(cwd), *a], text=True).strip()
+(repo/'problem.txt').write_text('make target.txt say fixed\n')
+(repo/'target.txt').write_text('broken\n')
+(repo/'check.sh').write_text('grep -qx fixed target.txt\n')
+git('add', '.')
+git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-qm', 'campaign files')
+def sha(name): return hashlib.sha256((repo/name).read_bytes()).hexdigest()
+def diff(name, old, new): return 'diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-%s\n+%s\n' % (name, name, name, name, old, new)
+(stub/'pass.patch').write_text(diff('target.txt', 'broken', 'fixed'))
+(stub/'wrong.patch').write_text(diff('target.txt', 'broken', 'other'))
+(stub/'tamper.patch').write_text(diff('check.sh', 'grep -qx fixed target.txt', 'true'))
+env = {k: v for k, v in os.environ.items() if k not in ('OMS_HARNESS_CHILD', 'OMS_HARNESS_DELEGATE_DEPTH')}
+env.update(PATH=str(stub/'bin')+':/usr/bin:/bin', HOME=str(stub/'home'), NVM_DIR=str(stub/'home/.nvm'), OMS_DELEGATE_WORKTREE_ROOT=str(stub/'managed'))
+def manifest(groups, **budget):
+    b = {'max_concurrent': 2, 'total_calls': 8, 'deadline_s': 600, 'max_waves': 2, 'stall_waves': 2,
+         'verifier': {'concurrency': 2, 'timeout_s': 60, 'max_artifact_bytes': 4096}}
+    b.update(budget)
+    return {'problem': {'file': 'problem.txt', 'sha256': sha('problem.txt')}, 'base': git('rev-parse', 'HEAD'),
+            'verify': {'command': 'bash check.sh', 'timeout_s': 60, 'inputs': [{'path': 'check.sh', 'sha256': sha('check.sh')}]},
+            'candidate_formats': ['patch'], 'groups': groups, 'budget': b}
+def group(gid, marker, model, k=1): return {'id': gid, 'formulation': marker, 'k': k, 'routes': [{'provider': 'codex', 'model': model}]}
+def go(m, extra_env=None, where=repo, *args):
+    file = where/'wave-campaign.json'
+    file.write_text(json.dumps(m))
+    e = dict(env, **(extra_env or {}))
+    return subprocess.run(['bash', str(root/'scripts/goal-drive.sh'), '--repo', str(where), '--campaign', str(file), *args], capture_output=True, text=True, env=e)
+def rows(m, where=repo):
+    cid = hashlib.sha256(json.dumps(m, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()[:16]
+    return [json.loads(l) for l in (where/'.oms/plan/campaigns'/cid/'events.jsonl').read_text().splitlines()]
+def calls(): return len((stub/'calls').read_text().split()) if (stub/'calls').exists() else 0
+def kinds(r): return [x['type'] for x in r]
+
+# Two groups: one route fails (seat_failed, skipped), the other solves. Exit 0, winner recorded.
+solve = manifest([group('a', 'MARK_BROKEN', 'm1'), group('b', 'MARK_PASS', 'm2')])
+before = calls()
+r = go(solve); assert r.returncode == 0, (r.stdout, r.stderr)
+ev = rows(solve)
+failed = [x for x in ev if x['type'] == 'seat_failed']
+assert len(failed) == 1 and failed[0]['group'] == 'a' and 'ts' in failed[0], failed
+verdict = [x for x in ev if x['type'] == 'candidate_verdict']
+assert [x['verdict'] for x in verdict] == ['pass'], verdict
+done = [x for x in ev if x['type'] == 'campaign_solved']
+assert len(done) == 1 and done[0]['candidate'] == verdict[0]['id'] and len(done[0]['sha256']) == 64, done
+assert 'solved' in r.stdout and done[0]['candidate'] in r.stdout, r.stdout
+assert ev[0]['type'] == 'campaign_started' and 'started_at' in ev[0]
+assert 'scratch' not in git('worktree', 'list') and len(git('worktree', 'list').splitlines()) == 1
+spent = calls(); assert spent - before == 2, (before, spent)
+# Resume of a solved campaign re-prints the winner and spends nothing.
+r = go(solve); assert r.returncode == 0 and done[0]['candidate'] in r.stdout, r.stdout
+assert calls() == spent and kinds(rows(solve)).count('reservation') == 2
+
+# A patch that edits a pinned verifier input is refused; stall_waves ends it.
+tamper = manifest([group('a', 'MARK_TAMPER', 'm1')], max_waves=3, stall_waves=2)
+r = go(tamper); assert r.returncode == 3 and 'stopped (stall)' in r.stdout, (r.stdout, r.stderr)
+ev = rows(tamper)
+assert [(x['verdict'], x['reason']) for x in ev if x['type'] == 'candidate_verdict'] == [('error', 'verifier-tamper')] * 2
+assert kinds(ev).count('wave_completed') == 2 and ev[-1]['type'] == 'campaign_stopped' and ev[-1]['reason'] == 'stall'
+spent = calls()
+r = go(tamper); assert r.returncode == 3 and calls() == spent and kinds(rows(tamper)).count('reservation') == 2
+
+# Seat budget (total_calls minus one reserved consolidator per wave) ends the campaign with exit 3.
+cap = manifest([group('a', 'MARK_WRONG', 'm1', k=3)], total_calls=3, max_waves=1, stall_waves=1, max_concurrent=3)
+r = go(cap); assert r.returncode == 3 and 'stopped (budget)' in r.stdout, (r.stdout, r.stderr)
+ev = rows(cap)
+assert kinds(ev).count('reservation') == 2 and 'budget_exhausted' in kinds(ev) and ev[-1]['reason'] == 'budget'
+assert [x['verdict'] for x in ev if x['type'] == 'candidate_verdict'] == ['fail', 'fail']
+
+# A verify command that outlives its timeout (with a grandchild) is killed and recorded.
+slow = manifest([group('a', 'MARK_WRONG', 'm3')], max_waves=1, stall_waves=1)
+slow['verify'].update(command='sleep 30 & sleep 30', timeout_s=1)
+r = go(slow); assert r.returncode == 3, (r.stdout, r.stderr)
+assert [x['verdict'] for x in rows(slow) if x['type'] == 'candidate_verdict'] == ['timeout']
+
+# A model name agent-call would reject is refused at validation; an unrunnable route fails its seat once.
+bad = manifest([group('a', 'MARK_WRONG', 'provider-default')])
+assert 'provider-default' in go(bad, None, repo, '--dry-run').stderr
+bad['groups'][0]['routes'][0]['model'] = 'x' * 161
+assert go(bad, None, repo, '--dry-run').returncode == 2
+bad['groups'][0]['routes'][0]['model'] = 'x' * 160
+assert go(bad, None, repo, '--dry-run').returncode == 0
+lost = manifest([group('a', 'MARK_WRONG', 'm1')], max_waves=2, stall_waves=2)
+lost['groups'][0]['routes'] = [{'provider': 'claude', 'model': 'm1'}]
+before = calls()
+r = go(lost); assert r.returncode == 3 and 'routes_exhausted' in r.stdout, (r.stdout, r.stderr)
+ev = rows(lost); assert kinds(ev).count('seat_failed') == 1 and kinds(ev).count('reservation') == 1, kinds(ev)
+r = go(lost); assert r.returncode == 3 and kinds(rows(lost)).count('reservation') == 1 and calls() == before
+
+# A core-era ledger (no started_at, resume rows without ts) resumes and runs.
+import importlib.util
+spec = importlib.util.spec_from_file_location('pc', root/'scripts/lib/problem_campaign.py')
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+old = manifest([group('a', 'MARK_PASS', 'm5')])
+directory, _ = pc.initialize(repo, old, repo)
+lines = [json.loads(l) for l in (directory/'events.jsonl').read_text().splitlines()]
+lines[0].pop('started_at'); lines[0].pop('ts'); lines.append({'type': 'campaign_resumed'})
+(directory/'events.jsonl').write_text(''.join(json.dumps(x, sort_keys=True, separators=(',', ':'))+'\n' for x in lines))
+r = go(old); assert r.returncode == 0 and 'solved' in r.stdout, (r.stdout, r.stderr)
+
+# A harness child is refused before any ledger row exists.
+child = manifest([group('a', 'MARK_WRONG', 'm9')])
+r = go(child, {'OMS_HARNESS_CHILD': '1'}); assert r.returncode == 2 and 'harness child' in r.stderr, r.stderr
+assert not (repo/'.oms/plan/campaigns').joinpath(hashlib.sha256(json.dumps(child, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:16]).exists()
+r = go(child, {'OMS_HARNESS_DELEGATE_DEPTH': '1'}); assert r.returncode == 2 and 'harness child' in r.stderr
+r = subprocess.run([sys.executable, '-B', str(root/'scripts/lib/problem_campaign.py'), '--repo', str(repo), '--campaign', str(repo/'wave-campaign.json')], capture_output=True, text=True, env=env)
+assert r.returncode == 2 and '--state-repo is required' in r.stderr, r.stderr
+
+# Route validation: pi needs public_data, cursor has no effort, effort must be a known value.
+bad = copy.deepcopy(child); bad['groups'][0]['routes'] = [{'provider': 'pi', 'model': 'x'}]
+assert 'public_data' in go(bad, None, repo, '--dry-run').stderr
+bad['public_data'] = True; assert go(bad, None, repo, '--dry-run').returncode == 0
+bad['groups'][0]['routes'] = [{'provider': 'cursor', 'model': 'x', 'effort': 'high'}]
+assert 'no effort control' in go(bad, None, repo, '--dry-run').stderr
+bad['groups'][0]['routes'] = [{'provider': 'codex', 'model': 'x', 'effort': 'turbo'}]
+assert 'route effort' in go(bad, None, repo, '--dry-run').stderr
+bad['groups'][0]['routes'] = [{'provider': 'codex', 'model': 'x', 'effort': 'high'}]
+assert go(bad, None, repo, '--dry-run').returncode == 0
+
+# A scratch checkout shares the owner checkout's ledger.
+scratch = pathlib.Path(subprocess.check_output(['bash', str(root/'scripts/scratch-worktree.sh'), 'add', '--repo', str(repo), '--owner-pid', str(os.getpid())], text=True, env=env).strip())
+try:
+    linked = manifest([group('a', 'MARK_NONE', 'm1')], max_waves=1, stall_waves=1)
+    r = go(linked, None, scratch); assert r.returncode == 3, (r.stdout, r.stderr)
+    assert 'candidate_rejected' in kinds(rows(linked)) and not (scratch/'.oms/plan/campaigns').exists()
+finally:
+    subprocess.run(['bash', str(root/'scripts/scratch-worktree.sh'), 'remove', '--repo', str(repo), '--force', str(scratch)], env=env, capture_output=True)
 PY
 }
 

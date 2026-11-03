@@ -76,7 +76,7 @@ mismatch between the admitted patch and the working tree. Every terminal
 writes a reason row to .oms/plan/progress.jsonl and a fail-ledger entry when
 it parked; a later run whose acceptance passes resolves those park rows.
 
-  --campaign FILE  Initialize or resume a problem campaign.
+  --campaign FILE  Initialize or resume a problem campaign and run its waves.
   --dry-run        Validate and print the normalized campaign without writing.
   --repo PATH     Repository (default: current directory). Tree must be clean.
   --to PROVIDER   Default worker for tasks without an assignment (default: codex).
@@ -171,7 +171,10 @@ if [ -n "$CAMPAIGN" ]; then
   oms_git_assert_plain_index "$REPO" || fail "campaign requires a plain index"
   git -c core.fsmonitor=false -C "$REPO" diff --quiet -- || fail "campaign requires a clean tracked tree"
   git -c core.fsmonitor=false -C "$REPO" diff --cached --quiet -- || fail "campaign requires a clean tracked tree"
-  exec python3 "$ROOT/scripts/lib/problem_campaign.py" --repo "$REPO" --campaign "$CAMPAIGN"
+  # Ledger and artifacts belong to the owner checkout; Git inputs stay on the working tree.
+  STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
+  STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the campaign state repository"
+  exec python3 "$ROOT/scripts/lib/problem_campaign.py" --repo "$REPO" --state-repo "$STATE_REPO" --campaign "$CAMPAIGN"
 fi
 [ "$GOAL_HELP" -eq 0 ] || { usage; exit 0; }
 [ "$CAMPAIGN_DRY_RUN" -eq 0 ] || fail "--dry-run requires --campaign"

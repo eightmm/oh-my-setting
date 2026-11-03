@@ -1033,13 +1033,43 @@ Normal task leases, scoped admission, one-use approvals and one-shot repair rema
 `oms goal-drive --campaign FILE --dry-run` validates a pinned problem campaign
 and prints its normalized manifest and planned call totals without writing state.
 The manifest binds the problem, HEAD, verifier inputs, groups, routes and bounded
-budgets. Routes without a provider-specific cap use the global caps. Dry-run
-reserves one consolidator call per wave in its totals and caps planned seats to
-fit; the total budget must cover those consolidator calls. Without `--dry-run`,
-the command requires a clean tracked tree, initializes or resumes its ledger,
-and exits 2 until campaign waves are implemented. Each resume adds an event.
-The saved manifest supplies the ledger budget; reservations count against the
-lifetime cap even if interrupted before settlement. Campaign mode accepts only
+budgets. Routes without a provider-specific cap use the global caps. A `pi` route
+needs `public_data: true`, a `cursor` route takes no `effort`, and any `effort`
+must be one `oms agent-call` accepts. A route `model` follows the same rules (at most 160 characters, no control characters, not `provider-default`). Dry-run reserves one consolidator call per
+wave in its totals and caps planned seats to fit; the total budget must cover
+those consolidator calls. v1 runs no consolidator seat: that headroom is never
+spent, and seat reservations stop at `total_calls` minus `max_waves`.
+
+Without `--dry-run`, the command requires a clean tracked tree and an owner
+(a harness child is refused before any state is written), then initializes or
+resumes the ledger and runs waves. Ledger, candidate artifacts and seat artifacts
+live under the state checkout (`oms_state_root`, so a scratch worktree shares its
+owner's ledger and lifetime budget); the base, problem and verifier inputs resolve
+from `--repo`. Each wave runs `k` seats per group, interleaved across groups and
+rotated over the group's routes, through `agent-call` with one artifact directory
+per seat. A seat is reserved before its call and settled after; reservations
+count against the lifetime cap even if interrupted. Replies are parsed into
+sha256-named candidate artifacts (fenced blocks tagged with an allowed format);
+malformed replies record `candidate_rejected`. Later waves show a seat's group a
+digest of its earlier candidates' ids, routes and verdicts only. A failed route
+(provider error, timeout, print-timeout stop) records `seat_failed` and is skipped
+for the rest of the campaign; a provider's call cap records `route_exhausted`;
+`total_calls` records `budget_exhausted`. A seat whose artifact is missing or unreadable is a failed seat. An outbound-scrubber refusal (exit 3 with the scrubber's `SKIPPED` marker in the artifact; other exit 3 is a provider error) stops the
+campaign (`outbound_refused`, exit 2) instead of failing the route.
+The evaluator runs locally and spends no provider budget: each patch or lean
+candidate is applied in a scratch checkout of the base, refused with
+`verifier-tamper` if it touches the problem file or a verifier input, re-checked
+against every pinned digest, then verified with the manifest command under the
+smaller of the two timeouts (process group killed on timeout). Verdicts are
+`pass`, `fail`, `timeout`, `error` or `unverified` (text and counterexample, never
+promoted). The first pass records `campaign_solved` and exits 0. Otherwise the run
+stops on `deadline` (counted from `started_at`), `budget`, `max_waves`, `stall`
+(`stall_waves` waves without a pass; v1 has no partial score) or `routes_exhausted`
+and exits 3; refusals exit 2. Every controller event carries `ts` (reservation and settlement rows do not); a ledger without `started_at` counts its deadline from the resuming run. Re-running the same
+manifest resumes from the ledger: a solved or stopped campaign prints its summary
+and spends nothing, an interrupted wave re-runs in full, and settled and
+unsettled reservations stay spent. One controller runs a campaign at a time.
+The saved manifest supplies the ledger budget. Campaign mode accepts only
 `--repo`, `--campaign` and `--dry-run`.
 
 `oms autopilot --max-parallel-tasks N` binds an immutable width of 1..4
