@@ -54,6 +54,8 @@ doctor runs automatically when a provider CLI is installed. --live-models
 adds bounded account-visible catalog probes, while --strict-diversity requires
 at least two usable independent model families. An invalid or unavailable
 receipt owner is never replaced automatically.
+Registered Codex account homes, shared links, login presence and model-cache
+presence are checked locally; account health issues only warn.
 
 --surfaces is a standalone read-only report: for every hook surface this
 checkout would register, it compares the source list, the live settings.json,
@@ -2110,6 +2112,14 @@ check_provider_auth() {
   [ "$reported" = 1 ] || return 0
 }
 check_provider_auth
+
+check_codex_accounts() {
+  python3 "$ROOT/scripts/lib/provider_accounts.py" doctor || {
+    echo "warn: Codex account health check unavailable"
+    return 0
+  }
+}
+check_codex_accounts
 
 check_claude_registry_path() {
   python3 - "$ROOT/scripts/lib" <<'PY' || return 0

@@ -139,6 +139,7 @@ change-guard
 checkpoint
 ci-status
 cleanup
+connect-services
 consult
 dashboard
 data-manifest
@@ -197,6 +198,7 @@ OMS_FRONTDOOR_TOOLS="
 # Setup and capabilities
 init
 install-profile
+connect-services
 # Goals and daily work
 panel
 agent-plan

@@ -3233,6 +3233,486 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
   case "$out" in *'doctor: ok'*) ;; *) fail "a missing provider credential must not fail the doctor: $out" ;; esac
 }
 
+test_connect_services_codex_account() {
+  python3 - "$ROOT" "$TMP/connect-account" <<'PY'
+import json
+import os
+from pathlib import Path
+import shlex
+import stat
+import subprocess
+import sys
+from unittest.mock import patch
+
+root, base = map(Path, sys.argv[1:])
+base.mkdir(mode=0o700)
+user = base / "user"
+user.mkdir(mode=0o700, parents=True)
+main = user / ".codex"
+main.mkdir(mode=0o700, parents=True)
+config = base / "config/oh-my-setting/provider-accounts.json"
+receipt = config.with_name("codex-account-links.json")
+links = ("AGENTS.md", "config.toml", "hooks.json", ".hook-trust", "plugins", "rules", "skills")
+for name in links:
+    if name in ("plugins", "rules", "skills"):
+        (main / name).mkdir()
+    else:
+        (main / name).touch()
+env = dict(os.environ, HOME=str(user), CODEX_HOME=str(main), XDG_CONFIG_HOME=str(config.parent.parent))
+env.pop("OMS_INSTALL_RECEIPT", None)
+timeout = int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "120"))
+entry = ["bash", str(root / "scripts/connect-services.sh")]
+public_entry = ["bash", str(root / "scripts/oms"), "connect-services"]
+
+def run(args, ok=True, public=False):
+    result = subprocess.run((public_entry if public else entry) + args,
+        env=env, capture_output=True, text=True, timeout=timeout)
+    assert (result.returncode == 0) == ok, (args, result.returncode, result.stdout, result.stderr)
+    return result.stdout + result.stderr
+
+def register(ident, *args, ok=True):
+    return run(["--codex-account", ident, *map(str, args)], ok=ok)
+
+def registry():
+    return json.loads(config.read_text())
+
+secondary = user / ".codex-credits"
+out = run(["--codex-account", "credits", "--first"], public=True)
+assert "registered, login pending" in out, out
+assert "CODEX_HOME=" + shlex.quote(str(secondary)) + " codex login" in out, out
+assert secondary.is_dir() and stat.S_IMODE(secondary.stat().st_mode) == 0o700
+assert stat.S_IMODE(config.stat().st_mode) == 0o600
+assert not (secondary / "auth.json").exists()
+for name in links:
+    assert (secondary / name).is_symlink() and os.readlink(secondary / name) == str(main / name), name
+assert registry()["providers"]["codex"]["accounts"][0] == {"id": "credits", "home": str(secondary)}
+before = config.read_bytes()
+inodes = [(secondary / name).lstat().st_ino for name in links]
+register("credits", "--first")
+assert config.read_bytes() == before
+assert [(secondary / name).lstat().st_ino for name in links] == inodes
+
+sys.path.insert(0, str(root / "scripts/lib"))
+import provider_accounts as accounts
+with patch.dict(os.environ, env):
+    loaded = accounts.load_accounts()
+assert not accounts.account_home_error(loaded["providers"]["codex"]["accounts"][0])
+helper = [sys.executable, str(root / "scripts/lib/provider_accounts.py")]
+def health():
+    result = subprocess.run(helper + ["doctor"], env=env, capture_output=True, text=True, timeout=timeout)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+# A private file is never replaced, and repair only replaces conflicting links.
+(secondary / "config.toml").unlink()
+(secondary / "config.toml").write_text("keep this config\n")
+(secondary / "hooks.json").unlink()
+(secondary / "hooks.json").symlink_to(main / "config.toml")
+out = register("credits")
+assert "kept existing non-link" in out and "--repair" in out, out
+assert os.readlink(secondary / "hooks.json") == str(main / "config.toml")
+register("credits", "--repair")
+assert (secondary / "config.toml").read_text() == "keep this config\n"
+assert os.readlink(secondary / "hooks.json") == str(main / "hooks.json")
+
+custom = user / "account with 'quotes'"
+custom.mkdir(mode=0o700)
+# Matching links supplied by the user are not adopted for later removal.
+(custom / "rules").symlink_to(Path("..") / main.name / "rules", target_is_directory=True)
+out = register("pro", "--home", custom, "--last")
+assert "CODEX_HOME=" + shlex.quote(str(custom)) + " codex login" in out
+assert "conflicting link rules" not in out
+assert registry()["providers"]["codex"]["accounts"][-1]["id"] == "pro"
+register("pro", "--first")
+assert registry()["providers"]["codex"]["accounts"][0]["id"] == "pro"
+assert registry()["providers"]["codex"]["accounts"][0]["home"] == str(custom)
+
+# Registration must not adopt a home another user can modify.
+for basename, mode in (("group-writable", 0o770), ("other-writable", 0o702)):
+    unsafe_home = user / basename
+    unsafe_home.mkdir(mode=mode)
+    unsafe_home.chmod(mode)
+    before = config.read_bytes()
+    out = register("shared", "--home", unsafe_home, ok=False)
+    assert str(unsafe_home) in out and "chmod go-w" in out, out
+    assert stat.S_IMODE(unsafe_home.stat().st_mode) == mode
+    assert not list(unsafe_home.iterdir()) and config.read_bytes() == before
+for uid in (os.getuid() + 1, None):
+    with patch.object(os, "getuid", return_value=uid) if uid is not None else patch.object(os, "getuid", None):
+        try:
+            accounts._account_home_private(custom, custom.stat())
+            raise AssertionError("unverified home ownership accepted")
+        except ValueError as error:
+            assert shlex.quote(str(custom)) in str(error) and "fix:" in str(error), error
+        try:
+            accounts._account_parent_private(custom.parent)
+            raise AssertionError("unverified ancestor ownership accepted")
+        except ValueError as error:
+            assert shlex.quote(str(custom.parent)) in str(error) and "--home" in str(error), error
+unsafe_parent = user / "writable-parent"
+unsafe_parent.mkdir(mode=0o770)
+unsafe_parent.chmod(0o770)
+out = register("unsafe-parent", "--home", unsafe_parent / "account", ok=False)
+assert str(unsafe_parent) in out and "chmod go-w" in out, out
+assert not (unsafe_parent / "account").exists()
+unsafe_parent.chmod(0o1770)
+register("sticky-parent", "--home", unsafe_parent / "account")
+
+# A private immediate parent must not hide an unsafe ancestor.
+ancestor = user / "shared-ancestor"
+private_parent = ancestor / "private"
+private_parent.mkdir(mode=0o700, parents=True)
+ancestor.chmod(0o777)
+before = config.read_bytes()
+out = register("ancestor", "--home", private_parent / "account", ok=False)
+assert str(ancestor) in out and "--home" in out, out
+assert config.read_bytes() == before and not (private_parent / "account").exists()
+ancestor.chmod(0o1777)
+register("ancestor", "--home", private_parent / "account")
+ancestor.chmod(0o777)
+out = register("ancestor", "--repair", ok=False)
+assert str(ancestor) in out and "--home" in out, out
+out = health()
+assert "warn: codex account ancestor" in out and str(ancestor) in out, out
+ancestor.chmod(0o1777)
+register("ancestor", "--repair")
+
+real_stat = Path.stat
+def foreign_ancestor(path, *args, **kwargs):
+    info = real_stat(path, *args, **kwargs)
+    if path == ancestor:
+        fields = list(info)
+        fields[4] = os.getuid() + 1
+        return os.stat_result(fields)
+    return info
+
+with patch.object(Path, "stat", foreign_ancestor):
+    try:
+        accounts._account_parent_private(private_parent)
+        raise AssertionError("foreign-owned ancestor accepted")
+    except ValueError as error:
+        assert str(ancestor) in str(error) and "--home" in str(error), error
+
+# A new directory at an old path cannot inherit the old directory's receipt.
+register("recreated")
+recreated = user / ".codex-recreated"
+moved = user / "moved-account"
+recreated.rename(moved)
+recreated.mkdir(mode=0o700)
+for name in links:
+    (recreated / name).symlink_to(main / name, target_is_directory=name in ("plugins", "rules", "skills"))
+out = register("recreated", "--repair", ok=False)
+assert "directory identity" in out, out
+saved_receipt = receipt.read_bytes()
+with patch.dict(os.environ, env):
+    rows = accounts._link_receipt(receipt)
+    accounts._drop_account_links(rows, receipt, ident="recreated", dry_run=True)
+assert receipt.read_bytes() == saved_receipt
+row = next(row for row in rows if row["id"] == "recreated")
+with patch.object(os, "lstat", side_effect=PermissionError("fixture stat refusal")):
+    assert not accounts._retire_stale_account_home(rows, receipt, row)
+assert receipt.read_bytes() == saved_receipt
+out = register("recreated", "--remove")
+assert "directory identity" in out, out
+assert "recovery: oms connect-services --codex-account recreated --home " + shlex.quote(str(recreated)) in out, out
+assert all((recreated / name).is_symlink() and (moved / name).is_symlink() for name in links)
+assert all(row["id"] != "recreated" for row in json.loads(receipt.read_text()))
+register("recreated")
+assert all((recreated / name).is_symlink() for name in links)
+
+register("missing-home")
+missing_home = user / ".codex-missing-home"
+for name in links:
+    (missing_home / name).unlink()
+missing_home.rmdir()
+out = register("missing-home", "--remove")
+assert "home missing" in out, out
+assert all(row["id"] != "missing-home" for row in json.loads(receipt.read_text()))
+register("missing-home")
+assert missing_home.is_dir() and (missing_home / "skills").is_symlink()
+
+# Simulate an entry changing after readlink but before removal.
+register("entry-swap")
+swap_home = user / ".codex-entry-swap"
+swap_path = swap_home / "config.toml"
+readlink = os.readlink
+swapped = []
+def swap_entry(path, *args, **kwargs):
+    value = readlink(path, *args, **kwargs)
+    if not swapped and (str(path) == str(swap_path) or
+            (str(path) == swap_path.name and kwargs.get("dir_fd") is not None)):
+        swap_path.unlink()
+        swap_path.write_text("keep concurrent file\n")
+        swapped.append(True)
+    return value
+
+receipt = config.with_name("codex-account-links.json")
+with patch.dict(os.environ, env), patch.object(os, "readlink", side_effect=swap_entry):
+    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="entry-swap")
+assert swapped and swap_path.is_file() and swap_path.read_text() == "keep concurrent file\n"
+
+# Partial cleanup retires removed and absent names before a later pass.
+register("unlink-retry")
+retry_home = user / ".codex-unlink-retry"
+(retry_home / "plugins").unlink()
+unlink = os.unlink
+def deny_unlink(path, *args, **kwargs):
+    if str(path) in links and kwargs.get("dir_fd") is not None:
+        progress = next(row for row in accounts._link_receipt(receipt) if row["id"] == "unlink-retry")
+        assert str(path) not in progress["links"], progress
+    if str(path) == "config.toml" and kwargs.get("dir_fd") is not None:
+        raise PermissionError("fixture unlink refusal")
+    return unlink(path, *args, **kwargs)
+
+with patch.dict(os.environ, env), patch.object(os, "unlink", side_effect=deny_unlink):
+    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="unlink-retry")
+remaining = next(row for row in accounts._link_receipt(receipt) if row["id"] == "unlink-retry")
+assert set(remaining["links"]) == {"config.toml"}, remaining
+for name in ("AGENTS.md", "plugins"):
+    (retry_home / name).symlink_to(main / name, target_is_directory=name == "plugins")
+with patch.dict(os.environ, env):
+    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="unlink-retry")
+assert not (user / ".codex-unlink-retry/skills").is_symlink()
+assert (retry_home / "AGENTS.md").is_symlink() and (retry_home / "plugins").is_symlink()
+assert not (retry_home / "config.toml").is_symlink()
+
+# Unsupported unlink APIs preserve conflicts during repair and all cleanup links.
+import io
+from contextlib import redirect_stdout
+from types import SimpleNamespace
+register("platform")
+platform_home = user / ".codex-platform"
+(platform_home / "config.toml").unlink()
+(platform_home / "config.toml").symlink_to(main / "hooks.json")
+output = io.StringIO()
+with patch.dict(os.environ, env), patch.object(accounts, "_ACCOUNT_SAFE_UNLINK", False), redirect_stdout(output):
+    accounts.connect_codex_account(SimpleNamespace(codex_account="platform", home=None,
+        remove=False, repair=True, first=False))
+    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="platform")
+assert "skipped: platform lacks safe unlink" in output.getvalue()
+assert os.readlink(platform_home / "config.toml") == str(main / "hooks.json")
+assert (platform_home / "skills").is_symlink()
+
+register("repair-swap")
+swap_path = user / ".codex-repair-swap/config.toml"
+swap_path.unlink()
+swap_path.symlink_to(main / "hooks.json")
+swapped.clear()
+with patch.dict(os.environ, env), patch.object(os, "readlink", side_effect=swap_entry), redirect_stdout(io.StringIO()):
+    accounts.connect_codex_account(SimpleNamespace(codex_account="repair-swap", home=None,
+        remove=False, repair=True, first=False))
+assert swapped and swap_path.is_file() and swap_path.read_text() == "keep concurrent file\n"
+
+# Legacy receipts without directory identity cannot authorize cleanup.
+register("legacy-receipt")
+saved = receipt.read_bytes()
+rows = json.loads(saved)
+legacy = next(row for row in rows if row["id"] == "legacy-receipt")
+del legacy["st_dev"], legacy["st_ino"]
+receipt.write_text(json.dumps(rows))
+out = register("legacy-receipt", "--remove")
+assert "directory identity" in out and (user / ".codex-legacy-receipt/skills").is_symlink(), out
+receipt.write_bytes(saved)
+
+# Refusal never rewrites malformed state or creates the requested home.
+valid = config.read_bytes()
+for malformed in ("", "{", "[]", '{"schema":0,"providers":{}}',
+                  '{"schema":true,"providers":{}}', '{"schema":1,"schema":1,"providers":{}}',
+                  '{"schema":1,"providers":{},"extension":NaN}',
+                  '{"schema":1,"providers":{"codex":{"accounts":[]}}}'):
+    config.write_text(malformed)
+    register("invalid-state", ok=False)
+    assert config.read_text() == malformed and not (user / ".codex-invalid-state").exists()
+config.write_bytes(valid)
+
+# Ownership state is also validated before any account mutation.
+receipt = config.with_name("codex-account-links.json")
+saved_receipt = receipt.read_bytes()
+for malformed in ("", "0", "{}", "[{}]"):
+    receipt.write_text(malformed)
+    register("invalid-receipt", ok=False)
+    assert receipt.read_text() == malformed and not (user / ".codex-invalid-receipt").exists()
+receipt.write_bytes(saved_receipt)
+for field, invalid in (("st_dev", -1), ("st_ino", None), ("st_ino", True), ("st_ino", "")):
+    rows = json.loads(saved_receipt)
+    rows[0][field] = invalid
+    receipt.write_text(json.dumps(rows))
+    before = receipt.read_bytes()
+    register("invalid-identity", ok=False)
+    assert receipt.read_bytes() == before and not (user / ".codex-invalid-identity").exists()
+receipt.write_bytes(saved_receipt)
+rows = json.loads(saved_receipt)
+credits_row = next(row for row in rows if row["id"] == "credits")
+credits_row.update(st_dev=0, st_ino=0)
+receipt.write_text(json.dumps(rows))
+out = register("credits", "--repair", ok=False)
+assert "directory identity" in out
+receipt.write_bytes(saved_receipt)
+
+# Invalid IDs, unsafe homes and incompatible CLI modes fail before mutation.
+for ident in ("", "UPPER", "../bad", "default", "x" * 65):
+    register(ident, ok=False)
+    assert config.read_bytes() == valid
+register("0")
+register("x" * 64)
+for args in (["--home"], ["--codex-account"], ["--first"], ["--remove"], ["--repair"],
+             ["--codex-account", "a", "--first", "--last"],
+             ["--codex-account", "a", "--no-notion"], ["--codex-account", "a", "--required"]):
+    run(args, ok=False)
+alias = user / "main-alias"
+alias.symlink_to(main, target_is_directory=True)
+repo = base / "repo"
+(repo / ".git").mkdir(parents=True)
+(repo / ".git/HEAD").touch()
+file_home = user / "plain-file"
+file_home.touch()
+for home in ("", main, alias, repo / "new-home", root / "new-account", file_home):
+    out = register("unsafe", "--home", home, ok=False)
+    if home in (repo / "new-home", root / "new-account"):
+        assert "--home" in out, out
+assert not (repo / "new-home").exists() and not (root / "new-account").exists()
+register("duplicate", "--home", custom, ok=False)
+relative = user / "relative-home"
+register("relative", "--home", os.path.relpath(relative))
+assert any(row == {"id": "relative", "home": str(relative)}
+           for row in registry()["providers"]["codex"]["accounts"])
+
+# Unknown fields and other providers survive registration unchanged.
+value = registry()
+value["extension"] = {"keep": True}
+value["providers"]["codex"]["extension"] = [1, 2]
+value["providers"]["future"] = {"policy": "ordered", "accounts": [
+    {"id": "future", "home": str(user / "future"), "extension": True}]}
+config.write_text(json.dumps(value))
+register("credits")
+changed = registry()
+assert changed["extension"] == value["extension"]
+assert changed["providers"]["future"] == value["providers"]["future"]
+assert changed["providers"]["codex"]["extension"] == [1, 2]
+config.write_bytes(valid)
+
+# Concurrent callers cannot lose either registry entry.
+commands = [entry + ["--codex-account", name] for name in ("parallel-a", "parallel-b")]
+calls = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for command in commands]
+for call in calls:
+    output = call.communicate(timeout=timeout)
+    assert call.returncode == 0, output
+assert {"parallel-a", "parallel-b"} <= {row["id"] for row in registry()["providers"]["codex"]["accounts"]}
+
+# Doctor checks only metadata, including a zero-byte login file.
+out = health()
+assert "warn: codex account credits auth.json missing" in out, out
+assert "warn: codex account credits models_cache.json missing" in out, out
+assert "warn: codex account credits shared config.toml" in out, out
+value = registry()
+value["providers"]["codex"]["accounts"].append({"id": "gone", "home": str(user / "gone")})
+config.write_text(json.dumps(value))
+assert "warn: codex account gone home missing" in health()
+config.write_bytes(valid)
+(secondary / "auth.json").touch(mode=0o600)
+login_file = secondary / ("au" + "th.json")
+metadata = login_file.stat()
+(secondary / "models_cache.json").touch()
+out = health()
+assert "ok: codex account credits auth.json present" in out, out
+assert "ok: codex account credits models_cache.json present" in out, out
+doctor = (root / "scripts/doctor.sh").read_text()
+start = doctor.index("check_codex_accounts() {")
+stop = doctor.index("\n}\n", start) + 3
+assert "check_codex_accounts\n" in doctor[stop:]
+probe = subprocess.run(["bash", "-c", 'ROOT="$1"; FAILED=0\n' + doctor[start:stop] +
+    '\ncheck_codex_accounts\n[ "$FAILED" = 0 ]', "doctor-probe", str(root)],
+    env=env, capture_output=True, text=True, timeout=timeout)
+assert probe.returncode == 0 and "warn: codex account credits shared config.toml" in probe.stdout, probe
+
+(secondary / "sessions").mkdir()
+(secondary / "sessions/keep").touch()
+register("credits", "--remove")
+assert secondary.is_dir() and login_file.stat() == metadata
+assert (secondary / "sessions/keep").exists() and (secondary / "models_cache.json").exists()
+assert (secondary / "config.toml").read_text() == "keep this config\n"
+assert not (secondary / "skills").is_symlink()
+assert all(row["id"] != "credits" for row in registry()["providers"]["codex"]["accounts"])
+register("credits", "--remove")
+register("pro", "--remove")
+assert (custom / "rules").is_symlink() and not (custom / "skills").is_symlink()
+for home in (user / "moving-before", user / "moving-after"):
+    register("moving", "--home", home)
+register("moving", "--remove")
+for home in (user / "moving-before", user / "moving-after"):
+    assert home.is_dir() and not (home / "skills").is_symlink()
+
+# Uninstall previews without writes, then removes only recorded, unchanged links.
+register("cleanup")
+cleanup = user / ".codex-cleanup"
+(cleanup / "skills").unlink()
+(cleanup / "skills").symlink_to(user / "unrelated")
+receipt = config.with_name("codex-account-links.json")
+saved = receipt.read_bytes()
+result = subprocess.run(helper + ["cleanup", "--root", str(root), "--dry-run"],
+    env=env, capture_output=True, text=True, timeout=timeout)
+assert result.returncode == 0 and receipt.read_bytes() == saved
+assert (cleanup / "plugins").is_symlink()
+result = subprocess.run(["bash", str(root / "scripts/uninstall.sh"), "--dry-run", "--yes"],
+    env=env, capture_output=True, text=True, timeout=timeout)
+assert result.returncode == 0 and "would remove Codex account link" in result.stdout, result
+assert receipt.read_bytes() == saved and (cleanup / "plugins").is_symlink()
+result = subprocess.run(helper + ["cleanup", "--root", str(root)], env=env,
+    capture_output=True, text=True, timeout=timeout)
+assert result.returncode == 0, result.stderr
+assert not (cleanup / "plugins").is_symlink() and (cleanup / "skills").is_symlink()
+assert cleanup.is_dir() and (custom / "rules").is_symlink()
+assert all((recreated / name).is_symlink() and (moved / name).is_symlink() for name in links)
+assert all(row["id"] != "cleanup" for row in accounts._link_receipt(receipt))
+(cleanup / "skills").unlink()
+(cleanup / "skills").symlink_to(main / "skills", target_is_directory=True)
+register("cleanup", "--remove")
+assert (cleanup / "skills").is_symlink()
+
+# Links outside uninstall's current targets retain ownership for explicit remove.
+register("partial")
+with patch.dict(os.environ, dict(env, CODEX_HOME=str(user / "other-main"))):
+    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="partial", root=root)
+assert (user / ".codex-partial/skills").is_symlink()
+assert any(row["id"] == "partial" for row in accounts._link_receipt(receipt))
+register("partial", "--remove")
+assert not (user / ".codex-partial/skills").is_symlink()
+uninstall = (root / "scripts/uninstall.sh").read_text()
+assert 'provider_accounts.py" cleanup' in uninstall
+
+# An interruption after links but before registry publication remains retryable
+# and discoverable by cleanup, without an account entry ever being published.
+from oms_runtime import common
+writer = common.atomic_write_json
+def interrupted(path, value, **kwargs):
+    if path == config:
+        raise OSError("injected registry interruption")
+    return writer(path, value, **kwargs)
+
+with patch.dict(os.environ, env), patch.object(common, "atomic_write_json", side_effect=interrupted):
+    try:
+        accounts.connect_codex_account(SimpleNamespace(codex_account="interrupted", home=None,
+            remove=False, repair=False, first=False))
+        raise AssertionError("injected interruption did not fail")
+    except OSError as error:
+        assert "injected" in str(error)
+assert (user / ".codex-interrupted/skills").is_symlink()
+assert all(row["id"] != "interrupted" for row in registry()["providers"]["codex"]["accounts"])
+result = subprocess.run(helper + ["cleanup", "--root", str(root)], env=env,
+    capture_output=True, text=True, timeout=timeout)
+assert result.returncode == 0 and not (user / ".codex-interrupted/skills").is_symlink()
+register("interrupted")
+
+# Removing the sole account leaves an accepted provider-less schema.
+config.write_text(json.dumps({"schema": 1, "providers": {"codex": {
+    "policy": "ordered", "accounts": [{"id": "solo", "home": str(custom)}]}}}))
+register("solo", "--remove")
+with patch.dict(os.environ, env):
+    assert accounts.load_accounts()["providers"] == {}
+print("codex account connect: create, repair, preservation, ordering, validation, concurrency, doctor, remove and cleanup passed")
+PY
+}
+
 test_installer_enables_auto_update_by_default() {
   # A harness that silently goes stale stops matching its own docs and
   # skills. Assert the default rather than the flag: apply-mode trigger on,
@@ -39406,6 +39886,12 @@ test_oms_allowlist_stays_in_sync_with_scripts() {
   done < "$public_list"
 
   sort -c "$public_list" 2>/dev/null || fail "OMS_PUBLIC_TOOLS is not sorted"
+  grep -Fxq connect-services "$public_list" || fail "connect-services must be a public tool"
+  local commands
+  commands="$("$ROOT/scripts/oms" list)"
+  contains "$commands" 'connect-services ' || fail "oms list must expose connect-services"
+  commands="$("$ROOT/scripts/oms" list --all)"
+  contains "$commands" 'connect-services ' || fail "oms list --all must expose connect-services"
 
   # Scripts outside the oms surface, invoked by path from install/update/
   # hooks/CI or as implementation behind a front door. A new scripts/*.sh
@@ -39415,7 +39901,6 @@ agent-ml-context
 check
 check-bash32
 check-python
-connect-services
 detect-project-style
 fail-ledger-hook
 git-move-guard-hook

@@ -1,11 +1,20 @@
-"""Machine-local provider accounts and read-only selection."""
+"""Machine-local provider account registration, health and read-only selection."""
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import re
 import stat
 import time
+
+
+CODEX_SHARED_ENTRIES = ("AGENTS.md", "config.toml", "hooks.json", ".hook-trust",
+                        "plugins", "rules", "skills")
+_ACCOUNT_SAFE_UNLINK = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+                        and all(call in os.supports_dir_fd for call in (os.stat, os.readlink, os.unlink))
+                        and os.stat in os.supports_follow_symlinks)
+_ACCOUNT_FD_SYMLINK = os.symlink in os.supports_dir_fd
 
 
 # Enable a provider only after its CLI's independent home behavior is verified.
@@ -185,3 +194,467 @@ def select_account(provider, model, readings=None, running=None, config=None, no
     if explicit and not eligible:
         return default_account(provider), reason + "; default current home"
     return (eligible[0][0] if eligible else None), reason
+
+
+def _account_paths():
+    root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    if not root.is_absolute():
+        root = Path.home() / ".config"
+    root = (root / "oh-my-setting").resolve()
+    return root / "provider-accounts.json", root / "codex-account-links.json"
+
+
+def _account_json(path, fallback):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return fallback
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("account state must be a regular non-link file")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_fields,
+                          parse_constant=_invalid_account_constant)
+    except (ValueError, RecursionError) as error:
+        raise ValueError("malformed account state; left unchanged") from error
+
+
+def _invalid_account_constant(_value):
+    raise ValueError("non-finite account state value")
+
+
+def _registration_config(path):
+    # Validate owned schema fields without discarding future extensions. The
+    # routing reader deliberately remains stricter about unsupported settings.
+    value = _account_json(path, {"schema": 1, "providers": {}})
+    if not isinstance(value, dict) or type(value.get("schema")) is not int or value["schema"] != 1:
+        raise ValueError("unsupported provider accounts schema")
+    if not isinstance(value.get("providers"), dict):
+        raise ValueError("provider accounts providers must be an object")
+    ids, homes = set(), set()
+    for settings in value["providers"].values():
+        if not isinstance(settings, dict) or settings.get("policy", "ordered") not in ("ordered", "spread"):
+            raise ValueError("invalid provider accounts policy")
+        entries = settings.get("accounts")
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("provider accounts must be a non-empty list")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("invalid provider account entry")
+            ident, home = entry.get("id"), entry.get("home")
+            if not isinstance(ident, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", ident):
+                raise ValueError("invalid provider account id")
+            if not isinstance(home, str) or not home or "\0" in home or not Path(home).is_absolute():
+                raise ValueError("provider account home must be an absolute path")
+            canonical = os.path.normcase(str(Path(home).resolve()))
+            if ident in ids or canonical in homes:
+                raise ValueError("duplicate provider account id or canonical home")
+            ids.add(ident)
+            homes.add(canonical)
+    return value
+
+
+def _link_receipt(path):
+    rows = _account_json(path, [])
+    if not isinstance(rows, list):
+        raise ValueError("invalid Codex link ownership receipt")
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) not in (
+                    {"id", "home", "links"}, {"id", "home", "links", "st_dev", "st_ino"})
+                or not isinstance(row["id"], str) or not isinstance(row["home"], str)
+                or not Path(row["home"]).is_absolute() or not isinstance(row["links"], dict)
+                or any(type(row[field]) is not int or row[field] < 0
+                       for field in ("st_dev", "st_ino") if field in row)
+                or any(name not in CODEX_SHARED_ENTRIES or not isinstance(target, str)
+                       or not Path(target).is_absolute() for name, target in row["links"].items())):
+            raise ValueError("invalid Codex link ownership receipt")
+    return rows
+
+
+def _outside_repository(home):
+    for parent in (home, *home.parents):
+        marker = parent / ".git"
+        if (marker.is_file() or marker.is_symlink() or (marker / "HEAD").is_file() or ((parent / "HEAD").is_file()
+                and (parent / "objects").is_dir() and (parent / "refs").is_dir())):
+            raise ValueError("Codex account home must not be inside a repository; use --home PATH outside the repository")
+
+
+def _matching_account_link(link, target):
+    try:
+        return link.is_symlink() and link.resolve() == target.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _account_parent_private(parent):
+    import shlex
+    if not callable(getattr(os, "getuid", None)):
+        raise ValueError("cannot verify Codex account ancestor %s ownership; fix: use --home on a platform with ownership checks" %
+                         shlex.quote(str(parent)))
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    parent = parent.resolve()
+    for ancestor in (parent, *parent.parents):
+        info = ancestor.stat()
+        quoted = shlex.quote(str(ancestor))
+        if info.st_uid not in (0, os.getuid()):
+            raise ValueError("Codex account ancestor %s is not owned by the current user or root; fix: use --home PATH elsewhere" % quoted)
+        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            raise ValueError("unsafe Codex account ancestor %s; fix: chmod go-w %s, or use --home PATH elsewhere" %
+                             (quoted, quoted))
+
+
+def _account_home_private(home, info):
+    import shlex
+    quoted = shlex.quote(str(home))
+    if not callable(getattr(os, "getuid", None)):
+        raise ValueError("cannot verify ownership of Codex account home %s; fix: use a platform with ownership checks" % quoted)
+    if info.st_uid != os.getuid():
+        raise ValueError("Codex account home %s is not owned by the current user; fix: chown %s %s" %
+                         (quoted, os.getuid(), quoted))
+    if info.st_mode & 0o022:
+        raise ValueError("unsafe Codex account home %s; fix: chmod go-w %s" % (quoted, quoted))
+    _account_parent_private(home.parent)
+
+
+def _verify_account_directory(home, descriptor, owner):
+    info = os.fstat(descriptor) if descriptor is not None else os.lstat(str(home))
+    current = os.lstat(str(home))
+    if (not stat.S_ISDIR(current.st_mode) or not stat.S_ISDIR(info.st_mode)
+            or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+            or (owner is not None and (owner.get("st_dev"), owner.get("st_ino")) != (info.st_dev, info.st_ino))):
+        raise ValueError("Codex account directory identity changed or unverified: %s; choose another home" % home)
+    return info
+
+
+@contextmanager
+def _account_directory(home, owner=None):
+    descriptor = None
+    try:
+        initial = _verify_account_directory(home, None, owner)
+        _account_home_private(home, initial)
+        if _ACCOUNT_SAFE_UNLINK:
+            descriptor = os.open(str(home), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        expected = owner if owner is not None else {"st_dev": initial.st_dev, "st_ino": initial.st_ino}
+        info = _verify_account_directory(home, descriptor, expected)
+        _account_home_private(home, info)
+        yield descriptor, info
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _account_entry(home, descriptor, name):
+    try:
+        if descriptor is not None:
+            return os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        return os.lstat(str(home / name))
+    except FileNotFoundError:
+        return None
+
+
+def _unlink_account_entry(home, descriptor, owner, name, target, expected, dry_run=False):
+    if descriptor is None:
+        print("skipped: platform lacks safe unlink: " + str(home / name))
+        return False
+    try:
+        info = _verify_account_directory(home, descriptor, owner)
+        _account_home_private(home, info)
+        current = _account_entry(home, descriptor, name)
+        if (current is None or not stat.S_ISLNK(current.st_mode)
+                or (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)
+                or os.readlink(name, dir_fd=descriptor) != target):
+            raise ValueError("entry type, identity or target changed")
+        # Recheck after readlink: it can race a rename of either the entry or
+        # the home. The descriptor never redirects an unlink into a new home.
+        after = _account_entry(home, descriptor, name)
+        if (after is None or not stat.S_ISLNK(after.st_mode)
+                or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
+            raise ValueError("entry type or identity changed")
+        _verify_account_directory(home, descriptor, owner)
+    except (OSError, ValueError) as error:
+        print("warn: kept Codex account entry %s: %s" % (home / name, error))
+        return False
+    if not dry_run:
+        # The verified home belongs to this user and is not group/other-writable;
+        # only the same user (or trusted root) can race this final unlink.
+        os.unlink(name, dir_fd=descriptor)
+    return True
+
+
+def _recorded_account_link(home, descriptor, owner, name, target, expected):
+    try:
+        _verify_account_directory(home, descriptor, owner)
+        info = _account_entry(home, descriptor, name)
+        if (info is not None and stat.S_ISLNK(info.st_mode)
+                and (info.st_dev, info.st_ino) == (expected.st_dev, expected.st_ino)
+                and os.readlink(name, dir_fd=descriptor) == target):
+            return info
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _account_link_progress(rows, receipt, row, name, target=None):
+    from oms_runtime.common import atomic_write_json
+    if target is None:
+        row["links"].pop(name, None)
+    else:
+        row["links"][name] = target
+    atomic_write_json(receipt, rows)
+
+
+def _retire_stale_account_home(rows, receipt, row):
+    import shlex
+    from oms_runtime.common import atomic_write_json
+    try:
+        info = os.lstat(row["home"])
+    except FileNotFoundError:
+        reason = "home missing"
+    except OSError:
+        return False
+    else:
+        if (stat.S_ISDIR(info.st_mode)
+                and (row.get("st_dev"), row.get("st_ino")) == (info.st_dev, info.st_ino)):
+            return False
+        reason = "directory identity changed or unverified"
+    # Explicit unregister forgets stale authority; it never adopts the entries
+    # of a different directory at the same path.
+    rows.remove(row)
+    atomic_write_json(receipt, rows)
+    print("warn: Codex account %s %s; stale receipt removed, links kept" % (row["id"], reason))
+    print("recovery: oms connect-services --codex-account %s --home %s" %
+          (shlex.quote(row["id"]), shlex.quote(row["home"])))
+    return True
+
+
+def _drop_account_links(rows, receipt, ident=None, root=None, dry_run=False):
+    from oms_runtime.common import atomic_write_json
+    main = Path(default_account("codex")["home"])
+    for row in list(rows):
+        if ident is not None and row["id"] != ident:
+            continue
+        home = Path(row["home"])
+        if ident is not None and not dry_run and _retire_stale_account_home(rows, receipt, row):
+            continue
+        if not _ACCOUNT_SAFE_UNLINK:
+            print("skipped: platform lacks safe unlink: " + str(home))
+            continue
+        try:
+            with _account_directory(home, row) as (descriptor, _info):
+                for name, target in list(row["links"].items()):
+                    _verify_account_directory(home, descriptor, row)
+                    current = _account_entry(home, descriptor, name)
+                    recorded = (_recorded_account_link(home, descriptor, row, name, target, current)
+                                if current is not None else None)
+                    if recorded is None:
+                        if current is not None:
+                            print("warn: kept changed or unmanaged Codex account entry: " + str(home / name))
+                        if not dry_run:
+                            _account_link_progress(rows, receipt, row, name)
+                        continue
+                    allowed = root is None or Path(target) == main / name or root in Path(target).resolve().parents
+                    if not allowed:
+                        print("warn: kept changed or unmanaged Codex account entry: " + str(home / name))
+                        continue
+                    if dry_run:
+                        if _unlink_account_entry(home, descriptor, row, name, target, recorded, True):
+                            print("would remove Codex account link: " + name)
+                        continue
+                    # Retire authority before unlink so a crash cannot authorize
+                    # deleting a later replacement at this name.
+                    _account_link_progress(rows, receipt, row, name)
+                    removed = False
+                    try:
+                        removed = _unlink_account_entry(home, descriptor, row, name, target, recorded)
+                        if removed:
+                            print("removed Codex account link: " + name)
+                    except OSError as error:
+                        print("warn: kept Codex account entry %s: %s" % (home / name, error))
+                    finally:
+                        if not removed and _recorded_account_link(home, descriptor, row, name, target, recorded) is not None:
+                            _account_link_progress(rows, receipt, row, name, target)
+        except (OSError, ValueError) as error:
+            if ident is not None and not dry_run and _retire_stale_account_home(rows, receipt, row):
+                continue
+            print("warn: kept Codex account home %s: directory identity or safety check failed: %s" % (home, error))
+            continue
+        if not dry_run and not row["links"]:
+            rows.remove(row)
+            atomic_write_json(receipt, rows)
+
+
+def connect_codex_account(args):
+    from oms_runtime.common import atomic_write_json, file_lock
+    ident = args.codex_account
+    if ident == "default":
+        raise ValueError("Codex account id default is reserved for the main home; choose another id")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", ident):
+        raise ValueError("invalid provider account id")
+    registry, receipt = _account_paths()
+    with file_lock(registry):
+        value = _registration_config(registry)
+        rows = _link_receipt(receipt)
+        settings = value["providers"].get("codex")
+        entries = settings["accounts"] if settings else []
+        existing = next((row for row in entries if row["id"] == ident), None)
+        if args.remove:
+            _drop_account_links(rows, receipt, ident=ident)
+            if existing:
+                entries.remove(existing)
+                if not entries:
+                    del value["providers"]["codex"]
+                atomic_write_json(registry, value)
+            print("Codex account removed: " + ident + "; home, login and sessions kept")
+            return
+        raw_home = args.home if args.home is not None else (
+            existing["home"] if existing else str(Path.home() / (".codex-" + ident)))
+        if not raw_home or "\0" in raw_home:
+            raise ValueError("Codex account home must not be empty")
+        home = Path(raw_home).expanduser().resolve()
+        main = Path(default_account("codex")["home"])
+        if home == main:
+            raise ValueError("Codex account home must differ from the main home")
+        _outside_repository(home)
+        if home.exists() and not home.is_dir():
+            raise ValueError("Codex account home must be a directory")
+        for provider, other in value["providers"].items():
+            for row in other["accounts"]:
+                if provider == "codex" and row["id"] == ident:
+                    continue
+                if row["id"] == ident or os.path.normcase(str(Path(row["home"]).resolve())) == os.path.normcase(str(home)):
+                    raise ValueError("duplicate provider account id or canonical home")
+        owner = next((row for row in rows if row["id"] == ident and row["home"] == str(home)), None)
+        if not _ACCOUNT_SAFE_UNLINK:
+            print("skipped: platform lacks safe unlink: " + str(home))
+        if owner is None:
+            _account_parent_private(home.parent)
+            home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with _account_directory(home, owner) as (descriptor, info):
+            if owner is None:
+                owner = {"id": ident, "home": str(home), "links": {}, "st_dev": info.st_dev, "st_ino": info.st_ino}
+                rows.append(owner)
+                atomic_write_json(receipt, rows)
+            for name in CODEX_SHARED_ENTRIES:
+                link, target = home / name, str(main / name)
+                current = _account_entry(home, descriptor, name)
+                if current is not None and stat.S_ISLNK(current.st_mode):
+                    if _matching_account_link(link, main / name):
+                        continue
+                    if not args.repair:
+                        print("warn: kept conflicting link " + name + "; rerun with --repair")
+                        continue
+                    try:
+                        old_target = (os.readlink(name, dir_fd=descriptor) if descriptor is not None
+                                      else os.readlink(str(link)))
+                    except OSError:
+                        print("warn: kept Codex account entry %s: entry type or target changed" % link)
+                        continue
+                    if not _unlink_account_entry(home, descriptor, owner, name, old_target, current):
+                        continue
+                elif current is not None:
+                    print("warn: kept existing non-link " + name)
+                    continue
+                _verify_account_directory(home, descriptor, owner)
+                # Intent binds to the open directory before any new link exists.
+                owner["links"][name] = target
+                atomic_write_json(receipt, rows)
+                _verify_account_directory(home, descriptor, owner)
+                if descriptor is not None and _ACCOUNT_FD_SYMLINK:
+                    os.symlink(target, name, dir_fd=descriptor,
+                               target_is_directory=name in ("plugins", "rules", "skills"))
+                else:
+                    link.symlink_to(target, target_is_directory=name in ("plugins", "rules", "skills"))
+            _verify_account_directory(home, descriptor, owner)
+        if settings is None:
+            entries = [default_account("codex")]
+            settings = {"policy": "ordered", "accounts": entries}
+            value["providers"]["codex"] = settings
+        entry = dict(existing or {}, id=ident, home=str(home))
+        entries[:] = [row for row in entries if row["id"] != ident]
+        if args.first:
+            entries.insert(0, entry)
+        else:
+            entries.append(entry)
+        atomic_write_json(registry, value)
+        if (home / "auth.json").is_file():
+            print("Codex account registered: " + ident)
+        else:
+            import shlex
+            print("Codex account " + ident + ": registered, login pending")
+            print("CODEX_HOME=" + shlex.quote(str(home)) + " codex login")
+
+
+def doctor_codex_accounts():
+    registry, _ = _account_paths()
+    if not os.path.lexists(str(registry)):
+        return
+    value = _registration_config(registry)
+    main = Path(default_account("codex")["home"])
+    for entry in value["providers"].get("codex", {}).get("accounts", []):
+        home = Path(entry["home"])
+        prefix = "codex account " + entry["id"] + " "
+        print(("ok: " if home.is_dir() else "warn: ") + prefix +
+              ("home exists" if home.is_dir() else "home missing"))
+        try:
+            physical = home.resolve()
+            _account_home_private(physical, physical.stat())
+            print("ok: " + prefix + "ancestor chain safe")
+        except (OSError, ValueError, RuntimeError) as error:
+            print("warn: " + prefix + "home safety: " + str(error))
+        for name in CODEX_SHARED_ENTRIES:
+            link, source = home / name, main / name
+            try:
+                good = (home == main or link.is_symlink()) and source.exists() and link.resolve() == source.resolve()
+            except (OSError, RuntimeError):
+                good = False
+            print(("ok: " if good else "warn: ") + prefix + "shared " + name +
+                  (" resolves" if good else " missing or differs from main home"))
+        for name in ("auth.json", "models_cache.json"):
+            present = (home / name).is_file()
+            print(("ok: " if present else "warn: ") + prefix + name + (" present" if present else " missing"))
+
+
+def _account_command():
+    import argparse
+    from oms_runtime.common import CoreError, file_lock
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    connect = commands.add_parser("connect")
+    connect.add_argument("--codex-account", required=True)
+    connect.add_argument("--home")
+    order = connect.add_mutually_exclusive_group()
+    order.add_argument("--first", action="store_true")
+    order.add_argument("--last", action="store_true")
+    action = connect.add_mutually_exclusive_group()
+    action.add_argument("--repair", action="store_true")
+    action.add_argument("--remove", action="store_true")
+    commands.add_parser("doctor")
+    cleanup = commands.add_parser("cleanup")
+    cleanup.add_argument("--root", type=Path, required=True)
+    cleanup.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.command == "connect":
+            connect_codex_account(args)
+        elif args.command == "doctor":
+            doctor_codex_accounts()
+        else:
+            registry, receipt = _account_paths()
+            if not os.path.lexists(str(receipt)):
+                return 0
+            if args.dry_run:
+                _drop_account_links(_link_receipt(receipt), receipt, root=args.root.resolve(), dry_run=True)
+            else:
+                with file_lock(registry):
+                    _drop_account_links(_link_receipt(receipt), receipt, root=args.root.resolve())
+    except (OSError, ValueError, RuntimeError, CoreError) as error:
+        if args.command == "doctor":
+            print("warn: Codex account health unavailable: " + str(error))
+            return 0
+        print("error: " + str(error), file=__import__("sys").stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_account_command())

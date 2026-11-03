@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Connect the two account-backed services used by the harness without ever
+# Connect account-backed services used by the harness without ever
 # reading or persisting their credentials. gh and ntn own their browser login
 # and credential stores; this script only verifies the resulting sessions and
 # records the non-secret Work Journal data-source id.
@@ -14,11 +14,17 @@ MODE=auto
 CONNECT_GITHUB=1
 CONNECT_NOTION=1
 DATA_SOURCE_ID=""
+ACCOUNT_ARGS=()
+ACCOUNT_SELECTED=0
+ACCOUNT_OPTIONS=0
+SERVICE_OPTIONS=0
 
 usage() {
   cat <<'EOF'
 Usage: connect-services.sh [--auto|--required] [--data-source-id ID]
                            [--no-github] [--no-notion] [-h|--help]
+       connect-services.sh --codex-account ID [--home PATH] [--first|--last]
+                           [--repair|--remove]
 
 Authenticate GitHub with `gh auth login` and Notion with `ntn login`, then
 discover and configure the existing Work Journal data source. Credentials stay
@@ -27,23 +33,50 @@ Notion data-source id and authentication mode.
 
 --auto continues a non-interactive install with exact follow-up commands.
 --required fails unless every selected service is connected.
+
+--codex-account registers an independent Codex home (default ~/.codex-ID).
+The id default is reserved for the main home. Use --home PATH outside the
+repository when the default account home would be inside a repository.
+It shares AGENTS.md, config.toml, hooks.json, .hook-trust, plugins, rules and
+skills with the parent CODEX_HOME or ~/.codex. Existing files are kept;
+--repair replaces conflicting links only. --first prioritizes the account;
+--last is the default. --remove unregisters it and removes only recorded links,
+keeping its home, login and sessions. Login is always left to the user.
+Existing homes must belong to the current user and must not be group/other
+writable. Every ancestor through the filesystem root must belong to the current
+user or root; writable ancestors need the sticky bit. Refusals name a fix; permissions
+are never changed automatically. Removal and repair require the recorded
+directory identity and a verified link; platforms without safe unlink keep it.
+Removing a missing or replaced home forgets its stale receipt and prints the
+exact registration command to recover. Cleanup retires ownership per entry;
+only remaining recorded links retain receipts for retry.
+Account options cannot be combined with GitHub/Notion options.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --auto) MODE=auto ;;
-    --required) MODE=required ;;
+    --auto) MODE=auto; SERVICE_OPTIONS=1 ;;
+    --required) MODE=required; SERVICE_OPTIONS=1 ;;
     --data-source-id)
       [ "$#" -ge 2 ] || {
         echo "error: --data-source-id requires a value" >&2
         exit 2
       }
       DATA_SOURCE_ID="$2"
+      SERVICE_OPTIONS=1
       shift
       ;;
-    --no-github) CONNECT_GITHUB=0 ;;
-    --no-notion) CONNECT_NOTION=0 ;;
+    --no-github) CONNECT_GITHUB=0; SERVICE_OPTIONS=1 ;;
+    --no-notion) CONNECT_NOTION=0; SERVICE_OPTIONS=1 ;;
+    --codex-account|--home)
+      [ "$#" -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
+      [ "$1" != --codex-account ] || ACCOUNT_SELECTED=1
+      ACCOUNT_OPTIONS=1
+      ACCOUNT_ARGS+=("$1" "$2")
+      shift
+      ;;
+    --first|--last|--repair|--remove) ACCOUNT_ARGS+=("$1"); ACCOUNT_OPTIONS=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "error: unknown option: $1" >&2
@@ -53,6 +86,16 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$ACCOUNT_SELECTED" = 1 ]; then
+  [ "$SERVICE_OPTIONS" = 0 ] || {
+    echo "error: account options cannot be combined with GitHub/Notion options" >&2
+    exit 2
+  }
+  command -v python3 >/dev/null 2>&1 || { echo "error: Python 3 is required" >&2; exit 2; }
+  exec python3 "$ROOT/scripts/lib/provider_accounts.py" connect "${ACCOUNT_ARGS[@]}"
+fi
+[ "$ACCOUNT_OPTIONS" = 0 ] || { echo "error: account options require --codex-account ID" >&2; exit 2; }
 
 case "${OMS_CONNECT_INTERACTIVE:-auto}" in
   1) INTERACTIVE=1; LOGIN_USES_TTY=0 ;;

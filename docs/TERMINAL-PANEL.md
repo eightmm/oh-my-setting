@@ -732,27 +732,83 @@ Set `OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1` for a dispatch to allow public-only routes
 Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 
 
-Provider accounts are configured machine-wide in
+### Provider accounts
+
+Register another entitled Codex account with:
+
+```bash
+oms connect-services --codex-account credits --first
+```
+
+The command creates `~/.codex-credits` with mode 0700. Use `--home PATH` for
+another location; relative paths are resolved physically from the current
+directory. The home must differ from the main Codex home and be outside Git
+repositories.
+If your home directory is versioned, use `--home PATH` outside that repository.
+Existing account homes must belong to the current user and must not be writable
+by the group or other users. Every ancestor through the filesystem root must be
+owned by the current user or root. An ancestor writable by the group or other
+users must have the sticky bit. Refusals name the offending directory and
+`--home PATH` elsewhere as a fix; the command never changes
+existing permissions automatically. Registration requires verifiable ownership.
+The main home is the parent environment's `CODEX_HOME`, or
+`~/.codex`. The new home links `AGENTS.md`, `config.toml`, `hooks.json`,
+`.hook-trust`, `plugins`, `rules`, and `skills` to the matching main-home entries.
+Re-running keeps matching links and existing files. Conflicting links are
+reported; `--repair` replaces only those links. Missing main-home entries leave
+dangling links, reported by `oms doctor`.
+
+When `auth.json` is absent, registration succeeds with `registered, login pending`
+and prints the exact interactive command `CODEX_HOME=<home> codex login`, quoting
+the home for the shell. Run that command yourself; registration never runs login
+or reads, copies, links, or prints login data. Each home keeps its own login,
+model cache, sessions, and other CLI state. After login, the registered account
+is available to routing without editing JSON.
+
+`--first` places the account ahead of existing accounts; the default `--last`
+appends it. The ID `default` is reserved for the main home. A fresh registry
+retains the main home as `default` after a
+`--first` account. Re-running an ID reuses its registered home unless `--home`
+changes it. To unregister and remove only links created by this command:
+
+```bash
+oms connect-services --codex-account credits --remove
+```
+
+The home, login, model cache, sessions, private files, and pre-existing links
+remain. A private `codex-account-links.json` ownership receipt beside the
+registry records each home's `st_dev` and `st_ino`, plus link targets before
+creation, including interrupted work. Removal and `--repair` open and verify the
+directory without following a symlink, then check each link through that directory
+handle. Changes to the directory identity, entry type, or target keep the entry
+and produce a warning. Moved or recreated homes and older receipts without an
+identity cannot authorize link removal. On platforms lacking directory-relative
+unlink or `O_NOFOLLOW`, entries stay with `skipped: platform lacks safe unlink`.
+An explicit `--remove` retires stale receipts for missing or replaced homes,
+keeps their links, and prints the exact registration command with `--home`.
+Re-registering that ID at the same path then succeeds when the home is safe;
+existing matching links remain unowned by the command. Cleanup updates receipts
+per entry, retaining only remaining recorded links for a later `--remove`.
+Removed, absent, or changed entries lose their recorded authority; matching
+links subsequently created at those names remain untouched by later cleanup.
+Authority is retired before unlink. A kill between those steps can leave an
+unrecorded shared link that stays in place on subsequent cleanup.
+Uninstall also removes recorded links still pointing to main-home or OMS-managed
+targets. It preserves account homes and logins. Registry and receipt writes use
+atomic replacement under one shared writer lock; an interrupted operation can
+leave partial links or an older registry, and is safe to rerun. `oms doctor`
+reports each registered home's presence, safety of its complete ancestor chain,
+shared-link resolution, and existence
+of `auth.json` and `models_cache.json`; these account checks only warn.
+
+Provider accounts are stored machine-wide in
 `${XDG_CONFIG_HOME:-~/.config}/oh-my-setting/provider-accounts.json`.
 A relative `XDG_CONFIG_HOME` is ignored in favor of `~/.config`. This user-local
-file applies to every project. Homes must be absolute directories. For example,
-replace these placeholders with two separately entitled Codex CLI homes, listing
-the credit workspace before the Pro subscription:
-
-```json
-{
-  "schema": 1,
-  "providers": {
-    "codex": {
-      "policy": "ordered",
-      "accounts": [
-        {"id": "credits", "home": "/path/to/codex-credits"},
-        {"id": "pro", "home": "/path/to/codex-pro"}
-      ]
-    }
-  }
-}
-```
+file applies to every project. The command writes mode 0600, schema 1, and
+`policy: ordered` when introducing the Codex entry; each account has only `id`
+and its resolved absolute `home`. It preserves other providers and unknown
+fields, refusing malformed state without rewriting it. Routing's existing
+validation still rejects unsupported providers and unknown fields.
 
 Provider names must occur in the routing policy. Only Codex accounts are enabled;
 Claude and Pi entries are rejected with `accounts for PROVIDER are not supported yet`.
@@ -775,7 +831,7 @@ eligible. Codex remains a candidate while any account can serve the requested
 model. Only model slugs are read from each home's `models_cache.json` (at most
 4 MiB): a readable list omitting the requested model excludes that account and
 appears in `account_reason`. Missing, unreadable or malformed caches leave support
-unknown and eligible. No other home files are inspected beyond the existing
+unknown and eligible. Routing inspects no other home files beyond the existing
 bounded session-log reader.
 
 `spread` selects the eligible account with the most measured quota left, placing
@@ -804,7 +860,8 @@ This routing stage records a selection only; children still use the current home
 Child-home selection, binding attempts and native continuation, and capacity-error
 overflow are separate execution work. The workspace balance is the upstream hard
 spending limit; v1 has no OMS money cap or strict-cap ledger. Routing alone does
-not implement overflow after a capacity error, or install OMS into multiple homes.
+not implement overflow after a capacity error. Registering an account shares the
+main home's existing OMS setup; it does not install a separate OMS copy.
 
 Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. A recorded Pi provider failure can fall back once to an eligible tier candidate, provided a write leaves the worktree unchanged; policy refusals and verification failures do not trigger fallback. An OpenRouter free-model daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only trigger the one-time fallback. Judge tier allocation stays on Claude or Codex; an explicit `--to` may select another provider.
 
