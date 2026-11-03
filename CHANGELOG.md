@@ -8,6 +8,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A council synthesis shares its quote bytes across seats so the whole file
+  fits the 64 KiB panel reader; when seats outnumber the budget the later ones
+  keep a one-line pointer to their full answer. An oversized synthesis now
+  shows a labelled prefix in the panel instead of a blank view.
+- A recorded provider error outranks exit 124 on the board and in Results, so a
+  usage-limit failure that exits 124 is shown as a provider error, not a
+  timeout.
+- The panel-workspaces smoke waits for both F5 presses in its binding section
+  to return to the origin pane and retries its two must-succeed controls checks
+  with their output, fixing a CI-only race.
+
 - `oms agent-plan add` and proposal application warn when a task verify names
   an operator `--section`/`--case` or a smoke `--only` test that does not exist,
   listing valid names; the task is still added, since it may create that test.
