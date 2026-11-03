@@ -704,6 +704,65 @@ with patch.object(panel, "_dispatch_call_finished", return_value=True), \
     exited = dict(report, room=dict(report["room"], participants=[owner, finished_worker]),
                   room_attempts=dict(report["room_attempts"], main={"state": "done"}))
     assert not warnings(exited)
+
+    route = {"kind": "worker", "provider": "codex", "model": "test", "role": "worker",
+             "purpose": "implement", "workload": "routine"}
+    main_record = {"attempt_id": "main", "tool": "panel-main", "provider": "codex",
+                   "terminal": False, "refs": {"panel_room_participant": "main", "panel_room_id": "room"}}
+    with patch.dict(os.environ, {"OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}), \
+            patch.object(panel, "_validate_dispatch_verifier"), patch.object(panel, "_validate_dry_run_inputs"), \
+            patch.object(panel, "routed_command", return_value=["delegate", "--repo", str(root),
+                                                                "--verify", "true", "--task-id", "plan-task"]), \
+            patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "room",
+                         "OMS_ROOM_PARTICIPANT": "main", "OMS_PANEL_MAIN_ATTEMPT": "main"}), \
+            patch.object(panel, "events", return_value=json.dumps(main_record)), \
+            patch.object(panel, "active_mains", return_value={"main": main_record}), \
+            patch.object(dispatch.room, "resolve", return_value="room"), \
+            patch.object(dispatch.room, "records", return_value=[]), \
+            patch.object(dispatch.room, "project", return_value=finished_room), \
+            patch.object(dispatch.room, "participant", return_value={"role": "main", "provider": "codex"}), \
+            patch.object(dispatch.room, "same_room", return_value=True), \
+            patch.object(dispatch, "_plan_task_paths", return_value=(["./src/shared.py"], [])), \
+            patch.object(panel, "scope_overlaps", return_value=overlap) as overlap_check, \
+            redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        def preview(role, access, scopes):
+            return dispatch.run_dispatch(root, "codex", role, access, None, None, "true", "plan-task",
+                                         True, None, dict(route, role=role), "main", None, scopes, work_repo=root)
+        assert preview("worker", "write", None) == 0
+        assert overlap_check.call_args.args[-1] == ["src/shared.py"]
+        assert preview("worker", "write", ["extra.py"]) == 0
+        assert overlap_check.call_args.args[-1] == ["extra.py", "src/shared.py"]
+        overlap_check.reset_mock()
+        assert preview("researcher", "read", None) == 0
+        assert not overlap_check.called
+        with patch.object(dispatch, "_plan_task_paths", return_value=(["../bad*"], [])):
+            assert preview("worker", "write", None) == 0
+            assert not overlap_check.called
+        def check_declaration():
+            for paths, expected in (([], []), (["p%d" % n for n in range(16)], ["p%d" % n for n in range(16)]),
+                                    (["p%d" % n for n in range(17)], []), (["../bad*"], [])):
+                with patch.object(dispatch, "_plan_task_paths", return_value=(paths, [])):
+                    assert dispatch._owned_scopes(root, "plan-task", "worker", None) == expected
+            with patch.object(dispatch.shutil, "which", return_value="delegate"), \
+                    patch.object(panel, "work_repository", return_value=root), \
+                    patch.object(panel, "snapshot", side_effect=ValueError("no snapshot")), \
+                    patch.object(panel, "_rollover_if_needed", return_value=None), \
+                    patch.object(panel, "_dispatch_capacity"), patch.object(panel, "_reconcile_dispatch"), \
+                    patch.object(dispatch.subprocess, "run", return_value=Mock(returncode=0)), \
+                    patch.object(panel, "plan_link", return_value=None), \
+                    patch.object(dispatch, "_reserve_alias", return_value="worker"), \
+                    patch.object(dispatch.room, "join", side_effect=RuntimeError("joined")) as join:
+                with patch.object(panel, "events", side_effect=[json.dumps(main_record), "[]"]):
+                    try:
+                        dispatch.run_dispatch(root, "codex", "worker", "write", None, None, "true", "plan-task",
+                                              False, None, route, "main", None, None, work_repo=root)
+                        raise AssertionError("join was not reached")
+                    except RuntimeError as error:
+                        assert str(error) == "joined"
+                declared = join.call_args.kwargs["owns"]
+                assert declared == ["src/shared.py"]
+                assert warnings(dict(report, room=dict(report["room"], participants=[dict(finished_worker, owns=declared)])))
+        check_declaration()
 # END settled overlap warning
 
 # BEGIN continuation admission hint

@@ -1094,8 +1094,9 @@ def _validate_dispatch_verifier(repo, verify, continuation_patch=None, patch_rep
 
 def _owned_scopes(repo, task_id, kind, scopes):
     """Declared scopes plus the plan task's allowed paths, which acceptance reads back; never raises on plan paths."""
-    if not scopes or not task_id:
+    if not task_id:
         return scopes
+    scopes = scopes or []
     plan_paths = _plan_task_paths(repo, task_id)[0]
     normalized, skipped = [], []
     for path in plan_paths:
@@ -2383,7 +2384,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             raise ValueError("--scope declares a write role's files; use it with --access write")
         scopes = list(dict.fromkeys(room.normalize_scope(scope) for scope in scopes))
         room.declared_scopes(route["kind"], scopes)
-    owned = _owned_scopes(repo, task_id, route["kind"], scopes)
+    owned = (_owned_scopes(repo, task_id, route["kind"], scopes)
+             if role in WRITERS and access == "write" else scopes)
     if dry_run and not main and not (scopes and os.environ.get("OMS_ROOM_ID")):
         print(json.dumps(dict(plan, overlaps=[]) if scopes else plan))
         return 0
@@ -2493,7 +2495,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             _dispatch_capacity(room_id, state)
             _reconcile_dispatch(repo, room_id, state, caller, parent)
             state = room.project(room.records(repo, room_id))
-        if scopes:
+        if owned:
             overlap_state = dict(state)
             if scope_review_state is not None:
                 overlap_state["scope_review_state"] = scope_review_state
