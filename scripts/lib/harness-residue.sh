@@ -489,14 +489,22 @@ try:
                             raise Unproven("regenerable tree holds Git data %s" % os.fsdecode(path))
                         info = entry_stat((fd, parent, leaf))
                         is_dir = stat.S_ISDIR(info.st_mode)
-                        if (not is_dir and not stat.S_ISREG(info.st_mode)
-                                or getattr(info, "st_file_attributes", 0) & 0x400):
+                        is_link = stat.S_ISLNK(info.st_mode)
+                        if (not (is_dir or is_link or stat.S_ISREG(info.st_mode))
+                                or getattr(info, "st_file_attributes", 0) & 0x400 and not is_link):
                             raise Unproven("regenerable tree holds unsafe entry %s" % os.fsdecode(path))
-                        entries.append((path, (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)))
+                        fields = (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)
+                        if is_link:
+                            # Git worktree removal unlinks leaves without following
+                            # their targets, including outside and dangling links.
+                            target = os.readlink(leaf, dir_fd=fd) if fd is not None else os.readlink(os.path.join(parent, leaf))
+                            fields += (os.fsencode(target),)
+                        entries.append((path, fields))
+                        # Bare repositories may link their storage directories.
+                        if (is_dir or is_link) and leaf in (b"objects", b"refs"):
+                            child_dirs.add(leaf)
                         if is_dir:
                             pending.append(path)
-                            if leaf in (b"objects", b"refs"):
-                                child_dirs.add(leaf)
                         if leaf == b"HEAD":
                             has_head = True
                 if has_head and child_dirs == {b"objects", b"refs"}:
@@ -1018,8 +1026,9 @@ oms_harness_cleanup_temp_dirs() {
         # No OMS writer reuses a dead delegate worktree: every delegate run
         # (including --continue, which applies the preserved patch to a fresh
         # base) takes a new mktemp directory, and salvage only reads a kept
-        # tree into its own scratch. What remains is the operator-applied
-        # cleanup itself, between this last read and the removal below.
+        # tree into its own scratch. The comparison refuses changes between
+        # the two scans; it relies on the worktree remaining dead and quiescent
+        # between the final scan and git worktree remove below.
         proof="$OMS_HARNESS_RESIDUE_PROOF"
         if ! oms_harness_residue_is_removable "$base" "$dir" "$marker" ||
             [ "$OMS_HARNESS_RESIDUE_VALIDATED" != 1 ] ||

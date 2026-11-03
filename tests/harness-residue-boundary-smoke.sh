@@ -341,7 +341,7 @@ printf '{}\n' > "$repo/package.json"
 printf '{}\n' > "$repo/pkg/package.json"
 git -C "$repo" add package.json pkg/package.json
 git -C "$repo" commit -qm packages
-for cache_case in venv nestedvenv pytest mypy ruff node nestednode mixed nocfg cfgdir cfglink rootlink parentlink unignored changed otherignored nopackage untrackedpackage emptycache nestedrepo deletedpackage linkedpackage emptypackage incompleterepo barerepo casegit gitfile externallink danglinglink; do
+for cache_case in venv nestedvenv pytest mypy ruff node nestednode mixed nocfg cfgdir cfglink rootlink parentlink unignored changed otherignored nopackage untrackedpackage emptycache nestedrepo deletedpackage linkedpackage emptypackage incompleterepo barerepo bareobjectslink barerefslink barelinkshead casegit gitfile externallink danglinglink venvlinks nodebin; do
   delegate_run "$cache_case" "task-$cache_case" "done"
   cache_wt="$TMPDIR/oh-my-setting-delegate.$cache_case/wt-$cache_case"
   cache_class=".venv"
@@ -352,15 +352,16 @@ for cache_case in venv nestedvenv pytest mypy ruff node nestednode mixed nocfg c
     pytest) cache_rel="pkg/deep/.pytest_cache"; cache_class=".pytest_cache" ;;
     mypy) cache_rel="pkg/.mypy_cache"; cache_class=".mypy_cache" ;;
     ruff) cache_rel=".ruff_cache"; cache_class=".ruff_cache" ;;
-    node) cache_rel="node_modules"; cache_class="node_modules" ;;
+    node|nodebin) cache_rel="node_modules"; cache_class="node_modules" ;;
     nestednode) cache_rel="pkg/node_modules"; cache_class="node_modules" ;;
     deletedpackage|linkedpackage|emptypackage)
       cache_rel="node_modules"; cache_class="node_modules"
       [ "$cache_case" = emptypackage ] || cache_keep="holds ignored file node_modules/data"
       ;;
     nestedrepo) cache_keep="holds ignored file .venv/src/dep/" ;;
-    incompleterepo|casegit|gitfile|barerepo) cache_keep="regenerable tree holds Git data" ;;
-    externallink|danglinglink) cache_keep="regenerable tree holds unsafe entry" ;;
+    incompleterepo|casegit|gitfile|barerepo|bareobjectslink|barerefslink|barelinkshead)
+      cache_keep="regenerable tree holds Git data"
+      ;;
     parentlink) cache_rel="linked/.venv" ;;
     unignored) cache_keep="does not reproduce the worktree's files" ;;
     changed) cache_keep="does not reproduce the worktree's files" ;;
@@ -394,9 +395,33 @@ for cache_case in venv nestedvenv pytest mypy ruff node nestednode mixed nocfg c
       mkdir -p "$cache_wt/.venv/src/dep"
       printf 'unresolved git directory\n' > "$cache_wt/.venv/src/dep/.git"
       ;;
-    barerepo) git init --bare -q "$cache_wt/.venv/recovery.git" ;;
+    barerepo|bareobjectslink|barerefslink|barelinkshead)
+      git init --bare -q "$cache_wt/.venv/recovery.git"
+      case "$cache_case" in
+        bareobjectslink) cache_links="objects" ;;
+        barerefslink) cache_links="refs" ;;
+        barelinkshead) cache_links="objects refs HEAD" ;;
+        *) cache_links="" ;;
+      esac
+      for cache_link in $cache_links; do
+        mv "$cache_wt/.venv/recovery.git/$cache_link" "$TMP/cache-outside/$cache_link"
+        ln -s "$TMP/cache-outside/$cache_link" "$cache_wt/.venv/recovery.git/$cache_link"
+      done
+      ;;
     externallink) ln -s "$TMP/cache-outside" "$cache_wt/.venv/external" ;;
     danglinglink) ln -s absent "$cache_wt/.venv/dangling" ;;
+    venvlinks)
+      mkdir -p "$cache_wt/.venv/bin" "$cache_wt/.venv/lib"
+      printf 'outside interpreter\n' > "$TMP/cache-outside/python3"
+      ln -s python3 "$cache_wt/.venv/bin/python"
+      ln -s "$TMP/cache-outside/python3" "$cache_wt/.venv/bin/python3"
+      ln -s lib "$cache_wt/.venv/lib64"
+      ;;
+    nodebin)
+      mkdir -p "$cache_wt/node_modules/.bin" "$cache_wt/node_modules/pkg/bin"
+      printf 'module command\n' > "$cache_wt/node_modules/pkg/bin/x"
+      ln -s ../pkg/bin/x "$cache_wt/node_modules/.bin/x"
+      ;;
     nestedrepo)
       mkdir -p "$cache_wt/.venv/src/dep"
       git -C "$cache_wt/.venv/src/dep" init -q
@@ -466,6 +491,10 @@ for cache_case in venv nestedvenv pytest mypy ruff node nestednode mixed nocfg c
   fi
   [ "$(cat "$TMP/cache-outside/keep")" = 'outside sentinel' ] ||
     fail "$cache_case cleanup followed a link outside the worktree"
+  if [ "$cache_case" = venvlinks ]; then
+    [ "$(cat "$TMP/cache-outside/python3")" = 'outside interpreter' ] ||
+      fail "virtualenv cleanup removed the outside interpreter"
+  fi
   if [ "$cache_case" = unignored ]; then
     cp "$TMP/cache-exclude" "$repo/.git/info/exclude"
     rm "$TMP/cache-exclude"
@@ -512,7 +541,8 @@ nodes = [node for node in ast.walk(ast.parse(source))
          or (isinstance(node, ast.ClassDef) and node.name == "Unproven")]
 scan_scope = dict(hashlib=hashlib, stat=stat, entry_stat=entry_info,
                   walk=lambda path: (None, b"virtual", b"."), OTHER=object(),
-                  os=SimpleNamespace(path=os.path, fsencode=os.fsencode, fsdecode=os.fsdecode, scandir=entries))
+                  os=SimpleNamespace(path=os.path, fsencode=os.fsencode, fsdecode=os.fsdecode, scandir=entries,
+                                     readlink=lambda *args, **kwargs: fixture["target"]))
 exec(compile(ast.Module(body=nodes, type_ignores=[]), "tree evidence", "exec"), scan_scope)
 assert "regenerable_tree" in scan_scope, "regenerable disk scan is missing"
 scan = scan_scope["regenerable_tree"]
@@ -542,14 +572,44 @@ for field in ("size", "mtime", "mode"):
         assert scan(b".venv") != before, field
     fixture[field] = original
 fixture["attributes"] = 0x400
+for mode in (stat.S_IFREG, stat.S_IFDIR):
+    fixture["mode"] = mode
+    try:
+        scan(b".venv")
+    except scan_scope["Unproven"] as error:
+        assert "regenerable tree holds unsafe entry" in str(error), error
+    else:
+        raise AssertionError("non-symlink reparse entry was accepted")
+fixture["attributes"] = 0
+fixture["mode"] = stat.S_IFLNK
+for attributes in (0, 0x400):
+    fixture["attributes"] = attributes
+    fixture["target"] = b"a"
+    before = scan(b".venv")
+    # Identical metadata and target length: only readlink bytes distinguish them.
+    for target in (b"b", b"../outside", os.fsencode(os.path.abspath("outside")), b"absent", b"\xff"):
+        fixture["target"] = target
+        assert scan(b".venv") != before, target
+def unreadable_link(*args, **kwargs):
+    raise OSError("link changed while reading")
+scan_scope["os"].readlink = unreadable_link
 try:
     scan(b".venv")
-except scan_scope["Unproven"] as error:
-    assert "regenerable tree holds unsafe entry" in str(error), error
+except OSError:
+    pass  # The evidence entry point converts read errors to an unproven result.
 else:
-    raise AssertionError("reparse entry was accepted")
-fixture["attributes"] = 0
-for field, value in (("root_mode", stat.S_IFREG), ("root_attributes", 0x400)):
+    raise AssertionError("unreadable link produced a proof")
+fixture["mode"], fixture["attributes"] = stat.S_IFREG, 0
+for mode in (stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK):
+    fixture["mode"] = mode
+    try:
+        scan(b".venv")
+    except scan_scope["Unproven"] as error:
+        assert "regenerable tree holds unsafe entry" in str(error), error
+    else:
+        raise AssertionError("special entry was accepted")
+fixture["mode"] = stat.S_IFREG
+for field, value in (("root_mode", stat.S_IFREG), ("root_mode", stat.S_IFLNK), ("root_attributes", 0x400)):
     original = fixture[field]
     fixture[field] = value
     try:
@@ -710,6 +770,7 @@ git -C "$repo" config --unset filter.sentinel.smudge
 eval "real_$(declare -f oms_harness_classify_dead_residue)"
 mutate_after=""
 remove_cfg_after=""
+retarget_after=""
 relist_after=""
 add_sibling_after=""
 target_classification_calls=0
@@ -723,6 +784,11 @@ oms_harness_classify_dead_residue() {
   if [ -n "$remove_cfg_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
     rm "$remove_cfg_after"
     remove_cfg_after=""
+  fi
+  if [ -n "$retarget_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+    rm "$retarget_after"
+    ln -s other "$retarget_after"
+    retarget_after=""
   fi
   if [ -n "$relist_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
     events start --provider claude --tool peer-delegate --task-id "task-$relist_after" \
@@ -757,6 +823,18 @@ mutate_after="$TMPDIR/oh-my-setting-delegate.venv-content-raced/wt-venv-content-
 printf 'cache\n' > "$mutate_after"
 kept_with venv-content-raced "worktree changed during cleanup" "changing ignored virtualenv content between proofs must keep the worktree"
 mutate_after=""
+delegate_run venv-link-raced task-venv-link-raced "done"
+link_wt="$TMPDIR/oh-my-setting-delegate.venv-link-raced/wt-venv-link-raced"
+mkdir -p "$link_wt/.venv"
+: > "$link_wt/.venv/pyvenv.cfg"
+ln -s first "$link_wt/.venv/python"
+cleanup_out 1 | grep >/dev/null -F '; settled; regenerable .venv)' ||
+  fail "virtualenv link must qualify before the retarget race"
+# Replacing the link happens after the first proof, before the removal recheck.
+retarget_after="$link_wt/.venv/python"
+kept_with venv-link-raced "worktree changed during cleanup" \
+  "retargeting an ignored virtualenv link between proofs must keep the worktree"
+retarget_after=""
 delegate_run relisted task-relisted "done"
 relist_after=relisted
 kept_with relisted "worktree changed during cleanup" "a run recorded between classification and removal must keep the worktree"
