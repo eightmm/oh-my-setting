@@ -2939,7 +2939,7 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
     seats = [item for item in seats if item["provider"] in PROVIDERS]
     if len({item["provider"] for item in seats}) < 2:
         raise ValueError("council tier must include two independent provider families")
-    from terminal_panel import provider_catalog
+    from terminal_panel import provider_catalog, routable_route_model
     for extra in routes.get("council", {}).get("extra", []):
         provider, model = extra["provider"], extra["model"]
         if any(item["provider"] == provider for item in seats):
@@ -2953,13 +2953,23 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
             reason = "catalog lookup failed"
         elif not row.get("installed"):
             reason = "not installed"
-        elif model not in row.get("catalog_models", row.get("models", [])):
-            reason = "model %s absent from the catalog" % model
-        elif (len(seats) + 1) * (rounds + 1) > 12:
-            reason = "%s seats x %s rounds exceeds the 12-call budget" % (len(seats) + 1, rounds + 1)
         else:
-            seats.append(dict(extra, optional=True))
-            continue
+            catalog = (row.get("routable", row.get("models", [])) if provider == "antigravity"
+                       else row.get("catalog_models", row.get("models", [])))
+            try:
+                if not isinstance(catalog, list) or not catalog or not all(isinstance(item, str) for item in catalog):
+                    raise ValueError("model %s absent from the catalog" % model)
+                if provider == "antigravity":
+                    model = routable_route_model(provider, model, catalog)
+                if model not in catalog:
+                    raise ValueError("model %s absent from the catalog" % model)
+                if (len(seats) + 1) * (rounds + 1) > 12:
+                    raise ValueError("%s seats x %s rounds exceeds the 12-call budget" % (len(seats) + 1, rounds + 1))
+            except ValueError as error:
+                reason = str(error)
+            else:
+                seats.append(dict(extra, model=model, optional=True))
+                continue
         print("council: %s seat skipped: %s" % (provider, reason), file=sys.stderr)
     targets = ",".join(item["provider"] + ":model=" + item["model"] + (":optional" if item.get("optional") else "") for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),

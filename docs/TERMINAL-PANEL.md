@@ -1107,11 +1107,21 @@ front doors. Omitted `--task-id` and `--label` are derived from the prompt and r
 `deep` adds the deep pair (Opus, Sol), while `frontier` combines the deep pair with
 the frontier pair (Fable, Astra). Seats come from the `tiers` routes in `config/panel-routing.json`: routine uses the routine tier, deep uses the deep and routine tiers, and frontier uses the deep and frontier tiers, so the seat set depends on `--workload`, not a fixed list. Each tier covers both families. One rebuttal round
 means four primary calls for routine and eight for deep or frontier before optional seats; two rounds
-mean six and twelve respectively. An installed Antigravity seat with the configured catalog model joins when it fits the 12-primary-call budget. This extra seat uses the `provider:model=NAME:optional` syntax; if it fails, the council records the failure and continues without it. Format repair can add one call per
+mean six and twelve respectively. An installed Antigravity seat joins when it
+fits the 12-primary-call budget. Its configured Gemini ID selects a name and
+level (for example, `gemini-4-argon-high` selects `argon-high`); council routing
+pins the newest numeric generation of that family in the provider's routable
+catalog, excluding models shown as not routed by `oms models`. If that name is
+absent, routing may select the newest generation of another Gemini name at the
+same level only when exactly one name is routable there. Otherwise the skip
+label names the configured family and routable choices; an empty or unreadable
+catalog also skips the seat. The council summary shows the resolved model.
+This extra seat uses the `provider:model=NAME:optional` syntax; if it fails, the
+council records the failure and continues without it. Format repair can add one call per
 primary call. `--dry-run` exposes both counts without executing a model. Every
 required seat must complete to report council success; failed seats remain
 visible and the owner still decides the outcome. All seats are read-only. There
-is no model fallback or additional synthesis-model call.
+is no model fallback after a seat launches or additional synthesis-model call.
 
 The board's bottom is one box whose top edge is a tab strip: Log, Detail, Plan,
 Messages, Past and Attention, which stay even when empty, plus Debate while a debate exists. The selected tab is bracketed; a `•` after Debate marks a

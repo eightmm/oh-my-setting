@@ -2147,6 +2147,60 @@ for title in ("".join(("api", "_key", "=", "fixture-value")), "/private/absolute
 assert panel.safe_label("설명 \033[31m source") == "설명 ?[31m source"
 
 # BEGIN council extra seats
+import panel_routing
+for model, family, version in (
+        ("gemini-4-argon-high", "argon-high", (4,)),
+        ("gemini-4.0-argon-medium", "argon-medium", (4,)),
+        ("gemini-4.10-argon-low", "argon-low", (4, 10)),
+        ("gemini-3.1-pro-high", "pro-high", (3, 1)),
+        ("gemini-0-deep-think-high", "deep-think-high", (0,))):
+    assert panel.route_family("antigravity", model) == (family, version), model
+    assert panel_routing.valid_route({"provider": "antigravity", "model": model, "effort": "high"}), model
+for model in (None, "", "gemini-latest", "gemini-4-argon", "gemini-4-argon-ultra",
+              "gemini-4..1-argon-high", "gemini-4.-argon-high", "gemini-4--high", "gpt-6-sol"):
+    assert panel.route_family("antigravity", model) is None, model
+    assert not panel_routing.valid_route({"provider": "antigravity", "model": model, "effort": "high"}), model
+configured_extra = panel.policy()["council"]["extra"][0]
+assert configured_extra["model"] == "gemini-4-argon-high", configured_extra
+argon_catalog = ["gemini-4-argon-" + level for level in ("low", "medium", "high")]
+for configured, routable, resolved, note in (
+        ("gemini-3.1-argon-high", argon_catalog, "gemini-4-argon-high", ""),
+        (configured_extra["model"], argon_catalog, "gemini-4-argon-high", ""),
+        (configured_extra["model"], ["gemini-5-argon-high"], "gemini-5-argon-high", ""),
+        ("gemini-3.1-pro-high", argon_catalog, "gemini-4-argon-high", ""),
+        ("gemini-3.1-pro-high", ["gemini-4-argon-high", "gemini-5-argon-high"], "gemini-5-argon-high", ""),
+        ("gemini-3.1-pro-high", ["gemini-4-argon-high", "gemini-4-orion-low"], "gemini-4-argon-high", ""),
+        ("gemini-3.1-argon-low", argon_catalog, "gemini-4-argon-low", ""),
+        ("gemini-3.1-argon-medium", argon_catalog, "gemini-4-argon-medium", ""),
+        ("gemini-4-argon-high", ["gemini-4.2-argon-high", "gemini-4.10-argon-high"], "gemini-4.10-argon-high", ""),
+        ("gemini-4.0-argon-high", ["gemini-4-argon-high"], "gemini-4-argon-high", ""),
+        ("gemini-3.1-argon-high", ["gemini-4-argon-high", "gemini-4-orion-high"], "gemini-4-argon-high", ""),
+        ("gemini-3.1-pro-high", ["gemini-4-argon-high", "gemini-4-orion-high"], None, "configured family pro-high"),
+        ("gemini-3.1-argon-high", ["gpt-6-sol"], None, "configured family argon-high"),
+        ("gemini-3.1-argon-high", argon_catalog[:2], None, "configured family argon-high"),
+        ("gemini-3.1-argon-high", ["gemini-4..1-argon-high", "gemini-5-argon-ultra"], None, "configured family argon-high"),
+        ("gemini-latest", argon_catalog, None, "role routes require a versioned model family"),
+        ("gemini-3.1-argon-high", [], None, "absent from the catalog"),
+        ("gemini-3.1-argon-high", None, None, "absent from the catalog"),
+        ("gemini-3.1-argon-high", 0, None, "absent from the catalog"),
+        ("gemini-3.1-argon-high", "malformed", None, "absent from the catalog"),
+        ("gemini-3.1-argon-high", [None], None, "absent from the catalog")):
+    candidate = deepcopy(panel.policy())
+    candidate["council"] = {"extra": [{"provider": "antigravity", "model": configured, "effort": "high"}]}
+    # Full-catalog presence cannot turn a non-routable model into a seat.
+    catalog = [configured, "gemini-3.8-flash-high", "gpt-6-sol"] + (routable if isinstance(routable, list) else [])
+    row = {"provider": "antigravity", "installed": True, "models": catalog,
+           "catalog_models": catalog, "routable": routable}
+    output = io.StringIO()
+    with patch.object(panel, "policy", return_value=candidate), \
+            patch.object(panel, "provider_catalog", return_value=[row]), redirect_stderr(output):
+        argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
+    targets = argv[argv.index("--providers") + 1].split(",")
+    extra_targets = [target for target in targets if target.startswith("antigravity:")]
+    assert extra_targets == (["antigravity:model=" + resolved + ":optional"] if resolved else []), (configured, routable, targets)
+    assert note in output.getvalue(), output.getvalue()
+    if note.startswith("configured family"):
+        assert "routable choices: " + ", ".join(sorted(routable)) in output.getvalue(), output.getvalue()
 extra_route = {"provider": "antigravity", "model": "gemini-3.1-pro-high", "effort": "high"}
 extra_policy = deepcopy(panel.policy())
 extra_policy["council"] = {"extra": [extra_route]}
@@ -2163,7 +2217,6 @@ for installed, models, rounds, workload, included, note in (
         argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
     assert ("antigravity:model=gemini-3.1-pro-high:optional" in argv[argv.index("--providers") + 1]) == included
     assert note in output.getvalue(), output.getvalue()
-import panel_routing
 for failure in (ValueError("unavailable"), subprocess.TimeoutExpired("catalog", 1), OSError("unavailable")):
     output = io.StringIO()
     with patch.object(panel, "policy", return_value=extra_policy), \
@@ -2213,11 +2266,18 @@ for council_value in (None, {"extra": []}, {"extra": [extra_route]}):
         candidate["council"] = council_value
     with patch.object(panel_routing.Path, "read_text", return_value=json.dumps(candidate)):
         assert panel_routing.policy()["council"]["extra"] == (council_value or {"extra": []})["extra"]
+budget_policy = deepcopy(extra_policy)
+budget_policy["tiers"]["deep"] = budget_policy["tiers"]["deep"][:1]
+with patch.object(panel, "policy", return_value=budget_policy), \
+        patch.object(panel, "provider_catalog", return_value=[{"provider": "antigravity", "installed": True,
+                                                             "routable": [extra_route["model"]]}]):
+    argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=2)
+assert len(argv[argv.index("--providers") + 1].split(",")) * 3 == 12, argv
 class CouncilStarted(Exception):
     pass
 advertised = io.StringIO()
 with patch.object(panel, "policy", return_value=extra_policy), \
-        patch.object(panel, "provider_catalog", return_value=[{"provider": "antigravity", "installed": True, "models": [extra_route["model"]]}]), \
+        patch.object(panel, "provider_catalog", return_value=[{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
         patch.object(panel, "child_environment", return_value={}), \
         patch.object(panel.room, "resolve", return_value=None), \
         patch.object(panel, "events", side_effect=CouncilStarted), redirect_stdout(advertised):
@@ -2227,7 +2287,8 @@ with patch.object(panel, "policy", return_value=extra_policy), \
         pass
     else:
         raise AssertionError("council did not start")
-assert "gemini-3.1-pro-high" in advertised.getvalue(), advertised.getvalue()
+assert "gemini-4-argon-high" in advertised.getvalue(), advertised.getvalue()
+assert extra_route["model"] not in advertised.getvalue(), advertised.getvalue()
 assert ":optional" not in advertised.getvalue(), advertised.getvalue()
 # END council extra seats
 

@@ -43,13 +43,18 @@ TIE_BAND_DEFAULTS = {"gap": 15}
 
 
 def route_family(provider, model):
-    """(family, version) of a versioned role model; scripts/lib/model-capability.sh oms_codex_route_family is the shell twin."""
+    """(family, version) of a role model; oms_codex_route_family is the Codex-only shell twin."""
     pattern = {"codex": r"gpt-(\d+(?:\.\d+)?)-(astra|sol|terra|luna)",
-               "claude": r"claude-(opus|sonnet|fable|haiku)-(\d+(?:-\d+)*)"}.get(provider)
+               "claude": r"claude-(opus|sonnet|fable|haiku)-(\d+(?:-\d+)*)",
+               "antigravity": r"gemini-(\d+(?:\.\d+)?)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-(low|medium|high)"}.get(provider)
     match = re.fullmatch(pattern, model) if pattern and isinstance(model, str) else None
     if not match:
         return None
-    number, family = match.groups() if provider == "codex" else reversed(match.groups())
+    if provider == "antigravity":
+        number, name, level = match.groups()
+        family = name + "-" + level
+    else:
+        number, family = match.groups() if provider == "codex" else reversed(match.groups())
     version = tuple(int(part) for part in re.split(r"[.-]", number))
     while len(version) > 1 and version[-1] == 0:
         version = version[:-1]
@@ -69,11 +74,26 @@ def routable_route_model(provider, configured, catalog):
     """Resolve native families or exact provider IDs; an empty exact catalog defers to the CLI.
 
     A Codex family behind the catalog's newest major generation is refused, matching the shell's routable set.
+    Antigravity requires a routable catalog and preserves the configured level; a missing name may use one unambiguous name.
     """
     if provider in EXACT_MODEL_PROVIDERS:
         if catalog and configured not in catalog:
             raise ValueError("%s exact model %s is absent from the catalog" % (provider, configured))
         return configured
+    if provider == "antigravity":
+        known = route_family(provider, configured)
+        if not known:
+            raise ValueError("role routes require a versioned model family")
+        families = {model: route_family(provider, model) for model in catalog if route_family(provider, model)}
+        candidates = [model for model, family in families.items() if family[0] == known[0]]
+        if not candidates:
+            candidates = [model for model, family in families.items()
+                          if family[0].rsplit("-", 1)[1] == known[0].rsplit("-", 1)[1]]
+            if len({families[model][0] for model in candidates}) != 1:
+                raise ValueError("configured family %s absent from the routable catalog; routable choices: %s"
+                                 % (known[0], ", ".join(sorted(catalog)) or "none"))
+        # The configured ID selects a family, never an unavailable catalog entry.
+        return newest_route_model(provider, candidates[0], candidates)
     model = newest_route_model(provider, configured, catalog)
     if provider == "codex":
         majors = [family[1][0] for family in (route_family(provider, m) for m in catalog) if family]
@@ -93,7 +113,7 @@ def valid_route(route):
     provider, model = route["provider"], route["model"]
     if provider in EXACT_MODEL_PROVIDERS:
         return re.fullmatch(r"[^\s/\x00-][^\s/\x00]*/[^\s\x00]+", model) is not None
-    if provider == "codex":
+    if provider in {"codex", "antigravity"}:
         return route_family(provider, model) is not None
     return provider in MODEL_IDS and model in MODEL_IDS[provider]
 
@@ -134,7 +154,8 @@ def policy():
     if set(tiers) != set(TIERS):
         raise ValueError("invalid panel tiers")
     for tier in TIERS:
-        if not isinstance(tiers.get(tier), list) or not tiers[tier] or not all(map(valid_route, tiers[tier])):
+        if (not isinstance(tiers.get(tier), list) or not tiers[tier] or not all(map(valid_route, tiers[tier]))
+                or any(route["provider"] == "antigravity" for route in tiers[tier])):
             raise ValueError("invalid panel tier: %s" % tier)
         if len({c["provider"] for c in tiers[tier]}) != len(tiers[tier]):
             raise ValueError("duplicate provider in panel tier: %s" % tier)
