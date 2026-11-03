@@ -545,6 +545,7 @@ def exercise_public_only_routing():
 
 exercise_public_only_routing()
 
+# BEGIN settled overlap warning
 # A finished write call keeps its declared scope in the advisory while its patch awaits a decision.
 finished_worker = {"participant": "W1", "joined": True, "parent": "main", "role": "worker",
                    "owns": ["src/shared.py"]}
@@ -566,6 +567,54 @@ with patch.object(panel, "_dispatch_call_finished", return_value=True), \
     finalized_room = dict(finished_room, scope_review_state=finalized_scope_state)
     assert dispatch.scope_overlaps(temporary, "room", finalized_room, "main", ["src/shared.py"]) == []
     assert dispatch.scope_overlaps(temporary, "room", finished_room, "main", ["src/shared.py"]) == []
+
+    report = {"room": dict(finished_room, id="room", call_results=finished_scope_state["call_results"]),
+              "call_results": finished_scope_state["call_results"],
+              "room_attempts": finished_scope_state["room_attempts"], "finalized": {},
+              "awaiting_admission": ["W1"]}
+    def warnings(snapshot):
+        return dispatch.scope_overlaps(temporary, "room", dict(finished_room, scope_review_state=snapshot),
+                                       "main", ["src/shared.py"])
+    assert warnings(report)
+    assert not warnings(dict(report, finalized={"finished-patch-task": "admitted"}))
+    assert not warnings(dict(report, plan={"tasks": [{"id": "finished-patch-task", "state": "done"}]}))
+    later = dict(finished_worker, participant="W2", owns=[], seq=2)
+    newer = dict(report, room=dict(report["room"], participants=[dict(finished_worker, seq=1), later]),
+                 room_attempts=dict(report["room_attempts"], W2={"task_id": "finished-patch-task", "state": "review"}))
+    assert not warnings(newer)
+    assert warnings(dict(report, finalized={"finished-patch-task": "failed"}))
+    done = dict(report, room_attempts={"W1": {"task_id": "finished-patch-task", "state": "done"}})
+    assert warnings(done)
+    assert not warnings(dict(done, awaiting_admission=[]))
+    attempt = {"attempt_id": "att-w1", "task_id": "finished-patch-task", "state": "review", "refs": {}}
+    patch_row = {"kind": "delegate", "attempt_id": "att-w1", "task_id": "finished-patch-task",
+                 "patch": "w.patch", "patch_sha256": "a" * 64}
+    recorded = dict(report, room_attempts={"W1": attempt}, admission_records=([attempt], [patch_row]))
+    assert warnings(recorded)
+    for kind in ("patch-admit", "patch-land"):
+        receipt = {"kind": kind, "task_id": "finished-patch-task", "patch_sha256": "a" * 64}
+        assert not warnings(dict(recorded, admission_records=([attempt], [patch_row, receipt])))
+    owner = {"participant": "main", "joined": True, "role": "main", "seq": 0}
+    exited = dict(report, room=dict(report["room"], participants=[owner, finished_worker]),
+                  room_attempts=dict(report["room_attempts"], main={"state": "done"}))
+    assert not warnings(exited)
+# END settled overlap warning
+
+# BEGIN continuation admission hint
+digest_a, digest_b = "a" * 64, "b" * 64
+workers = [{"task_id": "chain", "attempt_id": "a", "refs": {}},
+           {"task_id": "chain", "attempt_id": "b", "refs": {"panel_continues": "a"}}]
+records = [{"task_id": "chain", "kind": "delegate", "attempt_id": "a", "patch": "a.patch", "patch_sha256": digest_a},
+           {"task_id": "chain", "kind": "delegate", "attempt_id": "b", "patch": "b.patch", "patch_sha256": digest_b},
+           {"task_id": "chain", "kind": "patch-land", "patch_sha256": digest_b}]
+for receipt in (records[-1], dict(records[-1], kind="patch-admit"),
+                dict(records[-1], kind="panel-accept", attempt_id="b")):
+    assert saved._scan_admissions(workers, records[:2] + [receipt], {"chain"})[0] == set()
+for ref in (None, "", "missing", 0):
+    unrelated = [workers[0], dict(workers[1], refs={"panel_continues": ref})]
+    assert saved._scan_admissions(unrelated, records, {"chain"})[0] == {"chain"}
+assert saved._scan_admissions(workers, records[:2], {"chain"})[0] == {"chain"}
+# END continuation admission hint
 
 def exercise_continuation_preference():
     from panel_routing import allocate

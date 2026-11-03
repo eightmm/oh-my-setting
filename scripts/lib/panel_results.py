@@ -2210,7 +2210,7 @@ def _admission_scan(repo, task_ids, _tick=None):
     return _scan_admissions(attempts, rows, wanted)
 
 
-def _scan_admissions(attempts, rows, wanted):
+def _scan_admissions(attempts, rows, wanted, _attempt_filter=None):
     patches, admitted, seen, accepted = set(), set(), set(), {}
     for row in rows:
         ident, kind = row.get('task_id'), row.get('kind')
@@ -2230,9 +2230,20 @@ def _scan_admissions(attempts, rows, wanted):
         patches.update((ident, None, None) for ident in wanted - seen)
     landed = lambda ident, digest: any(
         task == ident and (digest is None or done is None or done == digest) for task, done in admitted)
+    positions = {(row.get('task_id'), row.get('attempt_id')): index for index, row in enumerate(attempts)
+                 if row.get('attempt_id')}
+    settled_patches = [(ident, attempt) for ident, digest, attempt in patches
+                       if landed(ident, digest) or (ident, digest, attempt) in accepted]
+    def continued_to_settled(ident, attempt):
+        start = positions.get((ident, attempt)) if attempt else None
+        return start is not None and any(
+            task == ident and end is not None and end > start and _continues(attempts, start, end)
+            for task, successor in settled_patches for end in [positions.get((task, successor))])
     # An accept record settles only the patch of its own attempt: a later round's patch is new bytes or a new attempt.
     pending = {ident for ident, digest, attempt in patches
-               if not landed(ident, digest) and (ident, digest, attempt) not in accepted}
+               if not landed(ident, digest) and (ident, digest, attempt) not in accepted
+               and not continued_to_settled(ident, attempt)
+               and (_attempt_filter is None or attempt == _attempt_filter)}
     waiting = {}
     for (ident, digest, attempt), stamp in accepted.items():
         if ident not in pending and not landed(ident, digest):

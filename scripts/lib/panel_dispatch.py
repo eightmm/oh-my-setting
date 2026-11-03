@@ -756,9 +756,16 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
     review_state = state.get("scope_review_state", {})
     if not isinstance(review_state, dict):
         review_state = {}
-    call_results = review_state.get("call_results", {})
+    report_room = review_state.get("room")
+    call_results = review_state.get("call_results", report_room.get("call_results", {}) if isinstance(report_room, dict) else {})
     attempts = review_state.get("room_attempts", {})
     finalized = review_state.get("finalized")
+    projected = {}
+    classify = None
+    if isinstance(review_state.get("room"), dict):
+        from room_view import call_classifier, nodes
+        projected = {call.get("participant"): call for call in nodes(review_state)}
+        classify = call_classifier(review_state)
     found = []
     for other in state["participants"]:
         if not other["joined"] or other["participant"] == caller or not other.get("owns"):
@@ -771,11 +778,31 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
                 task_id = result.get("task_id") if isinstance(result, dict) else None
                 if (not task_id and isinstance(attempt, dict)):
                     task_id = attempt.get("task_id")
+                from room_view import DECIDED
                 pending_patch = (isinstance(finalized, dict) and isinstance(task_id, str) and task_id
-                                 and task_id not in finalized and isinstance(result, dict)
+                                 and finalized.get(task_id) not in DECIDED and isinstance(result, dict)
                                  and result.get("task_id") == task_id and result.get("patch")
                                  and result.get("needs_review") is True and isinstance(attempt, dict)
-                                 and attempt.get("task_id") == task_id and attempt.get("state") == "review")
+                                 and attempt.get("task_id") == task_id and attempt.get("state") in {"review", "done"})
+                if pending_patch and classify is not None:
+                    call = projected.get(other["participant"])
+                    pending_patch = call is not None and classify(call) != "past"
+                    if pending_patch and call.get("attempt"):
+                        try:
+                            from panel_cache import read_shared
+                            from panel_results import _records, _scan_admissions
+                            records = review_state.get("admission_records")
+                            if records is None:
+                                records = read_shared(repo, 'result-records', lambda: _records(repo))
+                            rows = records[1]
+                            has_patch = any(row.get("task_id") == task_id and row.get("attempt_id") == call["attempt"]
+                                            and row.get("patch") and row.get("kind") in
+                                            {"ask", "call", "consult", "delegate", "review", "ask-synthesis"}
+                                            for row in rows)
+                            if has_patch:
+                                pending_patch = bool(_scan_admissions(records[0], rows, {task_id}, call["attempt"])[0])
+                        except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, subprocess.SubprocessError):
+                            pass
                 if pending_patch:
                     found += [{"participant": other["participant"], "role": other["role"],
                                "scope": theirs, "status": "finished, patch awaiting decision"}
@@ -2452,11 +2479,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 finalized = report.get("finalized") if isinstance(report, dict) else None
                 if (isinstance(report_room, dict) and room.same_room(repo, report_room.get("id"), room_id)
                         and isinstance(finalized, dict)):
-                    scope_review_state = {
-                        "call_results": report_room.get("call_results", {}),
-                        "room_attempts": report.get("room_attempts", {}),
-                        "finalized": finalized,
-                    }
+                    scope_review_state = dict(report, call_results=report_room.get("call_results", {}))
             except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
                 notice = None  # throughput policy fails open; an unreadable backlog never blocks work
             if notice:
