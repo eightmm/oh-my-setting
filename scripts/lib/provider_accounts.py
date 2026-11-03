@@ -475,17 +475,45 @@ def _retire_stale_account_home(rows, receipt, row):
     return True
 
 
+def _account_recovery(ident="ID"):
+    import shlex
+    main = ident == "default"
+    ident = "ID" if main else ident
+    command = "oms connect-services --codex-account " + shlex.quote(ident)
+    print("recovery: " + ("restore the main Codex home; for other accounts: " if main else "") +
+          command + " --remove; or " + command + " --repair")
+
+
+def _report_account_cleanup(removed, kept, rows_kept, dry_run):
+    reasons = ", ".join("%s: %s" % (reason, count) for reason, count in sorted(kept.items()) if count)
+    print("Codex account cleanup: %s %s links; %s %s links%s; %s %s receipt rows; registry %s" % (
+        "would remove" if dry_run else "removed", removed,
+        "would keep" if dry_run else "kept", sum(kept.values()),
+        " (" + reasons + ")" if reasons else "",
+        "would keep" if dry_run else "kept", rows_kept,
+        "would be kept" if dry_run else "kept"))
+    if sum(kept.values()) or rows_kept:
+        _account_recovery()
+
+
 def _drop_account_links(rows, receipt, ident=None, root=None, dry_run=False):
+    from collections import Counter
     from oms_runtime.common import atomic_write_json
     main = Path(default_account("codex")["home"])
+    removed_count, kept = 0, Counter()
+    rows_kept = sum(ident is None or row["id"] == ident for row in rows)
     for row in list(rows):
         if ident is not None and row["id"] != ident:
             continue
         home = Path(row["home"])
+        pending = set(row["links"])
+        remaining = set(pending)
         if ident is not None and not dry_run and _retire_stale_account_home(rows, receipt, row):
+            rows_kept -= 1
             continue
         if not _ACCOUNT_SAFE_UNLINK:
             print("skipped: platform lacks safe unlink: " + str(home))
+            kept["safe unlink unavailable"] += len(pending)
             continue
         try:
             with _account_directory(home, row) as (descriptor, _info):
@@ -497,16 +525,26 @@ def _drop_account_links(rows, receipt, ident=None, root=None, dry_run=False):
                     if recorded is None:
                         if current is not None:
                             print("warn: kept changed or unmanaged Codex account entry: " + str(home / name))
+                            kept["changed or unmanaged"] += 1
+                        remaining.discard(name)
+                        pending.discard(name)
                         if not dry_run:
                             _account_link_progress(rows, receipt, row, name)
                         continue
                     allowed = root is None or Path(target) == main / name or root in Path(target).resolve().parents
                     if not allowed:
                         print("warn: kept changed or unmanaged Codex account entry: " + str(home / name))
+                        kept["outside cleanup targets"] += 1
+                        pending.discard(name)
                         continue
                     if dry_run:
                         if _unlink_account_entry(home, descriptor, row, name, target, recorded, True):
                             print("would remove Codex account link: " + name)
+                            removed_count += 1
+                            remaining.discard(name)
+                        else:
+                            kept["unlink refused"] += 1
+                        pending.discard(name)
                         continue
                     # Retire authority before unlink so a crash cannot authorize
                     # deleting a later replacement at this name.
@@ -516,19 +554,30 @@ def _drop_account_links(rows, receipt, ident=None, root=None, dry_run=False):
                         removed = _unlink_account_entry(home, descriptor, row, name, target, recorded)
                         if removed:
                             print("removed Codex account link: " + name)
+                            removed_count += 1
                     except OSError as error:
                         print("warn: kept Codex account entry %s: %s" % (home / name, error))
                     finally:
                         if not removed and _recorded_account_link(home, descriptor, row, name, target, recorded) is not None:
                             _account_link_progress(rows, receipt, row, name, target)
+                    if not removed:
+                        kept["unlink refused"] += 1
+                    pending.discard(name)
         except (OSError, ValueError) as error:
             if ident is not None and not dry_run and _retire_stale_account_home(rows, receipt, row):
+                rows_kept -= 1
                 continue
             print("warn: kept Codex account home %s: directory identity or safety check failed: %s" % (home, error))
+            kept["directory identity or safety check failed"] += len(pending)
             continue
+        if dry_run and not remaining:
+            rows_kept -= 1
         if not dry_run and not row["links"]:
             rows.remove(row)
             atomic_write_json(receipt, rows)
+            rows_kept -= 1
+    if root is not None:
+        _report_account_cleanup(removed_count, kept, rows_kept, dry_run)
 
 
 def connect_codex_account(args):
@@ -633,16 +682,18 @@ def connect_codex_account(args):
 
 
 def doctor_codex_accounts():
-    registry, _ = _account_paths()
-    if not os.path.lexists(str(registry)):
-        return
+    registry, receipt = _account_paths()
     value = _registration_config(registry)
     main = Path(default_account("codex")["home"])
-    for entry in value["providers"].get("codex", {}).get("accounts", []):
+    entries = value["providers"].get("codex", {}).get("accounts", [])
+    homes = {os.path.normcase(str(Path(entry["home"]).resolve())) for entry in entries}
+    for entry in entries:
         home = Path(entry["home"])
         prefix = "codex account " + entry["id"] + " "
         print(("ok: " if home.is_dir() else "warn: ") + prefix +
               ("home exists" if home.is_dir() else "home missing"))
+        if not home.is_dir():
+            _account_recovery(entry["id"])
         try:
             physical = home.resolve()
             _account_home_private(physical, physical.stat())
@@ -660,6 +711,10 @@ def doctor_codex_accounts():
         for name in ("auth.json", "models_cache.json"):
             present = (home / name).is_file()
             print(("ok: " if present else "warn: ") + prefix + name + (" present" if present else " missing"))
+    for row in _link_receipt(receipt):
+        if os.path.normcase(str(Path(row["home"]).resolve())) not in homes:
+            print("warn: codex account " + row["id"] + " receipt home is not registered")
+            _account_recovery(row["id"])
 
 
 def _account_command():
@@ -689,6 +744,7 @@ def _account_command():
         else:
             registry, receipt = _account_paths()
             if not os.path.lexists(str(receipt)):
+                _report_account_cleanup(0, {}, 0, args.dry_run)
                 return 0
             if args.dry_run:
                 _drop_account_links(_link_receipt(receipt), receipt, root=args.root.resolve(), dry_run=True)

@@ -3235,6 +3235,7 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
 
 test_connect_services_codex_account() {
   python3 - "$ROOT" "$TMP/connect-account" <<'PY'
+import io
 import json
 import os
 from pathlib import Path
@@ -3242,6 +3243,7 @@ import shlex
 import stat
 import subprocess
 import sys
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 root, base = map(Path, sys.argv[1:])
@@ -3404,9 +3406,11 @@ for name in links:
 out = register("recreated", "--repair", ok=False)
 assert "directory identity" in out, out
 saved_receipt = receipt.read_bytes()
-with patch.dict(os.environ, env):
+output = io.StringIO()
+with patch.dict(os.environ, env), redirect_stdout(output):
     rows = accounts._link_receipt(receipt)
-    accounts._drop_account_links(rows, receipt, ident="recreated", dry_run=True)
+    accounts._drop_account_links(rows, receipt, ident="recreated", root=root, dry_run=True)
+assert "would remove 0 links; would keep 7 links (directory identity or safety check failed: 7); would keep 1 receipt rows" in output.getvalue(), output.getvalue()
 assert receipt.read_bytes() == saved_receipt
 row = next(row for row in rows if row["id"] == "recreated")
 with patch.object(os, "lstat", side_effect=PermissionError("fixture stat refusal")):
@@ -3465,7 +3469,10 @@ def deny_unlink(path, *args, **kwargs):
     return unlink(path, *args, **kwargs)
 
 with patch.dict(os.environ, env), patch.object(os, "unlink", side_effect=deny_unlink):
-    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="unlink-retry")
+    output = io.StringIO()
+    with redirect_stdout(output):
+        accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="unlink-retry", root=root)
+assert "removed 5 links; kept 1 links (unlink refused: 1); kept 1 receipt rows; registry kept" in output.getvalue(), output.getvalue()
 remaining = next(row for row in accounts._link_receipt(receipt) if row["id"] == "unlink-retry")
 assert set(remaining["links"]) == {"config.toml"}, remaining
 for name in ("AGENTS.md", "plugins"):
@@ -3477,8 +3484,6 @@ assert (retry_home / "AGENTS.md").is_symlink() and (retry_home / "plugins").is_s
 assert not (retry_home / "config.toml").is_symlink()
 
 # Unsupported unlink APIs preserve conflicts during repair and all cleanup links.
-import io
-from contextlib import redirect_stdout
 from types import SimpleNamespace
 register("platform")
 platform_home = user / ".codex-platform"
@@ -3488,8 +3493,10 @@ output = io.StringIO()
 with patch.dict(os.environ, env), patch.object(accounts, "_ACCOUNT_SAFE_UNLINK", False), redirect_stdout(output):
     accounts.connect_codex_account(SimpleNamespace(codex_account="platform", home=None,
         remove=False, repair=True, first=False))
-    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="platform")
+    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="platform", root=root)
 assert "skipped: platform lacks safe unlink" in output.getvalue()
+assert "kept 7 links (safe unlink unavailable: 7); kept 1 receipt rows; registry kept" in output.getvalue(), output.getvalue()
+assert "recovery: oms connect-services --codex-account ID --remove; or oms connect-services --codex-account ID --repair" in output.getvalue()
 assert os.readlink(platform_home / "config.toml") == str(main / "hooks.json")
 assert (platform_home / "skills").is_symlink()
 
@@ -3607,8 +3614,20 @@ assert "warn: codex account credits shared config.toml" in out, out
 value = registry()
 value["providers"]["codex"]["accounts"].append({"id": "gone", "home": str(user / "gone")})
 config.write_text(json.dumps(value))
-assert "warn: codex account gone home missing" in health()
+before = (config.read_bytes(), receipt.read_bytes())
+out = health()
+assert "warn: codex account gone home missing" in out, out
+assert "recovery: oms connect-services --codex-account gone --remove; or oms connect-services --codex-account gone --repair" in out, out
+assert (config.read_bytes(), receipt.read_bytes()) == before and not (user / "gone").exists()
 config.write_bytes(valid)
+main.rename(user / "moved-main")
+try:
+    out = health()
+    assert "warn: codex account default home missing" in out, out
+    assert "recovery: restore the main Codex home; for other accounts:" in out, out
+    assert "--codex-account default --remove" not in out, out
+finally:
+    (user / "moved-main").rename(main)
 (secondary / "auth.json").touch(mode=0o600)
 login_file = secondary / ("au" + "th.json")
 metadata = login_file.stat()
@@ -3649,17 +3668,29 @@ cleanup = user / ".codex-cleanup"
 (cleanup / "skills").symlink_to(user / "unrelated")
 receipt = config.with_name("codex-account-links.json")
 saved = receipt.read_bytes()
+saved_registry = config.read_bytes()
 result = subprocess.run(helper + ["cleanup", "--root", str(root), "--dry-run"],
     env=env, capture_output=True, text=True, timeout=timeout)
 assert result.returncode == 0 and receipt.read_bytes() == saved
+assert "Codex account cleanup: would remove " in result.stdout, result.stdout
+assert "would keep " in result.stdout and "changed or unmanaged:" in result.stdout, result.stdout
+assert "receipt rows; registry would be kept" in result.stdout, result.stdout
+assert "recovery: oms connect-services --codex-account ID --remove; or oms connect-services --codex-account ID --repair" in result.stdout, result.stdout
 assert (cleanup / "plugins").is_symlink()
 result = subprocess.run(["bash", str(root / "scripts/uninstall.sh"), "--dry-run", "--yes"],
     env=env, capture_output=True, text=True, timeout=timeout)
 assert result.returncode == 0 and "would remove Codex account link" in result.stdout, result
+assert "Codex account cleanup: would remove " in result.stdout and "registry would be kept" in result.stdout, result.stdout
+assert "recovery: oms connect-services --codex-account ID --remove" in result.stdout, result.stdout
 assert receipt.read_bytes() == saved and (cleanup / "plugins").is_symlink()
 result = subprocess.run(helper + ["cleanup", "--root", str(root)], env=env,
     capture_output=True, text=True, timeout=timeout)
 assert result.returncode == 0, result.stderr
+assert "Codex account cleanup: removed " in result.stdout and "changed or unmanaged:" in result.stdout, result.stdout
+assert "receipt rows; registry kept" in result.stdout, result.stdout
+assert "recovery: oms connect-services --codex-account ID --remove; or oms connect-services --codex-account ID --repair" in result.stdout, result.stdout
+assert config.read_bytes() == saved_registry
+assert metadata in (login_file.stat(),)
 assert not (cleanup / "plugins").is_symlink() and (cleanup / "skills").is_symlink()
 assert cleanup.is_dir() and (custom / "rules").is_symlink()
 assert all((recreated / name).is_symlink() and (moved / name).is_symlink() for name in links)
@@ -3671,10 +3702,18 @@ assert (cleanup / "skills").is_symlink()
 
 # Links outside uninstall's current targets retain ownership for explicit remove.
 register("partial")
-with patch.dict(os.environ, dict(env, CODEX_HOME=str(user / "other-main"))):
+output = io.StringIO()
+with patch.dict(os.environ, dict(env, CODEX_HOME=str(user / "other-main"))), redirect_stdout(output):
     accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="partial", root=root)
+assert "removed 0 links; kept 7 links (outside cleanup targets: 7); kept 1 receipt rows; registry kept" in output.getvalue(), output.getvalue()
 assert (user / ".codex-partial/skills").is_symlink()
 assert any(row["id"] == "partial" for row in accounts._link_receipt(receipt))
+saved = receipt.read_bytes()
+output = io.StringIO()
+with patch.dict(os.environ, env), patch.object(accounts, "_unlink_account_entry", return_value=False), redirect_stdout(output):
+    accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="partial", root=root, dry_run=True)
+assert "would remove 0 links; would keep 7 links (unlink refused: 7); would keep 1 receipt rows" in output.getvalue(), output.getvalue()
+assert receipt.read_bytes() == saved and (user / ".codex-partial/skills").is_symlink()
 register("partial", "--remove")
 assert not (user / ".codex-partial/skills").is_symlink()
 uninstall = (root / "scripts/uninstall.sh").read_text()
@@ -3698,10 +3737,43 @@ with patch.dict(os.environ, env), patch.object(common, "atomic_write_json", side
         assert "injected" in str(error)
 assert (user / ".codex-interrupted/skills").is_symlink()
 assert all(row["id"] != "interrupted" for row in registry()["providers"]["codex"]["accounts"])
+before = (config.read_bytes(), receipt.read_bytes())
+out = health()
+assert "warn: codex account interrupted receipt home is not registered" in out, out
+assert "recovery: oms connect-services --codex-account interrupted --remove; or oms connect-services --codex-account interrupted --repair" in out, out
+assert (config.read_bytes(), receipt.read_bytes()) == before
+assert (user / ".codex-interrupted/skills").is_symlink()
+config.unlink()
+out = health()
+assert "warn: codex account interrupted receipt home is not registered" in out, out
+assert receipt.read_bytes() == before[1] and not config.exists()
+config.write_bytes(before[0])
 result = subprocess.run(helper + ["cleanup", "--root", str(root)], env=env,
     capture_output=True, text=True, timeout=timeout)
 assert result.returncode == 0 and not (user / ".codex-interrupted/skills").is_symlink()
 register("interrupted")
+
+# Empty and malformed receipts retain the same warning/error boundaries.
+saved = receipt.read_bytes()
+for content in (None, "[]", "", "{}", "[{}]"):
+    if content is None:
+        receipt.unlink()
+    else:
+        receipt.write_text(content)
+    for preview in ([], ["--dry-run"]):
+        result = subprocess.run(helper + ["cleanup", "--root", str(root)] + preview,
+            env=env, capture_output=True, text=True, timeout=timeout)
+        if content in (None, "[]"):
+            assert result.returncode == 0, result
+            expected = ("would remove 0 links; would keep 0 links; would keep 0 receipt rows; registry would be kept"
+                        if preview else "removed 0 links; kept 0 links; kept 0 receipt rows; registry kept")
+            assert expected in result.stdout and "recovery:" not in result.stdout, result.stdout
+        else:
+            assert result.returncode == 2 and "error:" in result.stderr, result
+            assert "Codex account cleanup:" not in result.stdout, result.stdout
+            assert "warn: Codex account health unavailable:" in health()
+        assert receipt.read_text() == content if content is not None else not receipt.exists()
+receipt.write_bytes(saved)
 
 # Removing the sole account leaves an accepted provider-less schema.
 config.write_text(json.dumps({"schema": 1, "providers": {"codex": {

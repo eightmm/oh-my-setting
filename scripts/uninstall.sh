@@ -24,6 +24,9 @@ Registered Codex homes, logins and sessions stay; only recorded shared links
 still pointing to main-home or OMS-managed targets are removed.
 Directory identity must match the receipt. Changed entries and platforms lacking
 safe directory-relative unlink keep their links and report why.
+The cleanup summary counts removed and retained links, reasons and retained
+receipt rows. The account registry stays; retained state includes remove/repair
+guidance. --dry-run reports the projected counts without writing account state.
 
 Options:
   --yes       Assume yes for confirmation prompts.

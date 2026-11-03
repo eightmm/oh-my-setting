@@ -800,12 +800,24 @@ links subsequently created at those names remain untouched by later cleanup.
 Authority is retired before unlink. A kill between those steps can leave an
 unrecorded shared link that stays in place on subsequent cleanup.
 Uninstall also removes recorded links still pointing to main-home or OMS-managed
-targets. It preserves account homes and logins. Registry and receipt writes use
+targets. It preserves account homes and logins.
+Uninstall ends its account cleanup with counts of removed links, kept links by
+reason, and kept receipt rows; the account registry is always kept. Kept-link
+counts include changed or unmanaged entries and recorded links whose directory
+identity, safety, target or unlink checks prevented removal. `--dry-run` prints
+the projected summary without changing account state. When links or receipt rows
+stay, recovery guidance names `oms connect-services --codex-account ID --remove`
+or `oms connect-services --codex-account ID --repair`; replace `ID` with the
+account to unregister or repair.
+Registry and receipt writes use
 atomic replacement under one shared writer lock; an interrupted operation can
 leave partial links or an older registry, and is safe to rerun. `oms doctor`
 reports each registered home's presence, safety of its complete ancestor chain,
 shared-link resolution, and existence
 of `auth.json` and `models_cache.json`; these account checks only warn.
+Missing registered homes and receipt homes absent from the registry (even when
+the registry itself is absent) warn with the same remove/repair guidance. Doctor
+leaves homes, links, login state, registry entries and receipt rows unchanged.
 
 Provider accounts are stored machine-wide in
 `${XDG_CONFIG_HOME:-~/.config}/oh-my-setting/provider-accounts.json`.

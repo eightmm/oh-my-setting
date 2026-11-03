@@ -56,6 +56,8 @@ at least two usable independent model families. An invalid or unavailable
 receipt owner is never replaced automatically.
 Registered Codex account homes, shared links, login presence and model-cache
 presence are checked locally; account health issues only warn.
+Missing registered homes and receipt homes absent from the registry include
+account remove/repair guidance. The account check never removes state.
 
 --surfaces is a standalone read-only report: for every hook surface this
 checkout would register, it compares the source list, the live settings.json,
