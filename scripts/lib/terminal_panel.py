@@ -424,6 +424,7 @@ def main(argv=None):
     parser.add_argument("--alias", help="short unique room call name (1-8 letters, digits or hyphens)")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
+    workload_explicit = args.workload is not None
     if args.continue_task and args.brief_file and not (args.prompt or args.task_id) and args.access in (None, "write"):
         # A follow-up round repeats the original write dispatch's inputs unless a flag overrides them.
         inherited, unavailable = None, "no recorded write dispatch for the task"
@@ -807,7 +808,8 @@ def main(argv=None):
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
                               continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias,
-                              allow_stale_base=args.allow_stale_base, from_task=args.from_task)
+                              allow_stale_base=args.allow_stale_base, from_task=args.from_task,
+                              workload_explicit=workload_explicit)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

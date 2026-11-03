@@ -301,6 +301,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `oms panel --continue` reuses the provider, model and effort of an attempt
+  that chose them explicitly (`--to/--model`, `--reasoning-effort`) instead of
+  re-selecting by tier; a flag passed on the continue overrides, and
+  `--workload` returns it to tier selection.
 - `oms agent-plan add` refuses a repeated `--allowed`, `--depends` or
   `--forbidden` instead of silently keeping only the last list.
 - `patch-admit`, `patch-land` and `tick` strip a carriage return from values

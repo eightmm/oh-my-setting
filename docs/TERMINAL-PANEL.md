@@ -921,7 +921,11 @@ read-only roles never resume. The short form `oms panel --repo . --owner claude
 `--scope` and `--verify` from the task's newest recorded write dispatch in this main's
 lineage; any flag you pass overrides its recorded value, except that `--scope` adds to the
 inherited scope (a plan-bound dispatch's declared scope also covers the plan task's allowed
-paths), and a task with no recoverable
+paths). A recorded explicit model also inherits its provider and model; a recorded explicit
+reasoning effort is inherited independently. Historical records without these markers keep tier
+selection. `--workload` forces tier selection instead of inheriting the model. Stderr identifies
+an inherited route and its attempt; an inherited model is an explicit target and does not fall
+back to another provider. A task with no recoverable
 write dispatch is refused with a message to pass `--dispatch ROLE`. It finds the latest worker of that task owned by this
 main, and starts a new run in a new worktree at the current HEAD that resumes
 the worker's native session (recorded as `refs.native_session` in the attempt,

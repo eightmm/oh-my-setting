@@ -792,7 +792,7 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
-             candidate=None, allow_stale_base=False, from_task=None):
+             candidate=None, allow_stale_base=False, from_task=None, workload_explicit=False):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
     from terminal_panel import continuation, events, policy, provider_catalog, routable_route_model, routing_status
     from terminal_panel import run_dispatch, safe_label, selected_route
@@ -801,19 +801,57 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     routing_report = []
     readings = routing_status(repo, room_id, main, snapshot_sink=routing_report) if not target else None
     preferred = None
-    if continue_task and not target and not model:
-        from terminal_panel import _rework_history, owning_attempt, repository, resolve_call_alias
+    inherited_route = None
+    inherited_model = False
+    model_explicit = bool(target and model)
+    effort_explicit = effort is not None
+    if continue_task:
+        from terminal_panel import _dispatch_call_record, _rework_history, owning_attempt, repository, resolve_call_alias
         history_repo = repository(dispatch_env["OMS_ROOM_REPO"]) if dispatch_env.get("OMS_ROOM_REPO") else repo
         resolved_task = resolve_call_alias(history_repo, room_id, continue_task)
         parents = owning_attempt(history_repo, owner, main, dispatch_env)
-        history = _rework_history(json.loads(events(history_repo, "list", "--json", output=True)),
-                                  resolved_task, parents)
+        history_rows = json.loads(events(history_repo, "list", "--json", output=True))
+        history = _rework_history(history_rows, resolved_task, parents)
         if history:
             last = history[-1]
-            preferred = last.get("refs", {}).get("panel_provider") or last.get("provider")
-    route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
-                           room_id=room_id, task_id=task_id, candidate=candidate, routing_readings=readings,
-                           **({"preferred": preferred} if preferred else {}))
+            refs = last.get("refs", {})
+            if not target and not model:
+                preferred = refs.get("panel_provider") or last.get("provider")
+            parent = next((row for row in history_rows
+                            if row.get("attempt_id") == last.get("parent_attempt_id")), {})
+            member = refs.get("panel_room_participant")
+            caller = parent.get("refs", {}).get("panel_room_participant", parent.get("attempt_id"))
+            if isinstance(member, str) and member and isinstance(caller, str) and caller and refs.get("panel_room_id"):
+                call = _dispatch_call_record(history_repo, refs["panel_room_id"],
+                                             {"participant": member, "parent": caller})
+                if call and call.get("schema") == 2 and call.get("task_id") == resolved_task:
+                    anchor = dispatch_store.read(history_repo, member + "-launch.json")
+                    provenance = anchor.get("route", {}) if isinstance(anchor, dict) else {}
+                    if isinstance(provenance, dict):
+                        if (not target and not model and not workload_explicit and provenance.get("model_explicit") is True
+                                and isinstance(refs.get("panel_model"), str) and refs["panel_model"]
+                                and isinstance(preferred, str) and preferred):
+                            target, model, workload = preferred, refs["panel_model"], None
+                            model_explicit = True
+                            inherited_model = True
+                            inherited_route = last.get("attempt_id")
+                        if (effort is None and provenance.get("effort_explicit") is True
+                                and refs.get("panel_effort") in ("low", "medium", "high")):
+                            effort = refs["panel_effort"]
+                            effort_explicit = True
+                            inherited_route = last.get("attempt_id")
+    try:
+        route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
+                               room_id=room_id, task_id=task_id, candidate=candidate, routing_readings=readings,
+                               **({"preferred": preferred} if preferred else {}))
+    except ValueError as error:
+        if inherited_model:
+            raise ValueError("model %s was inherited from attempt %s; pass --to and --model or --workload to override: %s"
+                             % (model, inherited_route, error)) from error
+        raise
+    if inherited_route:
+        print("inherited route from attempt %s: %s / %s / %s" %
+              (inherited_route, route["provider"], route["model"], route.get("effort") or "native-settings"), file=sys.stderr)
     if access == "write":
         _require_assigned_route(repo, task_id, route)
     if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
@@ -902,7 +940,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                         fallback = None
                 except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
                     fallback = None
-        options = {"fallback_decision": fallback_decision}
+        options = {"fallback_decision": fallback_decision,
+                   "route_provenance": {"model_explicit": model_explicit, "effort_explicit": effort_explicit}}
         if candidate is not None:
             options["candidate"] = candidate
         if continuation_patch is not None:
@@ -1631,7 +1670,7 @@ def _dispatch_verifier(repo, room_id, member, caller, task_id=None):
 
 
 def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution_repo=None, rework=None,
-                           task_id=None, route=None):
+                           task_id=None, route=None, route_provenance=None):
     from terminal_panel import DURABLE, _dispatch_call_path, _write_brief_artifact
     call = {"schema": 2, "kind": "oms-panel-call", "room": room_id, "participant": member,
             "parent": caller, "nonce": uuid.uuid4().hex,
@@ -1649,9 +1688,12 @@ def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution
     except SystemExit as error:
         raise ValueError("dispatch launch record refused") from error
     anchor = {"call": call, "generation": dispatch_store.generation(path)}
+    recorded_route = dict(route_provenance or {})
     if route and route.get("account"):
-        anchor["route"] = {key: route[key] for key in
-                           ("provider", "model", "account", "account_reason") if key in route}
+        recorded_route.update({key: route[key] for key in
+                               ("provider", "model", "account", "account_reason") if key in route})
+    if route_provenance is not None or recorded_route:
+        anchor["route"] = recorded_route
     if verify:
         anchor["verify"] = verify
     if execution_repo:
@@ -2264,7 +2306,7 @@ def route_label(route):
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
                  candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None,
-                 routing_report=None, routing_repo=None, fallback_decision=None):
+                 routing_report=None, routing_repo=None, fallback_decision=None, route_provenance=None):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
     from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
@@ -2566,7 +2608,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             rework = (dict(role=role, scope=scopes or [], workload=route["workload"],
                            brief=_read_dispatch_brief(recorded_brief).decode("utf-8")) if access == "write" else None)
             launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
-                                             task_id=task_id, **({"route": route} if route.get("account") else {}))
+                                             task_id=task_id, route_provenance=route_provenance,
+                                             **({"route": route} if route.get("account") else {}))
             env["XDG_STATE_HOME"] = dispatch_store.pinned_state_home(repo, control_member)
             command = argv
             if launch and launch["backend"] == "subreaper":

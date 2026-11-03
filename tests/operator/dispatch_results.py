@@ -591,6 +591,98 @@ def exercise_continuation_preference():
 
 exercise_continuation_preference()
 
+# BEGIN continuation route provenance
+with patch.object(panel, "child_environment", return_value={}), \
+     patch.object(dispatch.room, "resolve", return_value="room"), \
+     patch.object(panel, "routing_status", return_value={}), \
+     patch.object(panel, "resolve_call_alias", return_value="task"), \
+     patch.object(panel, "owning_attempt", return_value=["parent"]), \
+     patch.object(panel, "events", return_value=json.dumps([
+         {"attempt_id": "parent", "refs": {"panel_room_participant": "owner"}},
+         {"attempt_id": "attempt", "parent_attempt_id": "parent", "task_id": "task",
+          "provider": "codex", "refs": {"panel_role": "worker", "panel_room_id": "room",
+          "panel_room_participant": "member", "panel_model": "gpt-6.1-sol", "panel_effort": "high"}}])), \
+     patch.object(panel, "_dispatch_call_record", return_value={"schema": 2, "task_id": "task"}), \
+     patch.object(dispatch.dispatch_store, "read") as anchor, \
+     patch.object(panel, "selected_route", side_effect=RuntimeError("captured")) as selected:
+    for flags, overrides, expected in (
+            ({"model_explicit": True, "effort_explicit": True}, {}, (None, "codex", "gpt-6.1-sol", "high")),
+            ({"model_explicit": False, "effort_explicit": False}, {}, ("routine", None, None, None)),
+            ({}, {}, ("routine", None, None, None)),
+            ({"model_explicit": True, "effort_explicit": True},
+             {"target": "claude", "model": "claude-test", "effort": "low"},
+             ("routine", "claude", "claude-test", "low")),
+            ({"model_explicit": False, "effort_explicit": True}, {}, ("routine", None, None, "high")),
+            ({"model_explicit": True, "effort_explicit": True}, {"effort": "low"},
+             (None, "codex", "gpt-6.1-sol", "low")),
+            ({"model_explicit": True, "effort_explicit": False}, {"target": "claude"},
+             ("routine", "claude", None, None)),
+            ({"model_explicit": "true", "effort_explicit": 0}, {}, ("routine", None, None, None))):
+        anchor.return_value = {"route": flags}
+        try:
+            dispatch.dispatch(temporary, "codex", "builder", "routine", "write", None,
+                              brief="brief", continue_task="task", **overrides)
+        except RuntimeError as error:
+            assert str(error) == "captured"
+        args = selected.call_args.args
+        assert (args[2], args[5], args[6], args[7]) == expected, args
+    anchor.return_value = {"route": {"model_explicit": True, "account": "fixture", "account_reason": "selected"}}
+    selected.side_effect = ValueError("retired model")
+    try:
+        dispatch.dispatch(temporary, "codex", "builder", "routine", "write", None,
+                          brief="brief", continue_task="task")
+        raise AssertionError("invalid inherited model was accepted")
+    except ValueError as error:
+        assert all(part in str(error) for part in ("gpt-6.1-sol", "attempt", "--to", "--model", "--workload", "retired model")), error
+    try:
+        dispatch.dispatch(temporary, "codex", "builder", "routine", "write", None,
+                          brief="brief", continue_task="task", workload_explicit=True)
+        raise AssertionError("invalid selected tier was accepted")
+    except ValueError as error:
+        assert str(error) == "retired model", error
+with patch.object(dispatch.dispatch_store, "initialize"), \
+     patch.object(dispatch.dispatch_store, "generation", return_value="generation"), \
+     patch.object(dispatch.dispatch_store, "write") as write, \
+     patch.dict(panel.DURABLE, {"atomic_mutate": lambda *args, **kwargs: None}):
+    flags = {"model_explicit": True, "effort_explicit": False, "account": "fixture", "account_reason": "selected"}
+    dispatch._prepare_dispatch_call(temporary, "room", "call-member", "owner", route_provenance=flags)
+    assert write.call_args.args[2]["route"] == flags
+    assert write.call_args.kwargs["exclusive"] is True
+# The public CLI must retain whether workload came from the user.
+cli_brief = temporary / "continuation-route-brief.md"
+cli_brief.write_text("Continue.\n")
+def cli_route(*args, **kwargs):
+    if kwargs.get("routing_readings") is not None:
+        raise RuntimeError(repr((args[2], args[5], args[6])))
+    return {"provider": "codex", "model": "fixture", "effort": "medium", "workload": "routine"}
+with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "0", "OMS_HARNESS_DELEGATE_DEPTH": "0"}), \
+     patch.object(panel, "continuation_defaults", return_value={"role": "builder", "scope": [],
+                  "workload": "routine", "verify": None, "purpose": "implement"}), \
+     patch.object(panel, "panel_repository", return_value=temporary), \
+     patch.object(panel, "git_toplevel", return_value=temporary), \
+     patch.object(panel, "work_repository", return_value=temporary), \
+     patch.object(panel, "routed_command", return_value=[]), \
+     patch.object(panel, "child_environment", return_value={}), \
+     patch.object(dispatch.room, "resolve", return_value="room"), \
+     patch.object(panel, "routing_status", return_value={}), \
+     patch.object(panel, "resolve_call_alias", return_value="task"), \
+     patch.object(panel, "owning_attempt", return_value=["parent"]), \
+     patch.object(panel, "events", return_value=json.dumps([
+         {"attempt_id": "parent", "refs": {"panel_room_participant": "owner"}},
+         {"attempt_id": "attempt", "parent_attempt_id": "parent", "task_id": "task",
+          "provider": "codex", "refs": {"panel_role": "worker", "panel_room_id": "room",
+          "panel_room_participant": "member", "panel_model": "gpt-6.1-sol"}}])), \
+     patch.object(panel, "_dispatch_call_record", return_value={"schema": 2, "task_id": "task"}), \
+     patch.object(dispatch.dispatch_store, "read", return_value={"route": {"model_explicit": True}}), \
+     patch.object(panel, "selected_route", side_effect=cli_route):
+    try:
+        panel.main(["--repo", str(temporary), "--owner", "codex", "--continue", "task",
+                    "--brief-file", str(cli_brief), "--workload", "deep"])
+        raise AssertionError("dispatch did not select a route")
+    except RuntimeError as error:
+        assert str(error) == repr(("deep", None, None)), error
+# END continuation route provenance
+
 # Dispatch passes the actual provider of the newest owned writer, including alias lookup.
 def exercise_continuation_dispatch_preference():
     rows = [{"attempt_id": "one", "parent_attempt_id": "parent", "task_id": "task",
