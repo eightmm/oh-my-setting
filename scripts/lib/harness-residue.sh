@@ -249,7 +249,7 @@ OMS_HARNESS_RESIDUE_LISTING_DIR=""
 # worktree's clean filters on stat-dirty files, so files are compared with HEAD
 # as raw bytes instead. MODE settled is evidence that a dead delegate
 # worktree's work is already preserved in the owning repo. Prints one line:
-# "ok TOKEN" or the reason it is not proven. The run is settled when the one attempt recording this worktree finished
+# "ok TOKEN[; regenerable CLASSES]" or the reason it is not proven. The run is settled when the one attempt recording this worktree finished
 # (failed/timed_out ones only once decided or aged past
 # OMS_HARNESS_RESIDUE_AGED_DAYS, default 7, like --settle-review) and the patch
 # the run preserved reproduces the worktree's files byte for byte. TOKEN digests
@@ -265,6 +265,8 @@ lib, mode, repo, wt, pid = sys.argv[1:6]
 aged_days = os.environ.get("OMS_HARNESS_RESIDUE_AGED_DAYS") or "7"
 INDEX = ".oms/artifacts/index.jsonl"
 DECIDED = ("completed", "accepted", "rejected")
+class Unproven(Exception):
+    pass
 try:
     store = runpy.run_path(os.path.join(lib, "artifact-index-store.py"))
     durable = runpy.run_path(os.path.join(lib, "durable-jsonl.py"))
@@ -398,8 +400,10 @@ try:
         return listed(), listed("-i")
 
     def bytecode(path):
-        # Regenerable Python bytecode is the only ignored content that may be discarded.
         parts = path.split(b"/")
+        # Git metadata must not fall through from the regenerable-tree refusal.
+        if b".git" in parts:
+            return False
         if len(parts) < 2 or parts[-2] != b"__pycache__" or not parts[-1].endswith((b".pyc", b".pyo")):
             return False
         where = walk(path)
@@ -413,6 +417,97 @@ try:
         finally:
             if where[0] is not None:
                 os.close(where[0])
+
+    def has_type(path, predicate):
+        where = walk(path)
+        if where is None or where is OTHER:
+            return False
+        try:
+            try:
+                info = entry_stat(where)
+                return predicate(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400
+            except OSError:
+                return False
+        finally:
+            if where[0] is not None:
+                os.close(where[0])
+
+    regenerable_roots, regenerable_classes = {}, set()
+    def regenerable(path):
+        # Git collapses nested repositories to a directory entry even without
+        # --directory; their commits are not preserved by the delegate patch.
+        if path.endswith(b"/"):
+            return False
+        # Root eligibility is separate from the independent disk scan below:
+        # Git omits some metadata paths from its ignored-file inventory.
+        parts = path.split(b"/")
+        for depth, part in enumerate(parts[:-1]):
+            if part not in (b".venv", b"venv", b".pytest_cache", b".mypy_cache", b".ruff_cache", b"node_modules"):
+                continue
+            if b".git" in parts[depth + 1:]:
+                return False
+            root = b"/".join(parts[:depth + 1])
+            if root not in regenerable_roots:
+                valid = has_type(root, stat.S_ISDIR)
+                if part in (b".venv", b"venv"):
+                    valid = valid and has_type(root + b"/pyvenv.cfg", stat.S_ISREG)
+                elif part == b"node_modules":
+                    manifest = b"/".join(parts[:depth] + [b"package.json"])
+                    valid = valid and manifest in head and has_type(manifest, stat.S_ISREG)
+                regenerable_roots[root] = valid
+            if regenerable_roots[root]:
+                regenerable_classes.add(os.fsdecode(part))
+                return True
+        return False
+
+    def regenerable_tree(root):
+        # Open every directory through the existing no-follow traversal, never
+        # through a DirEntry path that a concurrent replacement could redirect.
+        entries, pending, count = [], [root], 0
+        while pending:
+            directory = pending.pop()
+            where = walk(directory + b"/.")
+            if where is None or where is OTHER:
+                raise Unproven("regenerable tree changed while proving %s" % os.fsdecode(directory))
+            fd, cur, name = where
+            try:
+                info = entry_stat(where)
+                if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise Unproven("regenerable tree holds unsafe entry %s" % os.fsdecode(directory))
+                if directory == root:
+                    entries.append((root, (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)))
+                child_dirs, has_head = set(), False
+                parent = os.path.join(cur, name)
+                with os.scandir(fd if fd is not None else parent) as children:
+                    for child in children:
+                        count += 1
+                        if count > 200000:
+                            raise Unproven("regenerable tree too large to prove")
+                        leaf = os.fsencode(child.name)
+                        path = directory + b"/" + leaf
+                        if leaf.lower() == b".git":
+                            raise Unproven("regenerable tree holds Git data %s" % os.fsdecode(path))
+                        info = entry_stat((fd, parent, leaf))
+                        is_dir = stat.S_ISDIR(info.st_mode)
+                        if (not is_dir and not stat.S_ISREG(info.st_mode)
+                                or getattr(info, "st_file_attributes", 0) & 0x400):
+                            raise Unproven("regenerable tree holds unsafe entry %s" % os.fsdecode(path))
+                        entries.append((path, (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)))
+                        if is_dir:
+                            pending.append(path)
+                            if leaf in (b"objects", b"refs"):
+                                child_dirs.add(leaf)
+                        if leaf == b"HEAD":
+                            has_head = True
+                if has_head and child_dirs == {b"objects", b"refs"}:
+                    raise Unproven("regenerable tree holds Git data %s" % os.fsdecode(directory))
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        digest = hashlib.sha256()
+        for path, fields in sorted(entries):
+            digest.update(path + b"\0" + repr(fields).encode() + b"\0")
+        return digest.digest()
 
     untracked, ignored = inventory()
     # Paths that differ from HEAD on disk.
@@ -450,13 +545,13 @@ try:
         return not empty_only or have == blob(have[0], b"")
 
     # Ignored files are invisible to status and to the preserved patch: only
-    # regenerable bytecode and the disposable .oms files above may be discarded.
+    # recognized regenerable trees, bytecode and disposable .oms files may go.
     for path in ignored:
         if path.startswith(b".oms/"):
             if not disposable_oms(path):
                 print("holds %s" % os.fsdecode(path))
                 raise SystemExit(0)
-        elif not bytecode(path):
+        elif not regenerable(path) and not bytecode(path):
             print("holds ignored file %s" % os.fsdecode(path))
             raise SystemExit(0)
 
@@ -567,14 +662,19 @@ try:
             mismatch += 1
     for path in ignored_now:
         proof.update(b"ignored\0" + path + b"\0")
+    for root in sorted(root for root, valid in regenerable_roots.items() if valid):
+        proof.update(b"regenerable\0" + root + b"\0" + regenerable_tree(root))
     if mismatch:
         print("preserved patch %s does not reproduce the worktree's files" % rel)
     elif staged not in (head_tree, expected_tree):
         print("staged content in the worktree is not reproduced by preserved patch %s" % rel)
     else:
-        print("ok " + proof.hexdigest())
+        suffix = "; regenerable " + ", ".join(sorted(regenerable_classes)) if regenerable_classes else ""
+        print("ok " + proof.hexdigest() + suffix)
 except SystemExit:
     raise
+except Unproven as error:
+    print(str(error))
 except BaseException as error:
     print("evidence unreadable (%s)" % type(error).__name__)
 PY
@@ -901,7 +1001,12 @@ oms_harness_cleanup_temp_dirs() {
         continue
       fi
       if [ "$dry_run" = "1" ]; then
-        printf 'would remove: %s (dead harness temp dir)\n' "$dir"
+        case "$OMS_HARNESS_RESIDUE_PROOF" in
+          *"; regenerable "*)
+            printf 'would remove: %s (dead harness temp dir; settled; %s)\n' \
+              "$dir" "${OMS_HARNESS_RESIDUE_PROOF#*; }" ;;
+          *) printf 'would remove: %s (dead harness temp dir)\n' "$dir" ;;
+        esac
         OMS_HARNESS_RESIDUE_WOULD_REMOVE=$((OMS_HARNESS_RESIDUE_WOULD_REMOVE + 1))
         continue
       fi

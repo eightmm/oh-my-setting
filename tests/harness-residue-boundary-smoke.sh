@@ -312,8 +312,8 @@ cleanup_out 1 | grep >/dev/null -Fx "would remove: $TMPDIR/oh-my-setting-delegat
 cleanup_out 0 >/dev/null
 [ ! -e "$TMPDIR/oh-my-setting-delegate.settled" ] || fail "apply kept a settled delegate"
 
-# Ignored files are invisible to status and to the patch: only regenerable
-# bytecode may go with the worktree.
+# Ignored files are invisible to status and to the patch: only recognized
+# regenerable content may go with the worktree.
 printf '__pycache__/\n*.log\n' >> "$repo/.git/info/exclude"
 delegate_run bytecode task-bytecode "done"
 mkdir -p "$TMPDIR/oh-my-setting-delegate.bytecode/wt-bytecode/pkg/__pycache__"
@@ -325,7 +325,7 @@ cleanup_out 0 >/dev/null
 
 delegate_run ignored task-ignored "done"
 printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.ignored/wt-ignored/run.log"
-kept_with ignored "not settled: holds ignored file run.log" "an ignored non-bytecode file must keep the worktree"
+kept_with ignored "not settled: holds ignored file run.log" "an unrecognized ignored file must keep the worktree"
 
 delegate_run fakecode task-fakecode "done"
 mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/cache"
@@ -333,6 +333,241 @@ printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/cache/m.pyc.lo
 mkdir -p "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/other/__pycache__"
 printf 'x' > "$TMPDIR/oh-my-setting-delegate.fakecode/wt-fakecode/other/__pycache__/notes.log"
 kept_with fakecode "not settled: holds ignored file " "only *.pyc/*.pyo inside __pycache__ may be discarded"
+
+# BEGIN regenerable ignored trees
+printf '.venv\nvenv\n.pytest_cache\n.mypy_cache\n.ruff_cache\nnode_modules\nlinked\n' >> "$repo/.git/info/exclude"
+mkdir -p "$repo/pkg"
+printf '{}\n' > "$repo/package.json"
+printf '{}\n' > "$repo/pkg/package.json"
+git -C "$repo" add package.json pkg/package.json
+git -C "$repo" commit -qm packages
+for cache_case in venv nestedvenv pytest mypy ruff node nestednode mixed nocfg cfgdir cfglink rootlink parentlink unignored changed otherignored nopackage untrackedpackage emptycache nestedrepo deletedpackage linkedpackage emptypackage incompleterepo barerepo casegit gitfile externallink danglinglink; do
+  delegate_run "$cache_case" "task-$cache_case" "done"
+  cache_wt="$TMPDIR/oh-my-setting-delegate.$cache_case/wt-$cache_case"
+  cache_class=".venv"
+  cache_rel=".venv"
+  cache_keep=""
+  case "$cache_case" in
+    nestedvenv) cache_rel="pkg/deep/venv"; cache_class="venv" ;;
+    pytest) cache_rel="pkg/deep/.pytest_cache"; cache_class=".pytest_cache" ;;
+    mypy) cache_rel="pkg/.mypy_cache"; cache_class=".mypy_cache" ;;
+    ruff) cache_rel=".ruff_cache"; cache_class=".ruff_cache" ;;
+    node) cache_rel="node_modules"; cache_class="node_modules" ;;
+    nestednode) cache_rel="pkg/node_modules"; cache_class="node_modules" ;;
+    deletedpackage|linkedpackage|emptypackage)
+      cache_rel="node_modules"; cache_class="node_modules"
+      [ "$cache_case" = emptypackage ] || cache_keep="holds ignored file node_modules/data"
+      ;;
+    nestedrepo) cache_keep="holds ignored file .venv/src/dep/" ;;
+    incompleterepo|casegit|gitfile|barerepo) cache_keep="regenerable tree holds Git data" ;;
+    externallink|danglinglink) cache_keep="regenerable tree holds unsafe entry" ;;
+    parentlink) cache_rel="linked/.venv" ;;
+    unignored) cache_keep="does not reproduce the worktree's files" ;;
+    changed) cache_keep="does not reproduce the worktree's files" ;;
+    otherignored) cache_keep="holds ignored file run.log" ;;
+    nopackage|untrackedpackage)
+      cache_rel="no-package/node_modules"; cache_class="node_modules"
+      cache_keep="holds ignored file no-package/node_modules/data"
+      ;;
+    nocfg|cfgdir|cfglink|rootlink) cache_keep="holds ignored file .venv" ;;
+    emptycache) cache_rel=".pytest_cache"; cache_class="" ;;
+  esac
+  mkdir -p "$cache_wt/$cache_rel" "$TMP/cache-outside"
+  if [ "$cache_case" != emptycache ]; then
+    printf 'regenerable\n' > "$cache_wt/$cache_rel/data"
+  fi
+  case "$cache_class" in
+    .venv|venv) : > "$cache_wt/$cache_rel/pyvenv.cfg" ;;
+  esac
+  if [ "$cache_case" = nestedvenv ]; then
+    # Recognition checks the file type, without interpreting configuration.
+    printf 'malformed configuration\n' > "$cache_wt/$cache_rel/pyvenv.cfg"
+  fi
+  case "$cache_case" in
+    incompleterepo|casegit)
+      cache_git=".git"
+      [ "$cache_case" != casegit ] || cache_git=".GIT"
+      mkdir -p "$cache_wt/.venv/src/dep/$cache_git/objects"
+      printf 'unique object\n' > "$cache_wt/.venv/src/dep/$cache_git/objects/work"
+      ;;
+    gitfile)
+      mkdir -p "$cache_wt/.venv/src/dep"
+      printf 'unresolved git directory\n' > "$cache_wt/.venv/src/dep/.git"
+      ;;
+    barerepo) git init --bare -q "$cache_wt/.venv/recovery.git" ;;
+    externallink) ln -s "$TMP/cache-outside" "$cache_wt/.venv/external" ;;
+    danglinglink) ln -s absent "$cache_wt/.venv/dangling" ;;
+    nestedrepo)
+      mkdir -p "$cache_wt/.venv/src/dep"
+      git -C "$cache_wt/.venv/src/dep" init -q
+      printf 'unique dependency work\n' > "$cache_wt/.venv/src/dep/unique.txt"
+      git -C "$cache_wt/.venv/src/dep" add unique.txt
+      git -C "$cache_wt/.venv/src/dep" -c user.name=test -c user.email=test@example.com commit -qm unique
+      git -C "$cache_wt" ls-files -o -i --exclude-standard | grep >/dev/null -Fx '.venv/src/dep/' ||
+        fail "nested repository fixture must be listed as an ignored directory"
+      ;;
+    deletedpackage|linkedpackage|emptypackage)
+      rm "$cache_wt/package.json"
+      case "$cache_case" in
+        linkedpackage) ln -s pkg/package.json "$cache_wt/package.json" ;;
+        emptypackage) : > "$cache_wt/package.json" ;;
+      esac
+      # Preserve the manifest edit so only the regenerable-tree proof can refuse it.
+      git -C "$cache_wt" diff --no-ext-diff --no-textconv --binary HEAD -- package.json >> \
+        "$repo/.oms/artifacts/delegate/claude-$cache_case-20261018T000000Z-$run_pid.patch"
+      ;;
+    mixed)
+      mkdir -p "$cache_wt/pkg/.pytest_cache" "$cache_wt/node_modules"
+      printf 'cache\n' > "$cache_wt/pkg/.pytest_cache/data"
+      printf 'module\n' > "$cache_wt/node_modules/data"
+      cache_class=".pytest_cache, .venv, node_modules"
+      ;;
+    nocfg) rm "$cache_wt/$cache_rel/pyvenv.cfg" ;;
+    cfgdir)
+      rm "$cache_wt/$cache_rel/pyvenv.cfg"
+      mkdir "$cache_wt/$cache_rel/pyvenv.cfg"
+      ;;
+    cfglink)
+      rm "$cache_wt/$cache_rel/pyvenv.cfg"
+      : > "$TMP/cache-outside/pyvenv.cfg"
+      ln -s "$TMP/cache-outside/pyvenv.cfg" "$cache_wt/$cache_rel/pyvenv.cfg"
+      ;;
+    rootlink)
+      mv "$cache_wt/.venv" "$TMP/cache-outside/venv"
+      ln -s "$TMP/cache-outside/venv" "$cache_wt/.venv"
+      ;;
+    parentlink)
+      mv "$cache_wt/linked" "$TMP/cache-outside/parent"
+      ln -s "$TMP/cache-outside/parent" "$cache_wt/linked"
+      cache_keep="holds ignored file linked"
+      ;;
+    unignored)
+      cp "$repo/.git/info/exclude" "$TMP/cache-exclude"
+      printf '!.venv/\n' >> "$repo/.git/info/exclude"
+      ;;
+    changed) printf 'unpreserved\n' >> "$cache_wt/file.txt" ;;
+    otherignored) printf 'only copy\n' > "$cache_wt/run.log" ;;
+    untrackedpackage)
+      printf '{}\n' > "$cache_wt/no-package/package.json"
+      ;;
+  esac
+  printf 'outside sentinel\n' > "$TMP/cache-outside/keep"
+  if [ -n "$cache_keep" ]; then
+    kept_with "$cache_case" "$cache_keep" "$cache_case must keep the worktree"
+  else
+    cache_suffix=""
+    [ -z "$cache_class" ] || cache_suffix="; settled; regenerable $cache_class"
+    cleanup_out 1 | grep >/dev/null -Fx \
+      "would remove: $TMPDIR/oh-my-setting-delegate.$cache_case (dead harness temp dir$cache_suffix)" ||
+      fail "$cache_case must be removable with its regenerable class named"
+    [ -d "$cache_wt" ] || fail "$cache_case dry-run removed the worktree"
+    cleanup_out 0 >/dev/null
+    [ ! -e "$cache_wt" ] || fail "$cache_case apply kept the worktree"
+  fi
+  [ "$(cat "$TMP/cache-outside/keep")" = 'outside sentinel' ] ||
+    fail "$cache_case cleanup followed a link outside the worktree"
+  if [ "$cache_case" = unignored ]; then
+    cp "$TMP/cache-exclude" "$repo/.git/info/exclude"
+    rm "$TMP/cache-exclude"
+  fi
+  rm -rf "$TMP/cache-outside"
+done
+# END regenerable ignored trees
+
+# Git hides incomplete .git directories in ls-files; exercise those defensive
+# path refusals directly, including the bytecode fallback.
+python3 - "$ROOT/scripts/lib/harness-residue.sh" <<'PY'
+import ast, os, stat, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    source = handle.read().split("<<'PY' 2>/dev/null | tr -d '\\r'\n", 1)[1].split("\nPY\n", 1)[0]
+functions = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.FunctionDef) and node.name in ("regenerable", "bytecode")]
+scope = dict(os=os, stat=stat, has_type=lambda *args: True,
+             walk=lambda path: (None, b"", b""), OTHER=object(),
+             entry_stat=lambda where: os.stat_result((stat.S_IFREG,) + (0,) * 9),
+             regenerable_roots={}, regenerable_classes=set())
+exec(compile(ast.Module(body=functions, type_ignores=[]), "residue helpers", "exec"), scope)
+assert scope["regenerable"](b".venv/data"), "ordinary ignored content should qualify"
+accepted = [path for path in (b"", b".venv", b".venv/", b".venv/src/dep/", b".venv/src/dep/.git/config",
+                             b".venv/src/dep/.git/__pycache__/unique.pyc") if scope["regenerable"](path)]
+if scope["bytecode"](b".venv/src/dep/.git/__pycache__/unique.pyc"):
+    accepted.append(b"Git metadata bytecode")
+assert not accepted, accepted
+
+from contextlib import contextmanager
+from types import SimpleNamespace
+import hashlib
+fixture = dict(count=0, mode=stat.S_IFREG, size=0, mtime=0, attributes=0,
+               root_mode=stat.S_IFDIR, root_attributes=0)
+@contextmanager
+def entries(path):
+    yield (SimpleNamespace(name="entry%06d" % i) for i in range(fixture["count"]))
+def entry_info(where):
+    return SimpleNamespace(st_mode=fixture["root_mode"] if where[2] == b"." else fixture["mode"],
+                           st_size=0 if where[2] == b"." else fixture["size"],
+                           st_mtime_ns=0 if where[2] == b"." else fixture["mtime"],
+                           st_file_attributes=fixture["root_attributes"] if where[2] == b"." else fixture["attributes"])
+nodes = [node for node in ast.walk(ast.parse(source))
+         if (isinstance(node, ast.FunctionDef) and node.name == "regenerable_tree")
+         or (isinstance(node, ast.ClassDef) and node.name == "Unproven")]
+scan_scope = dict(hashlib=hashlib, stat=stat, entry_stat=entry_info,
+                  walk=lambda path: (None, b"virtual", b"."), OTHER=object(),
+                  os=SimpleNamespace(path=os.path, fsencode=os.fsencode, fsdecode=os.fsdecode, scandir=entries))
+exec(compile(ast.Module(body=nodes, type_ignores=[]), "tree evidence", "exec"), scan_scope)
+assert "regenerable_tree" in scan_scope, "regenerable disk scan is missing"
+scan = scan_scope["regenerable_tree"]
+for count in (0, 1, 200000):
+    fixture["count"] = count
+    assert len(scan(b".venv")) == 32, count
+fixture["count"] = 200001
+try:
+    scan(b".venv")
+except scan_scope["Unproven"] as error:
+    assert str(error) == "regenerable tree too large to prove", error
+else:
+    raise AssertionError("oversized tree was accepted")
+fixture["count"] = 1
+for field in ("size", "mtime", "mode"):
+    before = scan(b".venv")
+    original = fixture[field]
+    fixture[field] = 1 if field != "mode" else stat.S_IFIFO
+    if field == "mode":
+        try:
+            scan(b".venv")
+        except scan_scope["Unproven"] as error:
+            assert "regenerable tree holds unsafe entry" in str(error), error
+        else:
+            raise AssertionError("non-regular entry was accepted")
+    else:
+        assert scan(b".venv") != before, field
+    fixture[field] = original
+fixture["attributes"] = 0x400
+try:
+    scan(b".venv")
+except scan_scope["Unproven"] as error:
+    assert "regenerable tree holds unsafe entry" in str(error), error
+else:
+    raise AssertionError("reparse entry was accepted")
+fixture["attributes"] = 0
+for field, value in (("root_mode", stat.S_IFREG), ("root_attributes", 0x400)):
+    original = fixture[field]
+    fixture[field] = value
+    try:
+        scan(b".venv")
+    except scan_scope["Unproven"] as error:
+        assert "regenerable tree holds unsafe entry" in str(error), error
+    else:
+        raise AssertionError("unsafe root was accepted")
+    fixture[field] = original
+for missing in (None, scan_scope["OTHER"]):
+    scan_scope["walk"] = lambda path: missing
+    try:
+        scan(b".venv")
+    except scan_scope["Unproven"] as error:
+        assert "regenerable tree changed while proving" in str(error), error
+    else:
+        raise AssertionError("unverifiable root was accepted")
+PY
 
 # Only worker-session telemetry, cache and empty locks under .oms are disposable;
 # an unindexed artifact or a non-empty lock may be the only copy.
@@ -474,6 +709,7 @@ git -C "$repo" config --unset filter.sentinel.smudge
 # The scan lists runs once for classification; the recheck lists them afresh.
 eval "real_$(declare -f oms_harness_classify_dead_residue)"
 mutate_after=""
+remove_cfg_after=""
 relist_after=""
 add_sibling_after=""
 target_classification_calls=0
@@ -483,6 +719,10 @@ oms_harness_classify_dead_residue() {
   if [ -n "$mutate_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
     printf 'raced\n' >> "$mutate_after"
     mutate_after=""
+  fi
+  if [ -n "$remove_cfg_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+    rm "$remove_cfg_after"
+    remove_cfg_after=""
   fi
   if [ -n "$relist_after" ] && [ -z "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
     events start --provider claude --tool peer-delegate --task-id "task-$relist_after" \
@@ -503,6 +743,20 @@ delegate_run raced task-raced "done"
 mutate_after="$TMPDIR/oh-my-setting-delegate.raced/wt-raced/new-raced.txt"
 kept_with raced "worktree changed during cleanup" "content changed between classification and removal must keep the worktree"
 mutate_after=""  # kept_with consumed it in a pipeline subshell
+delegate_run venv-raced task-venv-raced "done"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.venv-raced/wt-venv-raced/.venv"
+remove_cfg_after="$TMPDIR/oh-my-setting-delegate.venv-raced/wt-venv-raced/.venv/pyvenv.cfg"
+: > "$remove_cfg_after"
+printf 'cache\n' > "$TMPDIR/oh-my-setting-delegate.venv-raced/wt-venv-raced/.venv/data"
+kept_with venv-raced "worktree changed during cleanup" "losing virtualenv proof between classification and removal must keep the worktree"
+remove_cfg_after=""
+delegate_run venv-content-raced task-venv-content-raced "done"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.venv-content-raced/wt-venv-content-raced/.venv"
+: > "$TMPDIR/oh-my-setting-delegate.venv-content-raced/wt-venv-content-raced/.venv/pyvenv.cfg"
+mutate_after="$TMPDIR/oh-my-setting-delegate.venv-content-raced/wt-venv-content-raced/.venv/data"
+printf 'cache\n' > "$mutate_after"
+kept_with venv-content-raced "worktree changed during cleanup" "changing ignored virtualenv content between proofs must keep the worktree"
+mutate_after=""
 delegate_run relisted task-relisted "done"
 relist_after=relisted
 kept_with relisted "worktree changed during cleanup" "a run recorded between classification and removal must keep the worktree"
