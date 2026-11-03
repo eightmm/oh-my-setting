@@ -56,10 +56,14 @@ EOF
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'provider 1.0\n'; exit 0 ;; esac
 cat > /dev/null
+# agy answers arrive in its --output-format json envelope.
+emit() { if [ "${0##*/}" = agy ]; then python3 -c 'import json,sys; print(json.dumps({"conversation_id": "fixture", "status": "SUCCESS", "response": sys.stdin.read(), "usage": {}}))'; else cat; fi; }
+{
 echo "Verdict: the seat bookkeeping is safe to land. Evidence: the artifact row,"
 echo "the thread turn, and the failure ledger are written from one place, and"
 echo "this run exercises all three. Risk: none beyond the missing regression."
 echo "Next: run the smoke suite, then land it."
+} | emit
 EOF
   done
   chmod +x "$bin_dir/codex" "$bin_dir/claude" "$bin_dir/agy"
