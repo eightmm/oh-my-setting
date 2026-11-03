@@ -305,6 +305,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   that chose them explicitly (`--to/--model`, `--reasoning-effort`) instead of
   re-selecting by tier; a flag passed on the continue overrides, and
   `--workload` returns it to tier selection.
+- `oms agent-plan finish` and owner `--finalize --landed-commit` accept a land
+  whose gate, push and CI passed while installation is deferred for live
+  workers, so dependent tasks no longer wait on an install that other running
+  workers keep postponing.
 - `oms agent-plan add` refuses a repeated `--allowed`, `--depends` or
   `--forbidden` instead of silently keeping only the last list.
 - `patch-admit`, `patch-land` and `tick` strip a carriage return from values

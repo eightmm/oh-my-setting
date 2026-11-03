@@ -7481,15 +7481,17 @@ assert s["stale_review"] == [], s
   # fix-forward land after it proves the whole tree: its range extends back over
   # that push. A land that never pushed, or one that passed, bounds the range.
   local fwd_head fwd_a fwd_b fwd_c fwd_d fwd_e
-  fwd_receipt() {  # sha state push-rc base ci
+  fwd_receipt() {  # sha state push-rc base ci [update-rc update-reason]
     python3 - "$receipt_dir/$1-fwd.json" "$@" <<'PY'
 import json, sys
-path, sha, state, rc, base, ci = sys.argv[1:]
+path, sha, state, rc, base, ci = sys.argv[1:7]
 push = {"rc": int(rc)}
 if base: push["base"] = base
+receipt = {"schema": 1, "state": state, "sha": sha, "remote": "origin", "target": "main",
+           "gate": {"rc": 0}, "push": push, "ci": {"conclusion": ci}}
+if len(sys.argv) > 7: receipt["update"] = {"rc": int(sys.argv[7]), "reason": sys.argv[8]}
 with open(path, "w", encoding="utf-8") as handle:
-    json.dump({"schema": 1, "state": state, "sha": sha, "remote": "origin", "target": "main",
-               "gate": {"rc": 0}, "push": push, "ci": {"conclusion": ci}}, handle)
+    json.dump(receipt, handle)
 PY
   }
   fwd_commit() { printf 'x\n' > "$d/$1"; git -C "$d" add "$1"; git -C "$d" commit -qm "$1"; git -C "$d" rev-parse HEAD; }
@@ -7499,13 +7501,13 @@ PY
   fwd_b="$(fwd_commit unrelated-b.txt)"
   fwd_c="$(fwd_commit src/unpushed-failed.txt)"
   fwd_d="$(fwd_commit unrelated-d.txt)"
-  fwd_e="$(fwd_commit unrelated-e.txt)"
+  fwd_e="$(fwd_commit src/deferred.txt)"
   git -C "$d" update-ref refs/remotes/origin/main HEAD
   fwd_receipt "$fwd_a" failed 0 "$fwd_head" failure
   fwd_receipt "$fwd_b" passed 0 "$fwd_a" success
   fwd_receipt "$fwd_c" failed 1 "$fwd_b" failure
   fwd_receipt "$fwd_d" passed 0 "$fwd_c" success
-  fwd_receipt "$fwd_e" update-deferred 0 "$fwd_d" success
+  fwd_receipt "$fwd_e" failed 0 "$fwd_d" success 1 update-failed
   for mode in pushed-failed unpushed-failed deferred; do
     "$SH" --repo "$d" add --id "fwd-$mode" --title "$mode" --allowed "src/$mode.txt" >/dev/null
     "$SH" --repo "$d" claim --id "fwd-$mode" --provider codex >/dev/null
@@ -7530,10 +7532,15 @@ PY
   fwd_receipt "$fwd_d" passed 0 "$fwd_c" success
   before="$(cat "$d/.oms/plan/tasks.json")"
   if "$SH" --repo "$d" finish --id fwd-deferred --landed-commit "$fwd_e" >"$d/err" 2>&1; then
-    fail "commit finish accepted a receipt whose update was deferred"
+    fail "commit finish accepted a receipt whose update failed"
   fi
   assert_file_contains "$d/err" 're-run oms land to finish installation'
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "refused fix-forward finishes changed plan"
+  # Install waits for live workers machine-wide; the pushed, CI-proven commit
+  # still finishes its task.
+  fwd_receipt "$fwd_e" running 0 "$fwd_d" success 76 deferred-live-workers
+  "$SH" --repo "$d" finish --id fwd-deferred --landed-commit "$fwd_e" >/dev/null ||
+    fail "an install deferred for live workers blocked plan finish of a pushed CI-proven land"
   # A separate producer clone explicitly hands real land receipts back to the
   # shared plan checkout. Two commits need the predecessor to cover src/.
   local handoff_remote="$TMP/plan-handoff.git" producer="$TMP/plan-producer"

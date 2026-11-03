@@ -285,7 +285,12 @@ def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
                 type(push.get("rc")) is not int or push["rc"] != 0 or
                 ci.get("conclusion") != "success"):
             continue
-        if receipt.get("state") != "passed":
+        update = receipt.get("update")
+        # Install waits for zero live workers machine-wide; the commit itself
+        # is verified and pushed, so plan completion does not wait for it.
+        install_deferred = (isinstance(update, dict) and update.get("rc") == 76
+                            and update.get("reason") == "deferred-live-workers")
+        if receipt.get("state") != "passed" and not install_deferred:
             if unfinished is None:
                 unfinished = receipt.get("state")
             continue
