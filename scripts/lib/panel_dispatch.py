@@ -2,6 +2,7 @@
 
 from typing import NamedTuple
 from pathlib import Path
+from verify_selectors import _read_suite, _uses_smoke_runner, validate_verify_selectors
 import dispatch_supervisor as dispatch_store
 import hashlib
 import io
@@ -1018,97 +1019,7 @@ def _warn_missing_module(repo, verify):
 
 
 def _validate_dispatch_verifier(repo, verify, continuation_patch=None, patch_repo=None):
-    """Refuse missing suite files and unknown selectors without running repository code.
-
-    A continuation may also select smoke tests defined on added hunk lines of
-    its digest-verified carried patch, only in the corresponding suite.
-    """
-    from terminal_panel import _read_suite, _uses_smoke_runner
-    if not isinstance(verify, str) or not verify.strip():
-        return
-    try:
-        lexer = shlex.shlex(verify, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        return
-    added = {}
-    if continuation_patch:
-        from panel_results import _patch_name, verified_patch
-        body = verified_patch(patch_repo or repo, {"patch": continuation_patch.get("patch"),
-                                                  "patch_sha256": continuation_patch.get("sha256")})
-        current, remaining = None, 0
-        for line in body.decode("utf-8", "surrogateescape").split("\n"):
-            if line.startswith("diff --git "):
-                current, remaining = None, 0
-            elif line.startswith("@@ "):
-                hunk = re.match(r"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@", line)
-                remaining = sum(int(count) if count is not None else 1 for count in hunk.groups()) if hunk else 0
-            elif remaining:
-                definition = re.match(r"\+(test_[A-Za-z0-9_]+)\(\) *\{", line)
-                if current and definition:
-                    added.setdefault(current, []).append(definition.group(1))
-                remaining = max(0, remaining - (2 if line.startswith(" ") else 1
-                                                if line.startswith(("+", "-")) else 0))
-            elif line.startswith("+++ "):
-                current = _patch_name(line[4:].split("\t", 1)[0])
-    separators = {"&&", "||", ";", "|", "&", ";;", "(", ")"}
-    repo = Path(repo)
-    for index, token in enumerate(tokens[:-1]):
-        if token != "bash":
-            continue
-        suite = tokens[index + 1]
-        if not re.fullmatch(r"(?:tests|scripts)/[A-Za-z0-9_.-]+\.sh", suite):
-            continue
-        target = repo / suite
-        if not target.is_file():
-            raise ValueError("--verify names missing suite file: %s" % suite)
-        cursor = index + 2
-        seen_sections = False
-        while cursor < len(tokens):
-            option = tokens[cursor]
-            if option in separators:
-                break  # selectors after a shell separator belong to the next command
-            if option not in {"--section", "--only"}:
-                cursor += 1
-                continue
-            if option == "--section" and suite == "tests/operator-tools-smoke.sh":
-                if seen_sections:
-                    raise ValueError("--verify repeats --section; use one comma-separated list")
-                seen_sections = True
-            if cursor + 1 >= len(tokens):
-                break
-            selector = tokens[cursor + 1]
-            # Selectors are read from the suite text, never by running repository code (dry runs included).
-            if option == "--section" and suite == "tests/operator-tools-smoke.sh":
-                source = _read_suite(target)
-                valid = [name.replace("_", "-") for name in
-                         re.findall(r"^# OPERATOR_SECTION_BEGIN ([a-z_-]+)$", source, re.M)
-                         if name not in {"core", "shared_cache"}]
-                # Split-out sections are registered in the runner manifest.
-                valid = list(dict.fromkeys(valid + re.findall(
-                    r'^    \("([a-z/-]+)", [0-9]+, ', _read_suite(repo / "tests/operator/runner.py"), re.M)))
-            elif option == "--only" and _uses_smoke_runner(suite, target):
-                selected_suite = (repo / "tests/scripts-smoke.sh" if suite == "tests/run-smoke-shard.sh"
-                                  else target)
-                valid = re.findall(r"^(test_[A-Za-z0-9_]+)\(\) *\{", _read_suite(selected_suite), re.M)
-                valid += added.get(selected_suite.relative_to(repo).as_posix(), [])
-            else:
-                cursor += 2
-                continue
-            # run-smoke-shard.sh matches one --only argument by literal spaces; a tab, newline or
-            # comma would select nothing and exit 0, so those stay part of an (unknown) name.
-            if option == "--section":
-                requested = selector.split(",")
-            elif selector.startswith("test_"):
-                requested = [name for name in selector.split(" ") if name]
-            else:
-                requested = [selector]
-            unknown = [name for name in requested if name not in valid]
-            if unknown:
-                raise ValueError("unknown %s value(s): %s; valid names: %s" %
-                                 (option, ", ".join(unknown), ", ".join(valid)))
-            cursor += 2
+    validate_verify_selectors(repo, verify, continuation_patch=continuation_patch, patch_repo=patch_repo)
 
 
 def _owned_scopes(repo, task_id, kind, scopes):
@@ -1218,24 +1129,6 @@ def _require_assigned_route(repo, task_id, route):
     if (route["provider"] != assignment["provider"] or "model" in assignment and route["model"] != assignment["model"]
             or effort and route.get("effort") != effort):
         raise ValueError("plan task %s is reviewed for %s; dispatch with that route" % (task_id, flags))
-
-
-def _read_suite(path):
-    try:
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("--verify suite must be a regular file: %s" % path.name)
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise ValueError("could not read --verify suite %s" % path.name) from error
-
-
-def _uses_smoke_runner(suite, target):
-    if suite == "tests/run-smoke-shard.sh":
-        return True
-    try:
-        return "run-smoke-shard.sh" in target.read_text(encoding="utf-8")
-    except OSError:
-        return False
 
 
 def plan_link(repo, owner, task_id, env, caller, access="read"):

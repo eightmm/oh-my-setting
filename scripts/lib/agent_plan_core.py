@@ -13,7 +13,7 @@ def _load(path):
     return vars(module)
 
 
-import ast, contextlib, datetime, hashlib, io, json, math, os, re, secrets, shlex, stat, subprocess, sys, tempfile, unicodedata
+import contextlib, datetime, hashlib, io, json, math, os, re, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
 PATCH_MAX = 16 * 1024 * 1024
@@ -442,141 +442,17 @@ def reject_controls(value, label):
 _floor_lint = _load(sys.argv[3])
 floor_incompatible_reads = _floor_lint["floor_incompatible_reads"]
 
-def _verify_commands(verify, depth=0):
-    """Yield word lists of each simple command, recursing into bash -c."""
-    try:
-        tokens = shlex.split(verify)
-    except ValueError:
-        return
-    boundary = {"&&", "||", ";", "|", "&", ";;"}
-    commands, current = [], []
-    for token in tokens:
-        parts = [token] if any(ch.isspace() for ch in token) else [
-            part for part in re.split(r"([;|&]+)", token) if part]
-        for part in parts:
-            if part in boundary:
-                commands.append(current)
-                current = []
-            else:
-                current.append(part)
-    commands.append(current)
-    for words in commands:
-        words = _floor_lint["unwrap_strict_command_wrapper"](list(words))
-        if (depth < 3 and words and words[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh")
-                and "-c" in words[:3]):
-            marker = words.index("-c")
-            if marker + 1 < len(words):
-                for inner in _verify_commands(words[marker + 1], depth + 1):
-                    yield inner
-            continue
-        if words:
-            yield words
+validate_verify_selectors = _load(os.path.join(os.path.dirname(__file__), "verify_selectors.py"))[
+    "validate_verify_selectors"]
 
-
-def _option_values(words, option):
-    return [words[i + 1] for i in range(len(words) - 1) if words[i] == option]
-
-
-def operator_sections(root):
-    """Section names from tests/operator/runner.py SECTIONS, parsed as text
-    (plan time must not execute the target tree); None when unreadable."""
-    try:
-        with open(os.path.join(root, "tests", "operator", "runner.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
-        for node in tree.body:
-            if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "SECTIONS"):
-                return [(name, filename) for name, _, filename in ast.literal_eval(node.value)]
-    except (OSError, SyntaxError, ValueError, TypeError):
-        pass
-    return None
-
-
-def operator_section_cases(root, section, sections):
-    """Case names of a section, in order; None when unreadable. Mirrors
-    tests/operator/runner.py body() and case_markers() `# BEGIN X` handling."""
-    try:
-        filename = dict(sections)[section]
-        if filename:
-            path = os.path.join(root, "tests", "operator", filename)
-        else:
-            path = os.path.join(root, "tests", "operator-tools-smoke.sh")
-        with open(path, encoding="utf-8") as handle:
-            code = handle.read()
-    except (OSError, ValueError, TypeError):
-        return None
-    if not filename:
-        begin, end = "# OPERATOR_SECTION_BEGIN dispatch_exit\n", "# OPERATOR_SECTION_END dispatch_exit\n"
-        if begin not in code:
-            return None
-        code = code.split(begin, 1)[1].split(end, 1)[0]
-    cases = []
-    for line in code.splitlines():
-        match = re.match(r"# (BEGIN|END) (.+)$", line)
-        if match and match.group(1) == "BEGIN":
-            cases.append(re.split(r" \(|\.", match.group(2), 1)[0].strip())
-    return cases
-
-
-def unknown_verify_selectors(verify, root):
-    """Typo lint: (selector, valid-names hint) for --section/--case/--only names
-    that do not exist under root. Static; unknown shapes and read errors pass."""
-    problems = []
-    runner = None
-    smoke_names = None
-    for words in _verify_commands(verify):
-        script = next((w for w in words if w.endswith((
-            "tests/operator-tools-smoke.sh", "tests/scripts-smoke.sh",
-            "tests/run-smoke-shard.sh"))), None)
-        if script is None:
-            continue
-        if script.endswith("operator-tools-smoke.sh"):
-            sections, cases = _option_values(words, "--section"), _option_values(words, "--case")
-            if not sections or not cases:
-                continue
-            if runner is None:
-                runner = operator_sections(root) or False
-            if not runner:
-                continue
-            valid_sections = [name for name, _ in runner]
-            if sections[0] not in valid_sections:
-                problems.append(("--section " + sections[0], ", ".join(valid_sections[:8])))
-                continue
-            known = operator_section_cases(root, sections[0], runner)
-            if known is None:
-                continue
-            for case in cases:
-                if case not in known:
-                    problems.append(("--section %s --case %s" % (sections[0], case),
-                                     ", ".join(known[:8])))
-            continue
-        if "OMS_SMOKE_SUITE=" in verify:
-            continue
-        names = []
-        for index, word in enumerate(words):
-            if word == "--only":
-                names.extend(words[index + 1].split() if index + 1 < len(words) else [])
-        if not names:
-            continue
-        try:
-            if smoke_names is None:
-                with open(os.path.join(root, "tests", "scripts-smoke.sh"), encoding="utf-8") as handle:
-                    smoke_names = [
-                        a or b for a, b in re.findall(
-                            r"^(?:function\s+(test_[A-Za-z0-9_]+)|(test_[A-Za-z0-9_]+)\s*\(\s*\))",
-                            handle.read(), re.M)]
-        except (OSError, ValueError):
-            continue
-        for name in names:
-            if name.startswith("test_") and name not in smoke_names:
-                problems.append(("--only " + name, ", ".join(smoke_names[:8])))
-    return problems
 
 def warn_unknown_selectors(verify):
     # A verify may name a test the task itself creates, so planning only warns.
-    for selector, valid in unknown_verify_selectors(verify, env("OMS_REPO")):
-        print("warning: unknown verify selector: %s; valid: %s (fine if this task creates it)"
-              % (selector, valid), file=sys.stderr)
+    try:
+        validate_verify_selectors(env("OMS_REPO"), verify)
+    except ValueError as error:
+        print("warning: unknown verify selector: %s (fine if this task creates it)" % error,
+              file=sys.stderr)
 
 def clean_rel(value, label):
     if not isinstance(value, str):

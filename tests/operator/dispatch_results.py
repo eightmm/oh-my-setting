@@ -863,6 +863,19 @@ with patch.dict(os.environ, {"PYTHONPATH": str(Path(root) / "scripts/lib")}):
     assert dispatch_verify("python3 -m panel_dispatch") == ""
 assert dispatch_verify("python3 -m scripts.lib.surely_missing_module_xyz") == ""
 assert not (sentinel_root / "sentinelpkg" / "ran").exists(), "probe executed package initialization"
+# BEGIN verify selector validation
+for case in ("no such case", "", "0", "reviewed-result acceptance composition (invalid suffix)."):
+    try:
+        panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section dispatch-results --case "
+                                          + shlex.quote(case))
+        raise AssertionError("unknown operator case was accepted: " + repr(case))
+    except ValueError as error:
+        assert str(error).startswith("unknown --case value(s): "), error
+        assert "reviewed-result acceptance composition" in str(error), error
+panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section dispatch-results"
+                                  " --case 'reviewed-result acceptance composition'")
+panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh"
+                                  " --case 'reviewed-result acceptance composition' --section dispatch-results")
 try:
     panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section not-a-section")
     raise AssertionError("unknown operator section was accepted")
@@ -984,6 +997,7 @@ def exercise_continuation_verifier(temporary):
 
 
 exercise_continuation_verifier(temporary)
+# END verify selector validation
 
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
