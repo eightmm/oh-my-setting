@@ -991,18 +991,33 @@ def changed_lines(row):
     """The latest retained patch's bounded file summary, ahead of the answer."""
     changes = next((mapping(c.get("changes")) for c in reversed(listing(row.get("calls")))
                     if mapping(c).get("changes")), {})
-    if changes.get("issue"):
-        return ["Changed files: unavailable (" + clean(changes["issue"]) + ")"]
     total = valid_count(changes.get("count"))
-    if total is None:
-        return []
-    lines = ["Changed files: %s (+%s -%s)" % (total, valid_count(changes.get("added")) or 0,
-                                            valid_count(changes.get("removed")) or 0)]
-    files = listing(changes.get("files"))[:12]
-    lines += ["  %s +%s -%s" % (clean(f[0]), f[1], f[2]) for f in files
-              if isinstance(f, (list, tuple)) and len(f) == 3]
-    if total > 12:
-        lines.append("  and %s more files" % (total - 12))
+    if changes.get("issue"):
+        lines = ["Changed files: unavailable (" + clean(changes["issue"]) + ")"]
+    elif total is None:
+        lines = []
+    else:
+        lines = ["Changed files: %s (+%s -%s)" % (total, valid_count(changes.get("added")) or 0,
+                                                valid_count(changes.get("removed")) or 0)]
+        files = listing(changes.get("files"))[:12]
+        lines += ["  %s +%s -%s" % (clean(f[0]), f[1], f[2]) for f in files
+                  if isinstance(f, (list, tuple)) and len(f) == 3]
+        if total > 12:
+            lines.append("  and %s more files" % (total - 12))
+    delta = mapping(row.get("round_delta"))
+    if delta.get("issue"):
+        lines.append("round delta: " + clean(delta["issue"]))
+    elif valid_count(delta.get("count")) is not None and valid_count(delta.get("since_round")) is not None:
+        lines.append("Since round %s: %s files changed" % (delta["since_round"], delta["count"]))
+        for item in listing(delta.get("files"))[:12]:
+            item = mapping(item)
+            path = clean(item.get("path"))
+            if item.get("status") in ("new in this round", "dropped this round"):
+                lines.append("  %s %s" % (path, item["status"]))
+            elif valid_count(item.get("added")) is not None and valid_count(item.get("removed")) is not None:
+                lines.append("  %s +%s -%s" % (path, item["added"], item["removed"]))
+        if delta["count"] > 12:
+            lines.append("  and %s more files" % (delta["count"] - 12))
     return lines
 
 

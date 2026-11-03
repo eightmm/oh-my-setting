@@ -6,6 +6,66 @@ from unittest.mock import Mock, patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
+# BEGIN continuation round delta
+delta_task = "delta-task"
+delta_attempts = [dict(task_id=delta_task, attempt_id="delta-%s" % n, state="done",
+                       refs={"panel_access": "write", "panel_role": "worker"}) for n in (1, 2)]
+delta_patches = [
+    b"diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+first\n",
+    b"diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+second\n"
+    b"diff --git a/b.txt b/b.txt\n--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+new\n",
+]
+delta_rows = []
+for index, data in enumerate(delta_patches):
+    path = project / (".oms/artifacts/delta-%s.patch" % index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    delta_rows.append(dict(task_id=delta_task, kind="delegate", attempt_id="delta-%s" % (index + 1),
+                           patch=path.relative_to(project).as_posix(), patch_sha256=hashlib.sha256(data).hexdigest()))
+with patch.object(saved, "_records", return_value=(delta_attempts, delta_rows)), \
+        patch.object(saved, "_worker_owns", return_value=[]):
+    delta = saved.results(project, delta_task)["rows"][0]["round_delta"]
+    assert delta == {"since_round": 1, "count": 2, "files": [
+        {"path": "a.txt", "added": 1, "removed": 1},
+        {"path": "b.txt", "status": "new in this round"}]}, delta
+    import room_view
+    rendered = room_view.changed_lines({"round_delta": delta})
+    assert rendered == ["Since round 1: 2 files changed", "  a.txt +1 -1", "  b.txt new in this round"], rendered
+    assert room_view.changed_lines({"round_delta": {"issue": "skipped (too large)"}}) == ["round delta: skipped (too large)"]
+    assert room_view.changed_lines({}) == []
+with patch.object(saved, "_records", return_value=(delta_attempts[:1], delta_rows[:1])):
+    assert "round_delta" not in saved.results(project, delta_task)["rows"][0]
+with patch.object(saved, "_records", return_value=(delta_attempts, [delta_rows[0], dict(delta_rows[1], patch_sha256="bad")])):
+    assert saved.results(project, delta_task)["rows"][0]["round_delta"] == {"issue": "unavailable"}
+with patch.object(saved, "_records", return_value=(delta_attempts, [delta_rows[0], dict(delta_rows[1], patch=".oms/artifacts/missing.patch")])):
+    assert saved.results(project, delta_task)["rows"][0]["round_delta"] == {"issue": "unavailable"}
+with patch.object(saved, "verified_patch", side_effect=[delta_patches[1], delta_patches[0]]):
+    delta = saved._round_delta(project, delta_attempts, delta_rows)
+    assert delta["files"][1] == {"path": "b.txt", "status": "dropped this round"}, delta
+with patch.object(saved, "verified_patch", side_effect=[b"", b""]):
+    assert saved._round_delta(project, delta_attempts, delta_rows) == {"since_round": 1, "count": 0, "files": []}
+for size, issue in ((saved.ROUND_DELTA_MAX, None), (saved.ROUND_DELTA_MAX + 1, "skipped (too large)")):
+    body = b"diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@ -0,0 +1 @@\n+"
+    body += b"x" * (size - len(body) - 1) + b"\n"
+    with patch.object(saved, "verified_patch", side_effect=[b"", body]):
+        result = saved._round_delta(project, delta_attempts, delta_rows)
+        assert result.get("issue") == issue, result
+for bad in (b"nonsense\n", b"diff --git a/a b/a\n@@ -1 +1 @@\n+truncated\n",
+            b"diff --git a/a b/a\nGIT binary patch\n"):
+    with patch.object(saved, "verified_patch", side_effect=[b"", bad]):
+        assert saved._round_delta(project, delta_attempts, delta_rows) == {"issue": "unavailable"}
+no_newline = (b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n"
+              b"\\ No newline at end of file\n+new\n\\ No newline at end of file\n")
+assert {line: n for line, n in saved._patch_line_balance(no_newline)["a"].items() if n} == {b"old": -1, b"new": 1}
+context_marker = b"diff --git a/a b/a\n@@ -2 +2 @@\n same\n\\ No newline at end of file\n"
+assert not saved._patch_line_balance(context_marker)["a"]
+carriage = b"diff --git a/a b/a\n@@ -1 +1 @@\n-before\rpart\n+after\rpart\n"
+assert saved._patch_line_balance(carriage)["a"][b"after\rpart\n"] == 1
+middle = dict(delta_attempts[0], attempt_id="delta-missing")
+with patch.object(saved, "verified_patch", side_effect=delta_patches):
+    assert saved._round_delta(project, [delta_attempts[0], middle, delta_attempts[1]], delta_rows)["since_round"] == 1
+# END continuation round delta
+
 # BEGIN continued acceptance regression
 with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": "main"}):
     task = {"state": "running", "verify": "true", "lease_id": "lease", "plan_id": "plan"}
@@ -174,6 +234,7 @@ with patch.object(saved, "_records", return_value=(index_attempts, index_rows)),
         patch.object(saved, "_last_delivery", return_value=None), \
         patch.object(saved, "_diffstat", return_value=dict(files=[], count=0, added=0, removed=0)), \
         patch.object(saved, "verified_patch", return_value=b""), \
+        patch.object(saved, "_round_delta", return_value=None), \
         patch.object(saved.room, "status", return_value=dict(participants=index_members)) as index_room:
     index_reports = [saved.results(project, **options) for options in index_pages]
     index_encoded = json.dumps(index_reports, ensure_ascii=False, separators=(",", ":")).encode()

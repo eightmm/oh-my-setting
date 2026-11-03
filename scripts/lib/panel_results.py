@@ -1,6 +1,7 @@
 """Owner result artifacts and delivery receipts, indexed by existing OMS state."""
 
 import contextlib
+from collections import Counter
 import hashlib
 import io
 import json
@@ -37,6 +38,7 @@ MAX_SUMMARY, MAX_RESULT = 8192, 32768
 MAX_DRAFT = 4096
 # Landing capture objects and delegate patches go up to 16 MiB; evidence files stay at 1 MiB.
 PATCH_MAX = 16 * 1024 * 1024
+ROUND_DELTA_MAX = 2 * 1024 * 1024
 TERMINAL_FAILURE_STATES = TERMINAL_STATES - {'done'}
 
 
@@ -418,6 +420,96 @@ def _diffstat(repo, row):
     return {'files': list(files.values())[:20], 'count': len(files),
             'added': sum(f[1] for f in files.values()),
             'removed': sum(f[2] for f in files.values())}
+
+
+def _patch_line_balance(data):
+    """Represent each text patch as added lines minus removed lines per file."""
+    files = {}
+    current = None
+    old_left = new_left = 0
+    last = None
+    if data and not data.endswith(b'\n'):
+        raise ValueError('truncated patch text')
+    for raw in data.split(b'\n')[:-1]:
+        line = raw + b'\n'
+        if line.startswith(b'\\ No newline at end of file'):
+            if not last:
+                raise ValueError('invalid no-newline marker')
+            value, sign = last
+            if sign:
+                files[current][value] -= sign
+                files[current][value[:-1]] += sign
+            last = None
+        elif old_left or new_left:
+            if line.startswith(b' '):
+                old_left -= 1
+                new_left -= 1
+                last = (line[1:], 0)
+            elif line.startswith(b'-'):
+                old_left -= 1
+                files[current][line[1:]] -= 1
+                last = (line[1:], -1)
+            elif line.startswith(b'+'):
+                new_left -= 1
+                files[current][line[1:]] += 1
+                last = (line[1:], 1)
+            else:
+                raise ValueError('invalid patch hunk')
+            if old_left < 0 or new_left < 0:
+                raise ValueError('invalid patch hunk length')
+        elif line.startswith(b'diff --git '):
+            paths = _patch_paths(line)
+            if len(paths) != 1 or paths[0] in files:
+                raise ValueError('unsupported patch paths')
+            current = paths[0]
+            files[current] = Counter()
+            last = None
+        elif line.startswith(b'@@ '):
+            match = re.match(rb'@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@', line)
+            if current is None or not match:
+                raise ValueError('invalid patch hunk header')
+            old_left, new_left = (int(n) if n is not None else 1 for n in match.groups())
+            last = None
+        elif line.startswith((b'GIT binary patch', b'Binary files ', b'rename ', b'copy ',
+                              b'old mode ', b'new mode ')):
+            raise ValueError('unsupported patch format')
+        elif not line.startswith((b'index ', b'--- ', b'+++ ', b'new file mode ', b'deleted file mode ')):
+            raise ValueError('invalid patch text')
+    if old_left or new_left:
+        raise ValueError('truncated patch hunk')
+    return files
+
+
+def _round_delta(repo, attempts, rows):
+    by_attempt = {}
+    for row in rows:
+        if row.get('kind') == 'delegate' and row.get('patch') and row.get('patch_sha256'):
+            by_attempt[row.get('attempt_id')] = row
+    writes = [a for a in attempts if a.get('refs', {}).get('panel_access') == 'write']
+    captured = [(number, by_attempt[a.get('attempt_id')]) for number, a in enumerate(writes, 1)
+                if a.get('attempt_id') in by_attempt]
+    if len(captured) < 2:
+        return None
+    try:
+        before, after = (verified_patch(repo, item[1]) for item in captured[-2:])
+        if len(before) + len(after) > ROUND_DELTA_MAX:
+            return {'issue': 'skipped (too large)'}
+        earlier, later = _patch_line_balance(before), _patch_line_balance(after)
+        files = []
+        for path in sorted(earlier.keys() | later.keys()):
+            if path not in earlier or path not in later:
+                files.append({'path': clean(path, 160),
+                              'status': 'new in this round' if path not in earlier else 'dropped this round'})
+                continue
+            delta = later[path].copy()
+            delta.subtract(earlier[path])
+            added = sum(n for n in delta.values() if n > 0)
+            removed = -sum(n for n in delta.values() if n < 0)
+            if added or removed:
+                files.append({'path': clean(path, 160), 'added': added, 'removed': removed})
+        return {'since_round': captured[-2][0], 'count': len(files), 'files': files[:20]}
+    except Exception:
+        return {'issue': 'unavailable'}
 
 
 def _admission(repo, rows, task_id, worker):
@@ -2602,6 +2694,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 'abandoned': 'salvage or re-dispatch',
                 'timed_out': timeout_action,
             }[last['state']]
+        round_delta = _round_delta(repo, matching, indexed) if task_id else None
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),
                        'model': clean(metadata.get('panel_model'), 160), 'role': metadata.get('panel_role'),
@@ -2618,6 +2711,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                        'issue': issue, 'missing_result': result is None,
                        'stages': stages, 'representative_state': representative, 'next_action': action,
                        'termination_reason': termination_reason})
+        if round_delta is not None:
+            output[-1]['round_delta'] = round_delta
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
             'coverage': ('all retained attempts' if task_id and not (_records_data or _tick or _shared)
                          else 'latest 300 attempts; attempt coverage may be incomplete')
