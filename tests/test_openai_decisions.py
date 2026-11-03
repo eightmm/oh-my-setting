@@ -147,6 +147,8 @@ class DecisionsTests(unittest.TestCase):
         self.assertEqual(path.read_text(), 'x' * 4096)
         path.write_text('x' * 4096 + '\n')
         self.assertEqual(self.run_cli(*self.question()).returncode, 0)
+        path.write_bytes(b'x' * 4096 + b'\r\n\nTRAILING')
+        self.assertEqual(self.run_cli(*self.question()).returncode, 2)
         path.chmod(0o644)
         directory.chmod(0o755)
         self.assertEqual(self.run_cli('--set-key', **{'stdin': self.private + '\n'}).returncode, 2)

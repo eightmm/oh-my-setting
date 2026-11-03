@@ -269,7 +269,7 @@ def get_auth():
         raise ClientError('verify %s is a regular non-symlink file owned by the current user; chmod 600 %s' % (name, name)) from None
     with os.fdopen(fd, 'rb') as handle:
         check_private(os.fstat(handle.fileno()), path)
-        return validate_auth(handle.read(AUTH_LIMIT + 3).decode('utf-8').rstrip('\r\n'))
+        return validate_auth(handle.read(AUTH_LIMIT + 3).decode('utf-8').removesuffix('\n').removesuffix('\r'))
 
 
 def question_list(value):
