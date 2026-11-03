@@ -2490,16 +2490,132 @@ except ValueError as error:
 else:
     raise AssertionError("main-written sensitive content passed outbound scan")
 
-for has_write_patch, expected in (
-        (True, "oms panel --accept hint-task, then oms panel --finalize --landed-commit SHA"),
-        (False, "a task with no patch cannot finish by landing; close it with oms agent-plan accept-main-research (completion bundle) or oms agent-plan block --id hint-task --reason TEXT")):
+# BEGIN finalized survey next-ready projection
+import hook_state
+survey_repo = temporary / "survey-ready"
+survey_plan_path = survey_repo / ".oms/plan/tasks.json"
+survey_plan_path.parent.mkdir(parents=True)
+survey_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+survey_plan = {"plan_id": "survey-plan", "goal": "Inspect then implement", "tasks": {
+    "survey": {"id": "survey", "title": "Read-only survey", "state": "ready", "lease_id": "",
+               "created": "1", "updated": survey_stamp},
+    "dependent": {"id": "dependent", "state": "ready", "created": "2", "depends": ["survey"]},
+    "next-task": {"id": "next-task", "title": "Next eligible work", "state": "ready", "created": "3"}}}
+survey_plan_path.write_text(json.dumps(survey_plan))
+survey_binding = saved._plan_bindings(survey_repo, {"survey"})["survey"]
+survey_result = {"schema": 1, "kind": "oms-panel-result", "task_id": "survey", "owner": "codex",
+                 "revision": "1" * 24, "outcome": "completed", "summary": "Survey answered",
+                 "evidence": [], "verification": {"status": "not_run"}, "plan_binding": survey_binding}
+survey_rows = []
+def survey_record(value):
+    relative = ".oms/artifacts/panel-results/survey-%s.json" % hashlib.sha256(
+        json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
+    result_path = Path(saved._write(survey_repo, relative, value))
+    survey_rows[:] = [{"kind": "panel-result", "task_id": "survey", "artifact": relative,
+                      "artifact_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest()}]
+def survey_hint(expected):
+    before = survey_plan_path.read_bytes()
+    notices = io.StringIO()
+    with patch.object(saved, "_records", return_value=([], survey_rows)), redirect_stderr(notices):
+        panel._print_dispatch_next_ready(survey_repo, "codex")
+        with patch.dict(os.environ, OMS_ROOM_REPO=str(survey_repo), OMS_ROOM_PARTICIPANT=""):
+            context = hook_state.panel_plan_hint({"cwd": str(project)})
+    assert "next ready: " + expected in notices.getvalue(), notices.getvalue()
+    assert "next ready: " + expected in context, context
+    assert "0 of 3 verified" in context, context
+    assert survey_plan_path.read_bytes() == before, "hint changed plan state"
+    assert "next ready: dependent" not in notices.getvalue(), notices.getvalue()
+survey_hint("survey")
+for survey_outcome in ("completed", "accepted", "failed", "rejected"):
+    survey_record(dict(survey_result, outcome=survey_outcome))
+    survey_hint("next-task" if survey_outcome in ("completed", "accepted") else "survey")
+survey_record(survey_result)
+# A later failed decision must not inherit an earlier successful answer.
+successful_row = dict(survey_rows[0])
+successful_row["artifact"] = ".oms/artifacts/panel-results/success.json"
+saved._write(survey_repo, successful_row["artifact"], survey_result)
+survey_record(dict(survey_result, outcome="failed"))
+survey_rows.insert(0, successful_row)
+survey_hint("survey")
+survey_record(survey_result)
+survey_plan["tasks"]["survey"]["title"] = "Amended within the same timestamp"
+survey_plan_path.write_text(json.dumps(survey_plan))
+survey_hint("survey")
+survey_plan["tasks"]["survey"]["title"] = "Read-only survey"
+survey_plan["tasks"]["survey"]["updated"] = "2099-01-01T00:00:00Z"
+survey_plan_path.write_text(json.dumps(survey_plan))
+survey_hint("survey")
+survey_plan["tasks"]["survey"]["updated"] = survey_stamp
+survey_plan["plan_id"] = "replacement-plan"
+survey_plan_path.write_text(json.dumps(survey_plan))
+survey_hint("survey")
+survey_plan["plan_id"] = "survey-plan"
+survey_plan_path.write_text(json.dumps(survey_plan))
+del survey_plan["plan_id"]
+survey_plan_path.write_text(json.dumps(survey_plan))
+survey_hint("survey")
+survey_plan["plan_id"] = "survey-plan"
+survey_plan_path.write_text(json.dumps(survey_plan))
+for bad_binding in (None, {}, {"plan_id": "survey-plan", "task_sha256": "0" * 64}):
+    survey_record(dict(survey_result, plan_binding=bad_binding))
+    survey_hint("survey")
+survey_record(dict(survey_result, outcome="malformed"))
+survey_hint("survey")
+survey_rows[0]["artifact_sha256"] = "0" * 64
+survey_hint("survey")
+with patch.object(saved, "_records", side_effect=ValueError("unreadable index")):
+    assert "next ready: survey" in hook_state.panel_next_ready_hint(hook_state.plan_tasks(survey_repo)[1], "codex")
+survey_empty_repo = temporary / "empty-survey-plan"
+survey_empty_repo.mkdir()
+with patch.object(saved, "_records") as unused_records:
+    assert hook_state.plan_tasks(survey_empty_repo) == ({}, [])
+    assert saved.outcomes(survey_repo, [], _current_only=True) == {}
+    unused_records.assert_not_called()
+survey_record(survey_result)
+del survey_plan["tasks"]["next-task"]
+survey_plan_path.write_text(json.dumps(survey_plan))
+with patch.object(saved, "_records", return_value=([], survey_rows)):
+    assert not hook_state.panel_next_ready_hint(hook_state.plan_tasks(survey_repo)[1], "codex")
+# END finalized survey next-ready projection
+
+# BEGIN finalized survey plan hint
+for has_write_patch, shown_task, expected in (
+        (True, {"state": "review"}, "oms panel --accept hint-task, then oms panel --finalize --landed-commit SHA"),
+        (False, {"state": "ready", "lease_id": ""}, "oms agent-plan cancel --id hint-task"),
+        (False, {"state": "ready"}, "oms agent-plan cancel --id hint-task"),
+        (False, {"state": "ready", "lease_id": None}, "oms agent-plan cancel --id hint-task"),
+        (False, {"state": "ready", "lease_id": 0}, "oms agent-plan cancel --id hint-task"),
+        (False, {"state": "ready", "lease_id": "lease"}, "oms agent-plan block --id hint-task --reason TEXT"),
+        (False, {"state": "claimed", "lease_id": "lease"}, "oms agent-plan accept-main-research (completion bundle)"),
+        (False, {"state": "running", "lease_id": "lease"}, "oms agent-plan accept-main-research (completion bundle)"),
+        (False, {"state": "review", "lease_id": "lease"}, "oms agent-plan accept-main-research (completion bundle)"),
+        (False, {"state": "review"}, "oms agent-plan accept-main-research (completion bundle)"),
+        (False, {"state": "blocked", "lease_id": "lease"}, "oms agent-plan accept-main-research (completion bundle)"),
+        (False, {"state": "done"}, "")):
     hint = io.StringIO()
     with patch.object(saved.subprocess, "run", return_value=SimpleNamespace(
-            returncode=0, stdout='{"state":"review"}', stderr="")), redirect_stderr(hint):
+            returncode=0, stdout=json.dumps(shown_task), stderr="")), redirect_stderr(hint):
         saved._plan_hint(project, "hint-task", has_write_patch)
     assert expected in hint.getvalue(), hint.getvalue()
+    if not expected:
+        assert not hint.getvalue(), hint.getvalue()
+    if "cancel --id" in expected:
+        for flag in ("--expected-plan-sha256 SHA", "--expected-task-sha256 SHA", "--expected-state ready",
+                     "--expected-lease-id none", "--operator-consent cancel", "--reason TEXT",
+                     "--decision-artifact ARTIFACT", "--expected-decision-artifact-sha256 SHA"):
+            assert flag in hint.getvalue(), hint.getvalue()
+        assert "accept-main-research" not in hint.getvalue(), hint.getvalue()
+        assert len(hint.getvalue().splitlines()) == 1, hint.getvalue()
     if not has_write_patch:
         assert "after oms land" not in hint.getvalue(), hint.getvalue()
+for unavailable in (SimpleNamespace(returncode=1, stdout="", stderr="missing task"),
+                    *(SimpleNamespace(returncode=0, stdout=body, stderr="")
+                      for body in ("", "malformed", "null", "[]", "0", "{}"))):
+    hint = io.StringIO()
+    with patch.object(saved.subprocess, "run", return_value=unavailable), redirect_stderr(hint):
+        saved._plan_hint(project, "hint-task", False)
+    assert not hint.getvalue(), hint.getvalue()
+# END finalized survey plan hint
 first = json.loads(call(final_args))
 assert first["verification"]["status"] == "passed"
 # A result recorded without panel identity still reaches the shared Plan,

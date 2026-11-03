@@ -1933,15 +1933,29 @@ def plain_line(value: Any, limit: int) -> str:
 
 
 def plan_tasks(repo: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Plan rows with projection-only answer metadata for next-ready callers."""
     from dashboard_projection import read_plan
 
-    return read_plan(repo)
+    data, tasks = read_plan(repo)
+    ready = {task["id"] for task in tasks if task.get("state") == "ready"}
+    if not ready:
+        return data, tasks
+    from panel_results import outcomes
+
+    try:
+        answered = outcomes(repo, ready, _current_only=True)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        answered = {}
+    return data, [dict(task, _panel_answered=answered.get(task["id"]) in {"completed", "accepted"})
+                  if task["id"] in ready else task for task in tasks]
 
 
 def panel_next_ready_hint(tasks: list[dict[str, Any]], provider: str) -> str:
+    """Suggest dependency-ready work without a current owner answer; never grant plan completion."""
     done = {t["id"] for t in tasks if t.get("state") == "done"}
     ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
-                  if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
+                  if t.get("state") == "ready" and not t.get("_panel_answered")
+                  and all(d in done for d in t.get("depends") or [])), None)
     if not ready:
         return ""
     from panel_routing import policy, TIERS

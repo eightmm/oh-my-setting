@@ -783,20 +783,29 @@ def _deliver(repo, payload, relative, rows, retry=False):
 
 
 def _plan_hint(repo, task_id, has_write_patch):
+    """Unclaimed read results need explicit cancellation; claimed work can use a completion bundle."""
     # No land receipt exists here, so the plan is never finished automatically.
     try:
         shown = subprocess.run(['bash', str(ENTRY), 'agent-plan', '--repo', str(repo), 'show', '--id', task_id],
                                capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=60)
-        if not shown.returncode and json.loads(shown.stdout).get('state') not in ('done', None):
+        task = json.loads(shown.stdout) if not shown.returncode else {}
+        if isinstance(task, dict) and task.get('state') not in ('done', None):
             if has_write_patch:
                 print('plan %s is not done: oms panel --accept %s, then oms panel --finalize --landed-commit SHA; '
                       'or review with oms agent-plan review --id %s --lease-id L --artifact A --patch P and land '
                       'with oms patch-land --plan-task %s'
                       % (task_id, task_id, task_id, task_id), file=sys.stderr)
             else:
+                close = 'oms agent-plan block --id %s --reason TEXT' % task_id
+                if task.get('state') == 'ready' and not task.get('lease_id'):
+                    close = ('oms agent-plan cancel --id %s --expected-plan-sha256 SHA '
+                             '--expected-task-sha256 SHA --expected-state ready --expected-lease-id none '
+                             '--operator-consent cancel --reason TEXT --decision-artifact ARTIFACT '
+                             '--expected-decision-artifact-sha256 SHA' % task_id)
+                elif task.get('state') in ('claimed', 'running', 'review', 'blocked'):
+                    close = 'oms agent-plan accept-main-research (completion bundle) or ' + close
                 print('plan %s is not done: a task with no patch cannot finish by landing; close it with '
-                      'oms agent-plan accept-main-research (completion bundle) or oms agent-plan block '
-                      '--id %s --reason TEXT' % (task_id, task_id), file=sys.stderr)
+                      '%s' % (task_id, close), file=sys.stderr)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
 
@@ -2260,8 +2269,8 @@ def retry_delivery(repo, task_id, revision=None):
     raise ValueError('saved result not found in retained evidence')
 
 
-def outcomes(repo, task_ids, _shared=False, _tick=None):
-    """The owner's recorded outcome for each of these tasks, beyond the twenty-task window results() pages."""
+def outcomes(repo, task_ids, _shared=False, _tick=None, _current_only=False):
+    """Owner outcomes beyond the display window; optionally require the current plan generation."""
     wanted = {i for i in task_ids if isinstance(i, str) and ID.fullmatch(i)}
     if not wanted:
         return {}
@@ -2279,6 +2288,8 @@ def outcomes(repo, task_ids, _shared=False, _tick=None):
         if result_rows:
             try:
                 result = _load_result(repo, result_rows[-1])
+                if _current_only and not result_matches_plan(repo, ident, result, bindings):
+                    continue
                 # Only a same-named task of the current plan supersedes the recorded generation; tasks the
                 # current plan no longer holds keep their decisions after a retire.
                 if (result.get('plan_binding') is not None and bindings.get(ident) is not None
