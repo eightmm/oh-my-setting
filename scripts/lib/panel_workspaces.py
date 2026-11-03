@@ -47,14 +47,16 @@ def _caller(repo, origin_session):
     proof = terminals.session_proof(repo, origin_session)
     pane = os.environ.get("TMUX_PANE", "")
     if not re.fullmatch(r"%[0-9]+", pane):
-        raise ValueError("run this from a pane of the origin session")
+        raise terminals.RefusalError("caller-not-managed", "run this from a pane of the origin session")
     fields = _fields(pane, "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}")
     if len(fields) != 5 or fields[0] != origin_session or fields[2] != pane or fields[4] != "0":
-        raise ValueError("caller pane is not in the origin session")
+        raise terminals.RefusalError("caller-not-managed", "caller pane is not in the origin session")
+    if not fields[3].isdigit():
+        raise terminals.RefusalError("caller-not-managed", "caller pane process identity unavailable")
     pid = int(fields[3])
     current = terminals.process(pid)
     if not current:
-        raise ValueError("caller pane process identity unavailable")
+        raise terminals.RefusalError("caller-not-managed", "caller pane process identity unavailable")
     return dict(_server(proof), session=origin_session, window=fields[1], pane=pane, pid=pid,
                 identity=current["identity"])
 
@@ -73,12 +75,17 @@ def origin_proof(repo, row):
 
 def workspace_proof(repo, row):
     if row.get("archived") is True:
-        raise ValueError("archived workspaces cannot control a session")
-    proof = terminals.session_proof(repo, row["session"])
+        raise terminals.RefusalError("workspace-proof", "archived workspaces cannot control a session")
+    try:
+        proof = terminals.session_proof(repo, row["session"])
+    except terminals.RefusalError as error:
+        if error.category != "caller-not-managed":
+            raise
+        raise terminals.RefusalError("workspace-proof", str(error)) from error
     if _server(proof) != _server(row["origin"]):
-        raise ValueError("workspace server identity changed")
+        raise terminals.RefusalError("workspace-proof", "workspace server identity changed")
     if terminals.tmux("show-options", "-v", "-t", row["session"], "key-table") != row["key_table"]:
-        raise ValueError("workspace key table changed")
+        raise terminals.RefusalError("workspace-proof", "workspace key table changed")
     base = row["state_home"]
     expected = {key: ["bind-key", "-T", row["key_table"], key, *_key_command(repo, row["id"], base, action)]
                 for key, action in KEYS}
@@ -90,24 +97,24 @@ def workspace_proof(repo, row):
     expected_values = list(expected.values())
     remaining = list(expected_values)
     if bound is None or len(bound) != len(remaining):
-        raise ValueError("workspace key bindings changed")
+        raise terminals.RefusalError("key-binding-proof", "workspace key bindings changed")
     for actual in bound:
         match = next((index for index, value in enumerate(remaining)
                       if terminals._same_tmux_tokens(actual, value)), None)
         if match is None:
-            raise ValueError("workspace key bindings changed")
+            raise terminals.RefusalError("key-binding-proof", "workspace key bindings changed")
         remaining.pop(match)
     if remaining:
-        raise ValueError("workspace key bindings changed")
+        raise terminals.RefusalError("key-binding-proof", "workspace key bindings changed")
     if not re.fullmatch(r"%[0-9]+", row.get("pane", "")):
-        raise ValueError("workspace launch has not completed")
+        raise terminals.RefusalError("workspace-proof", "workspace launch has not completed")
     fields = _fields(row["pane"], "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t"
                      "#{@oms_workspace_id}\t#{pane_start_command}")
     expected = [row["session"], row.get("window"), row["pane"], str(row.get("pid")), "0", row["id"]]
     if (len(fields) != 7 or fields[:6] != expected
             or not terminals._same_launcher(fields[6], _command(repo, row["id"], row["state_home"]))
             or not terminals.matches(row.get("pid"), row.get("identity"))):
-        raise ValueError("workspace control pane or launcher identity changed")
+        raise terminals.RefusalError("workspace-proof", "workspace control pane or launcher identity changed")
     return {key: row[key] for key in ("session", "window", "pane")}
 
 
@@ -134,8 +141,7 @@ def list_workspaces(repo, archived=False):
 
 def _gone(row):
     """True only when tmux positively reports that the workspace session no longer exists."""
-    result = subprocess.run(["tmux", "has-session", "-t", row["session"]], stdin=subprocess.DEVNULL,
-                            capture_output=True, timeout=4, check=False)
+    result = terminals.tmux_run("has-session", "-t", row["session"])
     return result.returncode != 0 and b"can't find" in result.stderr
 
 
@@ -194,11 +200,16 @@ def _related(repo, origin):
         try:
             workspace_proof(repo, row)
             live.append(row)
-        except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+        except terminals.RefusalError as error:
+            if error.category not in ("workspace-proof", "key-binding-proof", "caller-not-managed", "target-missing"):
+                raise
             if not row.get("session") or not _gone(row):
-                raise ValueError("an existing workspace for this pane is unknown; nothing was changed")
+                raise terminals.RefusalError(error.category, "an existing workspace for this pane is unknown; nothing was changed") from error
+        except (ValueError, KeyError) as error:
+            if not row.get("session") or not _gone(row):
+                raise terminals.RefusalError("workspace-proof", "an existing workspace for this pane is unknown; nothing was changed") from error
     if len(live) > 1:
-        raise ValueError("several workspaces match this pane; nothing was changed")
+        raise terminals.RefusalError("workspace-proof", "several workspaces match this pane; nothing was changed")
     return live
 
 

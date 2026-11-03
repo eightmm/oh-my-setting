@@ -104,6 +104,100 @@ for expected in expected_keys:
     check(not terminals._same_tmux_tokens(displayed + ['extra'], expected),
           'extra workspace key payload accepted')
 
+# BEGIN refusal-category unit checks
+import contextlib
+import io
+for error, category in ((ValueError('private marker'), 'unexpected'),
+                        (RuntimeError('private marker'), 'unexpected')):
+    stderr = io.StringIO()
+    with patch.object(workspaces, 'open_workspace', side_effect=error), contextlib.redirect_stderr(stderr):
+        result = terminals.cli_main(['controls', '--repo', str(repo), '--session', '$42'])
+    check(result == 1 and stderr.getvalue().splitlines() == [
+        'managed terminal action refused: ownership or target unavailable', 'category: ' + category],
+        'unexpected refusal category or disclosure: ' + stderr.getvalue())
+
+def refusal_call():
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        result = terminals.cli_main(['controls', '--repo', str(repo), '--session', '$42'])
+    return result, stderr.getvalue().splitlines()
+
+with patch.object(terminals.subprocess, 'run', side_effect=subprocess.TimeoutExpired('tmux', 4)):
+    result, lines = refusal_call()
+    check(result == 1 and lines[-1] == 'category: tmux-unavailable', 'tmux timeout category')
+with patch.object(terminals, 'tmux', side_effect=['$42\t123\tfixture', 'foreign']):
+    result, lines = refusal_call()
+    check(result == 1 and lines[-1] == 'category: caller-not-managed', 'foreign session category')
+with patch.object(workspaces, 'open_workspace', side_effect=RuntimeError('debug marker')), \
+     patch.dict(os.environ, {'OMS_DEBUG': '1'}):
+    try:
+        refusal_call()
+    except RuntimeError:
+        pass
+    else:
+        check(False, 'debug mode hid unexpected exception')
+
+with patch.object(terminals, 'session_proof', return_value={}), \
+     patch.object(workspaces, '_fields', return_value=['$42', '@1', '%7', 'bad', '0']), \
+     patch.dict(os.environ, {'TMUX_PANE': '%7'}):
+    try:
+        workspaces._caller(repo, '$42')
+    except terminals.RefusalError as error:
+        check(error.category == 'caller-not-managed', 'malformed caller pid category')
+    else:
+        check(False, 'malformed caller pid accepted')
+with patch.object(terminals.subprocess, 'run', side_effect=subprocess.TimeoutExpired('tmux', 4)):
+    try:
+        workspaces._gone({'session': '$42'})
+    except terminals.RefusalError as error:
+        check(error.category == 'tmux-unavailable', 'disappearance timeout category')
+    else:
+        check(False, 'disappearance timeout accepted')
+
+with patch.object(terminals, 'identifiers', return_value=['item']), \
+     patch.object(terminals, 'Store') as store, \
+     patch.object(terminals, 'validate_record', return_value={'origin': {}, 'session': '$42'}), \
+     patch.object(workspaces, 'workspace_proof', side_effect=terminals.RefusalError('workspace-proof', 'changed')), \
+     patch.object(terminals.subprocess, 'run', side_effect=subprocess.TimeoutExpired('tmux', 4)):
+    try:
+        workspaces._related(repo, {})
+    except terminals.RefusalError as error:
+        check(error.category == 'tmux-unavailable', 'related disappearance timeout category')
+    else:
+        check(False, 'related disappearance timeout accepted')
+
+with patch.object(terminals, 'identifiers', return_value=['item']), \
+     patch.object(terminals, 'Store'), \
+     patch.object(terminals, 'validate_record', return_value={'origin': {}, 'session': '$42'}), \
+     patch.object(terminals, 'tmux', side_effect=['$42\t123\tfixture', 'foreign']), \
+     patch.object(workspaces, '_gone', return_value=False):
+    try:
+        workspaces._related(repo, {})
+    except terminals.RefusalError as error:
+        check(error.category == 'workspace-proof', 'stored session ownership category')
+    else:
+        check(False, 'foreign stored session accepted')
+
+with patch.object(terminals.subprocess, 'run', side_effect=PermissionError('private marker')):
+    result, lines = refusal_call()
+    check(result == 1 and lines[-1] == 'category: tmux-unavailable', 'tmux permission category')
+
+with patch.object(terminals, 'identifiers', return_value=['item']), \
+     patch.object(terminals, 'Store'), \
+     patch.object(terminals, 'validate_record', return_value={'origin': {}, 'session': '$42'}), \
+     patch.object(workspaces, 'workspace_proof', side_effect=terminals.RefusalError('key-binding-proof', 'private marker')), \
+     patch.object(workspaces, '_gone', return_value=False):
+    try:
+        workspaces._related(repo, {})
+    except terminals.RefusalError as error:
+        check(error.category == 'key-binding-proof' and str(error) ==
+              'an existing workspace for this pane is unknown; nothing was changed' and
+              'private marker' not in str(error), 'related refusal message or category')
+    else:
+        check(False, 'unproven workspace accepted')
+
+# END refusal-category unit checks
+
 # The ordinary-shell entry resolves only the exact caller pane/session and never creates a main.
 caller_env = dict(os.environ)
 for name in ('TMUX', 'TMUX_PANE', 'OMS_PANEL_SESSION', 'OMS_ROOM_ID'):
@@ -402,10 +496,12 @@ try:
                'F5 after reuse did not return to the origin pane')
 
         # Binding replacement refuses and never adopts.
-        tmux('set-option', '-t', ws, 'key-table', 'root')
+        tmux('set-option', '-t', ws, 'key-table', 'private-marker-table')
         refused_table = controls(origin_pane)
         tmux('set-option', '-t', ws, 'key-table', record['key_table'])
         check(refused_table.returncode == 1 and len(workspace_rows()) == 1, 'changed key table accepted')
+        check(refused_table.stderr.splitlines() == ['managed terminal action refused: ownership or target unavailable',
+                                                     'category: workspace-proof'], 'table refusal category or disclosure')
         # Key callbacks are proven by exact payload, not by key names; tampering refuses and is never repaired.
         def rebind(key, *payload, flags=()):
             tmux('bind-key', *flags, '-T', record['key_table'], key, *payload)
@@ -427,7 +523,7 @@ try:
         good_f5 = workspaces._key_command(repo, record['id'], record['state_home'], 'origin')
         good_f4 = workspaces._key_command(repo, record['id'], record['state_home'], 'focus')
         for name, change in (
-                ('same-key callback replaced', lambda: rebind('F5', 'display-message', 'hijacked')),
+                ('same-key callback replaced', lambda: rebind('F5', 'display-message', 'private-marker-binding')),
                 ('focus payload on the origin key', lambda: rebind('F5', *good_f4)),
                 ('payload suffix changed', lambda: rebind('F5', good_f5[0], good_f5[1], good_f5[2] + ' ; true')),
                 ('repeat flag added', lambda: rebind('F5', *good_f5, flags=('-r',))),
@@ -437,6 +533,8 @@ try:
             refused = controls(origin_pane)
             restore()
             check(refused.returncode == 1 and len(workspace_rows()) == 1, name + ' was accepted')
+            check(refused.stderr.splitlines() == ['managed terminal action refused: ownership or target unavailable',
+                                                   'category: key-binding-proof'], name + ' category or disclosure')
         settle(controls_seen, lambda seen: seen[0] == 0, 'restored key bindings refused')
         press(b'\x1b[15~')
         settle(lambda: (client_session(), active_pane('origin')), lambda seen: seen == ('origin', origin_pane),

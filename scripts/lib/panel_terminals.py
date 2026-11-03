@@ -36,19 +36,33 @@ MAX_READ = 32768
 _PROCESS_HELPERS = None
 
 
-class CapacityError(ValueError):
+class RefusalError(ValueError):
+    CATEGORIES = frozenset(("caller-not-managed", "workspace-proof", "key-binding-proof",
+                            "tmux-unavailable", "lock-timeout", "target-missing", "capacity", "unexpected"))
+
+    def __init__(self, category, message):
+        if category not in self.CATEGORIES:
+            raise ValueError("invalid refusal category")
+        super().__init__(message)
+        self.category = category
+
+
+class CapacityError(RefusalError):
     """A bounded private store needs owner action; no retained evidence was deleted."""
+
+    def __init__(self, message):
+        super().__init__("capacity", message)
 
 
 def parent_only():
     if (os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
-        raise ValueError("workers cannot control owner terminals or jobs")
+        raise RefusalError("caller-not-managed", "workers cannot control owner terminals or jobs")
 
 
 def supported():
     if os.name != "posix" or fcntl is None or not hasattr(os, "O_NOFOLLOW"):
-        raise ValueError("managed terminals require POSIX tmux and no-follow private files")
+        raise RefusalError("tmux-unavailable", "managed terminals require POSIX tmux and no-follow private files")
 
 
 def canonical(repo):
@@ -304,7 +318,7 @@ class Store:
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
-                        raise ValueError("managed record is busy")
+                        raise RefusalError("lock-timeout", "managed record is busy")
                     time.sleep(.02)
             yield
         finally:
@@ -387,11 +401,19 @@ def forget_record(repo, kind, ident, proof, files):
             "notice": "Private history and any retained log were permanently deleted."}
 
 
+def tmux_run(*args):
+    try:
+        result = subprocess.run(["tmux", *args], stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=4, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RefusalError("tmux-unavailable", str(error)) from error
+    return result
+
+
 def tmux(*args):
-    result = subprocess.run(["tmux", *args], stdin=subprocess.DEVNULL,
-                            capture_output=True, timeout=4, check=False)
+    result = tmux_run(*args)
     if result.returncode:
-        raise ValueError("tmux target unavailable")
+        raise RefusalError("target-missing", "tmux target unavailable")
     return result.stdout.decode("utf-8", "replace").replace("\r", "").strip()
 
 
@@ -399,15 +421,17 @@ def session_proof(repo, session):
     supported()
     repo = canonical(repo)
     if not isinstance(session, str) or not re.fullmatch(r"\$[0-9]+", session):
-        raise ValueError("explicit tmux session ID required")
+        raise RefusalError("caller-not-managed", "explicit tmux session ID required")
     fields = tmux("display-message", "-p", "-t", session,
                   "#{session_id}\t#{pid}\t#{socket_path}").split("\t")
     owner = tmux("show-options", "-v", "-t", session, "@oms_panel_repo")
     if len(fields) != 3 or fields[0] != session or owner != tmux_display(str(repo)):
-        raise ValueError("session is not owned by this repository")
+        raise RefusalError("caller-not-managed", "session is not owned by this repository")
+    if not fields[1].isdigit():
+        raise RefusalError("caller-not-managed", "tmux server identity unavailable")
     server = process(int(fields[1]))
     if not server:
-        raise ValueError("tmux server identity unavailable")
+        raise RefusalError("caller-not-managed", "tmux server identity unavailable")
     return {"session": session, "server_pid": server["pid"], "server_identity": server["identity"],
             "socket": fields[2]}
 
@@ -419,7 +443,8 @@ def validate_record(store, ident, kind):
             or row.get("state_home") != str(store.state_home)
             or row.get("archived", False) is not store.archived
             or not isinstance(row.get("label"), str)):
-        raise ValueError("foreign or invalid managed record")
+        raise RefusalError("workspace-proof" if kind == "workspace" else "target-missing",
+                           "foreign or invalid managed record")
     return row
 
 
@@ -690,9 +715,13 @@ def cli_main(argv=None):
             result = read_terminal(args.repo, args.id, maximum=args.maximum)
         print(json.dumps(result, ensure_ascii=True))
         return 0
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    except Exception as error:
+        if not isinstance(error, RefusalError) and os.environ.get("OMS_DEBUG") == "1":
+            raise
         print(str(error) if isinstance(error, CapacityError) else
               "managed terminal action refused: ownership or target unavailable", file=sys.stderr)
+        print("category: " + (error.category if isinstance(error, RefusalError) else "unexpected"),
+              file=sys.stderr)
         return 1
 
 
