@@ -105,8 +105,7 @@ neither a postponed handoff nor an active land starts the cooldown.
 
 Delegated workers also defer installation: `oms update` exits 76 while a worker
 marker proves its owner is live. `oms land` keeps successful push and CI evidence,
-records `update.reason: deferred-live-workers`, and prints a retry command. The
-retry resumes installation; auto-update records the deferral as skipped. This
+records `update.reason: deferred-live-workers`, and prints a retry command. Under `--wait`, `oms land` rechecks the deferred installation every 15 seconds until the workers finish or `--sibling-wait` (default 1800 seconds) expires, so no manual retry is needed. Without `--wait`, the run does not recheck; rerun the printed retry command (which includes `--wait`) to resume installation. Auto-update records the deferral as skipped. This
 check does not detect a worker that starts after installation begins.
 
 For a goal bounded by `PROJECT.md`, the main reads the user's request scope,
@@ -973,7 +972,7 @@ ID`. `--dry-run` prints the chosen route and argv without running a model.
 The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
 front doors. `--workload routine` selects the routine pair (Sonnet, Terra); the default
 `deep` adds the deep pair (Opus, Sol), while `frontier` combines the deep pair with
-the frontier pair (Fable, Astra). Each tier covers both families. One rebuttal round
+the frontier pair (Fable, Astra). Seats come from the `tiers` routes in `config/panel-routing.json`: routine uses the routine tier, deep uses the deep and routine tiers, and frontier uses the deep and frontier tiers, so the seat set depends on `--workload`, not a fixed list. Each tier covers both families. One rebuttal round
 means four primary calls for routine and eight for deep or frontier before optional seats; two rounds
 mean six and twelve respectively. An installed Antigravity seat with the configured catalog model joins when it fits the 12-primary-call budget. Format repair can add one call per
 primary call. `--dry-run` exposes both counts without executing a model. Every
