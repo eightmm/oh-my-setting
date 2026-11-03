@@ -744,6 +744,9 @@ Project state lives under ignored `.oms/` paths:
 attention. `oms fail-ledger list`, `oms artifact-index unresolved`, and
 `oms thread list` expose the underlying records. Writers are append-oriented;
 use migration and GC commands instead of editing JSONL by hand.
+Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
+unsealed journal events at P3 with a journal seal dry run. Neither query nor
+`--fix-safe` removes those markers or seals the journal.
 
 Stop materializes the journal locally. Its detached publisher starts only if
 a Notion target is configured or GitHub CI polling is available for this repo.

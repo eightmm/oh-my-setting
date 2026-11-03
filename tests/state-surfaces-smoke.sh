@@ -31,6 +31,58 @@ make_repo() {
   printf '*\n' > "$dir/.oms/.gitignore"
 }
 
+test_inbox_orphan_and_unsealed_journal() {
+  local repo="$TMP/inbox-gaps"
+  make_repo "$repo"
+  python3 - "$ROOT" "$repo" <<'PY'
+import datetime as dt, json, pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+from work_journal import JournalStore
+repo = pathlib.Path(sys.argv[2])
+markers = repo / ".oms/delegations"
+markers.mkdir()
+(markers / "dead.json").write_text(json.dumps({"id": "dead", "pid": 99999999}))
+(markers / "live.json").write_text(json.dumps({"id": "live", "pid": __import__("os").getppid()}))
+(markers / "bad.json").write_text("{broken")
+store = JournalStore(repo, timezone_name="UTC")
+old = (dt.datetime.now(dt.timezone.utc).replace(day=1) - dt.timedelta(days=1)).isoformat()
+store.record_event({"event_type": "validation", "occurred_at": old,
+                    "source": {"type": "test", "id": "old"}, "verification_status": "passed"})
+store.record_event({"event_type": "validation", "occurred_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "source": {"type": "test", "id": "current"}, "verification_status": "passed"})
+PY
+  python3 - "$ROOT" "$repo" <<'PY'
+import json, os, pathlib, shlex, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+os.environ["OMS_WORK_JOURNAL_TIMEZONE"] = "UTC"
+sys.path.insert(0, str(root / "scripts/lib"))
+marker = repo / ".oms/delegations/dead.json"
+journal = repo / ".oms/work-journal/events.jsonl"
+before = marker.read_bytes(), journal.read_bytes()
+errors = []
+for extra in ([], ["--fix-safe"]):
+    result = subprocess.run([str(root / "scripts/inbox.sh"), "--repo", str(repo), "--json"] + extra,
+                            capture_output=True, text=True, check=True)
+    items = {item["code"]: item for item in json.loads(result.stdout)["items"]}
+    orphan = items.get("orphan-delegation", {})
+    if not (orphan.get("priority") == "P1" and orphan.get("count") == 1 and shlex.split(orphan.get("command", "")) == ["oms", "gc", "--repo", str(repo), "--dry-run"]):
+        errors.append("orphan-delegation: " + repr(orphan))
+    old = items.get("unsealed-journal", {})
+    if not (old.get("priority") == "P3" and old.get("count") == 1 and shlex.split(old.get("command", "")) == ["oms", "journal", "--repo", str(repo), "seal"]):
+        errors.append("unsealed-journal: " + repr(old))
+    assert (marker.read_bytes(), journal.read_bytes()) == before
+    assert not (journal.parent / "cold").exists()
+assert not errors, errors
+from inbox_projection import project_inbox, unsealed_journal_count
+assert unsealed_journal_count(repo) == 1
+assert unsealed_journal_count(repo / "missing") == 0
+assert not any(item["code"] == "orphan-delegation" for item in
+               project_inbox({"delegations": [{"live": True}, {"live": None}]}, repo_path=repo)["items"])
+journal.write_bytes(b"{malformed\n")
+assert unsealed_journal_count(repo) == 0
+PY
+}
+
 # --- MCP server protocol ----------------------------------------------------
 
 test_mcp_live_thread_reuses_peer_tools() {
@@ -2877,6 +2929,7 @@ assert read["cacheScope"] in ("public", "private"), read
 PY
 }
 
+test_inbox_orphan_and_unsealed_journal
 test_mcp_server_protocol
 test_mcp_live_thread_reuses_peer_tools
 test_mcp_server_serves_modern_clients_without_a_handshake

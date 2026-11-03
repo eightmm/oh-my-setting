@@ -1,6 +1,7 @@
 """Pure attention projection shared by inbox and the operator cockpit."""
 
 import calendar
+import datetime
 import json
 import os
 import shlex
@@ -21,8 +22,10 @@ REPO_ANCHOR_MODES = {
     ("oms", "artifact-index"): "repo-option",
     ("oms", "change-guard"): "repo-option",
     ("oms", "fail-ledger"): "repo-option",
+    ("oms", "gc"): "repo-option",
     ("oms", "init"): "repo-option",
     ("oms", "inbox"): "repo-option",
+    ("oms", "journal"): "repo-option",
     ("oms", "panel"): "repo-option",
     ("oms", "patch-land"): "repo-option",
     ("oms", "plan-from-spec"): "repo-option",
@@ -177,6 +180,27 @@ def pending_room_mail(repo):
     return result
 
 
+def unsealed_journal_count(repo):
+    """Use the journal's read-only snapshot and sealing partition rules."""
+    from pathlib import Path
+    from work_journal import (JournalError, _cold_segment, _journal_live,
+                              _journal_snapshot, _partition_live, resolve_timezone)
+    root = Path(repo) / ".oms" / "work-journal"
+    try:
+        _, zone = resolve_timezone()
+        cutoff = datetime.datetime.now(datetime.timezone.utc).astimezone(zone).date().isoformat()[:7]
+
+        def count(manifest):
+            for entry in manifest["segments"]:
+                _cold_segment(root, entry)
+            months, _ = _partition_live(_journal_live(root, manifest), cutoff)
+            return sum(len(rows.splitlines()) for rows in months.values())
+
+        return _journal_snapshot(root, count)[1]
+    except (OSError, ValueError, JournalError):
+        return 0
+
+
 def project_inbox(state, *, safe_actions=(), include_threads=True, repo_path="."):
     items = []
     repo_path = os.path.realpath(repo_path)
@@ -216,6 +240,19 @@ def project_inbox(state, *, safe_actions=(), include_threads=True, repo_path="."
                 (count, mail["oldest_age_seconds"]), mail["command"], count)
 
     plan = state.get("plan", {})
+    orphans = sum(1 for delegation in state.get("delegations", [])
+                  if delegation.get("live") is False)
+    if orphans:
+        add(10, "P1", "orphan-delegation", "%d dead-PID delegation marker(s)" % orphans,
+            oms_command("gc", "--dry-run"), orphans)
+
+    journal = state.get("work_journal", {})
+    if journal.get("present") and journal.get("healthy"):
+        unsealed = unsealed_journal_count(repo_path)
+        if unsealed:
+            add(90, "P3", "unsealed-journal", "%d prior-month journal event(s) available to seal" % unsealed,
+                oms_command("journal", "seal"), unsealed)
+
     stale = plan.get("stale", [])
     if stale:
         add(10, "P1", "stale-plan-claim", "%d expired plan claim(s)" % len(stale),
