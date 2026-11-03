@@ -6,6 +6,68 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+
+- `oms decide` asks the OpenAI Decisions API (`gpt-6-luna`) choice, predicate
+  or score questions with a dedicated key (`--set-key` stores it in a 0600
+  file, never `OPENAI_API_KEY`), a daily input-cost cap
+  (`OMS_DECIDE_DAILY_USD`, default 1.00) and a local usage ledger. The API
+  origin is pinned, the key file is read through its own descriptor, every
+  input is bounded, and key entry fails closed when echo cannot be disabled.
+- `oms decide --auto task-classify on|off|status` (default off): when on,
+  `oms agent-plan add` without `--role` asks once, before taking the plan
+  lock, for a role and workload suggestion that the next-ready hint shows.
+  Any failure leaves the add unchanged.
+- `oms status --repo PATH --json` reports one repository's task, plan and
+  land state for scripts.
+- `oms consult --diff` and `--repo-context` attach the working diff or
+  repository context to one turn without storing it in the thread.
+- `oms thread close --stale` previews the threads `list --stale` reports;
+  `--apply` closes them after a locked recheck and never touches a room log.
+- `agent-plan amend` changes an unleased ready or blocked task's allowed paths
+  or verify under plan and task CAS and records the change; it refuses to
+  empty either.
+- Problem campaigns can run an opt-in cited consolidator, re-verify a winning
+  candidate in a fresh checkout before marking the problem solved, write a
+  patch-admit handoff, and report `--status` read-only.
+- Claude panel mains get advisory feedback while they work: after 3, 8 and
+  every further 8 direct edits, file writes or project runs since their last
+  dispatch, a PostToolUse hook names the streak and the delegation command;
+  the prompt status line shows the count and `oms panel --metrics` reports it.
+  It never blocks; Codex and Antigravity mains are not covered yet.
+- `oms panel --results` shows, for a task continued over several rounds,
+  which files changed since the previous round with per-file line deltas, and
+  names a delta it could not compute or skipped as too large.
+- `oms cleanup` can discard recognised regenerable trees (virtualenvs,
+  `node_modules`, tool caches) after an anchored no-follow scan and a
+  metadata-bound proof; a tree with links, nested Git data or special files is
+  kept.
+
+### Changed
+
+- agy calls use JSON output, so usage and cache tokens reach the artifact
+  footer and a print timeout reports truncated.
+- tick refreshes installed provider model catalogs older than 7 days at most
+  once a day, and `oms models` shows each catalog's age.
+- `oms inbox` lists dead-PID delegation markers and an unsealed prior-month
+  journal that `oms state` already reported.
+- An unknown verify selector names the closest valid sections and smoke tests
+  instead of listing every name.
+- `oms panel --results` indexes rows once per call instead of rescanning per
+  task.
+- A failed extra council seat is labelled optional; the required native
+  seats alone decide whether the council completed.
+- `oms panel --council` without `--task-id` or `--label` derives them from the
+  prompt and says so.
+- A write dispatch for a plan task without `--scope` declares the task's
+  allowed paths as its room scope.
+- A `patch-land` rejection names its failed admission gates and report on
+  stderr and as the fail-ledger next step.
+- Each `oms sync-shared` refusal prints the read-only git command that shows
+  why, before its error line.
+- `patch-admit` keeps the verify floor when a verify selects only tests the
+  patch itself adds, including mixed pytest and node targets.
+
 ### Changed
 
 - `oms goal-drive --campaign` runs seat waves through `agent-call`, verifies
