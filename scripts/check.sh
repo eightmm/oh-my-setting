@@ -1207,7 +1207,7 @@ if [ "$RUN_QUICK" = 1 ]; then
         ;;
     esac
     case "$path" in
-      .github/workflows/*|scripts/check.sh|scripts/install-hooks.sh|scripts/pre-push-check.sh|tests/run-smoke-shard.sh|tests/harness-enhancements-smoke.sh|tests/source-distribution-smoke.sh)
+      .github/workflows/*|scripts/check.sh|scripts/install-hooks.sh|scripts/pre-push-check.sh|scripts/uninstall.sh|scripts/lib/provider_accounts.py|tests/run-smoke-shard.sh|tests/harness-enhancements-smoke.sh|tests/source-distribution-smoke.sh)
         quick_harness=1
         ;;
     esac

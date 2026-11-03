@@ -1287,7 +1287,7 @@ EOF
 
 test_affected_gate_runs_positive_evidence_and_fails_open() {
   local gate="$TMP/check-affected-gate"
-  local base head boundary_base out policy_path log="$TMP/check-affected.log"
+  local base head boundary_base out policy_path lifecycle_path log="$TMP/check-affected.log"
 
   mkdir -p "$gate/scripts/lib" "$gate/tests" "$gate/lib"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
@@ -1610,6 +1610,20 @@ PYTEST
     --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
     fail "ci-parity gate rejected a routing change"
   grep -Fxq operator-tools <<< "$out" || fail "a routing change skipped provider-less operator-tools: $out"
+  # Lifecycle dependencies must select the harness suite even when CI parity
+  # caps the full fallback to lint and quick lanes.
+  for lifecycle_path in scripts/uninstall.sh scripts/lib/provider_accounts.py; do
+    boundary_base="$head"
+    printf '# lifecycle changed\n' >> "$gate/$lifecycle_path"
+    git -C "$gate" add "$lifecycle_path"
+    git -C "$gate" commit -qm lifecycle
+    head="$(git -C "$gate" rev-parse HEAD)"
+    out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full bash scripts/check.sh --affected --ci-parity \
+      --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
+      fail "ci-parity gate rejected a lifecycle change: $lifecycle_path"
+    grep -Fxq harness-enhancements <<< "$out" ||
+      fail "a lifecycle change skipped harness-enhancements: $lifecycle_path: $out"
+  done
   # A selected test sees PATH as a CI host does: no provider CLI, every other tool.
   # codex and the helper share a directory reached through a relative PATH
   # entry, so its shadow links must still resolve from the shadow directory.
