@@ -572,8 +572,19 @@ def main(argv=None):
         parser.error("--finalize requires --owner, --task-id, --summary-file and --outcome")
     if args.landed_commit is not None and args.outcome not in ("accepted", "completed"):
         parser.error("--landed-commit requires --outcome accepted or completed")
-    if args.council and not (args.task_id and args.label and args.prompt):
-        parser.error("--council requires --task-id, --label and --prompt")
+    if args.council:
+        if not args.prompt:
+            parser.error("--council requires --prompt")
+        derived = []
+        if args.task_id is None:
+            args.task_id = "council-" + hashlib.sha256(args.prompt.encode("utf-8")).hexdigest()[:8]
+            derived.append("task-id=" + args.task_id)
+        if args.label is None:
+            first_line = args.prompt.split("\n", 1)[0].strip()
+            args.label = first_line[:60] + ("…" if len(first_line) > 60 else "")
+            derived.append("label=" + json.dumps(args.label, ensure_ascii=True))
+        if derived:
+            print("council defaults: " + ", ".join(derived), file=sys.stderr)
     if (args.to or args.reasoning_effort) and not args.dispatch:
         parser.error("--to and --reasoning-effort require --dispatch")
     if args.council and args.workload and args.workload not in ("routine", "deep", "frontier"):
@@ -722,8 +733,18 @@ def main(argv=None):
                 print("Swapped main to %s %s in room %s" % (report["provider"], report["model"], report["room"]))
             return 0
         if args.council:
+            if args.dry_run:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
+                                     args.thread, args.rounds, True, args.workload or "deep")
+                if output.getvalue():
+                    plan = json.loads(output.getvalue())
+                    plan.update(task_id=args.task_id, label=args.label)
+                    print(json.dumps(plan, ensure_ascii=False))
+                return result
             return council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
-                           args.thread, args.rounds, args.dry_run, args.workload or "deep")
+                           args.thread, args.rounds, False, args.workload or "deep")
         if args.mail:
             participant = room.identifier(args.mail, "participant")
 

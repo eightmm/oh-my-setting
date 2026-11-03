@@ -2170,6 +2170,32 @@ assert "gemini-3.1-pro-high" in advertised.getvalue(), advertised.getvalue()
 assert ":optional" not in advertised.getvalue(), advertised.getvalue()
 # END council extra seats
 
+# BEGIN council prompt defaults
+base = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council", "--owner", "codex", "--dry-run"]
+for prompt, label in (("  Compare options  \nDetails", "Compare options"),
+                      ("x" * 60, "x" * 60), ("x" * 61, "x" * 60 + "…")):
+    derived = subprocess.run(base + ["--prompt", prompt], cwd=str(project), env=environment,
+                             capture_output=True, text=True)
+    assert derived.returncode == 0, derived.stderr
+    plan = json.loads(derived.stdout)
+    ident = "council-" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
+    assert (plan["task_id"], plan["label"]) == (ident, label), plan
+    assert "task-id=" + ident in derived.stderr and "label=" + json.dumps(label, ensure_ascii=True) in derived.stderr, derived.stderr
+    for options, expected_id, expected_label in ((["--task-id", "chosen"], "chosen", label),
+                                                  (["--label", "Chosen"], ident, "Chosen"),
+                                                  (["--task-id", "chosen", "--label", "Chosen"], "chosen", "Chosen")):
+        result = subprocess.run(base + ["--prompt", prompt] + options, cwd=str(project), env=environment,
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        plan = json.loads(result.stdout)
+        assert (plan["task_id"], plan["label"]) == (expected_id, expected_label), plan
+        assert ("council defaults:" in result.stderr) == (len(options) < 4), result.stderr
+for options in ([], ["--prompt", ""], ["--prompt", "\n"],
+                ["--prompt", "valid", "--task-id", "bad/id"], ["--prompt", "valid", "--label", ""]):
+    result = subprocess.run(base + options, cwd=str(project), env=environment, capture_output=True, text=True)
+    assert result.returncode != 0, result
+# END council prompt defaults
+
 # Keep the subprocess council independent of any installed provider catalog.
 (capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
 # The council reuses the peer front door: seats over two families, explicit rounds,

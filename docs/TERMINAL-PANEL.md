@@ -972,7 +972,7 @@ ID`. `--dry-run` prints the chosen route and argv without running a model.
 ## Discussion and results
 
 The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
-front doors. `--workload routine` selects the routine pair (Sonnet, Terra); the default
+front doors. Omitted `--task-id` and `--label` are derived from the prompt and reported on stderr; dry-run JSON includes both values. `--workload routine` selects the routine pair (Sonnet, Terra); the default
 `deep` adds the deep pair (Opus, Sol), while `frontier` combines the deep pair with
 the frontier pair (Fable, Astra). Seats come from the `tiers` routes in `config/panel-routing.json`: routine uses the routine tier, deep uses the deep and routine tiers, and frontier uses the deep and frontier tiers, so the seat set depends on `--workload`, not a fixed list. Each tier covers both families. One rebuttal round
 means four primary calls for routine and eight for deep or frontier before optional seats; two rounds
