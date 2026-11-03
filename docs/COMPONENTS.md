@@ -1026,6 +1026,18 @@ executor markers instead of attempting to resume or retire their contracts.
 Default state/envelope queries no longer scan or advertise these retired files.
 Normal task leases, scoped admission, one-use approvals and one-shot repair remain.
 
+`oms goal-drive --campaign FILE --dry-run` validates a pinned problem campaign
+and prints its normalized manifest and planned call totals without writing state.
+The manifest binds the problem, HEAD, verifier inputs, groups, routes and bounded
+budgets. Routes without a provider-specific cap use the global caps. Dry-run
+reserves one consolidator call per wave in its totals and caps planned seats to
+fit; the total budget must cover those consolidator calls. Without `--dry-run`,
+the command requires a clean tracked tree, initializes or resumes its ledger,
+and exits 2 until campaign waves are implemented. Each resume adds an event.
+The saved manifest supplies the ledger budget; reservations count against the
+lifetime cap even if interrupted before settlement. Campaign mode accepts only
+`--repo`, `--campaign` and `--dry-run`.
+
 `oms autopilot --max-parallel-tasks N` binds an immutable width of 1..4
 (default 1); standalone `oms goal-drive` accepts the same flag. Propose/run
 continuations and reentry retain it, and older receipts mean width 1. Each

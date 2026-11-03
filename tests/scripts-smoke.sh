@@ -39508,6 +39508,187 @@ else:
 PY
 }
 
+test_goal_drive_problem_campaign() {
+  local project="$TMP/problem-campaign"
+  make_committed_repo "$project"
+  python3 -B - "$ROOT" "$project" <<'PY'
+import copy, hashlib, importlib.util, json, pathlib, subprocess, sys, concurrent.futures
+root, repo = map(pathlib.Path, sys.argv[1:])
+problem = repo / 'problem.txt'
+problem.write_text('problem\n')
+digest = hashlib.sha256(problem.read_bytes()).hexdigest()
+base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+m = {'problem': {'file':'problem.txt','sha256':digest}, 'base':base,
+     'verify': {'command':'true','timeout_s':1,'inputs':[]},
+     'candidate_formats':['patch'],
+     'groups':[{'id':'a','formulation':'approach','k':1,'routes':[{'provider':'codex','model':'example'}]}],
+     'budget':{'max_concurrent':2,'total_calls':2,'deadline_s':60,'max_waves':1,'stall_waves':1,
+               'verifier':{'concurrency':1,'timeout_s':1,'max_artifact_bytes':1}}}
+path = repo / 'campaign.json'
+def run(manifest, *args):
+    path.write_text(json.dumps(manifest))
+    return subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--repo',str(repo),'--campaign',str(path),*args],capture_output=True,text=True)
+r = run(m, '--dry-run'); assert r.returncode == 0, r.stderr
+out = json.loads(r.stdout); assert out['campaign_id'] and out['totals']['planned_seat_calls'] == 1
+assert out['groups'][0]['routes'][0]['cap_source'] == 'global'
+assert not (repo/'.oms').exists()
+sub = repo/'nested'; sub.mkdir()
+subrun = subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--campaign',str(path),'--dry-run'],cwd=sub,capture_output=True,text=True)
+assert subrun.returncode == 0, subrun.stderr
+assert json.loads(subrun.stdout)['campaign_id'] == out['campaign_id']
+assert out['totals']['remaining_headroom'] == 0
+small=copy.deepcopy(m); small['budget']['total_calls']=1
+small_out=json.loads(run(small,'--dry-run').stdout)
+assert small_out['totals']['planned_seat_calls'] == 0 and small_out['totals']['remaining_headroom'] == 0
+small['budget']['max_waves']=2
+assert 'total_calls must cover one consolidator per wave' in run(small,'--dry-run').stderr
+path.write_text(json.dumps(m))
+bad = copy.deepcopy(m); bad['extra'] = 1
+assert run(bad,'--dry-run').stderr == 'error: unknown key in manifest: extra\n'
+bad = copy.deepcopy(m); bad['problem']['sha256'] = '0'*64
+assert run(bad,'--dry-run').stderr == 'error: problem digest mismatch\n'
+bad = copy.deepcopy(m); bad['base'] = '0'*40
+assert run(bad,'--dry-run').stderr == 'error: base must equal HEAD\n'
+assert run(m,'--dry-run','--max-parallel-tasks','1').stderr == 'error: --campaign cannot be combined with --max-parallel-tasks\n'
+for option, value in [('--contract-id','x'),('--commit-task','x'),('--auto-repair',None),('--retry-known',None),('--expected-ref','x'),('--to','codex'),('--max-cycles','1'),('--run-id','x'),('--model','x'),('--fallback-model','x'),('--reasoning-effort','low'),('--provider-timeout','1s'),('--allow-verifier-change',None),('--allow-floor-change','x'),('--commit-message','x'),('--help',None)]:
+    args = [option] + ([value] if value else [])
+    assert ('--campaign cannot be combined with ' + option) in run(m,'--dry-run',*args).stderr
+for key, low, high in [('max_concurrent',1,16),('total_calls',1,200),('deadline_s',60,86400),('max_waves',1,20),('stall_waves',1,1)]:
+    for value in (0, high+1, 'bad'):
+        bad=copy.deepcopy(m); bad['budget'][key]=value
+        assert run(bad,'--dry-run').returncode == 2, (key,value)
+    bad=copy.deepcopy(m); bad['budget'][key]=high
+    if key == 'max_waves': bad['budget']['total_calls']=high
+    assert run(bad,'--dry-run').returncode == 0, key
+for key, low, high in [('concurrency',1,4),('timeout_s',1,3600),('max_artifact_bytes',1,1073741824)]:
+    for value in (0, high+1, 'bad'):
+        bad=copy.deepcopy(m); bad['budget']['verifier'][key]=value
+        assert run(bad,'--dry-run').returncode == 2, (key,value)
+    bad=copy.deepcopy(m); bad['budget']['verifier'][key]=high
+    assert run(bad,'--dry-run').returncode == 0, key
+for key in ('groups','candidate_formats'):
+    bad=copy.deepcopy(m); bad[key]=[]
+    assert run(bad,'--dry-run').returncode == 2, key
+for value in (0, 9, 'bad'):
+    bad=copy.deepcopy(m); bad['groups'][0]['k']=value
+    assert run(bad,'--dry-run').returncode == 2
+bad=copy.deepcopy(m); bad['groups'][0]['k']=8
+assert run(bad,'--dry-run').returncode == 0
+for field, high in [('calls',200),('concurrency',16)]:
+    for value in (0, high+1, 'bad'):
+        bad=copy.deepcopy(m); bad['budget']['per_provider']={'codex':{'calls':1,'concurrency':1}}
+        bad['budget']['per_provider']['codex'][field]=value
+        assert run(bad,'--dry-run').returncode == 2
+    bad=copy.deepcopy(m); bad['budget']['per_provider']={'codex':{'calls':1,'concurrency':1}}
+    bad['budget']['per_provider']['codex'][field]=high
+    assert run(bad,'--dry-run').returncode == 0
+bad=copy.deepcopy(m); bad['verify']['inputs']=[{'path':'problem.txt','sha256':'0'*64}]
+assert 'verify input digest mismatch' in run(bad,'--dry-run').stderr
+bad=copy.deepcopy(m); bad['groups'][0]['routes']=[]
+assert run(bad,'--dry-run').returncode == 2
+bad=copy.deepcopy(m); bad['groups'][0]['routes'][0]['unexpected']=True
+assert 'unknown key' in run(bad,'--dry-run').stderr
+bad=copy.deepcopy(m); bad['budget']['per_provider']={'codex':{'calls':1,'concurrency':1}}
+assert json.loads(run(bad,'--dry-run').stdout)['groups'][0]['routes'][0]['cap_source'] == 'provider'
+dirty = subprocess.check_output(['git','-C',str(repo),'ls-files'],text=True).splitlines()[0]
+tracked=repo/dirty
+original=tracked.read_bytes(); tracked.write_bytes(original+b'changed')
+assert 'campaign requires a clean tracked tree' in run(m).stderr
+assert run(m,'--dry-run').returncode == 0
+tracked.write_bytes(original)
+tracked.write_bytes(original+b'staged')
+subprocess.run(['git','-C',str(repo),'add','--',dirty],check=True)
+assert 'campaign requires a clean tracked tree' in run(m).stderr
+subprocess.run(['git','-C',str(repo),'reset','--',dirty],check=True,stdout=subprocess.DEVNULL)
+tracked.write_bytes(original)
+path.write_text(json.dumps(m))
+r=subprocess.run(['bash',str(root/'scripts/goal-drive.sh'),'--repo',str(sub),'--campaign',str(path)],capture_output=True,text=True)
+assert r.returncode == 2 and 'campaign waves are not implemented yet' in r.stderr, r.stderr
+assert not (sub/'.oms').exists()
+r=run(m); assert r.returncode == 2 and 'campaign waves are not implemented yet' in r.stderr, r.stderr
+state=repo/'.oms/plan/campaigns'/out['campaign_id']
+spec=importlib.util.spec_from_file_location('problem_campaign', root/'scripts/lib/problem_campaign.py')
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+ledger=module.Ledger(state)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    ids=list(pool.map(lambda _: ledger.reserve('codex','seat'), range(4)))
+assert sum(isinstance(x,str) and x.startswith('res_') for x in ids) == 2, ids
+assert ledger.spent()['total_calls'] == 2
+try:
+    module.Ledger(state, dict(m['budget'], total_calls=200))
+    raise AssertionError('caller budget accepted')
+except TypeError:
+    pass
+assert module.Ledger(state).remaining()['total_calls'] == 0
+ledger.budget['total_calls'] = 200
+assert ledger.reserve('codex','seat') == 'total_calls exhausted'
+original_name=module.os.name
+original_safe=module._durable.safe_regular
+try:
+    module.os.name='nt'
+    module._durable.safe_regular=lambda _: False
+    try:
+        with module.locked(state): pass
+        raise AssertionError('invalid lock accepted')
+    except ValueError:
+        pass
+finally:
+    module.os.name=original_name
+    module._durable.safe_regular=original_safe
+old_names=module.provider_names
+module.provider_names=lambda: set()
+assert module.Ledger(state).spent()['total_calls'] == 2
+module.initialize(repo,m)
+module.provider_names=old_names
+manifest_file=state/'manifest.json'
+original_manifest=manifest_file.read_bytes()
+manifest_file.write_text(json.dumps(dict(m, budget=dict(m['budget'], total_calls=200))))
+try:
+    ledger.reserve('codex','seat')
+    raise AssertionError('existing ledger ignored changed manifest')
+except ValueError:
+    pass
+try:
+    module.Ledger(state)
+    raise AssertionError('tampered manifest accepted')
+except ValueError:
+    pass
+manifest_file.write_bytes(original_manifest)
+try:
+    module.durable_call(module._durable.read_no_follow, str(state), str(state/'missing'), label='missing')
+    raise AssertionError('durable error accepted')
+except ValueError:
+    pass
+r=run(m); assert r.returncode == 2
+rows=[json.loads(line) for line in (state/'events.jsonl').read_text().splitlines()]
+assert rows[-1]['type'] == 'campaign_resumed' and ledger.remaining()['total_calls'] == 0
+assert ledger.reserve('codex','seat') == 'total_calls exhausted'
+reservation = next(x for x in ids if x.startswith('res_'))
+assert ledger.settle(reservation, 'done') is True
+assert ledger.settle(reservation, 'done') is False
+assert ledger.reserve('codex','seat') == 'total_calls exhausted'
+other=copy.deepcopy(m)
+other['budget'].update(total_calls=4, max_concurrent=2, per_provider={'codex':{'calls':2,'concurrency':1}})
+other['groups'][0]['routes'].append({'provider':'claude','model':'example'})
+r=run(other); assert r.returncode == 2
+other_id=module.validate(repo,other)[0]['campaign_id']
+limited=module.Ledger(repo/'.oms/plan/campaigns'/other_id)
+a=limited.reserve('codex','seat'); assert a.startswith('res_')
+assert limited.reserve('codex','seat') == 'provider concurrency exhausted'
+assert limited.settle(a,'ok')
+b=limited.reserve('codex','seat'); assert b.startswith('res_')
+assert limited.reserve('codex','seat') == 'provider calls exhausted'
+assert limited.reserve('unknown','seat') == 'invalid provider or kind'
+assert limited.reserve('codex','wrong') == 'invalid provider or kind'
+v=limited.reserve('claude','verifier'); assert v.startswith('res_')
+assert limited.reserve('claude','verifier') == 'max_concurrent exhausted'
+assert limited.settle(b,'ok')
+assert limited.reserve('claude','verifier') == 'verifier concurrency exhausted'
+problem.write_text('changed')
+assert 'problem digest mismatch' in run(m).stderr
+PY
+}
+
 test_goal_drive_batch_input_ownership() {
   goal_drive_batch_review_probe inputs || fail "explicit parallel selection did not use writable scope ownership"
 }
@@ -41672,6 +41853,7 @@ SH
     }
   ) || fail "Claude read stream did not include supported forwarded subagent text"
 }
+
 
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END

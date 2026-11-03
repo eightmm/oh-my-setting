@@ -47,6 +47,10 @@ FALLBACK_MODEL=""
 REASONING_EFFORT=auto
 PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
 EXPECTED_REF=""
+CAMPAIGN=""
+CAMPAIGN_DRY_RUN=0
+CAMPAIGN_CONFLICT=""
+GOAL_HELP=0
 COMMIT_TASK=""
 COMMIT_MESSAGE=""
 COMMIT_PATCH_SHA=""
@@ -54,7 +58,7 @@ COMMIT_RECEIPT_SHA=""
 
 usage() {
   cat <<'EOF'
-Usage: goal-drive.sh [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID]
+Usage: goal-drive.sh [--campaign FILE [--dry-run]] [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID]
                      [--contract-id OWNER_ID]
                      [--auto-repair] [--retry-known] [--model MODEL]
                      [--fallback-model MODEL] [--reasoning-effort E]
@@ -72,6 +76,8 @@ mismatch between the admitted patch and the working tree. Every terminal
 writes a reason row to .oms/plan/progress.jsonl and a fail-ledger entry when
 it parked; a later run whose acceptance passes resolves those park rows.
 
+  --campaign FILE  Initialize or resume a problem campaign.
+  --dry-run        Validate and print the normalized campaign without writing.
   --repo PATH     Repository (default: current directory). Tree must be clean.
   --to PROVIDER   Default worker for tasks without an assignment (default: codex).
   --max-cycles N  Hard task-attempt cap (default 3, max 10).
@@ -106,9 +112,15 @@ goal_provider_phase_wall() {  # seconds
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --repo|--campaign|--dry-run) ;;
+    *) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:-$1}" ;;
+  esac
+  case "$1" in
+    --campaign) [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--campaign requires a file"; CAMPAIGN="$2"; shift 2 ;;
+    --dry-run) CAMPAIGN_DRY_RUN=1; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --to) [ "$#" -ge 2 ] || fail "--to requires a provider"; PROVIDER="$2"; shift 2 ;;
-    --max-parallel-tasks)
+    --max-parallel-tasks) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---max-parallel-tasks}";
       [ "$#" -ge 2 ] || fail "--max-parallel-tasks requires a count"
       case "$2" in *[!0-9]*|"") fail "--max-parallel-tasks must be 1..4" ;; esac
       [ "$2" -ge 1 ] && [ "$2" -le 4 ] || fail "--max-parallel-tasks must be 1..4"
@@ -122,11 +134,11 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--run-id requires an id"
       [ -n "$2" ] || fail "--run-id requires a non-empty id"
       RUN_ID_OVERRIDE="$2"; shift 2 ;;
-    --contract-id)
+    --contract-id) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---contract-id}";
       [ "$#" -ge 2 ] || fail "--contract-id requires an id"
       CONTRACT_ID="$2"; shift 2 ;;
-    --auto-repair) AUTO_REPAIR=1; shift ;;
-    --retry-known) RETRY_KNOWN=1; shift ;;
+    --auto-repair) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---auto-repair}"; AUTO_REPAIR=1; shift ;;
+    --retry-known) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---retry-known}"; RETRY_KNOWN=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; AVC_FLAG="--allow-verifier-change"; shift ;;
     --allow-floor-change)
       [ "$#" -ge 2 ] || fail "--allow-floor-change requires a reason"
@@ -141,13 +153,28 @@ while [ "$#" -gt 0 ]; do
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires a value"; FALLBACK_MODEL="$2"; shift 2 ;;
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires a value"; REASONING_EFFORT="$2"; shift 2 ;;
     --provider-timeout) [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"; PROVIDER_TIMEOUT="$2"; shift 2 ;;
-    --expected-ref) [ "$#" -ge 2 ] || fail "--expected-ref requires a ref"; EXPECTED_REF="$2"; shift 2 ;;
-    --commit-task) [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--commit-task requires an id"; COMMIT_TASK="$2"; shift 2 ;;
+    --expected-ref) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---expected-ref}"; [ "$#" -ge 2 ] || fail "--expected-ref requires a ref"; EXPECTED_REF="$2"; shift 2 ;;
+    --commit-task) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---commit-task}"; [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--commit-task requires an id"; COMMIT_TASK="$2"; shift 2 ;;
     --commit-message) [ "$#" -ge 2 ] || fail "--commit-message requires text"; COMMIT_MESSAGE="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) GOAL_HELP=1; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
+
+if [ -n "$CAMPAIGN" ]; then
+  [ -z "$CAMPAIGN_CONFLICT" ] || fail "--campaign cannot be combined with $CAMPAIGN_CONFLICT"
+  REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
+  REPO="$(cd "${REPO//$'\r'/}" && pwd -P)" || fail "bad --repo"
+  if [ "$CAMPAIGN_DRY_RUN" -eq 1 ]; then
+    exec python3 "$ROOT/scripts/lib/problem_campaign.py" --repo "$REPO" --campaign "$CAMPAIGN" --dry-run
+  fi
+  oms_git_assert_plain_index "$REPO" || fail "campaign requires a plain index"
+  git -c core.fsmonitor=false -C "$REPO" diff --quiet -- || fail "campaign requires a clean tracked tree"
+  git -c core.fsmonitor=false -C "$REPO" diff --cached --quiet -- || fail "campaign requires a clean tracked tree"
+  exec python3 "$ROOT/scripts/lib/problem_campaign.py" --repo "$REPO" --campaign "$CAMPAIGN"
+fi
+[ "$GOAL_HELP" -eq 0 ] || { usage; exit 0; }
+[ "$CAMPAIGN_DRY_RUN" -eq 0 ] || fail "--dry-run requires --campaign"
 
 case "$CONTRACT_ID" in
   "") ;;
