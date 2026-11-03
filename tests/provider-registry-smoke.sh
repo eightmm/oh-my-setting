@@ -71,7 +71,12 @@ if [ "${OMS_TEST_FAIL_LAUNCH:-0}" = 1 ]; then exit 9; fi
 if [ "${OMS_TEST_WRITE:-0}" = 1 ]; then
   printf 'written by %s\n' "$name" > "$PWD/$name-write.txt"
 fi
-printf '%s returned a complete independent answer with enough detail.\n' "$name"
+if [ "$name" = agy ]; then
+  # agy answers arrive in its --output-format json envelope.
+  printf '{"conversation_id": "fake", "status": "SUCCESS", "response": "%s returned a complete independent answer with enough detail.", "usage": {}}\n' "$name"
+else
+  printf '%s returned a complete independent answer with enough detail.\n' "$name"
+fi
 FAKE
 chmod +x "$TMP/bin/provider-fake"
 for binary in cursor-agent grok gemini qwen opencode dsh vibe copilot droid aider muse kimi kiro-cli cn goose cline kilo openhands auggie; do

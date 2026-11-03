@@ -9149,7 +9149,7 @@ PYAMEND
   fi
   cmp -s "$plan_file" "$TMP/amend-before" || fail "stale amendment changed plan"
   task_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["task_sha256"])' "$project/amended.json" | tr -d '\r')"
-  for mode in invalid leased done; do
+  for mode in invalid leased 'done'; do
     cp "$TMP/amend-before" "$plan_file"
     python3 - "$plan_file" "$mode" <<'PYMODE'
 import json, sys
@@ -27200,7 +27200,11 @@ assert len(notice) == 1 and notice[0]["matcher"] == "permission_prompt|elicitati
 assert "telemetry-hook.sh" in notice[0]["hooks"][0]["command"] and notice[0]["hooks"][0]["timeout"] == 5, notice
 assert sum(
     len(entry["hooks"]) for entries in d["hooks"].values() for entry in entries
-) == 12 + 1, d["hooks"]  # the twelve OMS registrations plus the user router
+) == 13 + 1, d["hooks"]  # the thirteen OMS registrations plus the user router
+direct = [entry for entry in d["hooks"].get("PostToolUse", [])
+          if "panel-direct-work-hook.sh" in entry["hooks"][0]["command"]]
+assert len(direct) == 1 and direct[0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit|Bash", direct
+assert direct[0]["hooks"][0]["timeout"] == 5, direct
 pre = d["hooks"]["PreToolUse"]
 assert len(pre) == 1 and pre[0]["matcher"] == "Bash", pre
 assert "git-move-guard-hook.sh" in pre[0]["hooks"][0]["command"] and pre[0]["hooks"][0]["timeout"] == 5, pre
@@ -39430,6 +39434,7 @@ install-mcp
 install-skills
 install-tools
 link
+panel-direct-work-hook
 pre-push-check
 precompact-handoff
 python-runtime

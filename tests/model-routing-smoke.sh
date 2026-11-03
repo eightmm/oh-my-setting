@@ -350,7 +350,8 @@ case "${OMS_TEST_AGY_MODE:-}:$count" in
   repair-effort:2) printf 'broken\n' > delegated.txt ;;
   repair-effort:3) printf 'fixed\n' > delegated.txt ;;
 esac
-echo stub Antigravity review answer with enough substance to count
+# agy answers arrive in its --output-format json envelope.
+printf '%s\n' '{"conversation_id": "stub", "status": "SUCCESS", "response": "stub Antigravity review answer with enough substance to count", "usage": {}}'
 EOF
 chmod +x "$TMP/bin/codex" "$TMP/bin/claude" "$TMP/bin/agy"
 mkdir -p "$TMP/invoke-repo/.oms" "$TMP/locks" "$TMP/home"
