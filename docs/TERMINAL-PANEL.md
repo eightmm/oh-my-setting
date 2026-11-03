@@ -1045,7 +1045,7 @@ its patch, and records plan review: **committed locally; publication pending**.
 Successive accepts replay earlier canonical acceptances' verifiers in the same clone before the candidate verifier, refuse candidates naming the earlier task they break, and reset the replay set once those commits are landed.
 Run `oms land --repo INTEGRATION_CLONE` explicitly, then add `--repo INTEGRATION_CLONE
 --landed-commit SHA` to `--finalize`: publication proof finishes the plan before recording
-its result. Verification runs in that execution clone; evidence remains in the canonical
+its result. SHA is the full head that `oms land` pushed, not the accepted commit when commits such as the batch changelog sit on top. Verification runs in that execution clone; evidence remains in the canonical
 state repository. Only clones recognized by the existing repository resolver are supported.
 Accepted outcomes still require matching landed-patch evidence and a passing review gate.
 `--landed-commit` is allowed only with `--outcome accepted` or `completed`. The post-apply

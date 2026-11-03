@@ -774,6 +774,7 @@ def main(argv=None):
                             allow_floor_change=args.allow_floor_change)
             print("committed locally; publication pending: " + report['sha'])
             print("Next: oms land --repo " + shlex.quote(str(execution)))
+            print("Then: oms panel --finalize --repo " + shlex.quote(str(execution)) + " --landed-commit <full head SHA that oms land pushed>")
             return 0
         if args.finalize:
             report = finalize(repo, args.owner, args.task_id, args.summary_file, args.outcome,

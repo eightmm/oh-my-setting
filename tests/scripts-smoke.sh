@@ -7346,6 +7346,7 @@ print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
     fail "commit finish without receipt must be rejected"
   fi
   assert_file_contains "$d/err" 'no passed oms land receipt'
+  assert_file_contains "$d/err" 'head SHA that oms land pushed'
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "evidence on a rejected finish changed plan"
   "$SH" --repo "$d" release --id integrated >/dev/null
   "$SH" --repo "$d" claim --id integrated --provider codex >/dev/null

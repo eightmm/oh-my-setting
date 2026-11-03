@@ -3886,6 +3886,7 @@ for failed_stage in ("commit", "plan review"):
                                       env=failure_env).stdout)["state"] == "review"
 accepted = accept_call("panel", *accept_options, execution=accept_execution)
 assert "committed locally; publication pending" in accepted.stdout and "Next: oms land --repo" in accepted.stdout
+assert "Then: oms panel --finalize --repo" in accepted.stdout and "--landed-commit <full head SHA" in accepted.stdout
 accept_sha = subprocess.check_output(["git", "-C", str(accept_execution), "rev-parse", "HEAD"], text=True).strip()
 assert accept_sha.encode() != accept_base
 assert (accept_execution / "value.txt").read_text() == "old\naccepted\n"

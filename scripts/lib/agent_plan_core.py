@@ -338,7 +338,9 @@ def commit_landing_proof(sha, expected_receipt_sha256=None, with_receipt=False):
         die("no passed oms land receipt for %s: gate, push and CI succeeded but the receipt state is %r "
             "(for example an update deferred for live workers); re-run oms land to finish installation"
             % (sha, str(unfinished)[:40]))
-    die("no passed oms land receipt for %s with gate/push ok and CI success" % sha)
+    die("no passed oms land receipt for %s with gate/push ok and CI success; pass the full head SHA "
+        "that oms land pushed (a commit below that head, such as an accepted commit under a changelog "
+        "commit, has no receipt of its own)" % sha)
 
 def landed_range_paths(sha, receipt_sha256):
     """Files changed since the receipt's push.base, or the inferred legacy base."""
