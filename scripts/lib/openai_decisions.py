@@ -211,10 +211,10 @@ def prompt_auth():
             raise ClientError('cannot disable terminal echo') from None
         try:
             print('Decisions key: ', **{'end': '', 'file': sys.stderr, 'flush': True})
-            data = sys.stdin.buffer.readline(AUTH_LIMIT + 1)
+            data = sys.stdin.buffer.readline(AUTH_LIMIT + 3).removesuffix(b'\n').removesuffix(b'\r')
             if len(data) > AUTH_LIMIT:
                 raise ClientError('key exceeds 4 KiB limit')
-            return data.decode('utf-8').removesuffix('\n').removesuffix('\r')
+            return data.decode('utf-8')
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSAFLUSH, original)
@@ -222,7 +222,8 @@ def prompt_auth():
                 raise ClientError('cannot restore terminal settings') from None
             finally:
                 print(file=sys.stderr)
-    data = sys.stdin.buffer.read(AUTH_LIMIT + 2)
+    # One byte past a CRLF-terminated maximal key exposes trailing input.
+    data = sys.stdin.buffer.read(AUTH_LIMIT + 3)
     data = data.removesuffix(b'\n').removesuffix(b'\r')
     if len(data) > AUTH_LIMIT:
         raise ClientError('key exceeds 4 KiB limit')
@@ -233,8 +234,8 @@ def save_auth():
     value = prompt_auth()
     validate_auth(value)
     path = auth_path()
-    check_directory(path.parent, create=True)
     check_target(path)
+    check_directory(path.parent, create=True)
     fd, name = tempfile.mkstemp(prefix='.decisions-', dir=str(path.parent))
     try:
         os.fchmod(fd, 0o600)
@@ -268,7 +269,7 @@ def get_auth():
         raise ClientError('verify %s is a regular non-symlink file owned by the current user; chmod 600 %s' % (name, name)) from None
     with os.fdopen(fd, 'rb') as handle:
         check_private(os.fstat(handle.fileno()), path)
-        return validate_auth(read_bounded(handle, AUTH_LIMIT, 'key').rstrip('\r\n'))
+        return validate_auth(handle.read(AUTH_LIMIT + 3).decode('utf-8').rstrip('\r\n'))
 
 
 def question_list(value):

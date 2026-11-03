@@ -142,6 +142,16 @@ class DecisionsTests(unittest.TestCase):
             '--set-key', **{'stdin': 'x' * 4097 + '\n'})
         self.assertEqual(result.returncode, 2)
         self.assertEqual(path.stat().st_size, 4096)
+        result = self.run_cli('--set-key', **{'stdin': 'y' * 4096 + '\r\nTRAILING'})
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(path.read_text(), 'x' * 4096)
+        path.write_text('x' * 4096 + '\n')
+        self.assertEqual(self.run_cli(*self.question()).returncode, 0)
+        path.chmod(0o644)
+        directory.chmod(0o755)
+        self.assertEqual(self.run_cli('--set-key', **{'stdin': self.private + '\n'}).returncode, 2)
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+        path.chmod(0o600)
         self.env['XDG_CONFIG_HOME'] = ''
         result = self.run_cli(
             '--set-key', **{'stdin': self.private + '\n'})
