@@ -1613,8 +1613,9 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         history = t.get("history", [])
         if not isinstance(history, list):
             die("task %s history must be a list" % i)
-        landing = commit_landing_proof(env("OMS_LANDED_COMMIT"),
-                                       prior["receipt_sha256"] if retry else None)
+        # A land rewrites its receipt as installation proceeds, so a retry
+        # proves the same commit again rather than the same receipt bytes.
+        landing = commit_landing_proof(env("OMS_LANDED_COMMIT"))
         require_panel_acceptance_publication(i, t, d.get("plan_id"), landing["sha"])
         allowed = t.get("allowed_paths") or []
         if allowed:
@@ -1630,7 +1631,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                     % (landing["sha"], i, span, ", ".join(allowed),
                        ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "") or "nothing"))
         if retry:
-            if landing != prior:
+            if landing["sha"] != prior.get("sha") or landing.get("kind") != prior.get("kind"):
                 die("completed task landing proof changed")
             # A finalize retry must not change the task hashed by its result.
             sys.exit(0)

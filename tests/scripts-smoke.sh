@@ -7452,6 +7452,14 @@ assert s["stale_review"] == [], s
     fail "commit finish accepted done instead of review"
   fi
   assert_file_contains "$d/err" 'requires review'
+  # The land rewrites its receipt as installation proceeds; a finalize retry of
+  # the done task proves the same commit, not the same receipt bytes.
+  lease="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease_id"])' "$d/done.json")"
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); r["update"]={"rc":0,"reason":"installed"}; json.dump(r,open(sys.argv[1],"w"))' "$receipt"
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --lease-id "$lease" >/dev/null ||
+    fail "a finalize retry failed after the land rewrote its receipt"
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "finish retry changed the done task"
 
   # A receipt proves a landing, not which task it landed: a scoped task needs
   # the landed range, back to the previous pushed receipt, to touch its paths.
