@@ -1793,6 +1793,8 @@ esac
 EOF
     chmod +x "$checkout/scripts/$name.sh"
   done
+  printf '%s\n' 'import os' 'open(os.environ["OMS_TEST_OPS_LOG"], "a").write("provider_accounts.py\n")' \
+    > "$checkout/scripts/lib/provider_accounts.py"
 
   HOME="$TMP/uninstall-home" XDG_CONFIG_HOME="$TMP/uninstall-home/.config" \
     OMS_TEST_OPS_LOG="$log" \
@@ -1800,7 +1802,7 @@ EOF
     "$checkout/scripts/uninstall.sh" --yes --purge --purge-dirty > "$out" 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "uninstall ignored integration removal failures"
   [ -d "$checkout" ] || fail "uninstall purged its recovery checkout after a removal failure"
-  for name in uninstall-autoupdate.sh tick.sh install-claude-hooks.sh install-codex-plugin.sh install-mcp.sh install-agy-plugin.sh provider-permissions.sh; do
+  for name in uninstall-autoupdate.sh tick.sh provider_accounts.py install-claude-hooks.sh install-codex-plugin.sh install-mcp.sh install-agy-plugin.sh provider-permissions.sh; do
     grep -Fxq "$name" "$log" 2>/dev/null ||
       fail "uninstall stopped before attempting $name: $(tail -n 25 "$out" 2>/dev/null)"
   done
