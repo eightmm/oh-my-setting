@@ -156,6 +156,20 @@ Admission verifies applicability, syntax, verifier integrity, path scope, and
 the stored verification contract. A rejected patch remains rejected until the
 cause changes; consult the fail ledger before retrying.
 
+### Native dependencies in verify
+
+Worker `--verify` (`scripts/peer-delegate.sh`), admission and `patch-land
+--verify` (`scripts/patch-admit.sh`, `scripts/patch-land.sh`) run in fresh trees
+seeded with only ignored `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `PROJECT.md`;
+`.venv/` and `node_modules/` are never copied. Inherited `PATH`, `VIRTUAL_ENV`
+and `NODE_PATH` decide the rest: `.venv/bin/python -m pytest` fails without the
+relative interpreter, and an editable install imports the source checkout.
+
+`oms land --gate` runs in a clean clone (`scripts/land.sh`) seeded with nothing,
+so gates must not rely on ignored files either. Write `--verify` to run from a
+clean checkout (`npm ci && npm test`, `uv sync --frozen && uv run pytest`) or
+use an outside non-editable install. Never verify the source checkout.
+
 ## Evidence and authority in collaboration
 
 Keep authorized discussion and progress sharing lightweight across providers.

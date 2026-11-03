@@ -308,6 +308,8 @@ Say “Start this project.” or “이 프로젝트 시작해줘.” The
 verification contract without overwriting user content. `oms project-private`
 keeps `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `PROJECT.md` out of commits via
 `.git/info/exclude`; tracked files require an explicit untrack action.
+Before a first write worker, make its `--verify` work from a clean checkout; see
+[native dependencies in verify](../custom-skills/oms-agent-harness/references/delegation-artifacts.md#native-dependencies-in-verify).
 
 ```bash
 oms init
