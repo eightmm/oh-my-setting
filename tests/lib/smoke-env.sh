@@ -11,6 +11,19 @@ unset NVM_BIN NVM_DIR
 # Match CI's hermetic Git configuration. Fixtures that need commits must set
 # their own identity; ambient developer identity must never make them pass.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+# Config resolution is hermetic too: suites run directly (worker verify, floors)
+# must not read or write the invoking user's provider account registry. Keep
+# check.sh's runtime config, or the private dir an enclosing suite already made.
+case "${XDG_CONFIG_HOME:-}" in
+  */oms-check-runtime.*/config) ;;
+  *)
+    if [ -z "${OMS_SMOKE_CONFIG_HOME:-}" ] || [ "${XDG_CONFIG_HOME:-}" != "$OMS_SMOKE_CONFIG_HOME" ]; then
+      # One empty 0700 dir under TMPDIR stays behind; a suite trap cannot be claimed here.
+      OMS_SMOKE_CONFIG_HOME="$(mktemp -d "${TMPDIR:-/tmp}/oms-smoke-config.XXXXXX")" || return 2
+      export OMS_SMOKE_CONFIG_HOME
+      export XDG_CONFIG_HOME="$OMS_SMOKE_CONFIG_HOME"
+    fi ;;
+esac
 # Fixtures choose their tools through PATH; runtime activation must not undo it.
 export OMS_TEST_PROVIDER_PATH_ONLY=1
 for oms_smoke_inherited in $(compgen -e); do

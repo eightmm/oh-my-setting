@@ -1623,3 +1623,22 @@ before = cache.fingerprint(project)
 (git_dir / 'HEAD').write_text('ref: refs/heads/fixture\n', encoding='utf-8')
 assert cache.fingerprint(project) != before, 'worktree HEAD was omitted'
 PY
+
+# smoke-env keeps fixtures off the invoking user's provider account registry.
+mkdir -p "$TMP/caller-config/oh-my-setting"
+printf '{}\n' > "$TMP/caller-config/oh-my-setting/provider-accounts.json"
+smoke_cfg="$(env -u OMS_SMOKE_CONFIG_HOME XDG_CONFIG_HOME="$TMP/caller-config" TMPDIR="$TMP" \
+  bash -c '. "$1/tests/lib/smoke-env.sh" && printf "%s" "$XDG_CONFIG_HOME"' _ "$ROOT")" \
+  || fail "smoke-env config isolation did not source"
+[ "$smoke_cfg" != "$TMP/caller-config" ] && [ -d "$smoke_cfg" ] \
+  && [ -z "$(ls -A "$smoke_cfg")" ] && [ ! -e "$smoke_cfg/oh-my-setting/provider-accounts.json" ] \
+  || fail "smoke-env exposes the caller's provider account registry"
+[ "$(stat -c %a "$smoke_cfg" 2>/dev/null || stat -f %Lp "$smoke_cfg")" = 700 ] \
+  || fail "smoke-env config dir is not private"
+smoke_again="$(env XDG_CONFIG_HOME="$smoke_cfg" OMS_SMOKE_CONFIG_HOME="$smoke_cfg" TMPDIR="$TMP" \
+  bash -c '. "$1/tests/lib/smoke-env.sh" && printf "%s" "$XDG_CONFIG_HOME"' _ "$ROOT")"
+[ "$smoke_again" = "$smoke_cfg" ] || fail "smoke-env stacked a second config dir"
+smoke_check="$(env XDG_CONFIG_HOME="$TMP/runtime/oms-check-runtime.x/config" TMPDIR="$TMP" \
+  bash -c '. "$1/tests/lib/smoke-env.sh" && printf "%s" "$XDG_CONFIG_HOME"' _ "$ROOT")"
+[ "$smoke_check" = "$TMP/runtime/oms-check-runtime.x/config" ] || fail "smoke-env replaced check.sh config"
+rm -rf "$smoke_cfg" "$TMP/caller-config"
