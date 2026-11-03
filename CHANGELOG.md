@@ -8,6 +8,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Panel routing reads an optional machine-local
+  `~/.config/oh-my-setting/provider-accounts.json` listing several Codex
+  accounts (`ordered` or `spread` policy). Tier selection skips an account at
+  90% weekly usage or whose model cache omits the requested model, the route
+  line names the selected account, and the Codex usage line shows per-account
+  readings. This stage records the selection only; children still run under
+  the current home. Without the file, routing is unchanged.
+- Plan lint and `oms panel --dispatch` share one verify-selector check, so a
+  dispatch now also rejects an unknown operator `--case`.
 - `oms init` suggests the repository's own test command (`scripts/check.sh`,
   then pytest, npm, make, cargo, go, or a `<your test command>` placeholder)
   read from its files without running anything, and states which features
@@ -292,6 +301,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `oms agent-plan add` refuses a repeated `--allowed`, `--depends` or
+  `--forbidden` instead of silently keeping only the last list.
+- `patch-admit`, `patch-land` and `tick` strip a carriage return from values
+  read back from `python3`, so Windows Git Bash compares them correctly.
 - A first, still-retryable automatic-review launch failure no longer sends the
   "manual review is needed" mail; it is sent once no retry remains.
 - `oms scratch-worktree --help` names `oms cleanup --apply` as the residue
