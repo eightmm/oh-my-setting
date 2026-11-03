@@ -141,23 +141,25 @@ with patch.object(room, "structured_events", return_value=[candidate_event]), \
 auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
+# BEGIN automatic-review-tier-cap
 for paths in (["docs/x.md"], ["docs/sub/x.rst", "README.md", "CHANGELOG.md"]):
     assert panel._automatic_review_workload({"changed_files": paths}) == "routine", paths
 for paths in (["docs/x.md", "AGENTS.md"], ["docs/AGENTS.md"], ["docs/CLAUDE.md"],
               ["custom-skills/x/SKILL.md"], ["roles/x.md"], ["prompts/x.md"],
               ["templates/x.md"], ["docs/x.txt"], ["README.rst"]):
     assert panel._automatic_review_workload({"changed_files": paths}) == "deep", paths
-assert panel._automatic_review_workload({"changed_files": ["docs/x.md", "rules/x.md"]}) == "frontier"
+assert panel._automatic_review_workload({"changed_files": ["docs/x.md", "rules/x.md"]}) == "deep"
 for paths in (None, {}, [""], [0], ["docs//x.md"], ["docs/../x.md"]):
-    assert panel._automatic_review_workload({"changed_files": paths}) == "frontier", paths
-assert panel._automatic_review_workload({"changed_files": ["docs/permission.md"]}) == "frontier"
+    assert panel._automatic_review_workload({"changed_files": paths}) == "deep", paths
+assert panel._automatic_review_workload({"changed_files": ["docs/permission.md"]}) == "deep"
 assert panel._automatic_review_workload({"changed_files": ["docs/TERMINAL-PANEL.md", "scripts/fixture.py"]}) == "deep"
 for boundary in ("hooks/pre-commit", "plugins/oh-my-setting/hooks.json", "install.sh", "scripts/patch-land.sh",
                  "scripts/patch-admit.sh", "scripts/resume-hook.sh", "scripts/lib/pi-oms-extension.mjs",
                  "scripts/lib/hook_state.py", "scripts/install-claude-hooks.sh"):
-    assert panel._automatic_review_workload({"changed_files": ["docs/x.md", boundary]}) == "frontier", boundary
-assert panel._automatic_review_workload({"changed_files": []}) == "frontier"
-assert panel._automatic_review_workload({"changed_files": ["../escape"]}) == "frontier"
+    assert panel._automatic_review_workload({"changed_files": ["docs/x.md", boundary]}) == "deep", boundary
+assert panel._automatic_review_workload({"changed_files": []}) == "deep"
+assert panel._automatic_review_workload({"changed_files": ["../escape"]}) == "deep"
+# END automatic-review-tier-cap
 assert panel_review_impl._security_audit_paths(["scripts/permissions.sh"], None) == ["scripts/permissions.sh"]
 assert panel_review_impl._security_audit_paths(["docs/permissions.md"], None) == ["docs/permissions.md"]
 assert panel_review_impl._security_audit_paths(["docs/readme.md"], None) == []

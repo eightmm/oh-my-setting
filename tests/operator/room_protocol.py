@@ -124,10 +124,12 @@ for role, model in (("worker", "claude-sonnet-5-5"), ("builder", "claude-sonnet-
     assert allocate("claude", role=role, installed={"codex"})["provider"] == "codex"
 assert allocate("codex", role="documenter", installed=both)["model"] == "claude-haiku-5-5"
 assert allocate("claude", role="documenter", installed={"codex"})["model"] == "gpt-6-luna"
-assert allocate("claude", role="advisor", installed=both)["model"] == "gpt-6-astra"
-assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
+# BEGIN review-role-model-pins
+assert allocate("claude", role="advisor", installed=both)["model"] == "gpt-6.1-sol"
+assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6.1-sol"
 assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-opus-5-5"
-assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6-astra"
+assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6.1-sol"
+# END review-role-model-pins
 for role in ("reviewer", "verifier", "security-auditor", "critic"):
     assert allocate("claude", role=role, installed=both)["provider"] == "codex"
     assert allocate("codex", role=role, installed=both)["provider"] == "claude"
@@ -182,14 +184,15 @@ assert allocate("claude", role="reviewer", installed=both,
 assert allocate("codex", role="reviewer", installed=both,
                 provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "claude"
 assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly_used": 100}})["provider"] == "codex"
+# BEGIN role-review-tier-cap
 # Routing spread follows quota readings except that independent judgments always avoid the owner.
 routing_roles = {
     "researcher": "light", "scholar": "deep",
     "worker": "routine", "builder": "routine", "documenter": "light",
     "integrator": "deep", "performance-engineer": "deep",
     "reviewer": "deep", "verifier": "deep", "security-auditor": "frontier",
-    "critic": "frontier",
-    "advisor": "frontier", "architect": "frontier",
+    "critic": "deep",
+    "advisor": "deep", "architect": "deep",
 }
 usage_scenarios = {
     "none": {},
@@ -212,6 +215,11 @@ for role, tier in routing_roles.items():
                 ("deep", "claude"): "claude-opus-5-5", ("deep", "codex"): "gpt-6.1-sol",
                 ("frontier", "claude"): "claude-fable-5-1", ("frontier", "codex"): "gpt-6-astra",
             }[(tier, expected)]
+for role in ("advisor", "architect", "critic", "reviewer"):
+    assert allocate("codex", role=role, tier="frontier", installed=both)["workload"] == "frontier"
+assert "frontier only for security-auditor or an explicit workload choice" in panel.bootstrap("codex", project)
+# END role-review-tier-cap
+
 try:
     allocate("codex", installed=both, provider_status={p: {"weekly_used": 90} for p in both})
     raise AssertionError("all saturated candidates were accepted")
@@ -287,7 +295,7 @@ for target in ("grok", "muse"):
                               env=environment, capture_output=True, text=True)
     assert rejected.returncode != 0 and "requires an explicit valid --model" in rejected.stderr
 for role, kind, tier in (("builder", "worker", "routine"), ("integrator", "worker", "deep"),
-                         ("release-engineer", "worker", "routine"), ("critic", "advisor", "frontier"),
+                         ("release-engineer", "worker", "routine"), ("critic", "advisor", "deep"),
                          ("verifier", "reviewer", "deep"), ("reviewer", "reviewer", "deep"),
                          ("researcher", "researcher", "light"), ("scholar", "researcher", "deep")):
     allocated = allocate("claude", role=role, installed=both)
@@ -346,7 +354,7 @@ for owner in panel.PROVIDERS:
         "consumers in the worker brief", "drives the public entry point"))
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
     assert "routine for a bounded reversible choice" in panel.bootstrap(owner, project)
-    assert "frontier for architecture, trust-boundary or hard-to-reverse decisions" in panel.bootstrap(owner, project)
+    assert "frontier only for security-auditor or an explicit workload choice" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project)
     assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
     guidance = panel.bootstrap(owner, project)

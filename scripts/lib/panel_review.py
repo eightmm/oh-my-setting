@@ -37,14 +37,14 @@ _AUTO_REVIEW_FRONTIER_PATHS = (
 
 
 def _automatic_review_workload(result_event):
-    """Route verified documentation patches routinely and trust boundaries to frontier."""
+    """Route verified documentation patches routinely and all other patches to deep."""
     from terminal_panel import _AUTO_REVIEW_FRONTIER_PATHS, _safe_patch_path
     paths = result_event.get("changed_files") if isinstance(result_event, dict) else None
     if (not isinstance(paths, list) or not paths
             or any(not isinstance(path, str) or not _safe_patch_path(path) for path in paths)):
-        return "frontier"
+        return "deep"
     if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in _AUTO_REVIEW_FRONTIER_PATHS):
-        return "frontier"
+        return "deep"
     if all((path in {"README.md", "CHANGELOG.md"} or
             path.startswith("docs/") and path.endswith((".md", ".rst"))) and
            path.rsplit("/", 1)[-1] not in {"AGENTS.md", "CLAUDE.md"} for path in paths):

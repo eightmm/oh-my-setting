@@ -30,10 +30,10 @@
     "reviewer": {"tier": "deep"},
     "verifier": {"tier": "deep"},
     "security-auditor": {"tier": "frontier"},
-    "architect": {"tier": "frontier"},
-    "critic": {"tier": "frontier"},
+    "architect": {"tier": "deep"},
+    "critic": {"tier": "deep"},
     "integrator": {"tier": "deep"},
     "performance-engineer": {"tier": "deep"},
-    "advisor": {"tier": "frontier"}
+    "advisor": {"tier": "deep"}
   }
 }

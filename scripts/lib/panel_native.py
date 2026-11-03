@@ -273,7 +273,7 @@ def bootstrap(provider, repo):
         "or reroute a policy denial. For a debate use oms panel "
         "--council --owner OWNER --task-id ID --label TITLE --prompt TEXT. "
         "Choose --workload by difficulty: routine for a bounded reversible choice, deep by default, "
-        "frontier for architecture, trust-boundary or hard-to-reverse decisions. "
+        "frontier only for security-auditor or an explicit workload choice. "
         "Record an owner decision with oms panel --finalize --owner OWNER "
         "--task-id ID --summary-file PATH --outcome completed|accepted|failed|rejected; "
         "accepted requires --verify and matching landed patches "

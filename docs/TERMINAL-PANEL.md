@@ -164,7 +164,7 @@ of the worker's recorded base plus its digest-verified patch; both the complete 
 and mechanical gate use that candidate. Missing base objects, digest mismatches or
 patch-application failures require manual review; they never fall back to testing
 the unpatched source. The gate rejects candidate changes by the verifier.
-Automatic review uses routine for patches containing only `.md` or `.rst` files under `docs/` or top-level `README.md` and `CHANGELOG.md`, excluding `AGENTS.md` and `CLAUDE.md`; otherwise it uses deep. Unknown or unsafe paths and trust-boundary patterns use frontier (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins, hooks, install/uninstall, land and patch scripts, workflows, rules, permission/settings/policy files).
+Automatic review uses routine for patches containing only `.md` or `.rst` files under `docs/` or top-level `README.md` and `CHANGELOG.md`, excluding `AGENTS.md` and `CLAUDE.md`; otherwise it uses deep. Unknown or unsafe paths and trust-boundary patterns also use deep (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins, hooks, install/uninstall, land and patch scripts, workflows, rules, permission/settings/policy files).
 Patch admission reports `security: ADVISE` with risk paths and auditor guidance, or `SKIP` when none are found; this advisory does not change the `ADMIT`/`REJECT` verdict.
 A write call that exits 0 with a digest-verified patch, no failed verify and no guard stop starts this review automatically (`auto_review` in config/panel-routing.json, default true). It reuses the call's `--verify`, else the plan task's, and mails the main for manual review when neither exists. A FAIL verdict drafts a `--continue` fix brief and prints its command without launching it.
 Gate reviewers make a full pass over the scoped diff and report every evidenced
@@ -696,8 +696,8 @@ such rows.
 | t Auto task | Enter a task and open the owning native main |
 | 5 Explain | Read-only worker; optional tier, else routine |
 | 6 Implement | Optional tier; scoped brief and verifier required |
-| a Advisor | Optional tier, else frontier; read-only |
-| 7 Review | Optional tier, else frontier; mandatory review verifier |
+| a Advisor | Optional tier, else deep; read-only |
+| 7 Review | Optional tier, else deep; mandatory review verifier |
 | c Council | Choose routine (Sonnet, Terra), deep (Opus, Sol, Sonnet, Terra; default), or frontier (Opus, Sol, Fable, Astra) by difficulty |
 | r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
 | f Finalize | Record owner outcome, summary and evidence; request app delivery |
@@ -734,7 +734,7 @@ The launcher does not autonomously fan out before the main has a task.
 
 Set `OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1` for a dispatch to allow public-only routes in a private or unverified repository; otherwise these routes require a GitHub origin verified public. Visibility for a normalized GitHub origin is checked with `gh` on every routing decision; only a not-public answer is cached, for 10 minutes, in the state repository at `.oms/panel-state/public-route-visibility.json`, so a repository made private never keeps free routes; rejected origins are not cached and filtering prints nothing. An explicit `--to pi --model ...` bypasses the `public_only` check entirely.
 
-Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
+Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Only security-auditor defaults to frontier; other roles use deep or below. An explicit `--workload frontier` remains available. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 
 
 ### Provider accounts
@@ -936,9 +936,9 @@ Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium 
 | `reviewer` | deep | read | `oms panel --dispatch reviewer` | `peer-review` |
 | `verifier` | deep | read | `oms panel --dispatch verifier` | `peer-delegate --role --read-only` |
 | `security-auditor` | frontier | read | `oms panel --dispatch security-auditor` | `peer-delegate --role --read-only` |
-| `advisor` | frontier | read | `oms panel --dispatch advisor` | `advise` |
-| `architect` | frontier | read | `oms panel --dispatch architect` | `peer-delegate --role --read-only` |
-| `critic` | frontier | read | `oms panel --dispatch critic` | `peer-delegate --role --read-only` |
+| `advisor` | deep | read | `oms panel --dispatch advisor` | `advise` |
+| `architect` | deep | read | `oms panel --dispatch architect` | `peer-delegate --role --read-only` |
+| `critic` | deep | read | `oms panel --dispatch critic` | `peer-delegate --role --read-only` |
 
 Scholar performs multi-source literature research with verified citations at high effort; its default wall is 60 minutes, and `--workload frontier` selects the hardest surveys. Researcher remains the pinned cheap lookup role.
 
