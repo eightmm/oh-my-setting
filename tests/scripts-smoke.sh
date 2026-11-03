@@ -32086,7 +32086,7 @@ PY
 test_delegate_guards_canonical_checkout_during_sync() {
   # New refresh path; reuse the delegate guard fixture and a real fake-provider
   # call, including the separate-clone canonical snapshot that used to fail.
-  local project="$TMP/canonical-sync"
+  local project="$TMP/canonical sync's checkout"
   make_committed_repo "$project"
   python3 - "$ROOT" "$project" "$TMP" <<'PY' || fail 'canonical checkout sync guard regression'
 import json, os, pathlib, subprocess, sys, time
@@ -32242,6 +32242,12 @@ sync = ['bash', str(root / 'scripts/oms'), 'sync-shared', '--repo', str(repo)]
 def run_sync():
     return subprocess.run(sync, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
 
+def run_refusal():
+    return subprocess.run(['bash', str(root / 'scripts/sync-shared.sh'), '--repo', str(repo)],
+                          text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+
+quoted_repo = subprocess.check_output(['bash', '-c', 'printf %q "$1"', 'quote', str(repo.resolve())], text=True)
+
 with (temporary / 'canonical-call.out').open('w+') as log, (temporary / 'canonical-call2.out').open('w+') as log2:
     call = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     call2 = None
@@ -32307,8 +32313,11 @@ for mode in ('tracked', 'staged', 'untracked'):
     dirty.write_bytes(b'local dirty\n')
     if mode == 'staged':
         git(repo, 'add', 'file.txt')
-    result = run_sync()
-    assert result.returncode != 0 and 'dirty shared checkout' in result.stdout, result.stdout
+    result = run_refusal()
+    assert result.returncode == 2, result.stdout
+    assert result.stdout.splitlines()[-2:] == [
+        f'next: git --no-optional-locks -C {quoted_repo} status --short',
+        'error: dirty shared checkout; sync refused'], result.stdout
     assert dirty.read_bytes() == b'local dirty\n' and git(repo, 'rev-parse', 'HEAD') == tip
     if original is None:
         dirty.unlink()
@@ -32316,6 +32325,16 @@ for mode in ('tracked', 'staged', 'untracked'):
         dirty.write_bytes(original)
         if mode == 'staged':
             git(repo, 'add', 'file.txt')
+
+# Detached HEAD refuses before fetching and preserves the commit.
+git(repo, 'checkout', '--detach', 'HEAD')
+result = run_refusal()
+assert result.returncode == 2, result.stdout
+assert result.stdout.splitlines()[-2:] == [
+    f'next: git -C {quoted_repo} log --oneline -1 --decorate',
+    'error: detached shared checkout; sync refused'], result.stdout
+assert git(repo, 'rev-parse', 'HEAD') == tip
+git(repo, 'checkout', 'main')
 
 # No age-based eviction: a live identity with ancient metadata still defers.
 lock = repo / '.oms/locks/canonical-sync.d/live-fixture'
@@ -32414,8 +32433,11 @@ local_tip = git(repo, 'rev-parse', 'HEAD')
 (source / 'remote.txt').write_text('second remote advance\n')
 git(source, 'add', 'remote.txt'); git(source, 'commit', '-m', 'divergent remote fixture')
 git(source, 'push', 'origin', 'main')
-result = run_sync()
-assert result.returncode != 0 and 'ahead or diverged' in result.stdout, result.stdout
+result = run_refusal()
+assert result.returncode == 2, result.stdout
+assert result.stdout.splitlines()[-2:] == [
+    f'next: git -C {quoted_repo} log --oneline --left-right refs/remotes/origin/main...HEAD',
+    'error: shared checkout is ahead or diverged; sync refused'], result.stdout
 assert git(repo, 'rev-parse', 'HEAD') == local_tip
 PY
 }

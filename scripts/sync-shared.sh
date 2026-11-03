@@ -15,7 +15,8 @@ Usage: oms sync-shared [--repo PATH] [--remote NAME] [--target BRANCH]
 Refresh the canonical shared checkout (defaults: current repo, origin, main).
 Live calls defer sync with exit 75; retry after they finish. New calls wait up
 to five seconds for sync, then refuse safely if it is still busy. Dirty,
-detached and diverged checkouts are refused without a merge.
+detached and diverged checkouts are refused without a merge; refusals include
+a read-only inspection command.
 This operation does not push, gate, install or create a landing receipt.
 EOF
 }
@@ -40,7 +41,11 @@ REPO="$(cd "$REPO" && pwd -P)" || fail 'cannot resolve physical shared checkout'
 sync_clean() {
   local status
   status="$(git -C "$REPO" status --porcelain --untracked-files=all)" || return 2
-  [ -z "$status" ] || { echo 'error: dirty shared checkout; sync refused' >&2; return 2; }
+  [ -z "$status" ] || {
+    printf 'next: git --no-optional-locks -C %q status --short\n' "$REPO" >&2
+    echo 'error: dirty shared checkout; sync refused' >&2
+    return 2
+  }
 }
 
 sync_checkout() {
@@ -49,12 +54,16 @@ sync_checkout() {
   oms_git_assert_plain_index "$REPO" || return 2
   # Any local branch may track the target; only a fast-forward to the fetched target is applied.
   git -C "$REPO" symbolic-ref --quiet HEAD >/dev/null || {
-    echo 'error: detached shared checkout; sync refused' >&2; return 2;
+    printf 'next: git -C %q log --oneline -1 --decorate\n' "$REPO" >&2
+    echo 'error: detached shared checkout; sync refused' >&2
+    return 2
   }
   sync_clean || return $?
   git -C "$REPO" fetch --no-tags -- "$REMOTE" "+refs/heads/$TARGET:$ref" || return $?
   git -C "$REPO" merge-base --is-ancestor HEAD "$ref" || {
-    echo 'error: shared checkout is ahead or diverged; sync refused' >&2; return 2;
+    printf 'next: git -C %q log --oneline --left-right %q...HEAD\n' "$REPO" "$ref" >&2
+    echo 'error: shared checkout is ahead or diverged; sync refused' >&2
+    return 2
   }
   sync_clean || return $?
   git -C "$REPO" merge --ff-only "$ref"
