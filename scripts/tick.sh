@@ -105,7 +105,7 @@ codex_cache_stale() {  # doctor's predicate, so a tick repairs what doctor would
   [ "$(oms_install_receipt_field components.codex_plugin "$receipt" 2>/dev/null || true)" = true ] || return 1
   version="$(oms_install_plugin_version "$ROOT")" || return 1
   market="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' \
-    "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null)" || return 1
+    "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null | tr -d '\r')" || return 1
   cache="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$market/oh-my-setting/$version"
   [ -d "$cache" ] || return 0
   expected="$(oms_install_receipt_field plugin.sha256 "$receipt" 2>/dev/null || oms_install_plugin_hash "$ROOT")"

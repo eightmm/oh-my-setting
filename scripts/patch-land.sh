@@ -413,8 +413,8 @@ approval_recover_finish() {  # approval_recover_finish ID VERSION consumed|faile
   local row state current_version
   [ -n "$approval" ] && [ -n "$version" ] || return 0
   row="$("$ROOT/scripts/approval-inbox.sh" --repo "$REPO" show --approval "$approval" --json 2>/dev/null)" || return 1
-  state="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))')"
-  current_version="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))')"
+  state="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' | tr -d '\r')"
+  current_version="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' | tr -d '\r')"
   [ "$state" != "$result" ] || return 0
   # A crash before begin-consume performed no effect and leaves an approved
   # grant reusable. Only a reserved grant needs a terminal recovery row.

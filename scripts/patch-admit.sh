@@ -387,7 +387,7 @@ if [ "$apply_ok" = 1 ]; then
 
     # --- Gate 2: task path scope ----------------------------------
     scope_detail="$(OMS_CHANGED="$changed_files" OMS_ALLOWED="$SCOPE_ALLOWED" OMS_FORBIDDEN="$SCOPE_FORBIDDEN" \
-      OMS_PATH_SCOPE_HELPER="$ROOT_LIB/path_scope.py" python3 - <<'PY'
+      OMS_PATH_SCOPE_HELPER="$ROOT_LIB/path_scope.py" python3 - <<'PY' | tr -d '\r'
 import os, re, runpy
 scope = runpy.run_path(os.environ["OMS_PATH_SCOPE_HELPER"])
 classify = scope["classify"]
