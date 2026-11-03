@@ -365,13 +365,18 @@ def _scope_drift(paths, owns):
     return [path for path in paths if classify(path, owns, []) == 'outside'] if owns else []
 
 
-def _worker_owns(repo, worker):
+def _worker_owns(repo, worker, _rooms=None):
     refs = worker.get('refs', {})
     ident, who = refs.get('panel_room_id'), refs.get('panel_room_participant')
     if not ident or not who:
         return []
     # The room the worker joined holds its declaration, even after that room rolled over.
-    state = room.status(repo, ident, exact=True)
+    if _rooms is None:
+        state = room.status(repo, ident, exact=True)
+    else:
+        if ident not in _rooms:
+            _rooms[ident] = room.status(repo, ident, exact=True)
+        state = _rooms[ident]
     member = next((p for p in state['participants'] if p['participant'] == who), None)
     if member is None:
         raise ValueError('write worker declared scope evidence unavailable')
@@ -2292,6 +2297,7 @@ def settled_pending_admissions(repo, task_ids, _tick=None, _outcomes=None):
 
 def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None, _records_data=None,
             include_preflight=False, offset=0, limit=20):
+    """Read one result page using call-local task, attempt and room snapshots."""
     if task_id and not ID.fullmatch(task_id):
         raise ValueError('invalid task ID')
     if not isinstance(offset, int) or offset < 0 or not isinstance(limit, int) or limit < 1:
@@ -2305,6 +2311,21 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         attempts, rows = read_shared(repo, 'result-records', lambda: _records(repo))
     else:
         attempts, rows = _records(repo, full=bool(task_id), task_id=task_id)
+    attempts_by_task, rows_by_task, rows_by_attempt, rooms = {}, {}, {}, {}
+    for attempt in attempts:
+        ident = attempt.get('task_id')
+        if isinstance(ident, str):
+            attempts_by_task.setdefault(ident, []).append(attempt)
+    for position, row in enumerate(rows):
+        ident = row.get('task_id')
+        if isinstance(ident, str):
+            rows_by_task.setdefault(ident, []).append((position, row))
+        if rows_by_attempt is not None:
+            try:
+                rows_by_attempt.setdefault(row.get('attempt_id'), []).append((position, row))
+            except TypeError:
+                # Keep the original selection and failure behavior for malformed IDs.
+                rows_by_attempt = None
     latest = {}
     for row in sorted(attempts + rows, key=lambda r: r.get('updated_at') or r.get('ts') or ''):
         ident = row.get('task_id')
@@ -2327,16 +2348,17 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
     # Page over the rows that survive the scope checks below, so skipped tasks never count as omitted.
     output, passed, capped = [], 0, False
     for ident in chosen:
-        metadata_attempts = [a for a in attempts if a.get('task_id') == ident]
+        metadata_attempts = attempts_by_task.get(ident, [])
         matching = metadata_attempts
-        indexed = [r for r in rows if r.get('task_id') == ident]
+        task_rows = rows_by_task.get(ident, [])
+        indexed = [row for _, row in task_rows]
         result_rows = [r for r in indexed if r.get('kind') == 'panel-result']
         result = delivery = None
         issue = None
         if result_rows:
             try:
                 result = _load_result(repo, result_rows[-1])
-                delivery = _last_delivery(repo, rows, ident, result['revision'])
+                delivery = _last_delivery(repo, indexed, ident, result['revision'])
             except (OSError, ValueError, KeyError, TypeError):
                 issue = 'result or delivery evidence unavailable'
         if result and result.get('main_attempt_id'):
@@ -2345,7 +2367,15 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                         [a for a in attempts if a.get('parent_attempt_id') == result['main_attempt_id']
                          and not a.get('task_id')])
             linked = {a.get('attempt_id') for a in matching}
-            indexed = [r for r in rows if r.get('task_id') == ident or r.get('attempt_id') in linked]
+            # Union by source position preserves interleaving and repeated rows,
+            # including rows that match both the task and one of its attempts.
+            if rows_by_attempt is None:
+                indexed = [r for r in rows if r.get('task_id') == ident or r.get('attempt_id') in linked]
+            else:
+                linked_rows = dict(task_rows)
+                for attempt in linked:
+                    linked_rows.update(rows_by_attempt.get(attempt, []))
+                indexed = [linked_rows[position] for position in sorted(linked_rows)]
         if room_participant:
             matching = [a for a in matching if a.get("refs", {}).get("panel_room_participant") == room_participant]
             metadata_attempts = [a for a in metadata_attempts
@@ -2407,7 +2437,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                     call['changes'] = _diffstat(repo, row)
                     worker = next((a for a in matching if a.get('attempt_id') == row.get('attempt_id')), {})
                     if worker.get('refs', {}).get('panel_access') == 'write':
-                        drift = _scope_drift(_patch_paths(verified_patch(repo, row)), _worker_owns(repo, worker))
+                        drift = _scope_drift(_patch_paths(verified_patch(repo, row)), _worker_owns(repo, worker, _rooms=rooms))
                         call['changes']['out_of_scope'] = {'count': len(drift), 'paths': drift[:8]}
                 except (OSError, ValueError, TypeError):
                     call['changes'] = {'issue': 'patch evidence unavailable'}
@@ -2428,7 +2458,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         def owns(attempt):
             if attempt not in scopes:
                 try:
-                    scopes[attempt] = _worker_owns(repo, matching[order[attempt]])
+                    scopes[attempt] = _worker_owns(repo, matching[order[attempt]], _rooms=rooms)
                 except (OSError, ValueError, TypeError):
                     scopes[attempt] = []
             return scopes[attempt]

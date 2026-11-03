@@ -80,7 +80,7 @@ def exercise_continued_stage_rollup(repo):
              dict(attempts[2], refs=dict(write, panel_continues="round-2"))]
 
     def rollup(attempt_list, call_list, scopes=None):
-        scope = lambda _repo, worker: (scopes or {}).get(worker["attempt_id"], ["value.txt"])
+        scope = lambda _repo, worker, **kwargs: (scopes or {}).get(worker["attempt_id"], ["value.txt"])
         with patch.object(saved, "_records", return_value=(attempt_list, call_list)), \
                 patch.object(saved, "_worker_owns", side_effect=scope):
             return saved.results(repo, task_id=task)["rows"][0]
@@ -128,6 +128,112 @@ def exercise_continued_stage_rollup(repo):
                      [dict(delegate(2, 0), patch=None)]):
             chosen, _, dropped = saved._write_candidates(repo, [first, second], [None] * 2, [], "codex", rows=rows)
             assert chosen == [first, second] and not dropped, (rows, chosen)
+
+
+# BEGIN results task index
+# Frozen output covers interleaved task/attempt rows, duplicate rows, whole-main
+# children, participant scope and both pagination windows without timing assertions.
+index_attempts, index_rows, index_results = [], [], {}
+index_members = []
+for n in range(24):
+    ident, attempt = "indexed-%02d" % n, "worker-%02d" % n
+    index_attempts.append(dict(task_id=ident, attempt_id=attempt, state="done", updated_at=str(n),
+        refs=dict(panel_access="write", panel_role="worker", panel_room_id="index-room",
+                  panel_room_participant=attempt, panel_alias="W%s" % n)))
+    index_members.append(dict(participant=attempt, owns=["value.txt"]))
+    index_results[ident] = dict(task_id=ident, revision="a" * 24, outcome="completed",
+                              main_attempt_id="index-main", summary=ident)
+    index_rows.append(dict(task_id=ident, attempt_id=attempt, kind="delegate", exit=0,
+                           patch="fixture.patch", patch_sha256="b" * 64))
+index_attempts.append(dict(attempt_id="unassigned", parent_attempt_id="index-main", refs={}))
+index_results["whole-index"] = dict(task_id="whole-index", revision="a" * 24,
+    outcome="completed", main_attempt_id="index-main", summary="Whole main")
+index_results["preflight-index"] = dict(task_id="preflight-index", revision="a" * 24,
+    outcome="completed", summary="Preflight")
+index_rows += [dict(task_id=ident, kind="panel-result", ts="z" + ident)
+               for ident in reversed(index_results)]
+index_rows += [dict(kind="call", attempt_id="unassigned", exit=0),
+               dict(task_id="whole-index", kind="call", attempt_id="unassigned", exit=0),
+               dict(task_id="indexed-00", kind="call", attempt_id="unassigned", exit=0)]
+index_rows.append(index_rows[-2])
+# First matching attempt supplies aliases even if an ID is repeated later.
+index_attempts.append(dict(index_attempts[0], refs=dict(index_attempts[0]["refs"], panel_alias="later")))
+index_pages = [{}, dict(limit=25), dict(limit=1), dict(offset=24, limit=1), dict(offset=25),
+               dict(task_id="indexed-00"), dict(task_id="whole-index"), dict(task_id="missing"),
+               dict(room_participant="worker-00"), dict(room_participant="missing"),
+               dict(include_preflight=True)]
+index_reads = []
+class IndexRow(dict):
+    def get(self, key, default=None):
+        if key == "task_id":
+            index_reads.append(key)
+        return super().get(key, default)
+
+with patch.object(saved, "_records", return_value=(index_attempts, index_rows)), \
+        patch.object(saved, "_load_result", side_effect=lambda repo, row: index_results[row["task_id"]]), \
+        patch.object(saved, "_last_delivery", return_value=None), \
+        patch.object(saved, "_diffstat", return_value=dict(files=[], count=0, added=0, removed=0)), \
+        patch.object(saved, "verified_patch", return_value=b""), \
+        patch.object(saved.room, "status", return_value=dict(participants=index_members)) as index_room:
+    index_reports = [saved.results(project, **options) for options in index_pages]
+    index_encoded = json.dumps(index_reports, ensure_ascii=False, separators=(",", ":")).encode()
+    # Digest of the original reader's complete serialized reports for these selections.
+    assert hashlib.sha256(index_encoded).hexdigest() == "1acecc5d82e9a9affc9ecc67ba158b4f329b1388e05172ba416a0b699bffd850"
+    assert [row["task_id"] for row in index_reports[0]["rows"]][:1] == ["whole-index"]
+    assert len(index_reports[0]["rows"]) == 20 and index_reports[0]["truncated"]
+    assert len(index_reports[1]["rows"]) == 25 and not index_reports[1]["truncated"]
+    assert len(index_reports[6]["rows"][0]["calls"]) == 4
+    index_room.reset_mock()
+    saved.results(project)
+    assert index_room.call_count == 1, index_room.call_count
+    # A second call reads current room evidence; no process-wide cache survives.
+    saved.results(project)
+    assert index_room.call_count == 2, index_room.call_count
+    with ThreadPoolExecutor(max_workers=2) as index_pool:
+        index_parallel = list(index_pool.map(lambda _: saved.results(project), range(2)))
+    assert index_parallel == [index_reports[0], index_reports[0]]
+    assert index_room.call_count == 4, index_room.call_count
+    with patch.object(saved, "_records", return_value=(index_attempts, [IndexRow(row) for row in index_rows])):
+        saved.results(project)
+    assert len(index_reads) <= 4 * len(index_rows), len(index_reads)
+    with patch.object(saved, "_records", return_value=([], [])):
+        assert saved.results(project)["rows"] == []
+    with patch.object(saved, "_records", return_value=([], [dict(task_id=[], attempt_id=[])])):
+        assert saved.results(project)["rows"] == []
+    with patch.object(saved, "_records", return_value=(index_attempts, index_rows + [
+            dict(task_id="whole-index", attempt_id=[])])):
+        assert saved.results(project, task_id="whole-index") == index_reports[6]
+        try:
+            saved.results(project, task_id="indexed-00")
+            raise AssertionError("malformed linked ID accepted")
+        except TypeError:
+            pass
+    for options in (dict(limit=0), dict(offset=-1), dict(limit="1"), dict(offset=None), dict(task_id="bad/id")):
+        try:
+            saved.results(project, **options)
+            raise AssertionError("invalid results selection accepted")
+        except ValueError:
+            pass
+    assert saved._worker_owns(project, {}, _rooms={}) == []
+    assert saved._worker_owns(project, index_attempts[0]) == ["value.txt"]
+    index_room.assert_called_with(project, "index-room", exact=True)
+    with patch.object(saved.room, "status", side_effect=[ValueError("unavailable"), dict(participants=index_members)]):
+        index_cache = {}
+        try:
+            saved._worker_owns(project, index_attempts[0], _rooms=index_cache)
+            raise AssertionError("unavailable scope accepted")
+        except ValueError:
+            pass
+        assert not index_cache
+        assert saved._worker_owns(project, index_attempts[0], _rooms=index_cache) == ["value.txt"]
+        try:
+            saved._worker_owns(project, dict(refs=dict(panel_room_id="index-room", panel_room_participant="missing")),
+                               _rooms=index_cache)
+            raise AssertionError("missing participant accepted")
+        except ValueError:
+            pass
+    exercise_continued_stage_rollup(project)
+# END results task index
 
 
 def exercise_pi_cooldown_routing():
