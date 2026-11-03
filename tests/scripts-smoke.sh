@@ -23324,6 +23324,263 @@ PY
   [ ! -d "$project/.oms/runs/oldrun" ] || fail "gc should remove an aged capsule"
   [ ! -s "$project/.oms/failures.jsonl" ] || fail "gc should compact an all-resolved old ledger to empty"
 
+  # Dispatch retention requires stopped processes, settled attempts and plan
+  # coverage, rather than treating an aged output file as proof of completion.
+  local dispatch_project="$TMP/gc-dispatch"
+  make_committed_repo "$dispatch_project"
+  python3 - "$ROOT" "$dispatch_project" "$$" <<'PYDISPATCH'
+import contextlib, io, json, os, runpy, subprocess, sys, tempfile, time
+from pathlib import Path
+from unittest.mock import patch
+root, repo = map(Path, sys.argv[1:3])
+live_pid = int(sys.argv[3])
+sys.path.insert(0, str(root / 'scripts/lib'))
+import terminal_panel as panel
+if os.name != 'posix':
+    print('dispatch retention: native supervisor fixtures require POSIX; unknown evidence stays retained')
+    raise SystemExit(0)
+Path(os.environ['TMPDIR']).chmod(0o700)
+os.environ['XDG_STATE_HOME'] = str(Path(os.environ['TMPDIR']) / 'gc-dispatch-control')
+ops = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+logs = repo / '.oms/panel-state/dispatch-logs'
+logs.mkdir(parents=True, mode=0o700)
+events, tasks = [], {}
+now = int(time.time())
+
+def seed(name, state='done', task=None, age=31, finished=True, complete=True):
+    member = 'call-' + name
+    task = task or name
+    with patch.object(sys, 'platform', 'linux'):
+        call = panel._prepare_dispatch_call(repo, 'gc-dispatch-room', member, 'owner', task_id=task)
+    digest = panel._dispatch_exit_record(call, 0)['launch_sha256']
+    panel._record_dispatch_pending(repo, call, 0, task, {'descendants': []})
+    pid = 2147483647 if finished else live_pid
+    panel.dispatch_store.write(repo, member + '-process.json', {'pid': pid})
+    panel.dispatch_store.write(repo, member + '-supervisor.json',
+                               dict(launch_sha256=digest, pid=pid, all_reaped=finished, exit=0 if finished else None))
+    panel.dispatch_store.write(repo, member + '-settled.json', dict(released=True, exit=0, launch_sha256=digest))
+    panel.dispatch_store.write(repo, panel._settlement_claim_path(member),
+                               dict(schema=1, member=member, exit=0, active=False, complete=complete,
+                                    steps={k: complete for k in ('settlement', 'room_result', 'structured_event', 'auto_review')}))
+    panel._write(repo, panel._dispatch_call_path(member, True), panel._dispatch_exit_record(call, 0))
+    ident = 'att_' + name
+    refs = dict(panel_room_participant=member, panel_room_id='gc-dispatch-room')
+    created = ops['new_event'](ident, 1, 'attempt.created', from_state=None, to_state='queued',
+                               provider='codex', tool='gc-fixture', task_id=task, refs=refs)
+    created['ts'] = '2020-01-01T00:00:00Z'
+    events.append(created)
+    states = ['starting', 'working', 'verifying', 'review', 'done']
+    if state not in states:
+        states = ['cancelled']
+    else:
+        states = states[:states.index(state) + 1]
+    old = 'queued'
+    for seq, target in enumerate(states, 2):
+        events.append(ops['new_event'](ident, seq, 'attempt.state_changed', from_state=old, to_state=target))
+        old = target
+    tasks.setdefault(task, dict(id=task, state='done'))
+    for suffix in ('.log', '.activity.json', '.stream', '.transcript'):
+        path = logs / (member + suffix)
+        path.write_text('output' if suffix == '.log' else '{}')
+        os.utime(path, (now - age * 86400, now - age * 86400))
+    return member
+
+seed('settled')
+seed('fresh', age=0)
+seed('live', finished=False)
+live_record = seed('live-record')
+panel.dispatch_store.write(repo, live_record + '-process.json', {'pid': live_pid})
+panel.dispatch_store.write(repo, live_record + '-supervisor.json',
+                           dict(launch_sha256=panel._dispatch_exit_record(
+                               panel.dispatch_store.read(repo, live_record + '-launch.json')['call'], 0)['launch_sha256'],
+                                pid=live_pid, all_reaped=True, exit=0))
+seed('review', state='review')
+seed('delivery', complete=False)
+conflict = seed('conflict')
+released = panel.dispatch_store.read(repo, conflict + '-settled.json')
+panel.dispatch_store.write(repo, conflict + '-settled.json', dict(released, exit=1))
+unknown = seed('unknown')
+(repo / panel._dispatch_call_path(unknown, True)).write_text('{')
+seed('latest', task='unfinished')
+tasks['unfinished']['state'] = 'ready'
+seed('older', task='unfinished')
+events[-6]['ts'] = '2019-01-01T00:00:00Z'
+for name, stamp in (('calendar-old', '2020-2-01T00:00:00Z'), ('calendar-new', '2020-10-01T00:00:00Z'),
+                    ('equal-old', '2020-2-1T00:00:00Z'), ('equal-new', '2020-02-01T00:00:00Z')):
+    task = 'calendar' if name.startswith('calendar') else 'equal'
+    seed(name, task=task)
+    events[-6]['ts'] = stamp
+    tasks[task]['state'] = 'ready'
+seed('lease', task='claimed')
+tasks['claimed']['state'] = 'running'
+seed('mixed-age')
+os.utime(logs / 'call-mixed-age.activity.json', (now, now))
+for suffix in ('.stream', '.transcript'):
+    member = seed('fresh' + suffix)
+    os.utime(logs / (member + suffix), (now, now))
+seed('link')
+(logs / 'call-link.activity.json').unlink()
+(logs / 'call-link.activity.json').symlink_to(logs / 'call-settled.activity.json')
+seed('missing')
+(logs / 'call-missing.activity.json').unlink()
+(logs / 'call-orphan.log').write_text('unknown')
+os.utime(logs / 'call-orphan.log', (1, 1))
+(repo / '.oms/lifecycle').mkdir(exist_ok=True)
+ledger = repo / '.oms/lifecycle/events.jsonl'
+ledger.write_text(''.join(json.dumps(row) + '\n' for row in events))
+(repo / '.oms/plan').mkdir(exist_ok=True)
+plan = repo / '.oms/plan/tasks.json'
+plan.write_text(json.dumps(dict(schema=1, tasks=tasks)))
+cli = ['bash', str(root / 'scripts/gc.sh'), '--repo', str(repo), '--days', '30']
+call_timeout = int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
+def run(*args):
+    result = subprocess.run(cli + list(args), capture_output=True, text=True, check=True, timeout=call_timeout)
+    return result.stdout
+# Only the inline dispatch helper crashes; all other Python consumers stay real.
+with tempfile.TemporaryDirectory(prefix='gc-helper-crash-') as temporary:
+    shim = Path(temporary) / 'python3'
+    shim.write_text('''#!/usr/bin/env bash
+if [ "$#" = 5 ] && [ "$1" = - ] && [ "$2" = "$GC_CRASH_LIB" ] && [ "$3" = "$GC_CRASH_REPO" ]; then
+  echo 'simulated dispatch helper crash' >&2
+  exit "$GC_CRASH_CODE"
+fi
+exec "$GC_REAL_PYTHON" "$@"
+''')
+    shim.chmod(0o700)
+    for code in (1, 20, 24, 75):
+        environment = dict(os.environ, PATH=temporary + os.pathsep + os.environ['PATH'],
+                           GC_CRASH_LIB=str(root / 'scripts/lib'), GC_CRASH_REPO=str(repo),
+                           GC_CRASH_CODE=str(code), GC_REAL_PYTHON=sys.executable)
+        crashed = subprocess.run(cli + ['--apply'], capture_output=True, text=True,
+                                 env=environment, timeout=call_timeout)
+        assert crashed.returncode == 1, (code, crashed.returncode, crashed.stderr)
+        assert 'dispatch log cleanup failed' in crashed.stderr, crashed.stderr
+before = {p.name: p.read_bytes() for p in logs.iterdir()}
+out = run()
+assert '- dispatch-logs: 3 pair(s), 12 file(s), 36 bytes' in out, out
+assert before == {p.name: p.read_bytes() for p in logs.iterdir()}, 'dry run changed dispatch logs'
+markers = repo / '.oms/delegations'
+markers.mkdir(exist_ok=True)
+marker = markers / 'live.json'
+marker.write_text(json.dumps(dict(schema=1, id='live', pid=live_pid)))
+out = run('--apply')
+assert before == {p.name: p.read_bytes() for p in logs.iterdir()}, 'live delegation did not veto dispatch cleanup'
+marker.write_text('{')
+run('--apply')
+assert before == {p.name: p.read_bytes() for p in logs.iterdir()}, 'unknown marker did not veto dispatch cleanup'
+marker.unlink()
+out = run('--apply')
+assert '- dispatch-logs: 3 pair(s), 12 file(s), 36 bytes' in out, out
+for name in ('settled', 'older', 'calendar-old'):
+    assert all(not (logs / ('call-' + name + suffix)).exists()
+               for suffix in ('.log', '.activity.json', '.stream', '.transcript')), name
+for name in ('fresh', 'live', 'live-record', 'review', 'delivery', 'conflict', 'unknown', 'latest', 'lease', 'mixed-age', 'fresh.stream', 'fresh.transcript', 'link', 'missing', 'orphan', 'calendar-new', 'equal-old', 'equal-new'):
+    assert (logs / ('call-' + name + '.log')).exists(), name
+    if name != 'orphan':
+        assert all((logs / ('call-' + name + suffix)).exists() for suffix in ('.stream', '.transcript')), name
+assert '- dispatch-logs: 0 pair(s), 0 file(s), 0 bytes' in run('--apply'), 'repeat cleanup was not idempotent'
+
+# Freeze the retention clock to exercise equality, zero, and empty input without sleeps.
+source = (root / 'scripts/gc.sh').read_text().split("<<'PY_DISPATCH_LOGS'", 1)[1].split('\n', 1)[1].split('\nPY_DISPATCH_LOGS', 1)[0]
+def collect(days=30, dry=True, status=0):
+    output = io.StringIO()
+    with patch.object(sys, 'argv', ['gc', str(root / 'scripts/lib'), str(repo), str(days), '1' if dry else '0']), \
+            patch('time.time', return_value=now), contextlib.redirect_stdout(output):
+        actual_status = 0
+        try:
+            exec(compile(source, 'gc-dispatch-helper', 'exec'), {'__name__': '__main__'})
+        except SystemExit as error:
+            actual_status = error.code
+        assert actual_status == status, (actual_status, output.getvalue())
+    return output.getvalue()
+# Isolate one pair after the integration assertions; preserve its genuine call evidence.
+for path in logs.iterdir():
+    path.unlink()
+for suffix in ('.log', '.activity.json'):
+    path = logs / ('call-fresh' + suffix)
+    path.write_text('{}')
+    os.utime(path, (now - 30 * 86400, now - 30 * 86400))
+assert '0 pair(s)' in collect(), 'mtime equal to cutoff must be kept'
+assert '1 pair(s)' in collect(0), 'zero days should reclaim an aged settled pair'
+for suffix in ('.log', '.activity.json'):
+    os.utime(logs / ('call-fresh' + suffix), (now, now))
+assert '0 pair(s)' in collect(0), 'zero-day cutoff equality must be kept'
+for path in logs.iterdir():
+    os.utime(path, (1, 1))
+assert '1 pair(s)' in collect(0), 'malformed-evidence fixture must otherwise be eligible'
+ledger.write_text('{')
+assert '0 pair(s)' in collect(0), 'malformed lifecycle evidence must keep files'
+ledger.write_text(''.join(json.dumps(row) + '\n' for row in events))
+plan.write_text('{')
+assert '0 pair(s)' in collect(0), 'malformed plan evidence must keep files'
+for body in ('', '{}', json.dumps(dict(schema=0, tasks=tasks)), json.dumps(dict(schema=99, tasks=tasks))):
+    plan.write_text(body)
+    assert '0 pair(s)' in collect(0), 'unknown/empty plan evidence must keep files'
+valid_plan = json.dumps(dict(schema=3, tasks=tasks))
+plan.write_text(valid_plan + ' ' * (16 * 1024 * 1024 - len(valid_plan)))
+assert '1 pair(s)' in collect(0), 'plan exactly at the read limit must remain usable'
+with plan.open('a') as handle:
+    handle.write(' ')
+assert '0 pair(s)' in collect(0), 'oversized plan evidence must keep files'
+plan.unlink()
+assert '1 pair(s)' in collect(0), 'standalone settled calls need no plan'
+plan.write_text(valid_plan)
+saved_ledger = ledger.read_bytes()
+ledger.unlink()
+for arguments, notes in (([], 1), (['--apply'], 0)):
+    result = subprocess.run(cli + arguments, capture_output=True, text=True, check=True, timeout=call_timeout)
+    assert result.stderr.count('dispatch log evidence unavailable') == notes, result.stderr
+    if arguments:
+        assert 'dispatch-logs:' not in result.stdout, result.stdout
+ledger.write_bytes(saved_ledger)
+# A failed companion unlink accounts for the successful log removal, and the
+# next sweep can finish from the activity record left as its recovery anchor.
+original_unlink = Path.unlink
+def fail_activity(path, *args, **kwargs):
+    if path.name == 'call-fresh.activity.json':
+        raise PermissionError('simulated companion unlink failure')
+    return original_unlink(path, *args, **kwargs)
+with patch.object(Path, 'unlink', fail_activity):
+    partial = collect(0, dry=False, status=1)
+assert '- dispatch-logs: 1 pair(s), 1 file(s), 2 bytes' in partial, partial
+assert not (logs / 'call-fresh.log').exists()
+assert (logs / 'call-fresh.activity.json').exists()
+assert '- dispatch-logs: 1 pair(s), 1 file(s), 2 bytes' in collect(0, dry=False)
+assert not (logs / 'call-fresh.activity.json').exists()
+for suffix in ('.log', '.activity.json', '.stream', '.transcript'):
+    path = logs / ('call-fresh' + suffix)
+    path.write_text('{}')
+    os.utime(path, (1, 1))
+def fail_stream(path, *args, **kwargs):
+    if path.name == 'call-fresh.stream':
+        raise PermissionError('simulated stream unlink failure')
+    return original_unlink(path, *args, **kwargs)
+with patch.object(Path, 'unlink', fail_stream):
+    partial = collect(0, dry=False, status=1)
+assert '- dispatch-logs: 1 pair(s), 2 file(s), 4 bytes' in partial, partial
+assert (logs / 'call-fresh.activity.json').exists(), 'failed earlier unlink lost recovery anchor'
+assert '- dispatch-logs: 1 pair(s), 2 file(s), 4 bytes' in collect(0, dry=False)
+# Invalid creation evidence must preserve every call of that task.
+for member in ('call-calendar-old', 'call-calendar-new'):
+    for suffix in ('.log', '.activity.json'):
+        path = logs / (member + suffix)
+        path.write_text('{}')
+        os.utime(path, (1, 1))
+for row in events:
+    if row.get('event_type') == 'attempt.created' and row.get('task_id') == 'calendar':
+        row['ts'] = 'invalid'
+        break
+ledger.write_text(''.join(json.dumps(row) + '\n' for row in events))
+retained = {path.name: path.read_bytes() for path in logs.iterdir()}
+assert '0 pair(s)' in collect(0, dry=False)
+assert retained == {path.name: path.read_bytes() for path in logs.iterdir()}
+ledger.write_bytes(saved_ledger)
+for path in logs.iterdir():
+    path.unlink()
+assert '0 pair(s)' in collect(), 'empty directory should be harmless'
+print('dispatch retention: crash exits, partial recovery, sidecars, parsed timestamps and missing-ledger noise passed')
+PYDISPATCH
+
   # Work rooms reuse the thread lock and preserve unread mail, including mail
   # addressed to a member who has left. Unknown joined presence is retained.
   python3 - "$ROOT/scripts/lib" "$project" <<'PY'

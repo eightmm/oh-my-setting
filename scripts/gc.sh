@@ -60,6 +60,15 @@ or aged snapshot), terminal/draft executor souls, retired failure rows
 fail-ledger reads with), closed conversation threads, closed work rooms and empty
 rooms without joined participants (unread room mail is always retained),
 unreferenced completion captures/prefixes/segments when no unsettled lease exists;
+dispatch-log/activity pairs with recorded exits, stopped processes and settled
+terminal attempts, excluding the latest attempt of unfinished plan tasks.
+Dispatch cleanup reports pair/file counts and bytes, and defers while delegation
+evidence is live or unknown. Existing log/activity/stream/transcript files must
+all be older than --days. A lone activity file can finish interrupted cleanup;
+unknown evidence is kept. Missing lifecycle evidence is noted once in dry-run
+and stays silent in apply mode. Unexpected helper failures fail the sweep.
+Panel-result files are retained because
+their index, room-thread and outcome references need a separate closure check;
 artifact index rows are delegated to
 artifact-index prune; orphaned artifact files are left alone unless
 --delete-orphan-files says otherwise. Never touches live runs, the active task, unresolved
@@ -782,9 +791,8 @@ compact_hook_events() {
   [ "$apply" = 0 ] || compact_args+=(--apply)
   python3 "$ROOT_LIB/cached-main.py" "$ROOT_LIB/hook_state.py" "${compact_args[@]}"
 }
-hook_state_cleanup_locked() {
+delegations_quiescent() {
   local marker_names marker_names_rc marker_name marker_snapshot marker_rc marker_state
-  local hook_counts hook_before hook_after hook_session hook_mtime removed_before
 
   marker_names_rc=0
   marker_names="$(delegation_marker_names_locked "$delegation_dir" strict)" || marker_names_rc=$?
@@ -805,6 +813,11 @@ hook_state_cleanup_locked() {
   done <<EOF_HOOK_MARKERS
 $marker_names
 EOF_HOOK_MARKERS
+}
+
+hook_state_cleanup_locked() {
+  local hook_counts hook_before hook_after hook_session hook_mtime removed_before
+  delegations_quiescent || return $?
 
   removed_before="$removed"
   if [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; then
@@ -862,6 +875,197 @@ if { [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; } ||
       ;;
     *)
       echo "error: gc: could not safely complete hook cleanup (rc=$hook_cleanup_status)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Dispatch logs are recovery inputs until both process exit and owner settlement
+# are proven. Reuse the hook veto under marker-set -> plan so a new delegation
+# or lease cannot appear between eligibility and unlink. Terminal lifecycle
+# states cannot reopen; a changed ledger snapshot defers the remaining pairs.
+dispatch_logs_gc_locked() {
+  # 24 is the delegation veto; 75 is reserved for a busy outer writer lock.
+  # Normalize helper failures so they cannot impersonate either expected defer.
+  delegations_quiescent || return 24
+  python3 - "$ROOT_LIB" "$STATE_ROOT" "$DAYS" "$DRY_RUN" <<'PY_DISPATCH_LOGS' || return 1
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import stat
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as panel
+from process_liveness import pid_alive
+
+repo = Path(sys.argv[2])
+cutoff = time.time() - int(sys.argv[3]) * 86400
+dry = sys.argv[4] == "1"
+pairs = files = size = 0
+failed = False
+ops = runpy.run_path(str(Path(sys.argv[1]) / "agent-events.py"))
+errors = (OSError, ValueError, KeyError, TypeError, AttributeError,
+          RecursionError, subprocess.SubprocessError, ops["OpsError"])
+
+def generation(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError("not a single-link regular file")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def optional_generation(path):
+    try:
+        return generation(path)
+    except FileNotFoundError:
+        return None
+
+try:
+    directory = repo / ".oms/panel-state/dispatch-logs"
+    ancestry = panel.DURABLE["component_snapshot"](str(repo), str(directory / "probe"), "dispatch logs")
+    ledger = repo / ".oms/lifecycle/events.jsonl"
+    try:
+        ledger_generation = generation(ledger)
+    except FileNotFoundError as error:
+        if dry:
+            print("warning: gc: dispatch log evidence unavailable: %s" % error, file=sys.stderr)
+            print("- dispatch-logs: 0 pair(s), 0 file(s), 0 bytes")
+        raise SystemExit(0)
+    attempts = list(ops["project_attempts"](ops["read_rows"](ledger)).values())
+    # A present but unreadable plan is different from a repository with no plan.
+    raw_plan = panel._read(repo, ".oms/plan/tasks.json", 16 * 1024 * 1024, missing=True)
+    tasks = {}
+    if raw_plan:
+        plan = json.loads(raw_plan)
+        if (not isinstance(plan, dict) or type(plan.get("schema")) is not int
+                or plan["schema"] not in {1, 2, 3} or not isinstance(plan.get("tasks"), dict)):
+            raise ValueError("unknown plan shape")
+        for ident, task in plan["tasks"].items():
+            if (not isinstance(task, dict) or task.get("id") != ident
+                    or task.get("state") not in {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}):
+                raise ValueError("unknown plan task")
+            tasks[ident] = task
+    elif os.path.lexists(repo / ".oms/plan/tasks.json"):
+        raise ValueError("empty plan")
+    by_call, by_task = {}, {}
+    for attempt in attempts:
+        by_call.setdefault(attempt["refs"].get("panel_room_participant"), []).append(attempt)
+        by_task.setdefault(attempt["task_id"], []).append(attempt)
+    for activity in sorted(directory.glob("call-*.activity.json")):
+        member = activity.name[:-len(".activity.json")]
+        if not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", member):
+            continue
+        # Keep activity last: any interruption or failed earlier unlink leaves
+        # the next sweep an anchor, including after the output log is gone.
+        paths = [directory / (member + suffix) for suffix in (".log", ".stream", ".transcript")] + [activity]
+        try:
+            before = {path: optional_generation(path) for path in paths}
+            if before[activity] is None or any(item[3] >= cutoff * 1000000000 for item in before.values() if item):
+                continue
+            linked = by_call.get(member, [])
+            if not linked or any(a["terminal"] is not True for a in linked):
+                continue
+            # Review/approval/blocked attempts for this task can still need salvage.
+            if any(not a["terminal"] for own in linked for a in by_task[own["task_id"]]):
+                continue
+            protected = False
+            for own in linked:
+                task = tasks.get(own["task_id"])
+                if task is None:
+                    # A loaded plan that omits this task cannot prove its disposition.
+                    protected = bool(raw_plan)
+                elif task["state"] not in {"done", "cancelled"}:
+                    latest = max(ops["parse_ts"](a["created_at"]) for a in by_task[own["task_id"]])
+                    protected = (task["state"] in {"claimed", "running", "review", "landing"}
+                                 or ops["parse_ts"](own["created_at"]) >= latest)
+                if protected:
+                    break
+            if protected:
+                continue
+            launch = json.loads(panel._read(repo, panel._dispatch_call_path(member), 4096))
+            call = panel._dispatch_call_record(repo, launch["room"], launch)
+            if (not call or any(a["refs"].get("panel_room_id") != call["room"] for a in linked)
+                    or call.get("task_id") and any(a["task_id"] != call["task_id"] for a in linked)):
+                continue
+            exited = json.loads(panel._read(repo, panel._dispatch_call_path(member, True), 8192))
+            if (type(exited.get("exit")) is not int
+                    or exited != panel._dispatch_exit_record(call, exited["exit"])
+                    or not panel._dispatch_call_finished(repo, call["room"], call)
+                    or not panel._dispatch_released(repo, call)):
+                continue
+            pending = panel._dispatch_pending(repo, call)
+            released = panel.dispatch_store.read(repo, member + "-settled.json")
+            snapshot = panel._dispatch_supervisor_snapshot(repo, call, allow_stale=True)
+            if (not snapshot or snapshot[0]["all_reaped"] is not True
+                    or snapshot[0]["exit"] != exited["exit"] or pid_alive(snapshot[1]["pid"])
+                    or pending["exit"] != exited["exit"] or released["exit"] != exited["exit"]
+                    or any(a["task_id"] != pending["task_id"] for a in linked)):
+                continue
+            claim = panel.dispatch_store.read(repo, panel._settlement_claim_path(member))
+            if (claim.get("schema") != 1 or claim.get("member") != member
+                    or claim.get("complete") is not True or claim.get("active") is not False
+                    or type(claim.get("exit")) is not int or claim["exit"] != exited["exit"]
+                    or any(claim.get("steps", {}).get(step) is not True
+                           for step in ("settlement", "room_result", "structured_event", "auto_review"))):
+                continue
+            panel.DURABLE["components_unchanged"](ancestry, "dispatch logs")
+            if generation(ledger) != ledger_generation:
+                break
+            if before != {path: optional_generation(path) for path in paths}:
+                continue
+            group_failed = False
+            before_files = files
+            for path in paths:
+                if before[path] is None or path == activity and group_failed:
+                    continue
+                if not dry:
+                    try:
+                        path.unlink()
+                    except OSError as error:
+                        group_failed = failed = True
+                        print("warning: gc: dispatch log unlink failed: %s" % error, file=sys.stderr)
+                        continue
+                files += 1
+                size += before[path][2]
+            if files > before_files:
+                pairs += 1
+        except errors:
+            continue  # Unknown call evidence cannot authorize either unlink.
+except errors as error:
+    print("warning: gc: dispatch log evidence unavailable: %s" % error, file=sys.stderr)
+print("- dispatch-logs: %d pair(s), %d file(s), %d bytes" % (pairs, files, size))
+if failed:
+    raise SystemExit(1)
+PY_DISPATCH_LOGS
+}
+dispatch_logs_gc_plan_lock() {
+  oms_try_file_lock "$OMS/plan/tasks.json" dispatch_logs_gc_locked
+}
+if [ -d "$OMS/panel-state/dispatch-logs" ]; then
+  dispatch_gc_status=0
+  dispatch_gc_out="$(oms_try_file_lock "$delegation_set_lock" dispatch_logs_gc_plan_lock)" || dispatch_gc_status=$?
+  dispatch_gc_out="${dispatch_gc_out//$'\r'/}"
+  case "$dispatch_gc_status" in
+    0)
+      if [ -n "$dispatch_gc_out" ]; then
+        printf '%s\n' "$dispatch_gc_out"
+        dispatch_gc_count="$(printf '%s\n' "$dispatch_gc_out" | awk '/^- dispatch-logs:/ {print $5}')"
+        case "$dispatch_gc_count" in
+          *[!0-9]*|"") fail "could not account for dispatch log cleanup" ;;
+        esac
+        removed=$((removed + dispatch_gc_count))
+      fi
+      ;;
+    24|75)
+      echo "warning: gc: dispatch log cleanup skipped while a delegation is live or evidence/lock is unverified (rc=$dispatch_gc_status)" >&2
+      ;;
+    *)
+      [ -z "$dispatch_gc_out" ] || printf '%s\n' "$dispatch_gc_out"
+      echo "error: gc: dispatch log cleanup failed (rc=$dispatch_gc_status)" >&2
       exit 1
       ;;
   esac
