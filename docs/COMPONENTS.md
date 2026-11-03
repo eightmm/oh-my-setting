@@ -748,6 +748,12 @@ Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-mont
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
 
+`oms thread close --stale` previews the stale list; add `--apply` to close
+eligible non-room threads after a locked staleness recheck, optionally supplying
+`--summary TEXT`. Logs containing room events are excluded even when their IDs
+do not start with `room-`. An append failure stops the sweep and reports the
+failed ID; already closed IDs are reported as they succeed.
+
 Stop materializes the journal locally. Its detached publisher starts only if
 a Notion target is configured or GitHub CI polling is available for this repo.
 Existing content hashes, sync locks and CI polling intervals deduplicate work

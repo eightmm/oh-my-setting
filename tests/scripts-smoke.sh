@@ -29754,6 +29754,93 @@ assert [r["id"] for r in t["recent"]] == ["keep-open"], t
     fail "gc must never sweep an open thread"
   [ ! -f "$project/.oms/threads/done-thread.jsonl" ] ||
     fail "gc should sweep an aged closed thread"
+  out="$("$ROOT/scripts/thread.sh" --repo "$project" close --stale)"
+  contains "$out" 'Dry run: 0 stale open thread(s)' && contains "$out" '--apply' ||
+    fail "empty preview should explain the dry run: $out"
+
+  local id before listed
+  for id in stale-one stale-two fresh-thread room-abcdef mixed-time; do
+    "$ROOT/scripts/thread.sh" --repo "$project" new --id "$id" --topic "$id" >/dev/null
+  done
+  "$ROOT/scripts/room.sh" --repo "$project" new --id team --topic team >/dev/null
+  python3 - "$project/.oms/threads" <<'PY'
+import json, os, sys
+for tid in ("stale-one", "stale-two", "room-abcdef", "team"):
+    path = os.path.join(sys.argv[1], tid + ".jsonl")
+    with open(path, encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f]
+    for row in rows:
+        row["ts"] = "2001-01-01T00:00:00Z"
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+PY
+  # An older final row must not hide a newer earlier turn from apply.
+  python3 - "$project/.oms/threads/mixed-time.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"role": "note", "ts": "2001-01-01T00:00:00Z"}) + "\n")
+PY
+  # Make the fresh thread current; the room remains visible in the dry run.
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id fresh-thread >/dev/null 2>&1
+  listed="$("$ROOT/scripts/thread.sh" --repo "$project" list --stale --json | python3 -c 'import json,sys; print(" ".join(t["id"] for t in json.load(sys.stdin)["threads"]))')"
+  listed="${listed//$'\r'/}"
+  before="$(cat "$project/.oms/threads/stale-one.jsonl" "$project/.oms/threads/stale-two.jsonl")"
+  out="$("$ROOT/scripts/thread.sh" --repo "$project" close --stale)"
+  contains "$out" 'Dry run:' && contains "$out" '--apply' || fail "preview must explain dry run: $out"
+  for id in $listed; do
+    contains "$out" "$id" || fail "preview omitted $id: $out"
+  done
+  if contains "$out" 'close --id'; then
+    fail "preview should not list individual close commands: $out"
+  fi
+  [ "$before" = "$(cat "$project/.oms/threads/stale-one.jsonl" "$project/.oms/threads/stale-two.jsonl")" ] || fail "dry run changed threads"
+  before="$(cat "$project/.oms/threads/team.jsonl")"
+  "$ROOT/scripts/thread.sh" --repo "$project" close --stale --apply --summary "expired" >/dev/null
+  [ "$before" = "$(cat "$project/.oms/threads/team.jsonl")" ] || fail "apply changed a room with a custom id"
+  python3 - "$project/.oms/threads" <<'PY' || fail "stale close selected wrong threads or summary"
+import json, os, sys
+for tid in ("stale-one", "stale-two", "fresh-thread", "room-abcdef", "mixed-time"):
+    with open(os.path.join(sys.argv[1], tid + ".jsonl"), encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f]
+    closed = [row for row in rows if row.get("role") == "closed"]
+    assert len(closed) == (1 if tid.startswith("stale-") else 0), (tid, closed)
+    if closed:
+        assert closed[0]["text"] == "expired", closed
+PY
+  "$ROOT/scripts/thread.sh" --repo "$project" close --stale --apply >/dev/null
+  if "$ROOT/scripts/thread.sh" --repo "$project" close --stale --id fresh-thread --apply >/dev/null 2>&1; then
+    fail "stale close must reject a conflicting id"
+  fi
+  if "$ROOT/scripts/thread.sh" --repo "$project" close --apply >/dev/null 2>&1; then
+    fail "apply requires stale selection"
+  fi
+  for id in a-closed b-refused; do
+    "$ROOT/scripts/thread.sh" --repo "$project" new --id "$id" --topic "$id" >/dev/null
+  done
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id fresh-thread >/dev/null 2>&1
+  python3 - "$project/.oms/threads" <<'PY'
+import json, os, sys
+for tid in ("a-closed", "b-refused"):
+    path = os.path.join(sys.argv[1], tid + ".jsonl")
+    with open(path, encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f]
+    for row in rows:
+        row["ts"] = "2001-01-01T00:00:00Z"
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+        if tid == "b-refused":
+            f.write('{')
+PY
+  if out="$("$ROOT/scripts/thread.sh" --repo "$project" close --stale --apply 2>&1)"; then
+    fail "refused append must make stale close fail: $out"
+  fi
+  contains "$out" 'thread: closed a-closed' || fail "missing completed close: $out"
+  contains "$out" 'b-refused' || fail "missing failed thread id: $out"
+  if contains "$out" 'thread: closed b-refused'; then
+    fail "refused append reported a close: $out"
+  fi
 }
 
 test_thread_stale_triage_stays_advisory() {

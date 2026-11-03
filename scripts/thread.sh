@@ -28,6 +28,7 @@ MAX_TURNS=12
 AS_JSON=0
 ALL=0
 STALE=0
+APPLY=0
 AFTER=""
 WAIT=0
 CONSUMER=""
@@ -48,6 +49,7 @@ Usage: thread.sh new     [--id ID] [--topic TEXT] [--live] [--repo PATH]
        thread.sh stats   [--json]
        thread.sh current
        thread.sh close   [--id ID] [--summary TEXT]
+       thread.sh close   --stale [--apply] [--summary TEXT]
        thread.sh updates [--id ID] [--after CURSOR] [--wait 0..30] [--json]
        thread.sh ack     [--id ID] --after CURSOR --consumer SESSION
 
@@ -66,7 +68,7 @@ list     Open threads, newest first; --all includes closed ones, --stale keeps
 stats    Mechanical counts over every thread, open and closed: follow-up
          questions, multi-provider threads, recorded answer quality.
 current  Print the active thread id, or exit 1 when there is none.
-close    Mark the thread closed with an optional summary turn.
+close    Mark a thread closed; --stale previews, --apply closes stale non-room threads.
 updates  Read new complete turns in order; retain the returned opaque cursor.
          --max-bytes/--turns bound each page; has_more means continue paging.
 ack      Explicitly record consumption, not agreement or permission, in this log.
@@ -98,7 +100,8 @@ Options:
   --wait SECONDS   updates: bounded wait for a change (default 0, maximum 30).
   --consumer NAME  ack: caller's session identifier, not an authenticated identity.
   --room-event JSON append: typed room metadata; validated under the thread lock.
-  --stale         list: only stale open threads, each with its close command.
+  --stale         list or close: select stale open threads.
+  --apply         close --stale: close eligible threads after a locked recheck.
   --json          Machine-readable output (show, list, stats).
   -h, --help      Show help.
 
@@ -110,10 +113,8 @@ conversation.
 An open thread that is not current counts as stale once its last valid turn is
 older than OMS_THREAD_STALE_TTL seconds (default 259200, three days). Turns
 whose timestamp will not parse leave the thread `unknown`, never stale.
-Staleness is advisory: nothing here closes, deletes, or rewrites a thread.
-An open thread is the only record that an exchange happened and there is no
-reopen path, so closing one stays a deliberate call — `--stale` only prints
-the command you would run.
+Staleness is advisory; close --stale previews the list unless --apply is given.
+Apply excludes room logs and checks staleness again under each thread lock.
 EOF
 }
 
@@ -147,6 +148,7 @@ while [ "$#" -gt 0 ]; do
     --turns) [ "$#" -ge 2 ] || fail "--turns requires a value"; MAX_TURNS="$2"; shift 2 ;;
     --all) ALL=1; shift ;;
     --stale) STALE=1; shift ;;
+    --apply) APPLY=1; shift ;;
     --live) LIVE=1; shift ;;
     --after) [ "$#" -ge 2 ] || fail "--after requires a cursor"; AFTER="$2"; shift 2 ;;
     --wait) [ "$#" -ge 2 ] || fail "--wait requires seconds"; WAIT="$2"; shift 2 ;;
@@ -160,7 +162,11 @@ done
 
 ACTION="${ACTION:-list}"
 [ -z "$EVENT_JSON" ] || [ "$ACTION" = append ] || fail "--room-event applies to append"
-[ "$STALE" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--stale applies to list"
+[ "$STALE" -eq 0 ] || [ "$ACTION" = "list" ] || [ "$ACTION" = "close" ] || fail "--stale applies to list or close"
+[ "$APPLY" -eq 0 ] || { [ "$ACTION" = close ] && [ "$STALE" -eq 1 ]; } || fail "--apply requires close --stale"
+if [ "$ACTION" = close ] && [ "$STALE" -eq 1 ]; then
+  [ -z "$THREAD_ID" ] && [ "$ALL" -eq 0 ] && [ "$AS_JSON" -eq 0 ] || fail "close --stale cannot combine with --id, --all or --json"
+fi
 [ "$LIVE" -eq 0 ] || [ "$ACTION" = new ] || fail "--live applies to new"
 case "$ACTION" in updates|ack) ;; *)
   [ -z "$AFTER" ] && [ "$WAIT" = 0 ] && [ -z "$CONSUMER" ] || fail "delivery options apply to updates/ack" ;;
@@ -649,6 +655,13 @@ if only_stale:
     threads = [t for t in threads if t["staleness"] == "stale"]
 if as_json:
     print(json.dumps({"schema": 1, "threads": threads}, ensure_ascii=False))
+elif mode == "close-preview":
+    print("Dry run: %d stale open thread(s); re-run with --apply to close eligible non-room threads." % len(threads))
+    for t in threads:
+        print("%-28s idle=%-5s turns=%-3d %s%s" % (
+            t["id"], human(t["age_seconds"]), t["turns"],
+            ",".join(t["providers"]) or "-",
+            ("  " + t["topic"]) if t["topic"] else ""))
 elif only_stale and not threads:
     print("no stale open threads (none idle longer than %s)" % human(stale_ttl))
 elif only_stale:
@@ -699,8 +712,64 @@ cmd_ack() {
   append_row "$id" note ""
 }
 
+close_stale_locked() {
+  local id="$1" tmp="$2" view
+  view="$(AS_JSON=1 thread_view list)" || return 1
+  if printf '%s' "$view" | python3 -c 'import json,sys; tid=sys.argv[1]; sys.exit(0 if any(t["id"] == tid for t in json.load(sys.stdin)["threads"]) else 1)' "$id" &&
+    python3 - "$(thread_file "$id")" "$STALE_TTL" <<'PY'
+import calendar, json, sys, time
+cutoff = time.time() - int(sys.argv[2])
+with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
+    for line in f:
+        try:
+            row = json.loads(line)
+            if isinstance(row, dict) and "room_event" in row:
+                sys.exit(1)
+            epoch = calendar.timegm(time.strptime(row.get("ts") or "", "%Y-%m-%dT%H:%M:%SZ"))
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            continue
+        if epoch >= cutoff:
+            sys.exit(1)
+PY
+  then
+    append_row_unlocked "$id" closed "$tmp" "$(thread_file "$id")" || return 1
+    echo "thread: closed $id" >&2
+  fi
+}
+
+cmd_close_stale() {
+  local tmp candidates id
+  if [ "$APPLY" -eq 0 ]; then
+    thread_view close-preview
+    return
+  fi
+  tmp="$(agent_memory_mktemp)" || fail "mktemp failed"
+  printf '%s\n' "${SUMMARY:-stale}" > "$tmp"
+  if agent_memory_file_has_sensitive_content "$tmp"; then
+    rm -f "$tmp"
+    fail "summary looks sensitive; rephrase it"
+  fi
+  candidates="$(AS_JSON=1 thread_view list | python3 -c 'import json,re,sys; print("\n".join(t["id"] for t in json.load(sys.stdin)["threads"] if not t["id"].startswith("room-") and re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", t["id"])))')" || { rm -f "$tmp"; return 1; }
+  candidates="${candidates//$'\r'/}"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    oms_with_file_lock "$(thread_file "$id")" close_stale_locked "$id" "$tmp" || {
+      echo "error: failed to close $id; earlier closed threads are listed above" >&2
+      rm -f "$tmp"
+      return 1
+    }
+  done <<EOF
+$candidates
+EOF
+  rm -f "$tmp"
+}
+
 cmd_close() {
   local id tmp
+  if [ "$STALE" -eq 1 ]; then
+    cmd_close_stale
+    return
+  fi
   id="$(require_thread)"
   tmp="$(agent_memory_mktemp)" || fail "mktemp failed"
   printf '%s\n' "${SUMMARY:-closed}" > "$tmp"
