@@ -39,7 +39,9 @@ Physical discovery only resolves an executable. Automatic routing additionally
 requires a bounded `--version`/`--help` usability probe; a hanging or stale shim
 stays visible as broken but never enters a provider pool. `oms models` does not
 execute a CLI and reports `usable: null`; `--refresh` and `model-doctor` perform
-the bounded probe. Documented local model catalogs run only on explicit refresh.
+the bounded probe. Documented local model catalogs refresh on explicit
+`--refresh`, and `oms tick` refreshes installed catalogs older than 7 days at
+most once a day.
 None of these probes logs in, installs, upgrades, changes configuration, or
 starts an inference request.
 

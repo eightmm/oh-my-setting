@@ -755,7 +755,8 @@ by the group or other users. Every ancestor through the filesystem root must be
 owned by the current user or root. An ancestor writable by the group or other
 users must have the sticky bit. Refusals name the offending directory and
 `--home PATH` elsewhere as a fix; the command never changes
-existing permissions automatically. Registration requires verifiable ownership.
+existing permissions automatically. Registration requires verifiable ownership,
+so native Windows Python, which cannot report file owners, refuses it.
 The main home is the parent environment's `CODEX_HOME`, or
 `~/.codex`. The new home links `AGENTS.md`, `config.toml`, `hooks.json`,
 `.hook-trust`, `plugins`, `rules`, and `skills` to the matching main-home entries.

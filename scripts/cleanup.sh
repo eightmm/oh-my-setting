@@ -13,8 +13,12 @@ usage() {
 Usage: cleanup.sh [--dry-run|--apply] [-h|--help]
 
 Clean safe oh-my-setting install leftovers. Default is --dry-run.
-Removes only known oh-my-setting legacy symlinks and backup skill symlinks;
-never removes regular files, third-party plugins, caches, or directories.
+Removes known oh-my-setting legacy symlinks and backup skill symlinks, and the
+dead harness worktrees proven disposable below; never removes other regular
+files, third-party plugins or user caches. A dead cached worktree whose only
+extra content is recognised regenerable trees (venvs, node_modules, tool
+caches) is removed after a no-follow scan binds every link target and refuses
+nested Git data.
 
 Dead harness temp dirs holding work are kept ("kept with work"), except a
 delegate worktree whose run finished (a failed one needs an owner decision or

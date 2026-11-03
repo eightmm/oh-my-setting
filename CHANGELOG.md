@@ -8,6 +8,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms connect-services --codex-account NAME [--home PATH]` registers another
+  entitled Codex account home (default `~/.codex-NAME`, mode 0700) that links
+  the main home's shared config, rules, hooks, plugins and skills, keeps its
+  own login, records each link in a private ownership receipt, and refuses a
+  home not owned by you or writable by others, or an ancestor owned by anyone but
+  you or root, or writable by others without the sticky bit (native Windows Python
+  refuses registration). `--repair` replaces conflicting links,
+  `--remove` unlinks only recorded links, and `oms doctor` reports each
+  account.
+- Panel dispatch runs a Codex child under the selected account home after a
+  launch-time ownership and mode recheck, pins `--continue` to that account,
+  overflows once to the next listed account on a capacity failure, and runs
+  provider fallback with the parent environment.
+- `oms panel --council --lenses LIST` runs one blind zero-round seat per named
+  lens (2-12, names up to 32 characters, checked before any call) across the
+  workload's routes, with distinct seat identities, artifacts and synthesis
+  labels; seat failures count under the provider target.
 - `oms decide` asks the OpenAI Decisions API (`gpt-6-luna`) choice, predicate
   or score questions with a dedicated key (`--set-key` stores it in a 0600
   file, never `OPENAI_API_KEY`), a daily input-cost cap
@@ -34,17 +51,28 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   every further 8 direct edits, file writes or project runs since their last
   dispatch, a PostToolUse hook names the streak and the delegation command;
   the prompt status line shows the count and `oms panel --metrics` reports it.
-  It never blocks; Codex and Antigravity mains are not covered yet.
+  It never blocks. Codex panel mains get the same feedback through a plugin
+  PostToolUse row for shell and `apply_patch`, appended after the existing rows
+  so their hook trust keys stay unchanged; trust the new row once after
+  upgrade. Antigravity mains are not covered yet.
 - `oms panel --results` shows, for a task continued over several rounds,
   which files changed since the previous round with per-file line deltas, and
   names a delta it could not compute or skipped as too large.
 - `oms cleanup` can discard recognised regenerable trees (virtualenvs,
   `node_modules`, tool caches) after an anchored no-follow scan and a
-  metadata-bound proof; a tree with links, nested Git data or special files is
-  kept.
+  metadata-bound proof that binds each link target; a tree with nested Git
+  data (including linked objects, refs or HEAD) or special files is kept.
 
 ### Changed
 
+- The optional Antigravity council seat resolves its configured Gemini family
+  and level to the newest routable catalog generation, or to the one other
+  family at that level when the configured family is gone, so a model refresh
+  no longer skips it.
+- The next-ready hint skips a ready task whose current plan generation already
+  has a completed or accepted panel result, and the finalize hint for an
+  unclaimed read task names `agent-plan cancel` instead of the unreachable
+  `accept-main-research`.
 - agy calls use JSON output, so usage and cache tokens reach the artifact
   footer and a print timeout reports truncated.
 - tick refreshes installed provider model catalogs older than 7 days at most
@@ -385,6 +413,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Worker and review guards no longer abort when another OMS call registers a
+  managed sibling worktree mid-run: its admin entries are accepted only through
+  receipts bound to a digest the parent took before the provider started, and
+  linked, special or malformed receipts are refused.
 - `oms panel --continue` reuses the provider, model and effort of an attempt
   that chose them explicitly (`--to/--model`, `--reasoning-effort`) instead of
   re-selecting by tier; `--to` or `--model` on the continue chooses the route
