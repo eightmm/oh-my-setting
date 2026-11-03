@@ -83,9 +83,9 @@ while IFS= read -r provider; do
     "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" probed_at 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" models_probe 2>/dev/null || true)" \
-    "$(oms_provider_model_listing_kind "$provider")" >> "$rows" <<'PY'
+    "$(oms_provider_model_listing_kind "$provider")" "$(oms_capability_cache_dir)/$provider.models" >> "$rows" <<'PY'
 import json, os, sys, time
-provider, binary, present, usable, model_override, mechanism, values, probed, probe, listing = sys.argv[1:]
+provider, binary, present, usable, model_override, mechanism, values, probed, probe, listing, catalog_path = sys.argv[1:]
 def lines(path, limit=20):
     try:
         with open(path, encoding="utf-8") as f:
@@ -103,6 +103,8 @@ def scales(path):
     return result
 try: age = max(0, int(time.time()) - int(probed))
 except ValueError: age = None
+try: catalog_age = max(0, int(time.time() - os.stat(catalog_path).st_mtime))
+except OSError: catalog_age = None
 # "unsupported" is a property of the CLI, so it is derived here rather than
 # stored: a snapshot taken before the provider grew a listing command would
 # otherwise keep asserting it has none.
@@ -119,7 +121,7 @@ print(json.dumps({"provider": provider, "binary": binary, "present": present == 
  "models": models, "routable": routable, "not_routed": [m for m in models if m not in routable],
  "effort_mechanism": mechanism or None,
  "effort_values": values.split() if values else [], "model_effort_scales": scales(os.environ["OMS_EFFORTS_FILE"]),
- "catalog_probe": catalog_probe, "snapshot_age_seconds": age}, ensure_ascii=False))
+ "catalog_probe": catalog_probe, "snapshot_age_seconds": age, "catalog_age_seconds": catalog_age}, ensure_ascii=False))
 PY
 done <<EOF
 $PROVIDER_NAMES
@@ -151,6 +153,7 @@ for raw in open(sys.argv[1]):
         print("models: unknown — " + lead + HINT)
     print("effort: %s %s" % (row["effort_mechanism"] or "unknown", " ".join(row["effort_values"])))
     print("exact model override: %s" % row["exact_model_override"])
+    print("catalog age: %s" % (str(row["catalog_age_seconds"]) + "s" if row["catalog_age_seconds"] is not None else "unknown"))
     print("snapshot age: %s" % (str(row["snapshot_age_seconds"]) + "s" if row["snapshot_age_seconds"] is not None else "unknown"))
 PY
 fi

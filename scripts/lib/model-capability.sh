@@ -250,12 +250,16 @@ oms_capability_refresh() {
     if [ "$usable" -eq 1 ] && oms_provider_supports_model_listing "$provider" &&
       [ "${OMS_CAPABILITY_SKIP_MODELS:-0}" != 1 ]; then
       models_probe=failed
-      tmp="$(mktemp "${TMPDIR:-/tmp}/oms-cap-models.XXXXXX")" || tmp=""
-      efforts_tmp="$(mktemp "${TMPDIR:-/tmp}/oms-cap-efforts.XXXXXX")" || efforts_tmp=""
+      tmp="$(mktemp "$dir/.$provider.models.XXXXXX")" || tmp=""
+      efforts_tmp="$(mktemp "$dir/.$provider.efforts.XXXXXX")" || efforts_tmp=""
       if [ -n "$tmp" ] && [ -n "$efforts_tmp" ]; then
         if oms_capability_probe_models "$provider" "$tmp" "$efforts_tmp"; then
           models_probe=ok
-          mv "$tmp" "$models_file"
+          touch "$tmp" && mv "$tmp" "$models_file" || {
+            rm -f "$tmp" "$efforts_tmp"
+            [ "$own_help" -eq 0 ] || rm -f "$help_file"
+            return 1
+          }
           if [ -s "$efforts_tmp" ]; then
             mv "$efforts_tmp" "$dir/$provider.efforts"
           else
@@ -264,6 +268,9 @@ oms_capability_refresh() {
         else
           rm -f "$tmp" "$efforts_tmp"
         fi
+      else
+        [ -z "$tmp" ] || rm -f "$tmp"
+        [ -z "$efforts_tmp" ] || rm -f "$efforts_tmp"
       fi
     fi
   else

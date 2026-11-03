@@ -516,7 +516,10 @@ Routing is deliberately small:
 `--reasoning-effort` accepts `auto`, `low`, `medium`, `high`, `xhigh`, `max`,
 or `ultra`, then validates the value against the selected provider/model
 capability snapshot. `oms models` reads the cache; `oms models --refresh` and
-`oms model-doctor` perform explicit probes.
+`oms model-doctor` perform explicit probes. `oms models` reports catalog age
+separately from snapshot age. The hourly tick checks installed provider catalogs
+at most once daily and refreshes listings older than seven days; a failed listing
+keeps the previous catalog and is retried no earlier than the next day.
 Cached catalog reads separate tab-delimited model IDs from display labels and
 discard listing banners, so labels cannot leak into automatic recovery routes.
 

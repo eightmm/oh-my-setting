@@ -40,6 +40,58 @@ out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_CLASS_REQUE
 [ "$out" = 'provider-default|provider-default' ] || fail "legacy class request must not change the route: $out"
 if grep -q 'model tiers' "$TMP/warn.err"; then fail 'removed tier layer must not warn'; fi
 
+# BEGIN catalog-auto-refresh
+catalog="$TMP/catalog-refresh"
+mkdir -p "$catalog/bin" "$catalog/cache" "$catalog/state"
+cat > "$catalog/bin/agy" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 'agy 1' ;;
+  --help) echo '--model --effort (low, high)' ;;
+  models) printf 'probe\n' >> "$CATALOG_CALLS"; [ "${CATALOG_FAIL:-0}" != 1 ] || exit 1; echo gemini-4-argon ;;
+  *) exit 0 ;;
+esac
+STUB
+printf '#!/usr/bin/env bash\nexit 1\n' > "$catalog/bin/codex"
+cp "$catalog/bin/codex" "$catalog/bin/opencode"
+chmod +x "$catalog/bin/agy" "$catalog/bin/codex" "$catalog/bin/opencode"
+printf 'old-model\n' > "$catalog/cache/antigravity.models"
+python3 - "$catalog/cache/antigravity.models" <<'PYAGE'
+import os, sys, time
+old = time.time() - 8 * 86400
+os.utime(sys.argv[1], (old, old))
+PYAGE
+catalog_tick() {
+  PATH="$catalog/bin:$PATH" XDG_CONFIG_HOME="$catalog/config" OMS_PROVIDER_ADAPTER_DIR="$catalog/adapters" XDG_STATE_HOME="$catalog/state" OMS_LOCK_DIR="$catalog/locks" OMS_CAPABILITY_DIR="$catalog/cache" \
+    OMS_TICK_REGISTRY="$catalog/no-registry" CATALOG_CALLS="$catalog/calls" \
+    OMS_CAPABILITY_SETTLE_WAIT=0 bash "$ROOT/scripts/tick.sh" run >/dev/null
+}
+catalog_tick
+[ "$(cat "$catalog/cache/antigravity.models")" = gemini-4-argon ] || fail 'tick did not refresh stale catalog'
+[ "$(wc -l < "$catalog/calls" | tr -d ' ')" = 1 ] || fail 'expected one catalog listing'
+catalog_tick
+[ "$(wc -l < "$catalog/calls" | tr -d ' ')" = 1 ] || fail 'tick repeated daily catalog listing'
+PATH="$catalog/bin:$PATH" OMS_CAPABILITY_DIR="$catalog/cache" bash "$ROOT/scripts/models.sh" --json --providers antigravity | \
+  python3 -c 'import json,sys; a=json.load(sys.stdin)["providers"][0]["catalog_age_seconds"]; assert isinstance(a,int) and 0 <= a < 60' || fail 'catalog age missing'
+# A failed listing retains the prior catalog and the daily claim.
+python3 - "$catalog/cache/antigravity.models" "$catalog/state/oh-my-setting/catalog-refresh.stamp" <<'PYAGE'
+import os, sys, time
+old = time.time() - 8 * 86400
+for path in sys.argv[1:]: os.utime(path, (old, old))
+PYAGE
+export CATALOG_FAIL=1
+catalog_tick
+[ "$(cat "$catalog/cache/antigravity.models")" = gemini-4-argon ] || fail 'failed listing replaced catalog'
+count="$(wc -l < "$catalog/calls" | tr -d ' ')"
+[ "$count" = 3 ] || fail 'failed listing did not use the bounded retry'
+catalog_tick
+[ "$(wc -l < "$catalog/calls" | tr -d ' ')" = "$count" ] || fail 'failed listing retried on the same day'
+unset CATALOG_FAIL
+PATH="$catalog/bin:$PATH" OMS_CAPABILITY_DIR="$catalog/cache" bash "$ROOT/scripts/models.sh" --providers antigravity | grep -q '^catalog age: [0-9][0-9]*s$' || fail 'text catalog age missing'
+PATH="$catalog/bin:$PATH" OMS_CAPABILITY_DIR="$catalog/empty" bash "$ROOT/scripts/models.sh" --json --providers antigravity | \
+  python3 -c 'import json,sys; assert json.load(sys.stdin)["providers"][0]["catalog_age_seconds"] is None' || fail 'missing catalog age must be unknown'
+# END catalog-auto-refresh
+
 # Only the provider's own family at its newest generation is routable on its
 # own: a previous generation, a re-hosted foreign-family model, and an
 # unversioned name beside versioned siblings never enter the default chain.

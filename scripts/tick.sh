@@ -15,6 +15,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/work-journal.sh"
 # shellcheck source=scripts/lib/check-maintenance.sh
 . "$ROOT/scripts/lib/check-maintenance.sh"
+# shellcheck source=scripts/lib/provider-registry.sh
+. "$ROOT/scripts/lib/provider-registry.sh"
+# shellcheck source=scripts/lib/model-capability.sh
+. "$ROOT/scripts/lib/model-capability.sh"
 
 usage() {
   cat <<'EOF'
@@ -28,6 +32,7 @@ run        Sweep the given repos, or every registered one: journal and CI sync,
            attempt reconcile, stale thread/task close, plan and failure
            retirement, artifact-failure resolution, optional gc, and a Codex
            plugin cache refresh when the cache no longer matches the install.
+           At most daily, refresh installed provider catalogs older than 7 days.
            Each completed sweep gets .oms/tick/last.json. A repo under
            verification or another sweep is deferred until a later tick.
 register   Add a repo (default: PWD, git-root anchored) to the registry;
@@ -391,8 +396,41 @@ PY
   echo "swept $root: journal=$journal reconcile=$reconcile gc=$gc threads_closed=${#closed[@]} tasks_closed=$tasks_closed plans_retired=$plans_retired artifacts_resolved=$artifacts_resolved artifacts_superseded=$artifacts_superseded failures_retired=$failures_retired"
 }
 
+# Claim the daily attempt before probing so a crash or failed listing does not
+# cause hourly retries. The lock serializes concurrent ticks on this machine.
+refresh_catalogs() (
+  local stamp provider catalog
+  stamp="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/catalog-refresh.stamp"
+  mkdir -p "${stamp%/*}" || exit 0
+  oms_hold_file_lock "$stamp" 8 || exit 0
+  trap oms_release_held_file_lock EXIT
+  if ! python3 - "$stamp" 86400 <<'PYAGE'
+import os, sys, time
+try: age = time.time() - os.stat(sys.argv[1]).st_mtime
+except OSError: age = float('inf')
+sys.exit(0 if age >= int(sys.argv[2]) else 1)
+PYAGE
+  then exit 0; fi
+  touch "$stamp" || exit 0
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    oms_provider_supports_model_listing "$provider" || continue
+    catalog="$(oms_capability_cache_dir)/$provider.models"
+    if python3 - "$catalog" 604800 <<'PYAGE'
+import os, sys, time
+try: age = time.time() - os.stat(sys.argv[1]).st_mtime
+except OSError: age = float('inf')
+sys.exit(0 if age > int(sys.argv[2]) else 1)
+PYAGE
+    then oms_capability_refresh "$provider" >/dev/null 2>&1 || true; fi
+  done <<EOF
+$(oms_provider_discovered_names)
+EOF
+)
+
 run_tick() {
   local root
+  [ "$DRY_RUN" = 1 ] || refresh_catalogs
   if [ "${#REPOS[@]}" -eq 0 ] && [ -f "$REGISTRY" ]; then
     while IFS= read -r root; do [ -n "$root" ] && REPOS+=("$root"); done < "$REGISTRY"
   fi
