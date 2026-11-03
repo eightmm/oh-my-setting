@@ -286,6 +286,10 @@ Doctor checks installed Git HEAD/ref validity without fetching or rewriting
 refs. Damaged references require targeted recovery with preserved originals;
 link repair is not Git recovery.
 
+`oms status --repo PATH` selects a Git workspace and its active task from any
+working directory; `--json` emits its branch, alignment, task and auto-update
+fields as one object. Without `--repo`, existing workspace selection applies.
+
 `oms status` separates the active OMS workspace revision/changed-entry count
 from the canonical installation's actual revision/changed-entry count. Alignment
 is `in-sync`, `pending-source-changes`, `different-revision`,

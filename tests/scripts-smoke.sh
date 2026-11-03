@@ -17345,6 +17345,30 @@ EOF
   contains "$out" '- loop_attempts: 2' || fail "status.sh missing loop attempts"
   contains "$out" '- verification_level: focused-test' || fail "status.sh missing verification level"
 
+  local repo="$TMP/status-repo" rc=0
+  mkdir -p "$repo/.oms/task"
+  git -C "$repo" init -q
+  cp "$task" "$repo/.oms/task/current.md"
+  out="$(cd "$TMP" && "$ROOT/scripts/status.sh" --repo "$repo" --json)" || fail "status repo json failed"
+  printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["workspace_root"] == sys.argv[1]; assert d["active_task"]["goal"] == "Ship loop hardening"; assert d["branch"] == sys.argv[2]; assert "alignment" in d and "auto_update" in d' "$(cd "$repo" && pwd -P)" "$(git -C "$repo" symbolic-ref --short HEAD)" || fail "status json fields incorrect"
+  out="$(cd "$TMP" && "$ROOT/scripts/status.sh" --repo "$repo")" || fail "status repo failed"
+  contains "$out" "- workspace_root: $(cd "$repo" && pwd -P)" || fail "status repo root incorrect"
+  contains "$out" '- goal: Ship loop hardening' || fail "status repo task incorrect"
+  "$ROOT/scripts/status.sh" --repo "$TMP" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "status should reject non-git repo"
+  rc=0
+  "$ROOT/scripts/status.sh" --repo >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "status should reject missing repo"
+  rc=0
+  "$ROOT/scripts/status.sh" --repo "" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "status should reject empty repo"
+  rc=0
+  "$ROOT/scripts/status.sh" --invalid >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "status should reject malformed option"
+  rm "$repo/.oms/task/current.md"
+  out="$("$ROOT/scripts/status.sh" --repo "$repo" --json)" || fail "status empty task failed"
+  printf '%s' "$out" | python3 -c 'import json,sys; assert json.load(sys.stdin)["active_task"]["status"] == "none"' || fail "status empty task incorrect"
+
   cat > "$task" <<'EOF'
 # Active Agent Task
 

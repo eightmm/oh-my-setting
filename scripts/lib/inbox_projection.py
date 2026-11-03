@@ -31,6 +31,7 @@ REPO_ANCHOR_MODES = {
     ("oms", "runtime"): "repo-option",
     ("oms", "state"): "repo-option",
     ("oms", "state-verify"): "repo-option",
+    ("oms", "status"): "repo-option",
     ("oms", "thread"): "repo-option",
     ("git",): "git-c",
 }

@@ -5,10 +5,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERBOSE=0
+JSON=0
+REPO=""
 
 usage() {
   cat <<'EOF'
-Usage: status.sh [--verbose]
+Usage: status.sh [--verbose] [--repo PATH] [--json]
 
 Show install ownership, links, tool paths, snapshots, task, plugin, and update
 state. --verbose also runs tool version and Codex plugin probes.
@@ -18,11 +20,21 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --verbose) VERBOSE=1 ;;
+    --json) JSON=1 ;;
+    --repo)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: --repo requires a path" >&2; exit 2; }
+      REPO="$2"
+      shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+if [ -n "$REPO" ]; then
+  REPO="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" || { echo "error: --repo must be a git worktree" >&2; exit 2; }
+  REPO="${REPO//$'\r'/}"
+  REPO="$(cd "$REPO" && pwd -P)" || exit 2
+fi
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 
@@ -199,7 +211,7 @@ task_section_value() {
 }
 
 active_task_status() {
-  local task_file="${OH_MY_SETTING_TASK_FILE:-$ROOT/.oms/task/current.md}"
+  local task_file="${OH_MY_SETTING_TASK_FILE:-${REPO:-$ROOT}/.oms/task/current.md}"
   local value
 
   if [ ! -s "$task_file" ]; then
@@ -308,9 +320,9 @@ load_user_tool_paths
 
 checkout_alignment() {
   local workspace source_head installed_head source_changes installed_changes alignment
-  workspace="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  workspace="${REPO:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)}"
   workspace="${workspace//$'\r'/}"
-  if [ ! -f "$workspace/scripts/oms" ] || [ ! -f "$workspace/rules/global-AGENTS.md" ]; then
+  if [ -z "$REPO" ] && { [ ! -f "$workspace/scripts/oms" ] || [ ! -f "$workspace/rules/global-AGENTS.md" ]; }; then
     workspace="$ROOT"
   fi
   workspace="$(cd "$workspace" && pwd -P)"
@@ -334,14 +346,40 @@ checkout_alignment() {
   printf -- '- alignment: %s (checkout state; not plugin-cache or verification proof)\n' "$alignment"
 }
 
+if [ "$JSON" = 1 ]; then
+  alignment_text="$(checkout_alignment)"
+  task_text="$(active_task_status)"
+  update_text="$(auto_update_status; auto_update_trigger_status)"
+  workspace="$(printf '%s\n' "$alignment_text" | sed -n 's/^- workspace_root: //p')"
+  branch="$(git -C "$workspace" symbolic-ref --short HEAD 2>/dev/null || git -C "$workspace" rev-parse --short HEAD 2>/dev/null || printf unknown)"
+  branch="${branch//$'\r'/}"
+  python3 - "$branch" "$alignment_text" "$task_text" "$update_text" <<'PYJSON'
+import json, sys
+
+def fields(text):
+    result = {}
+    for line in text.splitlines():
+        if line.startswith('- ') and ': ' in line:
+            key, value = line[2:].split(': ', 1)
+            result[key] = value
+    return result
+
+alignment = fields(sys.argv[2])
+alignment['alignment'] = alignment['alignment'].split(' (checkout state;', 1)[0]
+print(json.dumps(dict(alignment, branch=sys.argv[1], active_task=fields(sys.argv[3]),
+                      auto_update=fields(sys.argv[4]))))
+PYJSON
+  exit $?
+fi
+
 printf '# oh-my-setting status\n\n'
 printf -- '- root: %s\n' "$ROOT"
 if [ -f "$ROOT/VERSION" ]; then
   printf -- '- version: %s\n' "$(head -n 1 "$ROOT/VERSION")"
 fi
-if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  printf -- '- branch: %s\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
-  printf -- '- commit: %s\n' "$(git -C "$ROOT" rev-parse --short HEAD)"
+if git -C "${REPO:-$ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf -- '- branch: %s\n' "$(git -C "${REPO:-$ROOT}" rev-parse --abbrev-ref HEAD)"
+  printf -- '- commit: %s\n' "$(git -C "${REPO:-$ROOT}" rev-parse --short HEAD)"
 fi
 
 printf '\n## Install Ownership\n\n'
