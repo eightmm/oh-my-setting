@@ -1025,6 +1025,8 @@ try:
                 if not dry:
                     try:
                         path.unlink()
+                    except FileNotFoundError:
+                        continue  # A concurrent transcript prune already removed it.
                     except OSError as error:
                         group_failed = failed = True
                         print("warning: gc: dispatch log unlink failed: %s" % error, file=sys.stderr)
