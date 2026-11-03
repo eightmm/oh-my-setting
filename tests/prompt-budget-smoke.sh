@@ -165,6 +165,48 @@ test_debate_and_synthesis_use_quote_budget() {
   ma_write_synthesis "$synth_big"
   assert_contains "$synth_big" 'Operator question first'
   assert_contains "$synth_big" '[TRUNCATED: operator prompt omitted '
+
+  unset OMS_PROMPT_QUOTE_BYTES
+  artifacts=() last_arts=() provider_names=() seat_exit=() seat_quality=() alive=()
+  local i file
+  for i in 1 2 3 4 5; do
+    file="$TMP/long-seat-$i"
+    { printf '# a\n\n## Output\n\n'; python3 -c "print('한글 evidence ' * 4000)"; printf '\n## Exit\n\n0\n'; } > "$file"
+    artifacts+=("$file") last_arts+=("$file") provider_names+=("seat-$i")
+  done
+  ok=5 total=5
+  ma_write_synthesis "$synth_big"
+  [ "$(LC_ALL=C wc -c < "$synth_big" | tr -d ' ')" -le 65536 ] || fail 'five-seat synthesis exceeds panel limit'
+  for i in 1 2 3 4 5; do
+    assert_contains "$synth_big" "## seat-$i"
+    assert_contains "$synth_big" "long-seat-$i"
+  done
+  for i in $(seq 6 20); do
+    artifacts+=("$file") last_arts+=("$file") provider_names+=("seat-$i")
+  done
+  ok=20 total=20
+  ma_write_synthesis "$synth_big" || fail 'large council should succeed'
+  [ "$(LC_ALL=C wc -c < "$synth_big" | tr -d ' ')" -le 65536 ] || fail 'large council exceeds limit'
+  for i in $(seq 1 20); do assert_contains "$synth_big" "## seat-$i"; done
+  assert_contains "$synth_big" 'answer omitted by the synthesis byte budget; full answer:'
+  if grep -F 'full answer:' "$synth_big" | grep -Fq "$TMP/"; then
+    fail 'outside artifact paths must not be disclosed'
+  fi
+  OMS_PROMPT_QUOTE_BYTES=1024 ma_write_synthesis "$synth_big"
+  if grep -Fq 'answer omitted by the synthesis byte budget' "$synth_big"; then
+    fail 'small quote budget should include all seats'
+  fi
+  artifacts=("$file") last_arts=("$file") provider_names=(seat-one)
+  prompt_file="$small_prompt"
+  OMS_PROMPT_QUOTE_BYTES=32768 ma_write_synthesis "$synth_big"
+  assert_contains "$synth_big" 'OMS_PROMPT_QUOTE_BYTES=32768'
+  cp "$synth_big" "$TMP/before-mktemp-failure"
+  if (agent_memory_mktemp() { return 1; }; ma_write_synthesis "$synth_big") 2> "$TMP/synth-error"; then
+    fail 'temporary file failure should be reported'
+  fi
+  assert_contains "$TMP/synth-error" 'ma_write_synthesis:'
+  assert_contains "$TMP/synth-error" 'previous synthesis left unchanged'
+  cmp -s "$synth_big" "$TMP/before-mktemp-failure" || fail 'temporary failure changed synthesis'
 }
 
 test_synthesis_spotlights_quoted_answers() {

@@ -450,6 +450,30 @@ assert debate_tree.count("COUNCIL") == 1 and "Debate: Pick next work" in debate_
 assert "1 seat(s) answering" in debate_tree and "ADVISORS" not in debate_tree, debate_tree
 # One bottom box with tabs (Detail, Plan, Debate, Messages) replaces the d and m views and the messages card.
 import panel_debate
+# BEGIN debate_synthesis_prefix
+import tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as synthesis_dir:
+    synthesis_path = Path(synthesis_dir) / "synthesis.md"
+    synthesis_path.write_bytes(b"start\n" + b"x" * panel_debate.MAX_SYNTHESIS)
+    synthesis_report = lambda *_: {"rows": [{"calls": [{"kind": "ask-synthesis", "artifact": "synthesis.md"}]}]}
+    synthesis_text = panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"]
+    assert synthesis_text.startswith("start\n") and "truncated" in synthesis_text.lower() and "synthesis.md" in synthesis_text
+    synthesis_path.write_bytes(b"x" * (panel_debate.MAX_SYNTHESIS - 1) + "한".encode() + b"end")
+    synthesis_text = panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"]
+    assert "�" not in synthesis_text and "truncated" in synthesis_text.lower()
+    synthesis_path.write_bytes(b"\xff" + b"x" * panel_debate.MAX_SYNTHESIS)
+    assert panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"].startswith("�")
+    synthesis_path.write_bytes(b"x" * (1024 * 1024 + 1))
+    assert panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"] == ""
+    synthesis_path.write_bytes(b"x" * panel_debate.MAX_SYNTHESIS)
+    assert panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"] == "x" * panel_debate.MAX_SYNTHESIS
+    synthesis_path.write_bytes(b"")
+    assert panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"] == ""
+    synthesis_path.unlink()
+    synthesis_path.symlink_to("missing")
+    assert panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"] == ""
+# END debate_synthesis_prefix
 import panel_messages
 import panel_chats
 import room_view

@@ -3,6 +3,7 @@
 Debate text is untrusted peer data: every line passes through clean()/wrapped(), never raw.
 """
 
+import codecs
 import re
 
 from dashboard_projection import clean, fit, listing, mapping
@@ -46,7 +47,15 @@ def read(repo, target, results_for):
     if synthesis:
         from panel_results import _read
         try:
-            text = _read(repo, synthesis["artifact"], MAX_SYNTHESIS).decode("utf-8", "replace")
+            try:
+                data = _read(repo, synthesis["artifact"], MAX_SYNTHESIS)
+                text = data.decode("utf-8", "replace")
+            except ValueError:
+                data = _read(repo, synthesis["artifact"], 1024 * 1024)
+                decoder = codecs.getincrementaldecoder("utf-8")("replace")
+                text = decoder.decode(data[:MAX_SYNTHESIS], final=False)
+                if len(data) > MAX_SYNTHESIS:
+                    text += "\n[Synthesis truncated; full artifact: %s]" % clean(synthesis["artifact"], 200)
         except (OSError, ValueError):
             text = ""
         report["synthesis"] = {"path": clean(synthesis["artifact"], 200), "text": text}

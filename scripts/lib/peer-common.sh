@@ -5870,7 +5870,42 @@ ma_run_debate_rounds() {
 
 ma_write_synthesis() {
   local synth_file="$1"
-  local i
+  local i quote_count=0 quote_budget prompt_budget prompt_size available rendered quote floor quoted=0 quote_limit pointer
+  prompt_budget="$(ma_prompt_quote_bytes)"
+  for i in "${!artifacts[@]}"; do
+    if [ "${seat_exit[i]:-0}" = 0 ] && [ -z "${seat_quality[i]:-}" ]; then
+      quote_count=$((quote_count + 1))
+    fi
+  done
+  # Reserve prompt, metadata, fences and truncation markers before sharing
+  # the remaining space. Failed seats still consume metadata overhead.
+  quote_budget="$prompt_budget"
+  floor=2048
+  [ "$quote_budget" -ge "$floor" ] || floor="$quote_budget"
+  available=$((65536 - 4096 - ${#artifacts[@]} * 512))
+  # The synthesis fit wins over an operator budget only when the reader's
+  # limit would otherwise be exceeded; preserve room for one quoted seat.
+  if [ "$quote_count" -gt 0 ] && [ "$available" -gt "$floor" ]; then
+    [ "$prompt_budget" -le $((available - floor)) ] || prompt_budget=$((available - floor))
+  elif [ "$prompt_budget" -gt "$available" ]; then
+    prompt_budget="$available"
+  fi
+  [ "$prompt_budget" -gt 0 ] || prompt_budget=1
+  prompt_size="$(LC_ALL=C wc -c < "$prompt_file" | tr -d ' ')"
+  [ "$prompt_size" -le "$prompt_budget" ] || prompt_size="$prompt_budget"
+  available=$((available - prompt_size))
+  [ "$available" -ge 0 ] || available=0
+  quote_limit="$quote_count"
+  if [ "$quote_count" -gt 0 ]; then
+    if [ $((available / quote_count)) -lt "$floor" ]; then
+      quote_limit=$((available / floor))
+      quote_budget="$floor"
+    elif [ "$quote_budget" -gt $((available / quote_count)) ]; then
+      quote_budget=$((available / quote_count))
+    fi
+  fi
+  rendered="$(agent_memory_mktemp)" || { echo 'ma_write_synthesis: cannot create temporary file; previous synthesis left unchanged' >&2; return 1; }
+  quote="$(agent_memory_mktemp)" || { rm -f "$rendered"; echo 'ma_write_synthesis: cannot create temporary quote; previous synthesis left unchanged' >&2; return 1; }
   {
     printf '# Peer %s synthesis\n\n' "$MA_KIND"
     printf 'Verification status: provider-reported, not owner-verified. Agreement is not proof; retain refutations and unresolved claims until the owner checks the evidence.\n'
@@ -5896,7 +5931,7 @@ ma_write_synthesis() {
     # and the diff below it already rode every seat's round-1 call — embedding
     # it whole here billed the same 64KB twice per review and pushed a 5-seat
     # synthesis prompt toward transport limits.
-    ma_emit_bounded_prompt_file "$prompt_file" "$(ma_prompt_quote_bytes)" \
+    ma_emit_bounded_prompt_file "$prompt_file" "$prompt_budget" \
       "operator prompt" "OMS_PROMPT_QUOTE_BYTES" head
     printf '\n```\n\n'
     for i in "${!artifacts[@]}"; do
@@ -5923,17 +5958,35 @@ ma_write_synthesis() {
           "$(printf '%s\n' "${seat_reason[i]:-no usable output}" | ma_sanitize_quoted_output)"
         continue
       fi
+      pointer="$(ma_repo_rel "${last_arts[i]}")"
+      case "$pointer" in
+        /*|../*|*/../*) pointer="$(basename "$pointer")" ;;
+        [A-Za-z]:[\\/]*) pointer="${pointer##*\\}"; pointer="${pointer##*/}" ;;
+      esac
       if [ "${alive[i]:-1}" != 1 ]; then
         printf '_last successful answer; provider dropped during debate (see %s)_\n\n' \
           "$(basename "${last_arts[i]}")"
       elif [ "${last_arts[i]}" != "${artifacts[i]}" ]; then
         printf '_final answer after debate_\n\n'
       fi
-      extract_output "${last_arts[i]}" | ma_sanitize_quoted_output |
-        ma_untrusted_block "${provider_names[i]}" "peer answer"
+      if [ "$quoted" -ge "$quote_limit" ]; then
+        printf 'seat %s: answer omitted by the synthesis byte budget; full answer: %s\n\n' "${provider_names[i]}" "$pointer"
+        continue
+      fi
+      quoted=$((quoted + 1))
+      extract_output "${last_arts[i]}" | OMS_PROMPT_QUOTE_BYTES="$quote_budget" ma_sanitize_quoted_output > "$quote"
+      if grep -Fq '[TRUNCATED: provider output omitted ' "$quote"; then
+        printf '[Full answer: %s]\n' "$pointer"
+      fi
+      ma_untrusted_block "${provider_names[i]}" "peer answer" < "$quote"
       printf '\n'
     done
-  } > "$synth_file"
+  } > "$rendered"
+  rm -f "$quote"
+  cat "$rendered" > "$synth_file"
+  local status=$?
+  rm -f "$rendered"
+  return "$status"
 }
 
 ma_print_run_summary() {
