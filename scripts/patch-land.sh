@@ -133,8 +133,8 @@ Sequence: main tree must be clean -> patch-admit returns ADMIT -> git apply
 --binary -> land row appended to .oms/artifacts/index.jsonl. Exit is nonzero
 (and nothing is applied) if the tree is dirty or admission fails. A rejection
 is recorded in the shared fail-ledger (fingerprint = patch content hash) so a
-later agent is warned before re-landing the same patch; a subsequent
-successful land resolves it.
+later agent is warned before re-landing the same patch. When available, failed
+gates and the report are printed and recorded; a successful land resolves it.
 patch-land never commits: commit the applied tree yourself, then publish with oms land.
 EOF
 }
@@ -1302,7 +1302,9 @@ if ! oms_hold_file_lock "$LANDINGS"; then
   echo "error: another landing or recovery is in progress in $REPO; retry when it finishes" >&2
   exit 75
 fi
+ADMISSION_STDERR=""
 patch_land_cleanup() {
+  [ -z "$ADMISSION_STDERR" ] || rm -f "$ADMISSION_STDERR" || true
   if [ -n "$CAPTURE_PATCH" ] && [ "$CAPTURE_PERSIST" = 0 ]; then
     python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" before-admission ||
       echo "warning: unproven capture remains reserved" >&2
@@ -1489,8 +1491,16 @@ admission_passed=0
 if [ "$reuse_admission" = 1 ]; then
   echo "patch-land: reusing unchanged native admission" >&2
   admission_passed=1
-elif "${admit_cmd[@]}" >/dev/null; then
-  admission_passed=1
+else
+  ADMISSION_STDERR="$(mktemp "${TMPDIR:-/tmp}/oms-land-admit.XXXXXX")" || ADMISSION_STDERR=""
+  if [ -n "$ADMISSION_STDERR" ]; then
+    if "${admit_cmd[@]}" >/dev/null 2>"$ADMISSION_STDERR"; then
+      admission_passed=1
+    fi
+    cat "$ADMISSION_STDERR" >&2 || true
+  elif "${admit_cmd[@]}" >/dev/null; then
+    admission_passed=1
+  fi
 fi
 if [ "$admission_passed" = 0 ]; then
   # A verifier can change its private input before the stricter producer
@@ -1510,6 +1520,37 @@ capture["admission_proof"](sys.argv[2], item, value, 1)
     echo "patch-land: admission did not run (usage error); not applied" >&2
     exit 2
   fi
+  # The report is diagnostic only: missing or malformed evidence must never
+  # alter the authenticated rejection or prevent its ledger record.
+  admission_details=""
+  if [ -n "$ADMISSION_STDERR" ]; then
+    admission_details="$(python3 - "$ADMISSION_STDERR" <<'PYDETAILS' 2>/dev/null || true
+import pathlib, re, sys
+try:
+    output = pathlib.Path(sys.argv[1]).read_text()
+    matches = re.findall(r"^patch-admit: REJECT \((.*)\)$", output, re.M)
+    if len(matches) != 1:
+        raise ValueError("ambiguous report")
+    report = matches[0]
+    content = pathlib.Path(report).read_text()
+    ladder = content.split("## Ladder\n", 1)[1].split("\n## ", 1)[0]
+    gates = re.findall(r"^- ([A-Za-z0-9_-]+): FAIL(?:\s|$)", ladder, re.M)
+    if not gates or "\n" in report or "\r" in report:
+        raise ValueError("missing gates")
+    print(report)
+    print(", ".join(gates))
+except (OSError, UnicodeError, ValueError, IndexError):
+    pass
+PYDETAILS
+)"
+  fi
+  ledger_next=()
+  if [ -n "$admission_details" ]; then
+    admission_report="${admission_details%%$'\n'*}"
+    admission_gates="${admission_details#*$'\n'}"
+    echo "patch-land: failed gate(s): $admission_gates; report: $admission_report" >&2
+    ledger_next=(--next "read $admission_report (failed: $admission_gates)")
+  fi
   # The outer landings lock is still held here. Acquire only the remaining
   # existing reader fences; no public skip-lock or force-cleanup capability.
   python3 -c 'import runpy,sys; runpy.run_path(sys.argv[1])["cleanup_rejected"](sys.argv[2],sys.argv[3])' \
@@ -1520,7 +1561,7 @@ capture["admission_proof"](sys.argv[2], item, value, 1)
   # admit cycle for a patch already known to fail.
   (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" record \
     --kind patch-land --cmd "$(land_fingerprint_cmd)" --exit 1 \
-    --summary "patch-land REJECT: $(basename "$SOURCE_PATCH")${PLAN_TASK:+ (plan task $PLAN_TASK)}") >&2 ||
+    --summary "patch-land REJECT: $(basename "$SOURCE_PATCH")${PLAN_TASK:+ (plan task $PLAN_TASK)}" "${ledger_next[@]}") >&2 ||
     echo "warning: patch-land: could not record rejection in fail-ledger" >&2
   exit 1
 fi

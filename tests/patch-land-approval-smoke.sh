@@ -65,6 +65,17 @@ if "$ROOT/scripts/patch-land.sh" --repo "$usage_repo" --patch "$TMP/usage.patch"
 fi
 grep -Fq 'patch-land: REJECTED by admission gate; not applied' "$TMP/reject.out" ||
   fail "authenticated admission rejection was not reported"
+python3 - "$TMP/reject.out" "$usage_repo" "$ROOT/scripts/fail-ledger.sh" "$TMP/usage.patch" <<'PYTEST' || fail "rejection did not identify the failed gate and report in the ledger"
+import hashlib, json, pathlib, re, subprocess, sys
+output = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r"^patch-land: failed gate\(s\): ([^;]+); report: (.+)$", output, re.M)
+assert match and "verify" in match.group(1).split(", ")
+report = pathlib.Path(match.group(2))
+assert report.is_file() and "- verify: FAIL" in report.read_text()
+rows = json.loads(subprocess.check_output([sys.argv[3], "--repo", sys.argv[2], "list", "--json"]))["failures"]
+command = "patch-land " + hashlib.sha256(pathlib.Path(sys.argv[4]).read_bytes()).hexdigest()
+assert any(row.get("cmd") == command and report.name in row.get("next", "") and row["next"].endswith(" (failed: %s)" % match.group(1)) for row in rows)
+PYTEST
 
 LAND="$ROOT/scripts/patch-land.sh"
 APPROVAL="$ROOT/scripts/approval-inbox.sh"
