@@ -13,8 +13,10 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-tick.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 TICK="$ROOT/scripts/tick.sh"
 PLAN="$ROOT/scripts/agent-plan.sh"
-export XDG_CONFIG_HOME="$TMP/xdg" XDG_RUNTIME_DIR="$TMP/rt" OMS_INSTALL_RECEIPT="$TMP/no-receipt.json" \
+export XDG_CONFIG_HOME="$TMP/xdg" XDG_RUNTIME_DIR="$TMP/rt" XDG_STATE_HOME="$TMP/state" OMS_CAPABILITY_DIR="$TMP/capabilities" OMS_INSTALL_RECEIPT="$TMP/no-receipt.json" \
   OMS_WORK_JOURNAL_CONFIG="$TMP/no-journal.json" OMS_TICK_THREAD_IDLE_DAYS=7 OMS_HARNESS_CHILD=0
+# A fresh refresh stamp keeps tick from listing real provider catalogs.
+mkdir -p "$TMP/state/oh-my-setting" && touch "$TMP/state/oh-my-setting/catalog-refresh.stamp"
 mkdir -p "$XDG_RUNTIME_DIR" "$TMP/bin"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/ntn"; chmod +x "$TMP/bin/ntn"
 cat > "$TMP/bin/systemctl" <<EOF
