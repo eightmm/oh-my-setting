@@ -12153,6 +12153,65 @@ test_agent_plan_lint_verify_matches_admission_floor() {
     --verify 'bash -c "bash tests/run.sh; echo done"' --allowed 'src/app.py' \
     > "$project/script-out" 2>&1 ||
     fail "an executing script with separators should lint clean: $(cat "$project/script-out")"
+  # Selector typos: the runner strips a case name at " (" or ".", so the
+  # parenthetical spelling never resolves at admission. Static, never runs a suite.
+  local sel_op='bash tests/operator-tools-smoke.sh --section dispatch-results --case'
+  mkdir -p "$project/tests/operator"
+  cp "$ROOT/tests/operator/runner.py" "$ROOT/tests/operator/dispatch_results.py" "$project/tests/operator/"
+  cp "$ROOT/tests/scripts-smoke.sh" "$project/tests/scripts-smoke.sh"
+  # Planning only warns (the task may create the selector it names). Run from
+  # outside the repo so --repo (OMS_REPO), not the cwd, selects the tree.
+  sel_add() {
+    (cd "$TMP" && "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id "$1" \
+      --title 'chore: sel' --allowed 'src/app.py' --verify "$2") \
+      > "$project/$1-out" 2> "$project/$1-err" ||
+      fail "agent-plan add $1 must accept the verify: $(cat "$project/$1-err")"
+    grep -q "\"$1\"" "$project/.oms/plan/tasks.json" || fail "add $1 must record the task"
+  }
+  sel_add sel1 "$sel_op 'no such case'"
+  assert_file_contains "$project/sel1-err" "warning: unknown verify selector: --section dispatch-results --case no such case; valid:"
+  assert_file_contains "$project/sel1-err" "reviewed-result acceptance composition"
+  assert_file_contains "$project/sel1-err" "(fine if this task creates it)"
+  sel_add sel2 "$sel_op 'reviewed-result acceptance composition (uses only disposable Git fixtures).'"
+  assert_file_contains "$project/sel2-err" "warning: unknown verify selector"
+  sel_add sel3 "$sel_op 'reviewed-result acceptance composition'"
+  [ ! -s "$project/sel3-err" ] || fail "a valid selector must not warn: $(cat "$project/sel3-err")"
+  sel_add sel4 'bash tests/scripts-smoke.sh --only test_no_such_function'
+  assert_file_contains "$project/sel4-err" "warning: unknown verify selector: --only test_no_such_function"
+  sel_add sel5 'OMS_SMOKE_SUITE=other bash tests/scripts-smoke.sh --only test_no_such_function'
+  [ ! -s "$project/sel5-err" ] || fail "another suite's --only must be skipped: $(cat "$project/sel5-err")"
+  # Drift guard: the static parse must agree with the runner's own markers.
+  python3 -B - "$ROOT" <<'PY' || fail "static operator case names drifted from runner.case_markers"
+import importlib.util, os, sys, types
+root = sys.argv[1]
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+# agent_plan_core runs plan code at import, so pull just the selector functions.
+import ast, re, shlex
+floor = load("floor", os.path.join(root, "scripts/lib/verify-floor-lint.py"))
+core_path = os.path.join(root, "scripts/lib/agent_plan_core.py")
+core_tree = ast.parse(open(core_path, encoding="utf-8").read())
+wanted = {"_verify_commands", "_option_values", "operator_sections",
+          "operator_section_cases", "unknown_verify_selectors"}
+lint = types.SimpleNamespace()
+ns = {"ast": ast, "os": os, "re": re, "shlex": shlex, "_floor_lint": vars(floor)}
+for node in core_tree.body:
+    if isinstance(node, ast.FunctionDef) and node.name in wanted:
+        exec(compile(ast.Module([node], []), core_path, "exec"), ns)
+for name in wanted:
+    setattr(lint, name, ns[name])
+runner = load("runner", os.path.join(root, "tests/operator/runner.py"))
+sections = lint.operator_sections(root)
+assert [n for n, _ in sections] == [n for n, _, _ in runner.SECTIONS], "sections"
+for name, _ in sections:
+    static = lint.operator_section_cases(root, name, sections)
+    assert static == list(runner.case_markers(runner.body(name)[0])), name
+assert "reviewed-result acceptance composition" in lint.operator_section_cases(
+    root, "dispatch-results", sections)
+PY
 }
 
 # The contract's implementation-shaping sections used to stop at plan-from-spec:
