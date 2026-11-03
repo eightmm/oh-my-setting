@@ -2837,6 +2837,28 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1, workloa
     seats = [item for item in seats if item["provider"] in PROVIDERS]
     if len({item["provider"] for item in seats}) < 2:
         raise ValueError("council tier must include two independent provider families")
+    from terminal_panel import provider_catalog
+    for extra in routes.get("council", {}).get("extra", []):
+        provider, model = extra["provider"], extra["model"]
+        if any(item["provider"] == provider for item in seats):
+            continue
+        try:
+            rows = provider_catalog(provider)
+            row = next((item for item in rows if item["provider"] == provider), None)
+        except (ValueError, subprocess.TimeoutExpired, OSError):
+            row = None
+        if row is None:
+            reason = "catalog lookup failed"
+        elif not row.get("installed"):
+            reason = "not installed"
+        elif model not in row.get("catalog_models", row.get("models", [])):
+            reason = "model %s absent from the catalog" % model
+        elif (len(seats) + 1) * (rounds + 1) > 12:
+            reason = "%s seats x %s rounds exceeds the 12-call budget" % (len(seats) + 1, rounds + 1)
+        else:
+            seats.append(extra)
+            continue
+        print("council: %s seat skipped: %s" % (provider, reason), file=sys.stderr)
     targets = ",".join(item["provider"] + ":model=" + item["model"] for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),
             "--providers", targets, "--debate", str(rounds), "--deliberation",

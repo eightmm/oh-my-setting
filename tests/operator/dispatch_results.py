@@ -1754,6 +1754,77 @@ for title in ("".join(("api", "_key", "=", "fixture-value")), "/private/absolute
         pass
 assert panel.safe_label("설명 \033[31m source") == "설명 ?[31m source"
 
+# BEGIN council extra seats
+extra_route = {"provider": "antigravity", "model": "gemini-3.1-pro-high", "effort": "high"}
+extra_policy = deepcopy(panel.policy())
+extra_policy["council"] = {"extra": [extra_route]}
+for installed, models, rounds, workload, included, note in (
+        (True, [extra_route["model"]], 1, "deep", True, ""),
+        (False, [], 1, "deep", False, "not installed"),
+        (True, [], 1, "deep", False, "absent from the catalog"),
+        (True, [extra_route["model"]], 2, "deep", False, "5 seats x 3 rounds exceeds the 12-call budget"),
+        (True, [extra_route["model"]], 2, "routine", True, "")):
+    row = {"provider": "antigravity", "installed": installed, "models": models}
+    output = io.StringIO()
+    with patch.object(panel, "policy", return_value=extra_policy), \
+            patch.object(panel, "provider_catalog", return_value=[row]), redirect_stderr(output):
+        argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
+    assert ("antigravity:model=gemini-3.1-pro-high" in argv[argv.index("--providers") + 1]) == included
+    assert note in output.getvalue(), output.getvalue()
+import panel_routing
+for failure in (ValueError("unavailable"), subprocess.TimeoutExpired("catalog", 1), OSError("unavailable")):
+    output = io.StringIO()
+    with patch.object(panel, "policy", return_value=extra_policy), \
+            patch.object(panel, "provider_catalog", side_effect=failure), redirect_stderr(output):
+        argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
+    assert "antigravity:" not in argv[argv.index("--providers") + 1]
+    assert output.getvalue() == "council: antigravity seat skipped: catalog lookup failed\n"
+for rows in ([], [{"provider": "other", "installed": False}]):
+    output = io.StringIO()
+    with patch.object(panel, "policy", return_value=extra_policy), \
+            patch.object(panel, "provider_catalog", return_value=rows), redirect_stderr(output):
+        argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
+    assert "antigravity:" not in argv[argv.index("--providers") + 1]
+    assert "not installed" not in output.getvalue()
+candidate = deepcopy(extra_policy)
+candidate["tiers"]["deep"].append(extra_route)
+with patch.object(panel_routing.Path, "read_text", return_value=json.dumps(candidate)):
+    try:
+        panel_routing.policy()
+    except ValueError as error:
+        assert "invalid panel tier" in str(error)
+    else:
+        raise AssertionError("antigravity tier accepted")
+for invalid_round in (0, 3, "malformed"):
+    try:
+        panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=invalid_round)
+    except (ValueError, TypeError):
+        pass
+    else:
+        raise AssertionError("invalid council rounds accepted")
+for council_value in (None, {}, {"extra": None}, {"extra": [extra_route, extra_route]},
+                      {"extra": [dict(extra_route, model="")]}, {"extra": [dict(extra_route, effort="bad")]}):
+    candidate = deepcopy(extra_policy)
+    candidate["council"] = council_value
+    with patch.object(panel_routing.Path, "read_text", return_value=json.dumps(candidate)):
+        try:
+            panel_routing.policy()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid extra routes accepted")
+for council_value in (None, {"extra": []}, {"extra": [extra_route]}):
+    candidate = deepcopy(extra_policy)
+    if council_value is None:
+        del candidate["council"]
+    else:
+        candidate["council"] = council_value
+    with patch.object(panel_routing.Path, "read_text", return_value=json.dumps(candidate)):
+        assert panel_routing.policy()["council"]["extra"] == (council_value or {"extra": []})["extra"]
+# END council extra seats
+
+# Keep the subprocess council independent of any installed provider catalog.
+(capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
 # The council reuses the peer front door: seats over two families, explicit rounds,
 # bounded repairs, and the owning main's child links rather than a new task DB.
 council_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",

@@ -101,7 +101,7 @@ def valid_route(route):
 def policy():
     value = json.loads((ROOT / "config/panel-routing.json").read_text(encoding="utf-8"))
     if (not isinstance(value, dict) or not {"schema", "main", "tiers", "roles"} <= set(value)
-            <= {"schema", "main", "tiers", "roles", "tie_band", "auto_review"} or value.get("schema") != 2):
+            <= {"schema", "main", "tiers", "roles", "tie_band", "auto_review", "council"} or value.get("schema") != 2):
         raise ValueError("unsupported panel routing policy")
     if "auto_review" in value and type(value["auto_review"]) is not bool:
         raise ValueError("panel auto-review setting must be boolean")
@@ -111,6 +111,19 @@ def policy():
             or any(type(number) is not int or not 0 <= number <= 100 for number in band.values())):
         raise ValueError("panel tie band limits must be integer percentages")
     value["tie_band"] = dict(TIE_BAND_DEFAULTS, **band)
+    def valid_council_route(route):
+        if not isinstance(route, dict) or route.get("provider") != "antigravity":
+            return valid_route(route)
+        model = route.get("model")
+        return (isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model) is not None
+                and valid_route(dict(route, provider="claude", model="claude-opus-5-5")))
+
+    council = value.get("council", {"extra": []})
+    if (not isinstance(council, dict) or set(council) != {"extra"}
+            or not isinstance(council["extra"], list) or not all(map(valid_council_route, council["extra"]))
+            or len({route["provider"] for route in council["extra"]}) != len(council["extra"])):
+        raise ValueError("invalid panel council extra routes")
+    value["council"] = council
     mains = value.get("main")
     if not isinstance(mains, dict) or set(mains) != set(MODEL_IDS):
         raise ValueError("invalid panel main routes")
