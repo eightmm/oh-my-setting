@@ -11,8 +11,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Global rules: on servers and clusters agents use the one checkout at the
   local `~`-relative path and move code only through git and the project's
   remote, with no copied trees, alternate checkouts or per-run code
-  directories. The Slurm overlay keeps outputs and data in gitignored paths or
-  declared scratch and asks before creating a new location.
+  directories.
 - Panel routing reads an optional machine-local
   `~/.config/oh-my-setting/provider-accounts.json` listing several Codex
   accounts (`ordered` or `spread` policy). Tier selection skips an account at
@@ -308,8 +307,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 - `oms panel --continue` reuses the provider, model and effort of an attempt
   that chose them explicitly (`--to/--model`, `--reasoning-effort`) instead of
-  re-selecting by tier; a flag passed on the continue overrides, and
-  `--workload` returns it to tier selection.
+  re-selecting by tier; `--to` or `--model` on the continue chooses the route
+  afresh, `--reasoning-effort` overrides the effort, and `--workload` returns
+  it to tier selection.
 - `oms agent-plan finish` and owner `--finalize --landed-commit` accept a land
   whose gate, push and CI passed while installation is deferred for live
   workers, so dependent tasks no longer wait on an install that other running
