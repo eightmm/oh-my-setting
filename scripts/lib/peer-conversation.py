@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -49,7 +50,7 @@ def control():
     return 0
 
 
-def result(provider, path, expected):
+def result(provider, path, expected, include_usage=False):
     with open(path, "rb") as handle:
         raw = handle.read(1048577)
     if len(raw) > 1048576:
@@ -58,14 +59,19 @@ def result(provider, path, expected):
     for line in raw.decode("utf-8").splitlines():
         if not line.lstrip().startswith("{"):
             continue
-        doc = decode(line)
+        try:
+            doc = decode(line)
+        except ValueError:
+            if include_usage:
+                continue
+            raise
         if isinstance(doc, dict) and (
             doc.get("type") == "result" if provider == "claude" else "conversation_id" in doc
         ):
             envelopes.append(doc)
-    if len(envelopes) != 1:
+    if not envelopes or (not include_usage and len(envelopes) != 1):
         raise ValueError("expected exactly one native result envelope")
-    doc = envelopes[0]
+    doc = envelopes[-1]
     if provider == "claude":
         ok = doc.get("subtype") == "success" and doc.get("is_error") is False
         ok = ok and doc.get("stop_reason") in (None, "end_turn", "stop_sequence")
@@ -79,7 +85,8 @@ def result(provider, path, expected):
         raise ValueError("missing or invalid native session ID")
     if expected and session_id != expected:
         raise ValueError("native session ID changed")
-    if not isinstance(answer, str) or not answer.strip():
+    timeout = include_usage and doc.get("finished_reason") == "print_timeout"
+    if not isinstance(answer, str) or (not answer.strip() and not timeout):
         raise ValueError("provider returned no answer")
     denials = doc.get("permission_denials", []) if provider == "claude" else []
     if not isinstance(denials, list) or not all(isinstance(item, dict) for item in denials):
@@ -89,8 +96,38 @@ def result(provider, path, expected):
         raise ValueError("invalid provider usage object")
     tokens = sum(usage.get(k, 0) for k in ("input_tokens", "output_tokens")
                  if type(usage.get(k, 0)) is int and usage.get(k, 0) >= 0)
-    return {"session_id": session_id, "response": answer, "tokens": tokens,
-            "permission_denials": len(denials)}
+    parsed = {"session_id": session_id, "response": answer, "tokens": tokens,
+              "permission_denials": len(denials)}
+    if include_usage:
+        parsed["usage"] = usage
+        parsed["timeout"] = timeout
+    return parsed
+
+
+def agy_text(path):
+    from peer_artifacts import usage_footer
+    parsed = result("antigravity", path, "", include_usage=True)
+    raw = Path(path).read_bytes()
+    usage = dict(parsed["usage"])
+    usage.update({"cache_read_input_tokens": usage.get("cache_read_tokens")})
+    footer = usage_footer("antigravity", [usage])
+    answer = parsed["response"]
+    output = answer + ("\n" if answer and not answer.endswith("\n") else "")
+    output += "\n".join(footer) + "\n"
+    banners = [line for line in raw.decode("utf-8").splitlines()
+               if re.fullmatch(r"\[agy\] print timeout after .+ with turn in progress; returning partial output\s*", line)]
+    if banners:
+        output += "\n".join(banners) + "\n"
+    if parsed["timeout"] and not banners:
+        output += "stop-reason: provider=antigravity reason=stream_truncated subtype=print_timeout is_error=0\n"
+    fd, temporary = tempfile.mkstemp(prefix=".agy-output-", dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(output)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def main():
@@ -113,7 +150,9 @@ def main():
             return control()
         finally:
             timer.cancel()
-    if mode == "result":
+    if mode == "agy-text":
+        agy_text(sys.argv[2])
+    elif mode == "result":
         print(json.dumps(result(*sys.argv[2:]), ensure_ascii=True))
     elif mode == "id":
         print(decode(Path(sys.argv[2]).read_text(encoding="utf-8"))["session_id"])

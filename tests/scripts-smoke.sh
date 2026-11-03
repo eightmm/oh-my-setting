@@ -3567,6 +3567,17 @@ test_peer_review_writer_sits_out_of_default_council() {
 }
 
 
+wrap_agy_stub() {
+  local path="$1"
+  mv "$path" "$path.plain"
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+answer="$("$0.plain" "$@")" || { result=$?; printf '%s\n' "$answer"; exit "$result"; }
+python3 -c 'import json,sys; print(json.dumps(dict(conversation_id="stub1", status="SUCCESS", response=sys.argv[1], usage={})))' "$answer"
+SH
+  chmod +x "$path"
+}
+
 write_fake_review_gate_provider() {
   local bin_dir="$1"
   local provider="$2"
@@ -3587,6 +3598,7 @@ case "$gate" in
 esac
 EOF
   chmod +x "$bin_dir/$binary"
+  [ "$binary" != agy ] || wrap_agy_stub "$bin_dir/$binary"
 }
 
 # smoke-weight: 5
@@ -5140,6 +5152,7 @@ fi
 printf 'Answer:\n%s ROUND%s ANSWER\nRecommendation:\nuse %s round %s\n' "$label" "\$round" "$label" "\$round"
 EOF
   chmod +x "$bin_dir/$binary"
+  [ "$binary" != agy ] || wrap_agy_stub "$bin_dir/$binary"
 }
 
 write_fake_auth_noise_debate_provider() {
@@ -5179,6 +5192,7 @@ else
 fi
 EOF
   chmod +x "$bin_dir/$binary"
+  [ "$binary" != agy ] || wrap_agy_stub "$bin_dir/$binary"
 }
 
 # smoke-weight: 5
@@ -5480,6 +5494,77 @@ test_peer_review_print_timeout() {
     --artifact-dir "$artifact_dir" \
     --print-timeout 10m \
     --prompt "Review with custom print timeout" >/dev/null
+
+  local bin="$project/bin" mode access
+  mkdir -p "$bin"
+  cat > "$bin/agy" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) echo 'agy stub'; exit 0 ;; esac
+printf '%s\n' "$@" > "$AGY_ARGS"
+case "$AGY_MODE" in
+  plain) printf 'plain provider failure\n' ;;
+  empty) : ;;
+  malformed) printf '{invalid json\n' ;;
+  invalid_utf8) printf '\377\n' ;;
+  oversized) python3 -c 'import sys; sys.stdout.write("x" * 1048577)' ;;
+  timeout) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"","usage":{},"finished_reason":"print_timeout"}' ;;
+  noisy) printf '%s\n' '{bad diagnostic' >&2; printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"noisy answer","usage":{}}' ;;
+  failed) printf '%s\n' '{"conversation_id":"id1","status":"FAILED","response":"bad answer","usage":{}}' ;;
+  zero) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"zero usage","usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0}}' ;;
+  *) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"Answer: hello\n","usage":{"input_tokens":7,"output_tokens":3,"thinking_tokens":2,"cache_read_tokens":4,"total_tokens":12}}' ;;
+esac
+SH
+  chmod +x "$bin/agy"
+  printf 'review prompt\n' > "$project/prompt"
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    oms_provider_cli_discovered() { return 0; }
+    oms_provider_cli_available() { return 0; }
+    run_with_timeout() { "$@"; }
+    export PATH="$bin:$PATH" AGY_ARGS="$project/args"
+    for access in read write; do
+      export AGY_MODE=success
+      ma_provider_attempt antigravity "$access" "$project/prompt" "$project/output" "$project" \
+        provider-default '' test '' '' || exit 1
+      grep -Fxq -- '--output-format' "$project/args" && grep -Fxq -- json "$project/args" || exit 2
+      grep -Fxq -- '--print-timeout' "$project/args" || exit 3
+      grep -Fxq 'Answer: hello' "$project/output" || exit 4
+      grep -Fq '"input_tokens": 7' "$project/output" || exit 5
+      grep -Fq '"output_tokens": 3' "$project/output" || exit 6
+      grep -Fq '"cache_read_tokens": 4' "$project/output" || exit 7
+    done
+    export AGY_MODE=zero
+    ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 11
+    grep -Fq '"input_tokens": 0' "$project/output" || exit 12
+    for mode in timeout noisy; do
+      export AGY_MODE="$mode"
+      ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+        provider-default '' test '' '' || exit 15
+      case "$mode" in
+        timeout) grep -Fq 'reason=stream_truncated subtype=print_timeout' "$project/output" || exit 16 ;;
+        noisy) grep -Fq 'noisy answer' "$project/output" || exit 17 ;;
+      esac
+    done
+    for mode in plain empty malformed failed invalid_utf8 oversized; do
+      export AGY_MODE="$mode"
+      if ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+          provider-default '' test '' ''; then exit 8; fi
+      case "$mode" in
+        plain) grep -Fq 'plain provider failure' "$project/output" || exit 9 ;;
+        empty) grep -Fq "error: conversation protocol:" "$project/output" || exit 13 ;;
+        malformed) grep -Fq '{invalid json' "$project/output" || exit 14 ;;
+        failed) grep -Fq '"status":"FAILED"' "$project/output" || exit 10 ;;
+        invalid_utf8|oversized) grep -Fq 'error: conversation protocol:' "$project/output" || exit 18 ;;
+      esac
+    done
+  ) || fail 'agy JSON output, usage, or failure handling failed'
+  PATH="$bin:$PATH" AGY_ARGS="$project/args" AGY_MODE=success \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$project/live" \
+    --providers antigravity --no-diff --print-timeout 10m --prompt 'Review JSON response' > "$project/review.out" ||
+    fail 'agy review failed'
+  assert_one_artifact_contains "$project/live" 'antigravity-review-json-response-*.md' 'Answer: hello'
+  assert_one_artifact_contains "$project/live" 'antigravity-review-json-response-*.md' '"cache_read_tokens": 4'
 }
 
 test_peer_ask_print_timeout() {
@@ -21981,7 +22066,7 @@ test_agy_read_pass_cannot_write_repo() {
 #!/usr/bin/env bash
 cat > /dev/null
 echo "pwned" > escaped-write.txt
-echo "agy answer"
+printf '%s\n' '{"conversation_id":"iso1","status":"SUCCESS","response":"agy answer","usage":{}}'
 EOF
   chmod +x "$bin_dir/agy"
 
@@ -21991,6 +22076,7 @@ EOF
     fail "agy read pass should succeed with the stub CLI"
   assert_not_exists "$project/escaped-write.txt"
   assert_one_artifact_contains "$project/.oms/artifacts/call" 'antigravity-*.md' 'agy answer'
+  assert_one_artifact_contains "$project/.oms/artifacts/call" 'antigravity-*.md' 'usage detail:'
   [ "$(git -C "$project" worktree list | wc -l)" -eq 1 ] ||
     fail "agy read isolation must clean up its worktree"
 }
@@ -30129,6 +30215,7 @@ echo "DDP workers never duplicate shards. Evidence: the loader contract. Next:"
 echo "pin the seed in the training config before the next run."
 EOF
   chmod +x "$bin_dir/codex" "$bin_dir/agy"
+  wrap_agy_stub "$bin_dir/agy"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
@@ -30147,6 +30234,8 @@ assert [a["provider"] for a in answers] == ["codex", "antigravity"], answers
 assert answers[0]["quality"] == "blocked", answers[0]
 assert answers[1].get("quality") == "ok", answers[1]
 ' || fail "the thread should record one question, a blocked attempt, and an answer"
+
+  assert_one_artifact_contains "$project/.oms/artifacts/consult" 'antigravity-*.md' 'usage detail:'
 
   project="$TMP/consult-short-answer"
   bin_dir="$project/bin"
@@ -30702,12 +30791,14 @@ echo "Sharding by file keeps streaming inputs balanced; seed the sampler per ran
 echo "Evidence: the loader contract. Next: pin the seed in the training config."
 EOF
   chmod +x "$bin_dir/agy"
+  wrap_agy_stub "$bin_dir/agy"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/agent-call.sh" --to antigravity --repo "$project" \
     --prompt "UNIQUE-PROMPT-MARKER which loader?" >/dev/null 2>&1 ||
     fail "antigravity call should succeed"
 
+  assert_one_artifact_contains "$project/.oms/artifacts/call" 'antigravity-*.md' 'usage detail:'
   seen="$(cat "$home_dir/agy-received" 2>/dev/null || true)"
   contains "$seen" 'UNIQUE-PROMPT-MARKER' ||
     fail "antigravity must receive the composed prompt, got: $seen"
@@ -30732,6 +30823,7 @@ echo "workers never duplicate shards. Evidence: the loader contract. Next: pin"
 echo "the seed in the training config before the next run."
 EOF
     chmod +x "$bin_dir/$provider"
+    [ "$provider" != agy ] || wrap_agy_stub "$bin_dir/$provider"
   done
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -30746,6 +30838,7 @@ EOF
   contains "$out" '3/3 target(s) answered, 2 independent model family(ies)' ||
     fail "the panel should report answers and independent families: $out"
 
+  assert_one_artifact_contains "$project/.oms/artifacts/consult" 'antigravity-*.md' 'usage detail:'
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
 import json, sys
 turns = json.load(sys.stdin)["turns"]
@@ -30950,6 +31043,7 @@ echo "touches only the file body. Risk: none beyond the missing regression test.
 echo "Next: run the smoke suite, then land it."
 EOF
     chmod +x "$bin_dir/$provider"
+    [ "$provider" != agy ] || wrap_agy_stub "$bin_dir/$provider"
   done
 }
 
@@ -31063,6 +31157,7 @@ echo 'add an allow-rule for the read tool, then re-run the council.'
 echo 'alternatively, re-run with the permission prompt enabled.'
 EOF
   chmod +x "$bin_dir/$binary"
+  [ "$binary" != agy ] || wrap_agy_stub "$bin_dir/$binary"
 }
 
 # smoke-weight: 6
@@ -31094,6 +31189,7 @@ test_peer_ask_council_does_not_seat_a_provider_that_never_answered() {
   assert_file_contains "$project/err" 'note: claude said: add an allow-rule for the read tool'
   assert_file_contains "$project/err" 'note: exited 0 without answering: claude'
 
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-*.md' 'usage detail:'
   synth="$(find "$artifact_dir" -type f -name '_synthesis-council-seat-quality-*.md' | sed -n '1p')"
   [ -n "$synth" ] || fail "missing council synthesis"
   assert_file_contains "$synth" '_non-answer (blocked): add an allow-rule for the read tool'
@@ -31105,7 +31201,8 @@ test_peer_ask_council_does_not_seat_a_provider_that_never_answered() {
   cat > "$bin_dir/agy" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-echo '[agy] print timeout after 10m0s with turn in progress; returning partial output'
+echo '[agy] print timeout after 10m0s with turn in progress; returning partial output' >&2
+printf '%s\n' '{"conversation_id":"timeout1","status":"SUCCESS","response":"partial answer","usage":{},"finished_reason":"print_timeout"}'
 EOF
   chmod +x "$bin_dir/agy"
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -31117,6 +31214,7 @@ EOF
   if find "$project/timeout-artifacts" -name 'antigravity-*-r2.md' | grep . > /dev/null; then
     fail 'a timed-out seat was called for rebuttal'
   fi
+  grep -qF '[agy] print timeout after' "$project/timeout-artifacts"/antigravity-*.md || fail 'agy timeout banner was lost'
   grep -q 'reason=stream_truncated subtype=print_timeout' "$project/timeout-artifacts"/antigravity-*.md ||
     fail 'agy print timeout lacks a transport stop reason'
 }

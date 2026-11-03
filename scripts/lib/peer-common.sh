@@ -3471,9 +3471,8 @@ ma_provider_attempt_run() {
         echo "error: prompt is $(wc -c < "$prompt_file" | tr -d ' ')B; the antigravity transport carries it as one argv element (limit ~128KiB) — trim the quoted context or use another provider" > "$output_file"
         return 2
       fi
-      if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
-        cmd+=(--output-format json)
-      else
+      cmd+=(--output-format json)
+      if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
         cmd+=(--print "$(cat "$prompt_file")")
       fi
       ;;
@@ -3940,6 +3939,13 @@ PY
   fi
   if [ "$provider" = pi ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
     ma_pi_jsonl_to_text "$output_file" || { [ "$status" -ne 0 ] || status=1; }
+  fi
+  if [ "$provider" = antigravity ] && [ "$status" -eq 0 ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+    local agy_error
+    agy_error="$(python3 "$(ma_scripts_dir)/lib/peer-conversation.py" agy-text "$output_file" 2>&1)" || {
+      printf '\n%s\n' "$agy_error" >> "$output_file"
+      status=1
+    }
   fi
   if [ "$status" -ne 0 ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
     OMS_PROVIDER_ERROR_CLASSIFICATION="$(oms_panel_provider_error_classify "$provider" "$status" "$output_file")"
