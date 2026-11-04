@@ -204,7 +204,8 @@ for n in range(24):
     index_results[ident] = dict(task_id=ident, revision="a" * 24, outcome="completed",
                               main_attempt_id="index-main", summary=ident)
     index_rows.append(dict(task_id=ident, attempt_id=attempt, kind="delegate", exit=0,
-                           patch="fixture.patch", patch_sha256="b" * 64))
+                           patch="fixture.patch", patch_sha256="b" * 64,
+                           **({"base_sha": "c" * 40} if n == 0 else {})))
 index_attempts.append(dict(attempt_id="unassigned", parent_attempt_id="index-main", refs={}))
 index_results["whole-index"] = dict(task_id="whole-index", revision="a" * 24,
     outcome="completed", main_attempt_id="index-main", summary="Whole main")
@@ -237,9 +238,12 @@ with patch.object(saved, "_records", return_value=(index_attempts, index_rows)),
         patch.object(saved, "_round_delta", return_value=None), \
         patch.object(saved.room, "status", return_value=dict(participants=index_members)) as index_room:
     index_reports = [saved.results(project, **options) for options in index_pages]
+    index_calls = index_reports[5]["rows"][0]["calls"]
+    assert next(call for call in index_calls if call["attempt_id"] == "worker-00")["base_sha"] == "c" * 40
+    assert all("base_sha" not in call for call in index_calls if call["attempt_id"] == "worker-01")
     index_encoded = json.dumps(index_reports, ensure_ascii=False, separators=(",", ":")).encode()
     # Digest of the original reader's complete serialized reports for these selections.
-    assert hashlib.sha256(index_encoded).hexdigest() == "1acecc5d82e9a9affc9ecc67ba158b4f329b1388e05172ba416a0b699bffd850"
+    assert hashlib.sha256(index_encoded).hexdigest() == "0980896d1284f58511d12ba461a75bf9bc9f73bc30c76ff3112553f2a1c387ad"
     assert [row["task_id"] for row in index_reports[0]["rows"]][:1] == ["whole-index"]
     assert len(index_reports[0]["rows"]) == 20 and index_reports[0]["truncated"]
     assert len(index_reports[1]["rows"]) == 25 and not index_reports[1]["truncated"]
