@@ -17459,7 +17459,8 @@ test_cleanup_dry_run_and_apply() {
   ln -s "$ROOT"$'\n' "$home_dir/.codex/skills/rootlf.backup.legacy"
   ln -s "$ROOT"$'\n/..' "$home_dir/.codex/skills/rootlf-dotdot.backup.legacy"
 
-  HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --dry-run >"$home_dir/dry-run"
+  # The suite-wide cache holds other tests' dead harness dirs; count only this home.
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" "$ROOT/scripts/cleanup.sh" --dry-run >"$home_dir/dry-run"
   lf_dry=ok
   [ -L "$home_dir/.codex/skills/rootlf.backup.legacy" ] &&
     [ -L "$home_dir/.codex/skills/rootlf-dotdot.backup.legacy" ] || lf_dry=removed
@@ -17475,7 +17476,7 @@ test_cleanup_dry_run_and_apply() {
   [ -L "$home_dir/.codex/skills/newline.backup.legacy" ] ||
     fail "dry-run removed trailing-newline backup link"
 
-  HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/apply"
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/apply"
   lf_apply=ok
   [ -L "$home_dir/.codex/skills/rootlf.backup.legacy" ] &&
     [ -L "$home_dir/.codex/skills/rootlf-dotdot.backup.legacy" ] || lf_apply=removed
