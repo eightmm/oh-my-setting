@@ -1105,7 +1105,7 @@ HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
   XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
   OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
   bash "$upstream/scripts/doctor.sh" > "$TMP/direct-digest-doctor.txt" 2>&1 || true
-grep -Fq 'tool version drift: uv (managed binary digest changed)' \
+grep -Fq 'tool version drift: uv (managed binary digest changed' \
   "$TMP/direct-digest-doctor.txt" ||
   fail "doctor accepted a changed managed direct-tool binary"
 sed -i.bak '$d' "$tools_bin/uv"
