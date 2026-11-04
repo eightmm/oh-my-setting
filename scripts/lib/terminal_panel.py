@@ -38,7 +38,7 @@ from dashboard_projection import clean
 from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
-                           TIERS, WRITERS, MAIN_OWNERS, newest_route_model, routable_route_model, route_family)
+                           TIERS, WRITERS, MAIN_OWNERS, newest_route_model, routable_route_model, route_family, tier_catalog)
 from panel_results import (DURABLE, _read, _write, _lock, accept, finalize, outcomes, results, results_snapshot,
                            retry_delivery, verified_patch, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
@@ -654,7 +654,7 @@ def main(argv=None):
             installed = {row["provider"] for row in rows if row["installed"]}
             owner = caller_owner()
             readings, recent, _ = route_inputs(owner, args.repo, args.room)
-            catalogs = {row["provider"]: row.get("catalog_models", row.get("models", [])) for row in rows}
+            catalogs = {row["provider"]: tier_catalog(row) for row in rows}
             chosen = {}
             for role in routes["roles"]:
                 try:

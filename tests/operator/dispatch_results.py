@@ -559,8 +559,163 @@ def exercise_exact_model_routing():
                                                              role="worker", joined=True)]}}, "codex", width=150, height=40)
             assert isinstance(text, str)
 
+def exercise_antigravity_read_tiers():
+    import panel_routing as routing
+    configured = routing.policy()
+    providers = {"claude", "codex", "antigravity"}
+    model = "gemini-4-argon-high"
+    catalogs = {"antigravity": [model, "gemini-4.10-argon-high", "gemini-5-argon-low"]}
+    exhausted = {name: {"weekly_used": 90} for name in ("claude", "codex")}
+
+    def choose(tier, **options):
+        arguments = dict(installed=providers, catalogs=catalogs, resolve_accounts=False)
+        arguments.update(options)
+        return allocate("claude", tier=tier, **arguments)
+
+    def refused(call):
+        try:
+            call()
+        except ValueError as error:
+            assert len(str(error).splitlines()) == 1, error
+            return str(error)
+        raise AssertionError("ineligible tier route accepted")
+
+    for tier in ("deep", "frontier"):
+        entry = next(route for route in configured["tiers"][tier] if route["provider"] == "antigravity")
+        assert entry == dict(provider="antigravity", model=model, effort="high", access="read")
+        assert routing.valid_route(entry)
+        for access in (None, "", 0, [], "malformed", "write"):
+            invalid = deepcopy(configured)
+            invalid_entry = next(route for route in invalid["tiers"][tier] if route["provider"] == "antigravity")
+            if access is None:
+                del invalid_entry["access"]
+            else:
+                invalid_entry["access"] = access
+            with patch.object(routing.Path, "read_text", return_value=json.dumps(invalid)):
+                assert "invalid panel tier" in refused(routing.policy)
+        for native in configured["tiers"][tier][:2]:
+            for access in ("read", "write"):
+                assert routing.valid_route(dict(native, access=access))
+            for access in (None, "", 0, [], "malformed"):
+                assert not routing.valid_route(dict(native, access=access))
+
+        # Antigravity's unknown quota cannot disturb native quota and tie-band ordering.
+        for used, expected in ((0, "codex"), (14, "codex"), (15, "claude"), (89, "claude"), (90, "claude")):
+            readings = {"claude": {"weekly_used": 0}, "codex": {"weekly_used": used}}
+            assert choose(tier, provider_status=readings)["provider"] == expected
+        for used in (0, 89, 90, 100):
+            readings = dict(exhausted, claude={"weekly_used": used})
+            assert choose(tier, provider_status=readings)["provider"] == ("claude" if used < 90 else "antigravity")
+        for unknown in (None, "", "malformed"):
+            readings = dict(exhausted, claude={"weekly_used": unknown})
+            assert choose(tier, provider_status=readings)["provider"] == "claude"
+        # An unknown-quota route keeps its position unless a known native must precede it.
+        reordered = deepcopy(configured)
+        reordered["tiers"][tier].insert(0, reordered["tiers"][tier].pop())
+        with patch.object(routing, "policy", return_value=reordered):
+            assert choose(tier)["provider"] == "antigravity"
+            readings = dict(exhausted, claude={"weekly_used": 89})
+            assert choose(tier, provider_status=readings)["provider"] == "claude"
+            previous = dict(provider="codex", workload=tier, access="read", role="worker")
+            assert routing.alternate_route(previous, providers, readings, resolve_accounts=False)["provider"] == "claude"
+        assert choose(tier, provider_status=exhausted)["provider"] == "antigravity"
+        assert choose(tier, installed={"antigravity"})["provider"] == "antigravity"
+        for missing in (None, {}, {"antigravity": []}, {"antigravity": ["gemini-5-argon-low"]}):
+            assert choose(tier, catalogs=missing)["provider"] == "codex"
+            refused(lambda: choose(tier, installed={"antigravity"}, catalogs=missing))
+        for role in routing.WRITERS:
+            assert choose(tier, role=role, access="write")["provider"] != "antigravity"
+            refused(lambda: choose(tier, role=role, access="write", installed={"antigravity"}))
+            refused(lambda: choose(tier, role=role, access="write", provider_status=exhausted))
+        for role in ("scholar", "reviewer", "verifier", "security-auditor", "critic", "advisor", "architect"):
+            route = choose(tier, role=role, writer="claude", provider_status=exhausted)
+            assert route["provider"] == "antigravity" and route["access"] == "read", route
+            if role in routing.INDEPENDENT:
+                assert choose(tier, role=role, writer="antigravity")["provider"] != "antigravity"
+                assert choose(tier, role=role, installed={"claude", "antigravity"}, writer="claude",
+                              provider_status={"claude": {"weekly_used": 0}})["provider"] == "antigravity"
+                with patch.object(routing, "model_family", return_value="google"):
+                    assert allocate("antigravity", role=role, tier=tier, installed=providers,
+                                    catalogs=catalogs, owner_model=model)["provider"] != "antigravity"
+            argv = panel.routed_command(panel.ENTRY, project, route, prompt="Inspect source.",
+                                        verify="true" if role == "reviewer" else None)
+            assert "antigravity" in " ".join(argv), argv
+            if role not in ("reviewer", "advisor"):
+                assert "--read-only" in argv, argv
+        native = choose(tier, installed={"claude"})
+        assert routing.alternate_route(native, {"antigravity"})["provider"] == "antigravity"
+        assert routing.alternate_route(dict(native, access="write"), {"antigravity"}) is None
+        restricted = deepcopy(configured)
+        restricted["tiers"][tier][0]["access"] = "read"
+        with patch.object(routing, "policy", return_value=restricted):
+            assert choose(tier, access="write")["provider"] == "codex"
+            assert routing.alternate_route(dict(native, provider="codex", access="write"), {"claude"}) is None
+
+    rows = [dict(provider=name, binary=name, present=True, installed=True, exact_model_override=True,
+                 access=["read", "write"],
+                 catalog_models=catalogs.get(name, []), routable=catalogs.get(name, [])) for name in providers]
+    for available in (None, 0, "malformed", [], ["gemini-5-argon-low"], catalogs["antigravity"]):
+        raw = [dict(row) for row in rows]
+        agy = next(row for row in raw if row["provider"] == "antigravity")
+        agy["catalog_models"] = catalogs["antigravity"] + ["gemini-99-argon-high"]
+        if available is None:
+            del agy["routable"]
+        else:
+            agy["routable"] = available
+        def registry_read(arguments, **kwargs):
+            if arguments[2] == "models":
+                selection = arguments[arguments.index("--providers") + 1]
+                shown = [row for row in raw if selection == "all" or row["provider"] in selection.split(",")]
+                return subprocess.CompletedProcess(arguments, 0, json.dumps({"providers": shown}), "")
+            assert arguments[3] == "panel-provider-access", arguments
+            return subprocess.CompletedProcess(arguments, 0, "".join(name + "\ttrue\n" for name in providers), "")
+
+        with patch.object(dispatch.subprocess, "run", side_effect=registry_read), \
+                patch.object(panel, "native_adapter", return_value=None), \
+                patch.object(dispatch, "route_inputs", return_value=(exhausted, None, None)), \
+                patch.object(panel, "route_inputs", return_value=(exhausted, None, None)):
+            observed = next(row for row in panel.provider_catalog() if row["provider"] == "antigravity")
+            assert observed["catalog_models"] == agy["catalog_models"]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assert panel.main(["--providers", "--json"]) == 0
+            displayed = next(row for row in json.loads(output.getvalue())["providers"]
+                             if row["provider"] == "antigravity")
+            assert displayed["catalog_models"] == agy["catalog_models"]
+            output = io.StringIO()
+            with redirect_stdout(output), patch.object(panel, "caller_owner", return_value="claude"):
+                assert panel.main(["--routes"]) == 0
+            chosen = json.loads(output.getvalue())["chosen"]["scholar"]
+            if available == catalogs["antigravity"]:
+                selected = panel.selected_route("claude", "scholar", "deep", "read", None)
+                assert selected["model"] == "gemini-4.10-argon-high", selected
+                assert chosen == {
+                    "provider": "antigravity", "model": selected["model"], "effort": "high"}
+            else:
+                assert "error" in chosen, chosen
+                refused(lambda: panel.selected_route("claude", "scholar", "deep", "read", None))
+            primary = dict(configured["tiers"]["deep"][0], role="worker", kind="worker", owner="claude",
+                           workload="deep", access="read", purpose="explain")
+            for exact in (False, True):
+                agy["exact_model_override"] = exact
+                with patch.object(panel, "selected_route", return_value=primary), \
+                        patch.object(panel, "child_environment", return_value={}), \
+                        patch.object(dispatch.room, "resolve", return_value=None), \
+                        patch.object(panel, "routing_status", return_value=exhausted), \
+                        patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: (
+                            args[-2], kwargs["fallback_decision"])):
+                    fallback, decision = panel.dispatch(project, "claude", "worker", "deep", "read", "explain",
+                                                        prompt="Inspect source.")
+                if exact and available == catalogs["antigravity"]:
+                    assert fallback["provider"] == "antigravity" and fallback["model"] == "gemini-4.10-argon-high"
+                else:
+                    assert fallback is None and decision == "alternate-not-routable", (fallback, decision)
+
+# BEGIN tier routing
 with patch.dict(os.environ, {"OMS_PANEL_PUBLIC_ROUTE_OPT_IN": "1"}):
     exercise_exact_model_routing()
+exercise_antigravity_read_tiers()
+# END tier routing
 
 # Third-party tier routing requires a public origin or an explicit opt-in.
 def exercise_public_only_routing():

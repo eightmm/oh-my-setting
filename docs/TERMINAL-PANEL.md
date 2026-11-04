@@ -260,8 +260,9 @@ Panel owner fields and `--owner` for dispatch, finalize and review settlement ac
 their own identities. Pi's default model and effort come from the Codex main preset;
 an explicit model in the full Codex catalog resolves to the gateway with owner `codex`.
 Any other exact Pi model resolves to direct transport with owner `pi`. The `agy`
-harness resolves to registry owner `antigravity`. Worker tiers still use Claude and
-Codex only. Independent review of Pi or Antigravity uses the recorded main model's
+harness resolves to registry owner `antigravity`. Deep and frontier tiers also offer
+read-only Antigravity routes after native providers with known weekly quota.
+Independent review of Pi or Antigravity uses the recorded main model's
 registry family; an unknown family cannot establish independence. Existing Pi rows
 with owner `codex` remain readable. Swap events and restart ownership validate the
 recorded owner/harness pair without consulting the current model cache; Pi permits
@@ -913,14 +914,28 @@ The workspace balance is the upstream hard spending limit; v1 has no OMS money
 cap or strict-cap ledger. Registering an account shares the main home's existing
 OMS setup; it does not install a separate OMS copy.
 
-Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. A recorded Pi provider failure can fall back once to an eligible tier candidate, provided a write leaves the worktree unchanged; policy refusals and verification failures do not trigger fallback. An OpenRouter free-model daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only trigger the one-time fallback. Judge tier allocation stays on Claude or Codex; an explicit `--to` may select another provider.
+Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. A recorded Pi provider failure can fall back once to an eligible tier candidate, provided a write leaves the worktree unchanged; policy refusals and verification failures do not trigger fallback. An OpenRouter free-model daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only trigger the one-time fallback. Judge tier allocation also permits Antigravity on deep and frontier; an explicit `--to` may select another provider.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
 | light | Pi `openrouter/thinkingmachines/inkling:free` (low), `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
 | routine | Pi `openrouter/thinkingmachines/inkling:free` (medium), `claude-sonnet-5-5` (medium), `gpt-6.1-terra` (medium) |
-| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
-| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
+| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high), Antigravity `gemini-4-argon-high` (high, read-only) |
+| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high), Antigravity `gemini-4-argon-high` (high, read-only) |
+
+Tier entries may declare `"access": "read"` to exclude them from every write
+selection, including provider fallback. Antigravity tier entries require this
+marker; invalid access values and missing Antigravity markers are refused with
+one line. Its unknown weekly quota does not change native quota or tie-band
+ordering: it follows every eligible native with a known weekly reading, while
+unknown-quota candidates retain their existing order. Independent judges count
+Antigravity as a separate provider from the implementer. Its configured model is
+a catalog selector: routing requires the registry's routable list, preserves the
+configured model level and pins the newest model in that family. A missing or
+unroutable catalog skips the candidate. Existing board and result views display
+the selected provider and model. A read fallback to Antigravity also requires
+the registry's `exact_model_override`; otherwise the fallback is recorded as
+`alternate-not-routable`.
 
 | Role | Default tier | Access | Front door | Runs |
 | --- | --- | --- | --- | --- |
@@ -958,7 +973,7 @@ warning changes neither command nor plan claims; write dispatch still requires
 a scoped brief and a verifier.
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` overrides one dispatch's effort. Panel dispatches with `--verify` and patch-admit (including patch-land admission) default to a 20m verify timeout; the `oms peer-review --gate` verify also defaults to 20m; other standalone peer commands default to 10m. Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. Verifier budgets must be positive finite durations up to 24h; zero, malformed and larger values are refused before the command runs on both native and Python timeout backends. An empty value keeps the caller's default, and fractional durations remain valid. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Codex and Claude tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Pi and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported effort flag. Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher` (researcher, scholar),
+`--reasoning-effort` overrides one dispatch's effort. Panel dispatches with `--verify` and patch-admit (including patch-land admission) default to a 20m verify timeout; the `oms peer-review --gate` verify also defaults to 20m; other standalone peer commands default to 10m. Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. Verifier budgets must be positive finite durations up to 24h; zero, malformed and larger values are refused before the command runs on both native and Python timeout backends. An empty value keeps the caller's default, and fractional durations remain valid. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Codex and Claude tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Pi and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported effort flag. Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when multiple providers remain available. Their records keep the board kinds `worker`, `researcher` (researcher, scholar),
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
 security-auditor) in `panel_role`; the strategy is generally the recorded purpose
 (plain workers record explain/investigate/implement, and scholar records research).

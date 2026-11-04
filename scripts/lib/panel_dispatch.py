@@ -227,7 +227,7 @@ def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candid
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
                    repo=None, room_id=None, main=None, task_id=None, candidate=None, routing_readings=None, preferred=None):
     from terminal_panel import MAIN_OWNERS, MODEL_IDS, PROVIDERS, allocate, policy, provider_catalog, routable_route_model
-    from terminal_panel import route_family, routing_status
+    from terminal_panel import route_family, routing_status, tier_catalog
     if owner not in MAIN_OWNERS:
         owner = provider_catalog(owner)[0]["provider"]
     owner_model = None
@@ -256,7 +256,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
                                     if routing_readings is not None else
                                     ({}, None, None) if target else route_inputs(
                                         owner, repo, room_id, main, task_id, candidate))
-        catalogs = {row["provider"]: row.get("catalog_models", row.get("models", [])) for row in rows}
+        catalogs = {row["provider"]: tier_catalog(row) for row in rows}
         visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs,
@@ -856,7 +856,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
              candidate=None, allow_stale_base=False, from_task=None, workload_explicit=False):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
-    from terminal_panel import continuation, events, policy, provider_catalog, routable_route_model, routing_status
+    from terminal_panel import continuation, events, policy, provider_catalog, routable_route_model, routing_status, tier_catalog
     from terminal_panel import run_dispatch, safe_label, selected_route
     dispatch_env = child_environment(owner, repo)
     room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
@@ -993,7 +993,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                         fallback["binary"] = peer["binary"]
                         fallback["model"] = routable_route_model(
                             fallback["provider"], fallback["model"],
-                            peer.get("catalog_models", peer.get("models", [])))
+                            tier_catalog(peer))
                         from panel_routing import resolve_provider_account
                         fallback = resolve_provider_account(fallback, readings, repo)
                         break

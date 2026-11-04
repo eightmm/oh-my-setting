@@ -103,10 +103,19 @@ def routable_route_model(provider, configured, catalog):
     return model
 
 
+def tier_catalog(row):
+    """Automatic Antigravity routes require its routable set; shared catalogs retain explicit choices."""
+    if row["provider"] == "antigravity":
+        routable = row.get("routable")
+        return routable if isinstance(routable, list) else []
+    return row.get("catalog_models", row.get("models", []))
+
+
 def valid_route(route):
     # A Codex route names any version of a known family; the catalog picks the newest one at dispatch.
-    if (not isinstance(route, dict) or not {"provider", "model", "effort"} <= set(route) <= {"provider", "model", "effort", "public_only"}
+    if (not isinstance(route, dict) or not {"provider", "model", "effort"} <= set(route) <= {"provider", "model", "effort", "public_only", "access"}
             or ("public_only" in route and type(route["public_only"]) is not bool)
+            or ("access" in route and route["access"] not in ("read", "write"))
             or not all(isinstance(route[key], str) for key in ("provider", "model", "effort"))
             or route["effort"] not in {"low", "medium", "high"}):
         return False
@@ -155,7 +164,7 @@ def policy():
         raise ValueError("invalid panel tiers")
     for tier in TIERS:
         if (not isinstance(tiers.get(tier), list) or not tiers[tier] or not all(map(valid_route, tiers[tier]))
-                or any(route["provider"] == "antigravity" for route in tiers[tier])):
+                or any(route["provider"] == "antigravity" and route.get("access") != "read" for route in tiers[tier])):
             raise ValueError("invalid panel tier: %s" % tier)
         if len({c["provider"] for c in tiers[tier]}) != len(tiers[tier]):
             raise ValueError("duplicate provider in panel tier: %s" % tier)
@@ -174,6 +183,18 @@ def weekly_used(provider_status, provider):
     from panel_metrics import percent
     row = provider_status.get(provider) if isinstance(provider_status, dict) else None
     return percent(row.get("weekly_used")) if isinstance(row, dict) else None
+
+
+def _defer_antigravity(candidates, used_by):
+    """Keep native and unknown-quota order, moving Antigravity behind known natives."""
+    ordered = list(candidates)
+    for candidate in [c for c in ordered if c["provider"] == "antigravity"]:
+        position = ordered.index(candidate)
+        ordered.remove(candidate)
+        after_known = max((index + 1 for index, c in enumerate(ordered)
+                           if used_by.get(c["provider"]) is not None), default=0)
+        ordered.insert(max(position, after_known), candidate)
+    return ordered
 
 
 def daily_capped(provider_status, candidate):
@@ -331,8 +352,10 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     else:
         purpose = {"advisor": "advise", "reviewer": "review", "researcher": "research", "scholar": "research"}.get(role, role)
     candidates = routes["tiers"][tier]
+    if access == "write":
+        candidates = [c for c in candidates if c.get("access") != "read"]
     if role in INDEPENDENT or KINDS[role] == "advisor":
-        candidates = [c for c in candidates if c["provider"] in MODEL_IDS]
+        candidates = [c for c in candidates if c["provider"] in MODEL_IDS or c["provider"] == "antigravity"]
     if role == "researcher":
         if tier != "light":
             raise ValueError("researchers use the light tier")
@@ -356,11 +379,11 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         usable = kept
     # Quota guards any choice among installed providers, including the one family exclusion leaves.
     several = len(usable) > 1
-    if catalogs is not None:
+    if catalogs is not None or any(c["provider"] == "antigravity" for c in usable):
         eligible, refused = [], None
         for candidate in usable:
             try:
-                routable_route_model(candidate["provider"], candidate["model"], catalogs.get(candidate["provider"], []))
+                routable_route_model(candidate["provider"], candidate["model"], (catalogs or {}).get(candidate["provider"], []))
                 eligible.append(candidate)
             except ValueError as error:
                 refused = error
@@ -409,7 +432,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         available, used_by = [], {}
         for candidate in usable:
             provider = candidate["provider"]
-            if provider in EXACT_MODEL_PROVIDERS:
+            if provider in EXACT_MODEL_PROVIDERS or provider == "antigravity":
                 available.append(candidate)
                 continue
             used = account_usage.get(provider) if provider in account_usage else weekly_used(provider_status, provider)
@@ -418,7 +441,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                 used_by[provider] = used
         if not available:
             raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
-        natives = [c for c in available if c["provider"] not in EXACT_MODEL_PROVIDERS]
+        natives = [c for c in available if c["provider"] in used_by]
         if used_by and None not in used_by.values():
             band = routes["tie_band"]
             tied = max(used_by.values()) - min(used_by.values()) < band["gap"]
@@ -430,7 +453,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         else:
             natives = sorted(natives, key=lambda c: c["provider"] == owner)
         native_iter = iter(natives)
-        available = [c if c["provider"] in EXACT_MODEL_PROVIDERS else next(native_iter) for c in available]
+        available = [next(native_iter) if c["provider"] in used_by else c for c in available]
+        available = _defer_antigravity(available, used_by)
         if access == "write":
             available = sorted(available, key=lambda c: c["provider"] in EXACT_MODEL_PROVIDERS)
         usable = available
@@ -443,13 +467,12 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     if role in INDEPENDENT:
         # An exact-model writer (Pi, OpenCode) is never a native judge, so ordering away from it keeps tier order;
         # a Pi main judging its own provider's work still needs its recorded family (unknown fails closed).
-        judged = writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS else owner
+        judged = writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS or writer == "antigravity" else owner
         if judged == owner and judged in ("pi", "antigravity"):
             family = model_family(judged, owner_model)
             if family == "unknown":
                 raise ValueError("recorded main model family is unknown; independence is unverified")
-            # Validated worker tiers contain native Codex/Claude models only.
-            native_families = {"codex": "openai", "claude": "anthropic"}
+            native_families = {"codex": "openai", "claude": "anthropic", "antigravity": "google"}
             usable = sorted(usable, key=lambda c: native_families[c["provider"]] == family)
         else:
             usable = sorted(usable, key=lambda c: c["provider"] == judged)
@@ -475,11 +498,13 @@ def alternate_route(route, installed=None, provider_status=None, repo=None, reso
         return None
     candidates = [candidate for candidate in policy()["tiers"][tier]
                   if candidate["provider"] != route.get("provider")
+                  and (route.get("access") != "write" or candidate.get("access") != "read")
                   and (installed is None or candidate["provider"] in installed)
                   and (candidate["provider"] == "codex" or (weekly_used(provider_status, candidate["provider"]) or 0) < 90)
                   and not daily_capped(provider_status, candidate)]
     if route.get("role") in INDEPENDENT or KINDS.get(route.get("role")) == "advisor":
-        candidates = [candidate for candidate in candidates if candidate["provider"] in MODEL_IDS]
+        candidates = [candidate for candidate in candidates
+                      if candidate["provider"] in MODEL_IDS or candidate["provider"] == "antigravity"]
     if route.get("role") == "researcher":
         candidates = [candidate for candidate in candidates
                       if route_family(candidate["provider"], candidate["model"])
@@ -499,7 +524,8 @@ def alternate_route(route, installed=None, provider_status=None, repo=None, reso
             except ValueError:
                 continue
         eligible.append(candidate)
-    candidates = eligible
+    candidates = _defer_antigravity(eligible, {c["provider"]: weekly_used(provider_status, c["provider"])
+                                             for c in eligible if c["provider"] in MODEL_IDS})
     if not candidates:
         return None
     return dict(candidates[0], effort=route.get("effort"), role=route.get("role"),
