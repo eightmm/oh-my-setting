@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- A report-only investigate worker stopped by its guard or by timeout keeps
+  its scratch for the owner: stderr, a local artifact bullet and the artifact
+  index row name the path, and gc collects it once the owner settles the task
+  or it ages out.
 - `oms report bug|feature` previews a privacy-checked upstream issue: the
   generated metadata is an allowlist (OMS version and commit, OS family,
   Bash/Python major.minor and, with `--from-failure`, the bare OMS verb, exit,
@@ -94,6 +98,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- OMS requires Python 3.11 at every entry point and in the managed runtime.
+  Interpreter selection ignores exported `python`/`python3` shell functions,
+  runs its probes without PYTHONHOME or PYTHONPATH, and validates the launcher
+  and fallback interpreter; the guard hooks fail closed without a runtime.
+- `oms panel --dispatch ROLE --task-id ID` without `--workload` uses the
+  task's stored workload suggestion in both the CLI preflight and the
+  dispatch; researcher suggestions stay light, and an unusable suggestion is
+  shown as unsure in the ready-task hint.
 - Reviewers, verifiers, security auditors and critics of Codex or Claude work
   route to Antigravity first while it is installed, outside daily cooldown and
   below 90% of any recorded weekly quota; the judged provider stays last.
@@ -476,6 +488,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A peer call stopped by HUP, INT or TERM removes its own pid-stamped
+  Antigravity read trees after its provider jobs are reaped, instead of
+  leaking `oh-my-setting-agy-read.*` directories.
 - Managed landing captures drain per generation: an unreferenced capture is
   reclaimed even while unrelated workers run, only tasks in an active lease
   state (claimed, running, review, landing) pin their captures, and the quota
