@@ -19352,7 +19352,7 @@ test_install_hooks_writes_pre_push() {
   cp "$ROOT/scripts/install-hooks.sh" "$repo/scripts/install-hooks.sh"
   ( cd "$repo" && bash scripts/install-hooks.sh >/dev/null ) || fail "install-hooks failed"
   [ -x "$repo/.git/hooks/pre-push" ] || fail "pre-push hook not installed/executable"
-  grep -Fq 'scripts/check.sh' "$repo/.git/hooks/pre-push" || fail "hook does not call check.sh"
+  grep -Fq 'scripts/pre-push-check.sh" --full' "$repo/.git/hooks/pre-push" || fail "hook does not select the full gate"
 
   ( cd "$repo" && bash scripts/install-hooks.sh --quick >/dev/null ) ||
     fail "install-hooks --quick failed"
@@ -19366,7 +19366,7 @@ test_install_hooks_writes_pre_push() {
   git -C "$repo" worktree add --detach "$TMP/install-hooks-linked" >/dev/null
   (cd "$TMP/install-hooks-linked" && bash scripts/install-hooks.sh >/dev/null) ||
     fail "install-hooks must work from a linked worktree"
-  grep -Fq 'scripts/check.sh' "$repo/.git/hooks/pre-push" ||
+  grep -Fq 'scripts/pre-push-check.sh" --full' "$repo/.git/hooks/pre-push" ||
     fail "linked checkout must install the shared full hook"
 }
 
@@ -19403,6 +19403,54 @@ EOF
     (cd "$repo" && OMS_TEST_CHECK_ARGS="$repo/check.args" \
       bash scripts/pre-push-check.sh origin example.invalid >/dev/null)
   [ ! -e "$repo/check.args" ] || fail "a deletion-only push should not run a gate"
+}
+
+test_pre_push_published_tags() {
+  local repo="$TMP/pre-push-tags" first second zero mode record output
+  mkdir -p "$repo/scripts"
+  git -C "$repo" init -b main >/dev/null
+  cp "$ROOT/scripts/install-hooks.sh" "$ROOT/scripts/pre-push-check.sh" "$repo/scripts/"
+  cat > "$repo/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'gate\n' > "$OMS_TEST_CHECK_MARKER"
+EOF
+  chmod +x "$repo/scripts/check.sh" "$repo/scripts/pre-push-check.sh"
+  printf 'one\n' > "$repo/tracked"
+  git -C "$repo" add .
+  git -C "$repo" commit -qm first
+  first="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" update-ref refs/remotes/origin/main "$first"
+  printf 'two\n' > "$repo/tracked"
+  git -C "$repo" commit -qam second
+  second="$(git -C "$repo" rev-parse HEAD)"
+  zero=0000000000000000000000000000000000000000
+  for mode in full quick; do
+    if [ "$mode" = quick ]; then
+      (cd "$repo" && bash scripts/install-hooks.sh --quick >/dev/null)
+    else
+      (cd "$repo" && bash scripts/install-hooks.sh >/dev/null)
+    fi
+    for record in       "refs/tags/v1 $first refs/tags/v1 $zero"       "refs/tags/v1 $first refs/tags/v1 $first"; do
+      rm -f "$repo/gate"
+      output="$(printf '%s\n' "$record" | (cd "$repo" && OMS_TEST_CHECK_MARKER="$repo/gate" .git/hooks/pre-push origin url))"
+      [ ! -e "$repo/gate" ] || fail "$mode published tag ran gate"
+      [ "$output" = 'pre-push: tag-only push of published commits; gate skipped' ] || fail "$mode skip message: $output"
+    done
+    for record in       "refs/tags/v2 $second refs/tags/v2 $zero"       "refs/tags/v1 $first refs/tags/v1 $second"       "refs/tags/v1 $first refs/heads/main $zero"       "refs/tags/v1 $first refs/tags/v1 malformed"       "refs/tags/v1 $first refs/tags/v1"       "refs/tags/v1 $first refs/tags/v1 $zero extra"       "refs/tags/v1 $first refs/tags/v1 $zero
+refs/heads/main $second refs/heads/main $first"; do
+      rm -f "$repo/gate"
+      printf '%b\n' "$record" | (cd "$repo" && OMS_TEST_CHECK_MARKER="$repo/gate" .git/hooks/pre-push origin url >/dev/null 2>&1)
+      [ -e "$repo/gate" ] || fail "$mode unsafe tag update skipped gate: $record"
+    done
+    rm -f "$repo/gate"
+    printf 'refs/tags/v1 %s refs/tags/v1 %s\n' "$zero" "$first" |
+      (cd "$repo" && OMS_TEST_CHECK_MARKER="$repo/gate" .git/hooks/pre-push origin url >/dev/null)
+    if [ "$mode" = full ]; then
+      [ -e "$repo/gate" ] || fail "full tag deletion skipped gate"
+    else
+      [ ! -e "$repo/gate" ] || fail "quick tag deletion ran gate"
+    fi
+  done
 }
 
 test_install_skills_detects_name_mismatch() {

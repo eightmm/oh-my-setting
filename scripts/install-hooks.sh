@@ -13,7 +13,7 @@ usage: install-hooks.sh [--quick]
 
 Install this repository's pre-push hook.
 
-  (default) Run scripts/check.sh before every push.
+  (default) Run scripts/check.sh before pushes except published tags.
   --quick  Run partial changed-file checks locally; requires the risk-based
            GitHub Actions gate to be a protected-branch requirement.
 EOF
@@ -49,11 +49,11 @@ EOF
 else
   cat > "$hooks_dir/pre-push" <<'EOF'
 #!/usr/bin/env bash
-# Installed by scripts/install-hooks.sh — runs the repo gate before every push.
+# Installed by scripts/install-hooks.sh — runs the full gate except for published tags.
 # Bypass for an emergency with: git push --no-verify
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
-exec "$root/scripts/check.sh"
+exec "$root/scripts/pre-push-check.sh" --full "$@"
 EOF
 fi
 chmod +x "$hooks_dir/pre-push"
@@ -62,6 +62,6 @@ if [ "$mode" = quick ]; then
   echo "installed: $hooks_dir/pre-push -> scripts/pre-push-check.sh (quick)"
   echo "required safety net: protect the destination branch with CI job 'gate'"
 else
-  echo "installed: $hooks_dir/pre-push -> scripts/check.sh (full)"
+  echo "installed: $hooks_dir/pre-push -> scripts/pre-push-check.sh (full)"
 fi
 echo "single-gate release: oms land --repo CHECKOUT (checks, pushes the same HEAD, then follows CI)"

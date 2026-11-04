@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fast, partial pre-push feedback for repositories whose protected branch
-# requires the complete GitHub Actions `gate` job. The hook supplies update
-# records on stdin; this script preserves the exact old/new commit range.
+# Full or partial pre-push feedback. Quick mode requires the complete GitHub
+# Actions `gate` job; update records preserve the exact old/new commit range.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+gate_mode=quick
+if [ "${1:-}" = --full ]; then
+  gate_mode=full
+  shift
+fi
 REMOTE_NAME="${1:-origin}"
 
 is_zero_oid() {
@@ -21,14 +25,51 @@ run_full_gate() {
 }
 
 update_count=0
+record_count=0
+tag_only=1
+malformed=0
 local_ref=""
 local_oid=""
 remote_ref=""
 remote_oid=""
-while IFS=' ' read -r next_local_ref next_local_oid next_remote_ref next_remote_oid; do
-  [ -n "$next_local_ref" ] || continue
-  if is_zero_oid "$next_local_oid"; then
+remote_refs=""
+if git -C "$ROOT" check-ref-format "refs/remotes/$REMOTE_NAME/probe" >/dev/null 2>&1; then
+  remote_refs="$(git -C "$ROOT" for-each-ref --format='%(objectname)' "refs/remotes/$REMOTE_NAME/" 2>/dev/null)" || tag_only=0
+else
+  tag_only=0
+fi
+while IFS=' ' read -r next_local_ref next_local_oid next_remote_ref next_remote_oid extra ||
+  [ -n "${next_local_ref:-}${next_local_oid:-}${next_remote_ref:-}${next_remote_oid:-}${extra:-}" ]; do
+  record_count=$((record_count + 1))
+  if [ -z "${next_local_ref:-}" ] || [ -z "${next_local_oid:-}" ] ||
+    [ -z "${next_remote_ref:-}" ] || [ -z "${next_remote_oid:-}" ] || [ -n "${extra:-}" ]; then
+    malformed=1
+    tag_only=0
     continue
+  fi
+  case "$next_local_ref:$next_remote_ref" in
+    refs/tags/*:refs/tags/*) ;;
+    *) tag_only=0 ;;
+  esac
+  if is_zero_oid "$next_local_oid"; then
+    tag_only=0
+    continue
+  fi
+  if ! is_zero_oid "$next_remote_oid" && [ "$next_remote_oid" != "$next_local_oid" ]; then
+    tag_only=0
+  fi
+  if [ "$tag_only" -eq 1 ]; then
+    commit="$(git -C "$ROOT" rev-parse --verify "$next_local_oid^{commit}" 2>/dev/null)" || commit=""
+    published=0
+    if [ -n "$commit" ]; then
+      for remote_tip in $remote_refs; do
+        if git -C "$ROOT" merge-base --is-ancestor "$commit" "$remote_tip" 2>/dev/null; then
+          published=1
+          break
+        fi
+      done
+    fi
+    [ "$published" -eq 1 ] || tag_only=0
   fi
   update_count=$((update_count + 1))
   local_ref="$next_local_ref"
@@ -36,6 +77,14 @@ while IFS=' ' read -r next_local_ref next_local_oid next_remote_ref next_remote_
   remote_ref="$next_remote_ref"
   remote_oid="$next_remote_oid"
 done
+
+if [ "$record_count" -gt 0 ] && [ "$tag_only" -eq 1 ]; then
+  echo "pre-push: tag-only push of published commits; gate skipped"
+  exit 0
+fi
+if [ "$gate_mode" = full ] || [ "$malformed" -eq 1 ]; then
+  exec "$ROOT/scripts/check.sh"
+fi
 
 if [ "$update_count" -eq 0 ]; then
   echo "pre-push: deletion-only update; no local gate needed"
