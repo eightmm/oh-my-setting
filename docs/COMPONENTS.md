@@ -684,6 +684,7 @@ unknown models and fallback routes cannot justify early stopping. A stop remains
 a failure. `OMS_REPAIR_REPLAY=0` retains the cap and records outcomes without
 reading history; `oms artifact-index telemetry` reports recorded/delegation
 counts, selections and stops, not a measured token or wall-clock saving.
+Telemetry also reports complete provider usage details by recorded route, with input, cached and output subtotals; incomplete reports are omitted.
 No extra run, timer, model, test omission or automatic delegation is introduced.
 Explicit repeated-failure advice bypasses replay: a different agent contributes
 to that trajectory and its cost, so single-worker evidence is not comparable.

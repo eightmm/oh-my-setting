@@ -318,6 +318,7 @@ def empty_route(provider: str, model_class: str, selected_model: str) -> dict:
         "fallback_used": 0,
         "token_reports": 0,
         "provider_reported_tokens": 0,
+        "usage_detail": {"reports": 0, "input_tokens": 0, "cache_read_tokens": 0, "output_tokens": 0},
         "duration_reports": 0,
         "wall_seconds": 0.0,
         "verified_success": 0,
@@ -520,6 +521,13 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
         if fallback_value is True:
             route["fallback_used"] += 1
 
+        detail = artifact_usage_metrics(repo, row)
+        keys = ("input_tokens", "cache_read_tokens", "output_tokens")
+        if detail and all(integer(detail.get(key)) is not None for key in keys):
+            route["usage_detail"]["reports"] += 1
+            for key in keys:
+                route["usage_detail"][key] += detail[key]
+
         present, duration, tokens = artifact_metrics(repo, row)
         prompt_bytes = integer(row.get("prompt_bytes"))
         if prompt_bytes is not None:
@@ -712,6 +720,11 @@ def emit_human(report: dict) -> None:
         )
     )
     for route in report["routes"]:
+        detail = route["usage_detail"]
+        if detail["reports"]:
+            print("tokens: provider=%s model=%s input=%d cached=%d output=%d reports=%d" % (
+                route["provider"], route["selected_model"], detail["input_tokens"],
+                detail["cache_read_tokens"], detail["output_tokens"], detail["reports"]))
         print(
             "route: provider=%s class=%s model=%s operations=%d "
             "exit-zero=%d exit-nonzero=%d fallback=%d"

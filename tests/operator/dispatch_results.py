@@ -6583,6 +6583,41 @@ def exercise_provider_account_routing():
         value = {"policy": "ordered", "accounts": [
             {"id": home.name, "home": str(home)} for home in homes]}
         now = time.time()
+        artifact_dir = base / ".oms/artifacts"
+        artifact_dir.mkdir(parents=True)
+        index = artifact_dir / "index.jsonl"
+        usage = {"provider": "antigravity", "input_tokens": 100,
+                 "cache_read_tokens": 40, "output_tokens": 10}
+        def event(when, detail):
+            return {"kind": "delegate", "provider": "antigravity",
+                    "ts": __import__("datetime").datetime.fromtimestamp(when, __import__("datetime").timezone.utc).isoformat(),
+                    "provider_usage": detail}
+        index.write_text("\n".join(json.dumps(row) for row in
+            (event(now, usage), event(now - 8 * 86400, usage), event(now, {}))) + "\n")
+        with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+            reading = metrics.collect({}, now=now, repo=base)["antigravity"]
+        assert reading["weekly_used"] is None and reading["source"] == "OMS artifacts", reading
+        assert (reading["calls"], reading["input_tokens"], reading["cache_read_tokens"], reading["output_tokens"]) == (1, 100, 40, 10), reading
+        assert "agy 7d" in metrics.usage_line({"provider_status": {"antigravity": reading}})
+        with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+            stale = metrics.collect({}, now=now + 8 * 86400, repo=base)["antigravity"]
+        assert stale["calls"] == 0, stale
+        index.write_text("")
+        with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+            empty = metrics.collect({}, now=now + 9 * 86400, repo=base)["antigravity"]
+        assert empty["calls"] == 0, empty
+        index.write_text((json.dumps(event(now, usage)) + "\n") * 1000)
+        with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+            at_limit = metrics.collect({}, now=now, repo=base)["antigravity"]
+        assert at_limit["calls"] == 1000, at_limit
+        index.write_text(json.dumps(event(now, usage)) + "\n" + "{}\n" * 1000)
+        with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+            over_limit = metrics.collect({}, now=now, repo=base)["antigravity"]
+        assert over_limit["calls"] == 0, over_limit
+        index.write_text("{bad\n" + json.dumps(event(now, dict(usage, input_tokens=-1))) + "\n")
+        with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
+            malformed = metrics.collect({}, now=now, repo=base)["antigravity"]
+        assert malformed["calls"] == 0, malformed
 
         def configure(data=None, root=None):
             config_path.write_text(json.dumps(root if root is not None else {

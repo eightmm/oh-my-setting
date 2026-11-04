@@ -14207,6 +14207,23 @@ PY
   "$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry |
     python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["outcomes"]["verified_success"] == 0; assert row["verification"]["unavailable"] == 2' ||
     fail "no-verify placeholder counted as a real verification"
+  cat > "$artifact_dir/usage.md" <<'EOF'
+## Output
+usage detail: {"provider":"antigravity","input_tokens":100,"cache_read_tokens":40,"output_tokens":10}
+usage detail: {"provider":"antigravity","input_tokens":30,"cache_read_tokens":5,"output_tokens":2}
+EOF
+  printf '%s\n' '{"kind":"delegate","provider":"antigravity","model_class":"explicit","selected_model":"agy-model","artifact":".oms/artifacts/usage.md"}' >> "$index"
+  printf '%s\n' '{"kind":"call","provider":"codex","model_class":"fast","selected_model":"gpt-fast","provider_usage":{"provider":"codex","input_tokens":20,"cache_read_tokens":10,"output_tokens":3}}' >> "$index"
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+rows = {(x["provider"], x["selected_model"]): x for x in r["routes"]}
+assert rows[("antigravity", "agy-model")]["usage_detail"] == {"input_tokens": 130, "cache_read_tokens": 45, "output_tokens": 12, "reports": 1}
+assert rows[("codex", "gpt-fast")]["usage_detail"] == {"input_tokens": 20, "cache_read_tokens": 10, "output_tokens": 3, "reports": 1}
+' || fail "per-route usage detail missing"
+  human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
+  contains "$human" 'tokens: provider=antigravity model=agy-model input=130 cached=45 output=12 reports=1' ||
+    fail "human telemetry omitted provider detail: $human"
 }
 
 test_artifact_index_latest_run_groups_rows() {

@@ -332,6 +332,49 @@ def current_weekly_reading(provider, consumer=None, now=None):
     return codex_weekly_reading(now, detail=True) if provider == "codex" else weekly_reading(provider, consumer, now)
 
 
+_AGY_USAGE_CACHE = {}
+
+
+def antigravity_artifact_reading(repo, now):
+    if repo is None:
+        return {}
+    root = os.path.realpath(repo)
+    path = Path(root) / ".oms/artifacts/index.jsonl"
+    try:
+        info = path.stat()
+        key = (info.st_ino, info.st_size, info.st_mtime_ns)
+    except OSError:
+        return {}
+    entry = _AGY_USAGE_CACHE.get(root)
+    if entry is None or entry[0] != key or now < entry[1] or now - entry[1] >= 60:
+        from collections import deque
+        helper = runpy.run_path(str(Path(__file__).with_name("artifact-telemetry.py")))
+        records = []
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                lines = deque(handle, maxlen=1000)
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or row.get("provider") != "antigravity" or row.get("kind") not in helper["ELIGIBLE_KINDS"]:
+                    continue
+                stamp = helper["parse_timestamp"](row.get("ts"))
+                detail = helper["artifact_usage_metrics"](root, row)
+                keys = ("input_tokens", "cache_read_tokens", "output_tokens")
+                if stamp is not None and detail and all(helper["integer"](detail.get(k)) is not None for k in keys):
+                    records.append((stamp.timestamp(), tuple(detail[k] for k in keys)))
+        except (OSError, OverflowError, ValueError):
+            return {}
+        entry = (key, now, records)
+        _AGY_USAGE_CACHE[root] = entry
+    recent = [values for stamp, values in entry[2] if now - 7 * 86400 <= stamp <= now]
+    return {"source": "OMS artifacts", "calls": len(recent),
+            "input_tokens": sum(v[0] for v in recent), "cache_read_tokens": sum(v[1] for v in recent),
+            "output_tokens": sum(v[2] for v in recent)}
+
+
 def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
     from panel_chats import current_models, windows
     from panel_cache import shared_board
@@ -385,6 +428,8 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
             if main["state"] in {"done", "failed", "cancelled", "timed_out", "abandoned"}:
                 row["context_left"] = None
         output[provider] = row
+    output["antigravity"] = {"context_left": None, "weekly_used": None, "source": "unavailable"}
+    output["antigravity"].update(antigravity_artifact_reading(repo, now))
     return output
 
 
@@ -1146,6 +1191,11 @@ def usage_line(report, width=100, unicode=True):
         parts.append("%s week %s%s%sctx %s%s" % (
             title, mark(week), " left" if week is not None else "", " · " if unicode else " / ",
             mark(context), " used" if context is not None else ""))
+    agy = mapping(mapping(report.get("provider_status")).get("antigravity"))
+    if agy.get("source") == "OMS artifacts":
+        total = agy["input_tokens"] + agy["cache_read_tokens"] + agy["output_tokens"]
+        amount = ("%.1fM" % (total / 1000000)) if total >= 1000000 else ("%.1fk" % (total / 1000) if total >= 1000 else str(total))
+        parts.append("agy 7d %s tok / %d calls" % (amount, agy["calls"]))
     line = (" │ " if unicode else " | ").join(parts)
     if len(line) > width:
         line = (" │ " if unicode else " | ").join(
