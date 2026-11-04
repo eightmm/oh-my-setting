@@ -3347,6 +3347,10 @@ ma_provider_attempt_run() {
     echo "error: unsupported provider: $provider" > "$output_file"
     return 2
   }
+  if [ "$provider" = codex ] && [ "$access" = write ] && oms_provider_codex_sandbox_blocked; then
+    echo "error: this host restricts unprivileged user namespaces, so Codex's workspace-write sandbox (bwrap) cannot start; route to another provider or run oms doctor for the remedy" > "$output_file"
+    return 2
+  fi
   if ! oms_provider_supports_access "$provider" "$access"; then
     echo "error: provider '$provider' does not support $access access through this transport" > "$output_file"
     return 2

@@ -327,6 +327,14 @@ def resolve_provider_account(route, provider_status=None, repo=None, config=None
     return dict(route, account=selected["id"], account_reason=reason)
 
 
+def codex_sandbox_blocked():
+    """True on a Linux host whose userns restriction stops Codex's bwrap sandbox (shell probe shared with doctor)."""
+    result = subprocess.run(["bash", "-c", '. "$1"; oms_provider_codex_sandbox_blocked',
+                             "panel-codex-sandbox", str(ROOT / "scripts/lib/provider-registry.sh")],
+                            capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
+    return result.returncode == 0
+
+
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
              recent=None, writer=None, catalogs=None, owner_model=None, repo=None, check_visibility=True,
              preferred=None, resolve_accounts=True):
@@ -362,6 +370,13 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         candidates = [c for c in candidates if route_family(c["provider"], c["model"])
                       and route_family(c["provider"], c["model"])[0] in RESEARCH_FAMILIES]
     usable = [c for c in candidates if installed is None or c["provider"] in installed]
+    skipped_codex = False
+    if access == "write" and any(c["provider"] == "codex" for c in usable) and codex_sandbox_blocked():
+        usable = [c for c in usable if c["provider"] != "codex"]
+        skipped_codex = True
+        if not usable:
+            raise ValueError("Codex write seats are unavailable: this host restricts unprivileged user namespaces "
+                             "(see oms doctor); no other provider serves the %s tier" % tier)
     if check_visibility:
         usable = public_candidates(usable, repo)
     if not usable:
@@ -479,7 +494,10 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     if role not in INDEPENDENT and preferred:
         usable = sorted(usable, key=lambda c: c["provider"] != preferred)
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])
-    return dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
+    route = dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
+    if skipped_codex:
+        route["route_reason"] = "Codex skipped: host restricts unprivileged user namespaces (bwrap sandbox); see oms doctor"
+    return route
 
 
 def model_family(owner, model):

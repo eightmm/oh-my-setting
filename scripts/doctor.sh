@@ -826,11 +826,8 @@ check_optional_cmd() {
 }
 
 check_unprivileged_userns() {
-  local setting_path="${OMS_DOCTOR_USERNS_SYSCTL_PATH:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
-
-  [ "$OMS_PLATFORM_KERNEL" = Linux ] || return 0
-  [ -r "$setting_path" ] || return 0
-  if [ "$(tr -d ' \r\n' < "$setting_path")" = 1 ]; then
+  . "$ROOT/scripts/lib/provider-registry.sh"
+  if oms_provider_codex_sandbox_blocked; then
     echo "warn: AppArmor restricts unprivileged user namespaces; Codex sandboxed runs may fail (bwrap). Allow userns for bwrap in an AppArmor profile, or set kernel.apparmor_restrict_unprivileged_userns=0 via sysctl."
   fi
 }

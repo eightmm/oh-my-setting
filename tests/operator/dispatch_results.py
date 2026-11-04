@@ -297,6 +297,33 @@ with patch.object(saved, "_records", return_value=(index_attempts, index_rows)),
 # END results task index
 
 
+def exercise_codex_sandbox_host_gate():
+    import os, tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        setting = os.path.join(tmp, "userns")
+        both = {"codex", "claude"}
+        for value, blocked in (("1\n", True), ("0\n", False), (None, False)):
+            if value is not None:
+                with open(setting, "w") as handle:
+                    handle.write(value)
+            with patch.dict(os.environ, {"OMS_DOCTOR_USERNS_SYSCTL_PATH": setting, "OMS_PLATFORM_KERNEL": "Linux"}):
+                write = allocate("codex", access="write", installed=both, check_visibility=False)
+                assert not blocked or write["provider"] == "claude", write
+                assert ("route_reason" in write) == blocked and (not blocked or "user namespaces" in write["route_reason"])
+                assert "route_reason" not in allocate("codex", access="read", installed=both, check_visibility=False)
+                if blocked:
+                    try:
+                        allocate("claude", access="write", installed={"codex"}, check_visibility=False)
+                    except ValueError as error:
+                        assert "user namespaces" in str(error)
+                    else:
+                        raise AssertionError("a Codex-only write route must be refused on a restricted host")
+        with open(setting, "w") as handle:
+            handle.write("1\n")
+        with patch.dict(os.environ, {"OMS_DOCTOR_USERNS_SYSCTL_PATH": setting, "OMS_PLATFORM_KERNEL": "Darwin"}):
+            assert "route_reason" not in allocate("claude", access="write", installed=both, check_visibility=False)
+
+
 def exercise_pi_cooldown_routing():
     import panel_routing
     from datetime import datetime, timezone, timedelta
@@ -402,6 +429,7 @@ def exercise_exact_model_routing():
     else:
         raise AssertionError("sole capped route was accepted")
     exercise_pi_cooldown_routing()
+    exercise_codex_sandbox_host_gate()
     # Free routes preserve read order but serve writes only after usable native routes.
     providers = {"pi", "claude", "codex"}
     for claude_used, codex_used, expected in ((10, 60, "claude"), (60, 10, "codex")):

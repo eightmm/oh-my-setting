@@ -689,3 +689,14 @@ oms_provider_selection_discovered_names() {
       ;;
   esac
 }
+
+# Codex write seats run in a bwrap sandbox that needs unprivileged user
+# namespaces; where AppArmor forbids them every sandboxed call fails
+# ("bwrap: loopback: Failed RTM_NEWADDR"). Linux-only; unreadable setting = fine.
+oms_provider_codex_sandbox_blocked() {
+  local setting_path="${OMS_DOCTOR_USERNS_SYSCTL_PATH:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+
+  [ "${OMS_PLATFORM_KERNEL:-$(uname -s 2>/dev/null)}" = Linux ] || return 1
+  [ -r "$setting_path" ] || return 1
+  [ "$(tr -d ' \r\n' < "$setting_path")" = 1 ]
+}
