@@ -6126,6 +6126,9 @@ SH
       grep -Fq '"output_tokens": 3' "$project/output" || exit 6
       grep -Fq '"cache_read_tokens": 4' "$project/output" || exit 7
     done
+    OMS_PEER_TIMEOUT=77m ma_provider_attempt antigravity write "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 9
+    grep -Fxq 77m "$project/args" || exit 10
     export AGY_MODE=zero
     ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
       provider-default '' test '' '' || exit 11

@@ -3543,7 +3543,7 @@ ma_provider_attempt_run() {
       # agy cuts itself off at --print-timeout regardless of the outer wall, so
       # its default must track the verb default or a raised wall changes nothing
       # for this seat: agy would still stop at its own five minutes.
-      cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-$(ma_peer_timeout_default)}")
+      cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}}")
       cmd+=(--output-format json)
       prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
       if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
