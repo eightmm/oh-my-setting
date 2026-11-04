@@ -6,11 +6,10 @@
   rules every session loads.
 - This repository maintains a Bash harness shared by Codex, Claude Code, and
   Antigravity. Preserve behavior across all three providers.
-- Keep scripts compatible with Bash 3.2, GNU/BSD userlands, and Windows Git
-  Bash for the documented core lifecycle. On that path, strip `\r` from any
-  value read back from `python3` and resolve paths with `pwd -P` before
-  comparing them: Windows Python emits CRLF, and one directory has more than
-  one spelling.
+- Supported hosts are Linux (Ubuntu 20.04 floor), WSL2 and macOS; native
+  Windows is retired and refused. Keep scripts compatible with Bash 3.2 and
+  GNU/BSD userlands for the documented core lifecycle, and resolve paths with
+  `pwd -P` before comparing them: one directory has more than one spelling.
 - Artifacts this repo publishes into shared namespaces carry the oms
   marker: skills and output styles are `oms-*`, MCP tools `oms_*`, work
   branches `oms/*`, and `skill-forge add` refuses new unprefixed project
@@ -46,7 +45,7 @@
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.
 - CI scopes PRs and main pushes alike. Full selections keep Linux lint, focused,
-  smoke and copy lifecycle coverage. Native macOS/Windows lifecycle, stock Bash
+  smoke and copy lifecycle coverage. Native macOS lifecycle, stock Bash
   3.2/BSD and Python 3.9 run for install/lifecycle/portability/Python compatibility
   changes and weekly/manual runs. Only plan-authorized skips pass the stable
   gate. CI remains authoritative. Smoke shards and focused lanes balance by

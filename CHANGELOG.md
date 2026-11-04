@@ -8,6 +8,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms doctor` inventories every provider CLI copy on PATH and vendor
+  channel. It runs only the PATH-selected copy; extras and aliases report
+  their digest state (matched/unmarked/invalid/unknown) and are never executed.
+- Artifact telemetry reports input, cached and output tokens per provider and
+  model. agy exposes no usage API, so the panel shows Antigravity's rolling
+  seven-day OMS-recorded tokens and calls.
 - `oms models` that finds an installed provider's catalog older than seven
   days starts the daily catalog refresh detached, behind the tick stamp and
   lock, so hosts without the hourly trigger stop routing on a stale catalog;
@@ -81,6 +87,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Native Windows (Git Bash/MSYS2/Cygwin) is retired. install, update, link,
+  `oms` and the Python runtime refuse it before any state write and point to
+  WSL2; an override cannot hide the real host identity. The Windows CI job is
+  removed, and `oms-windows-final` tags the last release with native Windows
+  support for uninstalling existing installs.
+- Codex account selection ranks eligible accounts by fresh measured weekly
+  quota for both policies, judging freshness by each reading's own timestamp,
+  and a capacity overflow re-picks across the remaining accounts.
+- The panel main bootstrap contract shrinks from 12.5KB to 6.1KB and points at
+  the harness reference files for tutorials.
+- Decisions task classification describes each role choice and tier cost.
+- Peer core helpers drop duplicated code paths; shell suites share smoke-env
+  assertion helpers.
 - Automatic trust-boundary reviews and the architect, critic and advisor roles
   default to the deep tier; frontier is for security-auditor or an explicit
   `--workload frontier`.
@@ -444,6 +463,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The Antigravity print timeout follows `OMS_PEER_TIMEOUT` when no explicit
+  print timeout is set, so a raised delegate wall no longer ends agy turns at 30m.
+- A write call whose provider reported failure still gets the automatic review
+  when its patch applies, its verify exited 0 and no guard, authority, timeout
+  or cancel stop occurred.
+- The outbound scanner flags private-root paths inside shell parameter defaults.
+- The Antigravity seven-day reading counts a row written this instant.
+- Smoke fixtures ignore the host's AppArmor user-namespace restriction, and the
+  dispatch-results section isolates HOME, so host state no longer fails CI or
+  steers routing assertions.
 - Antigravity read seats build their trees under the validated delegate root
   that the worker and review guards recognise, so a read seat no longer stops a
   concurrent write worker; a linked or invalid root falls back to TMPDIR.
