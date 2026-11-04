@@ -9,15 +9,6 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 export XDG_CACHE_HOME="$TMP/cache"
 mkdir -p "$XDG_CACHE_HOME"
 
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_contains() {
-  grep -Fq -- "$2" "$1" || fail "$1 does not contain: $2"
-}
-
 # An adopted repo plus a Claude transcript the handoff extractor can read. Two
 # user turns, since capture floors trivial sessions at --min-user-turns.
 make_handoff_fixture() {
@@ -332,8 +323,6 @@ test_receipt_preserves_snapshot_modes() {
   printf '0.4.0\n' > "$repo/VERSION"
   printf '{"version":"0.4.0"}\n' > "$repo/plugins/oh-my-setting/.codex-plugin/plugin.json"
   git -C "$repo" init -q
-  git -C "$repo" config user.email test@example.com
-  git -C "$repo" config user.name Test
   git -C "$repo" add .
   git -C "$repo" commit -qm fixture
 
@@ -688,10 +677,7 @@ commit="$(git rev-parse HEAD)"
 echo "update-check: up_to_date $commit"
 EOF
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
-  git -C "$repo" init -q
-  git -C "$repo" checkout -qb main
-  git -C "$repo" config user.email test@example.com
-  git -C "$repo" config user.name Test
+  oms_smoke_make_repo "$repo"
   git -C "$repo" add .
   git -C "$repo" commit -qm fixture
   python3 - "$receipt" "$repo" <<'PY'
@@ -712,11 +698,7 @@ test_update_refreshes_snapshot_policy() {
   local first
 
   mkdir -p "$source/scripts/lib" "$(dirname "$receipt")"
-  cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
-  cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
-  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
-  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
-  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
+  oms_smoke_make_update_source_fixture "$source"
   for script in install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate doctor install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/$script.sh"
     chmod +x "$source/scripts/$script.sh"
@@ -738,10 +720,7 @@ printf 'slurm\n' >> "$OMS_TEST_SNAPSHOT_LOG"
 EOF
   chmod +x "$source/scripts/write-machine-snapshot.sh" "$source/scripts/generate-slurm-reference.sh"
   printf 'base\n' > "$source/README.md"
-  git -C "$source" init -q
-  git -C "$source" checkout -qb main
-  git -C "$source" config user.email test@example.com
-  git -C "$source" config user.name Test
+  oms_smoke_make_repo "$source"
   git -C "$source" add .
   git -C "$source" commit -qm base
   first="$(git -C "$source" rev-parse HEAD)"

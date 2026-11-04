@@ -8,11 +8,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-v04-update.XXXXXX")"
 trap '[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMP"' EXIT
 export OMS_DELEGATE_WORKTREE_ROOT="$TMP/empty-worker-cache"
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
-
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
-export GIT_AUTHOR_NAME=oms-test GIT_AUTHOR_EMAIL=test@example.com
-export GIT_COMMITTER_NAME=oms-test GIT_COMMITTER_EMAIL=test@example.com
 
 make_agy_health_stub() {
   mkdir -p "$1/bin"
@@ -135,7 +131,6 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   cp "$ROOT/scripts/lib/agent-install-state.sh" "$source/scripts/lib/agent-install-state.sh"
-  rm -rf "$source/workflows"
   rm -f "$source/scripts/multi-agent-ask.sh" "$source/scripts/multi-agent-review.sh" \
     "$source/scripts/multi-agent-delegate.sh"
   printf 'VALUE = "aaaa"\n' > "$source/scripts/lib/precompile_probe.py"
@@ -422,11 +417,7 @@ test_doctor_failure_restores_previous_plugin_payload() {
   local agy_payload="$home/.gemini/config/plugins/oh-my-setting"
 
   mkdir -p "$source/scripts/lib" "$bin" "$(dirname "$receipt")" "$(dirname "$codex_config")"
-  cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
-  cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
-  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
-  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
-  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
+  oms_smoke_make_update_source_fixture "$source"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   for script in link install-claude-hooks install-autoupdate uninstall-autoupdate install-tools install-mcp install-agy-plugin; do
@@ -441,8 +432,7 @@ EOF
   printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/doctor.sh"
   printf 'old\n' > "$source/plugin-payload"
   chmod +x "$source/scripts/install-codex-plugin.sh" "$source/scripts/doctor.sh"
-  git -C "$source" init -q
-  git -C "$source" checkout -qb main
+  oms_smoke_make_repo "$source"
   git -C "$source" add .
   git -C "$source" commit -qm "fixture: old plugin"
   first="$(git -C "$source" rev-parse HEAD)"
@@ -587,7 +577,6 @@ test_schema1_update_preserves_channel_pin_and_cron() {
     scripts/lib/managed-target.py scripts/lib/agent-install-state.sh; do
     cp "$ROOT/$file" "$source/$file"
   done
-  rm -rf "$source/workflows"
   git -C "$source" add -A
   git -C "$source" commit -qm "fixture: 0.4 migration base" || true
   base="$(git -C "$source" rev-parse HEAD)"
@@ -788,11 +777,7 @@ test_signal_during_doctor_rolls_back_transaction() {
   local rc=0
 
   mkdir -p "$source/scripts/lib" "$(dirname "$receipt")" "$home/.codex"
-  cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
-  cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
-  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
-  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
-  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
+  oms_smoke_make_update_source_fixture "$source"
   cat > "$source/scripts/link.sh" <<'EOF'
 #!/usr/bin/env bash
 mkdir -p "$HOME/.codex"
@@ -805,8 +790,7 @@ EOF
   done
   printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/doctor.sh"
   chmod +x "$source/scripts/update.sh" "$source/scripts/link.sh" "$source/scripts/doctor.sh"
-  git -C "$source" init -q
-  git -C "$source" checkout -qb main
+  oms_smoke_make_repo "$source"
   git -C "$source" add .
   git -C "$source" commit -qm "fixture: signal base"
   first="$(git -C "$source" rev-parse HEAD)"
@@ -888,8 +872,7 @@ EOF_HEALTH
   chmod +x "$repo/scripts/install-tools.sh"
   printf 'local/\n' > "$repo/.gitignore"
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
-  git -C "$repo" init -q
-  git -C "$repo" checkout -qb main
+  oms_smoke_make_repo "$repo"
   git -C "$repo" add .
   git -C "$repo" commit -qm "fixture: detached auto update"
   commit="$(git -C "$repo" rev-parse HEAD)"
@@ -993,10 +976,7 @@ git -C "$root" checkout -q --detach "$selected"
 printf 'updated: %s -> %s\n' "${current:0:7}" "${selected:0:7}"
 EOF
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
-  git -C "$repo" init -q
-  git -C "$repo" checkout -qb main
-  git -C "$repo" config user.name test
-  git -C "$repo" config user.email test@example.com
+  oms_smoke_make_repo "$repo"
   printf 'base\n' > "$repo/value"
   git -C "$repo" add .
   git -C "$repo" commit -qm base
@@ -1225,10 +1205,7 @@ else
 fi
 EOF
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
-  git -C "$repo" init -q
-  git -C "$repo" checkout -qb main
-  git -C "$repo" config user.name test
-  git -C "$repo" config user.email test@example.com
+  oms_smoke_make_repo "$repo"
   printf 'base\n' > "$repo/value"
   git -C "$repo" add .
   git -C "$repo" commit -qm base
@@ -1486,8 +1463,7 @@ echo "error: codex command is required" >&2
 exit 1
 EOF
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
-  git -C "$repo" init -q
-  git -C "$repo" checkout -qb main
+  oms_smoke_make_repo "$repo"
   git -C "$repo" add .
   git -C "$repo" commit -qm "fixture: errmsg auto update"
   commit="$(git -C "$repo" rev-parse HEAD)"

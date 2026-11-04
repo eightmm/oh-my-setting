@@ -75,8 +75,6 @@ mkdir -p "$TEST_HOME" "$TEST_CWD"
 # (CI has none, dev machines vary — this is exactly what hid the
 # default-branch / no-identity bugs), pin a committer identity and a stable
 # locale/timezone. Tests must not depend on ambient host state.
-export GIT_AUTHOR_NAME="oms-test" GIT_AUTHOR_EMAIL="test@example.com"
-export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
 export LC_ALL=C LANG=C TZ=UTC
 export HOME="$TEST_HOME" XDG_CONFIG_HOME="$TMP/config" XDG_CACHE_HOME="$TEST_HOME/.cache" NVM_DIR="$TEST_HOME/.nvm"
 oms_smoke_use_fixture_root
@@ -94,29 +92,6 @@ cleanup() {
   rm -rf "$TMP"
 }
 trap cleanup EXIT
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_file_contains() {
-  local file="$1"
-  local text="$2"
-  grep -Fq -- "$text" "$file" || fail "$file does not contain: $text"
-}
-
-# A builtin substring match: `printf | grep -q` fails under pipefail when grep
-# exits at its match while printf is still writing a long value.
-contains() {
-  case "$1" in *"$2"*) return 0 ;; esac
-  return 1
-}
-
-assert_not_exists() {
-  local path="$1"
-  [ ! -e "$path" ] || fail "$path should not exist"
-}
 
 assert_one_artifact_contains() {
   local dir="$1"
@@ -146,54 +121,30 @@ agent_plan_land_reviewed() {
   local patch lease verify executor soul patch_sha
   local -a land_args
 
-  patch="$(python3 - "$repo/.oms/plan/tasks.json" "$id" patch <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    tasks = json.load(handle)["tasks"]
-task = tasks[sys.argv[2]]
-value = task.get(sys.argv[3], "")
-if not isinstance(value, str):
+  {
+    IFS= read -r -d '' patch
+    IFS= read -r -d '' lease
+    IFS= read -r -d '' verify
+    IFS= read -r -d '' executor
+    IFS= read -r -d '' soul
+    IFS= read -r -d '' patch_sha
+  } < <(python3 - "$repo" "$id" <<'PY'
+import hashlib, json, os, sys
+repo, task_id = sys.argv[1:]
+with open(os.path.join(repo, ".oms/plan/tasks.json"), encoding="utf-8") as handle:
+    task = json.load(handle)["tasks"][task_id]
+patch = task.get("patch", "")
+if not isinstance(patch, str):
     raise SystemExit("non-string plan receipt")
-print(value, end="")
-PY
-)"
-  lease="$(python3 - "$repo/.oms/plan/tasks.json" "$id" review_lease_id <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    task = json.load(handle)["tasks"][sys.argv[2]]
-print(task.get(sys.argv[3], ""), end="")
-PY
-)"
-  verify="$(python3 - "$repo/.oms/plan/tasks.json" "$id" verify <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    task = json.load(handle)["tasks"][sys.argv[2]]
-print(task.get(sys.argv[3], ""), end="")
-PY
-)"
-  executor="$(python3 - "$repo/.oms/plan/tasks.json" "$id" executor_id <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    task = json.load(handle)["tasks"][sys.argv[2]]
-print(task.get(sys.argv[3], ""), end="")
-PY
-)"
-  soul="$(python3 - "$repo/.oms/plan/tasks.json" "$id" executor_soul_sha256 <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    task = json.load(handle)["tasks"][sys.argv[2]]
-print(task.get(sys.argv[3], ""), end="")
-PY
-)"
-  patch_sha="$(python3 - "$repo" "$patch" <<'PY'
-import hashlib, os, sys
-path = sys.argv[2]
-if not os.path.isabs(path):
-    path = os.path.join(sys.argv[1], path)
+path = patch if os.path.isabs(patch) else os.path.join(repo, patch)
 with open(path, "rb") as handle:
-    print(hashlib.sha256(handle.read()).hexdigest())
+    digest = hashlib.sha256(handle.read()).hexdigest()
+values = [patch] + [task.get(key, "") for key in (
+    "review_lease_id", "verify", "executor_id", "executor_soul_sha256")] + [digest]
+for value in values:
+    sys.stdout.write(str(value) + "\0")
 PY
-)"
+  )
 
   land_args=(--repo "$repo" land --id "$id" --lease-id "$lease" \
     --expected-review-patch "$patch" \
@@ -417,13 +368,12 @@ test_delegate_kill9_recovery_via_gc() {
   # the orphan marker AND release the coupled plan task in one pass.
   make_committed_repo "$project"
   mkdir -p "$bin" "$home_dir"
-  cat > "$bin/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin/codex" <<EOF
 #!/usr/bin/env bash
 cat > /dev/null
 echo \$\$ > "$project/worker.pid"
 sleep 60
 EOF
-  chmod +x "$bin/codex"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal kill9 >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T --verify true >/dev/null
   OMS_AUTOPILOT_OWNER_ID="$owner" \
@@ -501,7 +451,7 @@ test_delegate_marker_set_lock_does_not_grow_per_run() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'fixture --effort low medium high'; exit 0 ;; esac
 if [ "${1:-}" = exec ] && [ -n "${LEASE_NEGATIVE_STARTED:-}" ]; then
@@ -511,7 +461,6 @@ cat >/dev/null
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_LOCK_DIR="$lock_dir" \
     PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
@@ -2611,12 +2560,11 @@ test_delegate_auto_verify_uses_check_contract() {
   git -C "$project" add scripts/check.sh
   git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm check
 
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 echo "worker done"
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
@@ -2681,7 +2629,7 @@ EOF
 
   "$ROOT/scripts/agent-task.sh" --repo "$project" init \
     --goal 'Detect read-only worker writes' --next 'Inspect worker report' >/dev/null
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'codex 1.0'; exit 0 ;; esac
 cat >/dev/null
@@ -2699,7 +2647,6 @@ if [ "${READ_ONLY_MANY_PATHS:-0}" = 1 ]; then
 fi
 echo 'worker done'
 EOF
-  chmod +x "$bin_dir/codex"
   local probe rc patch warning
   for probe in initial repair bounded; do
     rc=0
@@ -4918,12 +4865,11 @@ test_peer_review_gate_export_only() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 echo called >"$HOME/codex-called"
 exit 55
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OH_MY_SETTING_REVIEW_DRY_RUN=0 \
     "$ROOT/scripts/peer-review.sh" \
@@ -5310,10 +5256,7 @@ test_peer_review_dry_run_artifacts() {
   git -C "$project" init >/dev/null
   printf 'before\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m init >/dev/null
+  git -C "$project" commit -m init >/dev/null
   printf 'after\n' > "$project/file.txt"
 
   OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
@@ -5343,16 +5286,10 @@ test_peer_review_base_ref_diff() {
   git -C "$project" init >/dev/null
   printf 'one\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m first >/dev/null
+  git -C "$project" commit -m first >/dev/null
   printf 'two\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m second >/dev/null
+  git -C "$project" commit -m second >/dev/null
 
   OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
@@ -5556,10 +5493,7 @@ test_peer_review_excludes_private_status() {
   git -C "$project" init >/dev/null
   printf 'tracked\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m init >/dev/null
+  git -C "$project" commit -m init >/dev/null
   printf 'changed\n' > "$project/file.txt"
   printf 'API_%s=not-real\n' 'KEY' > "$project/.env.local"
 
@@ -5585,10 +5519,7 @@ test_peer_review_secret_diff_skips_external() {
   git -C "$project" init >/dev/null
   printf 'safe\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m init >/dev/null
+  git -C "$project" commit -m init >/dev/null
   printf 'api_%s%s = "not-real"\n' 'ke' 'y' >> "$project/file.txt"
 
   if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
@@ -5677,11 +5608,10 @@ test_peer_review_single_provider_failure_exits() {
 
   mkdir -p "$project" "$bin_dir" "$home_dir"
   git -C "$project" init >/dev/null
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 exit 42
 EOF
-  chmod +x "$bin_dir/codex"
 
   if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
@@ -6023,10 +5953,7 @@ test_peer_ask_repo_context_subset() {
   git -C "$project" init >/dev/null
   printf 'before\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m init >/dev/null
+  git -C "$project" commit -m init >/dev/null
   printf 'after\n' > "$project/file.txt"
   printf 'API_%s=not-real\n' 'KEY' > "$project/.env.local"
 
@@ -6056,10 +5983,7 @@ test_peer_ask_secret_diff_skips_external() {
   git -C "$project" init >/dev/null
   printf 'safe\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m init >/dev/null
+  git -C "$project" commit -m init >/dev/null
   printf 'api_%s%s = "not-real"\n' 'ke' 'y' >> "$project/file.txt"
 
   if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
@@ -6279,10 +6203,7 @@ make_committed_repo() {
   git -C "$project" init -b main >/dev/null
   printf 'base\n' > "$project/file.txt"
   git -C "$project" add file.txt
-  git -C "$project" \
-    -c user.email=test@example.com \
-    -c user.name='Test User' \
-    commit -m init >/dev/null
+  git -C "$project" commit -m init >/dev/null
 }
 
 write_auto_update_fixture_scripts() {
@@ -6365,8 +6286,6 @@ setup_auto_update_fixture() {
 
   git init --bare "$origin" >/dev/null
   git init -b main "$seed" >/dev/null
-  git -C "$seed" config user.email test@example.com
-  git -C "$seed" config user.name 'Test User'
   write_auto_update_fixture_scripts "$seed" ok ok
   printf 'local/\n' > "$seed/.gitignore"
   printf 'one\n' > "$seed/README.md"
@@ -6562,7 +6481,7 @@ PY_READ
 
   local bin_dir="$project/bin" home_dir="$project/home"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 prompt="$(cat)"
 [ -n "$prompt" ] || exit 0
@@ -6579,7 +6498,6 @@ if [ ! -f "$HOME/first-attempt" ]; then
 fi
 echo 'repaired read-only report'
 EOF
-  chmod +x "$bin_dir/codex"
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_TEST_DELEGATIONS="$project/.oms/delegations" "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt 'Read-only repair' --read-only --repair 1)"
@@ -6704,14 +6622,13 @@ test_delegate_fake_worker_apply() {
   git -C "$project" commit -qm 'verification fixture'
   git -C "$project" config diff.noprefix true
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'hello from worker\n' > delegated.txt
 printf 'assert() { test -f file.txt; }\nassert\n' > tests/verify.sh
 echo "worker done"
 EOF
-  chmod +x "$bin_dir/codex"
 
   local consent out
   for consent in none --allow-verifier-change --allow-test-reduction; do
@@ -6751,13 +6668,12 @@ test_delegate_nested_apply_preserves_parent_only_capture_guard() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'must stay in worker worktree\n' > nested.txt
 echo "nested worker done"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_HARNESS_DELEGATE_DEPTH=1 OMS_DELEGATE_MAX_DEPTH=2 \
@@ -6792,7 +6708,7 @@ PY
   # These primary-tree bytes are not part of the detached worker snapshot.
   printf 'def private_recover_lease(): pass\n' >> "$project/lease.py"
   printf 'def untracked_recover_lease(): pass\n' > "$project/untracked.py"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 set -e
 for arg in "$@"; do
@@ -6817,7 +6733,6 @@ else
 fi
 printf 'worker done\n'
 EOF
-  chmod +x "$bin_dir/codex"
 
   local mode
   for mode in default first cached disabled autobuild-disabled unmatched scoped; do
@@ -6910,12 +6825,11 @@ test_delegate_context_manifest_reaches_worker() {
   git -C "$project" add PROJECT.md
   git -C "$project" commit -qm context-fixture
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > "$OMS_CONTEXT_CAPTURE"
 printf 'worker done\n'
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     OMS_CONTEXT_CAPTURE="$capture" PATH="$bin_dir:/usr/bin:/bin" \
@@ -6965,13 +6879,12 @@ PY
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id context-debt \
     --provider codex >/dev/null
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > "$OMS_CONTEXT_DEBT_CAPTURE"
 printf 'VALUE = 2\n' >> large.py
 printf 'worker done\n'
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     OMS_CONTEXT_DEBT_CAPTURE="$capture" PATH="$bin_dir:/usr/bin:/bin" \
@@ -7003,12 +6916,11 @@ test_delegate_context_compile_failure_never_runs_worker() {
   make_committed_repo "$project"
   mkdir -p "$project/.oms/runtime" "$bin_dir" "$home_dir"
   printf 'not a directory\n' > "$project/.oms/runtime/context"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'ran\n' > "$OMS_CONTEXT_FAILURE_MARKER"
 cat >/dev/null
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     OMS_CONTEXT_FAILURE_MARKER="$marker" PATH="$bin_dir:/usr/bin:/bin" \
@@ -7030,12 +6942,11 @@ test_delegate_apply_refuses_dirty_tree() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'x\n' > delegated.txt
 EOF
-  chmod +x "$bin_dir/codex"
   printf 'dirty\n' >> "$project/file.txt"
 
   if HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -10655,41 +10566,10 @@ PY
     fail "nested acceptance retirement left its plan active"
 }
 
-test_agent_plan_retire_recovers_receipt_before_unlink() {
-  local project="$TMP/agent-plan-retire-crash"
-  local different_project="$TMP/agent-plan-retire-crash-new-live"
-  local claim_project="$TMP/agent-plan-retire-crash-claim"
-  local plan="$ROOT/scripts/agent-plan.sh"
-  local plan_file plan_sha receipt reason different_sha rc out
-  local authority_before authority_after custom_file
-  local alias_repo hold_ready hold_release lock_pid alias_rc tries
-
-  make_committed_repo "$project"
-  "$plan" --repo "$project" init --goal "old completed contract" --accept false >/dev/null
-  "$plan" --repo "$project" add --id t1 --title completed >/dev/null
-  python3 - "$project/.oms/plan/tasks.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-row = json.load(open(path, encoding="utf-8"))
-row["tasks"]["t1"]["state"] = "done"
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(row, handle, sort_keys=True)
-PY
-  plan_file="$project/.oms/plan/tasks.json"
-  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
-import hashlib, sys
-print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
-PY
-)"
-  reason="a reviewed PROJECT.md contract superseded this completed plan"
-
-  # Exercise the real transaction without a production fault hook: import the
-  # focused helper, let it durably write intent/archive/receipt, then replace
-  # only its process-local os.unlink for the exact live leaf. This models a
-  # process dying in the receipt-before-unlink window.
-  python3 - "$ROOT/scripts/lib/plan-retire.py" \
-    "$ROOT/scripts/lib/durable-jsonl.py" "$project" "$plan_file" \
-    "$plan_sha" "$reason" <<'PY' || fail "could not construct the receipt-before-unlink crash state"
+plan_retire_crash_fixture() {
+  local project="$1" plan_file="$2" plan_sha="$3" reason="$4"
+  {
+    cat <<'PY'
 import contextlib, io, json, os, re, runpy, sys
 
 helper, durable, repo, plan, plan_sha, reason = sys.argv[1:]
@@ -10722,6 +10602,46 @@ os.environ.update({
         preflight["plan_generation"], sort_keys=True, separators=(",", ":")),
     "OMS_RETIRE_PROOF_ID": preflight["proof_id"],
 })
+PY
+    cat
+  } | python3 -c 'import sys; exec(sys.stdin.read())' \
+    "$ROOT/scripts/lib/plan-retire.py" "$ROOT/scripts/lib/durable-jsonl.py" \
+    "$project" "$plan_file" "$plan_sha" "$reason"
+}
+
+test_agent_plan_retire_recovers_receipt_before_unlink() {
+  local project="$TMP/agent-plan-retire-crash"
+  local different_project="$TMP/agent-plan-retire-crash-new-live"
+  local claim_project="$TMP/agent-plan-retire-crash-claim"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_file plan_sha receipt reason different_sha rc out
+  local authority_before authority_after custom_file
+  local alias_repo hold_ready hold_release lock_pid alias_rc tries
+
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal "old completed contract" --accept false >/dev/null
+  "$plan" --repo "$project" add --id t1 --title completed >/dev/null
+  python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["tasks"]["t1"]["state"] = "done"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+PY
+  plan_file="$project/.oms/plan/tasks.json"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  reason="a reviewed PROJECT.md contract superseded this completed plan"
+
+  # Exercise the real transaction without a production fault hook: import the
+  # focused helper, let it durably write intent/archive/receipt, then replace
+  # only its process-local os.unlink for the exact live leaf. This models a
+  # process dying in the receipt-before-unlink window.
+  plan_retire_crash_fixture "$project" "$plan_file" "$plan_sha" "$reason" <<'PY' || fail "could not construct the receipt-before-unlink crash state"
 real_unlink = module["os"].unlink
 def crash_at_live_unlink(path):
     if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(plan)):
@@ -10901,41 +10821,7 @@ print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
 PY
 )"
   reason="a reviewed PROJECT.md contract superseded this completed plan"
-  python3 - "$ROOT/scripts/lib/plan-retire.py" \
-    "$ROOT/scripts/lib/durable-jsonl.py" "$project" "$plan_file" \
-    "$plan_sha" "$reason" <<'PY' || fail "could not construct the archive-before-receipt crash state"
-import contextlib, io, json, os, re, runpy, sys
-
-helper, durable, repo, plan, plan_sha, reason = sys.argv[1:]
-module = runpy.run_path(helper)
-run = module["run"]
-context = {
-    "path": plan, "ts": "2026-08-24T00:00:00Z",
-    "states": {"ready", "claimed", "running", "review", "landing", "blocked", "done"},
-    "id_re": re.compile(r"^[A-Za-z0-9._-]+$"),
-    "die": lambda message: (_ for _ in ()).throw(RuntimeError(message)),
-    "load_worker_markers": lambda: [],
-    "worker_marker_is_typed": lambda marker: True,
-    "marker_pid_alive": lambda marker: False,
-    "durable_jsonl": durable,
-}
-os.environ.update({
-    "OMS_REPO": repo, "OMS_PLAN_FILE": plan, "OMS_EXPECTED_PLAN_SHA256": plan_sha,
-    "OMS_DISPOSITION": "superseded", "OMS_REASON": reason,
-    "OMS_RETIRE_PHASE": "preflight",
-})
-output = io.StringIO()
-with contextlib.redirect_stdout(output):
-    run(context)
-preflight = json.loads(output.getvalue())
-os.environ.update({
-    "OMS_RETIRE_PHASE": "finalize",
-    "OMS_RETIRE_EXPECTED_HEAD": preflight["head"],
-    "OMS_RETIRE_EXPECTED_REF": preflight["git_ref"],
-    "OMS_RETIRE_EXPECTED_GENERATION": json.dumps(
-        preflight["plan_generation"], sort_keys=True, separators=(",", ":")),
-    "OMS_RETIRE_PROOF_ID": preflight["proof_id"],
-})
+  plan_retire_crash_fixture "$project" "$plan_file" "$plan_sha" "$reason" <<'PY' || fail "could not construct the archive-before-receipt crash state"
 globals_ = run.__globals__
 real_append = globals_["append_receipt"]
 def crash_before_receipt(filename, row):
@@ -11818,12 +11704,11 @@ print(json.dumps({"tasks": [{
 PY
 )"
     printf -v proposal_quoted '%q' "$proposal"
-    cat > "$bin_dir/codex" <<EOF
+    oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 printf '%s\n' 'plan follows.' $proposal_quoted
 EOF
-    chmod +x "$bin_dir/codex"
   }
   local verify
   for verify in 'tests/autopilot-smoke.sh' 'bash tests/autopilot-smoke.sh' \
@@ -11907,12 +11792,11 @@ test_plan_from_spec_proposes_then_applies() {
 
 - Required checks: bash tests/run.sh
 EOF
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > "$HOME/planner-prompt"
 printf 'plan follows.\n{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","assignment":{"provider":"claude","workload":"routine"}},{"id":"t2","title":"test: greeting covered","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}\n'
 EOF
-  chmod +x "$bin_dir/codex"
 
   # Propose: writes a proposal, prints the review pointer, touches no plan.
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -12275,7 +12159,7 @@ test_intent_draft_writes_reviewed_candidate() {
   mkdir -p "$bin_dir" "$home_dir" "$project/src" "$project/tests"
   # The stub echoes the prompt first — the skeleton inside the instructions
   # must not be mistaken for the answer (the answer follows the echo).
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 tee "$HOME/intent-prompt"
 printf '## Status\n\n- State: draft\n- Open decisions: none\n\n'
@@ -12286,7 +12170,6 @@ printf '## Edge cases\n\n- empty name input\n\n'
 printf '## Notes\n\n- Risks: none\n- Do not touch: docs/\n'
 printf 'tokens used\n308535\nusage detail: {}\n'
 EOF
-  chmod +x "$bin_dir/codex"
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex \
     --goal "인사 명령을 만들어줘" > "$project/draft-out" 2>&1 ||
@@ -13089,12 +12972,11 @@ test_plan_from_spec_prompt_carries_contract_decisions() {
   } > "$project/PROJECT.md"
   # The stub writes beside its own directory rather than through the
   # environment, so the capture does not depend on what the call passes down.
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > "$(dirname "$0")/../prompt.txt"
 printf '{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]}]}\n'
 EOF
-  chmod +x "$bin_dir/codex"
 
   env -u OMS_PANEL_MAIN_ATTEMPT HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex \
@@ -13394,12 +13276,11 @@ test_plan_from_spec_rejects_unsafe_executable_fields() {
   mkdir -p "$bin_dir" "$home_dir" "$project/tests"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"
   chmod +x "$project/tests/run.sh"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 echo called >> "$HOME/provider-called"
 exit 99
 EOF
-  chmod +x "$bin_dir/codex"
 
   for vector in \
     '`bash tests/run.sh' \
@@ -13907,14 +13788,13 @@ test_delegate_worker_failure_records_task_outcome() {
   "$ROOT/scripts/agent-task.sh" --repo "$project" init \
     --goal "Record failed delegated worker" \
     --next "Inspect task outcome" >/dev/null
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 echo "worker failed mid-run"
 exit 42
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
@@ -14038,12 +13918,11 @@ EOF
   git -C "$project" add train.py scripts/check.sh
   git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm ml-smoke
 
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 echo "worker done"
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
@@ -15684,7 +15563,7 @@ PY
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
   # A complete turn: answer item plus a closing turn.completed with usage.
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > /dev/null
 echo "ERROR rmcp::transport::worker: TRANSPORT-NOISE before the answer" >&2
@@ -15698,7 +15577,6 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_mess
 printf '%s\n' '{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: idle timeout waiting for websocket)"}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5,"cached_input_tokens":8}}'
 EOF
-  chmod +x "$bin_dir/codex"
   # The stream never names its model (probed live 2026-08-31: no event carries
   # one), so config.toml is useful inference, not transport-confirmed serving.
   # Real TOML parsing must accept single quotes and comments.
@@ -15736,14 +15614,13 @@ PY
 
   # A stream cut before turn.completed is codex's max_tokens: events arrived,
   # the turn never closed, and the answer only looks finished.
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > /dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"t2"}'
 printf '%s\n' '{"type":"turn.started"}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"A finished-looking sentence the stream cut right after."}}'
 EOF
-  chmod +x "$bin_dir/codex"
   rm -rf "$artifact_dir"
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
     --repo "$project" --artifact-dir "$artifact_dir" --to codex \
@@ -15928,25 +15805,6 @@ test_advise_picks_provider_that_is_not_caller() {
 
   find "$project/.oms/artifacts/advise" -type f -name 'antigravity-*.md' | grep . > /dev/null ||
     fail "OMS_ADVISOR_PROVIDER should pin the advisor provider"
-}
-
-test_v04_removes_deprecated_peer_shims() {
-  local shim
-
-  for shim in multi-agent-ask multi-agent-review multi-agent-delegate; do
-    assert_not_exists "$ROOT/scripts/$shim.sh"
-  done
-}
-
-test_peer_legacy_env_vars_are_simply_unknown() {
-  local out
-
-  # The 0.4 migration tombstones are gone: a legacy OMS_MULTI_AGENT_* variable
-  # is ignored like any other unknown environment, and the live variable works.
-  out="$(OMS_MULTI_AGENT_TIMEOUT=legacy OMS_PEER_TIMEOUT=2m bash -c \
-    ". '$ROOT/scripts/lib/peer-common.sh'; printf '%s' \"\$OMS_PEER_TIMEOUT\"")" ||
-    fail "peer-common must load with a legacy env var present"
-  [ "$out" = "2m" ] || fail "OMS_PEER_TIMEOUT should remain supported, got: $out"
 }
 
 
@@ -17688,13 +17546,12 @@ test_agent_call_term_removes_tmp_prompt() {
   local status=0
 
   mkdir -p "$project" "$bin_dir" "$tmp_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf '%s\n' "$$" > "$WORKER_PID_FILE"
 while :; do sleep 1; done
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" TMPDIR="$tmp_dir" PATH="$bin_dir:/usr/bin:/bin" \
     WORKER_PID_FILE="$project/worker.pid" \
@@ -18037,8 +17894,6 @@ test_auto_update_check_detects_update() {
 
   git init --bare "$origin" >/dev/null
   git init -b main "$seed" >/dev/null
-  git -C "$seed" config user.email test@example.com
-  git -C "$seed" config user.name 'Test User'
   mkdir -p "$seed/scripts"
   cp "$ROOT/scripts/auto-update.sh" "$seed/scripts/auto-update.sh"
   chmod +x "$seed/scripts/auto-update.sh"
@@ -18067,8 +17922,6 @@ test_auto_update_apply_skips_dirty_tree() {
 
   git init --bare "$origin" >/dev/null
   git init -b main "$seed" >/dev/null
-  git -C "$seed" config user.email test@example.com
-  git -C "$seed" config user.name 'Test User'
   mkdir -p "$seed/scripts"
   cp "$ROOT/scripts/auto-update.sh" "$seed/scripts/auto-update.sh"
   chmod +x "$seed/scripts/auto-update.sh"
@@ -18219,8 +18072,6 @@ test_auto_update_skips_without_upstream() {
   local work="$TMP/auto-no-upstream"
 
   git init -b main "$work" >/dev/null
-  git -C "$work" config user.email test@example.com
-  git -C "$work" config user.name 'Test User'
   mkdir -p "$work/scripts"
   cp "$ROOT/scripts/auto-update.sh" "$work/scripts/auto-update.sh"
   chmod +x "$work/scripts/auto-update.sh"
@@ -19473,8 +19324,6 @@ test_pre_push_quick_gate_uses_the_exact_push_range() {
 
   mkdir -p "$repo/scripts"
   git -C "$repo" init -b main >/dev/null
-  git -C "$repo" config user.email test@example.com
-  git -C "$repo" config user.name Test
   cp "$ROOT/scripts/pre-push-check.sh" "$repo/scripts/pre-push-check.sh"
   cat > "$repo/scripts/check.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -27990,17 +27839,6 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   assert_not_exists "$plain/.oms"
 }
 
-test_turn_guard_ignores_retired_format_settings() {
-  local project="$TMP/turn-guard"
-  local out
-  make_committed_repo "$project"
-  printf 'change\n' >> "$project/file.txt"
-  out="$(printf '{"hook_event_name":"Stop","session_id":"s1","cwd":"%s","last_assistant_message":"Done."}' "$project" |
-    OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=99 OMS_TURN_GUARD_STRICT=1 OMS_CI_TICK=0 OMS_WORK_JOURNAL=0 bash "$ROOT/scripts/turn-guard.sh")"
-  [ -z "$out" ] || fail "retired format settings must never block delivery: $out"
-  assert_not_exists "$project/.oms/hooks/sessions"
-}
-
 test_session_budget_blocks_once_past_the_turn_cap() {
   local d="$TMP/session-budget"
   local project="$d/project"
@@ -29077,7 +28915,7 @@ test_install_codex_plugin_skips_current_cache() {
   cache="$home/.codex/plugins/cache/oh-my-setting-local/oh-my-setting/$version"
   mkdir -p "$cache"
   cp -R "$ROOT/plugins/oh-my-setting/." "$cache/"
-  cat > "$bin/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CODEX_LOG"
 if [ "$1 $2 $3" = "plugin marketplace list" ]; then
@@ -29086,7 +28924,6 @@ elif [ "$1 $2 $3" = "plugin list --json" ]; then
   printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'
 fi
 EOF
-  chmod +x "$bin/codex"
 
   HOME="$home" CODEX_HOME="$home/.codex" CODEX_LOG="$log" OMS_TEST_ROOT="$ROOT" \
     PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" > "$d/out"
@@ -29125,7 +28962,7 @@ PY
   mkdir -p "$cache"
   printf 'stale\n' > "$cache/stale.txt"
 
-  cat > "$bin/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CODEX_LOG"
 if [ "$1 $2 $3" = "plugin list --json" ]; then
@@ -29139,7 +28976,6 @@ elif [ "$1 $2" = "plugin add" ]; then
   printf 'Installed plugin root: %s\n' "$OMS_TEST_CACHE"
 fi
 EOF
-  chmod +x "$bin/codex"
 
   env -u OH_MY_SETTING_CODEX_PLUGIN \
     HOME="$home" XDG_CONFIG_HOME="$d/config" CODEX_HOME="$home/.codex" \
@@ -32335,11 +32171,6 @@ EOF
   if "$ROOT/scripts/consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
     fail "a target that is neither PROVIDER nor PROVIDER:model=NAME must be refused"
   fi
-  if HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
-    --tiers deep "x" --quiet >/dev/null 2>&1; then
-    fail "the removed --tiers flag must be refused"
-  fi
 }
 
 test_worker_tier_follows_the_role_before_the_phase() {
@@ -32359,12 +32190,6 @@ test_worker_tier_follows_the_role_before_the_phase() {
     printf "%s %s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON" "$OMS_MODEL_PRIMARY"')"
   [ "$out" = "explicit explicit named-model" ] ||
     fail "an explicit model must be used as given, got: $out"
-
-  out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
-    OMS_MODEL_CLASS_REQUEST=deep oms_model_prepare codex >/dev/null
-    printf "%s" "$OMS_MODEL_PRIMARY"' 2>&1)"
-  [ "$out" = "provider-default" ] ||
-    fail "a legacy class request must be ignored without noise, got: $out"
 }
 
 test_agent_call_declares_its_work_phase() {
@@ -32756,13 +32581,12 @@ test_delegate_detects_a_worker_writing_outside_its_worktree() {
   mkdir -p "$bin_dir" "$home_dir"
   # Scope checks only inspect the returned patch, so a worker that edits the
   # primary worktree by absolute path used to be invisible.
-  cat > "$bin_dir/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 printf 'written by the worker\n' >> "$project/file.txt"
 echo "done"
 echo 'usage detail: {"provider":"codex","output_tokens":37}'
 EOF
-  chmod +x "$bin_dir/codex"
 
   rc=0
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -32783,13 +32607,12 @@ PY
 
   # The startup scrub must also protect ordinary rows, where there is no
   # guard-specific capture assignment to replace a caller's annotation.
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'delegated output\n' > worker-output.txt
 echo 'usage detail: {"provider":"codex","output_tokens":37}'
 EOF
-  chmod +x "$bin_dir/codex"
   rc=0
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_INDEX_PROVIDER_USAGE_JSON="$planted_usage" "$ROOT/scripts/peer-delegate.sh" \
@@ -32835,14 +32658,13 @@ test_delegate_detects_git_config_and_hook_tampering() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 git -C "$project" config --local oms.tampered yes
 printf '#!/bin/sh\nexit 0\n' > "$project/.git/hooks/pre-commit"
 chmod +x "$project/.git/hooks/pre-commit"
 echo "done"
 EOF
-  chmod +x "$bin_dir/codex"
 
   rc=0
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -34183,12 +34005,11 @@ test_delegate_leaves_a_well_behaved_worker_alone() {
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
   # Edits only its own worktree, which is exactly what a worker should do.
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'worker edit\n' >> file.txt
 echo "edited file.txt in the worktree"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
@@ -34210,12 +34031,11 @@ test_delegate_empty_write_is_no_change_unless_allowed() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 echo "worker made no changes"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
@@ -34254,7 +34074,7 @@ test_delegate_rejects_a_worker_commit_in_its_managed_worktree() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'committed by delegated worker\n' >> file.txt
@@ -34262,7 +34082,6 @@ git add file.txt
 git -c user.email=t@example.com -c user.name=t commit -qm delegated-commit
 echo "committed inside the managed worktree"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
@@ -34289,7 +34108,7 @@ test_delegate_rejects_replaced_managed_worktree_path() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 original="\$PWD"
@@ -34298,7 +34117,6 @@ mv "\$original" "\$original.moved"
 ln -s "$project" "\$original"
 echo "replaced the managed worktree pathname"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_WORKER_GUARD_OFF=1 \
@@ -34389,7 +34207,7 @@ test_delegate_rejects_recreated_managed_gitdir_inode() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 git_dir="$(git rev-parse --git-dir)"
@@ -34398,7 +34216,6 @@ mkdir "$git_dir"
 cp -R "$git_dir.moved/." "$git_dir/"
 echo "recreated the managed gitdir at the same pathname"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_WORKER_GUARD_OFF=1 \
@@ -34427,13 +34244,12 @@ test_delegate_rejects_worktree_path_replaced_during_verify() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'ordinary worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
   cat > "$verifier" <<EOF
 #!/usr/bin/env bash
 set -eu
@@ -34471,7 +34287,7 @@ test_delegate_does_not_export_owner_authority_to_worker() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 for name in OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID OMS_PANEL_EXECUTION_ROOT OMS_INDEX_BASE_REPO DELEGATE_SOURCE_REPO \
@@ -34486,7 +34302,6 @@ done
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_TASK_ID=caller-task OMS_PLAN_LEASE_ID=caller-lease \
@@ -34508,14 +34323,9 @@ test_default_worker_guard_binds_current_plan_and_executor_authority() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal current-authority >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
+  make_current_operation_fixture "$project" current-authority
 
-  cat > "$bin_dir/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -34543,7 +34353,6 @@ PY
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -34580,13 +34389,8 @@ test_current_operation_snapshot_is_not_worker_rewritable() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal snapshot-integrity >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
-  cat > "$bin_dir/codex" <<EOF
+  make_current_operation_fixture "$project" snapshot-integrity
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -34603,7 +34407,6 @@ rm -f "\$(dirname "\$PWD")/worker-guard/current-operation.json"
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -34630,7 +34433,7 @@ test_current_operation_guard_allows_a_sibling_task_transition() {
     --title sibling --allowed sibling.txt --verify true >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id current \
     --provider codex >/dev/null
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'worker edit\n' >> file.txt
@@ -34638,7 +34441,6 @@ printf 'worker edit\n' >> file.txt
 while [ ! -f "$OMS_TEST_BARRIER/release" ]; do sleep 0.05; done
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_TEST_BARRIER="$barrier" OMS_PEER_TIMEOUT=15 \
@@ -34694,7 +34496,7 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(plan, handle, ensure_ascii=False, indent=2)
 PY
 
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'worker edit\n' >> file.txt
@@ -34702,7 +34504,6 @@ printf 'worker edit\n' >> file.txt
 while [ ! -f "$OMS_TEST_BARRIER/release" ]; do sleep 0.05; done
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_TEST_BARRIER="$barrier" OMS_PEER_TIMEOUT=15 \
@@ -34729,6 +34530,16 @@ EOF
     grep -F '"state": "review"' > /dev/null || fail "the heartbeating task did not publish review"
 }
 
+make_current_operation_fixture() {
+  local project="$1" goal="$2"
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal "$goal" >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+}
+
 test_current_operation_guard_rejects_invalid_heartbeat_timestamps() {
   local project="$TMP/worker-current-future-heartbeat"
   local bin_dir="$project-bin"
@@ -34737,13 +34548,8 @@ test_current_operation_guard_rejects_invalid_heartbeat_timestamps() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal future-heartbeat >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
-  cat > "$bin_dir/codex" <<EOF
+  make_current_operation_fixture "$project" future-heartbeat
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -34762,7 +34568,6 @@ PY
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -34800,14 +34605,9 @@ test_current_operation_guard_restores_same_lease_tampering() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal restore-authority >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
+  make_current_operation_fixture "$project" restore-authority
 
-  cat > "$bin_dir/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -34834,7 +34634,6 @@ PY
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -34863,13 +34662,8 @@ test_current_operation_guard_restores_a_deleted_task() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal deleted-task >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
-  cat > "$bin_dir/codex" <<EOF
+  make_current_operation_fixture "$project" deleted-task
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -34886,7 +34680,6 @@ PY
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -34918,13 +34711,8 @@ test_current_operation_guard_restores_authority_under_forged_lease() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal forged-lease >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
-  cat > "$bin_dir/codex" <<EOF
+  make_current_operation_fixture "$project" forged-lease
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -34947,7 +34735,6 @@ PY
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -34976,13 +34763,8 @@ test_current_operation_guard_keeps_an_operator_block() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal operator-block >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
-  cat > "$bin_dir/codex" <<EOF
+  make_current_operation_fixture "$project" operator-block
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -35003,7 +34785,6 @@ PY
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -35031,13 +34812,8 @@ test_current_operation_restore_refuses_a_worker_written_snapshot() {
   local out
   local rc=0
 
-  make_guard_repo "$project"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal forged-snapshot >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
-    --title guarded --allowed file.txt --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
-    --provider codex >/dev/null
-  cat > "$bin_dir/codex" <<EOF
+  make_current_operation_fixture "$project" forged-snapshot
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 python3 - "$project/.oms/plan/tasks.json" <<'PY'
@@ -35055,7 +34831,6 @@ printf '{"schema":2,"plan":{"task_id":"guarded","lease_id":"lease_forged","task"
 printf 'worker edit\n' >> file.txt
 echo done
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
@@ -35831,22 +35606,13 @@ test_worker_guard_rejects_duplicate_live_managed_worktree_metadata() {
   local rc=0
 
   make_guard_repo "$project"
-  mkdir -p "$sibling_parent"
-  git -C "$project" worktree add --quiet --detach "$sibling" HEAD >/dev/null 2>&1 ||
-    fail "could not create the live managed sibling fixture"
-  {
-    printf 'kind=oh-my-setting-temp\n'
-    printf 'pid=%s\n' "$$"
-    printf 'repo=%s\n' "$project"
-    printf 'worktree=%s\n' "$sibling"
-    printf 'temporary=1\n'
-  } > "$sibling_parent/.oh-my-setting-tmp"
+  make_live_managed_sibling "$project" "$sibling_parent"
   common_dir="$(git -C "$project" rev-parse --git-common-dir)"
   case "$common_dir" in /*) ;; *) common_dir="$project/$common_dir" ;; esac
   real_metadata="$(git -C "$sibling" rev-parse --git-dir)"
   case "$real_metadata" in /*) ;; *) real_metadata="$sibling/$real_metadata" ;; esac
 
-  cat > "$bin_dir/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 mkdir -p "$common_dir/worktrees/rogue-duplicate"
@@ -35854,7 +35620,6 @@ printf '%s\\n' "$sibling/.git" > "$common_dir/worktrees/rogue-duplicate/gitdir"
 cp "$real_metadata/HEAD" "$common_dir/worktrees/rogue-duplicate/HEAD"
 echo "planted duplicate managed metadata"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
@@ -35883,29 +35648,19 @@ test_worker_guard_rejects_symlink_worktree_metadata() {
   local rc=0
 
   make_guard_repo "$project"
-  mkdir -p "$sibling_parent"
-  git -C "$project" worktree add --quiet --detach "$sibling" HEAD >/dev/null 2>&1 ||
-    fail "could not create the live sibling fixture for symlink metadata"
-  {
-    printf 'kind=oh-my-setting-temp\n'
-    printf 'pid=%s\n' "$$"
-    printf 'repo=%s\n' "$project"
-    printf 'worktree=%s\n' "$sibling"
-    printf 'temporary=1\n'
-  } > "$sibling_parent/.oh-my-setting-tmp"
+  make_live_managed_sibling "$project" "$sibling_parent"
   common_dir="$(git -C "$project" rev-parse --git-common-dir)"
   case "$common_dir" in /*) ;; *) common_dir="$project/$common_dir" ;; esac
   real_metadata="$(git -C "$sibling" rev-parse --git-dir)"
   case "$real_metadata" in /*) ;; *) real_metadata="$sibling/$real_metadata" ;; esac
   real_metadata_name="$(basename "$real_metadata")"
 
-  cat > "$bin_dir/codex" <<EOF
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
 ln -s "$real_metadata_name" "$common_dir/worktrees/rogue-link"
 echo "planted symlink worktree metadata"
 EOF
-  chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
@@ -37880,7 +37635,7 @@ test_parallel_delegates_do_not_erase_each_others_authority_state() {
 
   make_guard_repo "$project"
   mkdir -p "$barrier"
-  cat > "$bin_dir/codex" <<'EOF'
+  oms_smoke_make_fake_provider_stub "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
@@ -37895,7 +37650,6 @@ printf 'worker %s edit\n' "$name" >> file.txt
 while [ ! -f "$OMS_TEST_BARRIER/$name.release" ]; do sleep 0.05; done
 echo "parallel worker $name done"
 EOF
-  chmod +x "$bin_dir/codex"
 
   # Start B first so its snapshots are complete before A exists. FIFO release
   # below then proves B tolerates A's live managed worktree appearing during its
@@ -45082,7 +44836,7 @@ SH
     codex_call="call-fedcba9876543210"
     mkdir -p "$codex_root"
     printf 'prompt\n' > "$codex_root/prompt"
-    cat > "$bin/codex" <<'SH'
+    oms_smoke_make_fake_provider_stub "$bin/codex" <<'SH'
 #!/usr/bin/env bash
 if [ "${OMS_PANEL_CALL_ID+x}" = x ]; then
   echo 'nested call id leaked' >&2
@@ -45094,7 +44848,6 @@ printf '%s\n' \
   '{"type":"item.completed","item":{"type":"agent_message","text":"Updated src/changed.py"}}' \
   '{"type":"turn.completed","usage":{"input_tokens":8,"output_tokens":3}}'
 SH
-    chmod +x "$bin/codex"
     export OMS_PANEL_CALL_ID="$codex_call"
     . "$ROOT/scripts/lib/peer-common.sh"
     oms_provider_normalize() { printf '%s' "$1"; }

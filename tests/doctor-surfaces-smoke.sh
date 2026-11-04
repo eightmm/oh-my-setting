@@ -19,11 +19,6 @@ trap 'rm -rf "$TMP"' EXIT
 EXPECTED_HOOKS_SCHEMA=8
 EXPECTED_SURFACES_SHA256=3cc3f2cf77f84796bf614d4adb0de5fdbd5178dd1928393b2b3dd12228764250
 
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
 # A fixture HOME with a receipt this checkout owns, an empty harness repo for
 # the event stream, and a settings.json built from --print-expected so the
 # tests describe deviations from the real list rather than restating it.
@@ -559,31 +554,22 @@ test_evidence_window_marks_a_silent_registered_surface() {
 # --- receipt schema stamp ----------------------------------------------------
 
 test_stale_receipt_schema_warns() {
-  local home="$TMP/stale-schema"
-  local out
-
-  make_fixture "$home" rows 0
-  out="$(run_surfaces "$home")" ||
-    { printf '%s\n' "$out"; fail "a stale hooks_schema is a warning, not a failure"; }
-  case "$out" in
-    *"warn: install receipt hooks_schema 0 != source"*) ;;
-    *) printf '%s\n' "$out"; fail "a stale hooks_schema should warn" ;;
-  esac
-}
-
-test_absent_receipt_schema_warns() {
-  local home="$TMP/absent-schema"
-  local out
-
-  # An install that predates the stamp: the receipt is valid and complete, and
-  # this warning is the only thing that says its surface list may be older.
-  make_fixture "$home" rows ""
-  out="$(run_surfaces "$home")" ||
-    { printf '%s\n' "$out"; fail "an unstamped receipt is a warning, not a failure"; }
-  case "$out" in
-    *"warn: install receipt records no hooks_schema"*) ;;
-    *) printf '%s\n' "$out"; fail "an unstamped receipt should warn" ;;
-  esac
+  local home out schema expected
+  for schema in 0 ''; do
+    home="$TMP/schema-${schema:-absent}"
+    if [ -n "$schema" ]; then
+      expected="warn: install receipt hooks_schema 0 != source"
+    else
+      expected="warn: install receipt records no hooks_schema"
+    fi
+    make_fixture "$home" rows "$schema"
+    out="$(run_surfaces "$home")" ||
+      { printf '%s\n' "$out"; fail "stale or unstamped hooks_schema is a warning, not a failure"; }
+    case "$out" in
+      *"$expected"*) ;;
+      *) printf '%s\n' "$out"; fail "stale or unstamped hooks_schema should warn: $expected" ;;
+    esac
+  done
 }
 
 test_install_stamps_hooks_schema_into_the_receipt() {
@@ -641,6 +627,13 @@ test_displaced_user_config_is_reported() {
   local out
 
   make_fixture "$home" rows 1
+  out="$(run_default_doctor "$home")"
+  case "$out" in
+    *"displaced user config"*)
+      printf '%s\n' "$out"
+      fail "a HOME with no backups should say nothing about displaced config"
+      ;;
+  esac
   mkdir -p "$home/.codex" "$home/.gemini"
   printf 'my own rules\n' > "$home/.claude/CLAUDE.md.backup.20260610160231"
   printf 'my own rules\n' > "$home/.codex/AGENTS.md.backup.20260610160231"
@@ -648,14 +641,7 @@ test_displaced_user_config_is_reported() {
   # The default doctor run in a fixture HOME fails for unrelated reasons (no
   # managed targets are linked there), so this asserts on the report line, not
   # on the exit status.
-  out="$(HOME="$home" \
-    XDG_CONFIG_HOME="$home/.config" \
-    OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
-    OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
-    OMS_DOCTOR_PROJECT_DIR="$home/repo" \
-    OH_MY_SETTING_MODEL_DOCTOR=0 \
-    OH_MY_SETTING_CODEX_PLUGIN=0 \
-    bash "$ROOT/scripts/doctor.sh" 2>&1 || true)"
+  out="$(run_default_doctor "$home")"
 
   case "$out" in
     *"displaced user config: $home/.claude/CLAUDE.md.backup.20260610160231 (restore: oms uninstall, or merge it)"*) ;;
@@ -669,28 +655,6 @@ test_displaced_user_config_is_reported() {
     *".gemini/AGENTS.md.backup"*)
       printf '%s\n' "$out"
       fail "a target with no backup should produce no line"
-      ;;
-  esac
-}
-
-test_clean_home_reports_no_displaced_config() {
-  local home="$TMP/undisplaced"
-  local out
-
-  make_fixture "$home" rows 1
-  out="$(HOME="$home" \
-    XDG_CONFIG_HOME="$home/.config" \
-    OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
-    OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
-    OMS_DOCTOR_PROJECT_DIR="$home/repo" \
-    OH_MY_SETTING_MODEL_DOCTOR=0 \
-    OH_MY_SETTING_CODEX_PLUGIN=0 \
-    bash "$ROOT/scripts/doctor.sh" 2>&1 || true)"
-
-  case "$out" in
-    *"displaced user config"*)
-      printf '%s\n' "$out"
-      fail "a HOME with no backups should say nothing about displaced config"
       ;;
   esac
 }
@@ -937,10 +901,8 @@ test_missing_registration_fails_and_is_named
 test_complete_registration_is_ok
 test_evidence_window_marks_a_silent_registered_surface
 test_stale_receipt_schema_warns
-test_absent_receipt_schema_warns
 test_install_stamps_hooks_schema_into_the_receipt
 test_displaced_user_config_is_reported
-test_clean_home_reports_no_displaced_config
 test_post_refresh_integration_audit
 test_expected_surface_list_is_bump_gated
 test_capability_receipt_names_tool_absences

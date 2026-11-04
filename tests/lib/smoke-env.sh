@@ -8,9 +8,11 @@ unset OMS_PEER_VERIFY_TIMEOUT
 # Runtime seat-wall and worker-guard knobs of an accepting caller are not the fixtures' own.
 unset OMS_PEER_TIMEOUT OMS_PEER_PRINT_TIMEOUT OMS_WORKER_GUARD_STRICT OMS_WORKER_GUARD_OFF
 unset NVM_BIN NVM_DIR
-# Match CI's hermetic Git configuration. Fixtures that need commits must set
-# their own identity; ambient developer identity must never make them pass.
+# Match CI's hermetic Git configuration and pin a fixture identity so commits
+# never depend on ambient developer configuration.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=oms-test GIT_AUTHOR_EMAIL=test@example.com
+export GIT_COMMITTER_NAME=oms-test GIT_COMMITTER_EMAIL=test@example.com
 # Config resolution is hermetic too: suites run directly (worker verify, floors)
 # must not read or write the invoking user's provider account registry. Keep
 # check.sh's runtime config, or the private dir an enclosing suite already made.
@@ -47,4 +49,55 @@ oms_smoke_use_fixture_root() {
   export OMS_LOCK_DIR="$OMS_FIXTURE_ROOT/locks"
   export XDG_STATE_HOME="$OMS_FIXTURE_ROOT/state"
   export XDG_CACHE_HOME="$OMS_FIXTURE_ROOT/cache"
+}
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_file_contains() {
+  local file="$1"
+  local text="$2"
+  grep -Fq -- "$text" "$file" || fail "$file does not contain: $text"
+}
+
+# A builtin substring match avoids SIGPIPE under pipefail when a producer
+# writes more bytes than an early-exiting grep needs.
+contains() {
+  case "$1" in *"$2"*) return 0 ;; esac
+  return 1
+}
+
+assert_not_exists() {
+  local path="$1"
+  [ ! -e "$path" ] || fail "$path should not exist"
+}
+
+assert_contains() {
+  assert_file_contains "$@"
+}
+
+# Initialize only: callers retain their own tracked files and first commit.
+oms_smoke_make_repo() {
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" checkout -qb main
+}
+
+# Read the exact provider program from stdin; callers choose its interpreter.
+oms_smoke_make_fake_provider_stub() {
+  cat > "$1"
+  chmod +x "$1"
+}
+
+# Keep transaction fixtures on the working implementation without copying a repo.
+oms_smoke_make_update_source_fixture() {
+  local source="$1"
+  local file
+  mkdir -p "$source/scripts/lib"
+  cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
+  for file in install-contract.sh install-lifecycle-lock.sh file-lock.sh poll.sh; do
+    cp "$ROOT/scripts/lib/$file" "$source/scripts/lib/$file"
+  done
 }
