@@ -272,6 +272,10 @@ EOF
 }
 
 while [ "$#" -gt 0 ]; do
+  if ma_parse_common_option "$@"; then
+    shift "$MA_COMMON_OPTION_SHIFT"
+    continue
+  fi
   case "$1" in
     --to)
       [ "$#" -ge 2 ] || fail "--to requires provider"
@@ -299,16 +303,6 @@ while [ "$#" -gt 0 ]; do
       ROLE="$2"
       shift 2
       ;;
-    --repo)
-      [ "$#" -ge 2 ] || fail "--repo requires path"
-      REPO="$2"
-      shift 2
-      ;;
-    --model)
-      [ "$#" -ge 2 ] || fail "--model requires value"
-      MODEL="$2"
-      shift 2
-      ;;
     --workload)
       [ "$#" -ge 2 ] || fail "--workload requires standard or routine"
       case "$2" in standard|routine) WORKLOAD="$2" ;; *) fail "--workload requires standard or routine" ;; esac
@@ -326,16 +320,6 @@ while [ "$#" -gt 0 ]; do
         [ "$2" -le 3600 ] || fail "--idle-timeout must be 1-3600"
         CONVERSATION_IDLE_SECONDS="$2"
       fi
-      shift 2
-      ;;
-    --fallback-model)
-      [ "$#" -ge 2 ] || fail "--fallback-model requires value"
-      FALLBACK_MODEL="$2"
-      shift 2
-      ;;
-    --reasoning-effort)
-      [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
-      REASONING_EFFORT="$2"
       shift 2
       ;;
     --verify)
@@ -375,30 +359,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --keep-worktree)
       KEEP_WORKTREE=1
-      shift
-      ;;
-    --no-memory)
-      INCLUDE_MEMORY=0
-      shift
-      ;;
-    --memory)
-      INCLUDE_MEMORY=1
-      shift
-      ;;
-    --no-task)
-      INCLUDE_TASK=0
-      shift
-      ;;
-    --task)
-      INCLUDE_TASK=1
-      shift
-      ;;
-    --no-ml-context)
-      INCLUDE_ML_CONTEXT=0
-      shift
-      ;;
-    --ml-context)
-      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --thread)
@@ -475,10 +435,6 @@ while [ "$#" -gt 0 ]; do
       AUTO_GRAPH_CONTEXT=0
       shift
       ;;
-    --dry-run)
-      DRY_RUN=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -518,6 +474,16 @@ if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ]; then
   [ "$DRY_RUN" != 1 ] ||
     fail "--terminalize-resumed-repair is not valid for --dry-run"
 fi
+
+# Print one field of a JSON object; default joins lists, scalar keeps formatting,
+# and nonempty suppresses false values. Missing fields print empty.
+# Kept out of $(...) so the quoting stays parseable by Bash 3.2.
+delegate_json_field() {
+  printf '%s' "$2" | python3 -c 'import json, sys
+value = json.load(sys.stdin).get(sys.argv[1], "")
+if sys.argv[2] != "nonempty" or value:
+    print(", ".join(value) if not sys.argv[2] and isinstance(value, list) else value)' "$1" "${3:-}" 2>/dev/null | tr -d '\r'
+}
 
 # Plan lifecycle coupling for --plan-task. Failures release the claim so the
 # task never sticks in claimed/running when the worker dies or is rejected.
@@ -739,9 +705,7 @@ if [ -n "$PLAN_TASK_ID" ]; then
       --id "$PLAN_TASK_ID" 2>/dev/null
   )" || fail "could not read plan task $PLAN_TASK_ID"
   oms_require_current_task_contract "$PLAN_JSON" || exit $?
-  PLAN_ID="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
-    tr -d '\r')"
+  PLAN_ID="$(delegate_json_field plan_id "$PLAN_JSON" scalar)"
   if [ -z "$PLAN_ID" ]; then
     "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" ensure-lineage >/dev/null ||
       fail "could not establish plan lineage before delegating task $PLAN_TASK_ID"
@@ -749,9 +713,7 @@ if [ -n "$PLAN_TASK_ID" ]; then
       "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" evidence-snapshot \
         --id "$PLAN_TASK_ID" 2>/dev/null
     )" || fail "could not reread plan task $PLAN_TASK_ID after establishing lineage"
-    PLAN_ID="$(printf '%s' "$PLAN_JSON" |
-      python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
-      tr -d '\r')"
+    PLAN_ID="$(delegate_json_field plan_id "$PLAN_JSON" scalar)"
   fi
   case "$PLAN_ID" in
     plan_*)
@@ -770,13 +732,10 @@ if [ -n "$PLAN_TASK_ID" ]; then
   FALLBACK_MODEL="$OMS_TASK_FALLBACK_MODEL"
   REASONING_EFFORT="$OMS_TASK_REASONING_EFFORT"
   WORKLOAD="$OMS_TASK_WORKLOAD"
-  plan_provider="$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))')"
-  plan_provider="${plan_provider//$'\r'/}"
+  plan_provider="$(delegate_json_field provider "$PLAN_JSON" scalar)"
   [ -z "$plan_provider" ] || [ "$plan_provider" = "$TO" ] ||
     fail "task claim provider does not match its execution assignment"
-  PLAN_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys;print(json.load(sys.stdin).get("lease_id", ""))' |
-    tr -d '\r')" || fail "could not read lease for plan task $PLAN_TASK_ID"
+  PLAN_LEASE_ID="$(delegate_json_field lease_id "$PLAN_JSON" scalar)" || fail "could not read lease for plan task $PLAN_TASK_ID"
   export OMS_INDEX_PLAN_ID="$PLAN_ID"
 else
   unset OMS_INDEX_PLAN_ID
@@ -847,9 +806,7 @@ print("\n".join(lines))
     BRIEF_FILE="$plan_brief_file"
   fi
   if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ]; then
-    plan_verify="$(printf '%s' "$PLAN_JSON" |
-      python3 -c 'import json,sys;v=json.load(sys.stdin).get("verify", "");print(v) if v else None' |
-      tr -d '\r')"
+    plan_verify="$(delegate_json_field verify "$PLAN_JSON" nonempty)"
     if [ -n "$plan_verify" ]; then
       VERIFY_CMD="$plan_verify"
       echo "plan-verify: $VERIFY_CMD (from task $PLAN_TASK_ID)"
@@ -857,9 +814,7 @@ print("\n".join(lines))
   fi
   # A plan task can name a role; --role wins over it.
   if [ -z "$ROLE" ]; then
-    plan_role="$(printf '%s' "$PLAN_JSON" |
-      python3 -c 'import json,sys;r=json.load(sys.stdin).get("role", "");print(r) if r else None' |
-      tr -d '\r')"
+    plan_role="$(delegate_json_field role "$PLAN_JSON" nonempty)"
     [ -n "$plan_role" ] && ROLE="$plan_role"
   fi
 fi
@@ -1145,14 +1100,6 @@ write_minimal_change_doctrine() {
   esac
   printf ' Batch independent reads and searches into one tool call or parallel calls in one turn; keep dependent reads sequential.'
   printf ' Use source evidence to bound the smallest complete change, preserve contracts and safety, reuse existing tests, and run affected checks. Report changes, evidence, verification and uncertainty; return code as patch artifacts.\n'
-}
-
-# Print one field of a JSON object (a list joins with ", "); empty when absent.
-# Kept out of $(...) so the quoting stays parseable by Bash 3.2.
-delegate_json_field() {
-  printf '%s' "$2" | python3 -c 'import json, sys
-value = json.load(sys.stdin).get(sys.argv[1], "")
-print(", ".join(value) if isinstance(value, list) else value)' "$1" 2>/dev/null | tr -d '\r'
 }
 
 # Resolve the effective verification contract before assembling the first prompt,
@@ -1700,8 +1647,8 @@ if os.environ.get("OMS_DL_OBSERVATION"):
 target = os.environ["OMS_DL_FILE"]
 row = json.dumps({
     "schema": 4, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
-    "role": os.environ.get("OMS_DL_ROLE", ""), "executor_id": os.environ.get("OMS_DL_EXECUTOR", ""),
-    "soul_sha256": os.environ.get("OMS_DL_SOUL_SHA", ""), "pid": int(os.environ["OMS_DL_PID"]),
+    "role": os.environ.get("OMS_DL_ROLE", ""), "executor_id": "",
+    "soul_sha256": "", "pid": int(os.environ["OMS_DL_PID"]),
     "native_pid": int(os.environ["OMS_DL_NATIVE_PID"]),
     "native_pid_source": os.environ["OMS_DL_NATIVE_PID_SOURCE"],
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
@@ -1736,9 +1683,9 @@ PY
   }
   DELEGATION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
     fail "could not timestamp the worker marker"
-  export OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="" \
+  export OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" \
     OMS_DL_ACCESS="$WORKER_ACCESS" \
-    OMS_DL_SOUL_SHA="" OMS_DL_PID="$$" \
+    OMS_DL_PID="$$" \
     OMS_DL_NATIVE_PID="$DELEGATION_NATIVE_PID" \
     OMS_DL_NATIVE_PID_SOURCE="$DELEGATION_NATIVE_PID_SOURCE" \
     OMS_DL_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_DL_MODEL="$OMS_MODEL_PRIMARY" \

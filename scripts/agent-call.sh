@@ -63,6 +63,10 @@ EOF
 }
 
 while [ "$#" -gt 0 ]; do
+  if ma_parse_common_option "$@"; then
+    shift "$MA_COMMON_OPTION_SHIFT"
+    continue
+  fi
   case "$1" in
     --to)
       [ "$#" -ge 2 ] || fail "--to requires provider"
@@ -79,54 +83,10 @@ while [ "$#" -gt 0 ]; do
       PROMPT_FILE="$2"
       shift 2
       ;;
-    --repo)
-      [ "$#" -ge 2 ] || fail "--repo requires path"
-      REPO="$2"
-      shift 2
-      ;;
     --artifact-dir)
       [ "$#" -ge 2 ] || fail "--artifact-dir requires path"
       ARTIFACT_DIR="$2"
       shift 2
-      ;;
-    --model)
-      [ "$#" -ge 2 ] || fail "--model requires value"
-      MODEL="$2"
-      shift 2
-      ;;
-    --fallback-model)
-      [ "$#" -ge 2 ] || fail "--fallback-model requires value"
-      FALLBACK_MODEL="$2"
-      shift 2
-      ;;
-    --reasoning-effort)
-      [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
-      REASONING_EFFORT="$2"
-      shift 2
-      ;;
-    --no-memory)
-      INCLUDE_MEMORY=0
-      shift
-      ;;
-    --memory)
-      INCLUDE_MEMORY=1
-      shift
-      ;;
-    --no-task)
-      INCLUDE_TASK=0
-      shift
-      ;;
-    --task)
-      INCLUDE_TASK=1
-      shift
-      ;;
-    --no-ml-context)
-      INCLUDE_ML_CONTEXT=0
-      shift
-      ;;
-    --ml-context)
-      INCLUDE_ML_CONTEXT=1
-      shift
       ;;
     --thread)
       [ "$#" -ge 2 ] || fail "--thread requires an id"
@@ -146,10 +106,6 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--print-timeout requires duration"
       OMS_PEER_PRINT_TIMEOUT="$2"
       shift 2
-      ;;
-    --dry-run)
-      DRY_RUN=1
-      shift
       ;;
     -h|--help)
       usage

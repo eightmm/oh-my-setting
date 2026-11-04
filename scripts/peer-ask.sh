@@ -107,16 +107,6 @@ Environment:
 EOF
 }
 
-validate_provider_list() {
-  local normalized
-  local expanded
-  # Tiers first, then normalize: expansion produces the targets, normalization
-  # canonicalizes aliases. Lens assignments are checked against the final list below.
-  expanded="$(ma_expand_targets "$PROVIDERS")" || exit $?
-  normalized="$(ma_normalize_provider_list "$expanded" ask "${MA_COUNCIL_LENSES:+lenses}")" || exit $?
-  PROVIDERS="$normalized"
-}
-
 write_prompt() {
   local output="$1"
   local repo="$2"
@@ -168,15 +158,14 @@ write_prompt() {
 }
 
 while [ "$#" -gt 0 ]; do
+  if ma_parse_common_option "$@"; then
+    shift "$MA_COMMON_OPTION_SHIFT"
+    continue
+  fi
   case "$1" in
     --prompt)
       [ "$#" -ge 2 ] || fail "--prompt requires text"
       PROMPT="$2"
-      shift 2
-      ;;
-    --repo)
-      [ "$#" -ge 2 ] || fail "--repo requires path"
-      REPO="$2"
       shift 2
       ;;
     --providers)
@@ -190,18 +179,6 @@ while [ "$#" -gt 0 ]; do
       ARTIFACT_DIR="$2"
       shift 2
       ;;
-    --model)
-      [ "$#" -ge 2 ] || fail "--model requires value"
-      MODEL="$2"; shift 2
-      ;;
-    --fallback-model)
-      [ "$#" -ge 2 ] || fail "--fallback-model requires value"
-      FALLBACK_MODEL="$2"; shift 2
-      ;;
-    --reasoning-effort)
-      [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
-      REASONING_EFFORT="$2"; shift 2
-      ;;
     --hypothesis)
       HYPOTHESIS_PRESET=1
       shift
@@ -213,30 +190,6 @@ while [ "$#" -gt 0 ]; do
     --diff)
       INCLUDE_STATUS=1
       INCLUDE_DIFF=1
-      shift
-      ;;
-    --no-memory)
-      INCLUDE_MEMORY=0
-      shift
-      ;;
-    --memory)
-      INCLUDE_MEMORY=1
-      shift
-      ;;
-    --no-task)
-      INCLUDE_TASK=0
-      shift
-      ;;
-    --task)
-      INCLUDE_TASK=1
-      shift
-      ;;
-    --no-ml-context)
-      INCLUDE_ML_CONTEXT=0
-      shift
-      ;;
-    --ml-context)
-      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --thread)
@@ -257,10 +210,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --export-only)
       EXPORT_ONLY=1
-      shift
-      ;;
-    --dry-run)
-      DRY_RUN=1
       shift
       ;;
     --print-timeout)
@@ -300,7 +249,7 @@ if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
   fail "--hypothesis needs a prompt (--prompt or positional) with the hypothesis and the planned experiment"
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
-validate_provider_list
+ma_validate_provider_list ask "${MA_COUNCIL_LENSES:+lenses}"
 if [ -n "$MA_COUNCIL_LENSES" ]; then
   python3 - "$MA_COUNCIL_LENSES" "$PROVIDERS" <<'PY_LENSES' || exit 2
 import re, sys

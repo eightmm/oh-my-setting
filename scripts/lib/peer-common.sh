@@ -68,6 +68,35 @@ fail() {
   exit 2
 }
 
+# Parse only flags shared by all four front doors; callers shift the consumed count.
+# shellcheck disable=SC2034 # These globals are consumed by the front-door callers.
+ma_parse_common_option() {
+  MA_COMMON_OPTION_SHIFT=1
+  case "$1" in
+    --repo|--model|--fallback-model|--reasoning-effort)
+      local required=value
+      [ "$1" != --repo ] || required=path
+      [ "$#" -ge 2 ] || fail "$1 requires $required"
+      case "$1" in
+        --repo) REPO="$2" ;;
+        --model) MODEL="$2" ;;
+        --fallback-model) FALLBACK_MODEL="$2" ;;
+        --reasoning-effort) REASONING_EFFORT="$2" ;;
+      esac
+      MA_COMMON_OPTION_SHIFT=2
+      ;;
+    --memory) INCLUDE_MEMORY=1 ;;
+    --no-memory) INCLUDE_MEMORY=0 ;;
+    --task) INCLUDE_TASK=1 ;;
+    --no-task) INCLUDE_TASK=0 ;;
+    --ml-context) INCLUDE_ML_CONTEXT=1 ;;
+    --no-ml-context) INCLUDE_ML_CONTEXT=0 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
 ma_scripts_dir() {
   printf '%s\n' "${MA_LIB_DIR%/*}"
 }
@@ -1016,17 +1045,11 @@ contains_sensitive_content() {
 # symbol must still block. Only the exact public toggle is normalized. The
 # sensitive regex is written so its own source never matches itself, so the
 # whole prompt can be scanned directly.
-ma_prompt_has_sensitive_content() {
-  local file="$1"
-  [ -s "$file" ] || return 1
-  agent_memory_file_sensitive_status "$file"
-}
-
 ma_validate_outbound_prompt() {
   local prompt="$1"
   local scan_status=0
 
-  ma_prompt_has_sensitive_content "$prompt" || scan_status=$?
+  agent_memory_file_sensitive_status "$prompt" || scan_status=$?
   case "$scan_status" in
     0)
     echo "error: outbound provider context contains sensitive-looking content; external call blocked" >&2
@@ -4065,17 +4088,10 @@ if (not stat.S_ISDIR(info.st_mode) or
 absolute = os.path.join(os.path.realpath(os.path.dirname(output)), os.path.basename(output))
 fd = os.open(os.path.join(directory, call + ".stream"),
              os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-try:
+with os.fdopen(fd, "wb") as handle:
     if hasattr(os, "fchmod"):
-        os.fchmod(fd, 0o600)
-    data = (absolute + "\n").encode("utf-8")
-    while data:
-        written = os.write(fd, data)
-        if written <= 0:
-            raise OSError("short dispatch stream pointer write")
-        data = data[written:]
-finally:
-    os.close(fd)
+        os.fchmod(handle.fileno(), 0o600)
+    handle.write((absolute + "\n").encode("utf-8"))
 PY
     fi
     (
@@ -5206,13 +5222,10 @@ ma_target_label() {
   printf '%s\n' "$(ma_target_provider "$1")${extra:+-$extra}"
 }
 
-# Validates the provider target list (a panel of one CLI as several models is
-# written as explicit PROVIDER:model=NAME targets) and enforces the call budget.
-ma_expand_targets() {
-  local providers="$1"
-
-  ma_target_budget_check "$providers" || return 2
-  printf '%s\n' "$providers"
+# Validate the call budget before canonicalizing targets and checking duplicates.
+ma_validate_provider_list() {
+  ma_target_budget_check "$PROVIDERS" || exit $?
+  PROVIDERS="$(ma_normalize_provider_list "$PROVIDERS" "${1:-}" "${2:-}")" || exit $?
 }
 
 # Refuse an expansion whose cost the caller probably did not intend.

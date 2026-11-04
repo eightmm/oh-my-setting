@@ -401,18 +401,12 @@ if [ "${1:-}" = "verdicts" ]; then
 fi
 
 validate_provider_list() {
-  local normalized
-  local expanded
   local writer_norm
   local writer_provider
   local kept
   local entry
   local -a entries
-  # Tiers first, then normalize: expansion produces the targets, normalization
-  # canonicalizes the agy alias and rejects the same target twice.
-  expanded="$(ma_expand_targets "$PROVIDERS")" || exit $?
-  normalized="$(ma_normalize_provider_list "$expanded")" || exit $?
-  PROVIDERS="$normalized"
+  ma_validate_provider_list
   # The patch author's family re-judging its own patch is correlated
   # judgment, not independence. Unless the caller pinned --providers, the
   # writer sits out of the council; an explicit list is honored but named.
@@ -502,15 +496,14 @@ write_prompt() {
 }
 
 while [ "$#" -gt 0 ]; do
+  if ma_parse_common_option "$@"; then
+    shift "$MA_COMMON_OPTION_SHIFT"
+    continue
+  fi
   case "$1" in
     --prompt)
       [ "$#" -ge 2 ] || fail "--prompt requires text"
       PROMPT="$2"
-      shift 2
-      ;;
-    --repo)
-      [ "$#" -ge 2 ] || fail "--repo requires path"
-      REPO="$2"
       shift 2
       ;;
     --base)
@@ -543,48 +536,12 @@ while [ "$#" -gt 0 ]; do
       ARTIFACT_DIR="$2"
       shift 2
       ;;
-    --model)
-      [ "$#" -ge 2 ] || fail "--model requires value"
-      MODEL="$2"; shift 2
-      ;;
-    --fallback-model)
-      [ "$#" -ge 2 ] || fail "--fallback-model requires value"
-      FALLBACK_MODEL="$2"; shift 2
-      ;;
-    --reasoning-effort)
-      [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
-      REASONING_EFFORT="$2"; shift 2
-      ;;
     --no-diff)
       NO_DIFF=1
       shift
       ;;
     --ml)
       ML_PRESET=1
-      INCLUDE_ML_CONTEXT=1
-      shift
-      ;;
-    --no-memory)
-      INCLUDE_MEMORY=0
-      shift
-      ;;
-    --memory)
-      INCLUDE_MEMORY=1
-      shift
-      ;;
-    --no-task)
-      INCLUDE_TASK=0
-      shift
-      ;;
-    --task)
-      INCLUDE_TASK=1
-      shift
-      ;;
-    --no-ml-context)
-      INCLUDE_ML_CONTEXT=0
-      shift
-      ;;
-    --ml-context)
       INCLUDE_ML_CONTEXT=1
       shift
       ;;
@@ -625,10 +582,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --export-only)
       EXPORT_ONLY=1
-      shift
-      ;;
-    --dry-run)
-      DRY_RUN=1
       shift
       ;;
     --print-timeout)

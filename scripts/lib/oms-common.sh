@@ -333,6 +333,37 @@ oms_git_assert_plain_index() {  # REPO
 OMS_GIT_INDEX_SIGNATURE_PY="$(cat <<'PY'
 import hashlib
 import struct
+import os
+import stat
+
+
+def raw_signature(path, copy_to=None):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    if not stat.S_ISREG(info.st_mode):
+        return "non-regular:%o" % info.st_mode
+    if info.st_size > 64 * 1024 * 1024:
+        return "oversized:%d" % info.st_size
+    digest = hashlib.sha256()
+    copy = None
+    try:
+        if copy_to is not None:
+            copy = open(copy_to, "wb")
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                if copy:
+                    copy.write(chunk)
+    except OSError:
+        return "unreadable"
+    finally:
+        if copy:
+            copy.close()
+    return "regular:%o:%d:%s" % (stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest())
 
 
 def index_signature(data, oid_size):
@@ -476,19 +507,10 @@ for number, path in enumerate(os.environ["OMS_GIT_EXEC_PATHS"].splitlines()):
         if content:
             print("%s\tindex:%d:%s" % (key, oid, content))
             continue
-    digest = hashlib.sha256()
-    copy = None
-    if number == 0:
-        copy = open(os.environ["OMS_GIT_EXEC_COPY"], "wb")
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-            if copy:
-                copy.write(chunk)
-    if copy:
-        copy.close()
-    print("%s\tregular:%o:%d:%s" % (
-        key, stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest()))
+    signature = raw_signature(path, os.environ["OMS_GIT_EXEC_COPY"] if number == 0 else None)
+    print("%s\t%s" % (key, signature))
+    if signature == "unreadable" or signature.startswith("oversized:"):
+        raise SystemExit(2)
 PY
     rm -f "$tmp" "$tmp.config"
     return 2
@@ -558,25 +580,6 @@ try:
 except OSError:
     raise SystemExit(0)
 
-def raw_signature(path):
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return "absent"
-    except OSError:
-        return "unreadable"
-    if not stat.S_ISREG(info.st_mode):
-        return "non-regular:%o" % info.st_mode
-    if info.st_size > 64 * 1024 * 1024:
-        return "oversized:%d" % info.st_size
-    digest = hashlib.sha256()
-    try:
-        with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        return "unreadable"
-    return "regular:%o:%d:%s" % (stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest())
 
 def config_keys(path):
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -695,26 +698,6 @@ def staged(path, oid):
         return None
     return content and "index:%d:%s" % (oid, content)
 
-def signature(path):
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return "absent"
-    except OSError:
-        return "unreadable"
-    if not stat.S_ISREG(info.st_mode):
-        return "non-regular:%o" % info.st_mode
-    if info.st_size > 64 * 1024 * 1024:
-        return "oversized:%d" % info.st_size
-    digest = hashlib.sha256()
-    try:
-        with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        return "unreadable"
-    return "regular:%o:%d:%s" % (
-        stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest())
 
 try:
     rows = open(sys.argv[1], "rb").read().splitlines()
@@ -735,13 +718,13 @@ for number, row in enumerate(rows):
         if staged(path, int(expected.split(":")[1])) == expected:
             continue
         raise SystemExit(2)
-    current = signature(path)
+    current = raw_signature(path)
     if current == expected:
         continue
     old, new = expected.split(":"), current.split(":")
     if number != 0 or len(old) != 4 or len(new) != 4 or old[0] != "regular" or old[:2] != new[:2]:
         raise SystemExit(2)
-    if signature(sys.argv[2]).split(":")[2:] != old[2:]:
+    if raw_signature(sys.argv[2]).split(":")[2:] != old[2:]:
         raise SystemExit(2)
     sys.stdout.write(path)
 PY
