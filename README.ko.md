@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-0ea5e9" alt="Linux, macOS, Windows">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20via%20WSL2-0ea5e9" alt="Linux, macOS, Windows via WSL2">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e" alt="MIT license"></a>
 </p>
 
@@ -27,9 +27,9 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | 호스트 | 필요한 것 |
 |---|---|
-| Linux, WSL (glibc) | Bash, curl. Git·tar·gzip·find는 없으면 설치한다. **Python 불필요.** |
+| Linux (glibc) | Bash, curl. Git·tar·gzip·find는 없으면 설치한다. **Python 불필요.** |
 | macOS | Bash, curl, Command Line Tools(`xcode-select --install`). **Python 불필요.** |
-| Windows (Git Bash) | Git, Python 3.9+, Node 기반 agent를 고르면 네이티브 Node.js |
+| Windows via WSL2 | WSL2 안의 glibc Linux 배포판. 위 Linux 요구 사항 적용 |
 
 기본 `core` 프로필은 하네스와 코딩 agent 하나를 설치한다. Alpine 같은 musl
 기반 Linux는 지원하지 않는다. 프로필과 Windows 참고 사항은

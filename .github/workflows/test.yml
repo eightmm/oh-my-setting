@@ -197,7 +197,7 @@ jobs:
   # Exercise the same install -> update -> uninstall contract on every
   # supported host and ownership mode. Linux auto is already a focused stage;
   # do not run the same fixture twice on a full gate. Keep Linux copy and the
-  # native macOS/Windows legs for native-risk changes and weekly/manual runs.
+  # native macOS leg for native-risk changes and weekly/manual runs.
   # The matrix omits those hosts only when the plan explicitly permits it.
   install_e2e:
     needs: affected_plan
@@ -205,7 +205,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.affected_plan.outputs.native == 'true' && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"},{"os":"windows-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
+        include: ${{ fromJSON(needs.affected_plan.outputs.native == 'true' && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 100
     name: native (${{ matrix.os }}, ${{ matrix.link_mode }})
@@ -225,32 +225,6 @@ jobs:
 
       # Reuse the native host and interpreter. Each check still reports a
       # failure if another check failed; cancellation must stop obsolete work.
-      - name: native durable artifact store
-        timeout-minutes: 10
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        run: bash tests/windows-durable-writer-smoke.sh
-      - name: native persisted process liveness
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        timeout-minutes: 3
-        run: bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe
-      - name: native hook routing and handoff
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        timeout-minutes: 3
-        run: |
-          python3 -c 'import os; assert os.name == "nt", os.name'
-          status=0
-          TMPDIR="$(cygpath -m /tmp)" bash tests/fail-ledger-hook-filter-smoke.sh || status=1
-          for test in \
-            test_syntax_guard_hook_reports_broken_edits \
-            test_precompact_handoff_nested_cwd_uses_adopted_root \
-            test_precompact_handoff_ignores_nested_decoy_oms; do
-            bash tests/scripts-smoke.sh --only "$test" || status=1
-          done
-          exit "$status"
-      - name: native reenter anchor
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        timeout-minutes: 3
-        run: bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor
       - name: stock Bash 3.2 parse and project checker
         timeout-minutes: 20
         if: ${{ !cancelled() && runner.os == 'macOS' }}

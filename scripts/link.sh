@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Overrides can add a Windows signal, never hide the host identity.
+# Refuse before any lifecycle lock, checkout lookup or state write.
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}" in
+  windows|Windows|WINDOWS|MINGW*|MSYS*|CYGWIN*)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+case "$(uname -s):${OSTYPE:-}" in
+  MINGW*|MSYS*|CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+
 # Install rules, skills, and the oms dispatcher into all three agent
-# CLIs. POSIX hosts use symlinks; Windows Git Bash uses ownership-marked copies.
+# CLIs. Auto mode uses symlinks; explicit copy mode tracks ownership markers.
 
 script_dir="${BASH_SOURCE[0]%/*}"
 [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.

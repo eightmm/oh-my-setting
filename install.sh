@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Overrides can add a Windows signal, never hide the host identity.
+# Refuse before any lifecycle lock, checkout lookup or state write.
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}" in
+  windows|Windows|WINDOWS|MINGW*|MSYS*|CYGWIN*)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+case "$(uname -s):${OSTYPE:-}" in
+  MINGW*|MSYS*|CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
 INSTALLER_DEFAULT_REF="edge"
@@ -94,8 +109,8 @@ Environment:
   OH_MY_SETTING_AUTO_UPDATE_MODE=check  Only record available updates (default: apply).
   OH_MY_SETTING_REQUIRE_TOOLS=0    Let doctor treat a missing CLI as optional
                                    (default: 1 whenever the tools were installed).
-  OH_MY_SETTING_LINK_MODE=MODE     auto, symlink, or copy. auto uses copies on
-                                   Windows Git Bash and symlinks elsewhere.
+  OH_MY_SETTING_LINK_MODE=MODE     auto, symlink, or copy. auto uses symlinks on
+                                   supported hosts.
   OH_MY_SETTING_DIR=/path/to/dir   Install location.
 EOF
 }

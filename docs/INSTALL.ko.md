@@ -1,6 +1,6 @@
 # oh-my-setting 설치
 
-이 안내는 Linux, macOS, Windows Git Bash에서 OMS를 설치하고 관리하는 사용자를 위한 문서다.
+이 안내는 Linux, macOS, Windows via WSL2에서 OMS를 설치하고 관리하는 사용자를 위한 문서다.
 아래 명령으로 시작한 뒤 호스트와 프로필별 세부 내용을 확인한다.
 
 한 줄 설치 명령과 설치하면 바뀌는 것은 [README](../README.ko.md)에 있다. 이
@@ -15,9 +15,9 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | 호스트 | 필요한 것 | 관리 파일 |
 |---|---|---|
-| Linux, WSL (glibc) | Bash 3.2+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다). Python 불필요 | symlink |
+| Linux (glibc) | Bash 3.2+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다). Python 불필요 | symlink |
 | macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다). Python 불필요 | symlink |
-| Windows Git Bash | Git, Python 3.9+, 선택한 도구가 요구할 때 lock과 정확히 같은 네이티브 Node | 검증된 사본 |
+| Windows via WSL2 | WSL2 안에서 위 Linux 요구 사항 적용 | symlink |
 
 `python3` 3.9+와 uv가 모두 없으면 설치기는 고정 버전 uv를 받아 sha256을
 확인하고, `tools.lock.json`의 Python을 직접 만든 뒤 관리형 `python3` shim이
@@ -29,11 +29,26 @@ Codex sandbox 실행 실패 가능성을 경고한다. AppArmor 프로필에서 
 user namespace를 허용하거나 sysctl로
 `kernel.apparmor_restrict_unprivileged_userns=0`을 설정한다.
 
-Windows에서 기본 Codex 설치나 Node 기반 도구를 고른 프로필은 먼저 네이티브
-**Node.js와 npm**이 필요하다. 설치기가 알려 주는 정확한 버전을
-[공식 Node.js 아카이브](https://nodejs.org/dist/)에서 설치하고, PATH 옵션을
-켠 채로 Git Bash를 다시 연다. 설치기는 다른 Node 버전을 받아들이지 않고
-멈춘다. Antigravity만 쓰는 `core` 프로필은 Node가 필요 없다.
+## Windows via WSL2
+
+WSL1이 아닌 **WSL2**를 사용한다. 저장소와 `~/.oh-my-setting`, WSL 홈은
+모두 Linux 파일시스템 안에 둔다. `/mnt/c`는 사용하지 않는다. provider CLI도
+WSL 안에 설치하고 실행하며 위 Linux 요구 사항을 따른다.
+네이티브 Windows(Git Bash/MSYS2/Cygwin)는 지원하지 않으며 OMS 실행을 거부한다.
+
+기존 네이티브 Windows 설치를 제거하려면 기존 설치 체크아웃에서 Windows를
+마지막으로 지원한 `oms-windows-final` 태그를 사용한다.
+
+```bash
+cd ~/.oh-my-setting
+git fetch origin tag oms-windows-final
+git switch --detach oms-windows-final
+bash scripts/uninstall.sh
+```
+
+전환 전에 체크아웃의 로컬 변경을 보존한다. 현재 릴리스는 네이티브 Windows의
+`oms uninstall`도 거부한다. 이미 실행 중인 구버전 업데이트도 새 트리에 진입하면
+중단하고 체크아웃과 관리 링크를 롤백한다. WSL2 설치는 별도로 시작한다.
 
 ## 프로필과 도구
 
@@ -117,7 +132,7 @@ Claude Code에는 main과 subagent용 간결한 HUD(모델·effort, context, 사
 (설치 때 알리고 `oms doctor`가 보고한다), 설치가 유지되는 동안 적용되지 않으며,
 `oms uninstall`이 복원한다.
 
-예외 상황(Windows 사본 모드, Antigravity headless 권한, Notion data source
+예외 상황(Antigravity headless 권한, Notion data source
 지정)은 [COMPONENTS.md](COMPONENTS.md)와 [WORK-JOURNAL.md](WORK-JOURNAL.md)에
 있다.
 

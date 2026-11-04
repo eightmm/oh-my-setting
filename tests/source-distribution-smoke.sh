@@ -81,7 +81,7 @@ for requirement in (r'publication.*authorized', r'Never commit.*shared checkout'
                     r'role.{0,60}instance', r'sole panel main'):
     assert re.search(requirement, tower, re.I), requirement
 PY
-for host in ubuntu-latest macos-latest windows-latest; do
+for host in ubuntu-latest macos-latest; do
   grep -Fq "\"os\":\"$host\"" "$workflow" ||
     fail "install lifecycle matrix must cover $host"
 done
@@ -278,11 +278,10 @@ for mode, fast, count in (('operator', 'operator-2', 3), ('check', 'focused-only
                 process.wait(timeout=5)
 PY
 ) || exit 1
-# Copy mode is the Windows ownership contract. Proving it only on the Windows
-# runner means the slowest leg in the matrix is the first to report a broken
-# marker or a lost backup, so a Linux leg forces the same path early.
+# Copy mode remains an explicit ownership option on supported hosts. A Linux
+# leg catches broken ownership markers or lost backups alongside symlink mode.
 grep -Fq '"link_mode":"copy"' "$workflow" ||
-  fail "install lifecycle matrix must exercise copy mode outside Windows"
+  fail "install lifecycle matrix must exercise copy mode"
 # The macOS job is the only stock Bash 3.2 parser and the only BSD userland in
 # CI. Both catch a class nothing else does, and both have already shipped
 # breakage, so neither may quietly disappear again.
@@ -414,10 +413,9 @@ if not required:
 assert "portability_macos" not in jobs and "windows_durable_writer" not in jobs, \
     "native checks should reuse their lifecycle runner, not provision duplicate hosts"
 native_body = workflow_text.split("\n  install_e2e:\n", 1)[1].split("\n  python39:\n", 1)[0]
+assert "windows-latest" not in native_body, "native Windows is unsupported"
+assert "runner.os == 'Windows'" not in workflow_text, "native Windows steps must be removed"
 for command, host in (
-    ("bash tests/windows-durable-writer-smoke.sh", "Windows"),
-    ("bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe", "Windows"),
-    ("bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor", "Windows"),
     ("OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh", "macOS"),
     ("OMS_BASH32_BIN=/bin/bash bash tests/scripts-smoke.sh --only test_shared_fast_mode_detection_gates_auto_verify", "macOS"),
     ("bash tests/bsd-portability-smoke.sh", "macOS"),
@@ -501,8 +499,7 @@ alternatives = re.findall(r"'(\[.*?\])'", matrix)
 assert len(alternatives) == 2
 assert json.loads(alternatives[0]) == [
     {"os": "ubuntu-latest", "link_mode": "copy"},
-    {"os": "macos-latest", "link_mode": "auto"},
-    {"os": "windows-latest", "link_mode": "auto"}]
+    {"os": "macos-latest", "link_mode": "auto"}]
 assert json.loads(alternatives[1]) == [{"os": "ubuntu-latest", "link_mode": "copy"}]
 
 # Every expensive job follows the same decision. Run the planner shell with

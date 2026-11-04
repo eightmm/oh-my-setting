@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Overrides can add a Windows signal, never hide the host identity.
+# Refuse before any lifecycle lock, checkout lookup or state write.
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}" in
+  windows|Windows|WINDOWS|MINGW*|MSYS*|CYGWIN*)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+case "$(uname -s):${OSTYPE:-}" in
+  MINGW*|MSYS*|CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+
 # Provision and enter the private uv-managed interpreter used by OMS itself.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/lib/python-runtime.sh

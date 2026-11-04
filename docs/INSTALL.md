@@ -1,6 +1,6 @@
 # Installing oh-my-setting
 
-This guide is for people installing or maintaining OMS on Linux, macOS or Windows Git Bash.
+This guide is for people installing or maintaining OMS on Linux, macOS or Windows via WSL2.
 Start with the command below, then use the host and profile details as needed.
 
 The one-line install and what it changes are in the [README](../README.md).
@@ -11,12 +11,29 @@ updates. [한국어](INSTALL.ko.md)
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-On Windows, a fresh default Codex setup — or any profile selecting a
-Node-backed tool — first needs native **Node.js with npm**. Install the exact
-release named by the installer from the [official Node.js
-archive](https://nodejs.org/dist/), keep its PATH option enabled, and reopen Git
-Bash. The installer stops instead of accepting a different Node version. An
-Antigravity-only `core` profile does not need Node.
+## Windows via WSL2
+
+Use **WSL2**, not WSL1. Keep both the repository and `~/.oh-my-setting`
+on the Linux filesystem, along with your WSL home; do not use `/mnt/c`.
+Install and run provider CLIs inside WSL, using the Linux requirements below.
+Native Windows (Git Bash/MSYS2/Cygwin) is unsupported and OMS refuses to run.
+
+To uninstall an old native Windows installation, use the last Windows-supporting
+release, `oms-windows-final`, from the existing installation checkout:
+
+```bash
+cd ~/.oh-my-setting
+git fetch origin tag oms-windows-final
+git switch --detach oms-windows-final
+bash scripts/uninstall.sh
+```
+
+Preserve any local checkout changes before switching. The current release also
+refuses `oms uninstall` on native Windows. An already-running older updater
+also stops when it enters the new tree and rolls back the checkout and managed
+links; start the WSL2 installation separately.
+
+## Installation details
 
 The default installer selects the `core` capability: the harness, Bash, Git,
 Python, and one coding-agent provider. It does not make GitHub CLI, Notion CLI,
@@ -99,9 +116,9 @@ to `<file>.backup.<timestamp>` (announced at install time and reported by
 
 | Host | Needs | Managed files |
 |---|---|---|
-| Linux, WSL (glibc) | Bash 3.2+, curl; Git, tar, gzip and find are installed if missing (root or sudo needed then). No Python needed | symlinks |
+| Linux (glibc) | Bash 3.2+, curl; Git, tar, gzip and find are installed if missing (root or sudo needed then). No Python needed | symlinks |
 | macOS | stock Bash 3.2, curl, Command Line Tools (`xcode-select --install`; without them `git` is only an installer stub). No Python needed | symlinks |
-| Windows Git Bash | Git, Python 3.9+; exact locked native Node when selected tools need it | verified copies |
+| Windows via WSL2 | Linux requirements above, inside WSL2 | symlinks |
 
 With no `python3` 3.9+ and no uv, the installer fetches the pinned uv
 (sha256-checked), builds its own Python from `tools.lock.json`, and points a
@@ -113,7 +130,7 @@ On Ubuntu 24.04+ with AppArmor unprivileged user namespaces restricted,
 for `bwrap` in an AppArmor profile or set
 `kernel.apparmor_restrict_unprivileged_userns=0` with sysctl.
 
-The awkward cases — Windows copy mode, Antigravity's headless permissions,
+The awkward cases — Antigravity's headless permissions,
 Notion data-source selection — live in
 [COMPONENTS.md](COMPONENTS.md) and
 [WORK-JOURNAL.md](WORK-JOURNAL.md). Upgrading an existing install

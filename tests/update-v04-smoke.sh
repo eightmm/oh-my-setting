@@ -53,6 +53,83 @@ test_harness_child_cannot_mutate_install() {
   OMS_HARNESS_CHILD=1 "$fixture/scripts/update.sh" --help >/dev/null
 }
 
+test_native_windows_old_updater_rolls_back() {
+  local mode entry
+  for mode in symlink copy; do
+    local source="$TMP/windows-source-$mode" installed="$TMP/windows-installed-$mode"
+    local home="$TMP/windows-home-$mode" first target managed rc output before_install
+    local receipt="$home/.config/oh-my-setting/install.json"
+    local CODEX_HOME="$home/.codex" OMS_CODEX_CONFIG="$home/.codex/config.toml"
+    local OMS_CLAUDE_SETTINGS="$home/.claude/settings.json"
+    export CODEX_HOME OMS_CODEX_CONFIG OMS_CLAUDE_SETTINGS
+    git clone -q "$ROOT" "$source"
+    git -C "$source" checkout -qB main
+    # Model the updater already running before retirement, even after this
+    # regression test ships in a tree that carries the new startup guards.
+    python3 - "$ROOT" "$source" <<'PY_OLD'
+from pathlib import Path
+import sys
+for name in ('link.sh', 'python-runtime.sh', 'update.sh'):
+    text = (Path(sys.argv[1]) / 'scripts' / name).read_text()
+    start = text.find('case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}" in')
+    if start >= 0:
+        end = text.index('esac\n', start) + len('esac\n')
+        text = text[:start] + text[end:]
+    (Path(sys.argv[2]) / 'scripts' / name).write_text(text)
+PY_OLD
+    git -C "$source" add scripts/link.sh scripts/python-runtime.sh scripts/update.sh
+    git -C "$source" commit -qm 'fixture: updater before Windows retirement' --allow-empty
+    first="$(git -C "$source" rev-parse HEAD)"
+    git clone -q "$source" "$installed"
+    mkdir -p "$home"
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+      OH_MY_SETTING_PROFILE=minimal OH_MY_SETTING_REF=edge OH_MY_SETTING_LINK_MODE="$mode" \
+      OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+      OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+      "$installed/scripts/link.sh" >/dev/null
+    cp "$receipt" "$TMP/windows-receipt-before"
+    windows_install_snapshot() {
+      python3 - "$home" <<'PY_LINKS'
+import hashlib, json, os, sys
+entries = {}
+for directory, dirs, files in os.walk(sys.argv[1]):
+    for name in dirs + files:
+        path = os.path.join(directory, name)
+        if os.path.islink(path):
+            entries[os.path.relpath(path, sys.argv[1])] = ['link', os.readlink(path)]
+        elif os.path.isfile(path):
+            with open(path, 'rb') as handle:
+                entries[os.path.relpath(path, sys.argv[1])] = ['file', hashlib.sha256(handle.read()).hexdigest()]
+print(json.dumps(entries, sort_keys=True))
+PY_LINKS
+    }
+    before_install="$(windows_install_snapshot)"
+    for entry in link.sh python-runtime.sh update.sh; do
+      cp "$ROOT/scripts/$entry" "$source/scripts/$entry"
+    done
+    git -C "$source" add scripts/link.sh scripts/python-runtime.sh scripts/update.sh
+    git -C "$source" commit -qm 'fixture: native Windows refusal target' --allow-empty
+    target="$(git -C "$source" rev-parse HEAD)"
+    for managed in 0 1; do
+      output="$TMP/windows-update-$managed.out"
+      rc=0
+      HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+        OMS_PLATFORM_OVERRIDE=windows OMS_AUTO_UPDATE_MANAGED="$managed" PATH="/usr/bin:/bin" \
+        "$installed/scripts/update.sh" --no-tools --no-doctor >"$output" 2>&1 || rc=$?
+      [ "$rc" = 1 ] || fail "old Windows updater returned $rc: $(cat "$output")"
+      grep -Fxq 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' "$output" ||
+        fail "old updater missed new-tree refusal: $(cat "$output")"
+      grep -Fq "rolling back failed target $target -> $first" "$output" || fail "old updater did not try target"
+      grep -Fq "rollback restored $first" "$output" || fail "old updater did not report restoration: $(cat "$output")"
+      [ "$(git -C "$installed" rev-parse HEAD)" = "$first" ] || fail "Windows rollback changed HEAD"
+      [ -z "$(git -C "$installed" status --porcelain)" ] || fail "Windows rollback left tracked changes"
+      cmp -s "$receipt" "$TMP/windows-receipt-before" || fail "Windows rollback changed receipt"
+      [ "$(windows_install_snapshot)" = "$before_install" ] || fail "Windows rollback changed home files or links"
+    done
+    echo "native-windows-old-updater-rollback ($mode): ok"
+  done
+}
+
 test_schema1_receipt_migrates_to_profiled_schema2() {
   local home="$TMP/schema-home"
   local receipt="$home/.config/oh-my-setting/install.json"
@@ -1493,6 +1570,7 @@ PY
     fail "a multi-line failure must not corrupt the key=value state file"
 }
 
+test_native_windows_old_updater_rolls_back
 test_harness_child_cannot_mutate_install
 test_schema1_receipt_migrates_to_profiled_schema2
 test_update_rolls_back_and_supports_explicit_rollback

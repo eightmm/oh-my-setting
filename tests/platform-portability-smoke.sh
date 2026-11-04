@@ -32,6 +32,87 @@ assert_regular_copy() {
     fail "copy differs from source: $target"
 }
 
+# Native Windows must stop before locks, downloads, receipts or dispatch.
+test_native_windows_refusal() {
+  local fixture="$TMP/native-refusal" platform entry output verb override
+  local message='native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).'
+  mkdir -p "$fixture/home" "$fixture/bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$OMS_TEST_UNAME"' > "$fixture/bin/uname"
+  cat > "$fixture/bin/git" <<'EOF_GIT'
+#!/usr/bin/env bash
+[ "${1:-}" != --version ] || exit 0
+echo 'unexpected git bootstrap' >&2
+exit 97
+EOF_GIT
+  chmod +x "$fixture/bin/uname" "$fixture/bin/git"
+  cp "$ROOT/scripts/oms" "$fixture/oms"
+  for platform in MINGW64_NT-10.0 MSYS_NT-10.0 CYGWIN_NT-10.0; do
+    for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$fixture/oms" \
+      "$ROOT/scripts/link.sh" "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      output="$(HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/home/.config" \
+        OH_MY_SETTING_DIR="$fixture/home/.oh-my-setting" OMS_PLATFORM_OVERRIDE='' \
+        OMS_TEST_UNAME="$platform" PATH="$fixture/bin:$PATH" \
+        bash "$entry" 2>&1)" && fail "native Windows entry succeeded: $entry ($platform)"
+      [ "$output" = "$message" ] || fail "wrong native Windows refusal: $output"
+      [ -z "$(find "$fixture/home" -mindepth 1 -print)" ] || fail "native Windows entry wrote home"
+    done
+  done
+  # An override can add Windows, but cannot hide either native host signal.
+  for platform in MINGW64_NT-10.0 MSYS_NT-10.0 CYGWIN_NT-10.0; do
+    for override in Linux linux macos 0 malformed; do
+      for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
+        "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+        output="$(HOME="$fixture/home" OMS_PLATFORM_OVERRIDE="$override" OSTYPE=linux-gnu \
+          OMS_TEST_UNAME="$platform" PATH="$fixture/bin:$PATH" \
+          bash "$entry" --help 2>&1)" && fail "override hid native uname: $entry ($override)"
+        [ "$output" = "$message" ] || fail "wrong conflicting uname refusal: $output"
+      done
+    done
+  done
+  for platform in msys msys2 cygwin cygwin_nt win32; do
+    for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      output="$(HOME="$fixture/home" OMS_PLATFORM_OVERRIDE=Linux OSTYPE="$platform" \
+        OMS_TEST_UNAME=Linux PATH="$fixture/bin:$PATH" \
+        bash "$entry" --help 2>&1)" && fail "Linux signals hid native OSTYPE: $entry ($platform)"
+      [ "$output" = "$message" ] || fail "wrong conflicting OSTYPE refusal: $output"
+    done
+  done
+  (
+    unset OMS_PLATFORM_OVERRIDE
+    for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      OSTYPE=linux-gnu OMS_TEST_UNAME=Linux PATH="$fixture/bin:$PATH" \
+        bash "$entry" --help >/dev/null || fail "Linux without override refused: $entry"
+    done
+  )
+  for platform in '' 0 malformed; do
+    for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      OMS_PLATFORM_OVERRIDE=Linux OSTYPE="$platform" OMS_TEST_UNAME=Linux PATH="$fixture/bin:$PATH" \
+        bash "$entry" --help >/dev/null || fail "non-Windows OSTYPE refused: $entry ($platform)"
+    done
+  done
+  for verb in '' help --help list update uninstall '../invalid'; do
+    output="$(HOME="$fixture/home" OMS_PLATFORM_OVERRIDE=windows \
+      bash "$ROOT/scripts/oms" "$verb" 2>&1)" && fail "Windows dispatcher accepted $verb"
+    [ "$output" = "$message" ] || fail "wrong dispatcher refusal for $verb: $output"
+  done
+  # The curl/pipe installer has no platform library; re-exec must refuse too.
+  output="$(HOME="$fixture/home" OMS_PLATFORM_OVERRIDE=windows OH_MY_SETTING_REEXECED=1 \
+    bash < "$ROOT/install.sh" 2>&1)" && fail "standalone re-exec installer accepted Windows"
+  [ "$output" = "$message" ] || fail "wrong standalone installer refusal: $output"
+  [ -z "$(find "$fixture/home" -mindepth 1 -print)" ] || fail "Windows refusal wrote home"
+  for platform in linux macos '' 0 malformed; do
+    for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      OMS_PLATFORM_OVERRIDE="$platform" bash "$entry" --help >/dev/null || fail "supported help failed: $entry"
+    done
+  done
+  echo "native-windows-refusal: ok"
+}
+test_native_windows_refusal
+
 # shellcheck source=scripts/lib/platform.sh
 . "$ROOT/scripts/lib/platform.sh"
 # shellcheck source=scripts/lib/install-contract.sh
