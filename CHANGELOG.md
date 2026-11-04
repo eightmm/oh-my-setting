@@ -8,6 +8,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms models` that finds an installed provider's catalog older than seven
+  days starts the daily catalog refresh detached, behind the tick stamp and
+  lock, so hosts without the hourly trigger stop routing on a stale catalog;
+  `--json` reports `catalog_refresh: started` and harness children never start one.
+- Deep and frontier read tiers offer Antigravity Argon routes after native
+  providers with known weekly quota.
+- `oms gc` reclaims aged unreferenced completion objects while other tasks hold
+  leases; each live transaction pins the full closure of completion references it holds.
+- `oms panel --results --json` carries each call's recorded `base_sha`, so a
+  stale write patch can be rebased from the base its worker ran on.
+- Opt-in careful collaboration mode: the shared `oms-careful` skill, triggered
+  by an explicit request or a project `Collaboration mode: careful` line,
+  confirms understanding and plans before multi-file, interface or data changes
+  and separates facts from hedged inference with confidence levels. The ML
+  experiment template gains confidence, alternative-explanation and
+  unverified-assumption fields.
 - `oms connect-services --codex-account NAME [--home PATH]` registers another
   entitled Codex account home (default `~/.codex-NAME`, mode 0700) that links
   the main home's shared config, rules, hooks, plugins and skills, keeps its
@@ -65,6 +81,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Automatic trust-boundary reviews and the architect, critic and advisor roles
+  default to the deep tier; frontier is for security-auditor or an explicit
+  `--workload frontier`.
+- Every headless Codex inference call selects its account through one choke
+  point; direct resumes keep the caller's home and explicit targets fall back to it.
+- Tier routing skips Codex for write work on hosts whose AppArmor blocks
+  unprivileged user namespaces; an explicit Codex write fails fast naming the
+  `oms doctor` remedy.
+- A finished call delivers one actionable notice under its result id; routine
+  worker progress stays in room reads, and hook lines render compactly with
+  artifact pointers.
+- Account cleanup and `oms doctor` report what they kept: removed and kept
+  links, kept receipt rows and the reason.
+- The ci-parity quick lane runs the harness suite when uninstall or the account
+  helper it calls changes.
 - The optional Antigravity council seat resolves its configured Gemini family
   and level to the newest routable catalog generation, or to the one other
   family at that level when the configured family is gone, so a model refresh
@@ -413,6 +444,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Antigravity read seats build their trees under the validated delegate root
+  that the worker and review guards recognise, so a read seat no longer stops a
+  concurrent write worker; a linked or invalid root falls back to TMPDIR.
+- Fixture suites resolve `XDG_CONFIG_HOME` to a private empty directory unless
+  `check.sh` already isolated it, so a provider account registered on the host
+  no longer changes verify results.
+- Codex writes on userns-blocked hosts are refused before any plan, room or
+  worktree mutation for explicit routes, and write fallbacks skip Codex there.
+- Antigravity prompts above the argv limit travel in a staged file under the
+  caller's own run directory, so large reviews no longer exit 2. An interrupted
+  delegation, ask or council review leaves no staged prompt behind.
 - Worker and review guards no longer abort when another OMS call registers a
   managed sibling worktree mid-run: its admin entries are accepted only through
   receipts bound to a digest the parent took before the provider started, and
