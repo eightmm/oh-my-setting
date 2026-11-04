@@ -1435,11 +1435,19 @@ messages. A main has no cap on concurrent calls: split separable work into as ma
 Interruptions give the child up to 20 seconds to clean up, settle unfinished attempts and send a numeric
 result handoff. Sensitive summaries are withheld with an `oms panel --results --task-id` pointer;
 room races can still prevent delivery, while the indexed evidence remains available.
-Each reviewer result sends one addressed handoff containing the judgment and a
-findings pointer. A passing automatic review also prepares an editable completion
+Each finished call sends one result handoff containing its outcome, verification or
+review judgment, retained artifact path and next command. Failures combine the
+judgment and result in that handoff. Automatic-review launch retries defer the
+handoff until a reviewer launch or manual-review decision is settled. Successful
+write results stay quiet while their automatic review runs. A passing automatic
+review also prepares an editable completion
 summary and an owner finalization command, or names the paths outside the worker's
 declared scope instead of a command acceptance would refuse; admission and acceptance remain explicit.
-Room hook delivery still requires explicit `oms room ack` after consumption.
+Room hooks render one line per message: exact message ID, sender role and ID,
+the first 300 characters of text and the artifact path when present, including
+paths beyond the excerpt. The untrusted peer-data framing remains. One
+`oms room ack` command lists the delivered IDs; delivery requires explicit
+acknowledgment after consumption. Full text remains in `oms room updates` and results.
 Acknowledgment reminders are at most once per five minutes per session and are
 omitted when that hook delivers new mail.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
@@ -1749,6 +1757,12 @@ reply links and explicit consumption. Stable message IDs deduplicate identical
 sends; conflicting reuse fails. Broadcast recipients are fixed at send time.
 A new join does not replay earlier messages. Reads exclude sender echoes and
 other participants' direct mail, advance a checked cursor and do not acknowledge.
+Routine worker notes stay in the durable log and `oms room updates` but are
+omitted from main hook prompts and acknowledgment reminders. Typed questions,
+answers and handoffs, actionable notes (questions, blockers, verification failures,
+review verdicts and owner decisions), unclassified notes, and notes from other
+roles remain immediate.
+Use `--kind question` for questions and `--kind handoff` for completion.
 Delivery/consumption/answer/acceptance are separate states. Rooms are bounded
 to 32 members (mains and other unparented participants), 480 dispatched calls
 (participants with a parent, which keep their slot after finishing) and 1024

@@ -437,7 +437,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     notice_launches, lost_notices = [], []
     real_room_send = room.send
     def lose_first_judgment(*args, **kwargs):
-        if str(kwargs.get("message_id", "")).startswith("judgment-") and not lost_notices:
+        if str(kwargs.get("message_id", "")).startswith("result-") and not lost_notices:
             lost_notices.append(kwargs["message_id"])
             raise OSError("fixture notice loss")
         return real_room_send(*args, **kwargs)
@@ -456,9 +456,9 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
         assert not lost_notice_claim["complete"] and lost_notice_claim["steps"]["auto_review"] is False, \
             lost_notice_claim
         assert panel.deliver_result(project, shared, notice_call, room_owner, auto_task, 0)
-    assert lost_notices == ["judgment-" + notice_call] and not notice_launches, (lost_notices, notice_launches)
+    assert lost_notices == ["result-" + notice_call] and not notice_launches, (lost_notices, notice_launches)
     assert panel.dispatch_store.read(project, panel._settlement_claim_path(notice_call))["complete"]
-    assert any(row.get("room_event", {}).get("id") == "judgment-" + notice_call
+    assert any(row.get("room_event", {}).get("id") == "result-" + notice_call
                for row in room.records(project, shared))
     # Past the spawn point (launch record written) a reserved reviewer is never relaunched; the main reviews.
     def review_kinds(digest):
@@ -501,7 +501,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
         assert len(spawn_launches) == 1 and review_kinds(spawn_digest) == ["review-dispatch"], \
             (spawn_launches, review_kinds(spawn_digest))
         assert panel.dispatch_store.read(project, panel._settlement_claim_path(spawn_call))["complete"]
-        assert any(row.get("room_event", {}).get("id") == "judgment-" + spawn_call
+        assert any(row.get("room_event", {}).get("id") == "result-" + spawn_call
                    for row in room.records(project, shared))
     # A failed release write leaves the durable flag active; the same process still retries its delivery.
     release_call = "call-d6d6d6d6d6d6d6d6"
@@ -527,7 +527,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
         assert stranded["active"] and not stranded["complete"], stranded
         assert release_call not in panel.SETTLEMENTS_HELD
         assert panel.deliver_result(project, shared, release_call, room_owner, auto_task, 0)
-    assert lost_notices == ["judgment-" + release_call], lost_notices
+    assert lost_notices == ["result-" + release_call], lost_notices
     assert panel.dispatch_store.read(project, panel._settlement_claim_path(release_call))["complete"]
     preflight_call = "call-0000000000000001"
     preflight_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-preflight",
@@ -545,7 +545,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
             patch.object(panel, "work_repository", return_value=worker_execution_repo), \
             patch.dict(os.environ, room_env, clear=True):
         panel.deliver_result(project, shared, preflight_call, room_owner, auto_task, 0)
-        assert not any(m["id"] == "judgment-" + preflight_call for m in room.status(project, shared)["messages"])
+        assert not any(m["id"] == "result-" + preflight_call for m in room.status(project, shared)["messages"])
         panel.deliver_result(project, shared, preflight_call, room_owner, auto_task, 0)
     preflight_review = next(row["room_event"] for row in room.records(project, shared)
                             if row.get("room_event", {}).get("kind") == "review-dispatch"
@@ -564,7 +564,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
                            and row["room_event"].get("call_id") == preflight_member)
     assert reviewer_result["role"] == "reviewer" and reviewer_result["task_id"] == auto_task
     preflight_mail = next(m for m in room.status(project, shared)["messages"]
-                          if m["id"] == "judgment-" + preflight_call)
+                          if m["id"] == "result-" + preflight_call)
     assert "could not launch automatic review" in preflight_mail["text"] and room_owner in preflight_mail["targets"]
     assert any(row.get("room_event", {}).get("kind") == "review-dispatch-failed"
                and row["room_event"].get("review_call_id") == preflight_member for row in room.records(project, shared))
@@ -617,7 +617,7 @@ with patch.object(panel_result_store, "_records", return_value=([read_timeout_at
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, read_timeout_call, room_owner, auto_task, 124)
 read_timeout_mail = next(m for m in room.status(project, shared)["messages"]
-                         if m["id"] == "judgment-" + read_timeout_call)
+                         if m["id"] == "result-" + read_timeout_call)
 assert "worker exited with status 124" in read_timeout_mail["text"]
 assert "oms panel --salvage " not in read_timeout_mail["text"]
 verify_call = fixture_call_id("auto-review-verify-failed")
@@ -634,7 +634,7 @@ with patch.object(panel_result_store, "_records", return_value=([verify_attempt]
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, verify_call, room_owner, auto_task, 1)
     assert len(actual_dispatch_calls) == 1
-    verify_mail = next(m for m in room.status(project, shared)["messages"] if m["id"] == "judgment-" + verify_call)
+    verify_mail = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + verify_call)
     assert "verification failed" in verify_mail["text"] and room_owner in verify_mail["targets"]
     assert ("Continue with fixes: oms panel --dispatch worker --continue %s --access write "
             "--brief-file PATH --purpose implement --verify 'test -f scripts/fixture.py'" % auto_task) in verify_mail["text"]
@@ -668,7 +668,7 @@ with patch.object(panel_result_store, "_records", return_value=([builder_verify_
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, builder_verify_call, room_owner, auto_task, 1)
 builder_verify_mail = next(m for m in room.status(project, shared)["messages"]
-                           if m["id"] == "judgment-" + builder_verify_call)
+                           if m["id"] == "result-" + builder_verify_call)
 assert ("Continue with fixes: oms panel --dispatch builder --continue %s --access write "
         "--brief-file PATH --verify 'test -f scripts/fixture.py'" % auto_task) in builder_verify_mail["text"]
 assert "--purpose" not in builder_verify_mail["text"]
@@ -697,7 +697,7 @@ with patch.object(panel_result_store, "_records", return_value=([verify_long_att
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, verify_long_call, room_owner, auto_task, 1)
 verify_long_mail = next(m for m in room.status(project, shared)["messages"]
-                        if m["id"] == "judgment-" + verify_long_call)
+                        if m["id"] == "result-" + verify_long_call)
 assert ("Continue with fixes: oms panel --dispatch worker --continue %s --access write "
         "--brief-file PATH --purpose implement" % auto_task) in verify_long_mail["text"]
 assert "--verify VERIFY" in verify_long_mail["text"]
@@ -718,7 +718,7 @@ with patch.object(panel_result_store, "_records", return_value=([verify_read_att
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, verify_read_call, room_owner, auto_task, 1)
 verify_read_mail = next(m for m in room.status(project, shared)["messages"]
-                        if m["id"] == "judgment-" + verify_read_call)
+                        if m["id"] == "result-" + verify_read_call)
 assert "verification failed" in verify_read_mail["text"]
 assert "Continue with fixes:" not in verify_read_mail["text"]
 verify_timeout_call = fixture_call_id("auto-review-verifier-timeout")
@@ -735,7 +735,7 @@ with patch.object(panel_result_store, "_records", return_value=([verify_timeout_
         patch.dict(os.environ, room_env, clear=True):
     panel.deliver_result(project, shared, verify_timeout_call, room_owner, auto_task, 1)
 verify_timeout_mail = next(m for m in room.status(project, shared)["messages"]
-                           if m["id"] == "judgment-" + verify_timeout_call)
+                           if m["id"] == "result-" + verify_timeout_call)
 assert "verification failed" in verify_timeout_mail["text"]
 assert "Recover its edits: oms panel --salvage %s." % auto_task in verify_timeout_mail["text"]
 no_verify_call = fixture_call_id("auto-review-no-verify")
@@ -754,7 +754,7 @@ with patch.object(panel_result_store, "_records", return_value=([no_verify_attem
     panel.deliver_result(project, shared, no_verify_call, room_owner, auto_task, 0)
     assert len(actual_dispatch_calls) == 1
     no_verify_mail = next(m for m in room.status(project, shared)["messages"]
-                          if m["id"] == "judgment-" + no_verify_call)
+                          if m["id"] == "result-" + no_verify_call)
     assert "no recorded verifier" in no_verify_mail["text"] and room_owner in no_verify_mail["targets"]
 for malformed_tasks in ([], None):
     with patch.object(panel, "_dispatch_verifier", return_value=None), \
@@ -778,7 +778,7 @@ for missing_repo_call, execution_repo in (
         panel.deliver_result(project, shared, missing_repo_call, room_owner, auto_task, 0)
         assert len(actual_dispatch_calls) == before_calls
     missing_repo_mail = next(m for m in room.status(project, shared)["messages"]
-                             if m["id"] == "judgment-" + missing_repo_call)
+                             if m["id"] == "result-" + missing_repo_call)
     assert "execution repository is unknown or no longer available" in missing_repo_mail["text"]
     assert room_owner in missing_repo_mail["targets"]
     missing_repo_handoff = next(m for m in room.status(project, shared)["messages"]
@@ -802,11 +802,12 @@ with patch.object(panel_result_store, "_records", return_value=([timeout_attempt
     panel.deliver_result(project, shared, timeout_call, room_owner, auto_task, 124)
     assert len(actual_dispatch_calls) == before_calls
 timeout_messages = room.status(project, shared)["messages"]
-timeout_mail = next(m for m in timeout_messages if m["id"] == "judgment-" + timeout_call)
+timeout_mail = next(m for m in timeout_messages if m["id"] == "result-" + timeout_call)
 timeout_handoff = next(m for m in timeout_messages if m["id"] == "result-" + timeout_call)
 assert "worker exited with status 124" in timeout_mail["text"] and room_owner in timeout_mail["targets"]
 assert "Recover its edits: oms panel --salvage %s." % auto_task in timeout_mail["text"]
-assert not timeout_handoff.get("quiet") and timeout_mail["seq"] < timeout_handoff["seq"]
+assert not timeout_handoff.get("quiet") and timeout_mail["seq"] == timeout_handoff["seq"]
+assert len([m for m in timeout_messages if m["sender"] == timeout_call]) == 1
 plan_verify_call = "call-0000000000000004"
 plan_verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-plan-verify",
     refs=dict(auto_attempt["refs"], panel_room_participant=plan_verify_call))
@@ -880,7 +881,7 @@ def fail_always(*args, **kwargs):
 def launch_mail():
     # status() keeps only the last 12 messages; read the full projection.
     return [m for m in room.project(room.records(project, shared))["messages"]
-            if m["id"] == "judgment-" + mail_call and "could not launch" in m["text"]]
+            if m["id"] == "result-" + mail_call and "could not launch" in m["text"]]
 with patch.object(panel_result_store, "_records", return_value=([mail_attempt], [mail_index])), \
         patch.object(panel_result_store, "verified_patch", return_value=mail_patch), \
         patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
@@ -1060,8 +1061,10 @@ for case_number, (case, expected_draft) in enumerate((
     def notice_at_limit(*args, **kwargs):
         notice = original_fix_notice(*args, **kwargs)
         if case.startswith("notice-"):
-            pointer = " Read findings: oms panel --results --task-id " + fix_task
-            size = 3800 if case == "notice-limit" else 4000 - len(pointer.encode("utf-8"))
+            pointer = (" Read findings: oms panel --results --task-id " + fix_task
+                       + " --participant " + fix_reviewer + ". Full answer: " + review_relative + ".")
+            prefix = "Call exit=1; parent acceptance pending. Verification: not_run. "
+            size = 3800 if case == "notice-limit" else 4000 - len((prefix + pointer).encode("utf-8"))
             notice = "검" * (size // 3) + "x" * (size % 3)
         return notice
     with patch.object(panel_result_store, "_records", return_value=(fix_history, fix_products + [review_index, outcome_index])), \
@@ -1204,7 +1207,7 @@ for number in (1, 2):
 r5_notice_failures = []
 real_room_send = room.send
 def fail_r5_notice_once(*args, **kwargs):
-    if kwargs.get("message_id") == "judgment-" + r5_call and not r5_notice_failures:
+    if kwargs.get("message_id") == "result-" + r5_call and not r5_notice_failures:
         r5_notice_failures.append(kwargs["message_id"])
         raise OSError("fixture exhausted-reservation notice unavailable")
     return real_room_send(*args, **kwargs)
@@ -1220,9 +1223,9 @@ with patch.object(panel_result_store, "_records", return_value=([r5_attempt], [d
     r5_claim = panel.dispatch_store.read(project, panel._settlement_claim_path(r5_call))
     assert not r5_claim["complete"] and r5_claim["steps"]["auto_review"] is False, r5_claim
     assert panel.deliver_result(project, shared, r5_call, room_owner, auto_task, 0)
-assert r5_notice_failures == ["judgment-" + r5_call]
+assert r5_notice_failures == ["result-" + r5_call]
 assert panel.dispatch_store.read(project, panel._settlement_claim_path(r5_call))["complete"]
-assert any(message.get("id") == "judgment-" + r5_call
+assert any(message.get("id") == "result-" + r5_call
            for message in room.status(project, shared)["messages"])
 # Concurrent observers share one durable call claim and launch at most one reviewer per digest.
 import threading
@@ -1335,3 +1338,40 @@ for invalid in (request[:-1] + ["printf tampered > value.txt"],
     assert rejected_gate.returncode != 0 and "candidate" in rejected_gate.stderr, rejected_gate
     assert worker_log.read_bytes() == before_bad_gate and (project / "value.txt").read_bytes() == source_value
 shared, room_env = shared_before_auto, room_env_before_auto
+
+# BEGIN compact completion notice
+Path(environment["XDG_STATE_HOME"]).mkdir(mode=0o700, parents=True, exist_ok=True)
+compact_room = room.create(project, "compact-notice", "Compact completion")
+room.join(project, compact_room, "compact-owner", "claude", "main")
+room.join(project, compact_room, "call-compact-worker", "codex", "worker", parent="compact-owner")
+compact_artifact = ".oms/artifacts/fixture/compact.md"
+compact_event = {"role": "worker", "access": "write", "verify_status": "failed", "verify_exit": 2,
+                 "needs_review": False, "artifact": compact_artifact}
+with patch.object(panel, "_call_result_event", return_value=(compact_event, {"artifact": compact_artifact})), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "diagnostic " * 600}]}]}), \
+        patch.object(panel, "_review_verifier", return_value=None), \
+        patch.dict(os.environ, dict(environment, OMS_ROOM_ID=compact_room, OMS_ROOM_REPO=str(project)), clear=True):
+    panel._prepare_dispatch_call(project, compact_room, "call-compact-worker", "compact-owner", task_id="compact-task")
+    assert panel.deliver_result(project, compact_room, "call-compact-worker", "compact-owner", "compact-task", 1)
+    assert panel.deliver_result(project, compact_room, "call-compact-worker", "compact-owner", "compact-task", 1)
+compact_messages = room.project(room.records(project, compact_room))["messages"]
+assert len(compact_messages) == 1, compact_messages
+assert compact_messages[0]["id"] == "result-call-compact-worker"
+assert compact_artifact in compact_messages[0]["text"]
+assert "verification failed" in compact_messages[0]["text"]
+assert "oms panel --results" in compact_messages[0]["text"]
+assert len(compact_messages[0]["text"].encode()) <= 4000
+# Exercise empty summaries and both sides of the final message byte bound.
+for compact_size in (0, 1, 300, 4000, 4001):
+    compact_call = "call-compact-%d" % compact_size
+    room.join(project, compact_room, compact_call, "codex", "worker", parent="compact-owner")
+    with patch.object(panel, "_call_result_event", return_value=(dict(compact_event, verify_status="passed"),
+                                                               {"artifact": compact_artifact})), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "é" * compact_size}]}]}), \
+            patch.dict(os.environ, dict(environment, OMS_ROOM_ID=compact_room, OMS_ROOM_REPO=str(project)), clear=True):
+        panel._prepare_dispatch_call(project, compact_room, compact_call, "compact-owner", task_id="compact-task")
+        assert panel.deliver_result(project, compact_room, compact_call, "compact-owner", "compact-task", 0)
+    compact_body = room.project(room.records(project, compact_room))["messages"][-1]["text"]
+    assert compact_artifact in compact_body and len(compact_body.encode()) <= 4000
+    assert ("[Summary truncated.]" in compact_body) == (compact_size >= 4000)
+# END compact completion notice

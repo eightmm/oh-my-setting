@@ -767,7 +767,7 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
 def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim):
     """Keep the numeric outcome deliverable when a worker summary cannot be shared."""
     from terminal_panel import ROOT, _automatic_review_workload, _call_result_event, _completion_inputs
-    from terminal_panel import _dispatch_execution_repository, _judgment_mail, _review_dispatch_context
+    from terminal_panel import _dispatch_execution_repository, _review_dispatch_context
     from terminal_panel import _review_fix_notice, _review_launch_state, _review_verdict, _review_verifier
     from terminal_panel import _safe_patch_path, _settlement_step, _validate_dry_run_inputs, caller_owner
     from terminal_panel import clean, dispatch, policy, results
@@ -815,6 +815,12 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
     review_delivered = False
     dispatched_role = result_record.get("dispatched_role")
     review_notice = None
+
+    def judgment_notice(text):
+        nonlocal review_notice
+        review_notice = text
+        return True
+
     if role == "reviewer" or dispatched_role in {"verifier", "security-auditor", "critic", "architect"}:
         gate_required = bool(review_context) or dispatched_role == "review"
         verdict = _review_verdict(summary)
@@ -915,8 +921,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                 hint_budget = 4000 - len(base_bytes) - len(marker.encode("utf-8"))
                 hint = recovery.encode("utf-8")[:hint_budget].decode("utf-8", "ignore")
                 judgment = base + hint + marker
-        _judgment_mail(repo, room_id, member, caller, task_id,
-                       judgment)
+        judgment_notice(judgment)
     auto_review_done = bool(result_event and policy_available and not (result_event.get("needs_review") and status == 0
                                                   and not guard_stop
                                                   and result_event.get("verify_status") != "failed"
@@ -943,13 +948,13 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                        % task_id)
         try:
             if not verifier:
-                manual_notice = _judgment_mail(repo, room_id, member, caller, task_id,
+                manual_notice = judgment_notice(
                                "Task %s has a write patch but no recorded verifier; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                                % task_id)
                 raise LookupError("no verifier is available for automatic review")
             work_repo = _dispatch_execution_repository(repo, room_id, member, caller)
             if work_repo is None:
-                manual_notice = _judgment_mail(repo, room_id, member, caller, task_id,
+                manual_notice = judgment_notice(
                                "Task %s execution repository is unknown or no longer available; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                                % task_id)
                 raise LookupError("execution repository is unknown or unavailable")
@@ -978,11 +983,11 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
             elif pending_claim and launch == "interrupted":
                 _settlement_step(repo, member, claim, "review_launch", False)
                 review_delivered = False
-                auto_review_done = _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+                auto_review_done = judgment_notice(unconfirmed)
             elif pending_claim and launch == "possible":
                 # Past the spawn point a reviewer may exist: never relaunch, hand the review to the main.
                 review_delivered = False
-                auto_review_done = _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+                auto_review_done = judgment_notice(unconfirmed)
             else:
                 attempt = pending_claim.get("attempt") if pending_claim else len(claims) + 1
                 claim_id, failed_id, review_member = room.review_ids(member, digest, attempt)
@@ -1022,54 +1027,61 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                     review_delivered = False
                     exhausted = (len(claims) >= 2
                                  and all(item.get("attempt") in failures for item in claims))
-                    auto_review_done = (_judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+                    auto_review_done = (judgment_notice(unconfirmed)
                                         if exhausted else False)
         except LookupError as error:
             if "unconfirmed" in str(error):
-                manual_notice = _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+                manual_notice = judgment_notice(unconfirmed)
             # Completion needs the durable manual-review notice; without it the claim stays retryable.
             auto_review_done = manual_notice
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             if attempt is None or attempt >= 2:
                 # A first launch failure is retried by the next reconcile; mail only when none remains.
-                _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+                judgment_notice(unconfirmed)
             print("OMS automatic review unavailable for task %s: %s" % (task_id, clean(str(error), 180)),
                   file=sys.stderr)
             # Preflight/dispatch failures with no launch evidence retain their bounded retry.
             auto_review_done = False
-    if auto_review_done:
-        _settlement_step(repo, member, claim, "auto_review")
-    else:
-        _settlement_step(repo, member, claim, "auto_review", False)
+    # Manual review is settled only with the same durable handoff as its judgment.
+    manual_review = review_notice is not None and role != "reviewer" and bool(
+        result_event and result_event.get("needs_review") and status == 0 and not verify_failed and not guard_stop
+        and auto_review)
+    _settlement_step(repo, member, claim, "auto_review", bool(auto_review_done and not manual_review))
+    if (result_event and policy_available and result_event.get("needs_review") and auto_review
+            and not auto_review_done and review_notice is None):
+        return False  # A retry must not conflict with an already-published result body.
     if "room_quiet" not in claim["steps"]:
         _settlement_step(repo, member, claim, "room_quiet", bool(review_delivered))
     room_quiet = claim["steps"]["room_quiet"]
     prefix = "Call exit=%d; parent acceptance pending.\n" % status
-    full_message = (prefix + str(summary)).encode("utf-8")
-    message = full_message[:3800].decode("utf-8", "ignore")
-    if len(full_message) > 3800:
-        answer_artifact = result_record.get("artifact")
-        if (not _safe_patch_path(answer_artifact) or
-                not answer_artifact.startswith(".oms/artifacts/") or
-                len(answer_artifact.encode("utf-8")) > 1000):
-            answer_artifact = None
-        evidence_pointer = ("Full answer: " + answer_artifact if answer_artifact else
-                            "Full answer artifact unavailable")
-        pointer = (" [Summary truncated.] %s. Results overview: "
-                   "oms panel --results --task-id %s --participant %s" %
-                   (evidence_pointer, task_id, member))
-        budget = 4000 - len(pointer.encode("utf-8"))
-        message = full_message[:budget].decode("utf-8", "ignore") + pointer
+    verification = "Verification: %s. " % (result_event or {}).get("verify_status", "unavailable")
+    full_message = (prefix + verification + str(summary)).encode("utf-8")
+    answer_artifact = result_record.get("artifact")
+    if (not _safe_patch_path(answer_artifact) or
+            not answer_artifact.startswith(".oms/artifacts/") or
+            len(answer_artifact.encode("utf-8")) > 1000):
+        answer_artifact = None
+    evidence_pointer = ("Full answer: " + answer_artifact if answer_artifact else
+                        "Full answer artifact unavailable")
+    pointer = (" %s. Results overview: oms panel --results --task-id %s --participant %s" %
+               (evidence_pointer, task_id, member))
+    if len(full_message) + len(pointer.encode("utf-8")) > 4000:
+        pointer = " [Summary truncated.]" + pointer
+    budget = 4000 - len(pointer.encode("utf-8"))
+    message = full_message[:budget].decode("utf-8", "ignore") + pointer
     message_id = "result-" + member
     if review_notice is not None:
         # The result id also settles the call on the board and across room rollover.
-        pointer = " Read findings: oms panel --results --task-id " + task_id
+        artifact = result_record.get("artifact")
+        full = (" Full answer: " + artifact + "." if _safe_patch_path(artifact)
+                and artifact.startswith(".oms/artifacts/") and len(artifact.encode("utf-8")) <= 1000 else "")
+        pointer = " Read findings: oms panel --results --task-id " + task_id + " --participant " + member + "." + full
+        review_notice = prefix.strip() + " " + verification + review_notice
+        if not answer_artifact:
+            review_notice += " " + str(summary)
         message = review_notice + pointer
         if len(message.encode("utf-8")) > 4000:
-            artifact = result_record.get("artifact")
-            full = (" Full findings: " + artifact + "." if _safe_patch_path(artifact)
-                    and artifact.startswith(".oms/artifacts/") and len(artifact.encode("utf-8")) <= 1000 else "")
-            pointer = " [Notice truncated.]" + full + pointer
+            pointer = " [Notice truncated.]" + pointer
             message = review_notice.encode("utf-8")[:4000 - len(pointer.encode("utf-8"))].decode("utf-8", "ignore") + pointer
         room_quiet = False
     for retry in (False, True):
@@ -1077,11 +1089,13 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
             room.send(repo, room_id, member, caller, message, "handoff", message_id=message_id,
                       quiet=room_quiet)
             _settlement_step(repo, member, claim, "room_result")
+            if manual_review:
+                auto_review_done = True
+                _settlement_step(repo, member, claim, "auto_review")
             return bool(structured_done and auto_review_done)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             if not retry and isinstance(error, ValueError) and "sensitive" in str(error).lower():
-                message = (prefix + "Summary withheld by the sensitive-content screen; read it with "
-                           "oms panel --results --task-id %s --participant %s" % (task_id, member))
+                message = prefix + "Summary withheld by the sensitive-content screen." + pointer
                 continue
             if "message id conflicts" in str(error).lower():
                 print("OMS room result message-id conflict: " + message_id, file=sys.stderr)

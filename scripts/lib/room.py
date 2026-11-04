@@ -1490,6 +1490,25 @@ def visible(row, who, joined_seq=0):
             and event.get("recipient") in ("all", who) and who in event.get("audience", [who]))
 
 
+def prompt_message(message, state, who):
+    """Keep routine worker notes in room reads without injecting them into a main's prompt."""
+    members = {p["participant"]: p for p in state["participants"]}
+    sender = members.get(message.get("sender"), {})
+    if (members.get(who, {}).get("role") != "main" or sender.get("role") != "worker"
+            or message.get("message_kind") != "note" or message.get("reply_to")):
+        return True
+    text = str(message.get("text", ""))
+    # Ambiguous actionable notes stay immediate; typed questions/answers/handoffs always do.
+    if re.search(r"[?？]|\b(ask|question|need|help|block\w*|fail\w*|error\w*|unable|cannot|can['’]t|"
+                 r"verdict|gate|decision|approv\w*|reject\w*|complet\w*|pass\w*|success\w*|succeed\w*|done|finished|ready|"
+                 r"denied|missing|unavailable|conflict|stuck|stopped|timeout|timed out)\b"
+                 r"|질문|차단|실패|완료|결정|승인", text, re.IGNORECASE):
+        return True
+    return not re.search(r"\b(running|working|progress|started|starting|implement\w*|inspect\w*|"
+                         r"check\w*|test\w*|investigat\w*|prepar\w*|scop\w*|read\w*|updat\w*)\b",
+                         text, re.IGNORECASE)
+
+
 def unread_messages(state, who):
     """Unacknowledged mail visible in this participant's latest enrollment."""
     member = participant(state, who)
