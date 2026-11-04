@@ -31,10 +31,15 @@ usage() {
 Usage: install-tools.sh [--upgrade|--providers] [-h|--help]
 
 Install Node (via nvm), uv, gh, and ntn from tools.lock.json.
-The three provider CLIs (claude, codex, agy) follow stable releases with verified
-checksums; --providers refreshes installed optional npm CLIs to stable releases
-at least 14 days old, alongside already-installed core provider CLIs.
-An explicit OH_MY_SETTING_TOOL_LOCK retains reproducible pinned installs.
+Recognized vendor installations use claude update, codex update and agy update.
+Only --providers refreshes installed Pi, using pi update self.
+Their channels choose the version; OMS rejects downgrades.
+Fresh Claude uses its checksum-verified native installer; native Windows Git
+Bash keeps the npm path. Fresh Codex and agy keep their verified install paths.
+--providers also refreshes installed optional npm CLIs to stable releases at
+least 14 days old. Pi is never freshly installed by OMS.
+An explicit OH_MY_SETTING_TOOL_LOCK retains reproducible pinned installs and
+skips Pi refresh without changing its installation.
 
 Nothing here needs root: npm globals use the active writable prefix or
 ~/.local, and direct release payloads such as gh are installed in ~/.local/bin.
@@ -53,9 +58,17 @@ esac
 prepare_provider_versions() {
   local item snapshot
   local provider_args=()
+  for item in "$@"; do
+    if [ "$item" = claude ]; then preflight_claude_vendor || return 1; fi
+  done
   [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || return 0
   for item in "$@"; do
-    case "$item" in codex|claude|agy) provider_args+=(--provider "$item") ;; esac
+    case "$item" in
+      codex|claude|agy)
+        vendor_provider_path "$item" >/dev/null && continue
+        if [ "$item" = claude ] && claude_migration_pending; then continue; fi
+        provider_args+=(--provider "$item") ;;
+    esac
   done
   [ "${#provider_args[@]}" -gt 0 ] || return 0
   snapshot="$HOME/.local/share/oh-my-setting/provider-tools.lock.json"
@@ -727,44 +740,373 @@ npm_transaction_begin() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
   }
 }
 
-standalone_codex() {
-  local resolved
-  resolved="$(command -v codex 2>/dev/null)" || return 1
-  python3 - "$resolved" "${CODEX_HOME:-$HOME/.codex}/packages/standalone" <<'PY'
-import sys
+vendor_provider_path() { # PROVIDER [COMMAND_PATH]
+  local candidate="${2:-}" home_physical resolved
+  [ -n "$candidate" ] || candidate="$(command -v "$1" 2>/dev/null)" || return 1
+  home_physical="$(cd "$HOME" && pwd -P)" || return 1
+  resolved="$(python3 - "$1" "$candidate" "$home_physical" "${CODEX_HOME:-$HOME/.codex}" <<'PY_VENDOR' | tr -d '\r'
+import os, sys
 from pathlib import Path
 try:
-    parts = Path(sys.argv[1]).resolve(strict=True).relative_to(Path(sys.argv[2]).resolve(strict=True)).parts
-except (OSError, ValueError):
-    raise SystemExit(1)
-raise SystemExit(0 if len(parts) == 4 and parts[0] == "releases" and parts[2:] == ("bin", "codex") else 1)
-PY
+    name, candidate, home, codex = sys.argv[1:]
+    home = Path(home)
+    path = Path(candidate).resolve(strict=True)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError()
+    if name == "claude":
+        parts = path.relative_to((home / ".local/share/claude/versions").resolve(strict=True)).parts
+        valid = len(parts) == 1
+    elif name == "codex":
+        parts = path.relative_to((Path(codex) / "packages/standalone").resolve(strict=True)).parts
+        valid = len(parts) == 4 and parts[0] == "releases" and parts[2:] == ("bin", "codex")
+    elif name == "pi":
+        root = (home / ".pi/agent").resolve(strict=True)
+        path.relative_to(root)
+        valid = (path == (root / "bin/pi").resolve(strict=True)
+                 and (root / "install/current-version").is_file()
+                 and (root / "install/releases").is_dir())
+    elif name == "agy":
+        launcher = home / ".local/bin/agy"
+        if not launcher.exists():
+            launcher = home / ".local/bin/agy.exe"
+        valid = not launcher.is_symlink() and path == launcher.resolve(strict=True)
+    else:
+        valid = False
+    if not valid:
+        raise ValueError()
+    print(path)
+except (OSError, ValueError, RuntimeError):
+    sys.exit(1)
+PY_VENDOR
+)" || return 1
+  normalize_npm_path "$resolved"
 }
 
-refresh_standalone_codex() {
-  local resolved expected
-  resolved="$(command -v codex)"
-  expected="$(tool_lock_get npm.codex.version)"
-  if command_has_version "$resolved" "$expected"; then
-    echo "ok: codex $expected (standalone)"
+native_claude() { vendor_provider_path claude >/dev/null; }
+standalone_codex() { vendor_provider_path codex >/dev/null; }
+native_antigravity() { vendor_provider_path agy >/dev/null; }
+native_pi() { vendor_provider_path pi >/dev/null; }
+
+provider_command_version() { # RESOLVED_COMMAND
+  local output
+  output="$("$1" --version 2>/dev/null | tr -d '\r')" || return 1
+  printf '%s\n' "$output" | python3 -c '
+import re, sys
+version = re.search(r"(?<![0-9A-Za-z.+-])v?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.+-])", sys.stdin.read())
+if not version:
+    sys.exit(1)
+print(version[1])
+' | tr -d '\r'
+}
+
+provider_version_not_older() { # ACTUAL PREVIOUS
+  python3 - "$1" "$2" <<'PY_VERSION'
+import re, sys
+pattern = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?"
+def compare(left, right):
+    a, b = re.fullmatch(pattern, left), re.fullmatch(pattern, right)
+    if not a or not b:
+        raise ValueError()
+    an, bn = tuple(map(int, a.groups()[:3])), tuple(map(int, b.groups()[:3]))
+    if an != bn:
+        return (an > bn) - (an < bn)
+    ar, br = a[4], b[4]
+    if ar is None or br is None:
+        return (ar is None) - (br is None)
+    for x, y in zip(ar.split("."), br.split(".")):
+        if x == y:
+            continue
+        if x.isdigit() and y.isdigit():
+            return (int(x) > int(y)) - (int(x) < int(y))
+        if x.isdigit() != y.isdigit():
+            return -1 if x.isdigit() else 1
+        return (x > y) - (x < y)
+    return (len(ar.split(".")) > len(br.split("."))) - (len(ar.split(".")) < len(br.split(".")))
+try:
+    sys.exit(0 if compare(sys.argv[1], sys.argv[2]) >= 0 else 1)
+except ValueError:
+    sys.exit(1)
+PY_VERSION
+}
+
+verify_vendor_provider() { # PROVIDER [PREVIOUS_VERSION]
+  local name="$1" previous="${2:-}" resolved actual expected launcher=""
+  hash -r
+  if [ "$name" = claude ]; then launcher="$HOME/.local/bin/claude"; fi
+  resolved="$(vendor_provider_path "$name" "$launcher")" && actual="$(provider_command_version "$resolved")" || {
+    echo "error: $name no longer resolves to a working vendor layout; repair with the vendor installer" >&2
+    return 1
+  }
+  if [ -n "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
+    case "$name" in
+      claude|codex) expected="$(tool_lock_get "npm.$name.version")" ;;
+      agy) expected="$(tool_lock_get antigravity.version)" ;;
+      *) echo "error: $name has no explicit lock entry; omit OH_MY_SETTING_TOOL_LOCK to use its vendor channel" >&2; return 1 ;;
+    esac
+    [ "$actual" = "$expected" ] || {
+      echo "error: vendor $name is $actual, expected explicit pin $expected; use the vendor installer to restore the pin" >&2
+      return 1
+    }
+  elif [ -n "$previous" ] && ! provider_version_not_older "$actual" "$previous"; then
+    echo "error: vendor $name version went down ($previous to $actual); restore it with the vendor installer" >&2
+    return 1
+  fi
+  echo "ok: $name $actual (vendor channel)"
+}
+
+refresh_vendor_provider() { # PROVIDER
+  local name="$1" resolved previous expected refresh_owner=0
+  if [ "$name" = pi ] && [ -n "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
+    echo "note: pi refresh skipped (explicit tool lock; OMS does not install pi)"
     return 0
   fi
-  [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || {
-    echo "error: standalone Codex does not match explicit pin $expected; native latest update was not run" >&2
+  resolved="$(vendor_provider_path "$name")" || return 1
+  if [ "$name" = agy ] &&
+     { [ -e "$resolved.oh-my-setting-managed" ] || [ -L "$resolved.oh-my-setting-managed" ]; }; then
+    direct_target_owned "$resolved" || {
+      echo "error: agy managed binary digest changed or ownership marker invalid; update was not run" >&2
+      echo "error: restore the verified OMS binary and marker, or preserve both elsewhere and rerun to install the locked payload" >&2
+      return 1
+    }
+    refresh_owner=1
+  fi
+  previous="$(provider_command_version "$resolved")" || {
+    echo "error: cannot read vendor $name version; repair with the vendor installer" >&2; return 1;
+  }
+  if [ -n "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
+    case "$name" in
+      claude)
+        expected="$(tool_lock_get npm.claude.version)"
+        "$resolved" install "$expected" </dev/null || return $? ;;
+      *)
+        # Neither updater accepts an exact pin; check before invoking anything mutable.
+        verify_vendor_provider "$name" >/dev/null || return 1 ;;
+    esac
+  else
+    case "$name" in
+      pi) "$resolved" update self || return $? ;;
+      *) "$resolved" update || return $? ;;
+    esac
+  fi
+  verify_vendor_provider "$name" "$previous" || return 1
+  if [ "$refresh_owner" = 1 ] && [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
+    direct_owner_write "$resolved" || return 1
+  fi
+}
+
+refresh_standalone_codex() { refresh_vendor_provider codex; }
+
+newest_native_claude() {
+  local home_physical
+  home_physical="$(cd "$HOME" && pwd -P)" || return 1
+  python3 - "$home_physical/.local/share/claude/versions" <<'PY_NATIVE' | tr -d '\r'
+import os, re, sys
+from pathlib import Path
+try:
+    root = Path(sys.argv[1]).resolve(strict=True)
+    candidates = []
+    for candidate in root.iterdir():
+        if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", candidate.name):
+            continue
+        if candidate.is_file() and candidate.resolve(strict=True).parent == root and os.access(candidate, os.X_OK):
+            candidates.append((tuple(map(int, candidate.name.split("."))), candidate.resolve(strict=True)))
+    if not candidates:
+        sys.exit(1)
+    print(max(candidates)[1])
+except (OSError, ValueError, RuntimeError):
+    sys.exit(1)
+PY_NATIVE
+}
+
+claude_migration_pending() {
+  npm_shim_owned "$HOME/.local/bin/claude" ||
+    npm_shim_owned "$HOME/.local/bin/.claude.oh-my-setting-migration" || return 1
+  newest_native_claude >/dev/null
+}
+
+preflight_claude_vendor() {
+  local target="$HOME/.local/bin/claude" root identity
+  oms_platform_is_windows && return 0
+  if { [ -e "$target" ] || [ -L "$target" ]; } &&
+     ! npm_shim_owned "$target" && ! vendor_provider_path claude "$target" >/dev/null; then
+    if [ ! -L "$target" ] || ! has_cmd npm ||
+       ! root="$(npm_global_root)" ||
+       ! identity="$(optional_npm_identity "$root" "$target" claude)" ||
+       [ "${identity%%$'\t'*}" != '@anthropic-ai/claude-code' ]; then
+      echo "error: Claude launcher is not OMS-owned, vendor-native or in the active npm root; repair it with the vendor installer (it was not moved or overwritten)" >&2
+      return 1
+    fi
+  fi
+  if claude_migration_pending && ! claude_migration_source >/dev/null; then
+    echo "error: cannot prove Claude migration ownership; restore the OMS npm copy or use the vendor installer" >&2
+    return 1
+  fi
+  return 0
+}
+
+claude_migration_source() {
+  local home_physical native shim="$HOME/.local/bin/claude"
+  home_physical="$(cd "$HOME" && pwd -P)" || return 1
+  if [ -e "$HOME/.local/bin/.claude.oh-my-setting-migration" ] ||
+     [ -L "$HOME/.local/bin/.claude.oh-my-setting-migration" ]; then
+    shim="$HOME/.local/bin/.claude.oh-my-setting-migration"
+  fi
+  npm_shim_owned "$shim" || return 1
+  native="$(newest_native_claude)" || return 1
+  python3 - "$home_physical" "$shim" "$native" <<'PY_MIGRATE' | tr -d '\r'
+import json, os, shlex, sys
+from pathlib import Path
+try:
+    home = Path(sys.argv[1])
+    shim = Path(sys.argv[2])
+    lines = shim.read_text().splitlines()
+    command = shlex.split(lines[5])
+    if len(lines) != 6 or len(command) != 3 or command[0] != "exec" or command[2] != "$@":
+        raise ValueError()
+    binary = Path(command[1])
+    prefix = binary.parent.parent.resolve(strict=True)
+    if binary.parent.name != "bin" or binary.name != "claude":
+        raise ValueError()
+    package = prefix / "lib/node_modules/@anthropic-ai/claude-code"
+    package_present = package.exists() or package.is_symlink()
+    if package_present:
+        if package.resolve(strict=True) != package:
+            raise ValueError()
+        row = json.loads((package / "package.json").read_text())
+        if row["name"] != "@anthropic-ai/claude-code":
+            raise ValueError()
+        bins = row["bin"]
+        target = bins if isinstance(bins, str) else bins["claude"]
+        actual = (package / target).resolve(strict=True)
+        actual.relative_to(package)
+        if binary.resolve(strict=True) != actual:
+            raise ValueError()
+        if not os.access(prefix / "bin/npm", os.X_OK):
+            raise ValueError()
+    else:
+        # Cleanup may have completed before a kill left the parked shim behind.
+        if shim.name != ".claude.oh-my-setting-migration":
+            raise ValueError()
+        native = (home / ".local/bin/claude").resolve(strict=True)
+        parts = native.relative_to((home / ".local/share/claude/versions").resolve(strict=True)).parts
+        if len(parts) != 1 or not native.is_file() or not os.access(native, os.X_OK):
+            raise ValueError()
+    print(sys.argv[3])
+    print(prefix)
+except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError):
+    sys.exit(1)
+PY_MIGRATE
+}
+
+migrate_claude_vendor() {
+  local source resolved prefix previous expected shim="$HOME/.local/bin/claude"
+  local backup="$HOME/.local/bin/.claude.oh-my-setting-migration" previous_command
+  source="$(claude_migration_source)" || {
+    echo "error: cannot prove Claude shim npm prefix or find a native version; restore the OMS npm copy, or remove only the OMS shim and run the vendor installer" >&2
     return 1
   }
-  "$resolved" update || return $?
+  resolved="${source%%$'\n'*}"
+  prefix="${source#*$'\n'}"
+  previous_command="$shim"
+  if [ -e "$backup" ] || [ -L "$backup" ]; then
+    if npm_shim_owned "$shim" ||
+       { { [ -e "$shim" ] || [ -L "$shim" ]; } && ! vendor_provider_path claude "$shim" >/dev/null; }; then
+      echo "error: conflicting Claude migration backup; preserve it and restore the OMS shim before retrying" >&2
+      return 1
+    fi
+    previous_command="$backup"
+  fi
+  if ! previous="$(provider_command_version "$previous_command")"; then
+    vendor_provider_path claude "$shim" >/dev/null || return 1
+    previous=""
+  fi
+  provider_command_version "$resolved" >/dev/null || return 1
+  expected=latest
+  [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || expected="$(tool_lock_get npm.claude.version)"
+  if [ "$previous_command" = "$shim" ]; then
+    # The vendor preserves custom launchers. Move only the proven OMS shim;
+    # its backup also lets a later lifecycle call resume an interrupted install.
+    mv "$shim" "$backup" || return 1
+  fi
+  if ! vendor_provider_path claude "$shim" >/dev/null; then
+    if ! "$resolved" install "$expected" </dev/null; then
+      if [ ! -e "$shim" ] && [ ! -L "$shim" ]; then mv "$backup" "$shim" || return 1; fi
+      echo "error: Claude migration installer failed; restore the OMS migration backup or rerun the vendor installer" >&2
+      return 1
+    fi
+  fi
+  verify_vendor_provider claude "$previous" || return 1
+  # Keep the captured prefix until cleanup commits; a retry verifies the native
+  # launcher directly and finishes cleanup without installing a second time.
+  if [ -e "$prefix/lib/node_modules/@anthropic-ai/claude-code" ] ||
+     [ -L "$prefix/lib/node_modules/@anthropic-ai/claude-code" ]; then
+    "$prefix/bin/npm" uninstall -g --prefix "$prefix" --ignore-scripts --no-audit --no-fund -- @anthropic-ai/claude-code || {
+      echo "error: native Claude installed; remove the former OMS npm copy with npm uninstall -g --prefix '$prefix' @anthropic-ai/claude-code" >&2
+      return 1
+    }
+  fi
   hash -r
-  standalone_codex && command_has_version "$(command -v codex)" "$expected" || {
-    echo "error: native Codex update did not produce resolved stable version $expected" >&2
-    return 1
+  npm_shim_owned "$backup" && rm -f "$backup" || {
+    echo "error: Claude migration backup changed; preserve it and remove only the former OMS shim" >&2; return 1;
   }
-  echo "ok: codex $expected (standalone updater)"
+}
+
+install_native_claude() {
+  local version platform base tmp checksum
+  version="$(tool_lock_get npm.claude.version)"
+  platform="$(locked_platform)" || return 1
+  case "$platform" in
+    linux-amd64) platform=linux-x64 ;;
+    darwin-amd64) platform=darwin-x64 ;;
+    linux-arm64|darwin-arm64) ;;
+    *) echo "error: unsupported native Claude platform: $platform" >&2; return 1 ;;
+  esac
+  case "$platform" in
+    linux-*)
+      if { ldd --version 2>&1 || true; } | grep -qi musl; then platform="$platform-musl"; fi ;;
+  esac
+  base=https://downloads.claude.ai/claude-code-releases
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-claude.XXXXXX")" || return 1
+  if ! download_locked "$base/$version/manifest.json" "$tmp/manifest.json"; then rm -rf "$tmp"; return 1; fi
+  checksum="$(python3 - "$tmp/manifest.json" "$platform" <<'PY_MANIFEST' | tr -d '\r'
+import json, re, sys
+try:
+    value = json.load(open(sys.argv[1]))["platforms"][sys.argv[2]]["checksum"]
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError()
+    print(value)
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+PY_MANIFEST
+)" || { rm -rf "$tmp"; echo "error: invalid Claude manifest checksum" >&2; return 1; }
+  if ! download_locked "$base/$version/$platform/claude" "$tmp/claude" ||
+     ! verify_digest sha256 "$checksum" "$tmp/claude" "Claude $version ($platform)"; then
+    rm -rf "$tmp"; return 1
+  fi
+  if ! chmod +x "$tmp/claude"; then rm -rf "$tmp"; return 1; fi
+  if ! "$tmp/claude" install "$version" </dev/null; then rm -rf "$tmp"; return 1; fi
+  rm -rf "$tmp"
+  verify_vendor_provider claude || return 1
+  command_has_version "$(vendor_provider_path claude)" "$version" || {
+    echo "error: native Claude install did not produce requested version $version" >&2; return 1;
+  }
 }
 
 install_npm_global() {
   local name="$1"
-  if [ "$name" = codex ] && standalone_codex; then refresh_standalone_codex; return $?; fi
+  if [ "$name" = claude ]; then preflight_claude_vendor || return 1; fi
+  if [ "$name" = claude ] && ! oms_platform_is_windows && claude_migration_pending; then
+    migrate_claude_vendor; return $?
+  fi
+  case "$name" in
+    claude|codex)
+      if vendor_provider_path "$name" >/dev/null; then refresh_vendor_provider "$name"; return $?; fi ;;
+  esac
+  if [ "$name" = claude ] && ! oms_platform_is_windows; then
+    if ! has_cmd claude && [ ! -e "$HOME/.local/bin/claude" ] && [ ! -L "$HOME/.local/bin/claude" ]; then
+      install_native_claude; return $?
+    fi
+  fi
   local package binary version locked_integrity spec current tmp package_file
   local root package_root managed native_platform native_alias native_package global_bin
   local native_version native_integrity native_spec native_file
@@ -890,9 +1232,21 @@ npm_shim_owned() {  # FILE
 
 preflight_npm_shim() {  # BINARY
   local binary="$1" target="$HOME/.local/bin/$1" global_bin
-  if [ "$binary" = codex ] && standalone_codex; then return 0; fi
+  if [ "$binary" = claude ]; then preflight_claude_vendor || return 1; fi
+  case "$binary" in
+    claude|codex) vendor_provider_path "$binary" >/dev/null && return 0 ;;
+  esac
+  if [ "$binary" = claude ] && ! oms_platform_is_windows; then
+    if claude_migration_pending; then
+      claude_migration_source >/dev/null || {
+        echo "error: cannot prove Claude migration ownership; restore the OMS npm copy or use the vendor installer" >&2; return 1;
+      }
+      return 0
+    fi
+    if ! has_cmd claude && [ ! -e "$target" ] && [ ! -L "$target" ]; then return 0; fi
+  fi
   global_bin="$(npm_global_bin_dir)" || return 1
-  [ "$global_bin" != "$HOME/.local/bin" ] || return 0
+  [ "$(normalize_npm_path "$global_bin")" != "$(normalize_npm_path "$HOME/.local/bin")" ] || return 0
   [ ! -e "$target" ] && [ ! -L "$target" ] && return 0
   npm_shim_owned "$target" && return 0
   echo "error: $target shadows the locked npm-managed $binary command" >&2
@@ -902,7 +1256,9 @@ preflight_npm_shim() {  # BINARY
 
 write_npm_shim() {
   local binary="$1"
-  if [ "$binary" = codex ] && standalone_codex; then return 0; fi
+  case "$binary" in
+    claude|codex) vendor_provider_path "$binary" >/dev/null && return 0 ;;
+  esac
   local actual
   local node_bin
   local target="$HOME/.local/bin/$binary"
@@ -911,9 +1267,7 @@ write_npm_shim() {
     echo "error: no npm-managed binary found for $binary" >&2
     return 1
   }
-  case "$(dirname "$actual")" in
-    "$HOME/.local/bin") return 0 ;;
-  esac
+  if [ "$(normalize_npm_path "$(dirname "$actual")")" = "$(normalize_npm_path "$HOME/.local/bin")" ]; then return 0; fi
   if [ -e "$target" ] || [ -L "$target" ]; then
     npm_shim_owned "$target" || {
       echo "error: refusing to overwrite user-owned PATH shadow: $target" >&2
@@ -936,10 +1290,10 @@ write_npm_shim() {
 
 verify_resolved_npm_binary() {  # NAME
   local name="$1" binary version resolved target global_bin
-  if [ "$name" = codex ] && standalone_codex; then
-    command_has_version "$(command -v codex)" "$(tool_lock_get npm.codex.version)"
-    return $?
-  fi
+  case "$name" in
+    claude|codex)
+      if vendor_provider_path "$name" >/dev/null; then verify_vendor_provider "$name"; return $?; fi ;;
+  esac
   binary="$(tool_lock_get "npm.$name.binary")"
   version="$(tool_lock_get "npm.$name.version")"
   global_bin="$(npm_global_bin_dir)"
@@ -1171,11 +1525,30 @@ install_uv_binaries() {  # SOURCE_UV SOURCE_UVX TARGET_UV TARGET_UVX SHA_UV SHA_
 }
 
 install_antigravity() {
-  local platform version url expected archive tmp source target source_expected
-  platform="$(locked_platform)"
+  local platform="" version url expected archive tmp source target source_expected native recovering=0
+  native="$(vendor_provider_path agy)" || native=""
+  if [ -n "$native" ]; then
+    target="$native"
+  else
+    platform="$(locked_platform)"
+    case "$platform" in windows-*) target="$HOME/.local/bin/agy.exe" ;; *) target="$HOME/.local/bin/agy" ;; esac
+  fi
+  if [ -e "$target.oh-my-setting-backup" ] || [ -L "$target.oh-my-setting-backup" ] ||
+     [ -e "$target.oh-my-setting-stage" ] || [ -L "$target.oh-my-setting-stage" ]; then
+    if ! direct_target_claimed "$target" &&
+       ! direct_target_claimed "$target.oh-my-setting-backup" "$target" &&
+       ! direct_target_claimed "$target.oh-my-setting-stage" "$target"; then
+      echo "error: unowned agy transaction residue; preserve it for manual review before retrying" >&2
+      return 1
+    fi
+    recovering=1
+  elif [ -n "$native" ]; then
+    refresh_vendor_provider agy
+    return $?
+  fi
+  [ -n "$platform" ] || platform="$(locked_platform)"
   version="$(tool_lock_get antigravity.version)"
-  case "$platform" in windows-*) target="$HOME/.local/bin/agy.exe" ;; *) target="$HOME/.local/bin/agy" ;; esac
-  if direct_locked_command_is_current agy "$target" "$version" &&
+  if [ "$recovering" = 0 ] && direct_locked_command_is_current agy "$target" "$version" &&
      { [ "$UPGRADE" != 1 ] || [ "${OH_MY_SETTING_UPGRADE_ANTIGRAVITY:-1}" = 0 ]; }; then
     echo "ok: agy $version"
     return 0
@@ -1207,6 +1580,14 @@ install_antigravity() {
   esac
   [ -f "$source" ] || { rm -rf "$tmp"; echo "error: verified Antigravity payload has no binary" >&2; exit 1; }
   source_expected="$(oms_sha256_file "$source")" || { rm -rf "$tmp"; exit 1; }
+  if [ "$recovering" = 1 ]; then
+    recover_direct_install "$target" sha256 "$source_expected" "$version" || { rm -rf "$tmp"; return 1; }
+    if direct_target_owned "$target" && command_has_version "$target" "$version" && native_antigravity; then
+      rm -rf "$tmp"
+      refresh_vendor_provider agy
+      return $?
+    fi
+  fi
   ensure_local_bin_path
   if ! install_direct_binary "$source" "$target" sha256 "$source_expected" \
       "$version" "Antigravity $version ($platform)"; then
@@ -1544,21 +1925,39 @@ optional_npm_recover() { # ROOT GLOBAL_BIN
 
 refresh_optional_providers() {
   local provider binary resolved root prefix identity package previous target current before
-  local global_bin package_root extra_bins
+  local global_bin package_root extra_bins path_entry old_ifs recovery_needed
+  if native_pi; then refresh_vendor_provider pi || return $?; fi
   [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || return 0
   # shellcheck source=scripts/lib/provider-registry.sh
   . "$ROOT/scripts/lib/provider-registry.sh"
-  if has_cmd npm && [ "$(id -u)" != 0 ]; then
-    root="$(npm_global_root)" || root=""
-    global_bin="$(npm_global_bin_dir)" || global_bin=""
-    if [ -n "$root" ] && [ -n "$global_bin" ]; then
-      optional_npm_recover "$root" "$global_bin" || return 1
-    fi
-  fi
+  local optional_recovered=0
   for provider in $(oms_provider_supported_names); do
     case "$provider" in codex|claude|antigravity) continue ;; esac
     binary="$(oms_provider_binary "$provider")" || continue
-    resolved="$(command -v "$binary" 2>/dev/null)" || continue
+    resolved="$(command -v "$binary" 2>/dev/null)" || resolved=""
+    if [ -z "$resolved" ]; then
+      # Backing up an npm transaction temporarily removes its command. Discover
+      # that residue without invoking npm on a healthy vendor-only refresh.
+      recovery_needed=0
+      old_ifs="$IFS"
+      IFS=:
+      for path_entry in ${PATH:-}; do
+        [ -n "$path_entry" ] || path_entry=.
+        if [ -d "$path_entry/.$binary.oh-my-setting-backup" ] || [ -L "$path_entry/$binary" ]; then
+          recovery_needed=1
+          break
+        fi
+      done
+      IFS="$old_ifs"
+      if [ "$recovery_needed" = 1 ] && has_cmd npm && [ "$(id -u)" != 0 ]; then
+        root="$(npm_global_root)" && global_bin="$(npm_global_bin_dir)" || return 1
+        optional_npm_recover "$root" "$global_bin" || return 1
+        optional_recovered=1
+        resolved="$(command -v "$binary" 2>/dev/null)" || resolved=""
+      fi
+    fi
+    [ -n "$resolved" ] || continue
+    if [ "$binary" = pi ] && native_pi; then continue; fi
     if ! has_cmd npm || [ "$(id -u)" = 0 ]; then
       echo "$provider: skipped (npm unavailable or running as root)"
       continue
@@ -1568,6 +1967,11 @@ refresh_optional_providers() {
     if [ -z "$root" ] || [ -z "$prefix" ]; then
       echo "warning: $provider: npm global paths unavailable" >&2
       continue
+    fi
+    if [ "$optional_recovered" = 0 ]; then
+      global_bin="$(npm_global_bin_dir)" || return 1
+      optional_npm_recover "$root" "$global_bin" || return 1
+      optional_recovered=1
     fi
     identity="$(optional_npm_identity "$root" "$resolved" "$binary")" || {
       echo "$provider: skipped (binary is not in a global npm package)"
@@ -1637,7 +2041,9 @@ if [ "$PROVIDERS_ONLY" = 1 ]; then
   activate_provider_paths
   providers=()
   for item in codex claude agy; do
-    has_cmd "$item" && providers+=("$item")
+    if has_cmd "$item" || { [ "$item" = claude ] && claude_migration_pending; }; then
+      providers+=("$item")
+    fi
   done
   [ "${#providers[@]}" -gt 0 ] || echo "providers: none installed"
   if [ "${#providers[@]}" -gt 0 ]; then
@@ -1646,8 +2052,10 @@ if [ "$PROVIDERS_ONLY" = 1 ]; then
   for item in ${providers[@]+"${providers[@]}"}; do
     if [ "$item" = agy ]; then
       install_antigravity
-    elif [ "$item" = codex ] && standalone_codex; then
-      refresh_standalone_codex
+    elif [ "$item" = claude ] && claude_migration_pending; then
+      migrate_claude_vendor
+    elif vendor_provider_path "$item" >/dev/null; then
+      refresh_vendor_provider "$item"
     else
       has_cmd npm || { echo "error: npm is required to update $item" >&2; exit 1; }
       ensure_writable_npm_global

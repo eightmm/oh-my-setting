@@ -238,14 +238,43 @@ GitHub, Notion, research, HPC, container, or remote surfaces. Setup fails rather
 than silently recording a selected profile with missing required CLIs. Required
 provider dependencies are part of that plan: Codex and Claude include Node,
 while Antigravity does not. Bootstrap versions, URLs, and integrity values live in
-`tools.lock.json`. Providers resolve official stable releases during installation
-and updates; a private `provider-tools.lock.json` records the resolved checksum
-snapshot used by the installer and doctor, not a permanent version pin.
+`tools.lock.json`. Fresh provider installs resolve official stable releases;
+a private `provider-tools.lock.json` records the checksum snapshot used by the
+installer and doctor, not a permanent version pin.
 Explicit `OH_MY_SETTING_TOOL_LOCK` keeps reproducible pinned operation.
-Recognized standalone Codex uses its native updater and keeps its launcher;
-OMS checks the resulting version, not a provider-owned payload digest.
-Direct platform payloads and npm wrapper/native packages are
-verified before use and npm installation runs offline with a fresh cache.
+Recognized Claude, Codex, agy and Pi vendor layouts keep their launchers and
+use their vendor update commands.
+Pi refresh runs only through `install-tools.sh --providers`
+with `pi update self`; full-tool installation and profile reapply leave Pi unchanged.
+OMS verifies working vendor resolution and rejects version decreases, while
+the vendor channel chooses the release. Explicit locks pin native Claude via
+`claude install VERSION`; native Codex and agy refuse mismatches, while Pi is
+skipped with a note because the lock schema has no Pi entry. A successful agy
+update refreshes an existing OMS ownership digest only when the prior bytes
+matched and the resulting version was verified. Doctor reports digest drift;
+the installer refuses to execute changed OMS-owned bytes and names recovery.
+Doctor checks selected marked tools before provider/model execution and skips
+unverified inventory copies. Existing agy transaction residue is recovered from
+checksum-verified locked bytes before taking the vendor updater path.
+Fresh Claude uses its SHA-256-verified native installer on Linux/macOS and the npm path on native Windows Git Bash.
+The native checksum manifest is trusted over HTTPS without a GPG check.
+Fresh Codex and agy retain their verified installation paths; Pi is not freshly
+installed. OMS-owned Claude shims with native versions migrate through the
+vendor installer and remove only the npm copy in the shim's recorded prefix.
+Empty or invalid native versions directories keep the ordinary npm/shim path.
+`oms doctor` inventories all provider copies, including every nvm prefix,
+and names cleanup only for unselected npm packages or foreign launchers.
+Vendor-retained releases count as one installation and never receive cleanup
+guidance even on PATH. Only the selected command may execute a version probe;
+all extras and aliases say "not executed", with npm versions read from metadata.
+Digest status (`matched`, `unmarked`, `invalid` or `unknown`) describes sidecar
+integrity and never authorizes executing an extra copy.
+Entries with line or field separators are escaped and reported as unknown
+without execution. Disabled version probes say "not probed"; direct-tool
+transaction residue is reported before accepting a vendor-channel version.
+See [provider install and update rules](INSTALL.md).
+Direct platform payloads and npm wrapper/native packages are verified before
+use; npm installation runs offline with a fresh cache.
 Install, update, repair, and uninstall share one user-wide lifecycle lock. Lock
 ownership survives installer `exec` handoff. A checkout-selected foreground
 child may borrow the live parent's critical section only after matching its

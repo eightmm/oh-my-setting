@@ -79,13 +79,52 @@ bash scripts/uninstall.sh
 
 없는 Git·tar·gzip·find를 설치할 때를 빼면 root가 필요 없다. 관리 도구의
 부트스트랩 버전, 플랫폼 URL, 무결성 값은 `tools.lock.json`에 고정되어 있다.
-Codex, Claude, agy는 설치와 업데이트 때 현재 안정판을 찾고, 받은 바이트를 각
-공식 릴리스 체크섬과 대조한다. 예약 업데이트는 OMS가 바뀌지 않아도 설치된
-provider를 갱신한다. 수동 `--no-tools`는 도구 갱신을 건너뛰고, 명시한
-`OH_MY_SETTING_TOOL_LOCK`은 재현 가능한 고정 설치를 유지한다. 비공개
-`provider-tools.lock.json` 스냅샷은 찾은 버전을 기록할 뿐 영구 버전 정책이나
-설치 증명이 아니다. 인식된 standalone Codex 설치는 자체 업데이트를 유지하고,
-OMS는 결과 버전만 확인한다.
+새 provider 설치는 안정판을 찾아 비공개 `provider-tools.lock.json` 스냅샷에
+기록한다. Linux/macOS의 새 Claude는 공식 HTTPS manifest의 SHA-256으로
+네이티브 바이너리를 검증한 뒤 `install VERSION`을 실행한다. manifest에
+OMS가 GPG 서명을 별도로 검증하지는 않는다. 네이티브 Windows Git Bash는 기존 npm 경로를 쓰며,
+새 Codex와 agy도 기존 검증 설치 경로를 유지한다.
+
+인식된 Claude, Codex, agy는 각 vendor의 update 명령으로 갱신한다.
+Pi 갱신은 `install-tools.sh --providers`에서만 `pi update self`로 실행한다.
+전체 도구 설치와 프로필 재적용은 Pi를 갱신하지 않는다. OMS는 vendor 경로 유지, `--version` 성공,
+버전 하락 여부를 확인하며 스냅샷 버전과 같을 것을 요구하지 않는다.
+Pi는 이미 설치된 경우에만 갱신한다. 예약 업데이트도 설치된 provider를
+갱신하며, 선택적 npm provider는 게시된 지 14일 이상인 안정판을 사용한다.
+npm lifecycle 스크립트는 실행될 수 있고 git/URL 의존성에는 이 기간이
+적용되지 않는다. 수동 `--no-tools`는 도구 갱신을 건너뛴다.
+
+명시한 `OH_MY_SETTING_TOOL_LOCK`이 있으면 Claude는 `claude install VERSION`으로
+고정하고 정확한 버전을 확인한다. 네이티브 Codex와 agy는 고정 버전과 다르면
+변경 전에 거부한다. 현재 lock에는 Pi 항목이 없어 명시적인 lock이 있으면
+안내 한 줄과 함께 Pi 갱신만 건너뛰고 성공으로 끝낸다. OMS 소유 agy는 갱신
+전에 기존 digest가 맞아야 실행하며, doctor도 변경된 바이트를 drift로 보고한다.
+검증된 바이너리와 marker를 복원하거나 둘 다 보존한 뒤 프로필을 다시 적용한다.
+기존 digest 확인, 갱신 성공, 버전 검증을 모두 통과해야 새 digest를 기록한다.
+중단된 OMS 직접 설치의 잔여 상태는 고정 payload의 checksum을 검증한 뒤
+먼저 복구한다. 잔여 상태 없는 변조는 계속 거부한다. doctor는 provider/model
+실행 전에 선택된 관리 도구를 검증하고, digest가 틀린 사본의 버전 실행도 건너뛴다.
+버전 명령은 PATH에서 선택된 CLI에만 실행한다. 추가 사본은 sidecar digest가
+일치해도 실행하지 않고 `not executed`로 표시한다. npm 버전은 패키지 metadata에서 읽는다.
+`digest` 상태는 `matched`, `unmarked`, `invalid`, `unknown`이며 바이트 확인
+결과를 나타낼 뿐 추가 사본의 실행을 허가하지 않는다.
+vendor 보관 버전은 PATH에 있어도 한 설치로 묶고 삭제 명령을 제안하지 않는다.
+줄 또는 필드 구분자가 들어간 항목은 이스케이프해서 unknown으로 표시하고 실행하지 않는다.
+무결성 오류로 버전 확인을 건너뛰면 `not probed`로 표시한다. 직접 설치 도구의
+중단된 트랜잭션 잔여 상태는 vendor 버전을 정상으로 판단하기 전에 보고한다.
+
+네이티브 versions 디렉터리가 없거나 비었거나 유효한 실행 파일이 없으면
+기존 npm/shim 경로를 유지한다. OMS 소유 Claude npm shim과 기존 네이티브 버전이 함께 있으면 최신 네이티브
+바이너리의 설치기로 launcher를 복원하고, shim에 기록된 prefix의 npm 사본만
+제거한다. 소유권을 증명할 수 없으면 변경 전에 거부하고 복구 방법을 알린다.
+vendor 설치 후 npm 정리 전에 중단되면 backup을 유지한다. 재실행은 PATH
+순서와 무관하게 네이티브 launcher를 직접 확인하고 재설치 없이 정리한다.
+활성 npm 루트의 Claude launcher는 `~/.local` prefix에서도 그대로 허용한다.
+`oms doctor`는 PATH, vendor 루트, 모든 nvm Node prefix의 사본을 나열하고
+선택된 경로, 채널, 버전과 중복 제거 명령을 표시한다. 정리 명령은 선택되지
+않은 npm 패키지나 외부 launcher만 대상으로 한다. vendor가 보관한 이전
+버전 파일은 중복으로 세거나 실행·제거하지 않고, alias의 버전 점검은 재사용한다.
+제거와 복구는 vendor launcher나 루트를 지우지 않는다.
 
 provider 의존성은 provider와 함께 정해진다. Codex와 Claude는 고정된 Node를
 포함하고 Antigravity는 포함하지 않는다. 새로 받은 파일은 쓰기 전에 검증한다.

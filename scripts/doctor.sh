@@ -16,6 +16,7 @@ if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
   oms_python_runtime_activate_if_present
 fi
 FAILED=0
+DOCTOR_SKIP_TOOL_PROBES=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 REPAIR=0
 SURFACES=0
@@ -41,6 +42,14 @@ CONTRACT_ONLY=0
 # shellcheck source=scripts/lib/platform.sh
 . "$ROOT/scripts/lib/platform.sh"
 
+# Retain the shared cache/Windows implementation behind one integrity gate.
+eval "$(declare -f oms_doctor_probe | sed '1s/oms_doctor_probe/doctor_unchecked_probe/')"
+oms_doctor_probe() {
+  [ "${DOCTOR_SKIP_TOOL_PROBES:-0}" != 1 ] || return 1
+  doctor_command_digest_ok "$3" || return 1
+  doctor_unchecked_probe "$@"
+}
+
 usage() {
   cat <<'EOF'
 Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
@@ -65,6 +74,20 @@ and the harness event stream, and exits nonzero when a registration is
 missing. Unlike the rest of the doctor it never delegates to the receipt
 owner, because an installed doctor can only check the surfaces it shipped
 with.
+
+The tool report lists provider copies on PATH, in vendor roots, and in every
+nvm Node prefix, marking the selected command, channel and version. Duplicate
+warnings include uninstall guidance for unselected npm packages or foreign
+launchers. Vendor-retained releases group as one installation and never receive
+cleanup guidance, including releases on PATH. Only the command selected by
+command -v may be probed. All extras say "not executed", even with a matching
+sidecar; npm versions come from package metadata. Digest status is matched,
+unmarked, invalid or unknown and never grants execution authority. Aliases do
+not add probes. Vendor channels do not need to equal the OMS snapshot
+unless an explicit OH_MY_SETTING_TOOL_LOCK pins the provider.
+Marked tool digests are checked before probes; changed copies are not executed.
+Inventory entries with line or field separators are escaped and reported as
+unknown without execution. Disabled version probes are labeled "not probed".
 
 --tool-lock is a standalone read-only validation of the exact versions,
 download URLs, and payload digests owned by tools.lock.json.
@@ -433,30 +456,316 @@ provider_lock_path() {
   fi
 }
 
-check_locked_npm_version() {  # NAME
-  local name="$1" package binary expected installed resolved global_bin local_shim
-  local global_root package_root helper platform alias native_package native_version
-  local OH_MY_SETTING_TOOL_LOCK="${OH_MY_SETTING_TOOL_LOCK:-}"
-  case "$name" in claude|codex) OH_MY_SETTING_TOOL_LOCK="$(provider_lock_path)" || return 1 ;; esac
-  if [ "$name" = codex ] && python3 - "$(command -v codex 2>/dev/null || true)" \
-      "${CODEX_HOME:-$HOME/.codex}/packages/standalone" <<'PY'
+doctor_command_digest_ok() { # COMMAND_OR_PATH [--require-owner]; 2 means unmarked
+  local source="$1" resolved owner recorded actual previous_owner="" marked=0
+  case "$source" in
+    */*|*:*) ;;
+    *) source="$(command -v "$source" 2>/dev/null)" || return 1 ;;
+  esac
+  source="$(normalize_doctor_npm_path "$source")" || return 1
+  resolved="$(python3 - "$source" <<'PY_RESOLVE' | tr -d '\r'
 import sys
 from pathlib import Path
 try:
-    parts = Path(sys.argv[1]).resolve(strict=True).relative_to(Path(sys.argv[2]).resolve(strict=True)).parts
-except (OSError, ValueError):
-    raise SystemExit(1)
-raise SystemExit(0 if len(parts) == 4 and parts[0] == "releases" and parts[2:] == ("bin", "codex") else 1)
-PY
-  then
-    expected="$(tool_lock_value npm.codex.version)" || return 1
-    if command_has_locked_version codex "$expected"; then
-      echo "ok: tool version codex $expected (standalone managed)"
-    else
-      report_tool_drift codex "standalone command differs from resolved stable version $expected"
+    print(Path(sys.argv[1]).resolve(strict=True))
+except (OSError, RuntimeError):
+    sys.exit(1)
+PY_RESOLVE
+)" || return 1
+  resolved="$(normalize_doctor_npm_path "$resolved")" || return 1
+  for owner in "$source.oh-my-setting-managed" "$resolved.oh-my-setting-managed"; do
+    [ "$owner" != "$previous_owner" ] || continue
+    previous_owner="$owner"
+    if [ -e "$owner" ] || [ -L "$owner" ]; then
+      marked=1
+      [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+      [ "$(wc -c < "$owner" | tr -d '[:space:]')" = 72 ] || return 1
+      recorded="$(sed -n 's/^sha256=//p' "$owner")"
+      actual="$(doctor_sha256_file "$resolved" 2>/dev/null)" || return 1
+      [ -n "$actual" ] && [ "$recorded" = "$actual" ] || return 1
     fi
+  done
+  if [ "${2:-}" = --require-owner ] && [ "$marked" = 0 ]; then return 2; fi
+}
+
+doctor_managed_preflight() {
+  local commands selected
+  commands="$(python3 - <<'PY_SELECTED' | tr -d '\r'
+import os
+from pathlib import Path
+seen = set()
+for directory in os.environ.get("PATH", "").split(os.pathsep):
+    try:
+        entries = list(Path(directory or ".").iterdir())
+    except OSError:
+        continue
+    for entry in entries:
+        try:
+            if entry.name in seen or not entry.is_file() or not os.access(entry, os.X_OK):
+                continue
+            seen.add(entry.name)
+            resolved = entry.resolve(strict=True)
+            for source in (entry, resolved):
+                marker = Path(str(source) + ".oh-my-setting-managed")
+                if marker.exists() or marker.is_symlink():
+                    print(entry.absolute())
+                    break
+        except (OSError, RuntimeError):
+            continue
+PY_SELECTED
+)" || return 1
+  while IFS= read -r selected; do
+    [ -n "$selected" ] || continue
+    selected="$(normalize_doctor_npm_path "$selected")" || return 1
+    if ! doctor_command_digest_ok "$selected"; then
+      report_tool_drift "${selected##*/}" "managed binary digest changed; unsafe probes skipped"
+      return 1
+    fi
+  done <<< "$commands"
+  selected="${OMS_AGY_BIN:-}"
+  if [ -n "$selected" ]; then
+    case "$selected" in
+      */*|*:*) selected="$(normalize_doctor_npm_path "$selected")" || return 1 ;;
+      *) selected="$(command -v "$selected" 2>/dev/null || true)" ;;
+    esac
+    if { [ -e "$selected" ] || [ -L "$selected" ]; } && ! doctor_command_digest_ok "$selected"; then
+      report_tool_drift agy "managed binary digest changed; provider override probes skipped"
+      return 1
+    fi
+  fi
+}
+
+doctor_provider_inventory() { # [--selected PROVIDER]
+  local rows kind name selected channel version path remedy output _copy_id probe_note status digest_status
+  rows="$(python3 - "${1:-}" "${2:-}" "$HOME" "${CODEX_HOME:-$HOME/.codex}" \
+    "$(command -v claude 2>/dev/null || true)" "$(command -v codex 2>/dev/null || true)" \
+    "$(command -v agy 2>/dev/null || true)" "$(command -v pi 2>/dev/null || true)" <<'PY_COPIES'
+import json, os, shlex, sys
+from pathlib import Path
+mode, requested, home, codex, *commands = sys.argv[1:]
+home, codex = Path(home).resolve(), Path(codex).resolve()
+names = ("claude", "codex", "agy", "pi")
+packages = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex", "pi": "@earendil-works/pi-coding-agent"}
+selected = dict(zip(names, commands))
+vendor_roots = dict(
+    claude=(home / ".local/share/claude/versions").resolve(),
+    codex=(codex / "packages/standalone").resolve(),
+    pi=(home / ".pi/agent").resolve(),
+)
+retained_roots = dict(
+    claude=vendor_roots["claude"],
+    codex=(vendor_roots["codex"] / "releases").resolve(),
+    pi=(vendor_roots["pi"] / "install/releases").resolve(),
+)
+def emit_row(fields):
+    # Every field crosses the same framing boundary, including paths and remedies.
+    if any(any(char in value for char in "\x1f\r\n") for value in fields):
+        escaped = json.dumps(fields[5], ensure_ascii=True)
+        print("\x1f".join(("skipped", fields[1], fields[2], "unknown", "unknown", escaped, "-", "-")))
+        return False
+    print("\x1f".join(fields))
+    return True
+def identity(name, original):
+    path = original.resolve(strict=True)
+    # An OMS npm shim is an alias for its captured executable, not a second install.
+    if not original.is_symlink():
+        try:
+            with original.open("rb") as handle:
+                header = handle.read(4096).decode("utf-8")
+            lines = header.splitlines()
+            if lines[:1] == ["#!/usr/bin/env bash"] and len(lines) >= 6 and lines[3] == "# managed by oh-my-setting; rewritten on every tool update":
+                words = shlex.split(lines[5])
+                if len(words) == 3 and words[0] == "exec" and words[2] == "$@":
+                    path = Path(words[1]).resolve(strict=True)
+        except (OSError, UnicodeError, ValueError):
+            pass
+    retained = retained_roots.get(name)
+    protected = retained is not None and any(
+        candidate == retained or retained in candidate.parents
+        for candidate in (original.parent.resolve() / original.name, path)
+    )
+    for parent in (() if protected else (path, *path.parents)):
+        manifest = parent / "package.json"
+        if not manifest.is_file():
+            continue
+        try:
+            row = json.loads(manifest.read_text())
+            if row.get("name") == packages.get(name) and name in packages:
+                # parent is the package; its prefix precedes lib/node_modules (POSIX)
+                # or node_modules (native Windows npm).
+                prefix = parent
+                for _ in packages[name].split("/"):
+                    prefix = prefix.parent
+                prefix = prefix.parent
+                if prefix.name == "lib":
+                    prefix = prefix.parent
+                remedy = "npm uninstall -g --prefix %s %s" % (shlex.quote(str(prefix)), packages[name])
+                version = str(row.get("version", "unknown"))
+                # Untrusted metadata cannot create records in the shell's line/separator protocol.
+                if any(char in version for char in "\x1f\r\n"):
+                    version = "unknown"
+                return "npm", version, str(parent), remedy
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    channel = "unknown"
+    try:
+        if name == "claude" and len(path.relative_to((home / ".local/share/claude/versions").resolve()).parts) == 1:
+            channel = "vendor"
+        elif name == "codex":
+            parts = path.relative_to((codex / "packages/standalone").resolve()).parts
+            if len(parts) == 4 and parts[0] == "releases" and parts[2:] == ("bin", "codex"):
+                channel = "vendor"
+        elif name == "pi":
+            root = (home / ".pi/agent").resolve()
+            path.relative_to(root)
+            if path == (root / "bin/pi").resolve() and (root / "install/current-version").is_file() and (root / "install/releases").is_dir():
+                channel = "vendor"
+        elif name == "agy":
+            launcher = home / ".local/bin" / original.name
+            if not launcher.is_symlink() and path == launcher.resolve() and original.name in ("agy", "agy.exe"):
+                channel = "oms-direct" if Path(str(launcher) + ".oh-my-setting-managed").is_file() else "vendor"
+    except (OSError, ValueError, RuntimeError):
+        pass
+    if protected or channel in ("vendor", "oms-direct"):
+        # Inventory groups retained payloads; --selected keeps strict layout detection.
+        if protected and mode != "--selected":
+            channel = "vendor"
+        installation = path if name == "agy" else vendor_roots[name]
+        return channel, "-", str(installation), "-"
+    launchers = {
+        "claude": (home / ".local/bin/claude",),
+        "codex": (home / ".local/bin/codex", codex / "packages/standalone/current/bin/codex"),
+        "agy": (home / ".local/bin/agy", home / ".local/bin/agy.exe"),
+        "pi": (home / ".local/bin/pi", home / ".pi/agent/bin/pi"),
+    }
+    remedy = "-"
+    if channel == "unknown" or original.absolute() not in launchers[name]:
+        remedy = "extra launcher: rm -f -- %s" % shlex.quote(original.absolute().as_posix())
+    return channel, "-", str(path), remedy
+if mode == "--selected":
+    try:
+        command = Path(selected[requested])
+        channel = identity(requested, command)[0]
+        if selected[requested] and channel in ("vendor", "oms-direct"):
+            print(command.resolve(strict=True))
+        else:
+            sys.exit(1)
+    except (OSError, ValueError, KeyError, RuntimeError):
+        sys.exit(1)
+else:
+    for name in names:
+        candidates = []
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            for suffix in ("", ".exe", ".cmd"):
+                path = Path(entry or ".") / (name + suffix)
+                if path.is_file() and os.access(path, os.X_OK):
+                    candidates.append(path.absolute())
+        local = home / ".local/bin" / name
+        if local.is_file():
+            candidates.append(local)
+        if name == "claude":
+            candidates.append(home / ".local/bin/.claude.oh-my-setting-migration")
+        elif name == "codex":
+            candidates.append(codex / "packages/standalone/current/bin/codex")
+        elif name == "pi":
+            candidates.append(home / ".pi/agent/bin/pi")
+        if name in packages:
+            candidates.extend((home / ".nvm/versions/node").glob("*/lib/node_modules/" + packages[name]))
+        locations, copies, remedies = set(), set(), {}
+        selected_copy = None
+        if selected[name]:
+            try:
+                selected_copy = identity(name, Path(selected[name]))[2]
+            except (OSError, ValueError, RuntimeError):
+                pass
+        for path in candidates:
+            if not path.exists() or str(path) in locations:
+                continue
+            locations.add(str(path))
+            try:
+                channel, version, physical, remedy = identity(name, path)
+                mark = "selected" if selected[name] and path.absolute() == Path(selected[name]).absolute() else "extra"
+                if not emit_row(("copy", name, mark, channel, version, str(path), remedy, str(path.resolve(strict=True)))):
+                    continue
+                copies.add(physical)
+                if physical != selected_copy and remedy != "-":
+                    remedies[physical] = remedy
+            except (OSError, ValueError, RuntimeError):
+                continue
+        if len(copies) > 1:
+            emit_row(("warning", name, "-", "-", "-", "-", " | ".join(sorted(set(remedies.values()))) or "-", "-"))
+PY_COPIES
+)" || return 1
+  rows="${rows//$'\r'/}"
+  if [ "${1:-}" = --selected ]; then normalize_doctor_npm_path "$rows"; return $?; fi
+  [ -n "$rows" ] || return 0
+  # Whitespace IFS collapses empty metadata fields; this separator preserves them.
+  while IFS=$'\037' read -r kind name selected channel version path remedy _copy_id; do
+    if [ "$kind" = warning ]; then
+      echo "warn: multiple copies of $name; keep the selected channel and uninstall extras"
+      if [ "$remedy" != - ]; then echo "  next: $remedy"; fi
+      continue
+    fi
+    if [ "$kind" = skipped ]; then
+      printf 'provider copy: %s %s channel=unknown version=unknown path=%s (not executed) digest=unknown\n' "$name" "$selected" "$path"
+      continue
+    fi
+    path="$(normalize_doctor_npm_path "$path")" || return 1
+    probe_note=""
+    if doctor_command_digest_ok "$path" --require-owner; then
+      digest_status=matched
+    else
+      status=$?
+      if [ "$status" = 2 ]; then
+        digest_status=unmarked
+      else
+        digest_status=invalid
+        report_tool_drift "$name" "managed binary digest changed; version probe skipped ($path)"
+        version=unverified
+      fi
+    fi
+    if [ "$selected" != selected ] || [ "$digest_status" = invalid ]; then
+      probe_note=" (not executed)"
+      [ "$version" != - ] || version=unknown
+    elif [ "$version" = - ]; then
+      output="$(oms_doctor_probe 0 split "$path" --version 2>/dev/null | tr -d '\r' || true)"
+      version="${output%%$'\n'*}"
+      [ -n "$version" ] || version=unavailable
+      version="$(printf '%s\n' "$version" | sed -E 's/^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*).*/\1/')"
+    fi
+    echo "provider copy: $name $selected channel=$channel version=$version path=$path$probe_note digest=$digest_status"
+  done <<< "$rows"
+}
+
+check_vendor_provider_version() { # PROVIDER LOCK_FIELD
+  local name="$1" field="$2" resolved expected output
+  resolved="$(doctor_provider_inventory --selected "$name")" || return 1
+  if ! doctor_command_digest_ok "$resolved"; then
+    report_tool_drift "$name" "managed binary digest changed; version probe skipped"
     return 0
   fi
+  output="$(oms_doctor_probe 0 split "$resolved" --version 2>/dev/null | tr -d '\r')" || {
+    report_tool_drift "$name" "vendor --version failed; repair with the vendor installer"
+    return 0
+  }
+  if [ -n "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
+    expected="$(tool_lock_value "$field")" || return 1
+    if ! command_has_locked_version "$resolved" "$expected"; then
+      report_tool_drift "$name" "vendor command differs from explicit pin $expected"
+      return 0
+    fi
+  fi
+  echo "ok: tool version $name $output (vendor channel; version only)"
+}
+
+check_locked_npm_version() {  # NAME
+  local name="$1" package binary expected installed resolved global_bin local_shim
+  local global_root package_root helper platform alias native_package native_version
+  case "$name" in
+    claude|codex) check_vendor_provider_version "$name" "npm.$name.version" && return 0 ;;
+  esac
+  local OH_MY_SETTING_TOOL_LOCK="${OH_MY_SETTING_TOOL_LOCK:-}"
+  case "$name" in claude|codex) OH_MY_SETTING_TOOL_LOCK="$(provider_lock_path)" || return 1 ;; esac
   command -v npm >/dev/null 2>&1 || return 0
   package="$(tool_lock_value "npm.$name.package")" || return 1
   binary="$(tool_lock_value "npm.$name.binary")" || return 1
@@ -553,13 +862,31 @@ PY
 }
 
 check_locked_direct_version() {  # LABEL COMMAND LOCK_FIELD
-  local label="$1" command="$2" field="$3" expected resolved owner recorded actual
+  local label="$1" command="$2" field="$3" expected resolved owner recorded actual vendor_resolved
+  command -v "$command" >/dev/null 2>&1 || return 0
+  resolved="$(command -v "$command" 2>/dev/null | tr -d '\r')"
+  if [ "$command" = agy ]; then
+    vendor_resolved="$(doctor_provider_inventory --selected agy)" || vendor_resolved=""
+    if [ -n "$vendor_resolved" ]; then resolved="$vendor_resolved"; fi
+  fi
+  owner="$resolved.oh-my-setting-managed"
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    recorded="$(sed -n 's/^sha256=//p' "$owner" 2>/dev/null || true)"
+    actual="$(doctor_sha256_file "$resolved" 2>/dev/null || true)"
+    if [ ! -f "$owner" ] || [ -L "$owner" ] || [ -z "$actual" ] || [ "$recorded" != "$actual" ]; then
+      report_tool_drift "$label" "managed binary digest changed"
+      return 0
+    fi
+  fi
+  if [ -e "$resolved.oh-my-setting-stage" ] || [ -L "$resolved.oh-my-setting-stage" ] ||
+     [ -e "$resolved.oh-my-setting-backup" ] || [ -L "$resolved.oh-my-setting-backup" ]; then
+    report_tool_drift "$label" "interrupted direct-tool transaction residue is present"
+    return 0
+  fi
+  if [ "$command" = agy ] && check_vendor_provider_version agy antigravity.version; then return 0; fi
   local OH_MY_SETTING_TOOL_LOCK="${OH_MY_SETTING_TOOL_LOCK:-}"
   if [ "$command" = agy ]; then OH_MY_SETTING_TOOL_LOCK="$(provider_lock_path)" || return 1; fi
-  command -v "$command" >/dev/null 2>&1 || return 0
   expected="$(tool_lock_value "$field")" || return 1
-  resolved="$(command -v "$command" 2>/dev/null | tr -d '\r')"
-  owner="$resolved.oh-my-setting-managed"
   if ! command_has_locked_version "$command" "$expected"; then
     # An external package manager may supply a newer gh. Keep explicit pins
     # and OMS-owned binary integrity strict; do not recommend a downgrade.
@@ -576,23 +903,18 @@ check_locked_direct_version() {  # LABEL COMMAND LOCK_FIELD
     return 0
   fi
   if [ -f "$owner" ]; then
-    recorded="$(sed -n 's/^sha256=//p' "$owner")"
-    actual="$(doctor_sha256_file "$resolved" 2>/dev/null || true)"
-    if [ -n "$actual" ] && [ "$recorded" = "$actual" ]; then
-      echo "ok: tool version $label $expected (managed digest)"
-    else
-      report_tool_drift "$label" "managed binary digest changed"
-    fi
+    echo "ok: tool version $label $expected (managed digest)"
   else
     echo "note: tool version $label $expected (external; version only, bytes not authenticated)"
-  fi
-  if [ -e "$resolved.oh-my-setting-stage" ] ||
-     [ -e "$resolved.oh-my-setting-backup" ]; then
-    report_tool_drift "$label" "interrupted direct-tool transaction residue is present"
   fi
 }
 
 check_tool_versions() {
+  if [ "${DOCTOR_SKIP_TOOL_PROBES:-0}" = 1 ]; then
+    echo "note: tool versions not probed (managed binary digest changed)"
+    return 0
+  fi
+  doctor_provider_inventory
   check_locked_command_version node node node.version
   check_locked_direct_version uv uv uv.version
   check_locked_direct_version uvx uvx uv.version
@@ -600,6 +922,7 @@ check_tool_versions() {
   check_locked_npm_version codex
   check_locked_npm_version ntn
   check_locked_direct_version agy agy antigravity.version
+  # Pi has no lock row; the inventory reports its vendor version without pinning it.
   check_locked_direct_version gh gh gh.version
 }
 
@@ -699,6 +1022,7 @@ repair_install() {
 }
 
 if [ "$REPAIR" = "1" ]; then
+  if ! PATH="$HOME/.local/bin:$PATH" doctor_managed_preflight; then echo "doctor: failed"; exit 1; fi
   repair_install
   oms_install_lifecycle_lock_release
   # Repair may replace a probed tool. The follow-up doctor must inspect it anew.
@@ -725,9 +1049,13 @@ load_user_tool_paths() {
     locked_node="$(oms_lock_scalar "$INSTALL_ROOT/tools.lock.json" node.version \
       2>/dev/null | tr -d '\r' || true)"
     managed_node_bin="$NVM_DIR/versions/node/v$locked_node/bin"
-    if [ -n "$locked_node" ] && [ -x "$managed_node_bin/node" ] &&
-       [ "$(oms_doctor_probe 0 split "$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then
-      export PATH="$managed_node_bin:$PATH"
+    if [ -n "$locked_node" ] && [ -x "$managed_node_bin/node" ]; then
+      if ! doctor_command_digest_ok "$managed_node_bin/node"; then
+        report_tool_drift node "managed binary digest changed; bootstrap version probe skipped"
+        DOCTOR_SKIP_TOOL_PROBES=1
+      elif [ "$(oms_doctor_probe 0 split "$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then
+        export PATH="$managed_node_bin:$PATH"
+      fi
     fi
   fi
   # Match installation/runtime precedence: a native provider launcher wins
@@ -849,6 +1177,10 @@ check_unprivileged_userns() {
 # this harness invokes agy, a granted command still cannot write outside the
 # sandbox without a separate `unsandboxed` rule.
 check_antigravity_permissions() {
+  if [ "${DOCTOR_SKIP_TOOL_PROBES:-0}" = 1 ]; then
+    echo "warn: provider permission probes skipped (managed binary digest changed)"
+    return 0
+  fi
   local tool="$INSTALL_ROOT/scripts/provider-permissions.sh"
 
   command -v agy >/dev/null 2>&1 || return 0
@@ -875,6 +1207,10 @@ model_doctor_applicable() {
 }
 
 check_model_capabilities() {
+  if [ "${DOCTOR_SKIP_TOOL_PROBES:-0}" = 1 ]; then
+    echo "warn: model capability probes skipped (managed binary digest changed)"
+    return 0
+  fi
   local -a args=()
   local output
 
@@ -1098,6 +1434,10 @@ check_snapshots() {
 }
 
 check_codex_plugin() {
+  if [ "${DOCTOR_SKIP_TOOL_PROBES:-0}" = 1 ]; then
+    echo "warn: Codex plugin probes skipped (managed binary digest changed)"
+    return 0
+  fi
   local mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
   local plugin_version
   local marketplace_name
@@ -1963,6 +2303,14 @@ if [ "$SURFACES" = "1" ]; then
   exit 0
 fi
 
+if ! doctor_managed_preflight || [ "$DOCTOR_SKIP_TOOL_PROBES" = 1 ]; then
+  if [ "$REQUIRE_TOOLS" = 1 ] || [ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ]; then
+    echo "doctor: failed"
+    exit 1
+  fi
+  DOCTOR_SKIP_TOOL_PROBES=1
+fi
+
 # Internal update audit: no model/auth/network probes or project-state scans.
 # The lifecycle caller bounds the whole process, including legacy plugin probes.
 if [ "${OMS_DOCTOR_INTEGRATIONS_ONLY:-0}" = 1 ]; then
@@ -2182,7 +2530,9 @@ check_custom_skills "$HOME/.gemini/config/skills"
 check_path "$HOME/.local/bin/oms" "$INSTALL_ROOT/scripts/oms"
 check_displaced_config
 
-if ! "$ROOT/scripts/skill-doctor.sh"; then
+if [ "$DOCTOR_SKIP_TOOL_PROBES" = 1 ]; then
+  echo "warn: skill runtime probes skipped (managed binary digest changed)"
+elif ! "$ROOT/scripts/skill-doctor.sh"; then
   FAILED=1
 fi
 
