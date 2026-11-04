@@ -108,6 +108,22 @@ authorized instance only when needed; the main retains final acceptance.
 Each profile returns source or patch evidence, actual checks, and unresolved
 limits. No profile permits recursive delegation or expands existing authority.
 
+For panel tasks, choose the role from source evidence: security-auditor for
+risky authentication, permissions, sensitive data, signals, install, deletion,
+destructive operations, scripts or hooks; verifier before declaring completion
+(original request against final result); architect for structural decisions;
+integrator for merging/conflicts; performance-engineer when measurement is
+needed; documenter at completion; release-engineer for deployment. Use each
+when its trigger applies, one at a time, rather than invoking every specialty.
+
+Measurements needing scratch writes use `worker --purpose investigate --access
+write` with a brief and verifier. Scratch stays outside the repository;
+repository patches fail, and findings await owner finalization as `completed`,
+never `accepted`. Builders write experiment scripts/configs; only the main
+authorizes launches within the user's paid-compute authority. A worker reports
+finished outputs; `oms job-digest` condenses training/Slurm logs. Wait with one
+background wait or notification, not repeated polls.
+
 Panel `advisor` and `reviewer` dispatches load `roles/advisor.md` and
 `roles/reviewer.md` through the same project override, global override, bundled
 default resolver used by `oms agent-role`, except review gates: `peer-review --gate`

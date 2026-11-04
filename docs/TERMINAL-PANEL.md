@@ -1013,6 +1013,19 @@ without silently selecting another model.
 A panel main acts as the control tower: its bootstrap delegates implementation,
 investigation and test repair to bounded workers by default and keeps scope,
 briefs, integration, review, patch admission and coordination.
+Claude, Codex and Pi share the compact main contract with their durable `--owner`
+value; provider launch details and the appended room identity remain separate.
+The contract retains authority, delegation, admission, review, finalization and
+recovery invariants.
+Command walkthroughs live in the `oms-agent-harness`
+[panel main command reference](../custom-skills/oms-agent-harness/references/delegation-artifacts.md#panel-main-command-reference),
+[roles](../custom-skills/oms-agent-harness/references/roles.md) and
+[model routing](../custom-skills/oms-agent-harness/references/model-routing.md).
+Reference pointers use the absolute bundled directory resolved from the `oms`
+entrypoint, so they also work without the skill installed.
+The native integration regression caps the UTF-8 bootstrap at 6,250 bytes with
+fixed repository/entrypoint/reference labels (6,077 bytes, formerly 12,549);
+room instructions and provider launch labels are measured separately.
 Wait on each dispatched call separately, with one notification per call; review,
 admit or re-dispatch it as soon as it finishes, never batch-wait for a wave.
 Start the next ready plan task or follow-up round in the same turn; a new write
@@ -1025,10 +1038,10 @@ investigation, larger multi-file or parallelisable work, long verification, and 
 boundary changes (authentication, permissions, secrets, install, deletion,
 hooks). Direct edits use the same review gate (oms peer-review --gate --verify)
 and the same landing path as worker patches.
-Release bookkeeping (changelog, version, manifest, inventory files) goes in the
-scope of the worker whose change needs it, or in one documenter worker per
-landing batch, never hand-edited by the main. For experiments the main
-authorizes launches, since paid compute needs the user's authority; builders
+Serialize shared release bookkeeping (changelog, version, manifest, inventory
+files) outside parallel worker briefs: the main writes it once per landing
+batch during integration, or assigns one documenter for the batch.
+For experiments the main authorizes launches, since paid compute needs the user's authority; builders
 write run scripts and configs, a worker with `--purpose investigate`
 reports finished outputs (`oms job-digest` condenses a
 training or Slurm log), and the main waits on jobs with one background wait or

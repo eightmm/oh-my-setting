@@ -50,6 +50,18 @@ remain exact, and other model-selecting transports still require `--model`.
 `OMS_AGENT`, Claude markers, Codex markers, then Codex. Usage comes from existing
 board readings without invoking a provider CLI.
 
+For panel writes, a free Pi route without weekly quota is overflow after native
+providers. Ordinary role dispatches omit `--to` and `--model`; use explicit
+routes only for a required provider. Inspect `oms panel --providers --json` for
+an explicitly selected additional CLI, then dispatch with `--to PROVIDER`,
+an exact `--model` when supported and optional `--reasoning-effort`.
+Profile-controlled CLIs omit `--model`; explicit routes omit `--workload`.
+Discovery neither authorizes calls nor proves live session messaging.
+`--workload light|routine|deep|frontier` overrides one role tier: routine for a
+bounded reversible choice, deep by default for debate, frontier only for
+security-auditor or an explicit workload choice. Use high effort for trust-boundary
+or unclear-failure work and low for mechanical edits, within the model's scale.
+
 1. Run `oms models` for cached catalogs and per-model effort scales. Use
    `--refresh` only when a live probe is needed.
 2. No `--model` means provider default — except for a write worker

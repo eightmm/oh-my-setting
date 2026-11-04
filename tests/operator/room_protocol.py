@@ -217,7 +217,7 @@ for role, tier in routing_roles.items():
             }[(tier, expected)]
 for role in ("advisor", "architect", "critic", "reviewer"):
     assert allocate("codex", role=role, tier="frontier", installed=both)["workload"] == "frontier"
-assert "frontier only for security-auditor or an explicit workload choice" in panel.bootstrap("codex", project)
+# The frontier wording now lives in model-routing.md; the reference-token check below covers it.
 # END role-review-tier-cap
 
 try:
@@ -320,80 +320,81 @@ for owner in panel.PROVIDERS:
         assert "--session-id" not in arguments
     expected = "gpt-6.1-sol" if owner == "codex" else "claude-opus-5-5"
     assert arguments[arguments.index("--model") + 1] == expected, arguments
-    assert "--dispatch ROLE" in panel.bootstrap(owner, project) and "--workload light|routine|deep|frontier" in panel.bootstrap(owner, project)
-    assert all(trigger in panel.bootstrap(owner, project) for trigger in (
-        "security-auditor for risky changes", "verifier before declaring completion", "integrator when merging",
-        "performance-engineer when performance needs measurement", "documenter at completion",
-        "release-engineer when deploying", "Scholar runs multi-source literature research", "not all by default", "a context apart"))
-    assert all(phrase in panel.bootstrap(owner, project) for phrase in (
-        "cause is known", "one or two files", "brief costs more than the edit", "failed the same bounded task twice",
-        "larger multi-file or parallelisable work", "long verification", "authentication, permissions, secrets, install, deletion, hooks", "oms peer-review --gate --verify", "same landing path",
-        "Serialize shared release bookkeeping (changelog, version, manifest, inventory files): keep it out of parallel worker briefs;",
-        "the main writes it once per landing batch during integration, or assigns one documenter for the batch.",
-        "paid compute needs the user's authority", "--purpose investigate",
-        "oms job-digest", "one background wait or notification, not repeated polls"))
-    assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
-    assert "preferred installed provider" not in panel.bootstrap(owner, project) and \
-        "ordered by more weekly quota left" in panel.bootstrap(owner, project)
-    assert "a free Pi route with no weekly quota is overflow for write work after native providers" in panel.bootstrap(owner, project)
-    assert all(trigger in panel.bootstrap(owner, project) for trigger in (
-        "authentication, permissions, secrets, signals, install", "architect for structural decisions",
-        "one at a time when the trigger applies"))
-    assert "control tower: by default delegate" in panel.bootstrap(owner, project)
-    assert all(token in panel.bootstrap(owner, project) for token in (
-        "oms graph project (find, api PATH, blast, affected", "oms_project_graph_* MCP tools where available",
-        "oms graph project api PATH before reading a large file whole", "oms inbox",
-        "oms panel --results", "oms room updates", "oms session-handoff", "oms agent-memory recall"))
-    assert all(token in panel.bootstrap(owner, project) for token in (
-        "Dispatch blocks until its worker ends:", "start every independent ready task (non-overlapping scope)",
-        "in its own concurrent or background call before waiting",
-        "review, admit or re-dispatch each completion as it arrives",
-        "refill with the next ready task without a wave barrier",
-        "a new write dispatch is refused", "--continue"))
-    assert all(phrase in panel.bootstrap(owner, project) for phrase in (
-        "consumers in the worker brief", "drives the public entry point"))
-    assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
-    assert "routine for a bounded reversible choice" in panel.bootstrap(owner, project)
-    assert "frontier only for security-auditor or an explicit workload choice" in panel.bootstrap(owner, project)
-    assert "The sole main lands its work" in panel.bootstrap(owner, project)
-    assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
+
+# BEGIN main-bootstrap-reference-contract
+for owner in panel.PROVIDERS:
     guidance = panel.bootstrap(owner, project)
-    assert "PROJECT.md and its References" in guidance and "oms plan-from-spec" in guidance
-    assert "--expected-proposal-sha256" in guidance and "--finalize" in guidance
-    assert "Tasks from an applied proposal are ordinary shared-plan tasks" in guidance
-    assert "claim a ready task" in guidance and "delegate it (--task-id moves it" in guidance
-    assert "oms agent-plan review after acceptance" in guidance
-    assert "record the owner result with oms panel --finalize" in guidance
-    assert "oms agent-plan add only" in guidance
-    assert "Dependent tasks become ready automatically" in guidance
-    assert "oms panel --accept TASK" in guidance
-    assert "oms patch-land --plan-task ID" in guidance
-    assert "oms agent-plan accept-main-research" in guidance
-    assert "Owner --finalize records the result but does not itself mark a plan task done" in guidance
-    assert "For each landed write patch, accepted also requires a passing automatic review gate" in guidance
-    assert "do not manually release dependencies" in guidance
-    assert "For tasks not covered by a PROJECT.md plan" not in guidance
-    assert "if the user asks you to complete this project or an autopilot contract exists" in guidance
-    assert "Before any action inspect oms autopilot status and its receipt" in guidance
-    assert "before run, review the exact proposal bytes and digest" in guidance
-    assert "oms autopilot propose --review-mode gate (frozen at intake), run with the reviewed" in guidance
-    assert "Never dispatch panel write workers for campaign-owned tasks" in guidance
-    assert "release or reclaim their tasks" in guidance
-    assert "reset a contract to evade cycle exhaustion" in guidance
-    assert "override a parked receipt" in guidance
-    assert "gated whole-change review and fresh acceptance pass" in guidance
-    assert "An autopilot campaign runs from the main checkout on its own oms/autopilot-* work branch" in guidance
-    assert "the sole exception to the no-commit-in-shared-checkout rule" in guidance
-    assert "still needs authority (Draft PR or oms land from that branch)" in guidance
-    assert "Without a campaign, ordinary panel plan execution above is unchanged" in guidance
-    assert "only when publication is authorized" in panel.bootstrap(owner, project)
-    assert "git checkout --no-track -b oms/<task>" in panel.bootstrap(owner, project)
-    assert "No upstream is needed" in panel.bootstrap(owner, project)
-    assert "pushes the verified SHA to its target" in panel.bootstrap(owner, project)
-    assert "concurrent land exits 75" in panel.bootstrap(owner, project) and "retry after" in panel.bootstrap(owner, project)
-    assert "worker exit or review handoff is an intermediate step" in panel.bootstrap(owner, project)
-    assert "OMS_ROOM_REPO" in panel.bootstrap(owner, project)
-    assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
+    assert "--owner " + owner in guidance, owner
+    references = Path(panel.ENTRY).resolve().parents[1] / "custom-skills/oms-agent-harness/references"
+    assert json.dumps(str(references)) in guidance
+    assert references.is_absolute() and references.as_posix().endswith("custom-skills/oms-agent-harness/references")
+    for phrase in (
+            "cause is known", "one or two files", "brief costs more than the edit", "failed the same bounded task twice",
+            "larger multi-file or parallelisable work", "long verification", "authentication, permissions, secrets, install, deletion, hooks", "oms peer-review --gate --verify", "same landing path",
+            "Serialize shared release bookkeeping (changelog, version, manifest, inventory files): keep it out of parallel worker briefs;",
+            "the main writes it once per landing batch during integration, or assigns one documenter for the batch.",
+            "paid compute needs the user's authority", "--purpose investigate", "oms job-digest",
+            "one background wait or notification, not repeated polls", "not all advisors by default", "a context apart",
+            "control tower: by default delegate", "Review, admit or re-dispatch each completion as it arrives",
+            "without a wave barrier", "review backlog threshold", "--continue",
+            "consumers in the worker brief", "public entry point", "--depends", "exactly one live main", "trust boundary changes",
+            "The sole main lands only when publication is authorized", "PROJECT.md and its References",
+            "--expected-proposal-sha256", "--finalize", "Claim ready tasks in confirmed plan order, dependencies first",
+            "Proposal tasks use the shared plan; add only bounded gaps", "Dependencies release automatically",
+            "Owner --finalize records a result, not plan completion", "never release them manually",
+            "passing automatic review gate", "Missing review/verdict means completed, not accepted",
+            "if the user asks you to complete this project or an autopilot contract exists",
+            "Before acting inspect oms autopilot status/receipt", "review exact proposal bytes/digest before run",
+            "propose --review-mode gate (frozen at intake)", "validated receipt continuation",
+            "Never dispatch panel write workers for campaign-owned tasks", "release or reclaim their tasks",
+            "reset a contract to evade cycle exhaustion", "override a parked receipt",
+            "gated whole-change review and fresh acceptance", "use oms/autopilot-* in the main checkout",
+            "sole shared-checkout commit exception", "the main never commits there itself",
+            "Publication still needs authority", "Without a campaign, ordinary panel plan execution applies",
+            "concurrent land exits 75", "retry after the active land finishes",
+            "worker exit or review handoff is intermediate", "OMS_ROOM_REPO", "oms room scope", "--scope PATH"):
+        assert phrase in guidance, phrase
+    assert all(phrase not in guidance for phrase in ("--seat", "Astra", "preferred installed provider", "For tasks not covered by a PROJECT.md plan"))
+    reference_contracts = {
+        "delegation-artifacts.md": (
+            "oms panel --dispatch ROLE --owner OWNER", "--access write --brief-file PATH --verify COMMAND",
+            "--purpose explain|investigate|implement", "--task-id ID --label TITLE",
+            "Dispatch blocks until its worker ends", "each independent ready task",
+            "separate concurrent/background call before waiting", "review and refill",
+            "A new write dispatch is refused", "results awaiting review exceed the backlog threshold",
+            "--continue TASK_ID --brief-file F", "--salvage TASK_ID",
+            "oms inbox", "oms panel --results", "oms room updates", "oms session-handoff", "oms agent-memory recall",
+            "oms plan-from-spec", "--apply --expected-proposal-sha256 DIGEST", "Applied tasks use the ordinary shared plan",
+            "oms agent-plan add", "for bounded gaps only", "Claim ready tasks in dependency order",
+            "--task-id` moves a task to running", "oms agent-plan review", "after acceptance and record the owner result",
+            "oms panel --accept TASK", "oms panel --finalize --landed-commit SHA", "oms patch-land --plan-task ID",
+            "oms agent-plan accept-main-research", "oms scratch-worktree add --repo .", "starts detached",
+            "git checkout --no-track -b oms/<task>", "No upstream is needed", "pushes the verified SHA",
+            "Authorized campaign publication uses a Draft PR or `oms land` from its work branch"),
+        "model-routing.md": (
+            "--workload light|routine|deep|frontier", "ordering candidates by weekly quota left",
+            "a free Pi route without weekly quota is overflow after native providers",
+            "Reviewer/verifier/security-auditor/critic routes prefer a provider other than",
+            "Ordinary role dispatches omit", "Profile-controlled CLIs omit", "explicit routes omit",
+            "routine for a bounded reversible choice", "deep by default for debate", "frontier only for",
+            "security-auditor or an explicit workload choice", "high effort for trust-boundary", "low for mechanical edits"),
+        "roles.md": (
+            "oms panel --dispatch ROLE", "Only `worker`, `builder`, `refactorer`, `documenter`, `integrator` and `performance-engineer` may take `--access write`",
+            "security-auditor for risky authentication, permissions, sensitive data, signals, install, deletion",
+            "verifier before declaring completion", "architect for structural decisions", "integrator for merging/conflicts",
+            "performance-engineer when measurement is needed", "documenter at completion", "release-engineer for deployment",
+            "when its trigger applies, one at a time", "multi-source literature research with verified citations",
+            "deep tier at high effort", "Haiku or Luna at low effort", "not an agent instance",
+            "A Builder session may become a Refactorer", "separate context from the implementer"),
+        "graphs.md": (
+            "oms graph project find", "oms graph project api", "oms graph project blast", "oms graph project affected",
+            "oms_project_graph_*", "Use `api` before opening a large file")}
+    for name, phrases in reference_contracts.items():
+        text = " ".join((references / name).read_text(encoding="utf-8").split())
+        for phrase in phrases:
+            assert phrase in text, (name, phrase)
+# END main-bootstrap-reference-contract
+
 with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
     claude_stub = Path(help_dir) / "claude"
     claude_stub.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: claude [options]' '--autocompact <auto|tokens>' '  --disallowedTools, --disallowed-tools <tools...>'\n")
@@ -454,6 +455,7 @@ with tempfile.TemporaryDirectory(prefix="panel-claude-help-") as help_dir:
         os.environ["PATH"] = old_path
         clear_claude_probes()
 
+# BEGIN pi-main-bootstrap
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]
 assert option_text not in panel.native_command("codex", project, task=option_text)[:-1]
@@ -461,7 +463,7 @@ pi_argv = panel.native_command("pi", project, task=option_text, room_id="pi-room
 assert pi_argv[:4] == ["bash", str(panel.ENTRY), "harness", "pi"], pi_argv
 assert pi_argv[pi_argv.index("--model") + 1] == "gpt-6.1-sol"
 assert "--append-system-prompt" in pi_argv and "--owner codex" in pi_argv[pi_argv.index("--append-system-prompt") + 1]
-assert "oms graph project api PATH before reading a large file whole" in pi_argv[pi_argv.index("--append-system-prompt") + 1]
+assert "Outline large files before whole reads" in pi_argv[pi_argv.index("--append-system-prompt") + 1]
 assert json.dumps(option_text) in pi_argv[-1] and pi_argv[-2] == "--", pi_argv
 assert "pi-room" in pi_argv[pi_argv.index("--append-system-prompt") + 1]
 try:
@@ -471,6 +473,7 @@ except ValueError as error:
     assert "verified Pi session binding" in str(error)
 assert "--owner codex" in panel.watch_shell(project, "pi") and "--owner pi" not in panel.watch_shell(project, "pi")
 assert "Codex CLI" in panel.main_missing("pi") and "Pi CLI" in panel.main_missing("pi")
+# END pi-main-bootstrap
 for harness in panel.MAIN_HARNESSES:
     with patch.object(panel, "main_installed", return_value=False):
         try:

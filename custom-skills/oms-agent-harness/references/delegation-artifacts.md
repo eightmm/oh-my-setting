@@ -264,3 +264,82 @@ It is detection, not a sandbox, and these stay outside it:
 
 Closing those needs process isolation, which a bash harness does not have. Treat
 a clean result as "no repository surface moved", not as "the worker was safe".
+
+## Panel main command reference
+
+The persistent main contract keeps authority, admission and recovery invariants;
+load these command details when needed. The same contract serves Claude, Codex
+and Pi mains with their durable `--owner` value. Room identity and addressed-message
+instructions are appended separately; native conversations remain separate from
+shared OMS records.
+
+- Read judgment: `oms consult --to PROVIDER --repo . --prompt TEXT`.
+  Bounded implementation: `oms peer-delegate --to PROVIDER --repo .
+  --brief-file PATH --verify COMMAND`. Review: `oms peer-review --providers
+  PROVIDER --repo . --prompt TEXT --gate --verify COMMAND`.
+- Panel roles: `oms panel --dispatch ROLE --owner OWNER --repo . --prompt TEXT`;
+  write roles add `--access write --brief-file PATH --verify COMMAND`.
+  Plain workers choose `--purpose explain|investigate|implement`.
+  See [roles.md](roles.md) for write-capable roles, triggers and independence.
+- Every subtask gets a descriptive `--task-id ID --label TITLE`; reuse the exact
+  reviewed plan ID. Calls record main, role, model, task and execution location.
+  Continue reviewed work with `--continue TASK_ID --brief-file F`: role, scopes,
+  verifier and workload default to the original write dispatch. First salvage
+  stopped write work with `--salvage TASK_ID`.
+  Dispatch blocks until its worker ends; start each independent ready task in a
+  separate concurrent/background call before waiting, then review and refill
+  as each completes without a wave barrier. A new write dispatch is refused
+  while results awaiting review exceed the backlog threshold.
+- Graph lookup syntax is in [graphs.md](graphs.md); use `oms inbox`,
+  `oms panel --results` and `oms room updates` for current state. Resume with
+  `oms session-handoff` and `oms agent-memory recall`.
+
+For a PROJECT.md goal, `oms plan-from-spec` proposes tasks; review the bytes,
+then apply with `--apply --expected-proposal-sha256 DIGEST`. Applied tasks use
+the ordinary shared plan. `oms agent-plan add` is for bounded gaps only.
+Claim ready tasks in dependency order; dispatch with `--task-id` moves a task
+to running. After verification, inspection, integration and required checks,
+run `oms agent-plan review` after acceptance and record the owner result.
+For plan-bound writes use `oms panel --accept TASK`, then after authorized land
+`oms panel --finalize --landed-commit SHA`; alternatively review and land with
+`oms patch-land --plan-task ID`. Eligible verified local research uses
+`oms agent-plan accept-main-research`. Finalization alone does not mark a plan
+task done or release its dependencies. Campaign precedence and exact reviewed
+re-entry are in [autonomy-loop.md](autonomy-loop.md).
+
+Without an active shared-plan goal, register a supplied objective with
+`oms agent-plan init --goal TEXT`; without a supplied task, wait for one.
+Use the shared `OMS_ROOM_REPO` for plan and result records from scratch worktrees.
+Before shared-file edits, `oms room scope --owns PATH` declares scope; write
+dispatches take `--scope PATH`. Overlaps warn rather than lock. File scopes do
+not isolate public contracts: name consumers in the brief, test the public
+entry point and order consumer tasks with `--depends`.
+
+For an authorized landing, `oms scratch-worktree add --repo .` starts detached;
+create a local nontracking branch with `git checkout --no-track -b oms/<task>`,
+admit patches there and rebase on the remote target. No upstream is needed.
+After verification and authorized commit, `oms land` pushes the verified SHA.
+Read `oms land status --repo PATH` (`active: true`), never infer activity from
+`pgrep`. A concurrent land exits 75 after `OMS_LOCK_TIMEOUT` (default 300s);
+retry after the active land finishes. The shared-checkout campaign exception
+does not authorize the main to commit there itself or publish without authority.
+Authorized campaign publication uses a Draft PR or `oms land` from its work branch.
+
+Record the owner decision with `oms panel --finalize --owner OWNER --task-id ID
+--summary-file PATH --outcome completed|accepted|failed|rejected`.
+`accepted` requires `--verify`, matching landed patches for that task's write
+workers and current-main writes without a task ID, and a passing automatic
+review gate. Missing review or verdict means `completed`, with the reason.
+Local completion uses `--finalize --outcome completed --verify COMMAND`, retaining
+pending acceptance. `--evidence` supplies relative proof references and is
+optional when every landed patch has one admission report.
+Inspect `oms panel --results` before reporting completion. Use `--notify` per
+finalized product unless `OMS_CODEX_NOTIFY` is 0. Delivery failure preserves the
+work outcome; retry explicitly with `oms panel --retry-delivery --task-id ID`
+rather than blindly resending.
+
+For an authorized debate use `oms panel --council --owner OWNER --task-id ID
+--label TITLE --prompt TEXT`; workload selection is in [model-routing.md](model-routing.md).
+Role routes serve bounded work within the supplied task without making the user
+choose a model for each call; they grant no unrelated work or authority.
+Claude Code is the preferred main harness; Pi is an explicit alternative.
