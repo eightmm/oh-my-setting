@@ -87,7 +87,9 @@ count="$(wc -l < "$catalog/calls" | tr -d ' ')"
 catalog_tick
 [ "$(wc -l < "$catalog/calls" | tr -d ' ')" = "$count" ] || fail 'failed listing retried on the same day'
 unset CATALOG_FAIL
-PATH="$catalog/bin:$PATH" OMS_CAPABILITY_DIR="$catalog/cache" bash "$ROOT/scripts/models.sh" --providers antigravity | grep -q '^catalog age: [0-9][0-9]*s$' || fail 'text catalog age missing'
+# Capture first: grep -q exiting early would SIGPIPE models.sh under pipefail.
+text="$(PATH="$catalog/bin:$PATH" OMS_CAPABILITY_DIR="$catalog/cache" bash "$ROOT/scripts/models.sh" --providers antigravity)"
+grep -q '^catalog age: [0-9][0-9]*s$' <<< "$text" || fail 'text catalog age missing'
 PATH="$catalog/bin:$PATH" OMS_CAPABILITY_DIR="$catalog/empty" bash "$ROOT/scripts/models.sh" --json --providers antigravity | \
   python3 -c 'import json,sys; assert json.load(sys.stdin)["providers"][0]["catalog_age_seconds"] is None' || fail 'missing catalog age must be unknown'
 # END catalog-auto-refresh
