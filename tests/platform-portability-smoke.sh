@@ -118,6 +118,305 @@ test_native_windows_refusal
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 
+test_python_security() (
+  local d="$TMP/python-security" real_python version candidate
+  real_python="$(command -v python3)"
+  version="$($real_python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+  export OMS_PYTHON_RUNTIME_ROOT="$d/runtime"
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  oms_python_runtime_prepare_root "$OMS_PYTHON_RUNTIME_ROOT"
+  mkdir -p "$OMS_PYTHON_RUNTIME_ROOT/envs/$version/bin" "$OMS_PYTHON_RUNTIME_ROOT/managed"
+  printf 'schema=1\nversion=%s\n' "$version" > "$OMS_PYTHON_RUNTIME_ROOT/envs/$version/.oh-my-setting-python-env"
+  printf '%s\n' "$version" > "$OMS_PYTHON_RUNTIME_ROOT/current"
+  cp "$real_python" "$OMS_PYTHON_RUNTIME_ROOT/envs/$version/bin/python3"
+  oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" "$version" python3 bin
+  export PYTHONHOME="$d/foreign-home" PYTHONPATH="$d/foreign-modules"
+  cat > "$d/probe-python" <<'EOF_PROBE'
+#!/usr/bin/env bash
+[ -z "${PYTHONHOME+x}${PYTHONPATH+x}" ] || exit 9
+EOF_PROBE
+  chmod +x "$d/probe-python"
+  oms_python_runtime_python_matches "$d/probe-python" "$version" || fail "version probe inherited Python settings"
+  oms_python_runtime_activate_fallback || fail "valid fallback rejected"
+  oms_python_runtime_is_active || fail "valid runtime not active"
+  [ "$PYTHONHOME" = "$d/foreign-home" ] && [ "$PYTHONPATH" = "$d/foreign-modules" ] ||
+    fail "runtime selection changed caller Python settings"
+  unset PYTHONHOME PYTHONPATH
+  mkdir -p "$d/inject"
+  printf '%s\n' 'import os' 'open(os.environ["OMS_TEST_INJECTED"], "w").close()' > "$d/inject/sitecustomize.py"
+  OMS_TEST_INJECTED="$d/injected" PYTHONPATH="$d/inject" \
+    "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' || fail "valid launcher failed"
+  [ -e "$d/injected" ] || fail "launcher stripped caller Python path"
+  mv "$OMS_PYTHON_RUNTIME_ROOT/envs/$version" "$d/displaced-env"
+  ln -s "$d/displaced-env" "$OMS_PYTHON_RUNTIME_ROOT/envs/$version"
+  ! "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' >/dev/null 2>&1 || fail "launcher accepted symlinked environment"
+  ! oms_python_runtime_activate_fallback || fail "fallback accepted symlinked environment"
+  rm "$OMS_PYTHON_RUNTIME_ROOT/envs/$version"
+  mv "$d/displaced-env" "$OMS_PYTHON_RUNTIME_ROOT/envs/$version"
+  candidate="$OMS_PYTHON_RUNTIME_ROOT/envs/$version/bin/python3"
+  rm "$candidate"
+  ln -s "$real_python" "$candidate"
+  ! oms_python_runtime_is_active || fail "active runtime accepted foreign interpreter"
+  ! oms_python_runtime_activate_fallback || fail "foreign interpreter link accepted"
+  ! "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' >/dev/null 2>&1 || fail "launcher ran foreign interpreter"
+  ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$OMS_PYTHON_RUNTIME_ROOT/envs" || fail "directory interpreter accepted"
+  mkdir -p "$d/altbin" "$OMS_PYTHON_RUNTIME_ROOT/launchers/$version"
+  cp "$real_python" "$d/altbin/python3"
+  OMS_PYTHON="$OMS_PYTHON_RUNTIME_ROOT/../altbin/python3" \
+    PATH="$OMS_PYTHON_RUNTIME_ROOT/launchers/../../altbin:/usr/bin:/bin" \
+    oms_python_runtime_is_active && fail "traversal interpreter accepted"
+  ! oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" '3.12.9;id' python3 || fail "malformed version accepted"
+  ! oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" '' python3 || fail "empty version accepted"
+  ! oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" 0 python3 || fail "zero version accepted"
+  ! oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" "$version" '../python3' || fail "malformed name accepted"
+  cp "$ROOT/scripts/oms" "$d/copied-oms"
+  "$real_python" - "$ROOT" "$d/install.json" <<'PY_RECEIPT'
+import json, sys
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump({"schema": 2, "source_root": sys.argv[1]}, handle)
+PY_RECEIPT
+  printf '%s\n' '#!/usr/bin/env bash' ': > "$OMS_TEST_BAD_LAUNCHER"' 'exit 1' > "$OMS_PYTHON_RUNTIME_ROOT/bin/python3"
+  chmod +x "$OMS_PYTHON_RUNTIME_ROOT/bin/python3"
+  (
+    export OMS_TEST_BAD_LAUNCHER="$d/bad-launcher"
+    export PATH="$OMS_PYTHON_RUNTIME_ROOT/bin:/usr/bin:/bin"
+    oms_python_runtime_require >/dev/null 2>&1 && fail "host fallback trusted invalid managed launcher"
+    [ ! -e "$d/bad-launcher" ] || fail "host fallback ran invalid managed launcher"
+  )
+  (
+    python3() { : > "$d/bad-function"; return 0; }
+    export -f python3
+    OMS_TEST_BAD_LAUNCHER="$d/bad-launcher" OMS_INSTALL_RECEIPT="$d/install.json" \
+      PATH=/usr/bin:/bin bash "$d/copied-oms" list > "$d/copied.out" || fail "copied dispatcher failed"
+  )
+  [ ! -e "$d/bad-launcher" ] && [ ! -e "$d/bad-function" ] || fail "copied dispatcher trusted unverified Python"
+  mkdir -p "$d/old-bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$d/old-bin/python3"
+  chmod +x "$d/old-bin/python3"
+  (
+    python3() { : > "$d/exported-function"; return 0; }
+    export -f python3
+    PATH="$d/old-bin:/usr/bin:/bin" OMS_PYTHON_RUNTIME_ROOT="$d/missing" \
+      oms_python_runtime_require >/dev/null 2>&1 && fail "exported interpreter function was accepted"
+    [ ! -e "$d/exported-function" ] || fail "exported interpreter function ran"
+  )
+  local rc
+  rc=0
+  printf '%s' '{"tool_input":{"command":"git reset --hard"}}' | \
+    PATH="$d/old-bin:/usr/bin:/bin" OMS_PYTHON_RUNTIME_ROOT="$d/missing" \
+    OMS_HARNESS_CHILD=0 OMS_PANEL_MAIN_ATTEMPT=1 OMS_PANEL_SESSION=oms-test \
+    bash "$ROOT/scripts/lib/python-entry.sh" bash "$ROOT/scripts/git-move-guard-hook.sh" \
+    > "$d/git.out" 2> "$d/git.err" || rc=$?
+  [ "$rc" = 2 ] || fail "git guard did not fail closed"
+  rc=0
+  printf '{}' | PATH="$d/old-bin:/usr/bin:/bin" OMS_PYTHON_RUNTIME_ROOT="$d/missing" \
+    OMS_HARNESS_CHILD=0 OH_MY_SETTING_DIR="$ROOT" bash "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" turn-guard \
+    > "$d/turn.out" 2> "$d/turn.err" || rc=$?
+  [ "$rc" = 1 ] || fail "turn guard did not report unavailable"
+  printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"sample.py"}}' | \
+    PATH="$d/old-bin:/usr/bin:/bin" OMS_PYTHON_RUNTIME_ROOT="$d/missing" \
+    bash "$ROOT/scripts/syntax-guard-hook.sh" > "$d/syntax.out" 2> "$d/syntax.err" || fail "syntax hook failed"
+  [ "$(grep -Fc 'error: OMS requires Python 3.11+' "$d/syntax.err")" = 1 ] || fail "syntax hook omitted runtime error"
+  echo 'python-security: ok'
+)
+if [ "${1:-}" = --runtime-security-only ]; then
+  test_python_security
+  exit
+fi
+test_python_security
+
+# Focused floor coverage also runs as part of the complete portability suite.
+test_python_floor() (
+  local d="$TMP/python-floor" real_python version out hook_command
+  real_python="$(command -v python3)"
+  mkdir -p "$d/bin" "$d/repo/scripts/lib"
+  sed -n '/^ensure_python3() {$/,/^}$/p' "$ROOT/install.sh" > "$d/ensure.sh"
+  : > "$d/repo/scripts/lib/file-lock.sh"
+  cat > "$d/repo/scripts/lib/python-runtime.sh" <<'EOF'
+oms_python_runtime_root() { printf '%s\n' "$HOME/runtime"; }
+oms_python_runtime_bootstrap() {
+  [ "${OMS_TEST_BOOTSTRAP_FAIL:-0}" != 1 ] || return 1
+  local version
+  version="$("$OMS_TEST_REAL_PYTHON" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+  mkdir -p "$HOME/runtime/bin" "$HOME/runtime/envs/$version/bin"
+  printf 'schema=1\nversion=%s\n' "$version" > "$HOME/runtime/envs/$version/.oh-my-setting-python-env"
+  printf '%s\n' "$version" > "$HOME/runtime/current"
+  printf '%s\n' '#!/usr/bin/env bash' ': > "$HOME/managed-called"' \
+    'exec "$OMS_TEST_REAL_PYTHON" "$@"' > "$HOME/runtime/bin/python3"
+  cp "$HOME/runtime/bin/python3" "$HOME/runtime/envs/$version/bin/python3"
+  chmod +x "$HOME/runtime/bin/python3" "$HOME/runtime/envs/$version/bin/python3"
+  : > "$HOME/provisioned"
+}
+EOF
+  cat > "$d/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [ "${OMS_TEST_CLEAN_PROBE:-0}" = 1 ] && [ -n "${PYTHONHOME+x}${PYTHONPATH+x}" ]; then exit 9; fi
+exec "$OMS_TEST_REAL_PYTHON" -c 'import sys
+try:
+    sys.version_info = tuple(int(n) for n in sys.argv[1].split("."))
+except ValueError:
+    raise SystemExit(1)
+exec(sys.argv[2])' "$OMS_TEST_HOST_VERSION" "${@: -1}"
+EOF
+  chmod +x "$d/bin/python3"
+  for version in '' 0 3.10 3.11 4.0 malformed; do
+    (
+      export HOME="$d/host-$version" DEST="$d/repo" PATH="$d/bin:/usr/bin:/bin"
+      export OMS_TEST_REAL_PYTHON="$real_python" OMS_TEST_HOST_VERSION="$version"
+      . "$d/ensure.sh"
+      ensure_python3 > "$d/bootstrap.out" 2>&1 || fail "bootstrap failed for $version"
+      case "$version" in
+        3.11|4.0)
+          [ ! -e "$HOME/provisioned" ] || fail "supported Python $version was not accepted"
+          ;;
+        *)
+          [ -e "$HOME/provisioned" ] || fail "Python '$version' did not provision the runtime"
+          [ -x "$HOME/.local/bin/python3" ] || fail "managed bootstrap did not expose its shim"
+          ;;
+      esac
+    )
+  done
+  (
+    export HOME="$d/clean-probe" DEST="$d/repo" PATH="$d/bin:/usr/bin:/bin"
+    export OMS_TEST_REAL_PYTHON="$real_python" OMS_TEST_HOST_VERSION=3.11 OMS_TEST_CLEAN_PROBE=1
+    export PYTHONHOME=foreign PYTHONPATH=foreign
+    . "$d/ensure.sh"
+    ensure_python3 || fail "installer probe inherited Python settings"
+    [ "$PYTHONHOME" = foreign ] && [ "$PYTHONPATH" = foreign ] || fail "installer changed caller Python settings"
+  )
+  (
+    export HOME="$d/failed-bootstrap" DEST="$d/repo" PATH="$d/bin:/usr/bin:/bin"
+    export OMS_TEST_REAL_PYTHON="$real_python" OMS_TEST_HOST_VERSION=3.10 OMS_TEST_BOOTSTRAP_FAIL=1
+    if bash -c 'oms_platform_is_windows() { return 1; }; . "$1"; ensure_python3' _ "$d/ensure.sh" > "$d/failure.out" 2>&1; then
+      fail "bootstrap failure was accepted"
+    fi
+    grep -Fq "no Python 3.11+ 'python3'" "$d/failure.out" || fail "bootstrap failure omitted the required floor"
+    [ ! -e "$HOME/.local/bin/python3" ] || fail "failed bootstrap left a shim"
+  )
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    (
+      export HOME="$d/function-host" OMS_PYTHON_RUNTIME_ROOT="$d/no-runtime" PATH="$d/bin:/usr/bin:/bin"
+      export OMS_TEST_REAL_PYTHON="$real_python" OMS_TEST_HOST_VERSION=3.10
+      python3() { : > "$d/function-called"; return 0; }
+      export -f python3
+      oms_python_runtime_require >/dev/null 2>&1 && fail "exported interpreter function was trusted"
+      [ ! -e "$d/function-called" ] || fail "exported interpreter function ran"
+    )
+    for version in '' 0 3.10 3.11 4.0 malformed; do
+      (
+        export HOME="$d/resolve-$version" PATH="$d/bin:/usr/bin:/bin"
+        export OMS_TEST_REAL_PYTHON="$real_python" OMS_TEST_HOST_VERSION="$version"
+        export OMS_PYTHON_RUNTIME_ROOT="$HOME/runtime"
+        if out="$(oms_python_runtime_require 2>&1)"; then
+          case "$version" in 3.11|4.0) ;; *) fail "unsupported Python '$version' was accepted" ;; esac
+        else
+          case "$version" in 3.11|4.0) fail "supported Python '$version' was refused: $out" ;; esac
+          [ "$out" = 'error: OMS requires Python 3.11+; reinstall to provision the managed runtime' ] ||
+            fail "runtime refusal was not one clear line: $out"
+        fi
+      )
+    done
+    export HOME="$d/gui-home" OMS_TEST_REAL_PYTHON="$real_python"
+    export OMS_PYTHON_RUNTIME_ROOT="$HOME/runtime"
+    oms_python_runtime_prepare_root "$OMS_PYTHON_RUNTIME_ROOT"
+    . "$d/repo/scripts/lib/python-runtime.sh"
+    oms_python_runtime_bootstrap
+    (
+      . "$ROOT/scripts/lib/python-runtime.sh"
+      export PATH="$d/bin:/usr/bin:/bin" OMS_TEST_HOST_VERSION=3.11
+      export PYTHONHOME=bad PYTHONPATH=bad OMS_PYTHON=stale
+      OMS_PYTHON_RUNTIME_ROOT="$d/missing-runtime" oms_python_runtime_require || fail "host fallback failed"
+      [ "$PYTHONHOME" = bad ] && [ "$PYTHONPATH" = bad ] && [ -z "${OMS_PYTHON+x}" ] ||
+        fail "host fallback changed caller Python settings or retained managed state"
+    )
+    mkdir -p "$OMS_PYTHON_RUNTIME_ROOT/managed/fixture/bin" "$d/links"
+    cp "$real_python" "$OMS_PYTHON_RUNTIME_ROOT/managed/fixture/bin/python3"
+    ln -s "$OMS_PYTHON_RUNTIME_ROOT/managed/fixture/bin/python3" "$d/links/good"
+    oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/links/good" || fail "managed link refused"
+    ln -s "$real_python" "$d/links/foreign"
+    ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/links/foreign" || fail "foreign link accepted"
+    ln -s missing "$d/links/broken"
+    ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/links/broken" || fail "broken link accepted"
+    ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "" || fail "empty candidate accepted"
+    ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/links/0" || fail "missing zero candidate accepted"
+    ln -s cycle "$d/links/cycle"
+    ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/links/cycle" || fail "cyclic link accepted"
+    local link_target index
+    link_target="$OMS_PYTHON_RUNTIME_ROOT/managed/fixture/bin/python3"
+    index=1
+    while [ "$index" -le 32 ]; do
+      ln -s "$link_target" "$d/links/link-$index"
+      link_target="$d/links/link-$index"
+      index=$((index + 1))
+    done
+    oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$link_target" || fail "32 managed links refused"
+    ln -s "$link_target" "$d/links/link-33"
+    ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/links/link-33" || fail "33 managed links accepted"
+    ln -s /bin "$d/links/root-target"
+    ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/links/root-target" || fail "root target accepted"
+    oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" 3.11.0 python3
+    ! "$OMS_PYTHON_RUNTIME_ROOT/launchers/3.11.0/python3" -c 'pass' >/dev/null 2>&1 ||
+      fail "launcher accepted an unowned environment"
+    mkdir -p "$d/failbin"
+    printf '%s\n' '#!/usr/bin/env bash' ': > "$OMS_TEST_FAKE_CALLED"' 'exit 97' > "$d/failbin/python3"
+    chmod +x "$d/failbin/python3"
+    export OMS_TEST_FAKE_CALLED="$d/unexpected-probe"
+    (
+      printf '{}' | PATH="$d/failbin:/usr/bin:/bin" OMS_SYNTAX_GUARD_HOOK=0 OMS_PYTHON_RUNTIME_ROOT="$d/missing-runtime" \
+        bash "$ROOT/scripts/lib/python-entry.sh" bash "$ROOT/scripts/syntax-guard-hook.sh" ||
+        fail "disabled syntax hook failed"
+      [ ! -e "$d/unexpected-probe" ] || fail "disabled syntax hook probed Python"
+    )
+    hook_command="$("$real_python" - "$ROOT" <<'PY_HOOK'
+import importlib.util, sys
+from pathlib import Path
+sys.dont_write_bytecode = True
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("hooks", root / "scripts/lib/claude-hook-surfaces.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.hook_command(str(root), "telemetry-hook.sh"))
+PY_HOOK
+)"
+    export OMS_TEST_HOOK_COMMAND="$hook_command"
+    PATH="$d/failbin:/usr/bin:/bin" bash -c '
+      printf "%s\n" "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"probe.py\"}}" |
+        bash -c "$OMS_TEST_HOOK_COMMAND"
+    ' _ "$ROOT" || fail "minimal-PATH hook did not reach managed Python"
+    [ -e "$HOME/managed-called" ] || fail "registered hook did not use managed Python"
+    rm -f "$HOME/managed-called"
+    printf '{}' | OH_MY_SETTING_DIR="$ROOT" PATH="$d/failbin:/usr/bin:/bin" \
+      bash "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" telemetry-hook
+    [ -e "$HOME/managed-called" ] || fail "Codex hook did not use managed Python"
+    rm -f "$HOME/managed-called"
+    PATH="$d/failbin:/usr/bin:/bin" bash "$ROOT/scripts/oms" list > "$d/oms-list"
+    [ -e "$HOME/managed-called" ] || fail "dispatcher did not select managed Python"
+    cp "$ROOT/scripts/oms" "$d/copied-oms"
+    "$real_python" - "$ROOT" "$d/install.json" <<'PY_RECEIPT'
+import json, sys
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump({"schema": 2, "source_root": sys.argv[1]}, handle)
+PY_RECEIPT
+    rm -f "$HOME/managed-called"
+    PATH="$d/failbin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$d/install.json" \
+      bash "$d/copied-oms" list > "$d/copied-list"
+    [ -e "$HOME/managed-called" ] || fail "copied dispatcher did not use managed Python"
+    if out="$(OMS_PYTHON_RUNTIME_ROOT="$d/missing-runtime" PATH="$d/failbin:/usr/bin:/bin" \
+        bash -c "$hook_command" 2>&1)"; then
+      fail "registered hook accepted an unavailable runtime and old system Python"
+    fi
+    [ "$out" = 'error: OMS requires Python 3.11+; reinstall to provision the managed runtime' ] ||
+      fail "registered hook failure was not one clear line: $out"
+  )
+  echo 'python-floor: ok'
+)
+if [ "${1:-}" = --python-floor-only ]; then
+  test_python_floor
+  exit
+fi
+test_python_floor
+
 # Both source orders must agree that a missing file fails silently.
 missing_sha_file="$TMP/does-not-exist"
 sha_special_supported=0
@@ -412,7 +711,9 @@ chmod +x "$runtime_uv"
   ROOT="$runtime_repo"
   export PYTHONHOME="$TMP/nonexistent-python-home" PYTHONPATH="$TMP/foreign-modules"
   oms_python_runtime_activate || fail "private runtime activation failed"
-  [ -z "${PYTHONHOME:-}${PYTHONPATH:-}" ] || fail "foreign Python configuration leaked"
+  [ "$PYTHONHOME" = "$TMP/nonexistent-python-home" ] && [ "$PYTHONPATH" = "$TMP/foreign-modules" ] ||
+    fail "activation changed caller Python settings"
+  unset PYTHONHOME PYTHONPATH
   [ "$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' | tr -d '\r')" = "$runtime_version" ] ||
     fail "private runtime selected a different interpreter"
   case "$(command -v python3)" in "$runtime_root/launchers/$runtime_version/python3") ;; *)

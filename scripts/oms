@@ -37,12 +37,62 @@ resolve_self() {
   printf '%s\n' "$src"
 }
 
+receipt_runtime_safe() {
+  local root="$1" version env marker candidate path target parent managed count old_ifs
+  [ ! -L "$root" ] && [ -d "$root" ] && [ ! -L "$root/bin" ] &&
+    [ ! -L "$root/bin/python3" ] && [ -f "$root/bin/python3" ] && [ -x "$root/bin/python3" ] || return 1
+  marker="$root/.oh-my-setting-python-runtime"
+  [ ! -L "$marker" ] && [ -f "$marker" ] &&
+    [ "$(sed -n '1p' "$marker")" = schema=1 ] && [ "$(sed -n '2p' "$marker")" = owner=oh-my-setting ] || return 1
+  [ ! -L "$root/current" ] && [ -f "$root/current" ] || return 1
+  IFS= read -r version < "$root/current" || return 1
+  case "$version" in ''|*[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+  old_ifs="$IFS"; IFS=.; set -- $version; IFS="$old_ifs"
+  [ "$#" -eq 3 ] && [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || return 1
+  env="$root/envs/$version"
+  marker="$env/.oh-my-setting-python-env"
+  [ ! -L "$root/envs" ] && [ ! -L "$env" ] && [ -d "$env" ] &&
+    [ ! -L "$marker" ] && [ -f "$marker" ] &&
+    [ "$(sed -n '1p' "$marker")" = schema=1 ] && [ "$(sed -n '2p' "$marker")" = "version=$version" ] || return 1
+  for candidate in "$env/bin/python3" "$env/bin/python" "$env/Scripts/python.exe"; do
+    [ ! -L "${candidate%/*}" ] && [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    if [ ! -L "$candidate" ]; then return 0; fi
+    [ ! -L "$root/managed" ] && [ -d "$root/managed" ] || continue
+    managed="$(cd "$root/managed" && pwd -P)" || continue
+    path="$candidate"; count=0
+    while [ -L "$path" ]; do
+      count=$((count + 1)); [ "$count" -le 32 ] || return 1
+      parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
+      target="$(readlink "$path")" || return 1
+      case "$target" in /*) path="$target" ;; *) path="$parent/$target" ;; esac
+    done
+    parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
+    case "$parent/${path##*/}" in "$managed"/*) return 0 ;; esac
+  done
+  return 1
+}
+
 SCRIPTS_DIR="$(cd "$(dirname "$(resolve_self "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "$SCRIPTS_DIR/.." && pwd -P)"
+if [ -f "$SCRIPTS_DIR/lib/python-runtime.sh" ]; then
+  # shellcheck source=scripts/lib/python-runtime.sh
+  . "$SCRIPTS_DIR/lib/python-runtime.sh"
+  oms_python_runtime_activate_if_present
+fi
 if [ ! -f "$SCRIPTS_DIR/agent-task.sh" ]; then
   receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
   source_root=""
-  if command -v python3 >/dev/null 2>&1; then
-    source_root="$(python3 - "$receipt" <<'PY' 2>/dev/null || true
+  # A copied dispatcher has no adjacent library until this JSON bootstrap
+  # finds the checkout. Use the host interpreter in isolated mode.
+  unset -f python python3 2>/dev/null || true
+  runtime_root="${OMS_PYTHON_RUNTIME_ROOT:-$HOME/.local/share/oh-my-setting/python-runtime}"
+  receipt_python="$runtime_root/bin/python3"
+  if ! receipt_runtime_safe "$runtime_root"; then
+    receipt_python="$(command -v python3 2>/dev/null || true)"
+    case "$receipt_python" in "$runtime_root"/*|"$HOME/.local/bin/python3") receipt_python="" ;; esac
+  fi
+  if [ -n "$receipt_python" ]; then
+    source_root="$(env -u PYTHONHOME -u PYTHONPATH "$receipt_python" -I - "$receipt" <<'PY' 2>/dev/null || true
 import json
 import os
 import sys
@@ -64,6 +114,10 @@ PY
   fi
   if [ -n "$source_root" ] && [ -f "$source_root/scripts/agent-task.sh" ]; then
     SCRIPTS_DIR="$source_root/scripts"
+    ROOT="$source_root"
+    # shellcheck source=scripts/lib/python-runtime.sh
+    . "$SCRIPTS_DIR/lib/python-runtime.sh"
+    oms_python_runtime_activate_if_present
   else
     echo "error: oms cannot locate its checkout from $SCRIPTS_DIR" >&2
     echo "error: no harness scripts there and no usable install receipt at $receipt" >&2
@@ -274,6 +328,7 @@ EOF_LIST
 case "${1:-}" in
   "")
     if [ -t 0 ] && [ -t 1 ]; then
+      oms_python_runtime_require || exit 1
       exec bash "$SCRIPTS_DIR/panel.sh"
     fi
     usage
@@ -317,6 +372,12 @@ if [ ! -f "$TARGET" ]; then
   echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
 fi
+needs_python=1
+case "$TOOL" in doctor|uninstall) needs_python=0 ;; esac
+for arg in "$@"; do
+  case "$arg" in --help|-h) needs_python=0 ;; esac
+done
+[ "$needs_python" = 0 ] || oms_python_runtime_require || exit 1
 if [ "$TOOL" = panel ] || [ "$TOOL" = harness ]; then
   # Interactive entrypoints own the caller PID so signals reach their cleanup.
   exec bash "$TARGET" "$@"

@@ -104,17 +104,9 @@ V2_NOTES = {
 
 
 def toml_parser():
-    try:
-        import tomllib  # type: ignore
+    import tomllib
 
-        return tomllib
-    except ImportError:
-        try:
-            import tomli  # type: ignore
-
-            return tomli
-        except ImportError:
-            return None
+    return tomllib
 
 
 def read(path: str) -> Tuple[bytes, str, List[str]]:
@@ -279,16 +271,11 @@ def remove(parser, lines: List[str], dry_run: bool) -> Tuple[List[str], List[str
         if top and finish + 1 < len(updated) and not HUD.body(updated[finish + 1]).strip():
             finish += 1
         del updated[start : finish + 1]
-    # Exactly the lines this helper wrote are deleted, so what remains is the
-    # text that was valid before; a parser only confirms it when available.
-    if spans and parser is not None:
-        parse(parser, updated)
+    # Removal retracts only exact owned lines, including on legacy hosts.
     return updated, ["%s %s" % item for item in notes.items()], bool(spans)
 
 
 def check(parser, lines: List[str]) -> Tuple[str, int]:
-    if parser is None:
-        return "unverified (needs Python 3.11+ or tomli to read the config)", 1
     parsed = parse(parser, lines)
     root, v2 = root_state(lines, parsed), v2_state(lines, parsed)
     shown = root
@@ -311,18 +298,13 @@ def main() -> int:
     path = os.path.abspath(args.path)
 
     try:
-        parser = toml_parser()
+        parser = None if args.action == "remove" else toml_parser()
         original, newline, lines = read(path)
         if args.action == "check":
             state, code = check(parser, lines)
             print("codex-usage: %s" % state)
             return code
         if args.action == "install":
-            if parser is None:
-                # Whether the user already set a key cannot be known without
-                # reading the TOML, and guessing risks overriding them.
-                print("codex-usage: skipped (needs Python 3.11+ or tomli to read the config)")
-                return 0
             # The daemon that runs notify has its own PATH: name both absolutely.
             notifier = (NotifyBlock([sys.executable, os.path.abspath(args.notify_script)])
                         if args.notify_script else None)

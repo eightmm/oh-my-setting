@@ -43,7 +43,6 @@ def run_helper(action, path, *flags):
     return status, stdout.getvalue(), stderr.getvalue()
 
 
-@unittest.skipIf(PARSER is None, "needs tomllib or tomli")
 class CodexUsageConfigTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -52,6 +51,16 @@ class CodexUsageConfigTest(unittest.TestCase):
 
     def load(self):
         return PARSER.loads(self.config.read_text(encoding="utf-8"))
+
+    def test_remove_without_tomllib_preserves_user_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = pathlib.Path(directory) / "config.toml"
+            config.write_text('model = "user"\n', encoding="utf-8")
+            self.assertEqual(run_helper("install", config)[0], 0)
+            with mock.patch.dict(sys.modules, {"tomllib": None}):
+                self.assertEqual(run_helper("remove", config)[0], 0)
+            self.assertIn('model = "user"', config.read_text(encoding="utf-8"))
+            self.assertNotIn("oh-my-setting managed", config.read_text(encoding="utf-8"))
 
     def test_root_key_lands_at_root_and_round_trips(self):
         self.config.write_text(REALISTIC, encoding="utf-8")
@@ -198,25 +207,6 @@ class CodexUsageConfigTest(unittest.TestCase):
         self.config.write_bytes(REALISTIC.replace("\n", "\r\n").encode("utf-8"))
         self.assertEqual(run_helper("install", self.config)[0], 0)
         self.assertNotIn(b"\n", self.config.read_bytes().replace(b"\r\n", b""))
-
-
-class CodexUsageWithoutParserTest(unittest.TestCase):
-    def test_install_refuses_to_guess_but_remove_still_reverts(self):
-        with tempfile.TemporaryDirectory() as directory:
-            config = pathlib.Path(directory) / "config.toml"
-            config.write_text(REALISTIC, encoding="utf-8")
-            with mock.patch.object(USAGE, "toml_parser", return_value=None):
-                status, stdout, _ = run_helper("install", config)
-                self.assertEqual(status, 0)
-                self.assertIn("skipped", stdout)
-                self.assertEqual(config.read_text(encoding="utf-8"), REALISTIC)
-                self.assertEqual(run_helper("check", config)[0], 1)
-            if PARSER is None:
-                return
-            run_helper("install", config)
-            with mock.patch.object(USAGE, "toml_parser", return_value=None):
-                self.assertEqual(run_helper("remove", config)[0], 0)
-            self.assertEqual(config.read_text(encoding="utf-8"), REALISTIC)
 
 
 if __name__ == "__main__":

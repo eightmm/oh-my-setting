@@ -5,7 +5,7 @@ set -euo pipefail
 # agent can have is being told, in the same turn, that the file it just wrote
 # does not parse. Without it the error surfaces one command later, after the
 # agent has reasoned on top of the broken file. Scope is syntax only — bash -n,
-# a Python AST parse, JSON, and TOML where the stdlib has a parser — and the
+# a Python AST parse, JSON, and TOML — and the
 # verdict is feedback, never a block: PostToolUse cannot undo the write, and a
 # plain stdout line on this event reaches the transcript log rather than the
 # model, so the finding rides hookSpecificOutput.additionalContext. Silent on a
@@ -20,7 +20,6 @@ esac
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 # Shell-only precheck: the python pass below judges only sh/bash/py/json/toml
 # and extensionless (shebang) files, but it also delivers live collaboration
@@ -72,6 +71,11 @@ fast_nothing_to_do() {
   [ ! -d "$top/.oms/threads" ] && [ ! -e "$top/.oms/threads" ]
 }
 if fast_nothing_to_do; then exit 0; fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/lib/python-runtime.sh
+. "$ROOT/scripts/lib/python-runtime.sh"
+oms_python_runtime_require || exit 0
 
 OMS_SGH_PAYLOAD="$payload" python3 -X utf8 -I -B - "$ROOT/scripts/lib" "$BASH" <<'PY' 2>/dev/null || true
 import atexit
@@ -264,10 +268,7 @@ def syntax_problem(path):
         except (OSError, UnicodeDecodeError):
             return None
     elif kind == "toml":
-        try:
-            import tomllib
-        except ImportError:
-            return None
+        import tomllib
         try:
             with open(path, "rb") as handle:
                 tomllib.load(handle)

@@ -152,8 +152,8 @@ try:
         session = '$1'
 
     for module in ('panel_terminals.py', 'panel_jobs.py', 'panel_workspaces.py'):
-        ast.parse((root / 'scripts/lib' / module).read_text(), feature_version=(3, 9))
-    check(True, 'Python 3.9 grammar')
+        ast.parse((root / 'scripts/lib' / module).read_text(), feature_version=(3, 11))
+    check(True, 'Python 3.11 grammar')
     with patch.dict(os.environ, {'OMS_HARNESS_CHILD': '1'}):
         refused(lambda: terminals.open_terminal(repo, session))
         refused(lambda: jobs.run_job(repo, session, ['true']))

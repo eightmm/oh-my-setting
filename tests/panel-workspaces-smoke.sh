@@ -339,8 +339,8 @@ try:
         if not native:
             print('BLOCKED native tmux+PTY: ' + probe.stderr.strip())
     if native:
-        ast.parse((root / 'scripts/lib/panel_workspaces.py').read_text(), feature_version=(3, 9))
-        check(True, 'Python 3.9 grammar')
+        ast.parse((root / 'scripts/lib/panel_workspaces.py').read_text(), feature_version=(3, 11))
+        check(True, 'Python 3.11 grammar')
         server_pid, home_session, origin_pane, origin_window = tmux(
             'display-message', '-p', '-t', 'origin', '#{pid}\t#{session_id}\t#{pane_id}\t#{window_id}').split('\t')
         tmux('set-option', '-t', home_session, '@oms_panel_repo', str(repo))

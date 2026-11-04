@@ -246,14 +246,14 @@ class RuntimeFixture(RuntimeFixtureBase):
         with self.assertRaises(CoreError):
             release.promote(self.repo, git_head(self.repo), '1.0.1', expected_manifest_digest='')
 
-    def test_python_sources_parse_with_python39_grammar(self) -> None:
+    def test_python_sources_parse_with_python311_grammar(self) -> None:
         import ast
         roots = [ROOT / 'scripts' / 'lib' / 'oms_runtime', ROOT / 'scripts' / 'lib']
         checked = 0
         for root in roots:
             for path in sorted(root.glob('*.py')):
                 checked += 1
-                ast.parse(path.read_text(encoding='utf-8'), filename=str(path), feature_version=9)
+                ast.parse(path.read_text(encoding='utf-8'), filename=str(path), feature_version=(3, 11))
         self.assertGreater(checked, 10)
 
     def test_plan_acceptance_receipt_is_linked_and_becomes_stale_after_head_moves(self) -> None:

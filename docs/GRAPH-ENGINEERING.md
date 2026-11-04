@@ -225,10 +225,9 @@ tests/fixtures/graph-routes/    route fixtures (no model calls)
 tests/graph-smoke.sh            focused suite registered in scripts/check.sh
 ```
 
-Python 3.9 syntax, standard library only (the gate compiles with
-`feature_version=9`; no `match`, no `X | Y` annotations at runtime, no
-third-party imports). Reuse `oms_runtime.common` for hashing, JSON, atomic
-writes, locks, `run_json`, `install_root`, `repo_root`, `relative_path`,
+Python 3.11 syntax, standard library only (the gate compiles with
+`feature_version=11`; no third-party imports). Reuse `oms_runtime.common`
+for hashing, JSON, atomic writes, locks, `run_json`, `install_root`, `repo_root`, `relative_path`,
 `bounded_line`, `sensitive_text`, `parse_path_list`, `safe_id`. Reuse
 `path_scope` for scope predicates. Reuse `oms_runtime.evidence.artifact_rows`
 for receipt rows and `oms_runtime.context.plan_context` for bundles.

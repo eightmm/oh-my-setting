@@ -60,7 +60,7 @@ agent skill / MCP / intent router
 ```
 
 The runtime core has no daemon and no independent authority database. Project
-state on disk remains the source of truth. The Python package uses Python 3.9+
+state on disk remains the source of truth. The Python package uses Python 3.11+
 and only the standard library.
 
 A delegated process marked with `OMS_HARNESS_CHILD=1` can use the runtime's
@@ -908,7 +908,7 @@ every tool call, and an always-on multi-agent swarm.
 
 The additive implementation includes:
 
-- Python 3.9 grammar checks
+- Python 3.11 grammar checks
 - unit tests for projection, evidence, context, capsules, profiles, release,
   failure classification, execution, experiments, and telemetry
 - adversarial symlink, secret, stale-metrics, unknown-evidence, CAS, timeout,

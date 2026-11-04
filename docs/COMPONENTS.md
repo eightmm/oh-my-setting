@@ -1475,9 +1475,10 @@ chooses a connector or tracked summary.
   Nested paths resolve to the repository root; handoff transcript selection
   and relative edited paths retain the original session cwd.
 - Codex: local plugin hooks, including the edit-time syntax guard, plus a
-  managed native status line when the user has not set one. On Python 3.9/3.10,
-  arbitrary existing TOML requires `tomli` so
-  the helper never rewrites an unvalidated config.
+  managed native status line when the user has not set one. Python 3.11+
+  supplies the stdlib TOML parser for installation and checks.
+  Removal retracts only exact managed marker blocks, so a legacy host can
+  uninstall without a managed runtime or third-party parser.
   The same installer manages usage-efficiency keys it can evidence:
   `background_terminal_max_timeout = 900000` (a longer ceiling for an empty
   background-terminal poll, not a wait duration) and, only where the user
@@ -1575,7 +1576,7 @@ in the project's `PROJECT.md`. These defaults guide agents, not an enforcement
 service or proof of measured CI savings.
 
 `bash scripts/check.sh` is the repository gate: shell lint, Bash 3.2 parsing,
-Python 3.9 grammar, skill validation, focused suites, and sharded smoke tests.
+Python 3.11 grammar, skill validation, focused suites, and sharded smoke tests.
 Development uses affected tests and static checks, not this full gate per edit.
 Before landing a bundle, run `bash scripts/check.sh invariants` for the fast
 repository-wide allowlist/review-state, skill and provider registry,
@@ -1599,7 +1600,7 @@ job for PRs and main pushes. Full selections fan out to the existing Linux
 lint, four focused lanes, four smoke shards and copy lifecycle runner. The
 selector also emits `native=true|false`: install/lifecycle, shell portability,
 Python compatibility, shared runtime/configuration and workflow changes require
-macOS/Windows lifecycle, macOS Bash 3.2/BSD fixtures and real Python 3.9.
+macOS/Windows lifecycle, macOS Bash 3.2/BSD fixtures and real Python 3.11.
 Weekly/manual runs and unavailable-base fallbacks require all native jobs.
 The install matrix omits native hosts only on an explicit `native=false` plan;
 the stable `gate` rejects missing, failed or cancelled required results and

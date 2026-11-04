@@ -35,7 +35,7 @@ def decision_pin_indices(lines, now=None, max_rows=MAX_DECISION_PIN_ROWS):
         if not isinstance(timestamp, str) or not timestamp:
             continue
         try:
-            # datetime.fromisoformat on Python 3.9 does not accept the common Z suffix.
+            # Normalize the common Z suffix for older Python installations.
             normalized = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
             stamp = datetime.datetime.fromisoformat(normalized)
             if stamp.tzinfo is None:

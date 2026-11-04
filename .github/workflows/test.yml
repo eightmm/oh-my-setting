@@ -236,21 +236,18 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'macOS' }}
         run: bash tests/bsd-portability-smoke.sh
 
-  # README promises Python 3.9+. Newer parsers can emulate most of that
-  # grammar, but only a real 3.9 interpreter proves the no-tomllib HUD path.
-  python39:
+  # Exercise the minimum supported Python, including the stdlib TOML parser.
+  python311:
     needs: affected_plan
     if: needs.affected_plan.outputs.native == 'true'
-    # Last GitHub image with a setup-python 3.9 build (26.04 has none); move
-    # this lane to a container before 24.04 retires.
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.9"
-      - name: Python 3.9 compatibility
+          python-version: "3.11"
+      - name: Python 3.11 compatibility
         timeout-minutes: 45
         run: |
           bash scripts/check-python.sh
@@ -285,7 +282,7 @@ jobs:
   # are accepted; missing, failed, and cancelled required jobs fail closed.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, affected_plan, affected_verify, affected_operator, install_e2e, python39]
+    needs: [lint, focused, smoke_shard, affected_plan, affected_verify, affected_operator, install_e2e, python311]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -302,7 +299,7 @@ jobs:
           AFFECTED_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
           AFFECTED_OPERATOR_RESULT: ${{ needs.affected_operator.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
-          PYTHON39_RESULT: ${{ needs.python39.result }}
+          PYTHON311_RESULT: ${{ needs.python311.result }}
         run: |
           status=0
           [ "$AFFECTED_PLAN_RESULT" = success ] || status=1
@@ -341,7 +338,7 @@ jobs:
             *) native_expected=invalid; install_expected=invalid; status=1 ;;
           esac
           [ "$INSTALL_E2E_RESULT" = "$install_expected" ] || status=1
-          [ "$PYTHON39_RESULT" = "$native_expected" ] || status=1
+          [ "$PYTHON311_RESULT" = "$native_expected" ] || status=1
           if [ "$status" -ne 0 ]; then
             echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
           fi

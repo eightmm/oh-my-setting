@@ -4,10 +4,10 @@ install-claude-hooks.sh converges and removes with these functions and the
 doctor audits with them, so a registration the doctor calls healthy is exactly
 one the installer would leave unchanged.
 
-A hook is OMS-owned only when its command is `bash <root>/scripts/<script>`
-for a script OMS registers or once registered, and <root> is the current root
-or a verified OMS checkout. A same-named script elsewhere, a wrapper, or any
-other command stays user-owned: never rewritten, removed or counted.
+A hook is OMS-owned only when its command names a registered script under
+the current root or a verified OMS checkout, either directly (legacy) or
+through that same root's Python entry launcher. Arbitrary wrappers and
+same-named scripts elsewhere stay user-owned: never rewritten or removed.
 """
 
 import os
@@ -22,8 +22,27 @@ SCRIPTS = frozenset((
 ))
 
 
+def entry_command(root, executable, path):
+    return " ".join(shlex.quote(arg) for arg in (
+        "bash", "%s/scripts/lib/python-entry.sh" % root, executable, path))
+
+
 def hook_command(root, script):
-    return "bash " + shlex.quote("%s/scripts/%s" % (root, script))
+    return entry_command(root, "bash", "%s/scripts/%s" % (root, script))
+
+
+def entry_path(command, executable):
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    if len(argv) == 2 and argv[0] == executable:
+        return argv[1]
+    if len(argv) == 4 and argv[0] == "bash" and argv[2] == executable:
+        root = _norm(argv[3]).rsplit("/", 2)[0]
+        if _norm(argv[1]) == root + "/scripts/lib/python-entry.sh":
+            return argv[3]
+    return None
 
 
 def _norm(path):
@@ -31,12 +50,9 @@ def _norm(path):
 
 
 def _script_path(command):
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        argv = []
-    if len(argv) == 2 and argv[0] == "bash":
-        return argv[1]
+    path = entry_path(command, "bash")
+    if path is not None:
+        return path
     # Earlier installers wrote the path unquoted, which splits a root that
     # contains spaces; that exact legacy form is still ours to converge.
     rest = command[5:].strip() if command.startswith("bash ") else ""

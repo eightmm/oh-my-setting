@@ -50,16 +50,16 @@ claude_auto_compact_supported() {
 # unregistered while the doctor reported the registration complete.
 #
 # Rows are event|script|matcher|timeout. An empty matcher or timeout field is
-# omitted from the registration; the command is always `bash $ROOT/scripts/
-# <script>`, shell-quoted when the root needs it. Blank lines and # comments
-# are ignored, so the reason a surface exists lives next to the surface.
+# omitted from the registration; commands use scripts/lib/python-entry.sh
+# to select Python before running the shell-quoted hook. Blank lines and #
+# comments are ignored, so each surface can carry its rationale.
 #
-# HOOKS_SCHEMA is bumped whenever a row changes. It is stamped into the install
-# receipt at install/update time, which is what lets `doctor --surfaces` say
+# HOOKS_SCHEMA is bumped whenever a row or its command form changes. It is
+# stamped into the install receipt at install/update time, which is what lets `doctor --surfaces` say
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=8
+HOOKS_SCHEMA=9
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
@@ -302,10 +302,8 @@ spec = importlib.util.spec_from_file_location(
     "oms_claude_hooks", os.path.join(root, "scripts", "lib", "claude-hook-surfaces.py"))
 lib = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lib)
-status_cmd = "python3 %s" % shlex.quote(os.environ["OMS_CH_STATUS_PATH"])
-subagent_status_cmd = "python3 %s" % shlex.quote(
-    os.environ["OMS_CH_SUBAGENT_STATUS_PATH"]
-)
+status_cmd = lib.entry_command(root, "python3", os.environ["OMS_CH_STATUS_PATH"])
+subagent_status_cmd = lib.entry_command(root, "python3", os.environ["OMS_CH_SUBAGENT_STATUS_PATH"])
 # Per-model effort for the Claude models OMS routes through. Claude Opus 5.5
 # defaults to medium and thinks more per level than Opus 5, so a top-level
 # xhigh would otherwise carry over; high is the chosen default (user decision
@@ -340,20 +338,13 @@ def status_ours(value, command, script_name):
         return False
     if value.get("command") == command:
         return True
-    try:
-        argv = shlex.split(str(value.get("command", "")))
-    except ValueError:
-        return False
-    if not (
-        len(argv) == 2
-        and argv[0] == "python3"
-        and argv[1].replace("\\", "/").rsplit("/", 1)[-1] == script_name
-    ):
+    path = lib.entry_path(str(value.get("command", "")), "python3")
+    if path is None or path.replace("\\", "/").rsplit("/", 1)[-1] != script_name:
         return False
     # A previous canonical checkout can move. Recognize it only when the
     # command still points into an actual OMS checkout; a user's unrelated
     # script with the same basename remains user-owned.
-    candidate_root = os.path.dirname(os.path.dirname(os.path.realpath(argv[1])))
+    candidate_root = os.path.dirname(os.path.dirname(os.path.realpath(path)))
     return (
         os.path.isfile(os.path.join(candidate_root, ".agents", "plugins", "marketplace.json"))
         and os.path.isfile(os.path.join(candidate_root, "scripts", "install-claude-hooks.sh"))

@@ -25,7 +25,7 @@ FULL_JOBS = (["lint", "affected_plan", "gate", "native (ubuntu-latest, copy)"]
              + ["scripts-smoke (%d/4)" % shard for shard in range(1, 5)])
 # Native-risk legs and the affected-only operator and narrow-check jobs run only when the plan asks.
 OPTIONAL_JOBS = re.compile(
-    r"python39|native \((macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks")
+    r"python311|native \((macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks")
 
 
 def repo_slug(destination):

@@ -43,7 +43,7 @@ def newline_for(raw: bytes) -> str:
     return "\r\n" if b"\r\n" in raw else "\n"
 
 
-def load(path: str) -> Tuple[bytes, str, List[str]]:
+def load(path: str, validate: bool = True) -> Tuple[bytes, str, List[str]]:
     if not os.path.isfile(path):
         return b"", "\n", []
     with open(path, "rb") as fh:
@@ -54,28 +54,14 @@ def load(path: str) -> Tuple[bytes, str, List[str]]:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ConfigError("config is not UTF-8 (%s)" % exc)
-    validate_toml(text)
+    if validate:
+        validate_toml(text)
     return raw, newline_for(raw), text.splitlines(keepends=True)
 
 
 def validate_toml(text: str) -> None:
-    try:
-        import tomllib  # type: ignore
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore
-        except ImportError:
-            # Fresh Python 3.9/3.10 installs have no stdlib TOML parser. The
-            # helper can still prove the two shapes it owns, but must never
-            # trust an arbitrary existing user config and then rewrite it.
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
-            managed = ["[tui]", BEGIN, STATUS_LINE, END]
-            if not lines or lines == ["[tui]"] or lines == managed:
-                return
-            raise ConfigError(
-                "TOML validation requires Python 3.11+ or the tomli package "
-                "on Python 3.9-3.10"
-            )
+    import tomllib
+
     try:
         tomllib.loads(text)
     except Exception as exc:
@@ -171,11 +157,13 @@ def remove(lines: List[str]) -> Tuple[List[str], str, bool]:
             del updated[index]
     else:
         del updated[start : finish + 1]
-    validate_toml("".join(updated))
+    # Exact owned lines can be retracted on legacy hosts without a TOML parser.
     return updated, "removed", True
 
 
 def write(path: str, original: bytes, lines: List[str]) -> None:
+    if os.path.islink(path):
+        raise ConfigError("refusing to replace a symlinked config")
     parent = os.path.dirname(path) or "."
     os.makedirs(parent, exist_ok=True)
     backup = path + ".oms-bak"
@@ -217,7 +205,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        original, newline, lines = load(os.path.abspath(args.path))
+        original, newline, lines = load(os.path.abspath(args.path), validate=args.action != "remove")
         if args.action == "check":
             state, code = check(lines)
             print("codex-hud: %s" % state)

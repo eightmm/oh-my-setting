@@ -6,7 +6,7 @@ set -euo pipefail
 # Antigravity plugin packaging, the router's state-conditional hints, and
 # the generate-slurm-reference rename.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-state-surfaces.XXXXXX")"
@@ -1612,6 +1612,19 @@ EOF
 
 # --- antigravity plugin -----------------------------------------------------
 
+make_agy_runtime() {
+  local runtime="$1" python version
+  python="$(command -v python3)"
+  version="$($python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+  mkdir -p "$runtime/bin" "$runtime/envs/$version/bin"
+  printf 'schema=1\nowner=oh-my-setting\n' > "$runtime/.oh-my-setting-python-runtime"
+  printf 'schema=1\nversion=%s\n' "$version" > "$runtime/envs/$version/.oh-my-setting-python-env"
+  printf '%s\n' "$version" > "$runtime/current"
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$python" > "$runtime/bin/python3"
+  cp "$runtime/bin/python3" "$runtime/envs/$version/bin/python3"
+  chmod +x "$runtime/bin/python3" "$runtime/envs/$version/bin/python3"
+}
+
 test_install_agy_plugin_bakes_absolute_paths() {
   local bin="$TMP/agy-bin"
   local log="$TMP/agy-log"
@@ -1656,9 +1669,67 @@ EOF
   # Uncertified is the default: an agy nobody has probed gets the MCP server
   # and nothing else, whatever a previous probe on this machine concluded about
   # a different binary.
-  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
-    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-out" ||
+  make_agy_runtime "$TMP/agy-runtime"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 97' > "$bin/python3"
+  chmod +x "$bin/python3"
+  (
+    PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+      bash "$ROOT/scripts/install-agy-plugin.sh"
+  ) > "$TMP/agy-out" ||
     fail "agy plugin install should succeed with agy present"
+  local locked_version
+  locked_version="$(python3 - "$ROOT/tools.lock.json" <<'PY_LOCKED'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle)["python"]["version"])
+PY_LOCKED
+)"
+  mkdir -p "$TMP/agy-runtime/envs/$locked_version/bin" "$TMP/agy-runtime/launchers/$locked_version"
+  printf 'schema=1\nversion=%s\n' "$locked_version" > "$TMP/agy-runtime/envs/$locked_version/.oh-my-setting-python-env"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$*" in *"expected = tuple"*) exit 0 ;; esac' \
+    'exec /usr/bin/python3 "$@"' > "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+  chmod +x "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+  cp "$TMP/agy-runtime/envs/$locked_version/bin/python3" "$TMP/agy-runtime/launchers/$locked_version/python3"
+  mv "$TMP/agy-runtime/bin/python3" "$TMP/agy-runtime/bin/python3.saved"
+  ln -s "$bin/python3" "$TMP/agy-runtime/bin/python3"
+  if PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" bash "$ROOT/scripts/install-agy-plugin.sh" \
+      > "$TMP/agy-symlink.out" 2>&1; then
+    fail "AGY packaging accepted a symlinked runtime launcher"
+  fi
+  rm "$TMP/agy-runtime/bin/python3"
+  mv "$TMP/agy-runtime/bin/python3.saved" "$TMP/agy-runtime/bin/python3"
+  if (
+    PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/absent-runtime" bash "$ROOT/scripts/install-agy-plugin.sh"
+  ) > "$TMP/agy-no-runtime.out" 2>&1; then
+    fail "AGY packaging accepted an unavailable interpreter"
+  fi
+  [ "$(cat "$TMP/agy-no-runtime.out")" = 'error: OMS requires Python 3.11+; reinstall to provision the managed runtime' ] ||
+    fail "AGY packaging must report one interpreter error"
+  rm "$bin/python3"
+  mkdir -p "$TMP/agy-writable-host"
+  cp "$(command -v python3)" "$TMP/agy-writable-host/python3"
+  chmod 0775 "$TMP/agy-writable-host/python3"
+  if PATH="$TMP/agy-writable-host:$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/absent-runtime" bash "$ROOT/scripts/install-agy-plugin.sh" \
+      > "$TMP/agy-writable.out" 2>&1; then
+    fail "AGY packaging accepted a group-writable host interpreter"
+  fi
+  grep -Fq 'host Python interpreter is writable by others' "$TMP/agy-writable.out" ||
+    fail "AGY packaging omitted the writable interpreter error"
+  chmod 0755 "$TMP/agy-writable-host/python3"
+  chmod 0777 "$TMP/agy-writable-host"
+  if PATH="$TMP/agy-writable-host:$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/absent-runtime" bash "$ROOT/scripts/install-agy-plugin.sh" \
+      > "$TMP/agy-writable-dir.out" 2>&1; then
+    fail "AGY packaging accepted a world-writable interpreter directory"
+  fi
+  grep -Fq 'host Python interpreter is writable by others' "$TMP/agy-writable-dir.out" ||
+    fail "AGY packaging omitted the writable directory error"
+  chmod 0700 "$TMP/agy-writable-host"
   grep -Fq "agy-plugin: installed" "$TMP/agy-out" || fail "install was not reported"
   grep -Fq "run \`oms update --probe-agy-surfaces\`" "$TMP/agy-out" ||
     fail "an uncertified agy should say how to certify it"
@@ -1675,7 +1746,12 @@ assert plugin["name"] == "oh-my-setting", plugin
 assert plugin["version"] not in ("", "0.0.0"), plugin
 mcp = json.load(open(os.path.join(d, "mcp_config.json")))
 server = mcp["mcpServers"]["oh-my-setting"]
-assert server["command"] == "python3", server
+assert os.path.isabs(server["command"]), server
+import subprocess
+result = subprocess.run([server["command"], "-c", "import sys; assert sys.version_info >= (3, 11)"],
+                        env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True,
+                        timeout=float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "30")))
+assert result.returncode == 0, result
 assert server["args"] == [os.path.join(root, "scripts", "oms-mcp-server.py")], server
 PY
 
@@ -1929,9 +2005,16 @@ PY
     OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record \
       --cmd "python train.py" --exit 2 >/dev/null )
 
-  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"modelName":"auto","invocationNum":1}' "$repo" |
-    TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)" ||
+  make_agy_runtime "$TMP/agy-hook-runtime"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 97' > "$bin/python3"
+  chmod +x "$bin/python3"
+  out="$(
+    printf '{"conversationId":"c1","workspacePaths":["%s"],"modelName":"auto","invocationNum":1}' "$repo" |
+      PATH="$bin:/usr/bin:/bin" OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-hook-runtime" \
+      TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation
+  )" ||
     fail "the preinvocation adapter must exit 0"
+  rm "$bin/python3"
   OMS_T_OUT="$out" python3 - <<'PY' || fail "preinvocation did not inject the router hint: $out"
 import json, os
 
@@ -1945,6 +2028,15 @@ PY
     TMPDIR="$TMP" bash "$plugin/agy-hook.sh" stop)" ||
     fail "the stop adapter must exit 0"
   [ "$out" = "{}" ] || fail "stop must never return a decision, got: $out"
+
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$bin/python3"
+  chmod +x "$bin/python3"
+  out="$(PATH="$bin:/usr/bin:/bin" OMS_PYTHON_RUNTIME_ROOT="$TMP/missing-agy-runtime" \
+    bash "$plugin/agy-hook.sh" preinvocation 2> "$TMP/agy-no-python.err" <<< '{}')" ||
+    fail "adapter must fail open without Python"
+  [ "$out" = '{}' ] || fail "adapter did not return empty JSON"
+  [ "$(grep -Fc 'error: OMS requires Python 3.11+' "$TMP/agy-no-python.err")" = 1 ] || fail "adapter omitted the runtime error"
+  rm "$bin/python3"
 
   # Later invocations of the same turn stay quiet, and every kill switch is
   # honoured without reaching the harness at all.
@@ -2929,6 +3021,7 @@ assert read["cacheScope"] in ("public", "private"), read
 PY
 }
 
+# SMOKE_TEST_CALLS_BEGIN
 test_inbox_orphan_and_unsealed_journal
 test_mcp_server_protocol
 test_mcp_live_thread_reuses_peer_tools
@@ -2963,4 +3056,5 @@ test_template_style_switch_retires_the_old_block
 test_existing_gemini_md_is_kept_in_sync
 test_slurm_generator_has_one_front_door
 
+# SMOKE_TEST_CALLS_END
 echo "state-surfaces-smoke: ok"

@@ -15,14 +15,21 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | 호스트 | 필요한 것 | 관리 파일 |
 |---|---|---|
-| Linux (glibc) | Bash 3.2+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다). Python 불필요 | symlink |
-| macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다). Python 불필요 | symlink |
+| Linux (glibc) | Bash 3.2+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다). Python 3.11+는 관리형 런타임으로 설치된다 | symlink |
+| macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다). Python 3.11+는 관리형 런타임으로 설치된다 | symlink |
 | Windows via WSL2 | WSL2 안에서 위 Linux 요구 사항 적용 | symlink |
 
-`python3` 3.9+와 uv가 모두 없으면 설치기는 고정 버전 uv를 받아 sha256을
+Python 요구 사항은 상한 없는 3.11 이상이다. 관리형 런타임은 `tools.lock.json`의 3.12 버전을 사용하므로 Ubuntu 20.04/22.04나 macOS Command Line Tools의 오래된 시스템 Python을 바꿀 필요가 없다.
+
+시스템 `python3`가 없거나 3.11 미만이면 설치기는 고정 버전 uv를 받아 sha256을
 확인하고, `tools.lock.json`의 Python을 직접 만든 뒤 관리형 `python3` shim이
 그것을 가리키게 한다. Alpine 같은 musl 기반 Linux는 지원하지 않는다. 고정된
 빌드가 glibc를 요구하기 때문이다.
+
+provider 앱의 PATH가 `/usr/bin:/bin`뿐이어도 hook launcher는 관리형
+인터프리터를 선택한다. Antigravity MCP 등록은 해석된 인터프리터의 절대 경로를
+저장한다. 관리형 런타임이 없어도 오래된 시스템 Python으로 제거와 lifecycle
+도움말을 실행할 수 있다.
 
 Ubuntu 24.04+에서 AppArmor가 비특권 user namespace를 제한하면 `oms doctor`가
 Codex sandbox 실행 실패 가능성을 경고한다. AppArmor 프로필에서 `bwrap`의

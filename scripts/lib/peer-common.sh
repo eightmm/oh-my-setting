@@ -681,7 +681,7 @@ PY
 # or ignores it survives the timeout — so pass --kill-after (SIGKILL
 # escalation) when the binary supports it (GNU coreutils does; busybox may
 # not, probed once per process). Stock macOS has neither binary, so the Python
-# 3.9 floor supplies a process-group fallback. With neither mechanism, refuse
+# 3.11 floor supplies a process-group fallback. With neither mechanism, refuse
 # instead of launching an unbounded provider or verifier.
 ma_run_bounded() {
   local wall="$1"
@@ -3164,13 +3164,7 @@ ma_note_configured_default_model() {
   [ -f "$config" ] || return 0
   configured="$(python3 - "$config" <<'PY' 2>/dev/null || true
 import re, sys
-try:
-    import tomllib
-except ImportError:
-    try:
-        import tomli as tomllib
-    except ImportError:
-        raise SystemExit(0)
+import tomllib
 try:
     with open(sys.argv[1], "rb") as handle:
         value = tomllib.load(handle).get("model")

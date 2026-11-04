@@ -27,9 +27,11 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | 호스트 | 필요한 것 |
 |---|---|
-| Linux (glibc) | Bash, curl. Git·tar·gzip·find는 없으면 설치한다. **Python 불필요.** |
-| macOS | Bash, curl, Command Line Tools(`xcode-select --install`). **Python 불필요.** |
+| Linux (glibc) | Bash, curl. Git·tar·gzip·find는 없으면 설치한다. **Python 3.11+는 관리형 런타임으로 설치된다.** |
+| macOS | Bash, curl, Command Line Tools(`xcode-select --install`). **Python 3.11+는 관리형 런타임으로 설치된다.** |
 | Windows via WSL2 | WSL2 안의 glibc Linux 배포판. 위 Linux 요구 사항 적용 |
+
+Python 요구 사항은 상한 없는 3.11 이상이다. 관리형 런타임은 `tools.lock.json`의 3.12 버전을 사용하므로 Ubuntu 20.04/22.04나 macOS Command Line Tools의 오래된 시스템 Python을 바꿀 필요가 없다.
 
 기본 `core` 프로필은 하네스와 코딩 agent 하나를 설치한다. Alpine 같은 musl
 기반 Linux는 지원하지 않는다. 프로필과 Windows 참고 사항은

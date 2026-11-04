@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # The TOML helpers need the interpreter that wrote the config; a host python3
-# of 3.9 or 3.10 has no parser and stopped the uninstall.
+# older than 3.11 has no parser and stopped the uninstall.
 if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
   # shellcheck source=scripts/lib/python-runtime.sh
   . "$ROOT/scripts/lib/python-runtime.sh"

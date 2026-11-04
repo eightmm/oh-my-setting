@@ -332,12 +332,11 @@ grep -Fq 'github.event.pull_request.base.sha || github.event.before' "$workflow"
 grep -Fq 'workflow_dispatch:' "$workflow" || fail "manual full verification is missing"
 grep -Fq 'cron:' "$workflow" || fail "periodic full verification is missing"
 
-# The public floor is Python 3.9, so syntax and the parser-less Codex HUD path
-# need a real 3.9 interpreter in CI rather than only a modern-parser promise.
-grep -Fq 'python39:' "$workflow" || fail "Python 3.9 compatibility job must exist"
-grep -Fq 'python-version: "3.9"' "$workflow" || fail "CI must install Python 3.9 explicitly"
+# The minimum supported interpreter must exercise syntax and stdlib TOML in CI.
+grep -Fq 'python311:' "$workflow" || fail "Python 3.11 compatibility job must exist"
+grep -Fq 'python-version: "3.11"' "$workflow" || fail "CI must install Python 3.11 explicitly"
 grep -Fq 'codex-hud-config-smoke.sh' "$workflow" ||
-  fail "Python 3.9 job must exercise the Codex HUD fallback"
+  fail "Python 3.11 job must exercise the Codex HUD parser"
 
 # Matrix child names are unstable branch-protection targets. One fixed gate
 # depends on every required job and fails closed even when a dependency is
@@ -412,7 +411,7 @@ if not required:
     raise SystemExit("workflow defines no verification jobs to gate on")
 assert "portability_macos" not in jobs and "windows_durable_writer" not in jobs, \
     "native checks should reuse their lifecycle runner, not provision duplicate hosts"
-native_body = workflow_text.split("\n  install_e2e:\n", 1)[1].split("\n  python39:\n", 1)[0]
+native_body = workflow_text.split("\n  install_e2e:\n", 1)[1].split("\n  python311:\n", 1)[0]
 assert "windows-latest" not in native_body, "native Windows is unsupported"
 assert "runner.os == 'Windows'" not in workflow_text, "native Windows steps must be removed"
 for command, host in (
@@ -476,7 +475,7 @@ for mode in ("full", "affected"):
         env["AFFECTED_VERIFY_RESULT"] = "success" if mode == "affected" else "skipped"
         env.update({name.upper() + "_RESULT": "success" if mode == "full" else "skipped"
                     for name in full_jobs})
-        env["PYTHON39_RESULT"] = "success" if native == "true" else "skipped"
+        env["PYTHON311_RESULT"] = "success" if native == "true" else "skipped"
         env["INSTALL_E2E_RESULT"] = "success" if native == "true" or mode == "full" else "skipped"
         def passes(values):
             return subprocess.run(["bash", "-eu", "-c", script], env=values,
@@ -511,7 +510,7 @@ for name in full_jobs:
     job = re.split(r"\n  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
     assert "    needs: affected_plan\n" in job, name
     condition = {"install_e2e": "needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.native == 'true'",
-                 "python39": "needs.affected_plan.outputs.native == 'true'"}.get(name, "needs.affected_plan.outputs.mode == 'full'")
+                 "python311": "needs.affected_plan.outputs.native == 'true'"}.get(name, "needs.affected_plan.outputs.mode == 'full'")
     assert "    if: %s\n" % condition in job, name
 plan_body = workflow_text.split("\n  affected_plan:\n", 1)[1].split("\n  install_e2e:\n", 1)[0]
 plan_body, verify_body = plan_body.split("\n  affected_verify:\n", 1)

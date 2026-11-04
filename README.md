@@ -28,9 +28,11 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | Host | Needs |
 |---|---|
-| Linux (glibc) | Bash, curl. Git, tar, gzip and find are installed if missing. **No Python needed.** |
-| macOS | Bash, curl, Command Line Tools (`xcode-select --install`). **No Python needed.** |
+| Linux (glibc) | Bash, curl. Git, tar, gzip and find are installed if missing. **Python 3.11+ is provisioned as a managed runtime.** |
+| macOS | Bash, curl, Command Line Tools (`xcode-select --install`). **Python 3.11+ is provisioned as a managed runtime.** |
 | Windows via WSL2 | A glibc Linux distribution inside WSL2; use the Linux requirements above |
+
+Python 3.11 or newer is required, with no upper version bound. The managed runtime stays on the 3.12 version in `tools.lock.json`, so older system Python on Ubuntu 20.04/22.04 or macOS Command Line Tools does not need replacing.
 
 The default `core` profile installs the harness and one coding agent.
 musl-based Linux such as Alpine is not supported. Profiles and Windows notes

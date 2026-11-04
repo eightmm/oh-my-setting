@@ -19343,7 +19343,7 @@ test_python_helpers_are_syntax_checked() {
   printf '%s' "$out" | grep >/dev/null -E 'python-syntax: ok \([0-9]+ files([;)]|$)' ||
     fail "python syntax gate must report what it checked: $out"
   mkdir -p "$dir"
-  printf 'valid = 1\n' > "$dir/good.py"
+  printf 'try:\n  valid = 1\nexcept* Exception:\n  valid = 2\n' > "$dir/good.py"
   printf 'invalid = (\n' > "$dir/bad.py"
   out="$(bash "$ROOT/scripts/check-python.sh" "$dir/good.py")" || fail "selected valid Python failed"
   [ "$out" = 'python-syntax: ok (1 files)' ] || fail "syntax gate inspected unrelated files: $out"
@@ -19427,6 +19427,8 @@ EOF
   isolated_dynamic="$isolated_repo/tests/dynamic.py"
   mkdir -p "$isolated_repo/scripts" "$isolated_repo/tests/operator"
   cp "$ROOT/scripts/check-python.sh" "$isolated_checker"
+  mkdir -p "$isolated_repo/scripts/lib"
+  cp "$ROOT/scripts/lib/python-runtime.sh" "$isolated_repo/scripts/lib/"
   printf 'def fixture():\n  return sibling_binding\n' > "$isolated_operator"
   cat > "$isolated_dynamic" <<'EOF'
 globals()['provided_later'] = 1
@@ -22073,7 +22075,7 @@ test_run_with_timeout_uses_python_fallback() {
   # Empty PATH deliberately removes timeout and Bash; use the interpreter,
   # not a managed-runtime launcher whose shebang needs Bash on PATH.
   python_bin="$(python3 -c 'import sys; print(sys.executable.replace("\\", "/"))' | tr -d '\r')"
-  # Stock macOS has no timeout/gtimeout. The Python 3.9 floor supplies the
+  # Stock macOS has no timeout/gtimeout. The Python 3.11 floor supplies the
   # same wall clock without stealing the provider prompt from stdin.
   printf 'stdin-survived\n' |
     OMS_PYTHON_BIN="$python_bin" \

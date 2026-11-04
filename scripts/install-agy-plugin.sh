@@ -340,6 +340,8 @@ PY
 }
 
 if [ "$PROBE" = "1" ]; then
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  oms_python_runtime_activate_if_present
   PROBE_HOME=""
   agy_probe_surfaces
   exit 0
@@ -402,9 +404,35 @@ if [ "$REMOVE" = "1" ]; then
   esac
 fi
 
-command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+# shellcheck source=scripts/lib/python-runtime.sh
+. "$ROOT/scripts/lib/python-runtime.sh"
+oms_python_runtime_require || exit 1
 [ -f "$ROOT/scripts/oms-mcp-server.py" ] || fail "oms-mcp-server.py not found under $ROOT"
 [ -f "$ROOT/plugins/antigravity/plugin.json" ] || fail "plugin template missing"
+
+OMS_AP_PYTHON=""
+if [ -n "${OMS_PYTHON:-}" ]; then
+  runtime_root="$(oms_python_runtime_root)"
+  oms_python_runtime_root_owned "$runtime_root" && [ ! -L "$runtime_root/bin" ] &&
+    [ ! -L "$runtime_root/bin/python3" ] && [ -f "$runtime_root/bin/python3" ] &&
+    [ -x "$runtime_root/bin/python3" ] || fail "managed Python launcher is invalid"
+  OMS_AP_PYTHON="$runtime_root/bin/python3"
+else
+  OMS_AP_PYTHON="$(env -u PYTHONHOME -u PYTHONPATH python3 -I -c '
+import os, stat, sys
+path = os.path.realpath(sys.executable)
+try:
+    info = os.stat(path)
+    parent = os.stat(os.path.dirname(path))
+except OSError:
+    raise SystemExit(1)
+if (not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK) or
+        info.st_mode & (stat.S_IWGRP | stat.S_IWOTH) or
+        parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+    raise SystemExit(1)
+print(path)
+')" || fail "host Python interpreter is writable by others or invalid"
+fi
 
 BUILD="$(mktemp -d "${TMPDIR:-/tmp}/oms-agy-plugin.XXXXXX")"
 trap 'rm -rf "$BUILD"' EXIT
@@ -425,8 +453,8 @@ if [ "$HOOKS" != "1" ] && [ -f "$INSTALLED/hooks.json" ]; then
   echo "agy-plugin: retracted hooks from an agy that is no longer certified"
 fi
 
-OMS_AP_ROOT="$ROOT" OMS_AP_BUILD="$BUILD" OMS_AP_HOOKS="$HOOKS" python3 - <<'PY'
-import json, os
+OMS_AP_ROOT="$ROOT" OMS_AP_BUILD="$BUILD" OMS_AP_HOOKS="$HOOKS" OMS_AP_PYTHON="$OMS_AP_PYTHON" python3 - <<'PY'
+import json, os, sys
 
 root = os.environ["OMS_AP_ROOT"]
 build = os.environ["OMS_AP_BUILD"]
@@ -443,7 +471,7 @@ with open(os.path.join(build, "plugin.json"), "w", encoding="utf-8") as fh:
 mcp = {
     "mcpServers": {
         "oh-my-setting": {
-            "command": "python3",
+            "command": os.environ.get("OMS_AP_PYTHON") or os.path.abspath(sys.executable),
             "args": [os.path.join(root, "scripts", "oms-mcp-server.py")],
         }
     }
@@ -486,9 +514,8 @@ if [ "$HOOKS" = "1" ]; then
 # Antigravity lifecycle adapter. agy sends camelCase protojson naming a
 # workspace; the harness hooks read Claude-shaped keys and resolve state from
 # cwd, so the translation lives here rather than teaching every hook a second
-# dialect. Every path prints a JSON object and exits 0 — this runs in front of
-# the agent loop, so an adapter that errors is worse than one that says
-# nothing.
+# dialect. Payload paths print a JSON object and exit 0. An unavailable
+# Python runtime reports one error line before reading the payload.
 set -u
 ADAPTER_HEAD
     printf 'ROOT=%q\n' "$ROOT"
@@ -502,8 +529,10 @@ emit() { printf '%s\n' "$1"; exit 0; }
 # session state.
 [ "${OH_MY_SETTING_AGY_HOOKS:-1}" != 0 ] || emit '{}'
 [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || emit '{}'
-command -v python3 >/dev/null 2>&1 || emit '{}'
 [ -d "$ROOT/scripts" ] || emit '{}'
+# shellcheck source=scripts/lib/python-runtime.sh
+. "$ROOT/scripts/lib/python-runtime.sh"
+oms_python_runtime_require || emit '{}'
 
 PAYLOAD="$(cat 2>/dev/null || true)"
 TMP="$(mktemp "${TMPDIR:-/tmp}/oms-agy-hook.XXXXXX" 2>/dev/null)" || emit '{}'

@@ -8,7 +8,7 @@ script_dir="${BASH_SOURCE[0]%/*}"
 [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
 ROOT="$(cd "$script_dir/.." && pwd -P)"
 # Judge the install with the interpreter that configured it: a host python3
-# of 3.9 or 3.10 cannot read the TOML the 3.12 runtime wrote and failed a
+# older than 3.11 cannot read the TOML the 3.12 runtime wrote and failed a
 # healthy install. install.sh already runs doctor this way.
 if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
   # shellcheck source=scripts/lib/python-runtime.sh
@@ -172,6 +172,10 @@ if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
 fi
 
 if [ "$CONTRACT_ONLY" = 1 ]; then
+  if command -v python3 >/dev/null 2>&1 &&
+      ! python3 -I -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+    echo "warn: host Python is older than 3.11; reinstall to provision the managed runtime"
+  fi
   exec bash "$ROOT/scripts/lib/provider-contract.sh" --check
 fi
 
@@ -286,6 +290,11 @@ if [ "$SURFACES" = "0" ] && [ "$TOOL_LOCK_ONLY" = "0" ] &&
   doctor_probe_cache_cleanup
   unset OMS_DOCTOR_PROBE_DIR OMS_DOCTOR_PROBE_OWNER_PID
   exec "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
+fi
+
+if command -v python3 >/dev/null 2>&1 &&
+    ! python3 -I -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+  echo "warn: host Python is older than 3.11; reinstall to provision the managed runtime"
 fi
 
 check_tool_lock() {
@@ -1528,6 +1537,11 @@ PY
         echo "hint: open /hooks in Codex and trust the OMS hooks"
         ;;
     esac
+  fi
+
+  if ! python3 -I -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+    echo "warn: Codex HUD and usage TOML checks require Python 3.11+"
+    return 0
   fi
 
   if hud_state="$(python3 "$INSTALL_ROOT/scripts/lib/codex-hud-config.py" \

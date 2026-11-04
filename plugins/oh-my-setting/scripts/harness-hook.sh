@@ -40,6 +40,24 @@ if context:
 for root in "$SOURCE_ROOT" "${OH_MY_SETTING_DIR:-}" "$PLUGIN_ROOT/../.." "$HOME/.oh-my-setting"; do
   [ -n "$root" ] || continue
   if [ -f "$root/scripts/$tool.sh" ]; then
+    if [ "$tool" = syntax-guard-hook ]; then
+      printf '%s' "$payload" | bash "$root/scripts/$tool.sh" "${@:2}" || true
+      exit 0
+    fi
+    if [ "$tool" = panel-direct-work-hook ]; then
+      [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ] || exit 0
+      [ "${OMS_HARNESS_CHILD:-}" != 1 ] || exit 0
+      case "${OMS_PANEL_SESSION:-}" in oms-*) ;; *) exit 0 ;; esac
+    fi
+    case "$tool:${OMS_HARNESS_CHILD:-0}" in skill-router:1|turn-guard:1) exit 0 ;; esac
+    # Select once in the parent: resume output formatting also runs Python.
+    # shellcheck source=scripts/lib/python-runtime.sh
+    . "$root/scripts/lib/python-runtime.sh"
+    ROOT="$root"
+    if ! oms_python_runtime_require; then
+      [ "$tool" != turn-guard ] || exit 1
+      exit 0
+    fi
     printf '%s' "$payload" | bash "$root/scripts/$tool.sh" "${@:2}" | emit_hook_output || true
     exit 0
   fi

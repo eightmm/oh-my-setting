@@ -74,11 +74,32 @@ oms_python_runtime_env_owned() {
     [ "$(sed -n '2p' "$marker" 2>/dev/null)" = "version=$version" ]
 }
 
+# uv's venv interpreter links must resolve inside the owned managed tree.
+oms_python_runtime_candidate_valid() {
+  local root="$1" candidate="$2" path target parent managed count=0
+  [ ! -L "${candidate%/*}" ] && [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+  [ -L "$candidate" ] || return 0
+  [ ! -L "$root/managed" ] && [ -d "$root/managed" ] || return 1
+  managed="$(cd "$root/managed" && pwd -P)" || return 1
+  path="$candidate"
+  while [ -L "$path" ]; do
+    count=$((count + 1))
+    [ "$count" -le 32 ] || return 1
+    parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
+    target="$(readlink "$path")" || return 1
+    case "$target" in /*) path="$target" ;; *) path="$parent/$target" ;; esac
+  done
+  parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
+  path="$parent/${path##*/}"
+  case "$path" in "$managed"/*) [ -f "$path" ] && [ -x "$path" ] ;; *) return 1 ;; esac
+}
+
 oms_python_runtime_env_python() {
-  local env_dir="$1" candidate
+  local env_dir="$1" candidate root
+  root="$(oms_python_runtime_root)"
   for candidate in "$env_dir/bin/python3" "$env_dir/bin/python" \
       "$env_dir/Scripts/python.exe"; do
-    if [ -x "$candidate" ]; then
+    if oms_python_runtime_candidate_valid "$root" "$candidate"; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -88,7 +109,7 @@ oms_python_runtime_env_python() {
 
 oms_python_runtime_python_matches() {
   local python="$1" expected="$2"
-  "$python" -I -c 'import sys
+  env -u PYTHONHOME -u PYTHONPATH "$python" -I -c 'import sys
 expected = tuple(int(value) for value in sys.argv[1].split("."))
 raise SystemExit(0 if sys.version_info[:3] == expected else 1)' "$expected" \
     >/dev/null 2>&1
@@ -107,7 +128,7 @@ oms_python_runtime_matches_lock() {
   root="$(oms_python_runtime_root)"
   version="$(oms_python_runtime_locked_version "$1")" || return
   [ ! -L "$root/launchers" ] && [ ! -L "$root/launchers/$version" ] &&
-    [ -x "$root/launchers/$version/python3" ] &&
+    [ ! -L "$root/launchers/$version/python3" ] && [ -x "$root/launchers/$version/python3" ] &&
     oms_python_runtime_locked_python "$1" >/dev/null 2>&1
 }
 
@@ -125,6 +146,9 @@ oms_python_runtime_locked_python() {
 
 oms_python_runtime_write_launcher() {  # ROOT VERSION NAME [DIR]
   local root="$1" version="$2" name="$3" dir="${4:-launchers/$2}" up target stage
+  oms_python_runtime_version_valid "$version" || return 1
+  case "$name" in python|python3) ;; *) return 1 ;; esac
+  case "$dir" in bin|"launchers/$version") ;; *) return 1 ;; esac
   # bin/ holds the one version-free path a managed python3 shim can name.
   case "$dir" in bin) up=.. ;; *) up=../.. ;; esac
   target="$root/$dir/$name"
@@ -133,15 +157,18 @@ oms_python_runtime_write_launcher() {  # ROOT VERSION NAME [DIR]
   stage="$(mktemp "$root/$dir/.$name.XXXXXX")" || return
   {
     printf '#!/usr/bin/env bash\nversion=%s\nup=%s\n' "$version" "$up"
+    declare -f oms_python_runtime_root_owned oms_python_runtime_env_owned oms_python_runtime_candidate_valid
     cat <<'EOF_LAUNCHER'
 set -euo pipefail
 # Every managed python3 call runs this: no dirname process per interpreter start.
 case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
 root="$(cd "$here/$up" && pwd -P)"
 unset PYTHONHOME
+oms_python_runtime_root_owned "$root" && [ ! -L "$root/envs" ] &&
+  oms_python_runtime_env_owned "$root/envs/$version" "$version" || exit 1
 for candidate in "$root/envs/$version/bin/python3" \
     "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do
-  if [ -x "$candidate" ]; then exec "$candidate" "$@"; fi
+  if oms_python_runtime_candidate_valid "$root" "$candidate"; then exec "$candidate" "$@"; fi
 done
 echo "error: OMS Python runtime is incomplete: $root/envs/$version" >&2
 exit 1
@@ -285,6 +312,7 @@ oms_python_runtime_bootstrap() {  # REPO_ROOT; needs platform.sh and file-lock.s
 }
 
 oms_python_runtime_activate() {
+  unset -f python python3 2>/dev/null || true
   local root python version node_version node_bin repo_root="${1:-${ROOT:-}}"
   root="$(oms_python_runtime_root)"
   python="$(oms_python_runtime_locked_python "$repo_root")" || {
@@ -292,12 +320,12 @@ oms_python_runtime_activate() {
     return 1
   }
   version="$(oms_python_runtime_locked_version "$repo_root")" || return
-  [ -x "$root/launchers/$version/python3" ] && [ ! -L "$root/launchers" ] &&
+  [ ! -L "$root/launchers/$version/python3" ] && [ -x "$root/launchers/$version/python3" ] && [ ! -L "$root/launchers" ] &&
     [ ! -L "$root/launchers/$version" ] || {
       oms_python_runtime_fail "missing runtime launcher; run python-runtime.sh ensure"
       return 1
     }
-  unset PYTHONHOME PYTHONPATH
+  unset -f python3 2>/dev/null || true
   node_version="$(oms_lock_scalar "$repo_root/tools.lock.json" node.version)" || return
   node_bin="${NVM_DIR:-$HOME/.nvm}/versions/node/v$node_version/bin"
   if [ "${OMS_TEST_PROVIDER_PATH_ONLY:-0}" != 1 ]; then
@@ -327,7 +355,86 @@ oms_python_precompile() {
   return 0
 }
 
+oms_python_runtime_activate_fallback() {
+  local root python version env_dir
+  unset -f python python3 2>/dev/null || true
+  root="$(oms_python_runtime_root)"
+  python="$root/bin/python3"
+  [ ! -L "$root/current" ] && [ -f "$root/current" ] || return 1
+  IFS= read -r version < "$root/current" || return 1
+  oms_python_runtime_version_valid "$version" || return 1
+  env_dir="$root/envs/$version"
+  oms_python_runtime_root_owned "$root" && [ ! -L "$root/bin" ] &&
+    [ ! -L "$root/envs" ] && oms_python_runtime_env_owned "$env_dir" "$version" &&
+    oms_python_runtime_env_python "$env_dir" >/dev/null &&
+    [ ! -L "$python" ] && [ -f "$python" ] && [ -x "$python" ] && env -u PYTHONHOME -u PYTHONPATH "$python" -I -c \
+      'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1 || return 1
+  unset -f python3 2>/dev/null || true
+  export OMS_PYTHON="$python" PATH="$root/bin:$PATH"
+  hash -r 2>/dev/null || true
+}
+
+oms_python_runtime_is_active() {
+  local root selected version remainder
+  unset -f python python3 2>/dev/null || true
+  root="$(oms_python_runtime_root)"
+  oms_python_runtime_root_owned "$root" || return 1
+  case "${OMS_PYTHON:-}" in *..*) return 1 ;; "$root"/*) ;; *) return 1 ;; esac
+  oms_python_runtime_candidate_valid "$root" "$OMS_PYTHON" || return 1
+  selected="$(command -v python3 2>/dev/null)" || return 1
+  case "$selected" in *..*) return 1 ;; esac
+  [ -f "$selected" ] && [ ! -L "$selected" ] || return 1
+  case "$selected" in
+    "$root"/bin/python3) [ ! -L "$root/bin" ] || return 1 ;;
+    "$root"/launchers/*/python3)
+      [ ! -L "$root/launchers" ] && [ ! -L "${selected%/*}" ] || return 1
+      remainder="${selected#"$root"/launchers/}"
+      version="${remainder%/python3}"
+      oms_python_runtime_version_valid "$version" || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ ! -L "$root/current" ] && [ -f "$root/current" ] || return 1
+  IFS= read -r version < "$root/current" || return 1
+  case "$selected" in "$root"/launchers/"$version"/python3|"$root"/bin/python3) ;; *) return 1 ;; esac
+  oms_python_runtime_version_valid "$version" && [ ! -L "$root/envs" ] &&
+    oms_python_runtime_env_owned "$root/envs/$version" "$version" &&
+    oms_python_runtime_env_python "$root/envs/$version" >/dev/null || return 1
+  case "$OMS_PYTHON" in
+    "$root/bin/python3") [ ! -L "$root/bin" ] && [ ! -L "$OMS_PYTHON" ] || return 1 ;;
+    "$root/envs/$version/"*)
+      [ "$OMS_PYTHON" = "$(oms_python_runtime_env_python "$root/envs/$version")" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
 oms_python_runtime_activate_if_present() {
-  oms_python_runtime_matches_lock "$ROOT" || return 0
-  oms_python_runtime_activate "$ROOT"
+  unset -f python python3 2>/dev/null || true
+  oms_python_runtime_is_active && return 0
+  oms_python_runtime_activate "${ROOT:-}" 2>/dev/null ||
+    oms_python_runtime_activate_fallback || unset OMS_PYTHON
+  return 0
+}
+
+# Hooks and GUI apps may inherit only /usr/bin:/bin.
+oms_python_runtime_require() {
+  unset -f python python3 2>/dev/null || true
+  oms_python_runtime_is_active && return 0
+  if oms_python_runtime_activate "${ROOT:-}" 2>/dev/null || oms_python_runtime_activate_fallback; then
+    return 0
+  fi
+  unset OMS_PYTHON
+  hash -r 2>/dev/null || true
+  local host_python root
+  root="$(oms_python_runtime_root)"
+  host_python="$(command -v python3 2>/dev/null || true)"
+  case "$host_python" in
+    *..*|"$root"/*) host_python="" ;;
+    "$HOME/.local/bin/python3") [ ! -e "$root" ] || host_python="" ;;
+  esac
+  if [ -n "$host_python" ] && [ -f "$host_python" ] && [ -x "$host_python" ] &&
+      env -u PYTHONHOME -u PYTHONPATH "$host_python" -I -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "error: OMS requires Python 3.11+; reinstall to provision the managed runtime" >&2
+  return 1
 }

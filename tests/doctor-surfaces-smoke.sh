@@ -16,7 +16,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The expected surface list, recorded. Both literals move together or the gate
 # below fails; see test_expected_surface_list_is_bump_gated.
-EXPECTED_HOOKS_SCHEMA=8
+EXPECTED_HOOKS_SCHEMA=9
 EXPECTED_SURFACES_SHA256=3cc3f2cf77f84796bf614d4adb0de5fdbd5178dd1928393b2b3dd12228764250
 
 # A fixture HOME with a receipt this checkout owns, an empty harness repo for
@@ -232,7 +232,7 @@ hooks["SubagentStop"] = [{"hooks": [
     {"type": "command", "command": cmd(old, "telemetry-hook.sh", quote=False), "timeout": 5}]}]
 for entry in hooks["PostToolUse"]:
     for hook in entry["hooks"]:
-        if hook["command"] == cmd(root, "syntax-guard-hook.sh"):
+        if hook["command"].endswith("/scripts/syntax-guard-hook.sh"):
             entry["matcher"] = "Edit"
             hook["command"] = cmd(old, "syntax-guard-hook.sh", quote=False)
 hooks["UserPromptSubmit"][0]["hooks"][0]["command"] = cmd(old, "skill-router.sh")
@@ -266,7 +266,7 @@ path, before_path, home = sys.argv[1:]
 root = os.environ["OMS_T_ROOT"]
 hooks = json.load(open(path, encoding="utf-8"))["hooks"]
 before = json.load(open(before_path, encoding="utf-8"))["hooks"]
-own = lambda script: "bash %s/scripts/%s" % (root, script)
+own = lambda script: "bash %s/scripts/lib/python-entry.sh bash %s/scripts/%s" % (root, root, script)
 commands = [h.get("command", "") for entries in hooks.values()
             for entry in entries for h in entry.get("hooks", [])]
 assert not any("old oms" in c for c in commands), commands
@@ -317,10 +317,17 @@ lib = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lib)
 root = "/opt/my oms"
 command = lib.hook_command(root, "turn-guard.sh")
-assert shlex.split(command) == ["bash", "/opt/my oms/scripts/turn-guard.sh"], command
+assert shlex.split(command) == ["bash", root + "/scripts/lib/python-entry.sh",
+                                "bash", root + "/scripts/turn-guard.sh"], command
 assert lib.owned_script({"type": "command", "command": command}, [root]) == "turn-guard.sh"
 plain = lib.hook_command("/opt/oms", "turn-guard.sh")
-assert plain == "bash /opt/oms/scripts/turn-guard.sh", plain
+assert plain == "bash /opt/oms/scripts/lib/python-entry.sh bash /opt/oms/scripts/turn-guard.sh", plain
+assert lib.owned_script({"command": "bash /opt/other/scripts/lib/python-entry.sh bash /opt/oms/scripts/turn-guard.sh"},
+                        ["/opt/oms"]) is None
+assert lib.owned_script({"command": plain + " extra"}, ["/opt/oms"]) is None
+for invalid in ("", "0", "\"", "bash", "bash /opt/oms/scripts/lib/python-entry.sh", "bash /opt/oms/scripts/lib/python-entry.sh python3 /opt/oms/scripts/turn-guard.sh"):
+    assert lib.owned_script({"command": invalid}, ["/opt/oms"]) is None, invalid
+assert lib.owned_script({"command": "bash /opt/oms/scripts/turn-guard.sh"}, ["/opt/oms"]) == "turn-guard.sh"
 assert lib.owned_script({"type": "command", "command": "bash /opt/oms/scripts/turn-guard.sh x"},
                         ["/opt/oms"]) is None
 assert lib.owned_script({"type": "command", "command": "bash scripts/turn-guard.sh"}, ["/opt/oms"]) is None
@@ -885,7 +892,7 @@ EOF
     cat >&2 <<EOF
 FAIL: HOOKS_SCHEMA is $source_schema but this test records $EXPECTED_HOOKS_SCHEMA.
 The schema and the surface list move together. If the list changed, update
-EXPECTED_SURFACES_SHA256 too; if it did not, revert the bump.
+EXPECTED_SURFACES_SHA256 too; command-form changes also require a schema bump.
   EXPECTED_HOOKS_SCHEMA in tests/doctor-surfaces-smoke.sh -> $source_schema
 EOF
     exit 1

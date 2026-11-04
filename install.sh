@@ -811,21 +811,22 @@ load_user_tool_paths() {
 }
 
 ensure_python3() {
+  unset -f python python3 2>/dev/null || true
   local candidate=""
   local uv_interp=""
   local shim="$HOME/.local/bin/python3"
 
   export PATH="$HOME/.local/bin:$PATH"
   if command -v python3 >/dev/null 2>&1 &&
-     python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+     env -u PYTHONHOME -u PYTHONPATH python3 -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
     return 0
   fi
   if oms_platform_is_windows; then
     if command -v python >/dev/null 2>&1 &&
-       python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+       env -u PYTHONHOME -u PYTHONPATH python -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
       candidate=python
     elif command -v py >/dev/null 2>&1 &&
-         py -3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+         env -u PYTHONHOME -u PYTHONPATH py -3 -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
       candidate=py
     fi
   fi
@@ -834,19 +835,19 @@ ensure_python3() {
   # shim only as the bootstrap interpreter: once the OMS runtime exists the
   # shim is repointed at it, because `uv python find` depends on the cwd.
   if [ -z "$candidate" ] && command -v uv >/dev/null 2>&1; then
-    uv_interp="$(uv python find 2>/dev/null || true)"
+    uv_interp="$(uv python find 2>/dev/null | tr -d '\r' || true)"
     if [ -z "$uv_interp" ]; then
       uv python install >/dev/null 2>&1 || true
-      uv_interp="$(uv python find 2>/dev/null || true)"
+      uv_interp="$(uv python find 2>/dev/null | tr -d '\r' || true)"
     fi
     if [ -n "$uv_interp" ] &&
-       "$uv_interp" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+       env -u PYTHONHOME -u PYTHONPATH "$uv_interp" -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
       candidate=uv
     fi
   fi
 
-  # Neither exists on a fresh host (Debian, Ubuntu, Fedora and Arch images ship
-  # no python3): build the OMS runtime from the pinned uv and expose it.
+  # Missing or older system Python (including Ubuntu 20.04/22.04 and macOS
+  # Command Line Tools): build the pinned OMS runtime and expose it.
   if [ -z "$candidate" ] && ! oms_platform_is_windows; then
     # shellcheck disable=SC1091
     . "$DEST/scripts/lib/file-lock.sh"
@@ -861,7 +862,7 @@ ensure_python3() {
     if oms_platform_is_windows; then
       echo "error: Python 3.9+ is required; install Python and rerun" >&2
     else
-      echo "error: no Python 3.9+ 'python3' and the pinned uv could not build one; see the error above" >&2
+      echo "error: no Python 3.11+ 'python3' and the pinned uv could not build one; see the error above" >&2
     fi
     exit 1
   fi

@@ -30,6 +30,84 @@ else
   fail "Python 3 is required"
 fi
 
+# Legacy cleanup must work without downloading or retaining a managed runtime.
+test_uninstall_with_old_python() (
+  local d="$TMP/legacy-python" real_python
+  real_python="$(command -v python3)"
+  mkdir -p "$d/bin" "$d/modules" "$d/home"
+  export HOME="$d/home" XDG_CONFIG_HOME="$d/home/.config"
+  export XDG_DATA_HOME="$d/home/.local/share" XDG_STATE_HOME="$d/home/.local/state"
+  export OMS_PYTHON_RUNTIME_ROOT="$d/missing-runtime" OMS_TEST_REAL_PYTHON="$real_python"
+  unset OMS_INSTALL_RECEIPT OMS_CODEX_CONFIG CLAUDE_CONFIG_DIR
+  export CODEX_HOME="$HOME/.codex" OMS_CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+  bash "$ROOT/scripts/link.sh" > "$d/link.out" 2>&1 || fail "legacy link fixture failed"
+  printf 'model = "legacy-user"\n[tui]\nanimations = true\n' > "$HOME/.codex/config.toml"
+  "$real_python" "$ROOT/scripts/lib/codex-hud-config.py" install "$HOME/.codex/config.toml" >/dev/null
+  "$real_python" "$ROOT/scripts/lib/codex-usage-config.py" install "$HOME/.codex/config.toml" >/dev/null
+  cat > "$d/modules/sitecustomize.py" <<'PY_OLD'
+import builtins
+original_import = builtins.__import__
+def old_import(name, *args, **kwargs):
+    if name == "tomllib":
+        raise ImportError(name)
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = old_import
+PY_OLD
+  cat > "$d/bin/python3" <<'SH_OLD'
+#!/usr/bin/env bash
+case "$*" in
+  *sys.version_info*)
+    exec "$OMS_TEST_REAL_PYTHON" -c 'import sys; sys.version_info = (3, 10, 0); exec(sys.argv[1])' "${@: -1}"
+    ;;
+esac
+exec "$OMS_TEST_REAL_PYTHON" "$@"
+SH_OLD
+  chmod +x "$d/bin/python3"
+  export PATH="$d/bin:/usr/bin:/bin" PYTHONPATH="$d/modules"
+  for script in uninstall.sh doctor.sh update.sh auto-update.sh; do
+    bash "$ROOT/scripts/$script" --help > "$d/help.out" 2>&1 || fail "$script help refused old Python"
+  done
+  bash "$ROOT/scripts/doctor.sh" --contract > "$d/doctor.out" 2>&1 ||
+    fail "doctor contract check refused old Python: $(cat "$d/doctor.out")"
+  [ "$(grep -Fc 'warn: host Python is older than 3.11' "$d/doctor.out")" = 1 ] ||
+    fail "doctor must report the old host once"
+  "$HOME/.local/bin/oms" --help > "$d/oms-help.out" 2>&1 || fail "oms help refused old Python"
+  "$HOME/.local/bin/oms" uninstall --help > "$d/oms-uninstall-help.out" 2>&1 || fail "oms uninstall help refused old Python"
+  cat > "$d/bin/codex" <<'SH_CODEX'
+#!/usr/bin/env bash
+if [ "$1 ${2:-} ${3:-}" = 'plugin list --json' ]; then
+  printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'
+fi
+exit 0
+SH_CODEX
+  chmod +x "$d/bin/codex"
+  codex plugin list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; assert any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", []))' || fail "Codex fixture unavailable"
+  local plugin_version
+  plugin_version="$(cat "$ROOT/VERSION")"
+  mkdir -p "$CODEX_HOME/plugins/cache/oh-my-setting-local/oh-my-setting/$plugin_version"
+  OH_MY_SETTING_CODEX_PLUGIN=1 "$HOME/.local/bin/oms" doctor > "$d/doctor.out" 2>&1 || true
+  grep -Fq 'warn: Codex HUD and usage TOML checks require Python 3.11+' "$d/doctor.out" ||
+    fail "doctor did not reach the old-Python Codex TOML guard: $(cat "$d/doctor.out")"
+  ! grep -Fq 'fail: codex HUD' "$d/doctor.out" || fail "doctor failed the old-Python Codex HUD check"
+  [ "$(grep -Fc 'warn: host Python is older than 3.11' "$d/doctor.out")" = 1 ] || fail "doctor must report the old host once"
+  "$HOME/.local/bin/oms" doctor --json > "$d/doctor.json" 2> "$d/doctor.err" || true
+  "$real_python" -c 'import json,sys; json.load(open(sys.argv[1]))' "$d/doctor.json" || fail "doctor JSON invalid"
+  bash "$ROOT/scripts/uninstall.sh" --yes --dry-run > "$d/dry-run.out" 2>&1 || fail "legacy dry-run failed"
+  bash "$ROOT/scripts/uninstall.sh" --yes > "$d/uninstall.out" 2>&1 ||
+    fail "legacy uninstall failed: $(cat "$d/uninstall.out")"
+  [ ! -e "$HOME/.codex/AGENTS.md" ] || fail "legacy uninstall left managed links"
+  ! grep -Fq 'oh-my-setting managed' "$HOME/.codex/config.toml" || fail "legacy uninstall left TOML markers"
+  grep -Fq 'model = "legacy-user"' "$HOME/.codex/config.toml" || fail "legacy cleanup changed user config"
+  grep -Fq 'animations = true' "$HOME/.codex/config.toml" || fail "legacy cleanup changed user TOML"
+  [ ! -e "$OMS_PYTHON_RUNTIME_ROOT" ] || fail "legacy cleanup provisioned a runtime"
+  echo 'legacy-python-uninstall: ok'
+)
+if [ "${1:-}" = --legacy-python-only ]; then
+  test_uninstall_with_old_python
+  exit
+fi
+test_uninstall_with_old_python
+
 # Count external path tools across the lifecycle. Each shim appends one short
 # line, including when independent children run at the same time.
 path_tool_bin="$TMP/path-tool-bin"

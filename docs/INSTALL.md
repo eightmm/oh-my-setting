@@ -173,14 +173,21 @@ to `<file>.backup.<timestamp>` (announced at install time and reported by
 
 | Host | Needs | Managed files |
 |---|---|---|
-| Linux (glibc) | Bash 3.2+, curl; Git, tar, gzip and find are installed if missing (root or sudo needed then). No Python needed | symlinks |
-| macOS | stock Bash 3.2, curl, Command Line Tools (`xcode-select --install`; without them `git` is only an installer stub). No Python needed | symlinks |
+| Linux (glibc) | Bash 3.2+, curl; Git, tar, gzip and find are installed if missing (root or sudo needed then). Python 3.11+ is provisioned as a managed runtime | symlinks |
+| macOS | stock Bash 3.2, curl, Command Line Tools (`xcode-select --install`; without them `git` is only an installer stub). Python 3.11+ is provisioned as a managed runtime | symlinks |
 | Windows via WSL2 | Linux requirements above, inside WSL2 | symlinks |
 
-With no `python3` 3.9+ and no uv, the installer fetches the pinned uv
+Python 3.11 or newer is required, with no upper version bound. The managed runtime stays on the 3.12 version in `tools.lock.json`, so older system Python on Ubuntu 20.04/22.04 or macOS Command Line Tools does not need replacing.
+
+When system `python3` is missing or older than 3.11, the installer fetches the pinned uv
 (sha256-checked), builds its own Python from `tools.lock.json`, and points a
 managed `python3` shim at it. musl-based Linux such as Alpine is not
 supported: the pinned builds need glibc.
+
+Hook launchers select the managed interpreter even when provider apps inherit
+only `/usr/bin:/bin`. Antigravity's MCP registration stores the resolved
+interpreter's absolute path. Cleanup and lifecycle help remain available with
+an older system Python when no managed runtime exists.
 
 On Ubuntu 24.04+ with AppArmor unprivileged user namespaces restricted,
 `oms doctor` warns that Codex sandboxed runs may fail; allow user namespaces

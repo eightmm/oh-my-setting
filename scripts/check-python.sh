@@ -5,7 +5,10 @@ set -euo pipefail
 # scripts/lib. Compilation stays in memory so a read-only gate never writes
 # __pycache__ into the tree it is certifying.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/lib/python-runtime.sh
+. "$ROOT/scripts/lib/python-runtime.sh"
+oms_python_runtime_require || exit 1
 cd "$ROOT"
 
 case "${1:-}" in -h|--help) echo "usage: check-python.sh [PATH...] (default: all Python helpers)"; exit 0 ;; esac
@@ -220,7 +223,7 @@ for directory in sys.argv[1:]:
         checked += 1
         try:
             source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(path), mode="exec", feature_version=9)
+            tree = ast.parse(source, filename=str(path), mode="exec", feature_version=11)
             compile(source, str(path), "exec")
             problems, skip_reason = undefined_globals(tree, source, str(path))
             for name, line in problems:
