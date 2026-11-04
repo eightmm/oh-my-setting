@@ -262,9 +262,11 @@ an explicit model in the full Codex catalog resolves to the gateway with owner `
 Any other exact Pi model resolves to direct transport with owner `pi`. The `agy`
 harness resolves to registry owner `antigravity`. Deep and frontier tiers also offer
 read-only Antigravity routes after native providers with known weekly quota.
-Independent review of Pi or Antigravity uses the recorded main model's
-registry family; an unknown family cannot establish independence. Existing Pi rows
-with owner `codex` remain readable. Swap events and restart ownership validate the
+Reviewers, verifiers, security auditors and critics of Codex or Claude work take
+Antigravity first while it is installed, not in daily cooldown and below 90% of
+any recorded weekly quota; the judged provider stays last. Independent review
+of Pi or Antigravity uses the recorded main model's registry family; an unknown
+family cannot establish independence. Existing Pi rows with owner `codex` remain readable. Swap events and restart ownership validate the
 recorded owner/harness pair without consulting the current model cache; Pi permits
 recorded owners `codex` and `pi`, while `agy` uses `antigravity`. A default Pi swap
 retains the default gateway selection even when its cached catalog is empty.

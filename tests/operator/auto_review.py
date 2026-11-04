@@ -1,3 +1,4 @@
+# BEGIN independent-antigravity-preference
 # Settled results are structured room events, and review admission remains with the main.
 for owner in ("pi", "antigravity"):
     for model, expected in (("anthropic/claude-opus-5-5", "codex"),
@@ -13,8 +14,41 @@ for owner in ("pi", "antigravity"):
             raise AssertionError("unknown model family established independence")
     assert allocate(owner, role="reviewer", installed={"claude", "codex"},
                     writer="codex")["provider"] == "claude"
+    providers = {"claude", "codex", "antigravity"}
+    catalogs = {"antigravity": ["gemini-4-argon-high"]}
+    readings = {"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}}
+    assert allocate(owner, role="reviewer", installed=providers, writer="codex",
+                    provider_status=readings, catalogs=catalogs)["provider"] == "antigravity"
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    capped = dict(readings, antigravity={"daily_cap": {"gemini-4-argon-high": today}})
+    assert allocate(owner, role="reviewer", installed=providers, writer="codex",
+                    provider_status=capped, catalogs=catalogs)["provider"] == "claude"
     assert allocate(owner, role="reviewer", installed={"claude", "codex"}, writer=owner,
                     owner_model="anthropic/claude-opus-5-5")["provider"] == "codex"
+# END independent-antigravity-preference
+# BEGIN independent-antigravity-boundaries
+import panel_routing as judge_routing
+providers = {"claude", "codex", "antigravity"}
+readings = {"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}}
+for value, expected in ((None, "antigravity"), ("", "antigravity"), (0, "antigravity"),
+                        (89, "antigravity"), (90, "claude"), ("invalid", "antigravity")):
+    status = dict(readings, antigravity={"weekly_used": value})
+    selected = allocate("codex", role="reviewer", installed=providers, provider_status=status,
+                        catalogs={"antigravity": ["gemini-4-argon-high"]})
+    assert selected["provider"] == expected, value
+    failed = dict(selected, provider="codex")
+    assert judge_routing.alternate_route(failed, providers, status, resolve_accounts=False)["provider"] == expected
+assert judge_routing.alternate_route(failed, {"codex"}, resolve_accounts=False) is None
+try:
+    allocate("codex", role="reviewer", installed={"antigravity"},
+             provider_status={"antigravity": {"weekly_used": 90}},
+             catalogs={"antigravity": ["gemini-4-argon-high"]})
+except ValueError:
+    pass
+else:
+    raise AssertionError("weekly capped judge was selected")
+# END independent-antigravity-boundaries
 import panel_routing as family_routing
 with patch.object(family_routing, "model_family", side_effect=lambda provider, model:
                   {"pi": "anthropic", "claude": "anthropic", "codex": "openai"}[provider]) as family_lookup:

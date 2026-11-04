@@ -35,7 +35,7 @@ KINDS = {"worker": "worker", "builder": "worker", "refactorer": "worker", "docum
          "researcher": "researcher", "scholar": "researcher", "advisor": "advisor", "architect": "advisor", "critic": "advisor",
          "reviewer": "reviewer", "verifier": "reviewer", "security-auditor": "reviewer"}
 WRITERS = {"worker", "builder", "refactorer", "documenter", "integrator", "performance-engineer"}
-# Judges of another context's work prefer the provider other than the main's when the tier offers it.
+# Independent judgment favors a different provider from the judged work.
 INDEPENDENT = {"reviewer", "verifier", "security-auditor", "critic"}
 RESEARCH_FAMILIES = {"luna", "haiku"}
 # Weekly readings are ratios of unlike limits: within `gap` points count as equal.
@@ -483,9 +483,16 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             usable = non_pi
         # else: keep list as is (degraded beats refused)
     if role in INDEPENDENT:
-        # An exact-model writer (Pi, OpenCode) is never a native judge, so ordering away from it keeps tier order;
-        # a Pi main judging its own provider's work still needs its recorded family (unknown fails closed).
+        # Aggregator mains require a known family to establish independence.
         judged = writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS or writer == "antigravity" else owner
+        if judged in MODEL_IDS:
+            usable = [c for c in usable if c["provider"] != "antigravity"
+                      or weekly_used(provider_status, "antigravity") is None
+                      or weekly_used(provider_status, "antigravity") < 90]
+            if not usable:
+                raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
+            usable = sorted(usable, key=lambda c: (c["provider"] == judged,
+                                                   c["provider"] != "antigravity"))
         if judged == owner and judged in ("pi", "antigravity"):
             family = model_family(judged, owner_model)
             if family == "unknown":
@@ -549,6 +556,9 @@ def alternate_route(route, installed=None, provider_status=None, repo=None, reso
         eligible.append(candidate)
     candidates = _defer_antigravity(eligible, {c["provider"]: weekly_used(provider_status, c["provider"])
                                              for c in eligible if c["provider"] in MODEL_IDS})
+    if route.get("role") in INDEPENDENT and route.get("owner") in MODEL_IDS:
+        candidates = sorted(candidates, key=lambda c: (c["provider"] == route["owner"],
+                                                       c["provider"] != "antigravity"))
     if not candidates:
         return None
     return dict(candidates[0], effort=route.get("effort"), role=route.get("role"),
