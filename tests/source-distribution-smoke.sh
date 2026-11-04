@@ -782,6 +782,18 @@ import json, sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))["skills"]
 row = next(item for item in rows if item["name"] == "oms-spec-interview")
 assert "start this project" in [str(value).casefold() for value in row.get("triggers", [])]
+careful = next(item for item in rows if item["name"] == "oms-careful")
+careful_triggers = {str(value).casefold() for value in careful.get("triggers", [])}
+for expected in (
+    "careful mode",
+    "careful collaboration",
+    "신중 협업 모드",
+    "신중 모드",
+    "$oms-careful",
+    "/oms-careful",
+    "collaboration mode: careful",
+):
+    assert expected in careful_triggers, expected
 PY
 
 for command in agent-call peer-ask peer-review peer-delegate plan-run; do

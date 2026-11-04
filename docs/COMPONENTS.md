@@ -175,10 +175,18 @@ provenance boundaries; remove duplicated routing and generated boilerplate.
 | Stop session budgets | Answer-format blocking is removed, including legacy opt-ins. Positive `OMS_SESSION_BUDGET_TURNS` or `OMS_SESSION_BUDGET_HOURS` enables a session cap. Journal finalization remains. |
 | External adapters | Removed the old Herdr pane-control command and standalone A2A HTTP bridge/card. The panel has a separate optional local Herdr terminal host for wrapper launch, identity-checked navigation and reported footer values; it grants no landing authority. Native peer calls, live threads and CLI/MCP state reads remain. No extras dispatcher remains. |
 
-The seven skills retain distinct installation, coordination, specification,
-diagnosis, security, Slurm and local-GPU responsibilities. Combining them would
+The eight skills retain distinct installation, coordination, specification,
+diagnosis, security, careful collaboration, Slurm and local-GPU responsibilities. Combining them would
 load unrelated procedures or blur safety boundaries. Trace requires competing
 hypotheses only when real alternatives remain, not a fixed worksheet.
+`oms-careful` is an opt-in careful collaboration mode where the agent confirms
+understanding and plans before editing, explains reasoning, data flow and
+impact, and separates verified facts from hedged inference with confidence
+levels. Trigger it per session with `"careful mode"`, `"careful collaboration"`,
+`"신중 모드"`, `"신중 협업 모드"`, `$oms-careful`, or `/oms-careful`; enable it per
+project by adding the line `Collaboration mode: careful` to the project
+`AGENTS.md`; and turn it off in the session by asking to exit careful mode (or
+remove that line from `AGENTS.md`).
 Retired daily hint knobs (`OMS_USAGE_HINT_MIN`, `OMS_USAGE_HINT_DAYS`,
 `OMS_USAGE_SKILL_ROOTS`) no longer affect prompts; no stored skills or history
 are deleted. `OMS_SKILL_FORGE_HINT` still controls existing skill-contract

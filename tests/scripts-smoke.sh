@@ -17334,13 +17334,13 @@ test_link_installs_namespaced_skill_names() {
   for root in "$home_dir/.codex/skills" "$home_dir/.claude/skills" \
     "$home_dir/.gemini/config/skills"; do
     for name in oms-agent-harness oms-ops oms-spec-interview oms-trace \
-      oms-trust-boundary; do
+      oms-trust-boundary oms-careful; do
       assert_symlink_to "$root/$name" "$ROOT/custom-skills/$name"
     done
     # The unprefixed names are what the collision risk was: a fresh install
     # must not create them, under any linking path.
     for name in agent-harness oh-my-setting-ops spec-interview trace \
-      trust-boundary slurm gpu-workstation; do
+      trust-boundary careful slurm gpu-workstation; do
       [ ! -L "$root/$name" ] && [ ! -e "$root/$name" ] ||
         fail "link installed a superseded skill name: $root/$name"
     done
@@ -23582,6 +23582,7 @@ general = {
     "oms-spec-interview",
     "oms-trace",
     "oms-trust-boundary",
+    "oms-careful",
 }
 # Machine-conditional skills: linked only where every `requires` command
 # exists, so unrelated sessions never carry them. A conditional skill without
@@ -23649,6 +23650,42 @@ test_large_skills_use_progressive_disclosure() {
 
   skill="$ROOT/custom-skills/oms-trust-boundary/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 400 ] || fail "oms-trust-boundary method is too large"
+
+  skill="$ROOT/custom-skills/oms-careful/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 450 ] || fail "oms-careful method is too large"
+  local boundary_repo="$TMP/careful-boundary"
+  mkdir -p "$boundary_repo/custom-skills/oms-careful/agents" "$boundary_repo/scripts"
+  cp "$ROOT/scripts/install-skills.sh" "$boundary_repo/scripts/install-skills.sh"
+  cp "$ROOT/scripts/validate-skills.py" "$boundary_repo/scripts/validate-skills.py"
+  cp "$ROOT/custom-skills/oms-careful/agents/openai.yaml" "$boundary_repo/custom-skills/oms-careful/agents/openai.yaml"
+  printf '{"skills":[{"name":"oms-careful","source":"custom-skills/oms-careful","enabled":true}]}\n' > "$boundary_repo/skills.manifest.json"
+  python3 - "$boundary_repo/custom-skills/oms-careful/SKILL.md" 450 <<'PY'
+import pathlib, sys
+header = "---\nname: oms-careful\ndescription: Careful mode skill for boundary word count checks in tests.\n---\n"
+words = header.split()
+rest = int(sys.argv[2]) - len(words)
+pathlib.Path(sys.argv[1]).write_text(header + " ".join(["word"] * rest) + "\n", encoding="utf-8")
+PY
+  [ "$(wc -w < "$boundary_repo/custom-skills/oms-careful/SKILL.md" | tr -d ' ')" -eq 450 ] ||
+    fail "boundary fixture should be 450 words"
+  "$boundary_repo/scripts/install-skills.sh" >/dev/null || fail "450-word oms-careful fixture should validate"
+  printf 'extra\n' >> "$boundary_repo/custom-skills/oms-careful/SKILL.md"
+  [ "$(wc -w < "$boundary_repo/custom-skills/oms-careful/SKILL.md" | tr -d ' ')" -gt 450 ] ||
+    fail "over-limit fixture should exceed 450 words"
+  printf '' > "$boundary_repo/custom-skills/oms-careful/SKILL.md"
+  if "$boundary_repo/scripts/install-skills.sh" >/dev/null 2>&1; then
+    fail "empty oms-careful SKILL.md must fail validation"
+  fi
+  printf 'not frontmatter\n' > "$boundary_repo/custom-skills/oms-careful/SKILL.md"
+  if "$boundary_repo/scripts/install-skills.sh" >/dev/null 2>&1; then
+    fail "malformed oms-careful SKILL.md must fail validation"
+  fi
+  for line in \
+    "- Confidence (high/medium/low) and why:" \
+    "- Strongest alternative explanation:" \
+    "- Unverified assumptions / next checks:"; do
+    assert_file_contains "$ROOT/templates/ml-docs/EXPERIMENTS.md" "$line"
+  done
   # And the tools must still accept those forms. Prose that names an interface
   # it no longer has is the defect this repository keeps paying for: a guessed
   # field name left resolved failures looking open, and a hardcoded schema
@@ -27316,8 +27353,24 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"router-near-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep >/dev/null -E 'skill hint:.*oms-(agent-harness|gpu-workstation)'; then
+    if printf '%s' "$out" | grep >/dev/null -E 'skill hint:.*oms-(agent-harness|gpu-workstation|careful)'; then
       fail "generic prompt must not force a specialized skill: $prompt ($out)"
+    fi
+  done
+  for prompt in 'careful mode로 진행해줘' 'use careful collaboration here' '신중 협업 모드로 봐줘' '신중 모드 켜줘' 'Collaboration mode: careful'; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"router-careful-pos-%s","turn_id":"t1","cwd":"%s"}' \
+      "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
+    contains "$out" 'oms-careful' || fail "explicit careful trigger should route to oms-careful: $prompt ($out)"
+  done
+  for prompt in 'be careful with edge cases' 'explain the collaboration history' 'mode selector test'; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"router-careful-neg-%s","turn_id":"t1","cwd":"%s"}' \
+      "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK=0 bash "$ROOT/scripts/skill-router.sh")"
+    if contains "$out" 'oms-careful'; then
+      fail "ordinary prompt must not trigger oms-careful: $prompt ($out)"
     fi
   done
   out="$(printf '{"prompt":"CUDA OOM","session_id":"router-gpu","turn_id":"t1","cwd":"%s"}' "$project" |

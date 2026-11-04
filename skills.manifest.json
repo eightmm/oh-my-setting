@@ -207,6 +207,21 @@
         "webhook security",
         "sensitive data"
       ]
+    },
+    {
+      "name": "oms-careful",
+      "source": "custom-skills/oms-careful",
+      "enabled": true,
+      "reason": "Opt into a careful collaboration mode that confirms understanding and plans before editing, explains reasoning and data flow, and separates facts from hedged inference with confidence levels.",
+      "triggers": [
+        "careful mode",
+        "careful collaboration",
+        "신중 협업 모드",
+        "신중 모드",
+        "$oms-careful",
+        "/oms-careful",
+        "collaboration mode: careful"
+      ]
     }
   ]
 }

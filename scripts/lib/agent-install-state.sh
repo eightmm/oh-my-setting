@@ -201,6 +201,7 @@ oms_ops_legacy_skill_renames() {
     'spec-interview:oms-spec-interview' \
     'trace:oms-trace' \
     'trust-boundary:oms-trust-boundary' \
+    'careful:oms-careful' \
     'gpu-workstation:oms-gpu-workstation' \
     'slurm:oms-slurm'
 }

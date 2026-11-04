@@ -1,0 +1,4 @@
+interface:
+  display_name: "Careful Collaboration"
+  short_description: "Confirm plans, explain data flow, and separate fact from inference"
+  default_prompt: "Use $oms-careful to confirm understanding and plans before editing, explain reasoning and impact, and separate verified facts from hedged interpretations."

@@ -18,6 +18,9 @@ Each entry links the run ID, hypothesis, config diff, result and conclusion.
 - Result (primary metric):
 - Result (secondary):
 - Conclusion: keep / discard / followup
+- Confidence (high/medium/low) and why:
+- Strongest alternative explanation:
+- Unverified assumptions / next checks:
 - Next:
 
 ---
