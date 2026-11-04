@@ -535,11 +535,10 @@ PY_SELECTED
   fi
 }
 
-doctor_provider_inventory() { # [--selected PROVIDER]
-  local rows kind name selected channel version path remedy output _copy_id probe_note status digest_status
-  rows="$(python3 - "${1:-}" "${2:-}" "$HOME" "${CODEX_HOME:-$HOME/.codex}" \
-    "$(command -v claude 2>/dev/null || true)" "$(command -v codex 2>/dev/null || true)" \
-    "$(command -v agy 2>/dev/null || true)" "$(command -v pi 2>/dev/null || true)" <<'PY_COPIES'
+# Bash 3.2 misparses quotes inside a heredoc nested in $(...), so the
+# inventory program lives in its own function.
+doctor_provider_copies() {
+  python3 - "$@" <<'PY_COPIES'
 import json, os, shlex, sys
 from pathlib import Path
 mode, requested, home, codex, *commands = sys.argv[1:]
@@ -695,7 +694,13 @@ else:
         if len(copies) > 1:
             emit_row(("warning", name, "-", "-", "-", "-", " | ".join(sorted(set(remedies.values()))) or "-", "-"))
 PY_COPIES
-)" || return 1
+}
+
+doctor_provider_inventory() { # [--selected PROVIDER]
+  local rows kind name selected channel version path remedy output _copy_id probe_note status digest_status
+  rows="$(doctor_provider_copies "${1:-}" "${2:-}" "$HOME" "${CODEX_HOME:-$HOME/.codex}" \
+    "$(command -v claude 2>/dev/null || true)" "$(command -v codex 2>/dev/null || true)" \
+    "$(command -v agy 2>/dev/null || true)" "$(command -v pi 2>/dev/null || true)")" || return 1
   rows="${rows//$'\r'/}"
   if [ "${1:-}" = --selected ]; then normalize_doctor_npm_path "$rows"; return $?; fi
   [ -n "$rows" ] || return 0

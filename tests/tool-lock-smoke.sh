@@ -297,7 +297,7 @@ EOF_NPM_VENDOR
         ln -s "$HOME/.local/bin/agy" "$HOME/agy-alias/agy"
         export PATH="$HOME/agy-alias:$PATH"
         . "$ROOT/scripts/lib/doctor-probe-memo.sh"
-        for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_sha256_file doctor_provider_inventory check_vendor_provider_version provider_lock_path command_has_locked_version report_tool_drift check_locked_direct_version; do
+        for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_sha256_file doctor_provider_copies doctor_provider_inventory check_vendor_provider_version provider_lock_path command_has_locked_version report_tool_drift check_locked_direct_version; do
           eval "$(sed -n "/^${function_name}()/,/^}/p" "$ROOT/scripts/doctor.sh")"
         done
         INSTALL_ROOT="$ROOT"
@@ -494,7 +494,7 @@ PY_AGY_ARCHIVE
       INSTALL_ROOT="$ROOT"
       REQUIRE_TOOLS=0
       . "$ROOT/scripts/lib/doctor-probe-memo.sh"
-      for tool in normalize_doctor_npm_path doctor_command_digest_ok doctor_sha256_file doctor_provider_inventory check_vendor_provider_version provider_lock_path command_has_locked_version; do
+      for tool in normalize_doctor_npm_path doctor_command_digest_ok doctor_sha256_file doctor_provider_copies doctor_provider_inventory check_vendor_provider_version provider_lock_path command_has_locked_version; do
         eval "$(sed -n "/^$tool()/,/^}/p" "$ROOT/scripts/doctor.sh")"
       done
       tool_lock_value() { tool_lock_get "$1"; }
@@ -774,7 +774,7 @@ EOF
   write_npm_shim codex || fail "native launcher not preserved"
   verify_resolved_npm_binary codex || fail "native version verification failed"
   [ -L "$TMP/native-path/codex" ] || fail "native launcher was replaced"
-  for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_sha256_file doctor_provider_inventory check_vendor_provider_version check_locked_npm_version; do
+  for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_sha256_file doctor_provider_copies doctor_provider_inventory check_vendor_provider_version check_locked_npm_version; do
     eval "$(sed -n "/^${function_name}()/,/^}/p" "$ROOT/scripts/doctor.sh")"
   done
   . "$ROOT/scripts/lib/doctor-probe-memo.sh"

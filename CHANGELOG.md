@@ -463,6 +463,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `oms doctor` parses again under macOS's stock Bash 3.2: the provider-copy
+  inventory program moved out of a heredoc nested in `$(...)`, whose quotes
+  Bash 3.2 misread, failing native macOS lifecycle CI.
+- Antigravity usage counts cache reads even though agy reports no cache writes,
+  and the pinned agy seven-day line shows input, cached and output tokens separately.
+- The compact panel main contract names `oms panel --dispatch` and the
+  explicit cross-provider routes again.
 - The Antigravity print timeout follows `OMS_PEER_TIMEOUT` when no explicit
   print timeout is set, so a raised delegate wall no longer ends agy turns at 30m.
 - A write call whose provider reported failure still gets the automatic review
