@@ -11597,6 +11597,40 @@ test_agent_call_outbound_scrubber_blocks_private_path() {
   if grep -Fq "Assess private path" "$artifact"; then
     fail "blocked artifact should not contain prompt text"
   fi
+
+  local sample operator root pattern
+  for root in /ho""me /Us""ers /scra""tch; do
+    case "$root" in
+      */home) pattern=home-path ;;
+      */Users) pattern=user-path ;;
+      *) pattern=scratch-path ;;
+    esac
+    for operator in '-' ':-' '=' ':=' '+' ':+'; do
+      sample='test -f "${CONFIG'"$operator$root"'/user/file}"'
+      printf '%s\n' "$sample" > "$project/prompt"
+      if bash -c '. "$1/scripts/lib/peer-common.sh"; ma_validate_outbound_prompt "$2"' \
+        _ "$ROOT" "$project/prompt" >"$project/out" 2>"$project/error"; then
+        fail "private parameter default should be blocked: $operator $pattern"
+      fi
+      assert_file_contains "$project/error" "machine-tier match in prompt at line 1:$pattern"
+      bash -c '. "$1/scripts/lib/peer-common.sh"; rc=0; ma_validate_outbound_prompt "$2" 2>/dev/null || rc=$?; [ "$rc" = 3 ] && [ "$MA_OUTBOUND_EVIDENCE" = "machine,$3,prompt,1" ]' \
+        _ "$ROOT" "$project/prompt" "$pattern" || fail "prompt machine evidence missing: $operator $pattern"
+      printf '%s\n' '--- a/x' '+++ b/x' '@@ -0,0 +1 @@' "+$sample" > "$project/diff"
+      bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2" > "$3"; [ "$MA_OUTBOUND_EVIDENCE" = "machine,$4,diff,1" ]' \
+        _ "$ROOT" "$project/diff" "$project/diff-report" "$pattern" ||
+        fail "diff scan must report machine evidence: $operator $pattern"
+      assert_file_contains "$project/diff-report" "x:1: machine-tier match: $pattern"
+    done
+  done
+  for sample in '' '0' 'tests/a.py' 'custom-skills/x/y.md' '--only name' '-n' \
+    'https://host/path' '-Iinclude' '${VAR}' '${VAR:-default}' '${VAR:-}' \
+    '${VAR:-relative/path}' '${9VAR:-/opt/x}' '${0:-/opt/x}' 'mktemp -d "${TMPDIR:-/tmp}/x.XXXXXX"' \
+    '${HOME:-/nonexistent}' '2>"${f:-/dev/null}"' '${PATH:-/usr/bin:/bin}'; do
+    printf '%s\n' "$sample" > "$project/prompt"
+    bash -c '. "$1/scripts/lib/peer-common.sh"; ma_validate_outbound_prompt "$2"' \
+      _ "$ROOT" "$project/prompt" >"$project/out" 2>"$project/error" ||
+      fail "portable prompt should be allowed: $sample"
+  done
 }
 
 

@@ -504,13 +504,16 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             verified_failure = False
     def outbound_clean(value):
         import terminal_panel
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as candidate:
-            candidate.write(value)
-            candidate.flush()
+        candidate = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        try:
+            with candidate:
+                candidate.write(value)
             checked = subprocess.run(
                 ["bash", "-c", '. "$1"; ma_validate_outbound_prompt "$2"',
                  "oms-continuation-scan", str(terminal_panel.OUTBOUND_SCANNER), candidate.name],
                 capture_output=True, text=True, check=False)
+        finally:
+            os.unlink(candidate.name)
         return checked.returncode == 0
 
     verification_section = ""

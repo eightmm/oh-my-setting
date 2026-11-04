@@ -1272,6 +1272,43 @@ def run_continuation_fixture(room_repo, work_repo, base, answer=None):
     Path(materialized).unlink()
     return note, text
 
+# BEGIN continuation outbound temporary file
+continuation_patch = b"--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-before\n+worker change\n"
+scan_repo, scan_base = continuation_git_repo("continuation-scan-repo")
+real_temp = dispatch.tempfile.NamedTemporaryFile
+real_run = subprocess.run
+scan_files = []
+def track_temp(*args, **kwargs):
+    handle = real_temp(*args, **kwargs)
+    if kwargs.get("encoding") == "utf-8" and not kwargs.get("suffix"):
+        scan_files.append(handle)
+    return handle
+def check_scan_closed(args, *pos, **kwargs):
+    if isinstance(args, list) and "oms-continuation-scan" in args:
+        assert scan_files[-1].closed
+        assert Path(scan_files[-1].name).is_file()
+    return real_run(args, *pos, **kwargs)
+with patch.object(dispatch.tempfile, "NamedTemporaryFile", side_effect=track_temp), \
+        patch.object(dispatch.subprocess, "run", side_effect=check_scan_closed):
+    _, scan_text = run_continuation_fixture(scan_repo, scan_repo, scan_base, "safe summary")
+assert "safe summary" in scan_text
+assert scan_files and all(not Path(handle.name).exists() for handle in scan_files)
+def fail_scan(args, *pos, **kwargs):
+    if isinstance(args, list) and "oms-continuation-scan" in args:
+        assert scan_files[-1].closed
+        raise OSError("scanner unavailable")
+    return real_run(args, *pos, **kwargs)
+with patch.object(dispatch.tempfile, "NamedTemporaryFile", side_effect=track_temp), \
+        patch.object(dispatch.subprocess, "run", side_effect=fail_scan):
+    try:
+        run_continuation_fixture(scan_repo, scan_repo, scan_base, "safe summary")
+    except OSError as error:
+        assert str(error) == "scanner unavailable"
+    else:
+        raise AssertionError("scanner failure was not propagated")
+assert all(not Path(handle.name).exists() for handle in scan_files)
+# END continuation outbound temporary file
+
 # The room repository remains at the old base while the actual dispatch worktree conflicts.
 room_repo, continuation_base = continuation_git_repo("continuation-room-repo")
 work_repo = temporary / "continuation-work-repo"
