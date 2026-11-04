@@ -25493,10 +25493,12 @@ PY
 
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
   assert_not_exists "$project/.oms/delegations/d3.json"
-  # Capture retention runs before marker cleanup, so it sees quiescence one sweep later.
+  # Captures drain per generation, so the first sweep may already release one.
+  local charge_applied
+  charge_applied="$(capture_usage)"
   journal_before="$(wc -c < "$project/.oms/landings.jsonl" | tr -d ' \r')"
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 >/dev/null 2>&1 )
-  [ "$(capture_usage)" = "$charge_before" ] &&
+  [ "$(capture_usage)" = "$charge_applied" ] &&
     [ "$(wc -c < "$project/.oms/landings.jsonl" | tr -d ' \r')" = "$journal_before" ] ||
     fail "gc dry-run must not release a reservation"
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )

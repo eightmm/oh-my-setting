@@ -8,6 +8,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms report bug|feature` previews a privacy-checked upstream issue: the
+  generated metadata is an allowlist (OMS version and commit, OS family,
+  Bash/Python major.minor and, with `--from-failure`, the bare OMS verb, exit,
+  `failure_code` and repeat count), user text that the outbound scanner or the
+  path/hostname/IP checks flag is refused, and it publishes through `gh` only
+  with `--yes` or an interactive y; otherwise it prints a prefilled URL.
+  Actionable fail-ledger records print the matching `oms report` hint.
 - `oms doctor` inventories every provider CLI copy on PATH and vendor
   channel. It runs only the PATH-selected copy; extras and aliases report
   their digest state (matched/unmarked/invalid/unknown) and are never executed.
@@ -87,6 +94,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Reviewers, verifiers, security auditors and critics of Codex or Claude work
+  route to Antigravity first while it is installed, outside daily cooldown and
+  below 90% of any recorded weekly quota; the judged provider stays last.
 - Native Windows (Git Bash/MSYS2/Cygwin) is retired. install, update, link,
   `oms` and the Python runtime refuse it before any state write and point to
   WSL2; an override cannot hide the real host identity. The Windows CI job is
@@ -463,6 +473,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Managed landing captures drain per generation: an unreferenced capture is
+  reclaimed even while unrelated workers run, only tasks in an active lease
+  state (claimed, running, review, landing) pin their captures, and the quota
+  refusal names count and byte usage.
 - The worker source guard no longer stops a running worker when another dispatch
   adds or removes an OMS-managed sibling worktree: a new live managed sibling is
   validated between two repository fingerprints and treated as benign, kept

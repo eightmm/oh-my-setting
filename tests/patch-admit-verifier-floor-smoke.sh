@@ -1089,4 +1089,47 @@ contains "$TMP/hint-a.md" "Patch admission: ADMIT"
   --report "$TMP/hint-b.md" >/dev/null 2>"$TMP/hint-b.err" || { cat "$TMP/hint-b.err" >&2; fail "hint case b should admit"; }
 ! grep -Fq "land will also run" "$TMP/hint-b.err" || fail "no note when --verify names the consumer"
 
+# Managed capture quota refusal in patch-admit is a single-line state refusal (exit 1)
+# naming count/byte usage against limits and the remedy, with no usage hint.
+"$ADMIT" --repo "$hint_repo" --patch "$TMP/hint.patch" --verify 'bash tests/widget-smoke.sh' \
+  >/dev/null 2>"$TMP/quota-seed.err" || { cat "$TMP/quota-seed.err" >&2; fail "quota seed admission should succeed"; }
+patch_bytes="$(wc -c < "$TMP/hint.patch" | tr -d ' \r')"
+charged_bytes=$((2 * patch_bytes))
+
+quota_rc=0
+OMS_LANDING_CAPTURE_COUNT=1 "$ROOT/scripts/oms" patch-admit --repo "$hint_repo" \
+  --patch "$TMP/hint.patch" --verify 'bash tests/widget-smoke.sh' \
+  >"$TMP/quota-count.out" 2>"$TMP/quota-count.err" || quota_rc=$?
+[ "$quota_rc" -eq 1 ] || fail "count quota refusal should exit 1, got $quota_rc: $(cat "$TMP/quota-count.err")"
+[ ! -s "$TMP/quota-count.out" ] || fail "quota refusal should not write to stdout"
+[ "$(wc -l < "$TMP/quota-count.err" | tr -d ' \r')" = 1 ] ||
+  fail "quota refusal must be a single line on stderr: $(cat "$TMP/quota-count.err")"
+contains "$TMP/quota-count.err" "managed landing capture quota exhausted (count 1/1, bytes ${charged_bytes}/134217728, need ${charged_bytes} bytes)"
+contains "$TMP/quota-count.err" "oms gc"
+contains "$TMP/quota-count.err" "OMS_LANDING_CAPTURE_COUNT"
+contains "$TMP/quota-count.err" "OMS_LANDING_CAPTURE_BYTES"
+! grep -Fq "hint:" "$TMP/quota-count.err" || fail "quota refusal must not print usage hint"
+! grep -Fq "cannot capture admission input" "$TMP/quota-count.err" || fail "quota refusal must not print generic wrapper error"
+
+for byte_limit in "$charged_bytes" "$((2 * charged_bytes - 1))"; do
+  quota_rc=0
+  OMS_LANDING_CAPTURE_BYTES="$byte_limit" "$ROOT/scripts/oms" patch-admit --repo "$hint_repo" \
+    --patch "$TMP/hint.patch" --verify 'bash tests/widget-smoke.sh' \
+    >"$TMP/quota-bytes.out" 2>"$TMP/quota-bytes.err" || quota_rc=$?
+  [ "$quota_rc" -eq 1 ] || fail "byte quota refusal ($byte_limit) should exit 1, got $quota_rc: $(cat "$TMP/quota-bytes.err")"
+  [ "$(wc -l < "$TMP/quota-bytes.err" | tr -d ' \r')" = 1 ] ||
+    fail "byte quota refusal must be one line: $(cat "$TMP/quota-bytes.err")"
+  contains "$TMP/quota-bytes.err" "managed landing capture quota exhausted (count 1/256, bytes ${charged_bytes}/${byte_limit}, need ${charged_bytes} bytes)"
+  contains "$TMP/quota-bytes.err" "oms gc"
+  ! grep -Fq "hint:" "$TMP/quota-bytes.err" || fail "byte quota refusal must not print usage hint"
+done
+
+for bad_limit in "" 0 -1 bad; do
+  bad_rc=0
+  OMS_LANDING_CAPTURE_COUNT="$bad_limit" "$ADMIT" --repo "$hint_repo" \
+    --patch "$TMP/hint.patch" --verify 'bash tests/widget-smoke.sh' \
+    >/dev/null 2>"$TMP/quota-bad.err" || bad_rc=$?
+  [ "$bad_rc" -eq 2 ] || fail "malformed quota limit '$bad_limit' should exit 2, got $bad_rc"
+done
+
 echo "patch-admit-verifier-floor-smoke: ok"

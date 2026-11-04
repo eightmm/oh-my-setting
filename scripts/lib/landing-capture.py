@@ -24,7 +24,13 @@ from contextlib import contextmanager
 
 HERE = Path(__file__).resolve().parent
 D = runpy.run_path(str(HERE / 'durable-jsonl.py'))
+LIVENESS = runpy.run_path(str(HERE / 'process_liveness.py'))
+RETIRE = runpy.run_path(str(HERE / 'plan-retire.py'))
 MAX_STREAM = 32 * 1024 * 1024
+
+
+class QuotaError(ValueError):
+    pass
 MAX_OBJECT = 16 * 1024 * 1024
 DEFAULT_BYTES = 128 * 1024 * 1024
 DEFAULT_COUNT = 256
@@ -348,10 +354,17 @@ def allocate(repo, source, landing, expected, execution_repo=None):
     if any(item['landing_id'] == landing for item in reservations(repo).values()):
         raise ValueError('native landing already reserved; use its existing recovery path')
     count, size = usage(repo)
+    count_limit = limit('OMS_LANDING_CAPTURE_COUNT', DEFAULT_COUNT)
+    bytes_limit = limit('OMS_LANDING_CAPTURE_BYTES', DEFAULT_BYTES)
+    needed_bytes = 2 * len(raw)
     # Charge both private admission input and separate publication inode,
     # including crashes and failures. Hardlinked anchors need no extra bytes.
-    if count + 1 > limit('OMS_LANDING_CAPTURE_COUNT', DEFAULT_COUNT) or size + 2 * len(raw) > limit('OMS_LANDING_CAPTURE_BYTES', DEFAULT_BYTES):
-        raise ValueError('managed landing capture quota exhausted; retained/unknown evidence remains charged')
+    if count + 1 > count_limit or size + needed_bytes > bytes_limit:
+        raise QuotaError(
+            'managed landing capture quota exhausted (count %d/%d, bytes %d/%d, need %d bytes); '
+            'run `oms gc --apply` or raise OMS_LANDING_CAPTURE_COUNT / OMS_LANDING_CAPTURE_BYTES'
+            % (count, count_limit, size, bytes_limit, needed_bytes)
+        )
     execution_repo = os.path.realpath(execution_repo or repo)
     root = None
     for parent in (tempfile.gettempdir(), os.path.dirname(repo)):
@@ -820,6 +833,7 @@ def reference_bytes(repo, trace=None, needles=()):
     found, total, entries = set(), 0, 0
     deadline = time.monotonic() + REFERENCE_SCAN_SECONDS
     needles = set(needles)
+    retired_archives = _retired_plan_archives(repo) if present(Path(repo) / '.oms/plan') else set()
     lengths = sorted({len(token) for token in needles})
     pattern = re.compile(b'(?=(' + needle_pattern(needles) + b'))') if needles else None
 
@@ -850,6 +864,9 @@ def reference_bytes(repo, trace=None, needles=()):
                 path = os.path.join(parent, name)
                 expired(relative)
                 raw, _ = regular(path)
+                if (os.path.basename(path) != 'tasks.json' and
+                        os.path.normcase(os.path.realpath(path)) in retired_archives):
+                    continue
                 total += len(raw)
                 if total > MAX_REFERENCE_BYTES:
                     raise ValueError('reference scan limit exceeded in %s (%d bytes, limit %d)' %
@@ -974,6 +991,345 @@ def absent(path):
     return False
 
 
+ID_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+SAFE_MARKER_NAME = re.compile(r'^[A-Za-z0-9._-]+\.json$')
+OWNER_RE = re.compile(r'^owner_[0-9a-f]{32}$')
+HEX32_RE = re.compile(r'^[0-9a-f]{32}$')
+PLAN_STATES = tuple(RETIRE['KNOWN_STATES'])
+
+
+def _read_bounded_json(path, maximum=64 * 1024):
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or D['is_reparse'](before):
+        raise ValueError('not a regular file')
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+    with os.fdopen(os.open(path, flags), 'rb') as handle:
+        opened = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or D['is_reparse'](opened) or
+                opened.st_nlink != 1 or identity(before) != identity(opened) or
+                (hasattr(os, 'getuid') and opened.st_uid != os.getuid()) or
+                opened.st_size <= 0 or opened.st_size > maximum):
+            raise ValueError('unsafe or oversized file')
+        raw = handle.read(maximum + 1)
+        after = os.fstat(handle.fileno())
+    named = os.lstat(path)
+    if (len(raw) != opened.st_size or identity(named) != identity(after) or
+            identity(opened) != identity(after) or after.st_nlink != 1 or
+            opened.st_size != after.st_size or opened.st_mtime_ns != after.st_mtime_ns or
+            opened.st_ctime_ns != after.st_ctime_ns):
+        raise ValueError('file changed while reading')
+
+    def bad_const(value):
+        raise ValueError('non-finite constant: ' + str(value))
+
+    def no_dups(pairs):
+        out = {}
+        for k, v in pairs:
+            if k in out:
+                raise ValueError('duplicate key: ' + k)
+            out[k] = v
+        return out
+
+    data = json.loads(raw.decode('utf-8'), parse_constant=bad_const, object_pairs_hook=no_dups)
+    if not isinstance(data, dict):
+        raise ValueError('JSON root is not an object')
+    return data
+
+
+def _valid_marker(marker):
+    schema = marker.get('schema')
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema not in (1, 2, 3, 4):
+        return False
+    marker_id = marker.get('id')
+    if not isinstance(marker_id, str) or not ID_RE.fullmatch(marker_id) or marker_id in ('.', '..'):
+        return False
+    pid = marker.get('pid')
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid > 0x7FFFFFFF:
+        return False
+    native_pid = marker.get('native_pid')
+    if schema == 4 and 'native_pid' not in marker:
+        return False
+    if 'native_pid' in marker and (
+            isinstance(native_pid, bool) or not isinstance(native_pid, int) or
+            native_pid <= 0 or native_pid > 0xFFFFFFFF):
+        return False
+    if not LIVENESS['persisted_native_pid_is_proven'](native_pid, marker.get('native_pid_source')):
+        return False
+    for key in ('task_id', 'lease_id', 'executor_id'):
+        val = marker.get(key, '')
+        if not isinstance(val, str) or (val and not ID_RE.fullmatch(val)) or val in ('.', '..'):
+            return False
+    if 'access' in marker and marker['access'] not in ('read', 'write'):
+        return False
+    owner_id = marker.get('autopilot_owner_id', '')
+    if not isinstance(owner_id, str) or (owner_id and not OWNER_RE.fullmatch(owner_id)):
+        return False
+    for key in ('generation', 'capture_generation'):
+        if key in marker:
+            val = marker[key]
+            if not isinstance(val, str) or (val and not HEX32_RE.fullmatch(val)):
+                return False
+    for key in ('landing_id', 'landing', 'intake_id'):
+        if key in marker:
+            val = marker[key]
+            if not isinstance(val, str) or (val and not ID_RE.fullmatch(val)) or val in ('.', '..'):
+                return False
+    for key in ('patch', 'capture', 'artifact', 'plan_file'):
+        if key in marker and not isinstance(marker[key], str):
+            return False
+    for key in ('references', 'refs', 'captures', 'generations', 'landing_ids'):
+        if key in marker:
+            stack = [marker[key]]
+            while stack:
+                cur = stack.pop()
+                if isinstance(cur, str):
+                    if not cur:
+                        return False
+                elif isinstance(cur, list):
+                    stack.extend(cur)
+                elif isinstance(cur, dict):
+                    for k, v in cur.items():
+                        if not isinstance(k, str) or not k:
+                            return False
+                        stack.append(v)
+                else:
+                    return False
+    return True
+
+
+def _json_strings(value):
+    """Yield decoded strings at any depth in a parsed JSON object."""
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            yield current
+        elif isinstance(current, dict):
+            for k, v in current.items():
+                if isinstance(k, str):
+                    yield k
+                stack.append(v)
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+
+
+def _retire_die(message):
+    raise ValueError(message)
+
+
+def _retired_plan_archives(repo):
+    repo_real = os.path.realpath(str(repo))
+    validator = RETIRE['validate_retirement_ledger']
+    validator.__globals__['CONTEXT'] = {'die': _retire_die, 'repo_root': repo_real}
+    validator.__globals__['STATES'] = set(PLAN_STATES)
+    validator.__globals__['ID_RE'] = ID_RE
+    rows = validator(repo_real)
+    return {
+        os.path.normcase(os.path.realpath(os.path.join(repo_real, row['archive'])))
+        for row in rows
+        if isinstance(row.get('archive'), str) and row['archive']
+    }
+
+
+def _task_lease_is_live(task):
+    """True when a plan task holds live lease authority."""
+    lease_id = task.get('lease_id', '')
+    # Match agent_plan_core's block/release authority guard. Inactive tasks
+    # retain lease IDs for receipt convergence without retaining writer authority.
+    return (task.get('state') in ('claimed', 'running', 'review', 'landing') and
+            isinstance(lease_id, str) and bool(lease_id))
+
+
+def delegation_state(repo, log=None):
+    """Return (live_records, active_leases, active_tasks), or None if unproven."""
+    oms_dir = Path(repo) / '.oms'
+    if present(oms_dir):
+        oms_info = oms_dir.lstat()
+        if not stat.S_ISDIR(oms_info.st_mode) or D['is_reparse'](oms_info):
+            raise ValueError('delegation marker directory is unproven')
+    marker_dir = Path(repo) / '.oms/delegations'
+    if present(marker_dir):
+        info = marker_dir.lstat()
+        if not stat.S_ISDIR(info.st_mode) or D['is_reparse'](info):
+            raise ValueError('delegation marker directory is unproven')
+    live_records = []
+    active_leases = set()
+    active_tasks = set()
+    extra_plans = set()
+    try:
+        if present(marker_dir):
+            entries = []
+            with os.scandir(marker_dir) as iterator:
+                for entry in iterator:
+                    if len(entries) >= 4096:
+                        return None
+                    entries.append(entry)
+            for entry in entries:
+                if re.fullmatch(r'council-context\.[A-Za-z0-9]{6}', entry.name):
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode) and not D['is_reparse'](info):
+                        continue  # peer-common.sh stages evidence here, never authority.
+                if entry.name.startswith('.') or not SAFE_MARKER_NAME.fullmatch(entry.name):
+                    return None
+                marker = _read_bounded_json(entry.path, 64 * 1024)
+                if not _valid_marker(marker):
+                    return None
+                if LIVENESS['pid_alive'](marker['pid'], native_pid=marker.get('native_pid')):
+                    live_records.append(marker)
+                    lease_id = marker.get('lease_id', '')
+                    task_id = marker.get('task_id', '')
+                    if lease_id:
+                        active_leases.add(lease_id)
+                    if task_id:
+                        active_tasks.add((task_id, lease_id))
+                    plan_file = marker.get('plan_file', '')
+                    if plan_file:
+                        extra_plans.add(plan_file)
+        plan_root = Path(repo) / '.oms/plan'
+        scanned_plans = set()
+        retired_archives = set()
+
+        def scan_plan_file(path_str, is_explicit=False):
+            real = os.path.normcase(os.path.realpath(path_str))
+            if real in scanned_plans:
+                return True
+            scanned_plans.add(real)
+            if os.path.basename(path_str) != 'tasks.json' and real in retired_archives:
+                return True
+            data = _read_bounded_json(path_str, MAX_STREAM)
+            if 'tasks' in data or os.path.basename(path_str) == 'tasks.json' or is_explicit:
+                tasks = data.get('tasks')
+                if not isinstance(tasks, dict):
+                    return False
+                for tid, task in tasks.items():
+                    if not isinstance(task, dict) or task.get('id') != tid:
+                        return False
+                    t_state = task.get('state')
+                    if t_state not in PLAN_STATES:
+                        return False
+                    t_lease = task.get('lease_id', '')
+                    r_lease = task.get('review_lease_id', '')
+                    if not isinstance(t_lease, str) or not isinstance(r_lease, str):
+                        return False
+                    if _task_lease_is_live(task):
+                        active_leases.add(t_lease)
+                        active_tasks.add((tid, t_lease))
+                        live_records.append(task)
+            elif data.get('state') in PLAN_STATES:
+                if _task_lease_is_live(data):
+                    active_leases.add(data['lease_id'])
+                    tid = data.get('id', '')
+                    if isinstance(tid, str) and tid:
+                        active_tasks.add((tid, data['lease_id']))
+                    live_records.append(data)
+            else:
+                return False
+            return True
+
+        if present(plan_root):
+            plan_info = plan_root.lstat()
+            if not stat.S_ISDIR(plan_info.st_mode) or D['is_reparse'](plan_info):
+                return None
+            retired_archives = _retired_plan_archives(repo)
+            with os.scandir(plan_root) as iterator:
+                for entry in iterator:
+                    if entry.name.endswith('.json'):
+                        if not scan_plan_file(entry.path):
+                            return None
+            pins_dir = plan_root / 'completion-pins'
+            if present(pins_dir):
+                p_info = pins_dir.lstat()
+                if not stat.S_ISDIR(p_info.st_mode) or D['is_reparse'](p_info):
+                    return None
+                with os.scandir(pins_dir) as iterator:
+                    for entry in iterator:
+                        if entry.name.startswith('.'):
+                            continue
+                        if not entry.name.endswith('.json'):
+                            return None
+                        pin = _read_bounded_json(entry.path, MAX_STREAM)
+                        lease_id = pin.get('lease_id', '')
+                        if not isinstance(lease_id, str) or not lease_id:
+                            return None
+                        active_leases.add(lease_id)
+                        live_records.append(pin)
+            leases_dir = plan_root / 'completion-pin-leases'
+            if present(leases_dir):
+                l_info = leases_dir.lstat()
+                if not stat.S_ISDIR(l_info.st_mode) or D['is_reparse'](l_info):
+                    return None
+                with os.scandir(leases_dir) as iterator:
+                    for entry in iterator:
+                        if entry.name.startswith('.'):
+                            continue
+                        if not entry.name.endswith('.json'):
+                            return None
+                        idx = _read_bounded_json(entry.path, MAX_STREAM)
+                        pins = idx.get('pins')
+                        if not isinstance(pins, list):
+                            return None
+                        if pins:
+                            active_leases.add(entry.name[:-5])
+                            live_records.append(idx)
+        if log:
+            for row in log:
+                pf = row.get('plan_file', '')
+                if isinstance(pf, str) and pf:
+                    extra_plans.add(pf)
+        plan_root_real = os.path.normcase(os.path.realpath(str(plan_root)))
+        for pf in extra_plans:
+            target = Path(pf) if os.path.isabs(pf) else Path(repo) / pf
+            target_real = os.path.normcase(os.path.realpath(str(target)))
+            if os.path.commonpath([plan_root_real, target_real]) != plan_root_real:
+                return None
+            if present(target):
+                if not scan_plan_file(str(target), is_explicit=True):
+                    return None
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return None
+    return live_records, active_leases, active_tasks
+
+
+def delegation_referenced(repo, item, paths, log, state):
+    """True when a live marker or unsettled lease references item or its landing_id."""
+    if state is None:
+        return True
+    live_records, active_leases, active_tasks = state
+    if not live_records and not active_leases and not active_tasks:
+        return False
+    gen = item['generation']
+    land = item['landing_id']
+    sha = item['sha256']
+    gen_pat = re.compile(r'(?<![0-9a-fA-F])' + re.escape(gen) + r'(?![0-9a-fA-F])')
+    land_pat = re.compile(r'(?<![A-Za-z0-9._-])' + re.escape(land) + r'(?:\.patch)?(?![A-Za-z0-9._-])')
+    spellings = [spelling for path in paths for spelling in reference_spellings(repo, path)]
+    for record in live_records:
+        # landing-reference persists a path hash instead of the input path.
+        input_hash = record.get('reference_input_sha256', '')
+        if input_hash and any(digest(os.path.abspath(path).encode()) == input_hash for path in paths):
+            return True
+        for text in _json_strings(record):
+            if text in (gen, land, land + '.patch', sha):
+                return True
+            if gen_pat.search(text) or land_pat.search(text) or sha in text:
+                return True
+            if any(spelling in text for spelling in spellings):
+                return True
+    for row in log:
+        if (row.get('landing_id') == land or
+                row.get('managed_capture', {}).get('generation') == gen or
+                row.get('patch') in paths):
+            row_lease = row.get('lease', '')
+            row_task = row.get('task', '')
+            if isinstance(row_lease, str) and row_lease and row_lease in active_leases:
+                return True
+            if isinstance(row_task, str) and row_task:
+                for mt, ml in active_tasks:
+                    if mt == row_task and (not ml or not row_lease or ml == row_lease):
+                        return True
+    return False
+
+
 def release_missing(repo, item, log, evidence, days, apply):
     """Release an aged reservation or terminal generation whose directory is gone.
 
@@ -1007,6 +1363,60 @@ def release_missing(repo, item, log, evidence, days, apply):
         print('warning: managed capture preserved: ' + str(error), file=sys.stderr)
 
 
+def lifecycle_state(repo):
+    """Read per-attempt capture authority; unknown references preserve everything."""
+    engine = runpy.run_path(str(HERE / 'agent-events.py'))
+    try:
+        _, attempts = engine['load_projection'](Path(repo))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        records, leases, tasks = [], set(), set()
+        for attempt in attempts.values():
+            if attempt.get('terminal') is True:
+                continue
+            refs = attempt.get('refs', {})
+            if not isinstance(refs, dict) or any(not isinstance(v, str) for v in refs.values()):
+                return None
+            writer = refs.get('reference_writer') == 'landing-reference-v1'
+            if writer:
+                # Task mutations bind the destination packet, whose pending
+                # references are unavailable until publication has completed.
+                if attempt.get('tool') != 'patch-admit':
+                    return None
+                input_hash = refs.get('reference_input_sha256', '')
+                if input_hash and not re.fullmatch(r'[0-9a-f]{64}', input_hash):
+                    return None
+                if not input_hash and not any(refs.get(key) for key in
+                        ('patch', 'capture', 'generation', 'landing_id', 'task', 'task_id', 'lease', 'lease_id')):
+                    return None
+            # Reference writers retain authority until terminal; ordinary
+            # attempts keep reconcile's existing 300-second heartbeat horizon.
+            if not writer:
+                if attempt.get('tool') == 'panel-main':
+                    continue
+                try:
+                    age = (now - engine['parse_ts'](attempt['last_heartbeat_at'])).total_seconds()
+                except Exception:
+                    return None
+                if age >= 300:
+                    continue
+            records.append(refs)
+            lease = refs.get('lease_id') or refs.get('lease') or refs.get('panel_lease_id', '')
+            task = attempt.get('task_id') or refs.get('task_id') or refs.get('task', '')
+            if not isinstance(lease, str) or not isinstance(task, str):
+                return None
+            if (attempt.get('provider') == 'local' and not writer and not task and not lease and
+                    not any(refs.get(key) for key in ('patch', 'capture', 'artifact', 'generation',
+                            'capture_generation', 'landing_id', 'landing', 'intake_id'))):
+                return None  # An unscoped local operation has no provable capture closure.
+            if lease:
+                leases.add(lease)
+            if task:
+                tasks.add((task, lease))
+        return records, leases, tasks
+    except (OSError, ValueError, KeyError, TypeError, engine['OpsError']):
+        return None
+
+
 def collect(repo, days, apply, private_only=""):
     # private_only is an internal caller scope, never permission to ignore pins.
     log = rows(repo)
@@ -1038,13 +1448,24 @@ def collect(repo, days, apply, private_only=""):
                                  ' certificate unreadable, GC refused: ' + str(error))
         needles.update(spelling.encode() for path in recorded for spelling in reference_spellings(repo, path))
     evidence = reference_bytes(repo, needles=needles)
+    state = delegation_state(repo, log)
+    if state is None:
+        print('managed-landing-capture: preserved (delegation quiescence unproven)')
+        return
+    attempts = lifecycle_state(repo)
+    if attempts is None:
+        print('managed-landing-capture: preserved (native attempt not terminal; references unproven)')
+        return
+    state = (state[0] + attempts[0], state[1] | attempts[1], state[2] | attempts[2])
     for generation, item in items.items():
         if private_only and item['landing_id'] != private_only:
             continue
         if visible[generation] is None:
             continue
         if not visible[generation]:
-            if not private_only and absent(item['directory']):
+            missing_paths = [os.path.join(item['directory'], item['landing_id'] + '.patch'),
+                             os.path.join(repo, '.oms/landing-patches', item['landing_id'] + '.patch')]
+            if not private_only and absent(item['directory']) and not delegation_referenced(repo, item, missing_paths, log, state):
                 release_missing(repo, item, log, evidence, days, apply)
             continue
         try:
@@ -1067,6 +1488,12 @@ def collect(repo, days, apply, private_only=""):
                 scoped_needles.append(item['sha256'].encode())
                 scoped_evidence = reference_bytes(repo, (proof, item), scoped_needles)
             paths = [obj['path'] for obj in objects.values()]
+            all_paths = list(dict.fromkeys(paths + [
+                os.path.join(item['directory'], item['landing_id'] + '.patch'),
+                os.path.join(repo, '.oms/landing-patches', item['landing_id'] + '.patch'),
+            ]))
+            if delegation_referenced(repo, item, all_paths, log, state):
+                continue
             refs = [spelling.encode() for path in paths
                     for spelling in reference_spellings(repo, path)]
             if any(ref in scoped_evidence for ref in refs) or item['sha256'].encode() in scoped_evidence:
@@ -1134,40 +1561,15 @@ def gc_quiescent(repo, days, apply, private_only=""):
             lifecycle_lock.__exit__(None, None, None)
 
     with bounded_lifecycle_lock():
-        marker_dir = Path(repo) / '.oms/delegations'
-        if present(marker_dir):
-            info = marker_dir.lstat()
-            if not stat.S_ISDIR(info.st_mode) or D['is_reparse'](info):
-                raise ValueError('delegation marker directory is unproven')
-            if any(marker_dir.iterdir()):
-                print('managed-landing-capture: preserved (delegation quiescence unproven)')
-                return
-        _, attempts = engine['load_projection'](Path(repo))
-        now = datetime.datetime.now(datetime.timezone.utc)
-
-        def pins_capture(attempt):
-            if attempt.get('terminal') is True:
-                return False
-            # Only the landing-reference writers publish capture references;
-            # their liveness is the owner's, so they veto regardless of age.
-            if (attempt.get('refs') or {}).get('reference_writer') == 'landing-reference-v1':
-                return True
-            # A panel main is a session, not a capture or reference writer.
-            if attempt.get('tool') == 'panel-main':
-                return False
-            # Any other attempt vetoes while its heartbeat is live (the age
-            # rule of `agent-events reconcile`, default 300s); a long-expired
-            # one never finishes and must not pin the quota. Unparseable
-            # time is uncertainty, so it vetoes.
-            try:
-                age = (now - engine['parse_ts'](attempt['last_heartbeat_at'])).total_seconds()
-            except Exception:
-                return True
-            return age < 300
-
-        if any(pins_capture(a) for a in attempts.values()):
-            print('managed-landing-capture: preserved (native attempt not terminal)')
+        if delegation_state(repo) is None:
+            print('managed-landing-capture: preserved (delegation quiescence unproven)')
             return
+        attempts = lifecycle_state(repo)
+        if attempts is None:
+            print('managed-landing-capture: preserved (native attempt not terminal; references unproven)')
+            return
+        if attempts[0]:
+            print('managed-landing-capture: native attempt not terminal; checking per-generation references', flush=True)
         index_env = dict(os.environ,
                          OMS_CAPTURE_INDEX_CODE=('import runpy,sys; runpy.run_path(sys.argv[1])'
                                                  '["collect"](sys.argv[2], int(sys.argv[3]), bool(int(sys.argv[4])), sys.argv[5])'),
@@ -1317,6 +1719,9 @@ def main(args):
 if __name__ == '__main__':
     try:
         main(sys.argv[1:])
+    except QuotaError as exc:
+        print('error: landing capture: ' + str(exc), file=sys.stderr)
+        sys.exit(3)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         print('error: landing capture: ' + str(exc), file=sys.stderr)
         sys.exit(2)

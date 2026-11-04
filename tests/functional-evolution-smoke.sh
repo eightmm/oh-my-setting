@@ -971,9 +971,17 @@ old = (repo / '.oms/landings.jsonl').read_bytes()
 try:
     h['allocate'](str(repo), str(source), 'land-overflow', sha)
 except ValueError as error:
-    assert 'quota' in str(error)
+    msg = str(error)
+    assert 'quota exhausted' in msg and 'count 1/1' in msg and 'oms gc' in msg and 'OMS_LANDING_CAPTURE_COUNT' in msg, msg
 else:
     raise AssertionError('count quota bypassed')
+os.environ['OMS_LANDING_CAPTURE_COUNT'] = '0'
+try:
+    h['allocate'](str(repo), str(source), 'land-overflow-zero', sha)
+except ValueError as error:
+    assert 'invalid OMS_LANDING_CAPTURE_COUNT' in str(error), str(error)
+else:
+    raise AssertionError('zero count quota limit accepted')
 assert (repo / '.oms/landings.jsonl').read_bytes() == old
 collect()
 assert unknown.exists()
@@ -1654,15 +1662,263 @@ if os.name != 'nt':
         release.unlink()
 
 # Marker uncertainty vetoes the locked collector, independently of age/PID.
+# A readable live marker pins only generations it (or an unsettled lease) references.
+def new_leased(name, task_id='', lease_id=''):
+    capture = pathlib.Path(h['allocate'](str(repo), str(source), 'land-' + name, sha))
+    patch = repo / '.oms/landing-patches' / ('land-' + name + '.patch')
+    h['publish'](str(repo), str(capture), str(patch))
+    fields = dict(landing_id='land-' + name, patch=str(patch), patch_sha=sha,
+                  base_sha='fixture-base', task=task_id, lease=lease_id, plan_receipt_sha='',
+                  plan_done_receipt_sha='', approval='', approval_version='')
+    receipt = hashlib.sha256(json.dumps(dict(schema=1, **fields), sort_keys=True,
+                                        separators=(',', ':')).encode()).hexdigest()
+    for event in ('intent', 'complete'):
+        row = dict(schema=1, event=event, receipt_sha=receipt, ts='2020-01-01T00:00:00Z', **fields)
+        h['D']['append'](str(repo / '.oms/landings.jsonl'), h['encoded'](row), 'fixture native receipt')
+    h['seal'](str(repo), 'land-' + name, 'complete')
+    return capture, patch
+
+if os.name != 'nt':
+    # Keep the capture predicate aligned with the engine's authority guard,
+    # rather than allowing another state list to drift independently.
+    import ast
+    engine = ast.parse((root / 'scripts/lib/agent_plan_core.py').read_text())
+    block = next(node for node in ast.walk(engine) if isinstance(node, ast.If) and
+                 ast.dump(node.test) == ast.dump(ast.parse('act == "block"', mode='eval').body))
+    guard = next(node for node in block.body if isinstance(node, ast.If) and
+                 isinstance(node.test, ast.Compare))
+    active_states = ast.literal_eval(guard.test.comparators[0])
+    assert isinstance(active_states, tuple) and active_states
+    # A completed/blocked/cancelled task retains its lease as history; only
+    # the active states pin the journal's exact task/lease link.
+    for state in h['PLAN_STATES']:
+        cap, pub = new_leased('current-' + state, 'task-current', 'lease_current')
+        plan = repo / '.oms/plan/tasks.json'
+        task = {'id': 'task-current', 'state': state, 'lease_id': 'lease_current',
+                'review_lease_id': '', 'patch': 'elsewhere.patch'}
+        plan.write_text(json.dumps({'tasks': {'task-current': task}}))
+        h['gc'](str(repo), 0, True)
+        assert cap.exists() == pub.exists() == (state in active_states), state + ' retained lease has wrong capture authority'
+        assert h['_task_lease_is_live'](task) == (state in active_states), state + ' lease authority differs from engine'
+        task['lease_id'] = ''
+        plan.write_text(json.dumps({'tasks': {'task-current': task}}))
+        h['gc'](str(repo), 0, True)
+        assert not cap.exists() and not pub.exists(), state + ' empty current lease pinned capture'
+        plan.unlink()
+
+    marker_root = repo / '.oms/delegations'
+    marker_root.mkdir()
+    for name in ('council-context.', 'council-context.ABCDE', 'council-context.ABCDEFx',
+                 'unknown-directory'):
+        entry = marker_root / name
+        entry.mkdir()
+        cap, pub = new('unknown-context-' + name)
+        h['gc'](str(repo), 0, True)
+        assert cap.exists() and pub.exists(), 'unknown directory was accepted: ' + name
+        entry.rmdir()
+        h['gc'](str(repo), 0, True)
+        assert not cap.exists() and not pub.exists()
+    context = marker_root / 'council-context.ABCDEF'
+    context.mkdir()
+    (context / 'answer-0.md').write_text('council evidence')
+    cap, pub = new('council-context')
+    h['gc'](str(repo), 0, True)
+    assert not cap.exists() and not pub.exists(), 'council context vetoed GC'
+    shutil.rmtree(context)
+    context.symlink_to(sandbox, target_is_directory=True)
+    cap, pub = new('linked-council-context')
+    h['gc'](str(repo), 0, True)
+    assert cap.exists() and pub.exists(), 'symlinked council context was accepted'
+    context.unlink()
+    h['gc'](str(repo), 0, True)
+    assert not cap.exists() and not pub.exists()
+    marker_root.rmdir()
+
 (repo / '.oms/delegations').mkdir()
-(repo / '.oms/delegations/unknown.json').write_text('{malformed')
-h['gc'](str(repo), 0, True)
-assert unknown.exists()
-(repo / '.oms/delegations/unknown.json').unlink()
-# Only a live non-terminal attempt pins the quota: one whose heartbeat is
-# long expired (reconcile's age rule) never finishes, so it must not veto.
-# The landing-reference marker is the exception below: those writers publish
-# capture references and veto whatever their heartbeat age.
+unreferenced_cap, unreferenced_pub = new_leased('marker-unreferenced', 'task-done', 'lease_done')
+released_review_cap, released_review_pub = new_leased('released-review', 'task-released', 'lease_released_review')
+replaced_arch_cap, replaced_arch_pub = new_leased('replaced-archive', 'task-replaced-archive', 'lease_replaced_archive')
+unreceipted_arch_cap, unreceipted_arch_pub = new_leased('unreceipted-archive', 'task-unreceipted-archive', 'lease_unreceipted_archive')
+ref_gen_cap, ref_gen_pub = new_leased('marker-ref-gen', 'task-gen', 'lease_gen')
+ref_land_cap, ref_land_pub = new_leased('marker-ref-land', 'task-land', 'lease_land')
+ref_esc_gen_cap, ref_esc_gen_pub = new_leased('marker-ref-esc-gen', 'task-esc-gen', 'lease_esc_gen')
+ref_esc_land_cap, ref_esc_land_pub = new_leased('marker-ref-esc-land', 'task-esc-land', 'lease_esc_land')
+ref_lease_cap, ref_lease_pub = new_leased('marker-ref-lease', 'task-live-lease', 'lease_live_marker')
+unsettled_cap, unsettled_pub = new_leased('unsettled-lease', 'task-unsettled', 'lease_unsettled_plan')
+unreferenced_item = h['find'](str(repo), capture=str(unreferenced_cap))
+released_review_item = h['find'](str(repo), capture=str(released_review_cap))
+replaced_arch_item = h['find'](str(repo), capture=str(replaced_arch_cap))
+unreceipted_arch_item = h['find'](str(repo), capture=str(unreceipted_arch_cap))
+ref_gen_item = h['find'](str(repo), capture=str(ref_gen_cap))
+ref_land_item = h['find'](str(repo), capture=str(ref_land_cap))
+ref_esc_gen_item = h['find'](str(repo), capture=str(ref_esc_gen_cap))
+ref_esc_land_item = h['find'](str(repo), capture=str(ref_esc_land_cap))
+
+for bad_name, bad_body in (
+        ('unknown.json', '{malformed'),
+        ('empty.json', ''),
+        ('missing-id.json', json.dumps({'schema': 1, 'pid': os.getpid()})),
+        ('bad-schema.json', json.dumps({'schema': 999, 'id': 'bad', 'pid': os.getpid()})),
+        ('no-native.json', json.dumps({'schema': 4, 'id': 'no-native', 'pid': os.getpid()})),
+        ('bad-gen.json', json.dumps({'schema': 1, 'id': 'bad-gen', 'pid': os.getpid(), 'generation': 'invalid'})),
+        ('bad-refs.json', json.dumps({'schema': 1, 'id': 'bad-refs', 'pid': os.getpid(), 'references': None})),
+        ('bad-nested-refs.json', json.dumps({'schema': 1, 'id': 'bad-nested', 'pid': os.getpid(), 'references': {'nested': ['']}})),
+        ('bad-key-refs.json', json.dumps({'schema': 1, 'id': 'bad-key', 'pid': os.getpid(), 'references': {'': ['x']}})),
+        ('bad name.json', json.dumps({'schema': 1, 'id': 'unsafe-name', 'pid': os.getpid()}))):
+    bad_marker = repo / '.oms/delegations' / bad_name
+    bad_marker.write_text(bad_body)
+    h['gc'](str(repo), 0, True)
+    assert unknown.exists() and unreferenced_cap.exists() and unreferenced_pub.exists(), bad_name
+    bad_marker.unlink()
+
+if os.name != 'nt':
+    def write_marker(name, **extra):
+        payload = {'schema': 4, 'id': name, 'pid': os.getpid(),
+                   'native_pid': os.getpid(), 'native_pid_source': 'msys-proc-v1'}
+        payload.update(extra)
+        (repo / '.oms/delegations' / (name + '.json')).write_text(json.dumps(payload))
+
+    def u_escape(text):
+        return ''.join('\\u%04x' % ord(ch) for ch in text)
+
+    def write_raw_marker(name, raw_extra, expected_text):
+        base = json.dumps({'schema': 4, 'id': name, 'pid': os.getpid(),
+                           'native_pid': os.getpid(), 'native_pid_source': 'msys-proc-v1'})
+        raw_json = base[:-1] + ',' + raw_extra + '}'
+        assert expected_text.encode() not in raw_json.encode()
+        (repo / '.oms/delegations' / (name + '.json')).write_text(raw_json)
+
+    write_marker('live-unrelated', task_id='task-unrelated', lease_id='lease_unrelated')
+    write_marker('dead-ref', pid=2147483647, native_pid=2147483647,
+                 generation=unreferenced_item['generation'], landing_id=unreferenced_item['landing_id'])
+    write_marker('live-ref-gen', generation=ref_gen_item['generation'])
+    write_marker('live-ref-land', landing_id=ref_land_item['landing_id'])
+    write_raw_marker('live-ref-esc-gen',
+                     '"generation":"' + u_escape(ref_esc_gen_item['generation']) + '"',
+                     ref_esc_gen_item['generation'])
+    write_raw_marker('live-ref-esc-land',
+                     '"landing_id":"' + u_escape(ref_esc_land_item['landing_id']) + '"',
+                     ref_esc_land_item['landing_id'])
+    write_marker('live-ref-lease', task_id='task-live-lease', lease_id='lease_live_marker')
+    retire = runpy.run_path(str(root / 'scripts/lib/plan-retire.py'))
+    (repo / '.oms/plan/tasks.json').write_text(json.dumps({
+        'schema': 3, 'plan_id': 'plan_' + 'a' * 32, 'goal': 'replaced archive test',
+        'tasks': {
+            'task-replaced-archive': {
+                'id': 'task-replaced-archive', 'title': 'replaced running', 'state': 'running',
+                'lease_id': 'lease_replaced_archive', 'review_lease_id': '',
+                'patch': os.path.relpath(replaced_arch_pub, repo)
+            }
+        }
+    }))
+    os.environ['OMS_REPO'] = str(repo)
+    try:
+        replaced_archive_rel = retire['archive_replacement']({
+            'path': str(repo / '.oms/plan/tasks.json'),
+            'ts': '2026-01-01T00:00:00Z',
+            'states': set(h['PLAN_STATES']),
+            'id_re': h['ID_RE'],
+            'die': lambda msg: (_ for _ in ()).throw(AssertionError(msg)),
+            'durable_jsonl': str(root / 'scripts/lib/durable-jsonl.py'),
+        })
+    finally:
+        os.environ.pop('OMS_REPO', None)
+    replaced_archive_path = repo / replaced_archive_rel
+    assert replaced_archive_path.exists() and (repo / '.oms/plan/retirements.jsonl').exists()
+    unreceipted_bytes = json.dumps({
+        'schema': 3, 'plan_id': 'plan_' + 'b' * 32, 'goal': 'unreceipted archive test',
+        'tasks': {
+            'task-unreceipted-archive': {
+                'id': 'task-unreceipted-archive', 'title': 'unreceipted running', 'state': 'running',
+                'lease_id': 'lease_unreceipted_archive', 'review_lease_id': ''
+            }
+        }
+    }, sort_keys=True).encode('utf-8')
+    unreceipted_sha = hashlib.sha256(unreceipted_bytes).hexdigest()
+    unreceipted_archive_path = repo / '.oms/plan' / ('tasks.%s.archive.json' % unreceipted_sha)
+    unreceipted_archive_path.write_bytes(unreceipted_bytes)
+    (repo / '.oms/plan/tasks.json').write_text(json.dumps({
+        'schema': 3, 'plan_id': 'plan_' + 'c' * 32, 'goal': 'lease test',
+        'tasks': {
+            'task-unsettled': {
+                'id': 'task-unsettled', 'title': 'unsettled', 'state': 'running',
+                'lease_id': 'lease_unsettled_plan', 'review_lease_id': ''
+            },
+            'task-released': {
+                'id': 'task-released', 'title': 'released after review', 'state': 'ready',
+                'lease_id': '', 'review_lease_id': 'lease_released_review'
+            }
+        }
+    }))
+    count_before, bytes_before = h['usage'](str(repo))
+    h['gc'](str(repo), 0, True)
+    count_mid, bytes_mid = h['usage'](str(repo))
+    assert not unreferenced_cap.exists() and not unreferenced_pub.exists(), 'live unrelated marker blocked unreferenced GC'
+    assert not released_review_cap.exists() and not released_review_pub.exists(), 'released review_lease_id pinned GC'
+    assert not replaced_arch_cap.exists() and not replaced_arch_pub.exists(), 'receipt-backed replaced archive pinned GC'
+    assert unreceipted_arch_cap.exists() and unreceipted_arch_pub.exists(), 'archive with no receipt was not preserved'
+    reclaimed_bytes = unreferenced_item['bytes'] + released_review_item['bytes'] + replaced_arch_item['bytes']
+    assert count_mid == count_before - 3 and bytes_mid == bytes_before - reclaimed_bytes, (
+        count_before, count_mid, bytes_before, bytes_mid)
+    assert ref_gen_cap.exists() and ref_gen_pub.exists(), 'live marker generation reference was not preserved'
+    assert ref_land_cap.exists() and ref_land_pub.exists(), 'live marker landing_id reference was not preserved'
+    assert ref_esc_gen_cap.exists() and ref_esc_gen_pub.exists(), 'escaped live marker generation reference was not preserved'
+    assert ref_esc_land_cap.exists() and ref_esc_land_pub.exists(), 'escaped live marker landing_id reference was not preserved'
+    assert ref_lease_cap.exists() and ref_lease_pub.exists(), 'live marker lease reference was not preserved'
+    assert unsettled_cap.exists() and unsettled_pub.exists(), 'unsettled plan lease reference was not preserved'
+
+    for name in ('live-ref-gen', 'live-ref-land', 'live-ref-lease'):
+        (repo / '.oms/delegations' / (name + '.json')).unlink()
+    (repo / '.oms/plan/tasks.json').write_text(json.dumps({
+        'schema': 3, 'plan_id': 'plan_' + 'c' * 32, 'goal': 'lease test',
+        'tasks': {
+            'task-unsettled': {
+                'id': 'task-unsettled', 'title': 'settled', 'state': 'done',
+                'lease_id': 'lease_unsettled_plan', 'review_lease_id': ''
+            }
+        }
+    }))
+    h['gc'](str(repo), 0, True)
+    count_esc, bytes_esc = h['usage'](str(repo))
+    assert not ref_gen_cap.exists() and not ref_land_cap.exists() and not ref_lease_cap.exists() and not unsettled_cap.exists()
+    assert unreceipted_arch_cap.exists() and unreceipted_arch_pub.exists(), 'archive with no receipt was collected'
+    assert ref_esc_gen_cap.exists() and ref_esc_gen_pub.exists(), 'escaped generation capture was collected'
+    assert ref_esc_land_cap.exists() and ref_esc_land_pub.exists(), 'escaped landing_id capture was collected'
+    assert count_esc == count_mid - 4, (count_mid, count_esc)
+
+    write_raw_marker('live-ref-esc-gen',
+                     '"references":{"nested":["' + u_escape(ref_esc_gen_item['generation']) + '"]}',
+                     ref_esc_gen_item['generation'])
+    write_raw_marker('live-ref-esc-land',
+                     '"references":{"nested":["' + u_escape(ref_esc_land_item['landing_id']) + '"]}',
+                     ref_esc_land_item['landing_id'])
+    h['gc'](str(repo), 0, True)
+    assert ref_esc_gen_cap.exists() and ref_esc_gen_pub.exists(), 'nested escaped generation reference was not preserved'
+    assert ref_esc_land_cap.exists() and ref_esc_land_pub.exists(), 'nested escaped landing_id reference was not preserved'
+    assert h['usage'](str(repo)) == (count_esc, bytes_esc), 'quota accounting changed while escaped markers remained live'
+
+    for name in ('live-ref-esc-gen', 'live-ref-esc-land', 'live-unrelated', 'dead-ref'):
+        (repo / '.oms/delegations' / (name + '.json')).unlink()
+    unreceipted_archive_path.unlink()
+    replaced_archive_path.unlink()
+    (repo / '.oms/plan/retirements.jsonl').unlink()
+    (repo / '.oms/plan/tasks.json').unlink()
+    h['gc'](str(repo), 0, True)
+    count_after, bytes_after = h['usage'](str(repo))
+    assert not ref_esc_gen_cap.exists() and not ref_esc_land_cap.exists() and not unreceipted_arch_cap.exists()
+    assert count_after == count_esc - 3 and bytes_after == bytes_esc - ref_esc_gen_item['bytes'] - ref_esc_land_item['bytes'] - unreceipted_arch_item['bytes'], (
+        count_esc, count_after, bytes_esc, bytes_after)
+else:
+    for cap, pub in ((unreferenced_cap, unreferenced_pub), (released_review_cap, released_review_pub),
+                     (replaced_arch_cap, replaced_arch_pub), (unreceipted_arch_cap, unreceipted_arch_pub),
+                     (ref_gen_cap, ref_gen_pub),
+                     (ref_land_cap, ref_land_pub), (ref_esc_gen_cap, ref_esc_gen_pub),
+                     (ref_esc_land_cap, ref_esc_land_pub), (ref_lease_cap, ref_lease_pub),
+                     (unsettled_cap, unsettled_pub)):
+        shutil.rmtree(cap.parent)
+        pub.unlink()
+# Live attempts pin only their references. Expired ordinary attempts have no
+# authority; landing-reference writers retain their references regardless of age.
 ev = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
 def stale_attempt(provider, tool, refs=None):
     attempt = ev['create_attempt'](pathlib.Path(repo), provider=provider, tool=tool, refs=refs)
@@ -1675,8 +1931,9 @@ if os.name != 'nt':  # Windows gc preserves before reaching the lifecycle veto
     capture3, patch3 = new('expired')
     h['gc'](str(repo), 0, True)
     assert not capture3.exists() and not patch3.exists(), 'long-expired foreign attempt pinned GC'
-    stale_attempt('local', 'agent-task', {'reference_writer': 'landing-reference-v1'})
     capture3b, patch3b = new('marked')
+    stale_attempt('local', 'patch-admit', {'reference_writer': 'landing-reference-v1',
+                                        'patch': os.path.relpath(patch3b, repo)})
     h['gc'](str(repo), 0, True)
     assert capture3b.exists() and patch3b.exists(), 'expired reference-writer attempt did not veto GC'
 subprocess.run(['bash', str(root / 'scripts/agent-events.sh'), '--repo', str(repo), 'start',
@@ -1684,7 +1941,92 @@ subprocess.run(['bash', str(root / 'scripts/agent-events.sh'), '--repo', str(rep
                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 capture4, patch4 = new('active')
 h['gc'](str(repo), 0, True)
-assert capture4.exists() and patch4.exists(), 'active native attempt did not veto GC'
+if os.name != 'nt':
+    assert not capture4.exists() and not patch4.exists(), 'unrelated fresh attempt vetoed GC'
+    hashed_cap, hashed_pub = new('hashed-writer-reference')
+    ev['create_attempt'](repo, provider='local', tool='patch-admit', refs={
+        'reference_writer': 'landing-reference-v1',
+        'reference_input_sha256': h['digest'](str(hashed_cap).encode())})
+    h['gc'](str(repo), 0, True)
+    assert hashed_cap.exists() and hashed_pub.exists(), 'hashed reference-writer input did not pin capture'
+    unrelated_cap, unrelated_pub = new('unrelated-to-hashed-writer')
+    h['gc'](str(repo), 0, True)
+    assert not unrelated_cap.exists() and not unrelated_pub.exists(), 'hashed writer vetoed unrelated capture'
+    # Task packet writers bind the destination, not the capture they may add.
+    reference = root / 'scripts/lib/landing-reference.py'
+    packet = repo / '.oms/task/current.md'
+    packet.parent.mkdir(parents=True, exist_ok=True)
+    packet.write_text('pending task packet')
+    packet_cap, packet_pub = new('pending-task-packet')
+    operation = subprocess.check_output([
+        sys.executable, str(reference), 'begin', str(repo), 'agent-task', str(packet)],
+        text=True).strip()
+    for result in (None, '1'):
+        if result is not None:
+            subprocess.run([sys.executable, str(reference), 'finish', str(repo), operation, result], check=True)
+        h['gc'](str(repo), 0, True)
+        assert packet_cap.exists() and packet_pub.exists(), 'task packet writer lost pending capture'
+    subprocess.run([sys.executable, str(reference), 'finish', str(repo), operation, 'refuse-no-write'], check=True)
+    h['gc'](str(repo), 0, True)
+    assert not packet_cap.exists() and not packet_pub.exists(), 'terminal task writer pinned capture'
+
+    observer_cap, observer_pub = new('unscoped-local-observer')
+    observer = ev['create_attempt'](repo, provider='local', tool='capture-observer')
+    h['gc'](str(repo), 0, True)
+    assert observer_cap.exists() and observer_pub.exists(), 'unscoped local observer lost capture'
+    ev['append_lifecycle'](repo, ev['new_event'](
+        observer, 2, 'attempt.state_changed', from_state='queued', to_state='failed'))
+    h['gc'](str(repo), 0, True)
+    assert not observer_cap.exists() and not observer_pub.exists(), 'terminal local observer pinned capture'
+
+    for number, (task_id, refs) in enumerate((
+            ('task-lifecycle', {}),
+            ('task-lifecycle', {'panel_lease_id': 'lease_lifecycle'}),
+            ('', {'panel_lease_id': 'lease_lifecycle'}))):
+        linked_cap, linked_pub = new_leased('lifecycle-linked-' + str(number), 'task-lifecycle', 'lease_lifecycle')
+        other_cap, other_pub = new('lifecycle-unrelated-' + str(number))
+        attempt = ev['create_attempt'](repo, provider='codex', tool='peer-delegate', task_id=task_id, refs=refs)
+        h['gc'](str(repo), 0, True)
+        assert linked_cap.exists() and linked_pub.exists(), 'standard lifecycle task/lease did not pin capture'
+        assert not other_cap.exists() and not other_pub.exists(), 'standard lifecycle task/lease vetoed unrelated capture'
+        ev['append_lifecycle'](repo, ev['new_event'](
+            attempt, 2, 'attempt.state_changed', from_state='queued', to_state='failed'))
+        h['gc'](str(repo), 0, True)
+        assert not linked_cap.exists() and not linked_pub.exists(), 'terminal lifecycle task/lease pinned capture'
+
+    capture4, patch4 = new('active-reference')
+    ev['create_attempt'](repo, provider='codex', tool='capture-ref-fixture',
+                         refs={'patch': os.path.relpath(patch4, repo)})
+    h['gc'](str(repo), 0, True)
+    assert capture4.exists() and patch4.exists(), 'fresh referencing attempt did not pin capture'
+    for number, input_hash in enumerate(('', '0', 'z' * 64, '0' * 64)):
+        edge_cap, edge_pub = new('writer-hash-edge-' + str(number))
+        attempt = ev['create_attempt'](repo, provider='local', tool='patch-admit', refs={
+            'reference_writer': 'landing-reference-v1', 'reference_input_sha256': input_hash})
+        h['gc'](str(repo), 0, True)
+        if input_hash == '0' * 64:
+            assert not edge_cap.exists() and not edge_pub.exists(), 'unrelated valid writer hash vetoed GC'
+        else:
+            assert edge_cap.exists() and edge_pub.exists(), 'unknown writer hash did not preserve capture'
+        ev['append_lifecycle'](repo, ev['new_event'](
+            attempt, 2, 'attempt.state_changed', from_state='queued', to_state='failed',
+            actor={'kind': 'system', 'name': 'fixture'}))
+        h['gc'](str(repo), 0, True)
+        assert not edge_cap.exists() and not edge_pub.exists(), 'terminal unknown writer pinned capture'
+    unreadable_cap, unreadable_pub = new('unreadable-attempt')
+    lifecycle = repo / '.oms/lifecycle/events.jsonl'
+    lifecycle_before = lifecycle.read_bytes()
+    lifecycle.write_bytes(lifecycle_before + b'{malformed\n')
+    try:
+        h['gc'](str(repo), 0, True)
+        assert unreadable_cap.exists() and unreadable_pub.exists(), 'unreadable attempt did not preserve captures'
+    finally:
+        lifecycle.write_bytes(lifecycle_before)
+    h['gc'](str(repo), 0, True)
+    assert not unreadable_cap.exists() and not unreadable_pub.exists(), 'repaired unrelated attempt pinned capture'
+else:
+    assert capture4.exists() and patch4.exists()
+
 # The destructive collector is reachable only through the fully locked gc
 # entrypoint. Its former direct `collect` CLI path must now be rejected.
 rejected_collect = subprocess.run([sys.executable, str(root / 'scripts/lib/landing-capture.py'),

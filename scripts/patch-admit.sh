@@ -201,8 +201,11 @@ if [ "$managed_input" = 0 ] && [ -z "$REPORT" ] &&
   agent_memory_ensure_oms_ignore "$reference_state" || fail "cannot initialize private admission state"
   intake_sha="$(oms_sha256_file "$PATCH")" || fail "cannot hash admission input"
   intake_id="land-admit-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}"
+  capture_rc=0
   PATCH="$(oms_with_file_lock "$reference_state/.oms/landings.jsonl" python3 "$ROOT_LIB/landing-capture.py" \
-    allocate "$reference_state" "$PATCH" "$intake_id" "$intake_sha" "$REPO")" || fail "cannot capture admission input"
+    allocate "$reference_state" "$PATCH" "$intake_id" "$intake_sha" "$REPO")" || capture_rc=$?
+  [ "$capture_rc" -ne 3 ] || exit 1
+  [ "$capture_rc" -eq 0 ] || fail "cannot capture admission input"
   PATCH="${PATCH//$'\r'/}"
   managed_input=1
   intake_owned=1
