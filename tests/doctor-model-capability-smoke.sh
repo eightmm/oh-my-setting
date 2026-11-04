@@ -19,7 +19,7 @@ mkdir -p "$fixture/scripts/lib" "$fixture/rules" "$fixture/.agents/plugins" \
   "$home/.gemini/config/skills" "$home/.local/bin" "$bin" "$project"
 cp "$ROOT/scripts/doctor.sh" "$fixture/scripts/doctor.sh"
 cp "$ROOT/scripts/lib/tool-lock.py" "$ROOT/scripts/lib/doctor-probe-memo.sh" "$ROOT/scripts/lib/platform.sh" \
-  "$ROOT/scripts/lib/doctor-probe-memo.py" "$ROOT/scripts/lib/run-bounded.py" "$fixture/scripts/lib/"
+  "$ROOT/scripts/lib/doctor-probe-memo.py" "$ROOT/scripts/lib/run-bounded.py" "$ROOT/scripts/lib/provider-registry.sh" "$fixture/scripts/lib/"
 cp "$ROOT/tools.lock.json" "$fixture/tools.lock.json"
 chmod +x "$fixture/scripts/doctor.sh"
 
