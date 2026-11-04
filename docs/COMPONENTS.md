@@ -73,6 +73,7 @@ explains overlapping entrypoints.
 | `state-verify` | Check consistency of repository harness state. | `oms state-verify` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `agent-memory` | Maintain shared harness memory. | `oms agent-memory` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `journal` | Read and manage the local-first Work Journal. | `oms journal` | [Work Journal](WORK-JOURNAL.md) |
+| `report` | Preview and file a privacy-checked upstream bug or feature request. | `oms report` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `fail-ledger` | Record and inspect cross-session failures. | `oms fail-ledger` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `artifact-index` | Inspect and maintain indexed harness artifacts. | `oms artifact-index` | [Asking other agents](#asking-other-agents) |
 | `session-handoff` | Build a compact digest from an agent session. | `oms session-handoff` | [State, memory, and handoff](#state-memory-and-handoff) |
@@ -1232,6 +1233,7 @@ Recovery tools include:
 ```bash
 oms checkpoint create --label "before risky edit"
 oms fail-ledger list
+oms report bug --from-failure FINGERPRINT --dry-run
 oms artifact-index unresolved
 oms artifact-index salvage
 oms approval-inbox expire [--apply]
@@ -1239,6 +1241,33 @@ oms approval-inbox reconcile --older-than-seconds 300 [--apply]
 oms patch-land --recover
 oms gc
 ```
+
+`oms report bug [--from-failure FINGERPRINT] [--title TEXT]` and
+`oms report feature --title TEXT` always preview the full draft. Optional
+`--message TEXT` or piped stdin supplies the user's description; files and
+project content are never collected automatically. The default metadata is
+limited to OMS version/commit, OS family, Bash/Python major.minor and, when
+selected, the failure fingerprint, bare OMS verb, exit, `failure_code` and repeat
+count. Ledger summaries and command arguments are excluded. Descriptions and
+user-supplied titles normalize CRLF to LF and pass the peer outbound scanner
+and additional path/hostname/IP checks; the generated metadata header is not
+scanned as user text. Ordinary filenames, dotted identifiers, test ids, times
+and slash commands are accepted. Sensitive user text is refused, never silently
+edited. The verb must name an installed public OMS tool; otherwise it is
+`unavailable`. Blank failure commands are rejected before append. Actionable
+ledger records print `report: oms report bug --from-failure FP`; retiring/transient failures do
+not gain that hint. The public failure JSON additionally exposes `failure_code`.
+
+`--dry-run` previews without network access. Publication requires `--yes` or an
+interactive y (EOF means no); a noninteractive call without `--yes` exits
+nonzero and prints a prefilled URL. The destination is the OMS checkout's own GitHub origin, or
+`OMS_REPORT_REPO=owner/name`. Authenticated `gh` searches open issues by
+fingerprint before publishing; a match receives a comment (interactive users
+confirm that choice). Otherwise it creates an issue with `bug`/`enhancement`
+when that label exists. Without authenticated `gh`, it prints a URL capped at
+8,000 characters, explicitly marking any shortened body. No browser opens.
+Requires Bash 5.0 and Python 3.11. A failed or interrupted publication is never
+automatically retried; inspect GitHub before retrying because the post may exist.
 
 ## Graphs
 

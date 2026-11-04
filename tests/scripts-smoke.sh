@@ -22310,7 +22310,7 @@ test_oms_dispatcher_lists_and_dispatches() {
   out="$("$bin/oms" list --all)" || fail "expanded catalog should succeed"
   printf '%s' "$out" | grep >/dev/null -E '^run-ledger ' || fail "oms list should include run-ledger"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
-    runtime sync-shared; do
+    runtime report sync-shared; do
     printf '%s\n' "$out" | grep >/dev/null -E "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
@@ -23838,6 +23838,238 @@ print(row["hookSpecificOutput"]["additionalContext"])
 
 
 
+}
+
+test_fail_ledger_report_privacy_and_preview() {
+  local project="$TMP/report-ledger" out fp value rc
+  make_committed_repo "$project"
+  out="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd 'oms doctor --project private-project' --exit 1 \
+    --summary "failure on $(hostname) in $project" --failure-code verifier_failed 2>&1)"
+  fp="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" list --json |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][0]["fingerprint"])')"
+  contains "$out" "report: oms report bug --from-failure $fp" || fail "actionable failure needs report hint"
+  out="$(cd "$project" && OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/oms" report bug \
+    --from-failure "$fp" --message 'Please improve the diagnostic.' --dry-run </dev/null)"
+  contains "$out" 'Verb: oms doctor' || fail "report must retain the bare OMS verb"
+  contains "$out" 'Failure code: verifier_failed' || fail "report must retain failure code"
+  contains "$out" 'Repeat count: 1' || fail "report must retain count"
+  contains "$out" 'Please improve the diagnostic.' || fail "description missing"
+  if contains "$out" private-project || contains "$out" "$project" || contains "$out" "$(hostname)"; then
+    fail "report leaked free-form ledger or project data"
+  fi
+  for value in "/ho""me/planted/private" "$(hostname)" '192.0.2.1' '2001:db8::1' '/opt/private'; do
+    rc=0
+    out="$(OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --dry-run --message "$value" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || fail "sensitive description accepted"
+    contains "$out" 'report:' || fail "refusal needs a reason"
+    if contains "$out" 'Title:'; then fail "refused draft was displayed"; fi
+  done
+  value="pass""word=planted-material"
+  if OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --dry-run --message "$value" >/dev/null 2>&1; then
+    fail "sensitive description must use outbound scanner"
+  fi
+  out="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd 'oms doctor' --exit 1 --kind hook 2>&1)"
+  if contains "$out" 'report: oms report'; then fail "retiring failure gained report hint"; fi
+  out="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd 'oms run' --exit 1 --failure-code provider_capacity 2>&1)"
+  if contains "$out" 'report: oms report'; then fail "transient failure gained report hint"; fi
+  out="$(printf 'Description from stdin' | OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --dry-run)"
+  contains "$out" 'Description from stdin' || fail "stdin description missing"
+  for value in 'doctor.sh README.md tasks.json' 'package.module e.g. i.e.' \
+    'tests/test_doctor.py::test_case at 12:34:56' '/plan' $'First line\r\nSecond line'; do
+    out="$(OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --message "$value" --dry-run </dev/null)" ||
+      fail "ordinary diagnostic text refused: $value"
+    if contains "$out" $'\r'; then fail "CRLF was not normalized"; fi
+  done
+  for value in 'not-a-public-tool' 'check-bash32'; do
+    (cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record --cmd "oms $value" --exit 1 >/dev/null 2>&1)
+    fp="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" list --json |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][-1]["fingerprint"])')"
+    out="$(cd "$project" && OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --from-failure "$fp" --dry-run </dev/null)"
+    contains "$out" 'Verb: unavailable' || fail "unknown or internal tool leaked into verb"
+  done
+  local before
+  before="$(cat "$project/.oms/failures.jsonl")"
+  for value in '' ' ' $'\t\r\n'; do
+    if (cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record --cmd "$value" --exit 1 >/dev/null 2>&1); then
+      fail "blank command accepted"
+    fi
+    [ "$before" = "$(cat "$project/.oms/failures.jsonl")" ] || fail "blank command wrote a ledger row"
+  done
+  printf '[]\n' > "$TMP/report-malformed.jsonl"
+  (cd "$project" && OMS_FAIL_LEDGER="$TMP/report-malformed.jsonl" bash "$ROOT/scripts/fail-ledger.sh" \
+    record --cmd 'oms doctor' --exit 1 >/dev/null 2>&1) || fail "hint count failure changed record success"
+  OMS_STATE_REPO="$project" python3 -B - "$ROOT" <<'PY' || fail "hostname or interactive EOF regression"
+import contextlib, io, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+root = Path(sys.argv[1])
+code = (root / 'scripts/report.sh').read_text().split("<<'PY'\n", 1)[1].rsplit('\nPY\n', 1)[0]
+real_run = subprocess.run
+class Terminal(io.StringIO):
+    def isatty(self):
+        return True
+
+def invoke(host, args, answers=()):
+    calls = []
+    def run(command, **kwargs):
+        if command[0] != 'gh':
+            return real_run(command, **kwargs)
+        calls.append(command[:3])
+        result = '[{"number":7}]' if command[1:3] == ['issue', 'list'] else ''
+        return subprocess.CompletedProcess(command, 0, result, '')
+    out, err = io.StringIO(), io.StringIO()
+    with patch.dict(os.environ, OMS_REPORT_REPO='sample/oms'), \
+         patch.object(sys, 'argv', ['report', str(root)] + args), \
+         patch.object(sys, 'stdin', Terminal()), patch('socket.gethostname', return_value=host), \
+         patch('builtins.input', side_effect=list(answers)), \
+         patch('shutil.which', return_value='stub-gh'), patch('subprocess.run', side_effect=run), \
+         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            exec(compile(code, 'report', 'exec'), {'__name__': '__main__'})
+        except SystemExit as result:
+            status = result.code
+        else:
+            status = 0
+    return status, out.getvalue(), err.getvalue(), calls
+for host in ('OMS', 'linux', 'wsl', 'macos', 'bash', 'python', 'Bash', 'ab', 'abc', ''):
+    status, out, err, calls = invoke(host, ['bug', '--dry-run', '--message', host + ' reports an ordinary failure'])
+    assert status == 0, (host, err)
+for value in ('node-fixtureish', 'node-fixture.sh', 'package.node-fixture', 'node-fixture::test'):
+    assert invoke('node-fixture', ['bug', '--dry-run', '--message', value])[0] == 0, value
+for value in ('on node-fixture now', 'on node-fixture: error', 'on node-fixture.'):
+    assert invoke('node-fixture', ['bug', '--dry-run', '--message', value])[0] != 0, value
+assert invoke('node', ['bug', '--dry-run', '--message', 'on node now'])[0] != 0
+status, out, err, calls = invoke('node-fixture', ['bug'], [EOFError()])
+assert status == 0 and 'Not published' in out and not calls, (status, out, err, calls)
+# Exercise the second confirmation without touching the network or creating an issue.
+ledger = root / 'scripts/fail-ledger.sh'
+real_run(['bash', str(ledger), 'record', '--cmd', 'oms doctor', '--exit', '1'],
+         check=True, capture_output=True)
+import json
+row = json.loads(real_run(['bash', str(ledger), 'list', '--json'],
+                         check=True, capture_output=True, text=True).stdout)['failures'][-1]
+status, out, err, calls = invoke('node-fixture', ['bug', '--from-failure', row['fingerprint']], ['y', EOFError()])
+assert status == 0 and 'Not published' in out, (status, out, err)
+assert ['gh', 'issue', 'list'] in calls and all(c[1:] not in (['issue', 'create'], ['issue', 'comment']) for c in calls)
+PY
+}
+
+test_fail_ledger_report_consent_and_url() {
+  local bin="$TMP/report-no-gh" out rc arg value
+  mkdir -p "$bin"
+  for arg in bash python3 git dirname sed grep tr cat; do
+    ln -s "$(command -v "$arg")" "$bin/$arg"
+  done
+  rc=0
+  out="$(PATH="$bin" OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" feature \
+    --title 'A better diagnostic' </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "non-tty publication without --yes must refuse"
+  contains "$out" 'Title: A better diagnostic' || fail "draft must always display"
+  contains "$out" 'https://github.com/sample/oms/issues/new?' || fail "consent refusal needs URL"
+  out="$(PATH="$bin" OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" feature \
+    --title 'A better diagnostic' --yes </dev/null)"
+  contains "$out" 'gh unavailable' || fail "gh absence needs explanation"
+  contains "$out" 'title=A+better+diagnostic' || fail "URL must encode title"
+  for value in '' '0' '../bad' 'a/b/c'; do
+    if OMS_REPORT_REPO="$value" bash "$ROOT/scripts/report.sh" bug --dry-run </dev/null >/dev/null 2>&1; then
+      fail "malformed destination accepted"
+    fi
+  done
+  for value in '' '0' 'abcdefabcdefabc' 'abcdefabcdefabcde' 'gggggggggggggggg'; do
+    if OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --from-failure "$value" \
+      --dry-run </dev/null >/dev/null 2>&1; then fail "malformed fingerprint accepted"; fi
+  done
+  for value in '' ' '; do
+    if OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" feature --title "$value" \
+      --dry-run </dev/null >/dev/null 2>&1; then fail "empty feature title accepted"; fi
+  done
+  # Exercise the exact URL cap and both sides without depending on encoded lengths.
+  python3 - "$ROOT" "$bin" <<'PY' || fail "URL bounds failed"
+import os, subprocess, sys
+from urllib.parse import parse_qs, urlsplit
+root, bin_dir = sys.argv[1:]
+env = dict(os.environ, PATH=bin_dir, OMS_REPORT_REPO='sample/oms')
+base = 'https://github.com/sample/oms/issues/new?title=OMS+bug+report&body='
+metadata = subprocess.check_output(['bash', root + '/scripts/report.sh', 'bug', '--dry-run'],
+                                   input='', text=True, env=env).split('\n\n', 1)[1]
+from urllib.parse import quote_plus
+room = 8000 - len(base) - len(quote_plus(metadata.rstrip('\n') + '\n\n\n'))
+for size in (0, room - 1, room, room + 1, 16000):
+    result = subprocess.run(['bash', root + '/scripts/report.sh', 'bug', '--yes', '--message', 'x' * size],
+                            input='', text=True, capture_output=True, env=env)
+    assert result.returncode == 0, result.stderr
+    url = result.stdout.strip().splitlines()[-1]
+    assert len(url) <= 8000, len(url)
+    assert parse_qs(urlsplit(url).query)['title'] == ['OMS bug report']
+    decoded = parse_qs(urlsplit(url).query)['body'][0]
+    assert ('Draft shortened' in decoded) == (size > room)
+    if size == room:
+        assert len(url) == 8000, len(url)
+suffix = '\n[Draft shortened for URL; use --yes with gh for the full draft.]'
+fixed = len('https://github.com/sample//issues/new?') + len(quote_plus(suffix))
+fixed += len('title=OMS+bug+report&body=')
+for delta in (-1, 0, 1):
+    env['OMS_REPORT_REPO'] = 'sample/' + 'x' * (8000 - fixed + delta)
+    result = subprocess.run(['bash', root + '/scripts/report.sh', 'bug', '--yes'],
+                            input='', text=True, capture_output=True, env=env)
+    if delta > 0:
+        assert result.returncode != 0 and 'URL capacity' in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert len(result.stdout.strip().splitlines()[-1]) <= 8000
+PY
+}
+
+test_fail_ledger_report_gh_publication() {
+  local project="$TMP/report-publish" bin="$TMP/report-gh" out fp mode
+  make_committed_repo "$project"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$REPORT_LOG"
+case "$1 $2" in
+  'auth status') [ "$REPORT_MODE" != unauthenticated ] ;;
+  'issue list')
+    [ "$REPORT_MODE" != search-fail ] || exit 1
+    if [ "$REPORT_MODE" = duplicate ]; then echo '[{"number":7}]'; else echo '[]'; fi ;;
+  'label list')
+    [ "$REPORT_MODE" != label-fail ] || exit 1
+    if [ "$REPORT_MODE" = label ]; then echo '[{"name":"bug"}]'; else echo '[]'; fi ;;
+  'issue create'|'issue comment')
+    [ "$REPORT_MODE" != post-fail ] || exit 1
+    echo 'https://github.com/sample/oms/issues/7' ;;
+  *) exit 99 ;;
+esac
+SH
+  chmod +x "$bin/gh"
+  (cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record --cmd 'oms doctor' --exit 1 >/dev/null 2>&1)
+  fp="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" list --json |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][0]["fingerprint"])')"
+  for mode in create label duplicate unauthenticated search-fail label-fail post-fail; do
+    : > "$TMP/report-log"
+    local rc=0
+    out="$(cd "$project" && PATH="$bin:$PATH" REPORT_LOG="$TMP/report-log" REPORT_MODE="$mode" \
+      OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --from-failure "$fp" --yes </dev/null 2>&1)" || rc=$?
+    case "$mode" in
+      *-fail) [ "$rc" -ne 0 ] || fail "gh failure was ignored" ;;
+      *) [ "$rc" -eq 0 ] || fail "gh stub failed: $out" ;;
+    esac
+    case "$mode" in
+      duplicate) assert_file_contains "$TMP/report-log" 'issue comment 7' ;;
+      create) assert_file_contains "$TMP/report-log" 'issue create';
+        if grep -q -- '--label' "$TMP/report-log"; then fail "missing label passed to create"; fi ;;
+      label) assert_file_contains "$TMP/report-log" '--label bug' ;;
+      unauthenticated|search-fail|label-fail)
+        if grep -Eq 'issue (create|comment)' "$TMP/report-log"; then fail "unexpected publication"; fi ;;
+    esac
+  done
+  : > "$TMP/report-log"
+  if PATH="$bin:$PATH" REPORT_LOG="$TMP/report-log" REPORT_MODE=create OMS_REPORT_REPO=sample/oms \
+      bash "$ROOT/scripts/report.sh" bug </dev/null >/dev/null 2>&1; then fail "consent bypassed"; fi
+  [ ! -s "$TMP/report-log" ] || fail "unapproved draft touched gh"
 }
 
 test_fail_ledger_records_checks_resolves() {

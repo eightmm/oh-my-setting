@@ -188,6 +188,7 @@ project-doctor
 project-private
 provider-permissions
 remove-project-template
+report
 room
 run
 run-ledger
@@ -235,6 +236,7 @@ patch-admit
 patch-land
 land
 # Maintenance and removal
+report
 doctor
 update
 uninstall

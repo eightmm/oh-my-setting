@@ -233,7 +233,7 @@ export OMS_HOOK_TTL="$HOOK_FAIL_TTL"
 
 case "$ACTION" in
   record)
-    [ -n "$CMD" ] || fail "record requires --cmd"
+    [[ "$CMD" = *[![:space:]]* ]] || fail "record requires nonblank --cmd"
     case "$EXIT_CODE" in *[!0-9]*|"") fail "record requires --exit N (non-negative integer)" ;; esac
     valid_outbound_evidence=()
     dropped_outbound_evidence=0
@@ -279,11 +279,11 @@ EOF
       outbound_evidence="${outbound_evidence}${outbound_evidence:+
 }${evidence}"
     done
-    OMS_OUTBOUND_EVIDENCE="$outbound_evidence" OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
+    FAILURE_CODE="$(OMS_OUTBOUND_EVIDENCE="$outbound_evidence" OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
       OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" OMS_NEXT="$NEXT" \
       OMS_STATE_FP="$(state_fingerprint)" \
       OMS_RUNTIME_LIB="$ROOT/scripts/lib" OMS_FAILURE_CODE="${FAILURE_CODE:-}" \
-      python3 -X utf8 -I -B - > "$row_tmp" <<'PY'
+      python3 -X utf8 -I -B - "$row_tmp" <<'PY'
 import json, os, sys
 row = {"schema": int(os.environ["OMS_SCHEMA"]), "event": "fail",
        "ts": os.environ["OMS_TS"], "agent": os.environ["OMS_AGENT_L"],
@@ -320,14 +320,26 @@ try:
     row["recovery"] = judged["recovery"]
 except Exception:
     pass
-print(json.dumps(row, ensure_ascii=False, allow_nan=False))
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    print(json.dumps(row, ensure_ascii=False, allow_nan=False), file=handle)
+print(row.get("failure_code", ""))
 PY
+)"
     oms_with_file_lock "$LEDGER" ledger_append "$LEDGER" "$row_tmp"
     rm -f "$row_tmp"
     echo "fail-ledger: recorded $fp (exit $EXIT_CODE)" >&2
-    # Counted after the append, so the row just filed is included: the second
-    # unresolved failure of the same command is the one worth stopping on.
-    advise_hint_if_repeated "$fp" "$(unresolved_fails_for "$fp")"
+    # Reuse the classified row and one unresolved count; presentation failure
+    # must never turn a successful append into a failed record operation.
+    fails="$(unresolved_fails_for "$fp")" || fails=0
+    case "$FAILURE_CODE" in
+      provider_capacity|provider_no_answer|read_guard_changed|state_conflict) ;;
+      *)
+        if [ "$fails" -gt 0 ] && { [ "$KIND" != hook ] || [ "$fails" -ge 2 ]; }; then
+          echo "report: oms report bug --from-failure $fp" >&2
+        fi
+        ;;
+    esac
+    advise_hint_if_repeated "$fp" "$fails"
     ;;
   check)
     [ -n "$CMD" ] || fail "check requires --cmd"
@@ -590,6 +602,7 @@ for fp in order:
         "kind": last.get("kind"),
         "cmd": last.get("cmd"),
         "summary": last.get("summary"),
+        "failure_code": last.get("failure_code"),
     }
     if row["resolved"] or row["expired"]:
         row["attention"] = "none"
