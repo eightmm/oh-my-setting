@@ -370,7 +370,8 @@ def antigravity_artifact_reading(repo, now):
             return {}
         entry = (key, now, records)
         _AGY_USAGE_CACHE[root] = entry
-    recent = [values for stamp, values in entry[2] if now - 7 * 86400 <= stamp <= now]
+    # A row written this instant can carry a stamp rounded up past `now` at microsecond precision.
+    recent = [values for stamp, values in entry[2] if now - 7 * 86400 <= stamp <= now + 1]
     return {"source": "OMS artifacts", "calls": len(recent),
             "input_tokens": sum(v[0] for v in recent), "cache_read_tokens": sum(v[1] for v in recent),
             "output_tokens": sum(v[2] for v in recent)}
