@@ -6607,6 +6607,7 @@ def exercise_provider_account_routing():
     import panel_routing as routing
     import panel_dispatch as dispatch
     from contextlib import redirect_stdout
+    from datetime import datetime, timezone
     from tempfile import TemporaryDirectory
 
     with TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
@@ -6655,22 +6656,34 @@ def exercise_provider_account_routing():
         with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
             malformed = metrics.collect({}, now=now, repo=base)["antigravity"]
         assert malformed["calls"] == 0, malformed
+        now = int(time.time())
 
         def configure(data=None, root=None):
             config_path.write_text(json.dumps(root if root is not None else {
                 "schema": 1, "providers": {"codex": value if data is None else data}}))
 
-        def quota(index, used, reset=None):
+        missing = object()
+
+        def stamp_for(moment=None):
+            return datetime.fromtimestamp(now if moment is None else moment, timezone.utc).isoformat()
+
+        def quota(index, used, reset=None, observed=missing):
             day = homes[index] / "sessions/2026/11/03"
             day.mkdir(parents=True, exist_ok=True)
             log = day / "rollout-account.jsonl"
-            log.write_text(json.dumps({"timestamp": "2026-11-03T00:00:00Z", "payload": {
-                "rate_limits": {"primary": {"used_percent": used, "window_minutes": 10080,
-                    "resets_at": now + 3600 if reset is None else reset}}}}) + "\n")
+            stamp = stamp_for() if observed is missing else (
+                stamp_for(observed) if isinstance(observed, (int, float)) and not isinstance(observed, bool)
+                else observed)
+            row = {"payload": {"rate_limits": {"primary": {
+                "used_percent": used, "window_minutes": 10080,
+                "resets_at": now + 3600 if reset is None else reset}}}}
+            if observed is not False:
+                row["timestamp"] = stamp
+            log.write_text(json.dumps(row) + "\n")
             return log
 
         def choose(model="gpt-6.1-sol", status=None):
-            return accounts.select_account("codex", model, readings=status, config=accounts.load_accounts())
+            return accounts.select_account("codex", model, readings=status, config=accounts.load_accounts(), now=now)
 
         def route():
             return routing.allocate("claude", role="builder", tier="deep", access="write",
@@ -6699,19 +6712,49 @@ def exercise_provider_account_routing():
             with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
                 assert "accounts" not in metrics.collect({}, now=now)["codex"]
             configure()
-            quota(0, 50)
+            # Default ordered policy picks lowest measured weekly usage first and flips when readings flip.
+            quota(0, 70)
+            quota(1, 20)
+            assert route()["account"] == "pro"
+            quota(0, 20)
+            quota(1, 70)
+            assert route()["account"] == "credits"
+            # Equal measured usage and all-unknown readings preserve registry order.
+            quota(0, 20)
             quota(1, 20)
             assert route()["account"] == "credits"
             for malformed in (None, [], 0):
                 assert routing.allocate("claude", role="builder", tier="deep", access="write",
                     installed={"codex"}, provider_status={"codex": malformed}, repo=base)["account"] == "credits"
             assert accounts.select_account("codex", "gpt-6.1-sol", readings=[])[0]["id"] == "credits"
+            # Unknown ranks after measured usage; when both are unknown, registry order breaks the tie.
+            quota(0, None)
+            quota(1, 70)
+            assert route()["account"] == "pro"
+            quota(1, None)
             for used, expected in ((0, "credits"), (89, "credits"), (90, "pro"), (100, "pro"),
                                    (None, "credits"), ("bad", "credits")):
                 quota(0, used)
                 assert route()["account"] == expected, used
-            stale = quota(0, 99)
-            os.utime(stale, (now - metrics.CODEX_WEEK_SECONDS - 1,) * 2)
+            # Freshness uses the event's recorded timestamp, not file mtime.
+            quota(0, 70)
+            fresh_boundary = quota(1, 20, observed=now - accounts.ACCOUNT_READING_FRESH_SECONDS)
+            os.utime(fresh_boundary, (now - accounts.ACCOUNT_READING_FRESH_SECONDS - 100,) * 2)
+            assert choose()[0]["id"] == "pro"
+            for stale_stamp in (now - accounts.ACCOUNT_READING_FRESH_SECONDS - 1,
+                                now + 1, None, "", "malformed", False):
+                quota(1, 20, observed=stale_stamp)
+                assert choose()[0]["id"] == "credits", stale_stamp
+            for bad_observed in (now - accounts.ACCOUNT_READING_FRESH_SECONDS - 1,
+                                 now + 1, None, "", "malformed", True, float("nan"), float("inf")):
+                assert accounts.account_weekly_used(
+                    {"weekly_used": 20, "observed_at": bad_observed}, now=now) is None, bad_observed
+            assert accounts.account_weekly_used(
+                {"weekly_used": 20, "observed_at": now - accounts.ACCOUNT_READING_FRESH_SECONDS}, now=now) == 20
+            assert accounts.account_weekly_used({"weekly_used": 0, "observed_at": now}, now=now) == 0
+            # A stale >=90% reading is treated as unknown and remains eligible after known accounts.
+            quota(0, 99, observed=now - accounts.ACCOUNT_READING_FRESH_SECONDS - 1)
+            quota(1, 99)
             assert route()["account"] == "credits"
             quota(0, 99, reset=now)
             assert route()["account"] == "credits"
@@ -6745,6 +6788,9 @@ def exercise_provider_account_routing():
             assert deferred["provider"] == "codex" and "account" not in deferred
             selected, _ = accounts.select_account("codex", "gpt-6.1-sol", readings={
                 "credits": {"weekly_used": 99, "resets_at": now}, "pro": {"weekly_used": 50}}, now=now)
+            assert selected["id"] == "pro"
+            selected, _ = accounts.select_account("codex", "gpt-6.1-sol", readings={
+                "credits": {"weekly_used": 99, "resets_at": now}, "pro": {"weekly_used": None}}, now=now)
             assert selected["id"] == "credits"
             expired = {"credits": {"weekly_used": 99, "resets_at": now - 1},
                        "pro": {"weekly_used": 99, "resets_at": now + 3600}}
@@ -6783,11 +6829,16 @@ def exercise_provider_account_routing():
             assert selected["id"] == "pro" and "spread" in reason
             value["policy"] = "ordered"
             configure()
+            # An account lacking the requested model is skipped even when it has the most quota left.
+            quota(0, 10)
+            quota(1, 70)
             cache = homes[0] / "models_cache.json"
             cache.write_text(json.dumps({"models": [{"slug": "gpt-6.1-sol"}]}))
             selected, reason = choose("gpt-6.1-terra")
             assert selected["id"] == "pro" and "credits" in reason and "cached model list" in reason
             assert choose()[0]["id"] == "credits"
+            quota(0, 50)
+            quota(1, 50)
             for body in ("{", "null", '{"models":null}', '{"models":[{}]}'):
                 cache.write_text(body)
                 assert choose()[0]["id"] == "credits"
@@ -6820,10 +6871,21 @@ def exercise_provider_account_routing():
             assert not routing.valid_route(dict(provider="codex", model="gpt-6.1-sol", effort="high", account="credits"))
             peer = dict(provider="codex", binary="codex", installed=True, exact_model_override=True,
                         access=["read", "write"], models=["gpt-6.1-sol"])
+            quota(0, 70)
+            quota(1, 20)
+            with patch("terminal_panel.provider_catalog", return_value=[peer]):
+                assert dispatch.selected_route("claude", "builder", None, "write", None,
+                                               target="codex", model="gpt-6.1-sol", repo=base)["account"] == "pro"
+                assert dispatch.selected_route("claude", "builder", None, "write", None,
+                                               target="codex", repo=base)["account"] == "pro"
+            quota(0, 20)
+            quota(1, 70)
             with patch("terminal_panel.provider_catalog", return_value=[peer]):
                 selected = dispatch.selected_route("claude", "builder", None, "write", None,
                                                    target="codex", model="gpt-6.1-sol", repo=base)
             assert selected["account"] == "credits"
+            quota(0, 50)
+            quota(1, 50)
             cache.write_text(json.dumps({"models": [{"slug": "gpt-6-luna"}]}))
             with patch("terminal_panel.provider_catalog", return_value=[peer]):
                 selected = dispatch.selected_route("claude", "builder", "deep", "write", None, repo=base)
@@ -6907,12 +6969,15 @@ def exercise_provider_account_routing():
                         raise AssertionError("ineligible account launched")
                     except ValueError as error:
                         assert "all exhausted" in str(error)
-                # Explicit targets preserve list order and fall back without binding an account.
+                # Explicit targets use quota order (registry tie-break) and fall back without binding an account.
                 with patch.object(metrics, "account_readings", return_value={
                         "credits": {"weekly_used": 80}, "pro": {"weekly_used": 0}}):
                     configure(dict(value, policy="spread"))
-                    assert accounts.headless_codex_account("gpt-6.1-sol", explicit=True) == (homes[0], "credits")
+                    assert accounts.headless_codex_account("gpt-6.1-sol", explicit=True) == (homes[1], "pro")
                     assert accounts.headless_codex_account("gpt-6.1-sol") == (homes[1], "pro")
+                with patch.object(metrics, "account_readings", return_value={
+                        "credits": {"weekly_used": 20}, "pro": {"weekly_used": 70}}):
+                    assert accounts.headless_codex_account("gpt-6.1-sol", explicit=True) == (homes[0], "credits")
                 with patch.object(metrics, "account_readings", return_value={
                         "credits": {"weekly_used": 90}, "pro": {"weekly_used": 100}}):
                     assert accounts.headless_codex_account("gpt-6.1-sol", explicit=True) == (None, None)
@@ -7104,6 +7169,7 @@ def exercise_provider_account_execution():
     import panel_routing as routing
     import io
     from contextlib import redirect_stdout, redirect_stderr
+    from datetime import datetime, timezone
     from tempfile import TemporaryDirectory
 
     with TemporaryDirectory(dir=temporary) as directory:
@@ -7140,7 +7206,8 @@ if os.environ.get("OMS_HARNESS_CHILD") == "1":
     if provider == "codex" and mode in ("down", "unavailable"):
         print("Error: HTTP 503 service unavailable" if mode == "down" else "Error: model not found")
         sys.exit(1)
-    if provider == "codex" and (mode in ("all", "all-to-provider") or mode in ("capacity", "dirty", "policy") and Path(home).name == "credits"):
+    fail_home = os.environ.get("ACCOUNT_TEST_FAIL_HOME", "credits")
+    if provider == "codex" and (mode in ("all", "all-to-provider") or mode in ("capacity", "dirty", "policy") and Path(home).name == fail_home):
         if mode == "dirty":
             with open("value.txt", "a") as stream:
                 stream.write("changed before capacity failure\\n")
@@ -7371,6 +7438,19 @@ os.execv(os.environ["ACCOUNT_TEST_ORIGINAL"], [os.environ["ACCOUNT_TEST_ORIGINAL
         assert [anchor["route"]["account"] for anchor in anchors] == ["credits", "pro"], anchors
         assert all("home" not in anchor["route"] for anchor in anchors)
         assert all(anchor["route"].get("account_applied") is True for anchor in anchors)
+        # Overflow re-picks from all other eligible accounts in quota order (including earlier registry entries), once.
+        quota_now = int(time.time())
+        quota_stamp = datetime.fromtimestamp(quota_now, timezone.utc).isoformat()
+        for account_home, used in ((homes[0], 70), (homes[1], 20), (homes[2], 80)):
+            day = account_home / "sessions/2026/11/03"
+            day.mkdir(parents=True, exist_ok=True)
+            (day / "rollout-quota.jsonl").write_text(json.dumps({"timestamp": quota_stamp, "payload": {
+                "rate_limits": {"primary": {"used_percent": used, "window_minutes": 10080,
+                    "resets_at": quota_now + 3600}}}}) + "\n")
+        launched("account-overflow-quota", [str(homes[1]), str(homes[0])],
+                 extra={"ACCOUNT_TEST_MODE": "capacity", "ACCOUNT_TEST_FAIL_HOME": "pro"})
+        for account_home in homes:
+            (account_home / "sessions/2026/11/03/rollout-quota.jsonl").unlink()
         for mode, expected in (("all", homes[:2]), ("dirty", homes[:1]), ("policy", homes[:1])):
             result, rows = run("account-stop-" + mode, extra={"ACCOUNT_TEST_MODE": mode})
             assert result.returncode != 0 and [row["home"] for row in rows] == [str(home) for home in expected], (mode, result.stdout, result.stderr, rows)
@@ -7408,11 +7488,24 @@ os.execv(os.environ["ACCOUNT_TEST_ORIGINAL"], [os.environ["ACCOUNT_TEST_ORIGINAL
         candidate = dict(route, account="pro")
         with patch.object(accounts, "load_accounts", return_value=configured):
             assert accounts.next_account_route(candidate, readings={})["account"] == "third"
-            for ident in ("third", "removed", "", None):
+            assert accounts.next_account_route(dict(candidate, account="third"), readings={})["account"] == "pro"
+            assert accounts.next_account_route(dict(candidate, account="third"),
+                                               readings={"pro": {"weekly_used": 90}}) is None
+            for ident in ("removed", "", None):
                 assert accounts.next_account_route(dict(candidate, account=ident), readings={}) is None
             for used, expected in ((0, True), (89, True), (90, False), (100, False), ("bad", True)):
                 assert bool(accounts.next_account_route(candidate, readings={"third": {"weekly_used": used}})) is expected
             assert accounts.next_account_route(dict(candidate, model="unsupported"), readings={}) is None
+        homes[0].mkdir()
+        all_configured = accounts.load_accounts(config)
+        with patch.object(accounts, "load_accounts", return_value=all_configured):
+            assert accounts.next_account_route(candidate, readings={
+                "credits": {"weekly_used": 70}, "pro": {"weekly_used": 20}, "third": {"weekly_used": 80}})["account"] == "credits"
+            assert accounts.next_account_route(candidate, readings={
+                "credits": {"weekly_used": 80}, "pro": {"weekly_used": 20}, "third": {"weekly_used": 40}})["account"] == "third"
+            assert accounts.next_account_route(candidate, readings={
+                "credits": {"weekly_used": None}, "pro": {"weekly_used": 20}, "third": {"weekly_used": 70}})["account"] == "third"
+            assert accounts.next_account_route(candidate, readings={})["account"] == "credits"
         with patch.object(accounts, "load_accounts", return_value={"configured": False, "providers": {}}):
             assert accounts.next_account_route(candidate) is None
 

@@ -851,7 +851,15 @@ a user-owned home. Directory existence is still checked on other platforms.
 Routing, launch and pinned continuation all recheck this validator, so a
 permission change after selection is refused before the launch anchor.
 
-Per-provider policy defaults to `ordered`, selecting the first eligible account.
+Per-provider policy defaults to `ordered`. Both `ordered` and `spread` rank
+eligible accounts by measured weekly quota usage ascending (most quota left
+first), placing unknown readings after measured readings. A reading counts as
+measured only when its own recorded event timestamp (`observed_at` from
+`account_readings`, not session-log file `mtime`) is within
+`ACCOUNT_READING_FRESH_SECONDS` and its reset time has not passed; stale,
+missing or malformed readings are treated as unknown and remain eligible.
+`ordered` breaks equal or unknown quota ties by registry configuration order
+(and uses registry order when all readings are unknown).
 Each account is ineligible at 90% weekly usage during tier selection, including
 when Codex is the sole provider; missing, stale or malformed readings remain
 eligible. Codex remains a candidate while any account can serve the requested
@@ -861,8 +869,8 @@ appears in `account_reason`. Missing, unreadable or malformed caches leave suppo
 unknown and eligible. Routing inspects no other home files beyond the existing
 bounded session-log reader.
 
-`spread` selects the eligible account with the most measured quota left, placing
-unknown quota after measured readings. Ties use fewer live OMS workers for that
+`spread` uses the same measured-quota-first, unknown-after-known order, but
+breaks equal or unknown quota ties by fewer live OMS workers for that
 provider/account in the current repository's panel attempt records (using the
 launch decision when the attempt has no `panel_account` ref), then list order.
 Two unknown readings use the same worker-count tie break. This is best-effort:
@@ -883,7 +891,8 @@ Headless Codex calls through peer review, peer ask, consult/advise, agent-call,
 delegation and autonomy workers share this account policy at the common runner.
 Explicit Codex targets (`--to codex` on direct calls/delegation, `--providers`
 on peer ask/review, or `--model`)
-follow the panel's rule: use the first eligible account in configuration order,
+follow the panel's rule: select from eligible accounts in the same
+measured-quota-first, registry-tie-break order,
 falling back to the caller's home if none qualifies. Implicit/tier routes keep
 the configured ordered/spread policy and require an eligible account.
 Automatic consult and advise selections use that implicit policy and may try
@@ -917,7 +926,9 @@ retain the current home. Selection-only anchors without `account_applied: true`
 and missing or invalid anchors also continue without an account binding under
 the current home. Implicit selections are not recorded as an account in
 new launch anchors. A recorded Codex capacity/usage-limit failure can overflow
-once to the next eligible account serving the same model, provided the failed worker left the
+once to the next eligible account in quota order across all remaining configured
+accounts serving the same model (not only accounts listed after the failed one),
+provided the failed worker left the
 worktree unchanged. Both launch anchors retain their respective account ids.
 Account overflow is capacity-only; the tier provider fallback remains available
 for provider-down/model-unavailable failures and after the overflow account fails.

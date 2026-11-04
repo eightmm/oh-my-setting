@@ -12,6 +12,7 @@ import time
 
 CODEX_SHARED_ENTRIES = ("AGENTS.md", "config.toml", "hooks.json", ".hook-trust",
                         "plugins", "rules", "skills")
+ACCOUNT_READING_FRESH_SECONDS = 10080 * 60
 _ACCOUNT_SAFE_UNLINK = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
                         and all(call in os.supports_dir_fd for call in (os.stat, os.readlink, os.unlink))
                         and os.stat in os.supports_follow_symlinks)
@@ -116,8 +117,8 @@ def headless_codex_account(model, explicit=False):
     return (home, selected["id"]) if home is not None else (None, None)
 
 
-def next_account_route(route, readings=None):
-    """Select once from eligible accounts following this id in configuration order."""
+def next_account_route(route, readings=None, now=None):
+    """Select once from the remaining eligible accounts in quota order."""
     if route.get("provider") != "codex" or not route.get("account"):
         return None
     config = load_accounts()
@@ -125,12 +126,13 @@ def next_account_route(route, readings=None):
     if not settings:
         return None
     entries = settings["accounts"]
-    index = next((n for n, entry in enumerate(entries) if entry["id"] == route["account"]), len(entries))
-    remaining = entries[index + 1:]
+    if not any(entry["id"] == route["account"] for entry in entries):
+        return None
+    remaining = [entry for entry in entries if entry["id"] != route["account"]]
     if not remaining:
         return None
     config = dict(config, providers={"codex": dict(settings, policy="ordered", accounts=remaining)})
-    selected, reason = select_account("codex", route["model"], readings=readings, config=config)
+    selected, reason = select_account("codex", route["model"], readings=readings, config=config, now=now)
     return dict(route, account=selected["id"], account_reason="capacity overflow; " + reason) if selected else None
 
 
@@ -230,30 +232,36 @@ def model_slugs(home):
 
 
 def account_weekly_used(row, now=None):
-    from panel_metrics import percent
+    from panel_metrics import _stamp, number, percent
     if not isinstance(row, dict):
         return None
+    now = time.time() if now is None else now
     reset = row.get("resets_at")
-    if isinstance(reset, (int, float)) and reset <= (time.time() if now is None else now):
+    if "resets_at" in row and reset is not None and (number(reset) is None or reset <= now):
         return None
+    if "observed_at" in row or "timestamp" in row:
+        raw = row.get("observed_at") if "observed_at" in row else row.get("timestamp")
+        observed = _stamp(raw) if isinstance(raw, str) else number(raw)
+        if observed is None or not 0 <= now - observed <= ACCOUNT_READING_FRESH_SECONDS:
+            return None
     return percent(row.get("weekly_used"))
 
 
 def select_account(provider, model, readings=None, running=None, config=None, now=None, explicit=False):
-    """Return (account or None, reason), preserving list order for equal choices.
+    """Return (account or None, reason) in measured-quota order, then list order.
 
-    Unknown quota ranks after measured quota for spread. Running counts are a
-    best-effort observation, never a reservation between simultaneous callers.
-    Explicit targets pick the first eligible account and fall back to the current home.
+    Fresh measured weekly usage ranks ascending before unknown readings; spread
+    breaks quota ties by live running count before list order. Explicit targets
+    use the same quota order and fall back to the current home when none is eligible.
     """
     from panel_metrics import account_readings
     config = load_accounts() if config is None else config
     settings = config["providers"].get(provider)
     if settings is None:
         return None, "no configured accounts for " + provider
-    readings = account_readings(provider, config=config) if readings is None else readings
-    readings = readings if isinstance(readings, dict) else {}
     now = time.time() if now is None else now
+    readings = account_readings(provider, config=config, now=now) if readings is None else readings
+    readings = readings if isinstance(readings, dict) else {}
     eligible, skipped = [], []
     for entry in settings["accounts"]:
         ident = entry["id"]
@@ -270,9 +278,9 @@ def select_account(provider, model, readings=None, running=None, config=None, no
             skipped.append(ident + ": cached model list lacks " + model)
             continue
         eligible.append((entry, used))
-    if settings["policy"] == "spread" and not explicit:
-        eligible.sort(key=lambda item: (item[1] if item[1] is not None else 100,
-                                       (running or {}).get(item[0]["id"], 0)))
+    eligible.sort(key=lambda item: (item[1] if item[1] is not None else 100,
+                                    (running or {}).get(item[0]["id"], 0)
+                                    if settings["policy"] == "spread" and not explicit else 0))
     reason = ("explicit target" if explicit else settings["policy"])
     reason += "; skipped " + "; ".join(skipped) if skipped else ""
     if explicit and not eligible:

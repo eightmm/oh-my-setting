@@ -162,12 +162,13 @@ def _codex_session_file(home):
 def codex_weekly_reading(now, *, detail=False, home=None):
     """Use only the newest log's bounded quota tail, rechecking expiry on cache hits."""
     try:
+        default_home = home is None
         home = Path(home if home is not None else os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         path = _codex_session_file(home)
         if path is None:
             return {}
         info = path.stat()
-        if not stat.S_ISREG(info.st_mode) or now - info.st_mtime > CODEX_WEEK_SECONDS:
+        if not stat.S_ISREG(info.st_mode) or (default_home and now - info.st_mtime > CODEX_WEEK_SECONDS):
             return {}
         key = (str(path), info.st_ino, info.st_mtime_ns, info.st_size)
         cached_key, cached_reading = _CODEX_QUOTA_CACHE.get(str(home), (None, ({}, None)))

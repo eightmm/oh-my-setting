@@ -264,12 +264,16 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs,
-                         owner_model=owner_model, repo=visibility_repo_resolved, preferred=preferred)
+                         owner_model=owner_model, repo=visibility_repo_resolved, preferred=preferred,
+                         resolve_accounts=not bool(target))
         peer = next(row for row in rows if row["provider"] == route["provider"])
         route.update(binary=peer["binary"], model=routable_route_model(
             route["provider"], route["model"], catalogs[route["provider"]]))
         if model and model != route["model"]:
             raise ValueError("researchers require the newest configured/catalog Luna or Haiku model")
+        if target:
+            from panel_routing import resolve_provider_account
+            route = resolve_provider_account(route, routing_readings, visibility_repo_resolved, explicit=True)
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
         return dict(route, effort=effort) if effort else route
     visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
