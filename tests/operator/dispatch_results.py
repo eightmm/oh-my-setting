@@ -6,6 +6,13 @@ from unittest.mock import Mock, patch
 import io
 from concurrent.futures import ThreadPoolExecutor
 
+# Routing reads provider account homes (registered Codex accounts, provider-accounts.json);
+# the host's own accounts must not steer any exercise in this section.
+os.environ["HOME"] = str(temporary / "account-home")
+os.environ["XDG_CONFIG_HOME"] = str(temporary / "account-home" / ".config")
+for _name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR"):
+    os.environ.pop(_name, None)
+
 # BEGIN continuation round delta
 delta_task = "delta-task"
 delta_attempts = [dict(task_id=delta_task, attempt_id="delta-%s" % n, state="done",
