@@ -141,6 +141,8 @@ def classify_task():
             print('plan: role suggestion skipped (sensitive)', file=sys.stderr)
             return
         roles = policy()['roles']
+        if payload['allowed_paths']:
+            roles = {role: value for role, value in roles.items() if role in WRITERS}
         questions = [
             {'name': 'role', 'type': 'choice',
              'instructions': 'Choose the best panel role. Write tasks require a write role; read-only roles cannot edit files.',
@@ -149,7 +151,7 @@ def classify_task():
                                                      ROLE_OUTPUTS.get(role, role + ' deliverable'))}
                          for role in roles]},
             {'name': 'workload', 'type': 'choice',
-             'instructions': 'Choose task complexity: light is a mechanical edit with an exact spec (cheapest); routine is a bounded reversible change (default for builders); deep is multi-file or unclear logic; frontier is reserved for security audits (most expensive; choose only for a security review).',
+             'instructions': 'For researcher choose light only. Choose task complexity: light is a mechanical edit with an exact spec (cheapest); routine is a bounded reversible change (default for builders); deep is multi-file or unclear logic; frontier is reserved for security audits (most expensive; choose only for a security review).',
              'choices': [{'value': tier, 'description': TIER_DESCRIPTIONS[tier]} for tier in TIERS]},
         ]
         task = json.dumps(payload)
@@ -164,6 +166,8 @@ def classify_task():
         answers = {row['name']: row for row in json.loads(result.stdout)}
         role, workload = answers['role'], answers['workload']
         if (not given_role and role['choice'] not in roles) or workload['choice'] not in TIERS:
+            raise ValueError('choice')
+        if (given_role or role['choice']) == 'researcher' and workload['choice'] != 'light':
             raise ValueError('choice')
         probabilities = [workload['confidence']] if given_role else [role['confidence'], workload['confidence']]
         if any(isinstance(p, bool) or not isinstance(p, (float, int)) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities):

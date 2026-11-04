@@ -4,6 +4,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -209,6 +210,100 @@ class DecisionsTests(unittest.TestCase):
         self.assertNotEqual(self.run_cli('--auto', 'task-classify', 'on').returncode, 0)
         self.assertEqual(path.read_text(), '{bad')
 
+    def test_classification_write_roles(self):
+        sys.path.insert(0, str(ROOT / 'scripts/lib'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'scripts/lib'))
+        import io
+        import openai_decisions as decisions
+        choices = []
+        answer = 'builder'
+        tier = 'routine'
+        def call(args, **kwargs):
+            questions = json.loads(Path(args[args.index('--questions-file') + 1]).read_text())
+            choices.append([item['value'] for item in questions[0]['choices']])
+            return subprocess.CompletedProcess(args, 0, json.dumps([
+                {'name': 'role', 'choice': answer, 'confidence': 0.8},
+                {'name': 'workload', 'choice': tier, 'confidence': 0.8}]))
+        with mock.patch.object(decisions, 'read_config', return_value={'task-classify': True}), \
+             mock.patch.object(decisions, 'get_auth'), mock.patch.object(decisions, 'outbound_clean', return_value=True), \
+             mock.patch.object(decisions.subprocess, 'run', side_effect=call), \
+             mock.patch.dict(os.environ, {'OMS_ALLOWED': 'src', 'OMS_ROLE': ''}):
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                decisions.classify_task()
+                self.assertEqual(json.loads(output.getvalue())['role'], 'builder')
+                self.assertNotIn('researcher', choices[-1])
+                answer = 'researcher'
+                output.seek(0); output.truncate()
+                decisions.classify_task()
+                self.assertEqual(output.getvalue(), '')
+                self.assertIn('skipped', errors.getvalue())
+                os.environ['OMS_ALLOWED'] = ''
+                decisions.classify_task()
+                self.assertEqual(output.getvalue(), '')
+                tier = 'light'
+                decisions.classify_task()
+                self.assertIn('researcher', choices[-1])
+                self.assertEqual(json.loads(output.getvalue())['role'], 'researcher')
+
+    def test_dispatch_suggested_workload(self):
+        sys.path.insert(0, str(ROOT / 'scripts/lib'))
+        self.addCleanup(sys.path.remove, str(ROOT / 'scripts/lib'))
+        import panel_dispatch
+        import terminal_panel
+        suggestion = {'role': 'builder', 'workload': 'deep', 'role_probability': 0.8,
+                      'workload_probability': 0.5}
+        def read(*args, **kwargs):
+            return json.dumps({'tasks': {'one': {'role_suggestion': suggestion}}})
+        with mock.patch.object(terminal_panel, '_read', side_effect=read):
+            self.assertEqual(panel_dispatch._suggested_workload('.', 'one', 'builder'), 'deep')
+            for field, value in (('workload_probability', 0), ('workload_probability', 0.49),
+                                 ('workload_probability', None), ('workload_probability', 'bad'),
+                                 ('role_probability', 0.49), ('workload', ''), ('workload', 'bad'),
+                                 ('role', 'reviewer')):
+                original = suggestion[field]
+                suggestion[field] = value
+                self.assertIsNone(panel_dispatch._suggested_workload('.', 'one', 'builder'))
+                suggestion[field] = original
+            suggestion.update(role='researcher', workload='routine')
+            self.assertIsNone(panel_dispatch._suggested_workload('.', 'one', 'researcher'))
+            suggestion['workload'] = 'light'
+            self.assertEqual(panel_dispatch._suggested_workload('.', 'one', 'researcher'), 'light')
+            suggestion.update(role='builder', workload='deep')
+            self.assertIsNone(panel_dispatch._suggested_workload('.', 'missing', 'builder'))
+            with mock.patch.object(terminal_panel, 'panel_repository', return_value=Path('.')), \
+                 mock.patch.object(terminal_panel, 'selected_route', side_effect=RuntimeError('preflight')) as preflight:
+                for flags, expected in (([], 'deep'), (['--workload', 'light'], 'light'),
+                                        (['--to', 'claude'], None),
+                                        (['--to', 'claude', '--model', 'example'], None)):
+                    with self.assertRaisesRegex(RuntimeError, 'preflight'):
+                        terminal_panel.main(['--dispatch', 'builder', '--owner', 'claude',
+                                             '--task-id', 'one', '--prompt', 'test', '--dry-run', *flags])
+                    self.assertEqual(preflight.call_args.args[2], expected)
+            with mock.patch.object(terminal_panel, 'panel_repository', return_value=Path('.')), \
+                 mock.patch.object(terminal_panel, 'work_repository', return_value=Path('.')), \
+                 mock.patch.object(terminal_panel, 'selected_route', return_value={}) as preflight, \
+                 mock.patch.object(terminal_panel, 'routed_command'), \
+                 mock.patch.object(terminal_panel, 'dispatch', return_value=0) as execute, \
+                 mock.patch.dict(os.environ, {'OMS_HARNESS_CHILD': '0', 'OMS_HARNESS_DELEGATE_DEPTH': '0'}):
+                self.assertEqual(terminal_panel.main(['--dispatch', 'builder', '--owner', 'claude',
+                    '--task-id', 'one', '--prompt', 'test', '--dry-run']), 0)
+                self.assertEqual(preflight.call_args.args[2], 'deep')
+                self.assertEqual(execute.call_args.args[3], 'deep')
+                self.assertTrue(execute.call_args.kwargs['workload_explicit'])
+            with mock.patch.object(terminal_panel, 'child_environment', return_value={}), \
+                 mock.patch.object(panel_dispatch.room, 'resolve', return_value='room'), \
+                 mock.patch.object(terminal_panel, 'routing_status', return_value={}), \
+                 mock.patch.object(terminal_panel, 'selected_route', side_effect=RuntimeError('stop')) as route:
+                for workload, target, model, explicit, expected in ((None, None, None, False, 'deep'),
+                        ('light', None, None, True, 'light'), (None, 'claude', None, False, None),
+                        (None, None, 'model', False, None)):
+                    with self.assertRaisesRegex(RuntimeError, 'stop'):
+                        panel_dispatch.dispatch(Path('.'), 'claude', 'builder', workload, 'read', None,
+                                                task_id='one', target=target, model=model,
+                                                workload_explicit=explicit)
+                    self.assertEqual(route.call_args.args[2], expected)
+
     def test_auto_plan_add(self):
         repo = Path(self.tmp.name) / 'repo'
         repo.mkdir()
@@ -233,13 +328,18 @@ class DecisionsTests(unittest.TestCase):
         self.assertTrue(all(desc != name and '\n' not in desc and (desc.startswith('write: ') or desc.startswith('read-only: '))
                             for name, desc in role_choices.items()))
         self.assertTrue(role_choices['builder'].startswith('write: '))
-        self.assertTrue(role_choices['researcher'].startswith('read-only: '))
+        self.assertNotIn('researcher', role_choices)
         self.assertTrue(all(desc != name and '\n' not in desc for name, desc in tier_choices.items()))
         self.assertIn('security audit', tier_choices['frontier'])
         self.assertIn('cheapest', tier_choices['light'])
         self.assertEqual(task['role_suggestion']['workload_probability'], 0.9)
         shown = plan('show', '--id', 'one')
         self.assertEqual(json.loads(shown.stdout)['role_suggestion'], task['role_suggestion'])
+        Handler.answer['answers'][0] = dict(name='role', type='choice', choice='researcher', confidence=0.8)
+        rejected = plan('add', '--id', 'read-role', '--title', 'edit', '--allowed', 'src')
+        self.assertIn('skipped', rejected.stderr)
+        self.assertNotIn('role_suggestion', json.loads((repo / '.oms/plan/tasks.json').read_text())['tasks']['read-role'])
+        Handler.answer['answers'][0] = dict(name='role', type='choice', choice='builder', confidence=0.81)
         Handler.status = 500
         result = plan('add', '--id', 'two', '--title', 'another')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -248,7 +348,7 @@ class DecisionsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('plan: role suggestion skipped (', result.stderr)
         Handler.status = 200
-        Handler.answer['answers'] = [dict(name='role', type='choice', choice='researcher', confidence=0.75),
+        Handler.answer['answers'] = [dict(name='role', type='choice', choice='builder', confidence=0.75),
                                      dict(name='workload', type='choice', choice='light', confidence=0.88)]
         result = plan('add', '--id', 'three', '--title', 'explicit', '--allowed', 'docs/a.md', '--verify', 'true', '--role', 'documenter')
         self.assertEqual(result.returncode, 0, result.stderr)

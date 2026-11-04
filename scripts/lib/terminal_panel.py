@@ -98,6 +98,7 @@ from panel_dispatch import continuation
 from panel_dispatch import moved_main
 from panel_dispatch import scope_overlaps
 from panel_dispatch import dispatch
+from panel_dispatch import _suggested_workload
 from panel_dispatch import _validate_dispatch_verifier
 from panel_dispatch import plan_link
 from panel_dispatch import _read_dispatch_brief
@@ -426,6 +427,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
     workload_explicit = args.workload is not None
+    suggestion_checked = False
     if args.continue_task and args.brief_file and not (args.prompt or args.task_id) and args.access in (None, "write"):
         # A follow-up round repeats the original write dispatch's inputs unless a flag overrides them.
         inherited, unavailable = None, "no recorded write dispatch for the task"
@@ -602,6 +604,10 @@ def main(argv=None):
     if args.dispatch:
         try:
             owner = args.owner or caller_owner()
+            if args.task_id and not args.continue_task and args.workload is None and not args.to and not args.model:
+                plan_repo = panel_repository(os.environ.get("OMS_ROOM_REPO") or args.repo)
+                args.workload = _suggested_workload(plan_repo, args.task_id, args.dispatch)
+                suggestion_checked = True
             route = selected_route(owner, args.dispatch, args.workload, args.access, args.purpose,
                                    args.to, args.model, args.reasoning_effort,
                                    repo=args.repo, room_id=args.room, main=args.main)
@@ -833,7 +839,7 @@ def main(argv=None):
                               args.to, args.model, args.reasoning_effort, main=args.main,
                               continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias,
                               allow_stale_base=args.allow_stale_base, from_task=args.from_task,
-                              workload_explicit=workload_explicit)
+                              workload_explicit=workload_explicit or suggestion_checked)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)
