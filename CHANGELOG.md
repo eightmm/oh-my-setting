@@ -463,6 +463,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The worker source guard no longer stops a running worker when another dispatch
+  adds or removes an OMS-managed sibling worktree: a new live managed sibling is
+  validated between two repository fingerprints and treated as benign, kept
+  siblings still report the soft `kept-sibling` result, and refs, HEAD, index,
+  config or unmanaged worktree changes still stop the worker.
 - `oms doctor` parses again under macOS's stock Bash 3.2: the provider-copy
   inventory program moved out of a heredoc nested in `$(...)`, whose quotes
   Bash 3.2 misread, failing native macOS lifecycle CI.

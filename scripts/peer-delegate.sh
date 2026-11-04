@@ -236,7 +236,10 @@ Environment:
   OMS_WORKER_GUARD_MAX_FILES=20000
                              Cap the untracked/ignored stat scan; a truncated
                              scan is reported, never silent.
-  OMS_WORKER_GUARD_STRICT=1  Fail on every changed surface. By default a change
+  OMS_WORKER_GUARD_STRICT=1  Fail on every classified changed surface. Validated
+                             live managed-worktree lifecycle stays quiet,
+                             including detached siblings added during the run.
+                             By default a change
                              to untracked/ignored files, tracked content,
                              remote-tracking refs, stash, a sibling's branch
                              tracking config, or a dead-owner scratch HEAD move

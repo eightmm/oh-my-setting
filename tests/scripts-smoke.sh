@@ -35958,6 +35958,35 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
 
 # smoke-weight: 37
 test_worker_guard_exempts_a_live_sibling_mid_creation() {
+  local kind
+  for kind in delegate scratch; do
+    (
+      . "$ROOT/scripts/lib/harness-residue.sh"
+      . "$ROOT/scripts/lib/oms-common.sh"
+      local project="$TMP/guard-live-branch-$kind"
+      local root="$TMP/guard-live-branch-root-$kind"
+      local sibling="$root/oh-my-setting-$kind.live"
+      local snapshot="$TMP/guard-live-branch-snapshot-$kind"
+      local changed metadata
+      make_guard_repo "$project"
+      make_live_managed_sibling "$project" "$sibling"
+      export OMS_DELEGATE_WORKTREE_ROOT="$root"
+      oms_worker_surface_snapshot "$project" "$snapshot" "$project" || fail "live branch baseline failed"
+      # Ref policy is checked separately; this regression isolates the sibling
+      # HEAD exemption from the new branch ref created by switch.
+      rm "$snapshot/refs" "$snapshot/work-branches"
+      git -C "$sibling/wt" switch -q -c x || fail "live sibling could not switch branches"
+      changed="$(OMS_WORKER_GUARD_STRICT=1 oms_worker_surface_diff "$project" "$snapshot" "" "$project")" ||
+        fail "live sibling branch comparison failed ($kind)"
+      [ -z "$changed" ] || fail "baseline live sibling HEAD churn must stay quiet ($kind): $changed"
+      metadata="$(git -C "$sibling/wt" rev-parse --git-dir)"
+      mv "$sibling/wt" "$sibling/pending"
+      rm "$metadata/commondir"
+      oms_worker_gitmeta_is_live_managed_worktree "$project" "$metadata/gitdir" "$project" ||
+        fail "pending sibling must validate before commondir is written ($kind)"
+    )
+  done
+
   local project="$TMP/guard-sibling-creation"
   local managed_root="$TMP/guard-sibling-creation-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
@@ -36329,6 +36358,280 @@ printf '%s\\n' '$temp_project/.git' > '$metadata/gitdir'")"
   if contains "$result" 'changed owner authority shared-state'; then
     fail "a gitmeta guard stop must not be labelled owner authority: $result"
   fi
+}
+
+# Force one admin scan across marker visibility, after the baseline and the
+# first validated observation. The real metadata remains registered throughout
+# that scan, so HEAD and gitdir both enter the delta.
+# smoke-weight: 106
+test_worker_guard_accepts_new_managed_sibling_after_capture_race() {
+  local scenario failed=0
+  for scenario in kept removed settling-checkout unsettled-checkout kept-live-head soft-live-head soft-fingerprint-before soft-fingerprint-after protected-ref protected-head protected-index protected-late-ref protected-late-head protected-late-index protected-soft-ref protected-soft-head protected-soft-index head-sha256 settling unsettled unproven-removal unmarked outside symbolic-head mismatched-backpointer \
+    changed-gitdir changed-commondir head-empty head-zero head-short head-long \
+    head-malformed head-sha256-short head-sha256-long head-sha256-malformed head-symlink head-fifo commondir-symlink extra-exclude own-slot; do
+    # Report both reproductions before stopping a failed pre-fix run. Later
+    # safety cases exercise the new classifier's stricter admin contract.
+    case "$scenario:$failed" in kept:*|removed:*|protected-*:*|*:0) ;; *) break ;; esac
+    (
+      . "$ROOT/scripts/lib/harness-residue.sh"
+      . "$ROOT/scripts/lib/oms-common.sh"
+      local project="$TMP/guard-new-sibling-$scenario"
+      local managed_root="$TMP/guard-new-sibling-root-$scenario"
+      local snapshot="$TMP/guard-new-sibling-snapshot-$scenario"
+      local sibling="$managed_root/oh-my-setting-delegate.new"
+      local metadata slot changed worker="$project" alternate blob strict=1
+      local second_alternate initial_live_head dead_pid
+      local existing="$managed_root/oh-my-setting-delegate.existing" existing_metadata
+      if [ "$scenario" = head-sha256 ]; then
+        if ! git init --quiet --object-format=sha256 "$project" > "$TMP/sha256-probe" 2>&1; then
+          printf 'skip: Git does not support SHA-256 repositories\n'
+          exit 0
+        fi
+      fi
+      make_guard_repo "$project"
+      case "$scenario" in protected-soft-*|kept-live-head|soft-*) strict=0 ;; esac
+      case "$scenario" in
+        protected-*|kept-live-head|soft-live-head)
+          alternate="$(printf 'alternate commit\n' | git -C "$project" commit-tree 'HEAD^{tree}' -p HEAD)" || exit 1
+          blob="$(printf 'alternate staged content\n' | git -C "$project" hash-object -w --stdin)" || exit 1
+          second_alternate="$(printf 'second alternate commit\n' | git -C "$project" commit-tree 'HEAD^{tree}' -p HEAD)" || exit 1
+          ;;
+      esac
+      export OMS_DELEGATE_WORKTREE_ROOT="$managed_root"
+      [ "$scenario" != outside ] || sibling="$TMP/guard-new-outside/oh-my-setting-delegate.new"
+      case "$scenario" in
+        changed-*|extra-exclude|kept-live-head|soft-live-head)
+          make_live_managed_sibling "$project" "$existing"
+          existing_metadata="$(git -C "$existing/wt" rev-parse --git-dir)"
+          initial_live_head="$(cat "$existing_metadata/HEAD")"
+          ;;
+      esac
+      oms_worker_surface_snapshot "$project" "$snapshot" "$project" || fail "new sibling baseline failed"
+      [ -d "$sibling/wt" ] || make_live_managed_sibling "$project" "$sibling"
+      metadata="$(git -C "$sibling/wt" rev-parse --git-dir)"
+      slot="${metadata##*/}"
+      ! grep -Fq "worktrees/$slot/" "$snapshot/gitmeta" || fail "sibling entered baseline"
+      if [ "$scenario" = head-sha256 ]; then
+        [ "$(git -C "$sibling/wt" rev-parse HEAD | tr -d '\n' | wc -c | tr -d ' ')" = 64 ] ||
+          fail "SHA-256 fixture did not create a 64-hex detached HEAD"
+      fi
+      case "$scenario" in
+        kept-live-head)
+          dead_pid="$(sh -c 'echo $$')"
+          sed "s/^pid=.*/pid=$dead_pid/" "$sibling/.oh-my-setting-tmp" > "$snapshot/dead-marker"
+          mv "$snapshot/dead-marker" "$sibling/.oh-my-setting-tmp"
+          ;;
+        unmarked) rm "$sibling/.oh-my-setting-tmp" ;;
+        symbolic-head) printf 'ref: %s\n' "$(git -C "$project" symbolic-ref HEAD)" > "$metadata/HEAD" ;;
+        mismatched-backpointer) printf '%s/.git\n' "$project" > "$metadata/gitdir" ;;
+        changed-gitdir) printf '%s/wt/./.git\n' "$existing" > "$existing_metadata/gitdir" ;;
+        changed-commondir) printf '../../.\n' > "$existing_metadata/commondir" ;;
+        head-empty) : > "$metadata/HEAD" ;;
+        head-zero) printf '0\n' > "$metadata/HEAD" ;;
+        head-short) printf '%039d\n' 0 > "$metadata/HEAD" ;;
+        head-long) printf '%041d\n' 0 > "$metadata/HEAD" ;;
+        head-malformed) printf '%039dx\n' 0 > "$metadata/HEAD" ;;
+        head-sha256-short) printf '%063d\n' 0 > "$metadata/HEAD" ;;
+        head-sha256-long) printf '%065d\n' 0 > "$metadata/HEAD" ;;
+        head-sha256-malformed) printf '%063dx\n' 0 > "$metadata/HEAD" ;;
+        head-symlink|commondir-symlink)
+          local field=HEAD
+          [ "$scenario" != commondir-symlink ] || field=commondir
+          mv "$metadata/$field" "$snapshot/original-$field"
+          ln -s "$snapshot/original-$field" "$metadata/$field"
+          ;;
+        head-fifo) ;;
+        extra-exclude) printf '# unrelated edit\n' >> "$project/.git/info/exclude" ;;
+        own-slot) worker="$sibling/wt" ;;
+      esac
+      eval "$(declare -f oms_worker_surface_capture_one |
+        sed '1s/oms_worker_surface_capture_one/new_sibling_real_capture/')"
+      eval "$(declare -f oms_worker_gitmeta_admin_changes_are_safe |
+        sed '1s/oms_worker_gitmeta_admin_changes_are_safe/new_sibling_real_admin/')"
+      oms_worker_surface_capture_one() {
+        if [ "$2" = gitmeta ] && [ -f "$sibling/.oh-my-setting-tmp" ] &&
+          { [ "$scenario" = unproven-removal ] ||
+            { [ "${capture_race:-0}" = 1 ] &&
+              case "$scenario" in kept|removed|settling|settling-checkout|unsettled|unsettled-checkout|protected-*|head-*|symbolic-head|changed-*|extra-exclude|soft-*) true ;; *) false ;; esac; }; }; then
+          mv "$sibling/.oh-my-setting-tmp" "$sibling/marker-pending" || return 1
+          new_sibling_real_capture "$@" > "$snapshot/raced-capture" || return 1
+          mv "$sibling/marker-pending" "$sibling/.oh-my-setting-tmp" || return 1
+          grep -Fq "worktrees/$slot/HEAD " "$snapshot/raced-capture" || return 1
+          grep -Fq "worktrees/$slot/gitdir " "$snapshot/raced-capture" || return 1
+          cat "$snapshot/raced-capture"
+          if [ "${capture_race:-0}" = 1 ] &&
+            { [ "$scenario" = removed ] || [ "$scenario" = unproven-removal ]; }; then
+            git -C "$project" worktree remove --force "$sibling/wt" || return 1
+            rm -rf "$sibling"
+          fi
+        else
+          new_sibling_real_capture "$@"
+        fi
+      }
+      oms_worker_gitmeta_admin_changes_are_safe() {
+        local capture_race=1
+        new_sibling_real_admin "$@" || return
+        if [ "$scenario" = kept-live-head ]; then
+          # Exercise real baseline-sibling churn even when the kept candidate
+          # correctly skips every added-sibling fingerprint call.
+          printf '%s\n' "$alternate" > "$existing_metadata/HEAD"
+        fi
+      }
+      eval "$(declare -f oms_worker_gitmeta_settles |
+        sed '1s/oms_worker_gitmeta_settles/new_sibling_real_settles/')"
+      oms_worker_gitmeta_settles() {
+        [ -z "${4:-}" ] || : > "$snapshot/added-retry"
+        new_sibling_real_settles "$@"
+      }
+      local boundary_calls=0
+      eval "$(declare -f oms_worker_surface_boundary_fingerprint |
+        sed '1s/oms_worker_surface_boundary_fingerprint/new_sibling_real_boundary/')"
+      new_sibling_change_protected() {
+        case "$scenario" in
+          protected-*ref) git -C "$project" update-ref refs/heads/audit "$alternate" ;;
+          protected-*head) printf '%s\n' "$alternate" > "$project/.git/HEAD" ;;
+          protected-*index) git -C "$project" update-index --cacheinfo "100644,$blob,file.txt" ;;
+        esac
+      }
+      oms_worker_surface_boundary_fingerprint() {
+        printf 'capture\n' >> "$snapshot/added-boundary-calls"
+        boundary_calls=$((boundary_calls + 1))
+        # A later attempt must retain the first observation even if its own
+        # before/after pair sees the same, newly changed protected state.
+        case "$scenario" in
+          protected-late-*)
+            [ "$boundary_calls" != 3 ] || new_sibling_change_protected || return 1
+            ;;
+        esac
+        if [ "$scenario" = soft-fingerprint-before ] ||
+          { [ "$scenario" = soft-fingerprint-after ] && [ "$boundary_calls" = 2 ]; }; then
+          return 1
+        fi
+        new_sibling_real_boundary "$@" || return 1
+        case "$scenario" in
+          settling-checkout|unsettled-checkout)
+            if [ "$boundary_calls" = 1 ] && [ -d "$sibling/wt" ]; then
+              mv "$sibling/wt" "$sibling/pending"
+            elif [ "$boundary_calls" = 2 ] && [ "$scenario" = settling-checkout ]; then
+              mv "$sibling/pending" "$sibling/wt"
+            fi
+            ;;
+          kept-live-head|soft-live-head)
+            [ "$boundary_calls" != 1 ] || printf '%s\n' "$second_alternate" > "$existing_metadata/HEAD"
+            ;;
+          protected-*)
+            if [ "$boundary_calls" = 1 ]; then
+              case "$scenario" in protected-late-*) ;; *) new_sibling_change_protected || return 1 ;; esac
+              printf '../../.\n' > "$metadata/commondir"
+            fi
+            ;;
+          settling|unsettled)
+            if [ "$scenario" = unsettled ] || [ "$boundary_calls" = 1 ]; then
+              if [ "$((boundary_calls % 2))" = 1 ]; then
+                printf '../../.\n' > "$metadata/commondir"
+              else
+                printf '../..\n' > "$metadata/commondir"
+              fi
+            fi
+            ;;
+        esac
+      }
+      if [ "$scenario" = head-fifo ]; then
+        # A FIFO is a new-classifier type check, not a change to the shared
+        # validator's contract. Freeze the eligible delta before planting it.
+        oms_worker_gitmeta_admin_changes_are_safe "$project" "$snapshot" "$worker" ||
+          fail "FIFO fixture could not capture its eligible delta"
+        rm "$metadata/HEAD"
+        mkfifo "$metadata/HEAD"
+        if oms_worker_gitmeta_only_added_managed_siblings "$project" "$snapshot" "$worker"; then
+          fail "new classifier accepted a FIFO HEAD"
+        fi
+        exit 0
+      fi
+      changed="$(OMS_WORKER_GUARD_STRICT="$strict" oms_worker_surface_diff "$project" "$snapshot" "" "$worker")" ||
+        fail "new sibling comparison failed ($scenario)"
+      case "$scenario" in
+        kept-live-head|soft-*)
+          [ "$changed" = kept-sibling ] || fail "concurrent sibling lifecycle must remain soft ($scenario): $changed"
+          case "$scenario" in
+            *live-head)
+              [ "$(cat "$existing_metadata/HEAD")" != "$initial_live_head" ] ||
+                fail "baseline live sibling did not move its detached HEAD ($scenario)"
+              ;;
+          esac
+          if [ "$scenario" = kept-live-head ]; then
+            [ ! -e "$snapshot/added-boundary-calls" ] && [ ! -e "$snapshot/added-retry" ] ||
+              fail "kept candidate reached the live added-sibling classifier"
+          fi
+          ;;
+        kept|removed|settling|settling-checkout|head-sha256)
+          [ -z "$changed" ] || fail "validated new sibling must stay quiet ($scenario): $changed"
+          grep -Fq 'added-managed-sibling=yes' "$snapshot/gitmeta-trace" ||
+            fail "new sibling race missed its classifier ($scenario)"
+          if [ "$scenario" = settling-checkout ]; then
+            [ -e "$snapshot/added-retry" ] || fail "pending checkout did not exercise the live retry"
+          fi
+          if [ "$scenario" = kept ] && command -v oms_worker_gitmeta_added_admin_is_safe >/dev/null; then
+            local common invalid_common
+            common="$(oms_harness_git_path_physical "$project" --git-common-dir)"
+            cp "$metadata/commondir" "$snapshot/original-commondir"
+            for invalid_common in '' 0 missing-common "$TMP"; do
+              printf '%s\n' "$invalid_common" > "$metadata/commondir"
+              if oms_worker_gitmeta_added_admin_is_safe "$common" "$slot" 2>/dev/null; then
+                fail "new classifier accepted an invalid common directory"
+              fi
+            done
+            cp "$snapshot/original-commondir" "$metadata/commondir"
+            oms_worker_gitmeta_added_admin_is_safe "$common" "$slot" ||
+              fail "new classifier rejected the restored common directory"
+          fi
+          if [ "$scenario" = kept ] && command -v oms_worker_gitmeta_added_boundary_matches >/dev/null; then
+            local malformed malformed_details
+            for malformed in '' 0 invalid "$(printf '%063d' 0)" "$(printf '%065d' 0)"; do
+              awk -F '\t' -v digest="$malformed" 'BEGIN { OFS="\t" } $1 == "refs" { $2=digest } { print }' \
+                "$snapshot/gitmeta-added-details-before" > "$snapshot/malformed-details"
+              malformed_details="$(cat "$snapshot/malformed-details")"
+              if oms_worker_gitmeta_added_boundary_matches "$malformed_details" "$snapshot/malformed-details"; then
+                fail "malformed protected-state evidence was accepted: $malformed"
+              fi
+            done
+          fi
+          ;;
+        *)
+          [ -n "$changed" ] || fail "unsafe sibling stayed quiet ($scenario)"
+          case "$scenario" in
+            protected-*)
+              case "$changed" in *gitmeta*) ;; *) fail "protected retry mutation was softened ($scenario): $changed" ;; esac
+              grep -Fq 'added-protected-state-changed=yes' "$snapshot/gitmeta-trace" ||
+                fail "protected retry mutation missed the hard classifier ($scenario)"
+              ;;
+            changed-*|extra-exclude)
+              # The eligible new slot must reach the HEAD/directory path even
+              # while a separate baseline sibling or non-slot leaf is changed.
+              grep -Fq "worktrees/$slot/HEAD " "$snapshot/gitmeta-admin-now" ||
+                fail "mixed-change fixture missed its eligible sibling ($scenario)"
+              oms_worker_gitmeta_is_live_managed_worktree "$project" "$metadata/gitdir" "$worker" ||
+                fail "mixed-change fixture lacks a valid new managed sibling ($scenario)"
+              ;;
+          esac
+          # A standalone call starts a fresh observation; retry mutations
+          # are checked by the complete surface comparison above.
+          if [ "${scenario#protected-}" = "$scenario" ] &&
+            command -v oms_worker_gitmeta_only_added_managed_siblings >/dev/null &&
+            oms_worker_gitmeta_only_added_managed_siblings "$project" "$snapshot" "$worker"; then
+            fail "new classifier accepted unsafe sibling ($scenario)"
+          fi
+          case "$scenario" in
+            changed-*|extra-exclude)
+              [ ! -e "$snapshot/added-boundary-calls" ] && [ ! -e "$snapshot/added-retry" ] ||
+                fail "ineligible delta reached a costly added-sibling scan or retry ($scenario)"
+              ;;
+          esac
+          ;;
+      esac
+    ) || failed=1
+  done
+  [ "$failed" = 0 ] || fail "new managed sibling capture races failed"
 }
 
 # The incident that serialized every main's launches: sibling B starts after

@@ -1521,6 +1521,8 @@ oms_worker_surface_diff() {
   local name
   local common
   local surface_git_dir
+  local OMS_WG_GITMETA_INITIAL_DETAILS="" OMS_WG_GITMETA_PROTECTED_CHANGED=0
+  local OMS_WG_GITMETA_ADDED_RETRY=0
 
   if [ -n "${OMS_WG_RECEIPTS_SHA:-}" ]; then
     oms_worker_gitmeta_receipts_assert_unchanged "$before_dir" "$OMS_WG_RECEIPTS_SHA" || return 2
@@ -1561,6 +1563,26 @@ oms_worker_surface_diff() {
           printf 'admin-safe=no ' >> "$before_dir/gitmeta-trace"
           changed="${changed:+$changed, }gitmeta"
           continue
+        fi
+      fi
+      if [ "$name" = gitmeta ]; then
+        if [ "$OMS_WG_GITMETA_ADMIN_QUIET" != 1 ] &&
+          oms_worker_gitmeta_added_candidates_are_live "$repo" "$before_dir" "$current_worktree_physical" &&
+          { oms_worker_gitmeta_only_added_managed_siblings "$repo" \
+              "$before_dir" "$current_worktree_physical" ||
+            { [ "$OMS_WG_GITMETA_PROTECTED_CHANGED" != 1 ] &&
+              [ "$OMS_WG_GITMETA_ADDED_RETRY" = 1 ] &&
+              oms_worker_gitmeta_settles "$repo" "$before_dir/gitmeta" \
+                "$current_worktree_physical" "$before_dir"; }; }; then
+          printf 'added-managed-sibling=yes ' >> "$before_dir/gitmeta-trace"
+          continue
+        else
+          printf 'added-managed-sibling=no ' >> "$before_dir/gitmeta-trace"
+          if [ "$OMS_WG_GITMETA_PROTECTED_CHANGED" = 1 ]; then
+            printf 'added-protected-state-changed=yes ' >> "$before_dir/gitmeta-trace"
+            changed="${changed:+$changed, }gitmeta"
+            continue
+          fi
         fi
       fi
       if [ "$name" = gitmeta ] && [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ]; then
@@ -2091,21 +2113,219 @@ oms_worker_gitmeta_only_added_removed_siblings() {  # REPO BEFORE_DIR CURRENT_WO
   OMS_WG_GITMETA_SOFT=kept-sibling
 }
 
+# Compare retry evidence with the first observation. Status 2 names a changed
+# repository-wide protected row; status 1 is unclassified evidence or slot churn.
+# Only a still-valid candidate may escalate status 2 into a hard violation.
+oms_worker_gitmeta_added_boundary_matches() {  # INITIAL_DETAILS CURRENT_DETAILS [CANDIDATES]
+  python3 - "$2" "${3:-}" 3<<< "$1" <<'PY'
+import re
+import sys
+with open(3) as handle:
+    initial = handle.read().splitlines()
+with open(sys.argv[1]) as handle:
+    current = handle.read().splitlines()
+candidates = None
+if sys.argv[2]:
+    with open(sys.argv[2]) as handle:
+        candidates = set(handle.read().splitlines())
+def protected(rows):
+    result, required = set(), {'refs', 'head', 'symbolic-head', 'index', 'root'}
+    for row in rows:
+        fields = row.split('\t')
+        if fields[0] in required:
+            if len(fields) != 2 or not re.fullmatch('[0-9a-f]{64}', fields[1]):
+                raise SystemExit(1)
+            required.remove(fields[0])
+        if fields[0] in ('slot', 'slot-field', 'slot-path', 'other'):
+            if candidates is None or fields[1] in candidates:
+                continue
+        result.add(row)
+    if required:
+        raise SystemExit(1)
+    repository = {row for row in result
+                  if row.split('\t', 1)[0] in ('refs', 'head', 'symbolic-head', 'index')}
+    return result, repository
+old, old_repository = protected(initial)
+new, new_repository = protected(current)
+if old_repository != new_repository:
+    raise SystemExit(2)
+raise SystemExit(0 if candidates is None or old == new else 1)
+PY
+}
+
+# Reject unrelated deltas before any registry capture or settling retry.
+oms_worker_gitmeta_added_delta_candidates() {  # BEFORE_DIR [CURRENT_CAPTURE]
+  local before="$1" now="${2:-$1/gitmeta-admin-now}"
+  python3 - "$before/gitmeta" "$before/gitmeta-admin-now" "$now" <<'PYADDED'
+import re
+import sys
+
+def lines(path):
+    with open(path) as handle:
+        return set(handle.read().splitlines())
+
+old, observed, now = (lines(path) for path in sys.argv[1:])
+# Admin-only additions already have the quiet lifecycle path. This classifier
+# handles scans that also exposed a directory/HEAD before validation caught up.
+if not any(line.startswith('worktree-dir ') or '/HEAD ' in line for line in old ^ observed):
+    raise SystemExit(1)
+slots = set()
+for line in (old ^ observed) | (old ^ now):
+    match = re.fullmatch(r'worktree(?:-dir worktrees/([^/\s]+)| worktrees/([^/\s]+)/(?:gitdir|commondir|HEAD) [0-9a-f]{64})', line)
+    if not match:
+        raise SystemExit(1)
+    slot = match.group(1) or match.group(2)
+    prefix = 'worktrees/' + slot
+    if any(row.split()[1] == prefix or row.split()[1].startswith(prefix + '/') for row in old):
+        raise SystemExit(1)
+    slots.add(slot)
+if not slots:
+    raise SystemExit(1)
+for slot in sorted(slots):
+    print(slot)
+PYADDED
+}
+
+# Only the new-slot classifier requires detached, complete admin metadata.
+# Shared liveness also covers branch checkouts and registrations in progress.
+oms_worker_gitmeta_added_admin_is_safe() {  # COMMON_DIR SLOT
+  local common="$1" metadata="$1/worktrees/$2" field head resolved
+  [ -d "$metadata" ] && [ ! -L "$metadata" ] || return 1
+  for field in gitdir commondir HEAD; do
+    [ -f "$metadata/$field" ] && [ ! -L "$metadata/$field" ] || return 1
+  done
+  [ ! -e "$metadata/config.worktree" ] && [ ! -L "$metadata/config.worktree" ] || return 1
+  head="$(cat "$metadata/HEAD")" || return 1
+  case "$head" in ""|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#head}" = 40 ] || [ "${#head}" = 64 ] || return 1
+  resolved="$(cd "$metadata" && cd -- "$(cat commondir)" && pwd -P)" || return 1
+  [ "$resolved" = "$common" ]
+}
+
+# A kept sibling belongs to the existing soft classifiers, including when a
+# fingerprint cannot be taken. Removed slots may use an intermediate capture
+# that already passed the live validator and proved the slot complete.
+oms_worker_gitmeta_added_candidates_are_live() {  # REPO BEFORE_DIR WORKER [CANDIDATES]
+  local repo="$1" before="$2" worker="${3:-}" slots="${4:-$2/gitmeta-added-slots}"
+  local common entry
+  if [ -z "${4:-}" ]; then
+    oms_worker_gitmeta_added_delta_candidates "$before" > "$slots" || return 1
+  fi
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  [ -s "$slots" ] || return 1
+  while IFS= read -r entry; do
+    if [ -e "$common/worktrees/$entry" ] || [ -L "$common/worktrees/$entry" ]; then
+      oms_worker_gitmeta_added_admin_is_safe "$common" "$entry" || return 1
+      oms_worker_gitmeta_is_live_managed_worktree "$repo" \
+        "$common/worktrees/$entry/gitdir" "$worker" || return 1
+    else
+      grep -Fxq "$entry" "$before/gitmeta-managed-added" || return 1
+      grep -Fxq "$entry" "$before/gitmeta-managed-complete" || return 1
+    fi
+  done < "$slots"
+}
+
+# A non-atomic scan can expose HEAD before a new sibling becomes live-exempt.
+# Reuse the managed-shape validators, then bind validation to an unchanged
+# registry recapture. This is cooperative same-UID protection: the marker proves
+# the managed shape, not identity. Existing-slot wiring and non-slot metadata
+# never qualify. Removal needs a validated complete intermediate observation.
+oms_worker_gitmeta_only_added_managed_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
+  local repo="$1" before="$2" worker="${3:-}"
+  local common entry initial_details candidate_safe=0 boundary_status=0
+  OMS_WG_GITMETA_ADDED_RETRY=0
+  oms_worker_gitmeta_added_candidates_are_live "$repo" "$before" "$worker" || return 1
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  OMS_WG_BOUNDARY_INDEX=1 OMS_WG_BOUNDARY_DETAIL_OUT="$before/gitmeta-added-details-before" \
+    oms_worker_surface_boundary_fingerprint "$repo" > "$before/gitmeta-added-boundary-before" || return 1
+  initial_details="${OMS_WG_GITMETA_INITIAL_DETAILS:-}"
+  if [ -z "$initial_details" ]; then
+    initial_details="$(cat "$before/gitmeta-added-details-before")" || return 1
+    # surface_diff owns this local across all attempts; direct calls use only
+    # their own observation. A retry cannot replace the protected baseline.
+    if [ "${OMS_WG_GITMETA_INITIAL_DETAILS+x}" = x ]; then
+      OMS_WG_GITMETA_INITIAL_DETAILS="$initial_details"
+    fi
+  fi
+  # Always recapture protected state, including after a failed candidate proof.
+  if (
+  # Do not let Git consume special admin files during the following capture.
+  while IFS= read -r entry; do
+    if [ -e "$common/worktrees/$entry" ] || [ -L "$common/worktrees/$entry" ]; then
+      oms_worker_gitmeta_added_admin_is_safe "$common" "$entry" || return 1
+    fi
+  done < "$before/gitmeta-added-slots"
+  oms_worker_surface_capture_one "$repo" gitmeta "$worker" > "$before/gitmeta-added-now" || return 1
+  oms_worker_gitmeta_added_delta_candidates "$before" "$before/gitmeta-added-now" \
+    > "$before/gitmeta-added-slots" || return 1
+  while IFS= read -r entry; do
+    if [ -e "$common/worktrees/$entry" ] || [ -L "$common/worktrees/$entry" ]; then
+      oms_worker_gitmeta_added_admin_is_safe "$common" "$entry" || return 1
+      oms_worker_gitmeta_is_live_managed_worktree "$repo" \
+        "$common/worktrees/$entry/gitdir" "$worker" || return 1
+      oms_worker_gitmeta_is_foreign_worktree "$repo" \
+        "$common/worktrees/$entry" "$worker" || return 1
+    else
+      grep -Fxq "$entry" "$before/gitmeta-managed-added" || return 1
+      grep -Fxq "$entry" "$before/gitmeta-managed-complete" || return 1
+      ! grep -Fq "worktrees/$entry/" "$before/gitmeta-added-now" || return 1
+    fi
+  done < "$before/gitmeta-added-slots"
+  oms_worker_surface_capture_one "$repo" gitmeta "$worker" > "$before/gitmeta-added-confirmed" || return 1
+  cmp -s "$before/gitmeta-added-now" "$before/gitmeta-added-confirmed"
+  ); then
+    candidate_safe=1
+  fi
+  OMS_WG_BOUNDARY_INDEX=1 OMS_WG_BOUNDARY_DETAIL_OUT="$before/gitmeta-added-details-after" \
+    oms_worker_surface_boundary_fingerprint "$repo" > "$before/gitmeta-added-boundary-after" || return 1
+  oms_worker_gitmeta_added_candidates_are_live "$repo" "$before" "$worker" \
+    "$before/gitmeta-added-slots" || return 1
+  oms_worker_gitmeta_added_boundary_matches "$initial_details" \
+    "$before/gitmeta-added-details-after" "$before/gitmeta-added-slots" || boundary_status=$?
+  case "$boundary_status" in
+    0) ;;
+    2)
+      if [ "$candidate_safe" = 1 ]; then OMS_WG_GITMETA_PROTECTED_CHANGED=1; fi
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+  if [ "$candidate_safe" = 1 ] &&
+    cmp -s "$before/gitmeta-added-boundary-before" "$before/gitmeta-added-boundary-after"; then
+    return 0
+  fi
+  # Unchanged repository and other-slot rows let a live registration finish
+  # or candidate-local churn settle against the original protected observation.
+  OMS_WG_GITMETA_ADDED_RETRY=1
+  return 1
+}
+
 # Neither `git worktree add` nor `remove` is atomic: for a moment the registry
 # entry exists without its `gitdir` file, or the file is already gone while the
 # entry directory remains, and no marker can classify what cannot be read.
 # Those states resolve on their own; a worker's write to the metadata surface
-# does not. Re-capture briefly before naming gitmeta as changed.
-oms_worker_gitmeta_settles() {  # REPO BEFORE_FILE CURRENT_WORKTREE
+# does not. Re-capture briefly before naming gitmeta as changed. With a private
+# baseline directory, retry the new-sibling proof instead of baseline equality;
+# a registration that never becomes coherent remains a failed classification.
+oms_worker_gitmeta_settles() {  # REPO BEFORE_FILE CURRENT_WORKTREE [ADDED_BEFORE_DIR]
   local repo="$1"
   local before="$2"
   local current_worktree_physical="${3:-}"
   local attempt=0
 
   while [ "$attempt" -lt 3 ]; do
+    if [ -n "${4:-}" ]; then
+      oms_worker_gitmeta_added_candidates_are_live "$repo" "$4" "$current_worktree_physical" || return 1
+    fi
     attempt=$((attempt + 1))
     sleep 0.3
-    if oms_worker_surface_capture_one "$repo" gitmeta \
+    if [ -n "${4:-}" ]; then
+      if oms_worker_gitmeta_only_added_managed_siblings "$repo" "$4" "$current_worktree_physical"; then
+        return 0
+      fi
+      [ "${OMS_WG_GITMETA_PROTECTED_CHANGED:-0}" != 1 ] &&
+        [ "${OMS_WG_GITMETA_ADDED_RETRY:-0}" = 1 ] || return 1
+    elif oms_worker_surface_capture_one "$repo" gitmeta \
       "$current_worktree_physical" | cmp -s - "$before"; then
       return 0
     fi
@@ -3393,8 +3613,9 @@ oms_worker_surface_boundary_fingerprint() {  # REPO
   [ -d "$common" ] || return 1
   common="$(cd "$common" && pwd -P)" || return 1
   common="${common//$'\r'/}"
-  OMS_WG_REPO="$repo" OMS_WG_COMMON="$common" python3 - <<'PY'
-import hashlib, os, stat, subprocess
+  OMS_WG_REPO="$repo" OMS_WG_COMMON="$common" \
+    python3 -I -B - "$OMS_GIT_INDEX_SIGNATURE_PY" <<'PY'
+import hashlib, os, stat, subprocess, sys
 
 repo = os.environ["OMS_WG_REPO"]
 common = os.environ["OMS_WG_COMMON"]
@@ -3438,6 +3659,25 @@ symbolic_head = git_output("symbolic-ref", "-q", "HEAD", empty_status=(1,))
 add("symbolic-head", symbolic_head.strip())
 details.append("head\t" + record(b"head", head.strip() or b"unborn"))
 details.append("symbolic-head\t" + record(b"symbolic-head", symbolic_head.strip()))
+
+# Only retry classification needs staged-index evidence. Use the existing
+# semantic reader so ordinary Git stat/cache refreshes remain guard-neutral.
+if os.environ.get("OMS_WG_BOUNDARY_INDEX") == "1":
+    exec(sys.argv[1])
+    path = os.fsdecode(git_output("rev-parse", "--git-path", "index").strip())
+    if not os.path.isabs(path):
+        path = os.path.join(repo, path)
+    value = raw_signature(path)
+    if value.startswith("regular:"):
+        with open(path, "rb") as handle:
+            data = handle.read()
+        content = index_signature(data, 20) or index_signature(data, 32)
+        if content:
+            value = "index:" + content
+    if value == "unreadable" or value.startswith("oversized:"):
+        raise SystemExit(1)
+    add("index", value)
+    details.append("index\t" + record(b"index", value.encode()))
 
 worktrees = os.path.join(common, "worktrees")
 try:
