@@ -75,7 +75,7 @@ oms_check_parallel_run() {
               separator=", "
             fi
           done
-          echo "check: parallel gate stopped after ${names[$k]} failed; not run: $omitted"
+          echo "check: parallel gate stopped after ${names[$k]} failed${omitted:+; not run: $omitted}"
           exit 1
         fi
         pids[$k]=""

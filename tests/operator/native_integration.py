@@ -1284,7 +1284,8 @@ native_adapter.write_text("#!/usr/bin/env python3\n" +
     " os.kill(os.getppid(), getattr(signal, os.environ['OMS_OPEN_SIGNAL']))\n time.sleep(300)\n")
 native_adapter.chmod(0o755)
 with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=shared, OMS_OPEN_LOG=str(open_log), OMS_GRAPH_AUTOBUILD="0",
-                                OMS_OPEN_CONTEXT=str(open_context), OMS_PROVIDER_NATIVE_ADAPTERS="roomtest"), clear=True):
+                                OMS_OPEN_CONTEXT=str(open_context), OMS_PROVIDER_NATIVE_ADAPTERS="roomtest",
+                                OMS_COUNCIL_ALLOW_PARTIAL="1"), clear=True):
     assert "--owner roomtest" in panel.watch_shell(project, "roomtest")
     with patch.object(panel, "watch", return_value=0) as adapter_watch:
         assert panel.main(["--repo", str(project), "--watch", "--owner", "roomtest", "--count", "1"]) == 0
