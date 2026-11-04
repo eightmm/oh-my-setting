@@ -26,6 +26,9 @@ case "${XDG_CONFIG_HOME:-}" in
 esac
 # Fixtures choose their tools through PATH; runtime activation must not undo it.
 export OMS_TEST_PROVIDER_PATH_ONLY=1
+# The host's AppArmor userns setting must not gate fixture Codex write dispatches;
+# sandbox-gate tests point this at their own file.
+export OMS_DOCTOR_USERNS_SYSCTL_PATH=/nonexistent/oms-test-userns
 for oms_smoke_inherited in $(compgen -e); do
   case "$oms_smoke_inherited" in
     HERDR_*|OMS_HARNESS_*|OMS_PANEL_*|OMS_ROOM_*) unset "$oms_smoke_inherited" ;;
