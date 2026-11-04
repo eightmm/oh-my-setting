@@ -4796,8 +4796,30 @@ trap '' TERM
 while :; do sleep 1; done
 EOF
   chmod +x "$bin_dir/claude"
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+prompt=""
+add_dirs=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print|--prompt|-p) prompt="${2:-}"; shift 2 ;;
+    --add-dir) add_dirs+=("${2:-}"); shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -z "$prompt" ]; then
+  printf 'gemini-3.6-flash\n'
+  exit 0
+fi
+printf '%s\n' "${add_dirs[1]:-}" > "$HOME/agy-staged.dir"
+printf '%s\n' "$$" > "$HOME/provider.pid"
+trap '' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$bin_dir/agy"
 
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PEER_TIMEOUT=5m \
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PEER_TIMEOUT=5m OMS_CAPABILITY_SETTLE_WAIT=0 \
     python3 - "$ROOT" "$project" <<'PY_SIGNAL'
 import os
 import signal
@@ -4809,33 +4831,50 @@ from pathlib import Path
 root, project = map(Path, sys.argv[1:])
 sys.path.insert(0, str(root / "scripts/lib"))
 import panel_terminals
-# Reset background-shell inheritance before exec so the INT trap is exercised.
-signal.signal(signal.SIGINT, signal.SIG_DFL)
-for command, arguments in (("peer-review", ["--providers", "claude", "--gate", "--no-verify", "--no-diff"]),
-                           ("advise", ["--to", "claude", "--no-failures"])):
+# Reset background-shell inheritance before exec so HUP/INT/TERM traps are exercised.
+for ResetSignal in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(ResetSignal, signal.SIG_DFL)
+call_timeout = int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "60"))
+oversized_prompt = "Wait for signal\n" + ("x" * 120001)
+for command, arguments, prompt_text, expect_staged in (
+    ("peer-review", ["--providers", "claude", "--gate", "--no-verify", "--no-diff"], "Wait for signal", False),
+    ("peer-review", ["--providers", "antigravity", "--gate", "--no-verify", "--no-diff"], oversized_prompt, True),
+    ("advise", ["--to", "claude", "--no-failures"], "Wait for signal", False),
+):
     for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         pid_file = Path(os.environ["HOME"]) / "provider.pid"
+        staged_file = Path(os.environ["HOME"]) / "agy-staged.dir"
         pid_file.unlink(missing_ok=True)
+        staged_file.unlink(missing_ok=True)
         provider = None
+        staged_dir = None
         with (project / (command + "-" + str(number) + ".log")).open("w") as log:
             peer = subprocess.Popen(["bash", str(root / "scripts" / (command + ".sh")),
                                      "--repo", str(project), "--artifact-dir", str(project / "artifacts"),
-                                     "--prompt", "Wait for signal"] + arguments,
+                                     "--prompt", prompt_text] + arguments,
                                     stdout=log, stderr=log, start_new_session=True)
             try:
-                deadline = time.monotonic() + 10
+                deadline = time.monotonic() + call_timeout
                 while not pid_file.exists() and peer.poll() is None and time.monotonic() < deadline:
                     time.sleep(.05)
                 assert pid_file.exists(), (command, number, "provider did not start")
+                if expect_staged:
+                    assert staged_file.exists(), (command, number, "staged prompt record missing")
+                    staged_path = staged_file.read_text(encoding="utf-8").strip()
+                    assert staged_path, (command, number, "empty staged prompt path")
+                    staged_dir = Path(staged_path)
+                    assert (staged_dir / "prompt.md").is_file(), (command, number, "staged prompt missing before signal", staged_dir)
                 provider = panel_terminals.process(int(pid_file.read_text()))
                 assert provider, (command, number, "provider identity unavailable")
                 os.kill(peer.pid, number)
-                status = peer.wait(timeout=10)
+                status = peer.wait(timeout=call_timeout)
                 assert status == 128 + number, (command, number, status)
-                deadline = time.monotonic() + 3
+                deadline = time.monotonic() + call_timeout
                 while panel_terminals.matches(provider["pid"], provider["identity"]) and time.monotonic() < deadline:
                     time.sleep(.05)
                 assert not panel_terminals.matches(provider["pid"], provider["identity"]), (command, number, "provider survived")
+                if expect_staged:
+                    assert staged_dir is not None and not staged_dir.exists(), (command, number, "staged prompt survived signal", staged_dir)
             finally:
                 # A failed regression must not leave the fake provider at its five-minute wall.
                 if provider and panel_terminals.matches(provider["pid"], provider["identity"]):
@@ -4844,6 +4883,8 @@ for command, arguments in (("peer-review", ["--providers", "claude", "--gate", "
                     os.killpg(peer.pid, signal.SIGKILL)
                 peer.wait(timeout=5)
 PY_SIGNAL
+  rm -rf "$home_dir/.cache/oh-my-setting/worktrees"
+  git -C "$project" worktree prune >/dev/null 2>&1 || true
 }
 
 test_peer_review_gate_missing_exits() {
@@ -31907,7 +31948,7 @@ test_antigravity_receives_the_prompt_it_is_given() {
   local project="$TMP/agy-prompt"
   local bin_dir="$project/bin"
   local home_dir="$project/home"
-  local seen
+  local seen extra_dir limit_prompt out rc size ready caller_pid tries max_tries workdir_real tmp_target
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
@@ -31917,13 +31958,27 @@ test_antigravity_receives_the_prompt_it_is_given() {
   cat > "$bin_dir/agy" <<'EOF'
 #!/usr/bin/env bash
 prompt=""
+: > "$HOME/agy-add-dirs"
+rm -f "$HOME/agy-prompt-file" "$HOME/agy-prompt-modes"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print|--prompt|-p) prompt="${2:-}"; shift 2 ;;
+    --add-dir) printf '%s\n' "${2:-}" >> "$HOME/agy-add-dirs"; shift 2 ;;
     *) shift ;;
   esac
 done
 printf '%s' "$prompt" > "$HOME/agy-received"
+extra_dir="$(sed -n '2p' "$HOME/agy-add-dirs")"
+if [ -n "$extra_dir" ] && [ -f "$extra_dir/prompt.md" ]; then
+  cp "$extra_dir/prompt.md" "$HOME/agy-prompt-file"
+  python3 - "$extra_dir" "$extra_dir/prompt.md" > "$HOME/agy-prompt-modes" <<'PY'
+import os, stat, sys
+print("%o %o" % (stat.S_IMODE(os.lstat(sys.argv[1]).st_mode), stat.S_IMODE(os.lstat(sys.argv[2]).st_mode)))
+PY
+fi
+[ -z "$prompt" ] || [ -z "${OMS_TEST_AGY_READY_FILE:-}" ] || printf '%s\n' "${extra_dir:-none}" > "$OMS_TEST_AGY_READY_FILE"
+[ -z "$prompt" ] || [ "${OMS_TEST_AGY_SLEEP:-0}" != 1 ] || sleep "${OMS_TEST_AGY_SLEEP_SEC:-5}"
+[ -z "$prompt" ] || [ "${OMS_TEST_AGY_FAIL:-0}" != 1 ] || exit 17
 echo "Sharding by file keeps streaming inputs balanced; seed the sampler per rank."
 echo "Evidence: the loader contract. Next: pin the seed in the training config."
 EOF
@@ -31942,6 +31997,212 @@ EOF
   if printf '%s' "$seen" | grep >/dev/null -Fx -- '--sandbox'; then
     fail "the flag after --print must not become the prompt"
   fi
+  [ "$(wc -l < "$home_dir/agy-add-dirs" | tr -d ' ')" = 1 ] ||
+    fail "small prompt must not add an extra prompt directory"
+  [ ! -e "$home_dir/agy-prompt-file" ] ||
+    fail "small prompt must stay on argv"
+
+  limit_prompt="$project/limit-prompt.txt"
+  out="$project/attempt-out.txt"
+  for size in 0 120000; do
+    if [ "$size" -eq 0 ]; then
+      : > "$limit_prompt"
+    else
+      awk -v bytes="$size" 'BEGIN { for (i = 0; i < bytes; i++) printf "x" }' > "$limit_prompt"
+    fi
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      bash -c '. "$1/scripts/lib/peer-common.sh"
+        ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-edge"' \
+      _ "$ROOT" "$limit_prompt" "$out" "$project" ||
+      fail "antigravity prompt of $size bytes should succeed on argv"
+    [ "$(wc -c < "$home_dir/agy-received" | tr -d ' ')" = "$size" ] ||
+      fail "antigravity prompt of $size bytes should arrive via --print unchanged"
+    [ "$(wc -l < "$home_dir/agy-add-dirs" | tr -d ' ')" = 1 ] ||
+      fail "antigravity prompt of $size bytes must not add an extra --add-dir"
+  done
+
+  awk 'BEGIN {
+    printf "OVERSIZED-BEGIN:"
+    for (i = 0; i < 120000; i++) printf "y"
+    printf ":OVERSIZED-END\n"
+  }' > "$limit_prompt"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/agent-call.sh" --to antigravity --repo "$project" \
+    --prompt-file "$limit_prompt" >/dev/null 2>&1 ||
+    fail "antigravity call above 120000 bytes should succeed via prompt file"
+  seen="$(cat "$home_dir/agy-received" 2>/dev/null || true)"
+  extra_dir="$(sed -n '2p' "$home_dir/agy-add-dirs")"
+  [ -n "$extra_dir" ] || fail "oversized prompt must pass an extra --add-dir"
+  case "$extra_dir" in
+    "$project"/*) fail "oversized prompt directory must live outside the worktree: $extra_dir" ;;
+    /*) ;;
+    *) fail "oversized prompt directory must be an absolute path: $extra_dir" ;;
+  esac
+  [ "${#seen}" -lt 256 ] || fail "oversized prompt must pass a short --print value, got ${#seen}B"
+  contains "$seen" "$extra_dir/prompt.md" ||
+    fail "short --print value must name the absolute prompt file path: $seen"
+  [ "$(cat "$home_dir/agy-prompt-modes" 2>/dev/null || true)" = "700 600" ] ||
+    fail "oversized prompt dir and file must have modes 0700 and 0600, got: $(cat "$home_dir/agy-prompt-modes" 2>/dev/null || true)"
+  contains "$(cat "$home_dir/agy-prompt-file" 2>/dev/null || true)" 'OVERSIZED-BEGIN:' ||
+    fail "staged prompt file must contain the beginning of the composed prompt"
+  contains "$(cat "$home_dir/agy-prompt-file" 2>/dev/null || true)" ':OVERSIZED-END' ||
+    fail "staged prompt file must contain the end of the composed prompt"
+  [ ! -e "$extra_dir" ] || fail "oversized prompt directory must be removed after the run: $extra_dir"
+
+  awk 'BEGIN { for (i = 0; i < 120001; i++) printf "z" }' > "$limit_prompt"
+  mkdir -p "$TMP/rel-tmp-parent/sub"
+  (
+    cd "$TMP/rel-tmp-parent" &&
+    TMPDIR="sub" HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      bash -c '. "$1/scripts/lib/peer-common.sh"
+        ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-120001"' \
+      _ "$ROOT" "$limit_prompt" "$out" "$project"
+  ) || fail "antigravity prompt of 120001 bytes should succeed"
+  extra_dir="$(sed -n '2p' "$home_dir/agy-add-dirs")"
+  case "$extra_dir" in
+    /*) ;;
+    *) fail "relative TMPDIR must still produce an absolute --add-dir path: $extra_dir" ;;
+  esac
+  cmp -s "$limit_prompt" "$home_dir/agy-prompt-file" ||
+    fail "staged prompt file must match the exact 120001-byte prompt"
+  [ ! -e "$extra_dir" ] || fail "oversized prompt directory must be removed after 120001-byte run"
+
+  rc=0
+  OMS_TEST_AGY_FAIL=1 HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"
+      ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-fail"' \
+    _ "$ROOT" "$limit_prompt" "$out" "$project" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "failing agy stub must return non-zero"
+  extra_dir="$(sed -n '2p' "$home_dir/agy-add-dirs")"
+  [ -n "$extra_dir" ] || fail "failing oversized run must still record its extra --add-dir"
+  [ ! -e "$extra_dir" ] || fail "oversized prompt directory must be removed on failure exit: $extra_dir"
+
+  rc=0
+  OMS_PEER_TIMEOUT=1 OMS_TEST_AGY_SLEEP=1 HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"
+      ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-timeout"' \
+    _ "$ROOT" "$limit_prompt" "$out" "$project" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 124 ] || fail "timed-out agy stub must exit 124, got $rc"
+  extra_dir="$(sed -n '2p' "$home_dir/agy-add-dirs")"
+  [ -n "$extra_dir" ] || fail "timed-out oversized run must still record its extra --add-dir"
+  [ ! -e "$extra_dir" ] || fail "oversized prompt directory must be removed on timeout exit: $extra_dir"
+
+  rc=0
+  TMPDIR="$project/missing-tmpdir/child" HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"
+      ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-no-tmp"' \
+    _ "$ROOT" "$limit_prompt" "$out" "$project" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "unwritable TMPDIR on oversized prompt must exit 2, got $rc"
+  grep -Fq 'error: could not allocate private Antigravity prompt' "$out" ||
+    fail "unwritable TMPDIR should report prompt allocation failure: $(cat "$out" 2>/dev/null || true)"
+
+  mkdir -p "$project/wt-local-tmp"
+  workdir_real="$(cd "$project" && pwd -P)"
+  rc=0
+  TMPDIR="$project" HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"
+      ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-wt-missing"' \
+    _ "$ROOT" "$limit_prompt" "$out" "$project/missing-worktree" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "missing workdir on oversized prompt must exit 2, got $rc"
+  grep -Fq 'error: could not resolve Antigravity worktree path' "$out" ||
+    fail "missing workdir should report worktree path resolution failure: $(cat "$out" 2>/dev/null || true)"
+
+  for tmp_target in "$project" "$project/wt-local-tmp"; do
+    OMS_LIB_TMPDIR="$project/wt-local-tmp" TMPDIR="$tmp_target" HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      bash -c '. "$1/scripts/lib/peer-common.sh"
+        ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-wt-tmp"' \
+      _ "$ROOT" "$limit_prompt" "$out" "$project" ||
+      fail "worktree-local TMPDIR ($tmp_target) on oversized prompt should relocate outside the worktree"
+    extra_dir="$(sed -n '2p' "$home_dir/agy-add-dirs")"
+    [ -n "$extra_dir" ] || fail "worktree-local TMPDIR run must still pass an extra --add-dir"
+    case "$extra_dir" in
+      "$project"|"$project"/*|"$workdir_real"|"$workdir_real"/*)
+        fail "worktree-local TMPDIR must not stage the prompt inside the worktree: $extra_dir"
+        ;;
+      /*) ;;
+      *) fail "worktree-local TMPDIR fallback must still produce an absolute --add-dir path: $extra_dir" ;;
+    esac
+    [ ! -e "$extra_dir" ] || fail "relocated prompt directory must be removed after the run: $extra_dir"
+  done
+  rmdir "$project/wt-local-tmp"
+
+  rc=0
+  OMS_PEER_INTERACTIVE=1 HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"
+      ma_provider_attempt antigravity write "$2" "$3" "$4" provider-default "" peer-delegate "$4" "agy-interactive-over"' \
+    _ "$ROOT" "$limit_prompt" "$out" "$project" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "oversized interactive antigravity attempt must exit 2, got $rc"
+  grep -Fq 'error: prompt is 120001B; the antigravity transport carries it as one argv element (limit ~128KiB)' "$out" ||
+    fail "oversized interactive antigravity attempt must report explicit size refusal: $(cat "$out" 2>/dev/null || true)"
+
+  ready="$TMP/agy-term-ready"
+  rm -f "$ready"
+  OMS_TEST_AGY_READY_FILE="$ready" OMS_TEST_AGY_SLEEP=1 OMS_TEST_AGY_SLEEP_SEC=30 \
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/agent-call.sh" --to antigravity --repo "$project" \
+    --prompt-file "$limit_prompt" >/dev/null 2>&1 &
+  caller_pid=$!
+  tries=0
+  max_tries=$(( ${OMS_TEST_CALL_TIMEOUT:-120} * 20 ))
+  while [ ! -s "$ready" ] && kill -0 "$caller_pid" 2>/dev/null && [ "$tries" -lt "$max_tries" ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -s "$ready" ] || {
+    kill -KILL "$caller_pid" 2>/dev/null || true
+    wait "$caller_pid" 2>/dev/null || true
+    fail "timed out waiting for agy stub to stage oversized prompt before TERM"
+  }
+  extra_dir="$(sed -n '1p' "$ready")"
+  [ -n "$extra_dir" ] && [ "$extra_dir" != "none" ] || {
+    kill -KILL "$caller_pid" 2>/dev/null || true
+    wait "$caller_pid" 2>/dev/null || true
+    fail "TERM cleanup test must observe a live staged prompt directory"
+  }
+  kill -TERM "$caller_pid" 2>/dev/null || true
+  rc=0
+  wait "$caller_pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "signaled agent-call must exit non-zero"
+  [ ! -e "$extra_dir" ] || fail "staged prompt directory must be removed when caller receives TERM: $extra_dir"
+
+  rm -f "$ready"
+  OMS_TEST_AGY_READY_FILE="$ready" OMS_TEST_AGY_SLEEP=1 OMS_TEST_AGY_SLEEP_SEC=30 \
+    OMS_LIB_TMPDIR="$TMP" OMS_DELEGATE_WORKTREE_ROOT="$TMP/agy-delegate-wt" \
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to antigravity --repo "$project" \
+    --brief-file "$limit_prompt" >/dev/null 2>&1 &
+  caller_pid=$!
+  tries=0
+  while [ ! -s "$ready" ] && kill -0 "$caller_pid" 2>/dev/null && [ "$tries" -lt "$max_tries" ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -s "$ready" ] || {
+    kill -KILL "$caller_pid" 2>/dev/null || true
+    wait "$caller_pid" 2>/dev/null || true
+    fail "timed out waiting for peer-delegate agy stub to stage oversized prompt before TERM"
+  }
+  extra_dir="$(sed -n '1p' "$ready")"
+  [ -n "$extra_dir" ] && [ "$extra_dir" != "none" ] && [ -d "$extra_dir" ] || {
+    kill -KILL "$caller_pid" 2>/dev/null || true
+    wait "$caller_pid" 2>/dev/null || true
+    fail "peer-delegate TERM cleanup test must observe a live staged prompt directory"
+  }
+  kill -TERM "$caller_pid" 2>/dev/null || true
+  rc=0
+  wait "$caller_pid" || rc=$?
+  [ "$rc" -ne 0 ] || {
+    rm -rf "$TMP/agy-delegate-wt"
+    git -C "$project" worktree prune >/dev/null 2>&1 || true
+    fail "signaled peer-delegate must exit non-zero"
+  }
+  [ ! -e "$extra_dir" ] || {
+    rm -rf "$TMP/agy-delegate-wt"
+    git -C "$project" worktree prune >/dev/null 2>&1 || true
+    fail "staged prompt directory must be removed when peer-delegate receives TERM: $extra_dir"
+  }
+  rm -rf "$TMP/agy-delegate-wt"
+  git -C "$project" worktree prune >/dev/null 2>&1 || true
 }
 
 test_consult_panel_asks_one_provider_at_several_tiers() {
@@ -39892,6 +40153,22 @@ else:
         assert process.returncode == 6 and len(failed) == 1, (process.returncode, events)
         assert "verify_exit" in failed[0] and failed[0]["verify_exit"] is None, failed
     assert sample not in (root / "stderr").read_text() and sample not in json.dumps(events)
+if scenario == "antigravity-success":
+    oversized_brief = root / "oversized-brief.md"
+    oversized_brief.write_text("Task\n" + ("x" * 120001) + "\n", encoding="utf-8")
+    calls_before = len((root / "calls.jsonl").read_text().splitlines())
+    oversized_cmd = ["bash", str(Path(source) / "scripts/peer-delegate.sh"), "--repo", str(repo),
+                     "--to", provider, "--interactive", "--model", "fixture-model",
+                     "--brief-file", str(oversized_brief), "--verify", "true"]
+    rejected = subprocess.run(oversized_cmd, input="", text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "60")))
+    assert rejected.returncode != 0, (rejected.returncode, rejected.stdout, rejected.stderr)
+    assert len((root / "calls.jsonl").read_text().splitlines()) == calls_before, "oversized interactive prompt must not invoke agy"
+    failed_events = [json.loads(row) for row in rejected.stdout.splitlines() if row.strip()]
+    assert len(failed_events) == 1 and failed_events[0]["event"] == "failed" and failed_events[0]["worker_exit"] == 2, failed_events
+    refusal_text = Path(failed_events[0]["artifact"]).read_text(encoding="utf-8")
+    assert "the antigravity transport carries it as one argv element (limit ~128KiB)" in refusal_text, refusal_text
 PY
   done
 }

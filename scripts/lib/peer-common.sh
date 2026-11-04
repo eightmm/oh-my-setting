@@ -139,6 +139,10 @@ ma_read_guard_snapshot_source() {
 
 ma_read_guard_begin() {  # PRIVATE_DIR
   MA_READ_GUARD_DIR=""
+  if [ -n "${1:-}" ] && [ -d "${1:-}" ] && [ "${1:-}" != "${read_guard_tmp:-}" ]; then
+    OMS_LIB_TMPDIR="$1"
+    export OMS_LIB_TMPDIR
+  fi
   [ "$REPO" != "$MA_READ_SOURCE_REPO" ] || return 0
   MA_READ_GUARD_DIR="$1/read-guard"
   oms_git_assert_safe_execution_config "$REPO" diff-read || return 2
@@ -2351,12 +2355,15 @@ ma_final_attempt_output() { # ARTIFACT [ROUTE]
 
 # One transport/result contract for consultation and its advice prompt variant.
 ma_call_read_peer() {  # ARTIFACT_OUT PREVIEW AGENT_CALL_ARGS...
-  local artifact_out="$1" preview="$2" log artifact rc=0
+  local artifact_out="$1" preview="$2" log artifact rc=0 call_tmpdir_parent="${TMPDIR:-/tmp}"
   shift 2
   OMS_PEER_ANSWER_QUALITY=blocked
   [ "${OH_MY_SETTING_CALL_DRY_RUN:-0}" != 1 ] || preview=1
   log="$(agent_memory_mktemp)" || return 1
-  MA_READ_SOURCE_REPO="${MA_READ_SOURCE_REPO:-}" \
+  if [ -n "${OMS_LIB_TMPDIR:-}" ] && [ -d "${OMS_LIB_TMPDIR:-}" ]; then
+    call_tmpdir_parent="$OMS_LIB_TMPDIR"
+  fi
+  TMPDIR="$call_tmpdir_parent" MA_READ_SOURCE_REPO="${MA_READ_SOURCE_REPO:-}" \
     bash "$(ma_scripts_dir)/agent-call.sh" "$@" > "$log" 2>&1 || rc=$?
   cat "$log"
   # Ambiguous or absent receipts never borrow another concurrent call's file.
@@ -3537,15 +3544,88 @@ ma_provider_attempt_run() {
       # its default must track the verb default or a raised wall changes nothing
       # for this seat: agy would still stop at its own five minutes.
       cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-$(ma_peer_timeout_default)}")
-      # The prompt rides argv here (see above), and Linux caps a single argv
-      # element at MAX_ARG_STRLEN (128KiB). Refusing with the limit named
-      # beats dying as E2BIG mid-exec with the prompt already composed.
-      if [ "$(wc -c < "$prompt_file" | tr -d ' ')" -gt 120000 ]; then
-        echo "error: prompt is $(wc -c < "$prompt_file" | tr -d ' ')B; the antigravity transport carries it as one argv element (limit ~128KiB) — trim the quoted context or use another provider" > "$output_file"
-        return 2
-      fi
       cmd+=(--output-format json)
-      if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
+        # Interactive turns ride argv via peer-conversation.sh, and Linux caps
+        # a single argv element at MAX_ARG_STRLEN (128KiB). Refusing with the
+        # limit named beats dying as E2BIG mid-exec.
+        if [ "$prompt_bytes" -gt 120000 ]; then
+          echo "error: prompt is ${prompt_bytes}B; the antigravity transport carries it as one argv element (limit ~128KiB) — trim the quoted context or use another provider" > "$output_file"
+          return 2
+        fi
+      elif [ "$prompt_bytes" -gt 120000 ]; then
+        # The prompt rides argv by default, and Linux caps a single argv
+        # element at MAX_ARG_STRLEN (128KiB). Above 120000 bytes, stage the
+        # full prompt in a private temp directory outside the worktree, grant
+        # agy read access with --add-dir, and pass a short --print pointer.
+        local agy_prompt_dir="" agy_prompt_base="" agy_prompt_candidate=""
+        workdir_real="$(cd "$workdir" 2>/dev/null && pwd -P)" || workdir_real=""
+        workdir_real="${workdir_real//$'\r'/}"
+        if [ -z "$workdir_real" ]; then
+          echo 'error: could not resolve Antigravity worktree path' > "$output_file"
+          return 2
+        fi
+        for agy_prompt_candidate in \
+          "${worktree_parent:+$worktree_parent/tmp}" \
+          "${read_guard_temp:-}" \
+          "${call_tmpdir:-}" \
+          "${OMS_LIB_TMPDIR:-}"; do
+          [ -n "$agy_prompt_candidate" ] && [ -d "$agy_prompt_candidate" ] || continue
+          agy_prompt_base="$(cd "$agy_prompt_candidate" 2>/dev/null && pwd -P)" || agy_prompt_base=""
+          agy_prompt_base="${agy_prompt_base//$'\r'/}"
+          case "$agy_prompt_base" in
+            ""|"$workdir_real"|"$workdir_real"/*) agy_prompt_base="" ;;
+            *) break ;;
+          esac
+        done
+        if [ -z "$agy_prompt_base" ]; then
+          agy_prompt_base="${TMPDIR:-/tmp}"
+          if [ -d "$agy_prompt_base" ]; then
+            agy_prompt_base="$(cd "$agy_prompt_base" 2>/dev/null && pwd -P)" || agy_prompt_base=""
+            agy_prompt_base="${agy_prompt_base//$'\r'/}"
+            case "$agy_prompt_base" in
+              "$workdir_real"|"$workdir_real"/*)
+                agy_prompt_base="$(cd /tmp 2>/dev/null && pwd -P)" || agy_prompt_base=""
+                agy_prompt_base="${agy_prompt_base//$'\r'/}"
+                case "$agy_prompt_base" in
+                  ""|"$workdir_real"|"$workdir_real"/*)
+                    echo 'error: could not allocate private Antigravity prompt state outside worktree' > "$output_file"
+                    return 2
+                    ;;
+                esac
+                ;;
+            esac
+          fi
+        fi
+        provider_scratch="$(mktemp -d "${agy_prompt_base:-/tmp}/oms-agy-prompt.XXXXXX")" || {
+          echo 'error: could not allocate private Antigravity prompt state' > "$output_file"
+          return 2
+        }
+        chmod 0700 "$provider_scratch" || {
+          rm -rf "$provider_scratch"
+          echo 'error: could not protect private Antigravity prompt state' > "$output_file"
+          return 2
+        }
+        agy_prompt_dir="$(cd "$provider_scratch" 2>/dev/null && pwd -P)" || agy_prompt_dir=""
+        agy_prompt_dir="${agy_prompt_dir//$'\r'/}"
+        case "$agy_prompt_dir" in
+          ""|"$workdir_real"|"$workdir_real"/*)
+            rm -rf "$provider_scratch"
+            echo 'error: could not resolve private Antigravity prompt state outside worktree' > "$output_file"
+            return 2
+            ;;
+        esac
+        provider_scratch="$agy_prompt_dir"
+        if ! (umask 077 && cat "$prompt_file" > "$provider_scratch/prompt.md") ||
+          ! chmod 0600 "$provider_scratch/prompt.md"; then
+          rm -rf "$provider_scratch"
+          echo 'error: could not write private Antigravity prompt file' > "$output_file"
+          return 2
+        fi
+        cmd+=(--add-dir "$provider_scratch"
+          --print "Read $provider_scratch/prompt.md in full and follow it as your complete instructions.")
+      else
         cmd+=(--print "$(cat "$prompt_file")")
       fi
       ;;
