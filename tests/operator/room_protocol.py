@@ -15,6 +15,18 @@ import sys
 import tempfile
 import panel_native
 
+# BEGIN council missing family
+with patch.object(panel, "provider_catalog", return_value=[
+        {"provider": "codex", "installed": True, "models": ["gpt-6.1-sol", "gpt-6.1-terra"]},
+        {"provider": "antigravity", "installed": True, "routable": ["gemini-4-argon-high"]}]):
+    try:
+        panel.council_command(project, "Compare", "missing-family", "Compare")
+    except ValueError as error:
+        assert "claude" in str(error) and "catalog lookup failed" in str(error), error
+    else:
+        raise AssertionError("missing council family accepted")
+# END council missing family
+
 _operator_block("provider-and-routing")
 # Main ownership is independent of the worker-tier provider set.
 with patch.object(panel, "provider_catalog", return_value=[{"catalog_models": ["gpt-6.1-sol"]}]):
@@ -93,8 +105,10 @@ for harness, model, owner in (("pi", "openrouter/thinkingmachines/inkling:free",
                                    "--launch", harness, "--model", model, "--dry-run"]))
     assert planned_main["provider"] == owner and planned_main["harness"] == harness, planned_main
     assert planned_main["argv"] is None and planned_main["executes"] is False, planned_main
-    with patch("sys.stdout", new=io.StringIO()):
+    with patch.object(panel, "provider_catalog", side_effect=council_fixture_catalog), \
+            patch("sys.stdout", new=io.StringIO()) as council_output:
         assert panel.council(project, owner, "owner-council", "Owner council", "Compare", dry_run=True) == 0
+    assert json.loads(council_output.getvalue())["families"] == 3
 
 # Discovery is registry-driven and does not execute even marked adapters.
 inventory = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--providers", "--json"]))
@@ -1044,7 +1058,7 @@ for action in ("native", "council"):
             patch.object(panel.room, "join"), \
             patch.object(panel, "check_legacy_main"), \
             patch.object(panel.subprocess, "Popen", return_value=process), \
-            patch.object(panel, "provider_catalog", return_value=[]), \
+            patch.object(panel, "provider_catalog", side_effect=council_fixture_catalog), \
             patch.dict(os.environ, environment, clear=True):
         status = panel.run_native("codex", project) if action == "native" else \
             panel.council(project, "codex", "heartbeat-council", "Inspect source", "Compare options")
@@ -2857,7 +2871,8 @@ control_codex = {"provider": "codex", "binary": "codex", "installed": True, "mod
                  "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-astra"],
                  "access": ["read", "write"], "exact_model_override": True}
 control_claude = {"provider": "claude", "binary": "claude", "installed": True,
-                  "models": ["claude-haiku-5-5"], "access": ["read", "write"],
+                  "models": [], "catalog_models": [], "routable": [], "catalog_probe": "unsupported",
+                  "access": ["read", "write"],
                   "exact_model_override": True}
 real_popen = panel.subprocess.Popen
 def observe_control_launch(argv, *args, **kwargs):

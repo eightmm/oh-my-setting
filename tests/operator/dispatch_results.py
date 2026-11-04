@@ -344,7 +344,7 @@ def exercise_codex_sandbox_host_gate():
                             assert "oms doctor" in str(error) and len(str(error).splitlines()) == 1
                         else:
                             raise AssertionError("explicit blocked Codex write accepted")
-                    other = dict(peer, provider="claude", binary="claude", models=["claude-opus-5-5"])
+                    other = dict(peer, provider="claude", binary="claude", models=[], catalog_models=[], routable=[], catalog_probe="unsupported")
                     with patch("terminal_panel.provider_catalog", return_value=[other]):
                         explicit = dispatch.selected_route("claude", "builder", None, "write", None,
                                                            target="claude", model="claude-opus-5-5")
@@ -2423,7 +2423,48 @@ for title in ("".join(("api", "_key", "=", "fixture-value")), "/private/absolute
         pass
 assert panel.safe_label("설명 \033[31m source") == "설명 ?[31m source"
 
+# BEGIN council resolved catalog model
+rows = council_fixture_catalog()
+for row in rows:
+    if row["provider"] == "codex":
+        row.update(models=["gpt-6.2-sol", "gpt-6.2-terra", "gpt-6-astra"],
+                   catalog_models=["gpt-6.2-sol", "gpt-6.2-terra", "gpt-6-astra"])
+with patch.object(panel, "provider_catalog", return_value=rows):
+    argv = panel.council_command(project, "Compare", "resolved-catalog", "Compare")
+    targets = argv[argv.index("--providers") + 1]
+    assert "codex:model=gpt-6.2-sol" in targets and "codex:model=gpt-6.2-terra" in targets, targets
+# END council resolved catalog model
+
+# BEGIN council help families
+help_text = call(["bash", str(panel.ENTRY), "panel", "--help"])
+assert "Codex, Claude and Antigravity debate" in help_text, help_text
+# END council help families
+
 # BEGIN council extra seats
+(capability_dir / "codex.models").write_text("gpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\n")
+with patch.object(panel, "provider_catalog", return_value=[
+        {"provider": "antigravity", "installed": True, "routable": ["gemini-4-argon-high"]}]):
+    try:
+        panel.council_command(project, "Compare", "missing-catalog", "Compare")
+    except ValueError as error:
+        assert "catalog lookup failed" in str(error), error
+    else:
+        raise AssertionError("missing main provider catalogs accepted")
+main_catalog_rows = [
+    {"provider": "claude", "binary": "claude", "installed": True, "catalog_probe": "unsupported",
+     "models": [], "catalog_models": [], "routable": []},
+    {"provider": "codex", "installed": True, "models": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]},
+]
+for codex_models in ([], ["gpt-6.2-sol", "gpt-6.2-terra", "gpt-6-astra"]):
+    with patch.object(panel, "provider_catalog", return_value=[
+            main_catalog_rows[0], dict(main_catalog_rows[1], binary="codex", models=codex_models,
+                                      catalog_models=codex_models, routable=codex_models),
+            {"provider": "antigravity", "installed": True, "routable": ["gemini-4-argon-high"]}]):
+        argv = panel.council_command(project, "Compare", "empty-catalog", "Compare")
+        targets = argv[argv.index("--providers") + 1]
+        assert "claude:model=claude-opus-5-5" in targets, targets
+        if codex_models:
+            assert "codex:model=gpt-6.2-sol" in targets and "codex:model=gpt-6.2-terra" in targets, targets
 import panel_routing
 for model, family, version in (
         ("gemini-4-argon-high", "argon-high", (4,)),
@@ -2470,44 +2511,171 @@ for configured, routable, resolved, note in (
            "catalog_models": catalog, "routable": routable}
     output = io.StringIO()
     with patch.object(panel, "policy", return_value=candidate), \
-            patch.object(panel, "provider_catalog", return_value=[row]), redirect_stderr(output):
-        argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
-    targets = argv[argv.index("--providers") + 1].split(",")
-    extra_targets = [target for target in targets if target.startswith("antigravity:")]
-    assert extra_targets == (["antigravity:model=" + resolved + ":optional"] if resolved else []), (configured, routable, targets)
-    assert note in output.getvalue(), output.getvalue()
-    if note.startswith("configured family"):
-        assert "routable choices: " + ", ".join(sorted(routable)) in output.getvalue(), output.getvalue()
+            patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [row]), redirect_stderr(output):
+        if resolved:
+            for tier, expected_seats in (("routine", 3), ("deep", 5), ("frontier", 5)):
+                argv = panel.council_command(project, "Compare", "extra-seat", "Compare", workload=tier)
+                targets = argv[argv.index("--providers") + 1].split(",")
+                assert len(targets) == expected_seats, (tier, targets)
+                assert {target.split(":", 1)[0] for target in targets} == {"claude", "codex", "antigravity"}, targets
+                assert ":optional" not in argv[argv.index("--providers") + 1], argv
+                extra_targets = [target for target in targets if target.startswith("antigravity:")]
+                assert extra_targets == ["antigravity:model=" + resolved], (configured, routable, targets)
+            assert output.getvalue() == "", output.getvalue()
+        else:
+            try:
+                panel.council_command(project, "Compare", "extra-seat", "Compare")
+            except ValueError as error:
+                assert "antigravity" in str(error) and note in str(error), error
+                if note.startswith("configured family"):
+                    assert "routable choices: " + ", ".join(sorted(routable)) in str(error), error
+            else:
+                raise AssertionError("council accepted unroutable antigravity seat: %s" % (configured,))
+            with patch.dict(os.environ, {"OMS_COUNCIL_ALLOW_PARTIAL": "1"}):
+                argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
+            targets = argv[argv.index("--providers") + 1].split(",")
+            assert [target for target in targets if target.startswith("antigravity:")] == [], targets
+            assert note in output.getvalue(), output.getvalue()
+            if note.startswith("configured family"):
+                assert "routable choices: " + ", ".join(sorted(routable)) in output.getvalue(), output.getvalue()
 extra_route = {"provider": "antigravity", "model": "gemini-3.1-pro-high", "effort": "high"}
 extra_policy = deepcopy(panel.policy())
 extra_policy["council"] = {"extra": [extra_route]}
 for installed, models, rounds, workload, included, note in (
+        (True, [extra_route["model"]], 1, "routine", True, ""),
         (True, [extra_route["model"]], 1, "deep", True, ""),
+        (True, [extra_route["model"]], 1, "frontier", True, ""),
+        (False, [], 1, "routine", False, "not installed"),
         (False, [], 1, "deep", False, "not installed"),
+        (False, [], 1, "frontier", False, "not installed"),
         (True, [], 1, "deep", False, "absent from the catalog"),
         (True, [extra_route["model"]], 2, "deep", False, "5 seats x 3 rounds exceeds the 12-call budget"),
+        (True, [extra_route["model"]], 2, "frontier", False, "5 seats x 3 rounds exceeds the 12-call budget"),
         (True, [extra_route["model"]], 2, "routine", True, "")):
     row = {"provider": "antigravity", "installed": installed, "models": models}
     output = io.StringIO()
     with patch.object(panel, "policy", return_value=extra_policy), \
-            patch.object(panel, "provider_catalog", return_value=[row]), redirect_stderr(output):
-        argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
-    assert ("antigravity:model=gemini-3.1-pro-high:optional" in argv[argv.index("--providers") + 1]) == included
-    assert note in output.getvalue(), output.getvalue()
-for failure in (ValueError("unavailable"), subprocess.TimeoutExpired("catalog", 1), OSError("unavailable")):
+            patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [row]), redirect_stderr(output):
+        if included:
+            argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
+            providers_arg = argv[argv.index("--providers") + 1]
+            assert "antigravity:model=gemini-3.1-pro-high" in providers_arg and ":optional" not in providers_arg
+            assert {t.split(":", 1)[0] for t in providers_arg.split(",")} == {"claude", "codex", "antigravity"}
+            assert output.getvalue() == "", output.getvalue()
+        else:
+            for partial_value in ("", "0", "malformed"):
+                with patch.dict(os.environ, {"OMS_COUNCIL_ALLOW_PARTIAL": partial_value}):
+                    try:
+                        panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
+                    except ValueError as error:
+                        assert "antigravity" in str(error) and note in str(error), error
+                    else:
+                        raise AssertionError("council accepted unavailable seat")
+            with patch.dict(os.environ, {"OMS_COUNCIL_ALLOW_PARTIAL": "1"}):
+                argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
+            assert "antigravity:" not in argv[argv.index("--providers") + 1]
+            assert note in output.getvalue(), output.getvalue()
+for result in (ValueError("unavailable"), subprocess.TimeoutExpired("catalog", 1), OSError("unavailable"),
+               [], [{"provider": "other", "installed": False}]):
     output = io.StringIO()
-    with patch.object(panel, "policy", return_value=extra_policy), \
-            patch.object(panel, "provider_catalog", side_effect=failure), redirect_stderr(output):
-        argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
-    assert "antigravity:" not in argv[argv.index("--providers") + 1]
-    assert output.getvalue() == "council: antigravity seat skipped: catalog lookup failed\n"
-for rows in ([], [{"provider": "other", "installed": False}]):
-    output = io.StringIO()
-    with patch.object(panel, "policy", return_value=extra_policy), \
-            patch.object(panel, "provider_catalog", return_value=rows), redirect_stderr(output):
-        argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
-    assert "antigravity:" not in argv[argv.index("--providers") + 1]
-    assert "not installed" not in output.getvalue()
+    catalog_patch = (patch.object(panel, "provider_catalog", side_effect=result) if isinstance(result, Exception)
+                     else patch.object(panel, "provider_catalog", return_value=result))
+    with patch.object(panel, "policy", return_value=extra_policy), catalog_patch, redirect_stderr(output):
+        try:
+            panel.council_command(project, "Compare", "extra-seat", "Compare")
+        except ValueError as error:
+            assert str(error) == "council: claude seat unavailable: catalog lookup failed", error
+        else:
+            raise AssertionError("missing catalog accepted")
+        with patch.dict(os.environ, {"OMS_COUNCIL_ALLOW_PARTIAL": "1"}):
+            try:
+                panel.council_command(project, "Compare", "extra-seat", "Compare")
+            except ValueError as error:
+                assert "two independent provider families" in str(error), error
+            else:
+                raise AssertionError("empty partial council accepted")
+    assert "catalog lookup failed" in output.getvalue(), output.getvalue()
+for missing_family in ("claude", "codex"):
+    other_family = "codex" if missing_family == "claude" else "claude"
+    other_row = next(row for row in council_fixture_catalog() if row["provider"] == other_family)
+    for rows, reason in (
+            ([other_row,
+              {"provider": "antigravity", "installed": True, "routable": [extra_route["model"]]}], "catalog lookup failed"),
+            ([{"provider": missing_family, "installed": False, "models": []},
+              other_row,
+              {"provider": "antigravity", "installed": True, "routable": [extra_route["model"]]}], "not installed"),
+            ([{"provider": missing_family, "installed": True, "models": []},
+              other_row,
+              {"provider": "antigravity", "installed": True, "routable": [extra_route["model"]]}], "absent from the catalog")):
+        if missing_family == "claude" and reason == "absent from the catalog":
+            continue
+        output = io.StringIO()
+        with patch.object(panel, "policy", return_value=extra_policy), \
+                patch.object(panel, "provider_catalog", return_value=rows), redirect_stderr(output):
+            try:
+                panel.council_command(project, "Compare", "extra-seat", "Compare")
+            except ValueError as error:
+                assert missing_family in str(error) and reason in str(error), error
+            else:
+                raise AssertionError("missing %s seat accepted" % missing_family)
+            with patch.dict(os.environ, {"OMS_COUNCIL_ALLOW_PARTIAL": "1"}):
+                argv = panel.council_command(project, "Compare", "extra-seat", "Compare")
+            providers_arg = argv[argv.index("--providers") + 1]
+            assert missing_family + ":" not in providers_arg
+            assert {t.split(":", 1)[0] for t in providers_arg.split(",")} == {other_family, "antigravity"}
+            assert missing_family in output.getvalue() and reason in output.getvalue(), output.getvalue()
+with patch.object(panel, "policy", return_value=extra_policy), \
+        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [
+            {"provider": "antigravity", "installed": True, "models": [extra_route["model"]]}]):
+    for tier in ("routine", "deep", "frontier"):
+        for size in (2, 3, 4, 5, 12):
+            lens_names = ",".join("lens-%s" % index for index in range(size))
+            argv = panel.council_command(project, "Compare", "extra-seat", "Compare", workload=tier, lenses=lens_names)
+            targets = argv[argv.index("--providers") + 1].split(",")
+            assert len(targets) == size and ":optional" not in argv[argv.index("--providers") + 1], targets
+            families = {target.split(":", 1)[0] for target in targets}
+            assert families == ({"claude", "codex"} if size == 2 else {"claude", "codex", "antigravity"}), (tier, size, targets)
+no_agy_bin = temporary / "no-agy-bin"
+no_agy_bin.mkdir(exist_ok=True)
+for name in ("claude", "codex"):
+    target_bin = no_agy_bin / name
+    if not target_bin.exists():
+        target_bin.symlink_to(binary / name)
+sys_path = os.pathsep.join(
+    entry for entry in os.environ.get("PATH", "").split(os.pathsep)
+    if entry and not (Path(entry) / "agy").exists()
+)
+no_agy_env = dict(environment, PATH=str(no_agy_bin) + os.pathsep + sys_path)
+for key in ("OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT", "OMS_COUNCIL_ALLOW_PARTIAL"):
+    no_agy_env.pop(key, None)
+(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
+before_extra_calls = worker_log.read_bytes() if worker_log.exists() else b""
+attempt_log = project / ".oms/lifecycle/events.jsonl"
+before_extra_attempts = attempt_log.read_bytes() if attempt_log.exists() else b""
+refusal_cmd = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
+               "--owner", "codex", "--task-id", "extra-refuse", "--label", "Refuse council", "--prompt", "Compare"]
+not_installed_run = subprocess.run(refusal_cmd, cwd=str(project), env=no_agy_env, capture_output=True, text=True)
+assert not_installed_run.returncode != 0, not_installed_run
+assert len(not_installed_run.stderr.strip().splitlines()) == 1, not_installed_run.stderr
+assert "antigravity" in not_installed_run.stderr and "not installed" in not_installed_run.stderr, not_installed_run.stderr
+budget_refusal = subprocess.run(refusal_cmd + ["--rounds", "2"], cwd=str(project),
+                                env=dict(no_agy_env, PATH=environment["PATH"]), capture_output=True, text=True)
+assert budget_refusal.returncode != 0, budget_refusal
+assert len(budget_refusal.stderr.strip().splitlines()) == 1, budget_refusal.stderr
+assert "antigravity" in budget_refusal.stderr and "12-call budget" in budget_refusal.stderr, budget_refusal.stderr
+(capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
+unrouted_refusal = subprocess.run(refusal_cmd, cwd=str(project),
+                                  env=dict(no_agy_env, PATH=environment["PATH"]), capture_output=True, text=True)
+assert unrouted_refusal.returncode != 0, unrouted_refusal
+assert len(unrouted_refusal.stderr.strip().splitlines()) == 1, unrouted_refusal.stderr
+assert "antigravity" in unrouted_refusal.stderr and "argon-high" in unrouted_refusal.stderr, unrouted_refusal.stderr
+assert (worker_log.read_bytes() if worker_log.exists() else b"") == before_extra_calls
+assert (attempt_log.read_bytes() if attempt_log.exists() else b"") == before_extra_attempts
+partial_plan_run = subprocess.run(refusal_cmd + ["--dry-run"], cwd=str(project),
+                                  env=dict(no_agy_env, OMS_COUNCIL_ALLOW_PARTIAL="1"), capture_output=True, text=True)
+assert partial_plan_run.returncode == 0, partial_plan_run.stderr
+assert "council: antigravity seat skipped: not installed" in partial_plan_run.stderr, partial_plan_run.stderr
+(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
 candidate = deepcopy(extra_policy)
 candidate["tiers"]["deep"].append(extra_route)
 with patch.object(panel_routing.Path, "read_text", return_value=json.dumps(candidate)):
@@ -2546,7 +2714,7 @@ for council_value in (None, {"extra": []}, {"extra": [extra_route]}):
 budget_policy = deepcopy(extra_policy)
 budget_policy["tiers"]["deep"] = budget_policy["tiers"]["deep"][:1]
 with patch.object(panel, "policy", return_value=budget_policy), \
-        patch.object(panel, "provider_catalog", return_value=[{"provider": "antigravity", "installed": True,
+        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True,
                                                              "routable": [extra_route["model"]]}]):
     argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=2)
 assert len(argv[argv.index("--providers") + 1].split(",")) * 3 == 12, argv
@@ -2554,7 +2722,7 @@ class CouncilStarted(Exception):
     pass
 advertised = io.StringIO()
 with patch.object(panel, "policy", return_value=extra_policy), \
-        patch.object(panel, "provider_catalog", return_value=[{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
+        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
         patch.object(panel, "child_environment", return_value={}), \
         patch.object(panel.room, "resolve", return_value=None), \
         patch.object(panel, "events", side_effect=CouncilStarted), redirect_stdout(advertised):
@@ -2570,6 +2738,8 @@ assert ":optional" not in advertised.getvalue(), advertised.getvalue()
 # END council extra seats
 
 # BEGIN council prompt defaults
+(capability_dir / "codex.models").write_text("gpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\n")
+(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
 base = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council", "--owner", "codex", "--dry-run"]
 for prompt, label in (("  Compare options  \nDetails", "Compare options"),
                       ("x" * 60, "x" * 60), ("x" * 61, "x" * 60 + "…")):
@@ -2577,6 +2747,8 @@ for prompt, label in (("  Compare options  \nDetails", "Compare options"),
                              capture_output=True, text=True)
     assert derived.returncode == 0, derived.stderr
     plan = json.loads(derived.stdout)
+    targets = plan["argv"][plan["argv"].index("--providers") + 1]
+    assert plan["families"] == 3 and ":optional" not in targets, targets
     ident = "council-" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
     assert (plan["task_id"], plan["label"]) == (ident, label), plan
     assert "task-id=" + ident in derived.stderr and "label=" + json.dumps(label, ensure_ascii=True) in derived.stderr, derived.stderr
@@ -2596,11 +2768,13 @@ for options in ([], ["--prompt", ""], ["--prompt", "\n"],
 # END council prompt defaults
 
 # BEGIN council lens seats
+(capability_dir / "codex.models").write_text("gpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\n")
 lens_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
              "--owner", "codex", "--task-id", "lens-council", "--label", "Lens review",
              "--prompt", "Compare options.", "--workload", "routine"]
 lens_env = dict(environment, OMS_RESUME_SESSION="old-session", OMS_PANEL_FALLBACK_PROVIDER="codex",
-                OMS_PANEL_FALLBACK_MODEL="gpt-6-luna", OMS_PANEL_FALLBACK_EFFORT="low")
+                OMS_PANEL_FALLBACK_MODEL="gpt-6-luna", OMS_PANEL_FALLBACK_EFFORT="low",
+                OMS_COUNCIL_ALLOW_PARTIAL="1")
 for key in ("OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT",
             "OMS_COUNCIL_LENSES"):
     lens_env.pop(key, None)
@@ -2627,11 +2801,14 @@ for tier in ("deep", "frontier"):
 extra_policy = deepcopy(panel.policy())
 extra_policy["council"] = {"extra": [{"provider": "antigravity", "model": "gemini-3.1-pro-high", "effort": "high"}]}
 with patch.object(panel, "policy", return_value=extra_policy), patch.object(panel, "provider_catalog", return_value=[
+        {"provider": "claude", "binary": "claude", "installed": True, "catalog_probe": "unsupported",
+         "models": [], "catalog_models": [], "routable": []},
+        {"provider": "codex", "installed": True, "models": ["gpt-6.1-terra"]},
         {"provider": "antigravity", "installed": True, "models": ["gemini-3.1-pro-high"]}]):
     argv = panel.council_command(project, "Compare", "lens", "Lens", workload="routine", lenses="a,b,c,d,e")
     targets = argv[argv.index("--providers") + 1].split(",")
     assert targets == ["claude:model=claude-sonnet-5-5", "codex:model=gpt-6.1-terra",
-                       "antigravity:model=gemini-3.1-pro-high:optional",
+                       "antigravity:model=gemini-3.1-pro-high",
                        "claude:model=claude-sonnet-5-5", "codex:model=gpt-6.1-terra"], targets
 before_calls = worker_log.read_bytes() if worker_log.exists() else b""
 attempt_log = project / ".oms/lifecycle/events.jsonl"
@@ -2776,25 +2953,30 @@ assert recovered.returncode == 0, recovered
 # END council lens seats
 
 # Keep the subprocess council independent of any installed provider catalog.
-(capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
-# The council reuses the peer front door: seats over two families, explicit rounds,
+(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
+# The council reuses the peer front door: seats over all three families, explicit rounds,
 # bounded repairs, and the owning main's child links rather than a new task DB.
 council_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
                 "--owner", "codex", "--task-id", "panel-council-test", "--label", "Decide readable results",
                 "--prompt", "Inspect value.txt and compare the result presentation."]
 before_index = (project / ".oms/artifacts/index.jsonl").read_bytes()
+planned = json.loads(call(council_args + ["--rounds", "1", "--dry-run"]))
+assert planned["primary_calls"] == 10 and planned["max_calls"] == 20
+assert planned["families"] == 3 and planned["executes"] is False
+assert planned["argv"][planned["argv"].index("--providers") + 1] == \
+    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,antigravity:model=gemini-4-argon-high,claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
+assert len(planned["argv"][planned["argv"].index("--providers") + 1].split(",")) == 5 == planned["seats"]
 for rounds in (1, 2):
-    planned = json.loads(call(council_args + ["--rounds", str(rounds), "--dry-run"]))
-    assert planned["primary_calls"] == 4 * (rounds + 1) and planned["max_calls"] == 8 * (rounds + 1)
-    assert planned["families"] == 2 and planned["executes"] is False
-    assert planned["argv"][planned["argv"].index("--providers") + 1] == \
-        "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
-    assert len(planned["argv"][planned["argv"].index("--providers") + 1].split(",")) == 4 == planned["seats"]
+    partial_planned = json.loads(call(council_args + ["--rounds", str(rounds), "--dry-run"],
+                                      dict(environment, OMS_COUNCIL_ALLOW_PARTIAL="1")))
+    if rounds == 2:
+        assert partial_planned["primary_calls"] == 12 and partial_planned["max_calls"] == 24
+        assert partial_planned["families"] == 2 and partial_planned["seats"] == 4
 for rounds in (1, 2):
     routine_plan = json.loads(call(council_args + ["--workload", "routine", "--rounds", str(rounds), "--dry-run"]))
-    assert (routine_plan["seats"], routine_plan["families"], routine_plan["primary_calls"]) == (2, 2, 2 * (rounds + 1))
+    assert (routine_plan["seats"], routine_plan["families"], routine_plan["primary_calls"]) == (3, 3, 3 * (rounds + 1))
     assert routine_plan["argv"][routine_plan["argv"].index("--providers") + 1] == \
-        "claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
+        "claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra,antigravity:model=gemini-4-argon-high"
 for invalid_tier in ("", "light", "malformed"):
     try:
         panel.council_command(project, "Compare", "invalid-tier", "Compare", workload=invalid_tier)
@@ -2804,7 +2986,7 @@ for invalid_tier in ("", "light", "malformed"):
         raise AssertionError("invalid council tier accepted: " + invalid_tier)
 frontier_plan = json.loads(call(council_args + ["--workload", "frontier", "--dry-run"]))
 assert frontier_plan["argv"][frontier_plan["argv"].index("--providers") + 1] == \
-    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
+    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,antigravity:model=gemini-4-argon-high,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
 assert (project / ".oms/artifacts/index.jsonl").read_bytes() == before_index
 # A council rejects a tier that no longer preserves two-family independence.
 one_route = deepcopy(panel.policy())
@@ -2823,7 +3005,7 @@ council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "-
 council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]
 assert any(a["tool"] == "panel-council" and a["state"] == "done" for a in council_attempts)
 assert {a["refs"].get("panel_model") for a in council_attempts if a["tool"] != "panel-council"} == \
-    {"gpt-6.1-sol", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6.1-terra"}, council_attempts
+    {"gpt-6.1-sol", "claude-opus-5-5", "gemini-4-argon-high", "claude-sonnet-5-5", "gpt-6.1-terra"}, council_attempts
 assert all(a.get("parent_attempt_id") == main_attempts["codex"] for a in council_attempts)
 # A control-menu council has no inherited main: it binds the room's one live main, or refuses, so Debate can show it.
 class CouncilBound(Exception):
@@ -2835,6 +3017,7 @@ def council_events(repo, *args, **kwargs):
 menu_env = {"OMS_ROOM_ID": "council-room", "OMS_ROOM_PARTICIPANT": ""}
 with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", return_value=[]), \
         patch.object(panel.room, "project", return_value={}), patch.object(panel, "events", council_events), \
+        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
         patch.object(panel, "active_mains", return_value={"m1": {"attempt_id": "att_m1"}}):
     try:
         panel.council(project, "codex", "menu-council", "Menu council", "Compare options.")
@@ -2846,6 +3029,7 @@ with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", retur
 for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
     with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", return_value=[]), \
             patch.object(panel.room, "project", return_value={}), patch.object(panel, "events", council_events), \
+            patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
             patch.object(panel, "active_mains", return_value=none):
         try:
             panel.council(project, "codex", "menu-council", "Menu council", "Compare options.")

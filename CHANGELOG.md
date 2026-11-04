@@ -97,6 +97,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Reviewers, verifiers, security auditors and critics of Codex or Claude work
   route to Antigravity first while it is installed, outside daily cooldown and
   below 90% of any recorded weekly quota; the judged provider stays last.
+- `oms panel --council` seats Codex, Claude and Antigravity by default and
+  refuses to run when any family is missing; `OMS_COUNCIL_ALLOW_PARTIAL=1`
+  allows a partial council that names the absent seats.
 - Native Windows (Git Bash/MSYS2/Cygwin) is retired. install, update, link,
   `oms` and the Python runtime refuse it before any state write and point to
   WSL2; an override cannot hide the real host identity. The Windows CI job is
@@ -477,6 +480,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   reclaimed even while unrelated workers run, only tasks in an active lease
   state (claimed, running, review, landing) pin their captures, and the quota
   refusal names count and byte usage.
+- The pre-push hook skips the full gate for a push that only publishes tags
+  pointing at commits already on the remote, so `git push --tags` after a land
+  no longer reruns the gate; a malformed update record still runs it.
+- `check.sh --parallel` stops launching lanes after the first failure and
+  names the lanes it did not run, instead of finishing the whole gate.
+- `oms land` retries a transient remote fetch failure up to three times before
+  it gives up, and says each retry.
 - The worker source guard no longer stops a running worker when another dispatch
   adds or removes an OMS-managed sibling worktree: a new live managed sibling is
   validated between two repository fingerprints and treated as benign, kept

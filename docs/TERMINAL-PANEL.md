@@ -1184,19 +1184,18 @@ ID`. `--dry-run` prints the chosen route and argv without running a model.
 The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
 front doors. Omitted `--task-id` and `--label` are derived from the prompt and reported on stderr; dry-run JSON includes both values. `--workload routine` selects the routine pair (Sonnet, Terra); the default
 `deep` adds the deep pair (Opus, Sol), while `frontier` combines the deep pair with
-the frontier pair (Fable, Astra). Seats come from the `tiers` routes in `config/panel-routing.json`: routine uses the routine tier, deep uses the deep and routine tiers, and frontier uses the deep and frontier tiers, so the seat set depends on `--workload`, not a fixed list. Each tier covers both families. One rebuttal round
-means four primary calls for routine and eight for deep or frontier before optional seats; two rounds
-mean six and twelve respectively. An installed Antigravity seat joins when it
-fits the 12-primary-call budget. Its configured Gemini ID selects a name and
+the frontier pair (Fable, Astra). Seats come from the `tiers` routes and `council.extra` in `config/panel-routing.json`: routine uses the routine tier plus the extra Antigravity seat, deep uses the deep and routine tiers plus Antigravity, and frontier uses the deep and frontier tiers plus Antigravity, so every workload seats all three provider families (`claude`, `codex`, and `antigravity`). One rebuttal round
+means six primary calls for routine (three seats) and ten for deep or frontier (five seats); two rounds
+mean nine for routine and exceed the 12-primary-call budget for five-seat deep or frontier councils. Its configured Gemini ID selects a name and
 level (for example, `gemini-4-argon-high` selects `argon-high`); council routing
 pins the newest numeric generation of that family in the provider's routable
-catalog, excluding models shown as not routed by `oms models`. If that name is
-absent, routing may select the newest generation of another Gemini name at the
-same level only when exactly one name is routable there. Otherwise the skip
-label names the configured family and routable choices; an empty or unreadable
-catalog also skips the seat. The council summary shows the resolved model.
-This extra seat uses the `provider:model=NAME:optional` syntax; if it fails, the
-council records the failure and continues without it. Format repair can add one call per
+catalog, excluding models shown as not routed by `oms models`. Codex and Claude
+seats also pin the newest catalog model in their configured family. If that Gemini
+name is absent, routing may select the newest generation of another Gemini name
+at the same level only when exactly one name is routable there. An installed
+Codex or Claude CLI with an empty catalog retains the configured model: Claude
+Code cannot enumerate models, and Codex may not have refreshed its catalog yet.
+Installation and catalog lookup checks still apply to every seat. When `codex`, `claude`, or `antigravity` cannot seat (not installed, catalog lookup failed, model absent, or the 12-call budget would be exceeded), the council refuses before any provider call or started-council record, exiting nonzero with one line naming the missing family and the reason (unless `OMS_COUNCIL_ALLOW_PARTIAL=1` is set as an explicit opt-out for hosts that cannot run a provider, which keeps the skip-and-continue behavior). The council summary shows the resolved model. Format repair can add one call per
 primary call. `--dry-run` exposes both counts without executing a model. Every
 required seat must complete to report council success; failed seats remain
 visible and the owner still decides the outcome. All seats are read-only. There
@@ -1205,8 +1204,8 @@ is no model fallback after a seat launches or additional synthesis-model call.
 For blind lens reviews, add `--lenses correctness,security,compatibility` to
 `oms panel --council`. Each unique comma-separated name of 1..32 characters
 matching `[a-z0-9-]+` gets one seat; 2..12 seats are required. Assignments cycle over the exact
-routes selected by `--workload`, including any eligible optional route, and
-are frozen before dispatch. At least two provider families must be assigned.
+routes selected by `--workload`, with the first pass covering all three provider families before repeating a family, and
+are frozen before dispatch. With at least three lenses, each family gets at least one lens; two-lens reviews still require two independent families.
 Lens mode defaults to `--rounds 0` and rejects every other round count: there
 are no rebuttals, but every opening still requires the deliberation evidence,
 alternatives, counterargument and verification sections. Each run uses a fresh

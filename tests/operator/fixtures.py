@@ -48,6 +48,17 @@ def fixture_provider_catalog(providers=None):
     return rows
 
 
+def council_fixture_catalog(providers=None):
+    models = {"claude": [],
+              "codex": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"],
+              "antigravity": ["gemini-4-argon-high"]}
+    requested = set(providers.split(",")) if isinstance(providers, str) else set(providers or models)
+    return [{"provider": name, "binary": name, "installed": True,
+             "catalog_probe": "unsupported" if name == "claude" else "ok",
+             "models": entries, "catalog_models": entries, "routable": entries}
+            for name, entries in models.items() if name in requested]
+
+
 def empty_control(*args, **kwargs):
     kwargs["cache"].update(status=0, state={"collection": {"ok": True}, "attempts": {"active_recent": []}})
     kwargs["navigation"]["main_occupied"] = False

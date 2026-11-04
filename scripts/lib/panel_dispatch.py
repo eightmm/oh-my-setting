@@ -2955,22 +2955,69 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
     if workload not in ("routine", "deep", "frontier"):
         raise ValueError("council tier must be routine, deep or frontier")
     routes = policy()
+    allow_partial = os.environ.get("OMS_COUNCIL_ALLOW_PARTIAL") == "1"
+    required_families = (*PROVIDERS, "antigravity")
     # Routine uses one pair; deep and frontier add their pair to the deep pair.
     seats = routes["tiers"]["routine"] if workload == "routine" else (
         routes["tiers"]["deep"] + routes["tiers"]["frontier" if workload == "frontier" else "routine"])
-    seats = [item for item in seats if item["provider"] in PROVIDERS]
+    seats = [dict(item) for item in seats if item["provider"] in PROVIDERS]
     if len({item["provider"] for item in seats}) < 2:
-        raise ValueError("council tier must include two independent provider families")
-    from terminal_panel import provider_catalog, routable_route_model
-    for extra in routes.get("council", {}).get("extra", []):
-        provider, model = extra["provider"], extra["model"]
-        if any(item["provider"] == provider for item in seats):
+        missing = next((p for p in PROVIDERS if all(item["provider"] != p for item in seats)), "provider")
+        raise ValueError("council: %s seat unavailable: council tier must include two independent provider families" % missing)
+    from terminal_panel import provider_catalog, routable_route_model, route_family
+    extras = [extra for extra in routes.get("council", {}).get("extra", [])
+              if all(item["provider"] != extra["provider"] for item in seats)]
+    queried = ",".join(dict.fromkeys([*(item["provider"] for item in seats), *(extra["provider"] for extra in extras)]))
+    try:
+        rows = provider_catalog(queried) if queried else []
+        if not isinstance(rows, list):
+            rows = []
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        rows = None
+    by_provider = {item["provider"]: item for item in (rows or [])
+                   if isinstance(item, dict) and isinstance(item.get("provider"), str)}
+    kept, skipped = [], set()
+    for item in seats:
+        provider, model = item["provider"], item["model"]
+        if provider in skipped:
             continue
-        try:
-            rows = provider_catalog(provider)
-            row = next((item for item in rows if item["provider"] == provider), None)
-        except (ValueError, subprocess.TimeoutExpired, OSError):
-            row = None
+        row = by_provider.get(provider)
+        reason = None
+        if row is None or "installed" not in row:
+            reason = "catalog lookup failed"
+        elif not row.get("installed"):
+            reason = "not installed"
+        else:
+            catalog = (row.get("routable", row.get("catalog_models", row.get("models")))
+                       if "routable" in row and "binary" not in row
+                       else row.get("catalog_models", row.get("models", [])))
+            resolved = model
+            try:
+                if "binary" not in row or catalog:
+                    if not isinstance(catalog, list) or not catalog or not all(isinstance(entry, str) for entry in catalog):
+                        raise ValueError("model %s absent from the catalog" % model)
+                    resolved = routable_route_model(provider, model, catalog)
+                    family = route_family(provider, model)
+                    if resolved not in catalog and not (family and any(
+                            route_family(provider, entry) and route_family(provider, entry)[0] == family[0]
+                            for entry in catalog)):
+                        raise ValueError("model %s absent from the catalog" % model)
+            except ValueError as error:
+                reason = str(error)
+            if reason is None and (len(kept) + 1) * (rounds + 1) > 12:
+                reason = "%s seats x %s rounds exceeds the 12-call budget" % (len(kept) + 1, rounds + 1)
+        if reason is not None:
+            if not allow_partial:
+                raise ValueError("council: %s seat unavailable: %s" % (provider, reason))
+            if reason in ("catalog lookup failed", "not installed"):
+                skipped.add(provider)
+            print("council: %s seat skipped: %s" % (provider, reason), file=sys.stderr)
+            continue
+        kept.append(dict(item, model=resolved))
+    seats = kept
+    for extra in extras:
+        provider, model = extra["provider"], extra["model"]
+        row = by_provider.get(provider) if rows is not None else None
         if row is None:
             reason = "catalog lookup failed"
         elif not row.get("installed"):
@@ -2990,14 +3037,33 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
             except ValueError as error:
                 reason = str(error)
             else:
-                seats.append(dict(extra, model=model, optional=True))
+                seats.append(dict(extra, model=model))
                 continue
+        if not allow_partial:
+            raise ValueError("council: %s seat unavailable: %s" % (provider, reason))
         print("council: %s seat skipped: %s" % (provider, reason), file=sys.stderr)
+    if len(seats) * (rounds + 1) > 12:
+        raise ValueError("council: %s seats x %s rounds exceeds the 12-call budget" % (len(seats), rounds + 1))
+    if not allow_partial:
+        for family in required_families:
+            if all(item["provider"] != family for item in seats):
+                raise ValueError("council: %s seat unavailable: absent from council policy" % family)
+    if len({item["provider"] for item in seats}) < 2:
+        missing = next((p for p in required_families if all(item["provider"] != p for item in seats)), "provider")
+        raise ValueError("council: %s seat unavailable: council tier must include two independent provider families" % missing)
+    seen, ordered, repeats = set(), [], []
+    for item in seats:
+        (repeats if item["provider"] in seen else ordered).append(item)
+        seen.add(item["provider"])
+    seats = ordered + repeats
     if lenses is not None:
         seats = [seats[index % len(seats)] for index in range(len(names))]
         if len({item["provider"] for item in seats}) < 2:
             raise ValueError("council tier must include two independent provider families")
-    targets = ",".join(item["provider"] + ":model=" + item["model"] + (":optional" if item.get("optional") else "") for item in seats)
+        if not allow_partial and len(names) >= 3 and len({item["provider"] for item in seats}) < 3:
+            missing = next(family for family in required_families if all(item["provider"] != family for item in seats))
+            raise ValueError("council: %s seat unavailable: lenses require codex, claude and antigravity" % missing)
+    targets = ",".join(item["provider"] + ":model=" + item["model"] for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),
             "--providers", targets, "--debate", str(rounds), "--deliberation",
             "--require-complete", "--no-task", "--no-memory", "--reasoning-effort", "high", "--prompt", prompt]
@@ -3016,6 +3082,31 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=None, dry_r
     from terminal_panel import update_activity
     if owner not in MAIN_OWNERS:
         owner = provider_catalog(owner)[0]["provider"]
+    if not dry_run:
+        env = child_environment(owner, repo)
+        env.pop("OMS_COUNCIL_LENSES", None)
+        if lenses is not None:
+            env["OMS_COUNCIL_LENSES"] = lenses
+        parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
+        room_id = room.resolve(repo, env.get("OMS_ROOM_ID"))
+        if room_id:
+            found = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner,
+                                 caller=env.get("OMS_ROOM_PARTICIPANT"), attempt=parent)
+            if len(found) != 1:
+                raise ValueError("select a unique active main in this room before starting a council")
+            selected = next(iter(found.values()))
+            if parent and selected["attempt_id"] != parent:
+                raise ValueError("panel main identity does not match an active owner")
+            parent = selected["attempt_id"]
+        where = {}
+        if parent:
+            record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
+            if record.get("tool") != "panel-main" or record.get("provider") != owner or record.get("terminal"):
+                raise ValueError("panel main identity does not match an active owner")
+            refs_ = record.get("refs") or {}
+            where = {k: refs_[k] for k in ("panel_room_id", "panel_room_participant") if refs_.get(k)}
+        where.setdefault("panel_room_id", room_id or "")
+        where.setdefault("panel_room_participant", env.get("OMS_ROOM_PARTICIPANT") or "")
     if lenses is None:
         argv = council_command(repo, prompt, task_id, label, thread, rounds, workload)
     else:
@@ -3030,37 +3121,13 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=None, dry_r
                           "max_format_repairs": primary_calls, "max_calls": primary_calls * 2,
                           "executes": False}))
         return 0
-    env = child_environment(owner, repo)
-    env.pop("OMS_COUNCIL_LENSES", None)
-    if lenses is not None:
-        env["OMS_COUNCIL_LENSES"] = lenses
-    parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
-    room_id = room.resolve(repo, env.get("OMS_ROOM_ID"))
-    if room_id:
-        found = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner,
-                             caller=env.get("OMS_ROOM_PARTICIPANT"), attempt=parent)
-        if len(found) != 1:
-            raise ValueError("select a unique active main in this room before starting a council")
-        selected = next(iter(found.values()))
-        if parent and selected["attempt_id"] != parent:
-            raise ValueError("panel main identity does not match an active owner")
-        parent = selected["attempt_id"]
-    where = {}
-    if parent:
-        record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
-        if record.get("tool") != "panel-main" or record.get("provider") != owner or record.get("terminal"):
-            raise ValueError("panel main identity does not match an active owner")
-        refs_ = record.get("refs") or {}
-        where = {k: refs_[k] for k in ("panel_room_id", "panel_room_participant") if refs_.get(k)}
-    where.setdefault("panel_room_id", room_id or "")
-    where.setdefault("panel_room_participant", env.get("OMS_ROOM_PARTICIPANT") or "")
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_TASK_ID=task_id, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="advisor", OMS_PANEL_STRATEGY="advisor",
                OMS_PANEL_PURPOSE="advise", OMS_PANEL_WORKLOAD="main",
                OMS_PANEL_LABEL=safe_label(label))
     print("council: %s seats / %s families / %s primary calls + up to %s format repairs / %s" %
           (len(seats), families, primary_calls, primary_calls,
-           ", ".join((seat[:-9] if seat.endswith(":optional") else seat).split(":model=", 1)[1] for seat in seats)), flush=True)
+           ", ".join(seat.split(":model=", 1)[1] for seat in seats)), flush=True)
     refs = ["start", "--provider", owner, "--tool", "panel-council", "--task-id", task_id,
             "--ref", "panel_role=advisor", "--ref", "panel_owner=" + owner,
             "--ref", "panel_label=" + safe_label(label), "--ref", "panel_purpose=advise",
