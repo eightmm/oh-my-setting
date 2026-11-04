@@ -1658,10 +1658,12 @@ provider system instructions and user-owned settings are not replaced.
 
 Automatic task classification is off by default. `oms decide --auto task-classify on`
 enables it; use `off` to disable it or `status` to see the setting and whether a
-key is configured. When enabled, a parent `oms agent-plan add` without `--role`
-sends the title, allowed paths and verify command to OpenAI in one request for a
-panel role and workload suggestion. The suggestion is stored with the task and
-shown when ready; it never dispatches a worker. Failures leave task creation
+key is configured. When enabled, a parent `oms agent-plan add` sends the title,
+allowed paths, verify command and any given `--role` to OpenAI in one request for
+a panel role and workload suggestion (keeping the given role and storing the
+suggested workload when `--role` is set). The suggestion is stored with the task; the
+ready hint shows it for tasks without a given role, and it never dispatches a worker. Sensitive fields (secret-shaped
+text or absolute paths) and failures skip classification, leave task creation
 unchanged and print a short skip message.
 
 `oms decide --input TEXT --choice NAME --option VALUE=DESCRIPTION --option VALUE=DESCRIPTION --instructions TEXT`

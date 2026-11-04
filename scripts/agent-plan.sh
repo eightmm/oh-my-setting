@@ -1444,7 +1444,7 @@ print(json.dumps(row, ensure_ascii=False))
 fi
 
 # The optional network call must finish before the plan writer lock is acquired.
-if [ "$ACTION" = add ] && [ "$ROLE_SET" = 0 ] && [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ]; then
+if [ "$ACTION" = add ] && [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ]; then
   ROLE_SUGGESTION="$(python3 "$ROOT/scripts/lib/openai_decisions.py" --classify-task)" || ROLE_SUGGESTION=""
 fi
 export OMS_ROLE_SUGGESTION="$ROLE_SUGGESTION"

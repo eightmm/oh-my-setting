@@ -52,6 +52,8 @@ class DecisionsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = dict(os.environ, HOME=self.tmp.name, XDG_STATE_HOME=self.tmp.name + '/state')
+        for key in ('OMS_HARNESS_CHILD', 'OMS_HARNESS_DELEGATE_DEPTH', 'OMS_STATE_REPO'):
+            self.env.pop(key, None)
         self.env['XDG_CONFIG_HOME'] = self.tmp.name + '/config'
         self.env['OMS_OPENAI_BASE_URL'] = 'http://127.0.0.1:%d/v1' % self.server.server_port
         self.private = 'fixture-' + 'value'
@@ -226,6 +228,15 @@ class DecisionsTests(unittest.TestCase):
         request = Handler.requests[0]
         self.assertEqual(json.loads(request['input']), {'title': 'Fix it', 'allowed_paths': ['src'], 'verify': 'true'})
         self.assertEqual([q['name'] for q in request['questions']], ['role', 'workload'])
+        role_choices = {c['value']: c['description'] for c in request['questions'][0]['choices']}
+        tier_choices = {c['value']: c['description'] for c in request['questions'][1]['choices']}
+        self.assertTrue(all(desc != name and '\n' not in desc and (desc.startswith('write: ') or desc.startswith('read-only: '))
+                            for name, desc in role_choices.items()))
+        self.assertTrue(role_choices['builder'].startswith('write: '))
+        self.assertTrue(role_choices['researcher'].startswith('read-only: '))
+        self.assertTrue(all(desc != name and '\n' not in desc for name, desc in tier_choices.items()))
+        self.assertIn('security audit', tier_choices['frontier'])
+        self.assertIn('cheapest', tier_choices['light'])
         self.assertEqual(task['role_suggestion']['workload_probability'], 0.9)
         shown = plan('show', '--id', 'one')
         self.assertEqual(json.loads(shown.stdout)['role_suggestion'], task['role_suggestion'])
@@ -233,10 +244,60 @@ class DecisionsTests(unittest.TestCase):
         result = plan('add', '--id', 'two', '--title', 'another')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('plan: role suggestion skipped (', result.stderr)
+        result = plan('add', '--id', 'two-role', '--title', 'another', '--role', 'builder')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('plan: role suggestion skipped (', result.stderr)
+        Handler.status = 200
+        Handler.answer['answers'] = [dict(name='role', type='choice', choice='researcher', confidence=0.75),
+                                     dict(name='workload', type='choice', choice='light', confidence=0.88)]
+        result = plan('add', '--id', 'three', '--title', 'explicit', '--allowed', 'docs/a.md', '--verify', 'true', '--role', 'documenter')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        explicit_req = Handler.requests[-1]
+        self.assertEqual(json.loads(explicit_req['input']),
+                         {'title': 'explicit', 'allowed_paths': ['docs/a.md'], 'verify': 'true', 'role': 'documenter'})
+        three = json.loads((repo / '.oms/plan/tasks.json').read_text())['tasks']['three']
+        self.assertEqual(three['role'], 'documenter')
+        self.assertEqual(three['role_suggestion']['role'], 'documenter')
+        self.assertIs(three['role_suggestion']['role_given'], True)
+        self.assertEqual(three['role_suggestion']['workload'], 'light')
+        self.assertEqual(three['role_suggestion']['workload_probability'], 0.88)
+        self.assertNotIn('role_probability', three['role_suggestion'])
+        for index, (tier_choice, probability) in enumerate((('unknown', 0.5), ('light', -0.01), ('light', 1.01),
+                                                            ('light', True), ('light', 0), ('light', 1))):
+            Handler.answer['answers'][1] = dict(name='workload', type='choice', choice=tier_choice, confidence=probability)
+            result = plan('add', '--id', 'role-edge-' + str(index), '--title', 'edge', '--role', 'builder')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual('skipped' in result.stderr, index < 4)
+        Handler.answer['answers'] = [dict(name='role', type='choice', choice='builder', confidence=0.81),
+                                     dict(name='workload', type='choice', choice='routine', confidence=0.9)]
         count = len(Handler.requests)
-        self.assertEqual(plan('add', '--id', 'three', '--title', 'explicit', '--role', 'builder').returncode, 0)
+        assignment = ' '.join((
+            'pass' + 'word',
+            chr(61),
+            'synthetic',
+        )).replace(' ', '')
+        abs_path = self.tmp.name + '/src/a.py'
+        for task_id, extra in (
+            ('sens-verify', ['--title', 'safe', '--verify', assignment + ' true']),
+            ('sens-verify-role', ['--title', 'safe', '--verify', assignment + ' true', '--role', 'builder']),
+            ('sens-path', ['--title', 'safe', '--allowed', 'docs/a.md,' + abs_path]),
+            ('sens-unc', ['--title', 'safe', '--allowed', 'docs/a.md,\\\\server\\share\\src\\a.py']),
+            ('sens-single-abs', ['--title', 'safe', '--allowed', '/private']),
+            ('sens-include', ['--title', 'safe', '--verify', 'cc -I/some/dir test.c']),
+            ('sens-default', ['--title', 'safe', '--verify', 'test -f "${CONFIG-/opt/acme/private.json}"']),
+            ('sens-title', ['--title', 'Fix ' + assignment]),
+        ):
+            result = plan('add', '--id', task_id, *extra)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(Handler.requests), count)
+            self.assertEqual(result.stderr.strip(), 'plan: role suggestion skipped (sensitive)')
+            self.assertNotIn('synthetic', result.stderr)
+            self.assertNotIn(self.tmp.name, result.stderr)
+            stored = json.loads((repo / '.oms/plan/tasks.json').read_text())['tasks'][task_id]
+            self.assertNotIn('role_suggestion', stored)
         self.assertEqual(self.run_cli('--auto', 'task-classify', 'off').returncode, 0)
         self.assertEqual(plan('add', '--id', 'four', '--title', 'off').returncode, 0)
+        self.assertEqual(plan('add', '--id', 'four-role', '--title', 'off', '--role', 'builder').returncode, 0)
         self.assertEqual(len(Handler.requests), count)
         self.assertEqual(self.run_cli('--auto', 'task-classify', 'on').returncode, 0)
         for env_name, value in (('OMS_HARNESS_CHILD', '1'), ('OMS_HARNESS_DELEGATE_DEPTH', '1')):
@@ -369,6 +430,10 @@ class DecisionsTests(unittest.TestCase):
         for value in ('', 'bad token', 'bad/token', '한'):
             with self.assertRaises(module.ClientError):
                 module.validate_auth(value)
+        self.assertTrue(module.outbound_clean(''))
+        self.assertTrue(module.outbound_clean('src/a.py'))
+        for unsafe in ('/', '/private', '\\\\server\\share\\a.py', '-I/some/dir', '${CONFIG-/opt/x}'):
+            self.assertFalse(module.outbound_clean(unsafe), unsafe)
         self.assertEqual(module.validate_auth('a._-9'), 'a._-9')
         self.assertEqual(len(module.validate_auth('x' * module.AUTH_LIMIT)), module.AUTH_LIMIT)
         with self.assertRaises(module.ClientError):

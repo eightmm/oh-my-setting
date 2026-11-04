@@ -5,7 +5,6 @@ import decimal
 import json
 import math
 import os
-import re
 from pathlib import Path
 import re
 import shlex
@@ -78,23 +77,82 @@ def auto_config(action):
             os.unlink(name)
 
 
+OUTBOUND_SCANNER = Path(__file__).resolve().with_name('peer-common.sh')
+ABSOLUTE_PATH_RE = re.compile(
+    r'(?m)^/$'
+    r'|(?:^|[\s"\'`=(:<>\[,;{}-])(?:/|~/|-[A-Za-z0-9_.,:+-]*~?/)[^\s/"\'`,;][^\s"\'`,;]*'
+    r'|[A-Za-z]:(?:\\|/(?!/))[^\s"\'`,;]*'
+    r'|(?:\\\\|(?<!:)//)[^\\/\s"\'`,;]+[\\/][^\s"\'`,;]*'
+)
+ROLE_OUTPUTS = {
+    'researcher': 'fast source or document lookup with cited findings',
+    'scholar': 'multi-source literature research with verified citations',
+    'worker': 'bounded implementation or investigation patch and check results',
+    'builder': 'bounded feature or fix patch and test results',
+    'refactorer': 'structural code cleanup preserving behavior and contracts',
+    'documenter': 'documentation and handoff updates in assigned paths',
+    'release-engineer': 'release, packaging and rollback checklist',
+    'reviewer': 'independent diff review for correctness and regressions',
+    'verifier': 'requirement-by-requirement completion verification',
+    'security-auditor': 'security boundary, permission and hazard audit findings',
+    'architect': 'component structure, interface design and tradeoffs',
+    'critic': 'failure-condition analysis of a proposed design',
+    'integrator': 'branch integration and conflict-resolution changes',
+    'performance-engineer': 'profiling measurements and evidence-backed optimizations',
+    'advisor': 'direction recommendation with alternatives and tradeoffs',
+}
+TIER_DESCRIPTIONS = {
+    'light': 'mechanical edit with an exact spec (cheapest)',
+    'routine': 'bounded reversible change (default for builders)',
+    'deep': 'multi-file or unclear logic',
+    'frontier': 'reserved for security audits (most expensive; choose only for a security review)',
+}
+
+
+def outbound_clean(value):
+    # Closed before the scan: Windows cannot reopen a file held open for deletion.
+    with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False) as candidate:
+        candidate.write(value)
+    try:
+        checked = subprocess.run(
+            ['bash', '-c', '. "$1"; ma_validate_outbound_prompt "$2"',
+             'oms-decisions-scan', str(OUTBOUND_SCANNER), candidate.name],
+            capture_output=True, text=True, timeout=10, check=False)
+    finally:
+        os.unlink(candidate.name)
+    return checked.returncode == 0 and not ABSOLUTE_PATH_RE.search(value)
+
+
 def classify_task():
     try:
         if not read_config().get('task-classify', False):
             return
         get_auth()
-        from panel_routing import policy, TIERS
+        from panel_routing import policy, TIERS, WRITERS
+        raw_allowed = os.environ.get('OMS_ALLOWED', '')
+        given_role = os.environ.get('OMS_ROLE', '').strip()
+        payload = {'title': os.environ.get('OMS_TITLE', ''),
+                   'allowed_paths': [x for x in re.split(r'[,\s]+', raw_allowed) if x],
+                   'verify': os.environ.get('OMS_VERIFY', '')}
+        if given_role:
+            payload['role'] = given_role
+        if not outbound_clean('\n'.join([payload['title'], raw_allowed, *payload['allowed_paths'],
+                                         payload['verify'], given_role])):
+            print('plan: role suggestion skipped (sensitive)', file=sys.stderr)
+            return
         roles = policy()['roles']
         questions = [
-            {'name': 'role', 'type': 'choice', 'instructions': 'Choose the best panel role.',
-             'choices': [{'value': role, 'description': role} for role in roles]},
+            {'name': 'role', 'type': 'choice',
+             'instructions': 'Choose the best panel role. Write tasks require a write role; read-only roles cannot edit files.',
+             'choices': [{'value': role,
+                          'description': '%s: %s' % ('write' if role in WRITERS else 'read-only',
+                                                     ROLE_OUTPUTS.get(role, role + ' deliverable'))}
+                         for role in roles]},
             {'name': 'workload', 'type': 'choice',
-             'instructions': 'Choose task complexity: light is a mechanical edit with an exact spec; routine is a bounded reversible change; deep is multi-file or unclear logic; frontier is architecture or a trust boundary.',
-             'choices': [{'value': tier, 'description': tier} for tier in TIERS]},
+             'instructions': 'Choose task complexity: light is a mechanical edit with an exact spec (cheapest); routine is a bounded reversible change (default for builders); deep is multi-file or unclear logic; frontier is reserved for security audits (most expensive; choose only for a security review).',
+             'choices': [{'value': tier, 'description': TIER_DESCRIPTIONS[tier]} for tier in TIERS]},
         ]
-        task = json.dumps({'title': os.environ.get('OMS_TITLE', ''),
-                           'allowed_paths': [x for x in re.split(r'[,\s]+', os.environ.get('OMS_ALLOWED', '')) if x],
-                           'verify': os.environ.get('OMS_VERIFY', '')})
+        task = json.dumps(payload)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'questions.json'
             path.write_text(json.dumps(questions), encoding='utf-8')
@@ -105,14 +163,19 @@ def classify_task():
             raise ClientError(category)
         answers = {row['name']: row for row in json.loads(result.stdout)}
         role, workload = answers['role'], answers['workload']
-        if role['choice'] not in roles or workload['choice'] not in TIERS:
+        if (not given_role and role['choice'] not in roles) or workload['choice'] not in TIERS:
             raise ValueError('choice')
-        probabilities = [role['confidence'], workload['confidence']]
+        probabilities = [workload['confidence']] if given_role else [role['confidence'], workload['confidence']]
         if any(isinstance(p, bool) or not isinstance(p, (float, int)) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities):
             raise ValueError('confidence')
-        print(json.dumps({'role': role['choice'], 'workload': workload['choice'],
-                          'role_probability': probabilities[0], 'workload_probability': probabilities[1],
-                          'source': 'openai-decisions', 'model': 'gpt-6-luna'}))
+        suggestion = ({'role': given_role, 'role_given': True, 'workload': workload['choice'],
+                       'workload_probability': workload['confidence'],
+                       'source': 'openai-decisions', 'model': 'gpt-6-luna'}
+                      if given_role else
+                      {'role': role['choice'], 'workload': workload['choice'],
+                       'role_probability': role['confidence'], 'workload_probability': workload['confidence'],
+                       'source': 'openai-decisions', 'model': 'gpt-6-luna'})
+        print(json.dumps(suggestion))
     except subprocess.TimeoutExpired:
         print('plan: role suggestion skipped (timeout)', file=sys.stderr)
     except (ClientError, OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
