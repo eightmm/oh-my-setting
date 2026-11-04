@@ -976,6 +976,7 @@ cleanup() {
   fi
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  ma_agy_read_cleanup_owned
   stop_verify_heartbeat
   if [ "$INCLUDE_TASK" = 1 ]; then
     agent_task_record_outcome "$REPO" peer-delegate "$TO" "$status" "${artifact:-}" \

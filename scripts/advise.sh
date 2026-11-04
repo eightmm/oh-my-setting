@@ -236,10 +236,11 @@ cleanup_signal() {
   local code="$1"
   trap - EXIT HUP INT TERM
   ma_kill_jobs
+  ma_agy_read_cleanup_owned
   rm -rf "$advise_tmpdir"
   exit "$code"
 }
-trap 'rm -rf "$advise_tmpdir"' EXIT
+trap 'ma_agy_read_cleanup_owned; rm -rf "$advise_tmpdir"' EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
@@ -315,6 +316,7 @@ summary="$PROMPT"
 # exists while agent-call reads it and the tmpdir is still cleaned up after.
 status=0
 call_advisor() {
+export MA_AGY_READ_OWNER_PID="$$"
 OMS_ACCOUNT_IMPLICIT_TARGET="$AUTO_TARGET" ma_call_read_peer "" "$PREVIEW" \
   --to "$1" \
   --repo "$REPO" \

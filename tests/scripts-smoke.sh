@@ -4764,9 +4764,31 @@ trap '' TERM
 while :; do sleep 1; done
 EOF
   chmod +x "$bin_dir/agy"
+  cat > "$bin_dir/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree remove "*)
+    if [ -s "$HOME/provider.pid" ]; then
+      state="$(ps -o stat= -p "$(cat "$HOME/provider.pid")" 2>/dev/null || true)"
+      case "$state" in ''|Z*) ;; *) printf 'alive\n' >> "$HOME/remove-while-alive" ;; esac
+    fi
+    sleep 0.4
+    ;;
+esac
+exec "$OMS_TEST_REAL_GIT" "$@"
+EOF
+  chmod +x "$bin_dir/git"
+  bash -c '
+    . "$1/scripts/lib/peer-common.sh"
+    trap ":" HUP INT TERM
+    trap -p HUP INT TERM > "$2/before-traps"
+    ma_run_routed_provider_inner invalid read "" "$2/artifact" "$2" test "$2" "" || :
+    trap -p HUP INT TERM > "$2/after-traps"
+    cmp "$2/before-traps" "$2/after-traps"
+  ' _ "$ROOT" "$project" || fail "routed call changed caller signal traps"
 
-  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_PEER_TIMEOUT=5m OMS_CAPABILITY_SETTLE_WAIT=0 \
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PEER_TIMEOUT=5m OMS_CAPABILITY_SETTLE_WAIT=0 OMS_TEST_REAL_GIT="$(command -v git)" \
     python3 - "$ROOT" "$project" <<'PY_SIGNAL'
 import os
 import signal
@@ -4787,6 +4809,10 @@ for command, arguments, prompt_text, expect_staged in (
     ("peer-review", ["--providers", "claude", "--gate", "--no-verify", "--no-diff"], "Wait for signal", False),
     ("peer-review", ["--providers", "antigravity", "--gate", "--no-verify", "--no-diff"], oversized_prompt, True),
     ("advise", ["--to", "claude", "--no-failures"], "Wait for signal", False),
+    ("advise", ["--to", "antigravity", "--no-failures"], "Wait for signal", False),
+    ("agent-call", ["--to", "antigravity"], "Wait for signal", False),
+    ("peer-ask", ["--providers", "antigravity"], "Wait for signal", False),
+    ("peer-delegate", ["--to", "antigravity", "--read-only", "--no-verify"], "Wait for signal", False),
 ):
     for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         pid_file = Path(os.environ["HOME"]) / "provider.pid"
@@ -4820,8 +4846,14 @@ for command, arguments, prompt_text, expect_staged in (
                 while panel_terminals.matches(provider["pid"], provider["identity"]) and time.monotonic() < deadline:
                     time.sleep(.05)
                 assert not panel_terminals.matches(provider["pid"], provider["identity"]), (command, number, "provider survived")
+                assert not (Path(os.environ["HOME"]) / "remove-while-alive").exists(), (command, number, "tree removal began while provider was alive")
+                if "antigravity" in arguments:
+                    cache = Path(os.environ["XDG_CACHE_HOME"]) / "oh-my-setting" / "worktrees"
+                    assert not list(cache.glob("oh-my-setting-agy-read.*")), (command, number, "read tree survived signal")
                 if expect_staged:
                     assert staged_dir is not None and not staged_dir.exists(), (command, number, "staged prompt survived signal", staged_dir)
+                    cache = Path(os.environ["XDG_CACHE_HOME"]) / "oh-my-setting" / "worktrees"
+                    assert not list(cache.glob("oh-my-setting-agy-read.*")), (command, number, "read tree survived signal")
             finally:
                 # A failed regression must not leave the fake provider at its five-minute wall.
                 if provider and panel_terminals.matches(provider["pid"], provider["identity"]):
@@ -4830,6 +4862,25 @@ for command, arguments, prompt_text, expect_staged in (
                     os.killpg(peer.pid, signal.SIGKILL)
                 peer.wait(timeout=5)
 PY_SIGNAL
+  mkdir -p "$project/marker-fixtures"
+  TMPDIR="$project/marker-fixtures" OMS_DELEGATE_WORKTREE_ROOT="$project/marker-fixtures" \
+    bash -c '
+      . "$1/scripts/lib/peer-common.sh"
+      own="$TMPDIR/oh-my-setting-agy-read.own"
+      other="$TMPDIR/oh-my-setting-agy-read.other"
+      invalid="$TMPDIR/oh-my-setting-agy-read.invalid"
+      zero="$TMPDIR/oh-my-setting-agy-read.zero"
+      empty="$TMPDIR/oh-my-setting-agy-read.empty"
+      mkdir -p "$own" "$other" "$invalid" "$zero" "$empty"
+      oms_harness_mark_tmpdir "$own" "" ""
+      oms_harness_mark_tmpdir "$other" "" "" 99999999
+      oms_harness_mark_tmpdir "$invalid" "" "" invalid
+      oms_harness_mark_tmpdir "$zero" "" "" 0
+      printf "kind=oh-my-setting-temp\ntemporary=1\npid=\n" > "$empty/.oh-my-setting-tmp"
+      ma_agy_read_cleanup_owned
+      [ ! -e "$own" ] && [ -d "$other" ] && [ -d "$invalid" ] && [ -d "$zero" ] && [ -d "$empty" ]
+    ' _ "$ROOT" || fail "read-tree cleanup crossed marker ownership"
+
   rm -rf "$home_dir/.cache/oh-my-setting/worktrees"
   git -C "$project" worktree prune >/dev/null 2>&1 || true
 }

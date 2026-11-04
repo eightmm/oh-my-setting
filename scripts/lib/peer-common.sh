@@ -642,6 +642,7 @@ EOF
     sleep 0.2
     [ "${#tree[@]}" -eq 0 ] || kill -KILL "${tree[@]}" 2>/dev/null || true
     kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
   done <<EOF
 $(jobs -pr)
 EOF
@@ -805,7 +806,7 @@ ma_agy_read_dir() {
   # Mark before registering, so a concurrent worker guard sees a marked, live
   # entry at every instant of the add rather than an unexplained new worktree.
   local read_tree="$base/tree-${base##*.}"
-  [ -z "$repo" ] || oms_harness_mark_tmpdir "$base" "$repo" "$read_tree" 2>/dev/null || true
+  oms_harness_mark_tmpdir "$base" "$repo" "$read_tree" "${MA_AGY_READ_OWNER_PID:-$$}" 2>/dev/null || true
   if [ -n "$repo" ] &&
      oms_git_assert_safe_execution_config "$repo" diff-read >/dev/null 2>&1 &&
      git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
@@ -816,7 +817,7 @@ ma_agy_read_dir() {
     oms_seed_local_agent_files "$repo" "$read_tree"
     printf '%s\n' "$read_tree"
   else
-    oms_harness_mark_tmpdir "$base" "$repo" "" 2>/dev/null || true
+    oms_harness_mark_tmpdir "$base" "$repo" "" "${MA_AGY_READ_OWNER_PID:-$$}" 2>/dev/null || true
     printf '%s\n' "$base"
   fi
 }
@@ -836,6 +837,31 @@ ma_agy_read_cleanup() {
       ;;
   esac
   rm -rf "$base"
+}
+
+# Called only by the owning shell after its provider jobs have stopped.
+ma_agy_read_cleanup_owned() {
+  local base dir marker repo tree
+  while IFS= read -r base; do
+    [ -d "$base" ] || continue
+    for dir in "$base"/oh-my-setting-agy-read.*; do
+      [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || continue
+      marker="$dir/.oh-my-setting-tmp"
+      [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+      [ "$(oms_harness_read_marker_value "$marker" kind)" = oh-my-setting-temp ] || continue
+      [ "$(oms_harness_read_marker_value "$marker" temporary)" = 1 ] || continue
+      [ "$(oms_harness_read_marker_value "$marker" pid)" = "$$" ] || continue
+      repo="$(oms_harness_read_marker_value "$marker" repo)"
+      tree="$(oms_harness_read_marker_value "$marker" worktree)"
+      if oms_harness_safe_residue_worktree "$base" "$dir" "$repo" "$tree"; then
+        ma_agy_read_cleanup "$OMS_HARNESS_SAFE_RESIDUE_REPO" "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE"
+      elif [ -z "$tree" ] || [ "$tree" = "$dir/tree-${dir##*.}" ]; then
+        rm -rf "$dir"
+      fi
+    done
+  done <<EOF
+$(oms_harness_temp_bases)
+EOF
 }
 
 # Verification commands (test suites) get their own, longer wall clock than

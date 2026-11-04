@@ -167,6 +167,7 @@ cleanup() {
   local status="${1:-0}"
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  ma_agy_read_cleanup_owned
   if [ "$INCLUDE_TASK" = 1 ]; then
     agent_task_record_outcome "$REPO" agent-call "$TO" "$status" "${artifact:-}" || true
   fi

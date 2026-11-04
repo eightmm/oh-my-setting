@@ -697,6 +697,7 @@ cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  ma_agy_read_cleanup_owned
   rm -f "$status_file" "$diff_file" "$raw_diff_file" "$diff_scan_report_file" "$prompt_file" "$gate_verify_temp"
   if [ -n "$debate_dir" ]; then
     rm -rf "$debate_dir"
