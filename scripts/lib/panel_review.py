@@ -153,10 +153,10 @@ def _call_result_event(repo, room_id, member, task_id, status):
     return payload, result_record
 
 
-def _judgment_mail(repo, room_id, member, caller, task_id, message):
+def _judgment_mail(repo, room_id, member, caller, task_id, message, prefix="judgment-"):
     try:
         room.send(repo, room_id, member, caller, message, "note",
-                  message_id="judgment-" + member, quiet=False)
+                  message_id=prefix + member, quiet=False)
         return True
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         print("OMS judgment notification unavailable for task " + task_id, file=sys.stderr)
@@ -551,16 +551,25 @@ def _completion_inputs(repo, room_id, member, caller, task_id, record, context):
     verifier = _review_verifier(repo, room_id, worker, caller, task_id)
     if not verifier:
         return ""
+    worker_results = [event for event in room.structured_events(repo, room_id)
+                      if event.get("kind") == "call-result" and event.get("call_id") == worker]
+    failed_worker = bool(worker_results and worker_results[-1].get("exit") != 0)
     relative = ".oms/artifacts/panel-results/completion-%s.md" % member
     content = ("# Completion draft for %s\n\nReview evidence: %s\n\n"
                "Verifier: %s\n\nOwner: inspect the findings and candidate, admit the patch, "
                "and edit this summary before accepting.\n" % (task_id, artifact, verifier))
+    if failed_worker:
+        content = ("# Completion draft for %s\n\nReview evidence: %s\n\n"
+                   "Verifier: %s\n\nOwner: judge the failed worker result and edit this summary.\n"
+                   % (task_id, artifact, verifier))
     _validate_dry_run_inputs(content, None)
     _write_brief_artifact(repo, relative, content)
     arguments = ["oms", "panel", "--finalize", "--owner",
                  os.environ.get("OMS_AGENT") or caller_owner(), "--task-id", task_id, "--summary-file", relative,
-                 "--outcome", "accepted", "--verify", verifier, "--evidence", artifact]
-    return " After admission and editing the summary, owner command: " + " ".join(shlex.quote(p) for p in arguments)
+                 "--outcome", "completed" if failed_worker else "accepted", "--verify", verifier, "--evidence", artifact]
+    lead = (" After judging the failed worker and editing the summary, owner command: " if failed_worker else
+            " After admission and editing the summary, owner command: ")
+    return lead + " ".join(shlex.quote(p) for p in arguments)
 
 
 def _review_verifier(repo, room_id, member, caller, task_id):
@@ -922,12 +931,23 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                 hint = recovery.encode("utf-8")[:hint_budget].decode("utf-8", "ignore")
                 judgment = base + hint + marker
         judgment_notice(judgment)
-    auto_review_done = bool(result_event and policy_available and not (result_event.get("needs_review") and status == 0
-                                                  and not guard_stop
-                                                  and result_event.get("verify_status") != "failed"
-                                                  and auto_review))
-    if (result_event and result_event.get("needs_review") and status == 0 and not guard_stop
-            and result_event.get("verify_status") != "failed" and auto_review):
+    worker_reviewable = status == 0
+    if status not in (0, 124, 129, 130, 143) and result_event and type(result_event.get("verify_exit")) is int and result_event["verify_exit"] == 0:
+        try:
+            from terminal_panel import _dispatch_verifier
+            worker_reviewable = bool(_dispatch_verifier(repo, room_id, member, caller))
+        except (OSError, ValueError, KeyError, TypeError):
+            worker_reviewable = False
+    review_needed = bool(result_event and result_event.get("needs_review") and worker_reviewable
+                         and not guard_stop and not result_record.get("guard")
+                         and result_record.get("reason_code") != "worker_authority_violation"
+                         and result_event.get("verify_status") != "failed" and auto_review)
+    auto_review_done = bool(result_event and policy_available and not review_needed)
+    if review_needed:
+        def review_judgment(message):
+            # A provider failure keeps its judgment and salvage hint; the review handoff joins that one notice.
+            return judgment_notice(message if status == 0 or not review_notice else review_notice + " " + message)
+
         digest = result_event["patch_sha256"]
         artifact, patch_path = result_event.get("artifact"), result_event.get("patch")
         evidence_paths = (("artifact " + artifact + " and ") if artifact else "") + "patch " + str(patch_path)
@@ -938,6 +958,9 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                   "The original evidence in the owner state is " + evidence_paths + ".\n"
                   "Assess correctness and safety. Keep the candidate unchanged; the controller runs the verifier there.\n"
                   "End with exactly one final line: GATE: pass or GATE: fail, then concise findings before it.")
+        if status != 0:
+            prompt += ("\nThe worker exited nonzero (exit %s); its provider reported failure. "
+                       "The patch may be partial; assess completeness as well as correctness." % status)
         prior = _prior_gate_findings(repo, room_id, task_id)
         if prior:
             prompt = prompt.replace("End with exactly one final line:", prior + "\n\nEnd with exactly one final line:")
@@ -948,13 +971,13 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                        % task_id)
         try:
             if not verifier:
-                manual_notice = judgment_notice(
+                manual_notice = review_judgment(
                                "Task %s has a write patch but no recorded verifier; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                                % task_id)
                 raise LookupError("no verifier is available for automatic review")
             work_repo = _dispatch_execution_repository(repo, room_id, member, caller)
             if work_repo is None:
-                manual_notice = judgment_notice(
+                manual_notice = review_judgment(
                                "Task %s execution repository is unknown or no longer available; manual review is needed. Finalize completed (not accepted) and explain why in the summary."
                                % task_id)
                 raise LookupError("execution repository is unknown or unavailable")
@@ -983,11 +1006,11 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
             elif pending_claim and launch == "interrupted":
                 _settlement_step(repo, member, claim, "review_launch", False)
                 review_delivered = False
-                auto_review_done = judgment_notice(unconfirmed)
+                auto_review_done = review_judgment(unconfirmed)
             elif pending_claim and launch == "possible":
                 # Past the spawn point a reviewer may exist: never relaunch, hand the review to the main.
                 review_delivered = False
-                auto_review_done = judgment_notice(unconfirmed)
+                auto_review_done = review_judgment(unconfirmed)
             else:
                 attempt = pending_claim.get("attempt") if pending_claim else len(claims) + 1
                 claim_id, failed_id, review_member = room.review_ids(member, digest, attempt)
@@ -1027,17 +1050,17 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                     review_delivered = False
                     exhausted = (len(claims) >= 2
                                  and all(item.get("attempt") in failures for item in claims))
-                    auto_review_done = (judgment_notice(unconfirmed)
+                    auto_review_done = (review_judgment(unconfirmed)
                                         if exhausted else False)
         except LookupError as error:
             if "unconfirmed" in str(error):
-                manual_notice = judgment_notice(unconfirmed)
+                manual_notice = review_judgment(unconfirmed)
             # Completion needs the durable manual-review notice; without it the claim stays retryable.
             auto_review_done = manual_notice
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             if attempt is None or attempt >= 2:
                 # A first launch failure is retried by the next reconcile; mail only when none remains.
-                judgment_notice(unconfirmed)
+                review_judgment(unconfirmed)
             print("OMS automatic review unavailable for task %s: %s" % (task_id, clean(str(error), 180)),
                   file=sys.stderr)
             # Preflight/dispatch failures with no launch evidence retain their bounded retry.

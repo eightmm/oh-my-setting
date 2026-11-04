@@ -1375,3 +1375,90 @@ for compact_size in (0, 1, 300, 4000, 4001):
     assert compact_artifact in compact_body and len(compact_body.encode()) <= 4000
     assert ("[Summary truncated.]" in compact_body) == (compact_size >= 4000)
 # END compact completion notice
+# BEGIN provider-error-review
+room_owner = "provider-owner"
+room_env = dict(environment, OMS_ROOM_REPO=str(project), OMS_ROOM_PARTICIPANT=room_owner)
+provider_room = room.create(project, "provider-error-review", "Provider failure fixtures")
+room.join(project, provider_room, room_owner, "claude", "main")
+provider_env = dict(room_env, OMS_ROOM_ID=provider_room)
+for label, verify_exit, guard, access, patch_present, verifier, expected in (
+        ("pass", 0, False, "write", True, "true", True),
+        ("failed", 2, False, "write", True, "true", False),
+        ("guard", 0, True, "write", True, "true", False),
+        ("skipped", None, False, "write", True, "true", False),
+        ("empty", 0, False, "write", False, "true", False),
+        ("read", 0, False, "read", True, "true", False),
+        ("no-command", 0, False, "write", True, None, False),
+        ("malformed", False, False, "write", True, "true", False)):
+    member = "call-" + hashlib.sha256(label.encode()).hexdigest()[:16]
+    room.join(project, provider_room, member, "antigravity", "worker", parent=room_owner)
+    panel._prepare_dispatch_call(project, provider_room, member, room_owner, verifier, project)
+    event = {"role": "worker", "access": access, "needs_review": patch_present and access == "write",
+             "verify_status": "not_run" if verify_exit is None else "passed" if verify_exit == 0 else "failed",
+             "verify_exit": verify_exit, "patch_sha256": "a" * 64, "patch": ".oms/artifacts/fixture/change.patch",
+             "changed_files": ["scripts/fixture.py"]}
+    record = {"guard": guard, "exit": 1, "base_sha": "b" * 40}
+    with patch.object(panel, "_call_result_event", return_value=(event, record)), \
+            patch.object(panel, "_dispatch_verifier", return_value=verifier), \
+            patch.object(panel, "_review_verifier", return_value=verifier), \
+            patch.object(panel, "_dispatch_execution_repository", return_value=project), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "status ERROR; stream idle timeout"}]}]}), \
+            patch.object(panel, "dispatch") as dispatched, patch.dict(os.environ, provider_env, clear=True):
+        panel.deliver_result(project, provider_room, member, room_owner, "provider-task", 1)
+    assert (dispatched.call_count == 2) == expected, (label, dispatched.call_count)
+    if expected:
+        prompt = dispatched.call_args.kwargs["prompt"]
+        assert "worker exited nonzero" in prompt and "provider reported failure" in prompt and "patch may be partial" in prompt
+    handoff = next(m for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + member)
+    assert "Call exit=1" in handoff["text"] and "status ERROR; stream idle timeout" in handoff["text"]
+for label, exit_code, reason, missing, possible in (
+        ("missing-repo", 1, None, True, False),
+        ("possible-launch", 1, None, False, True),
+        ("cancel", 130, None, False, False),
+        ("timeout", 124, None, False, False),
+        ("hangup", 129, None, False, False),
+        ("signal", 143, None, False, False),
+        ("authority", 1, "worker_authority_violation", False, False)):
+    member = "call-" + hashlib.sha256(label.encode()).hexdigest()[:16]
+    room.join(project, provider_room, member, "antigravity", "worker", parent=room_owner)
+    panel._prepare_dispatch_call(project, provider_room, member, room_owner, "true", project)
+    event = {"role": "worker", "access": "write", "needs_review": True, "verify_status": "passed",
+             "verify_exit": 0, "patch_sha256": "a" * 64, "patch": ".oms/artifacts/fixture/change.patch",
+             "changed_files": ["scripts/fixture.py"]}
+    record = {"exit": exit_code, "reason_code": reason, "base_sha": "b" * 40}
+    if possible:
+        claim_id, _, reviewer = room.review_ids(member, "a" * 64, 1)
+        room.claim_review(project, provider_room, {"kind": "review-dispatch", "event_id": claim_id,
+            "task_id": "provider-task", "call_id": member, "patch_sha256": "a" * 64,
+            "review_call_id": reviewer, "attempt": 1})
+    with patch.object(panel, "_call_result_event", return_value=(event, record)), \
+            patch.object(panel, "_dispatch_verifier", return_value="true"), \
+            patch.object(panel, "_review_verifier", return_value="true"), \
+            patch.object(panel, "_dispatch_execution_repository", return_value=None if missing else project), \
+            patch.object(panel, "_review_launch_state", return_value="possible" if possible else "absent"), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "status ERROR; stream idle timeout"}]}]}), \
+            patch.object(panel, "dispatch") as dispatched, patch.dict(os.environ, provider_env, clear=True):
+        assert panel.deliver_result(project, provider_room, member, room_owner, "provider-task", exit_code)
+    dispatched.assert_not_called()
+    if missing or possible:
+        messages = room.status(project, provider_room)["messages"]
+        assert any("manual review is needed" in m["text"] for m in messages if m.get("sender") == member)
+        assert panel.dispatch_store.read(project, panel._settlement_claim_path(member))["steps"]["auto_review"] is True
+with patch.object(panel_result_store, "_records", return_value=([], [])), \
+        patch.object(panel, "_review_verifier", return_value="true"), \
+        patch.object(panel, "_write_brief_artifact") as draft, \
+        patch.object(room, "structured_events", return_value=[{"kind": "call-result", "call_id": "worker",
+                                                               "exit": 1}]):
+    notice = panel._completion_inputs(project, provider_room, "reviewer", room_owner, "provider-task",
+                                      {"artifact": ".oms/artifacts/fixture/review.md"}, {"call_id": "worker"})
+    assert "--outcome completed" in notice and "--outcome accepted" not in notice
+    assert "judge the failed worker" in draft.call_args.args[2]
+with patch.object(panel_result_store, "_records", return_value=([], [])), \
+        patch.object(panel, "_review_verifier", return_value="true"), \
+        patch.object(panel, "_write_brief_artifact"), \
+        patch.object(room, "structured_events", return_value=[{"kind": "call-result", "call_id": "worker",
+                                                               "exit": 0}]):
+    notice = panel._completion_inputs(project, provider_room, "reviewer", room_owner, "provider-task",
+                                      {"artifact": ".oms/artifacts/fixture/review.md"}, {"call_id": "worker"})
+    assert "After admission and editing the summary" in notice and "--outcome accepted" in notice
+# END provider-error-review
