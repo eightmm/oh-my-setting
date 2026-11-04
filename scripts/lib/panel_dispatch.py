@@ -246,6 +246,10 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         raise ValueError("invalid reasoning effort; researchers use low effort")
     if model and not target:
         raise ValueError("explicit peer model requires --to")
+    if target == "codex" and access == "write":
+        from panel_routing import codex_sandbox_blocked
+        if codex_sandbox_blocked():
+            raise ValueError("Codex write seats are unavailable: this host restricts unprivileged user namespaces (see oms doctor)")
     if target and workload:
         raise ValueError("--to is an explicit route; omit the --workload tier")
     if not target or role == "researcher" or target in PROVIDERS and not model:
@@ -271,6 +275,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
     visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
     route = allocate(owner, role, None, access, purpose, owner_model=owner_model, repo=visibility_repo_resolved,
                      check_visibility=not bool(model), resolve_accounts=False)
+    route.pop("route_reason", None)
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
     peer = provider_catalog(target)[0]

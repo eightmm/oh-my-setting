@@ -392,8 +392,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                                      and c["model"] in cooldowns)]
     if kept:
         usable = kept
-    # Quota guards any choice among installed providers, including the one family exclusion leaves.
-    several = len(usable) > 1
+    excluded_codex = int(skipped_codex)
     if catalogs is not None or any(c["provider"] == "antigravity" for c in usable):
         eligible, refused = [], None
         for candidate in usable:
@@ -402,9 +401,13 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                 eligible.append(candidate)
             except ValueError as error:
                 refused = error
+                if candidate["provider"] == "codex":
+                    excluded_codex += 1
         if not eligible:
             raise refused
         usable = eligible
+    # Family and sandbox exclusions still count; unroutable catalogs do not.
+    several = len(usable) + excluded_codex > 1
     account_usage = {}
     if resolve_accounts and any(candidate["provider"] == "codex" for candidate in usable):
         from provider_accounts import account_weekly_used, load_accounts
@@ -520,6 +523,8 @@ def alternate_route(route, installed=None, provider_status=None, repo=None, reso
                   and (installed is None or candidate["provider"] in installed)
                   and (candidate["provider"] == "codex" or (weekly_used(provider_status, candidate["provider"]) or 0) < 90)
                   and not daily_capped(provider_status, candidate)]
+    if route.get("access") == "write" and any(c["provider"] == "codex" for c in candidates) and codex_sandbox_blocked():
+        candidates = [c for c in candidates if c["provider"] != "codex"]
     if route.get("role") in INDEPENDENT or KINDS.get(route.get("role")) == "advisor":
         candidates = [candidate for candidate in candidates
                       if candidate["provider"] in MODEL_IDS or candidate["provider"] == "antigravity"]

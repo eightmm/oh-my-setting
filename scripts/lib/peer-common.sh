@@ -3926,7 +3926,11 @@ ma_provider_attempt_run() {
   if [ "$provider" = codex ]; then
     [ "${OMS_MODEL_RESOLVED_CLASS:-}" != explicit ] || codex_account_explicit=1
     case "${MA_KIND:-}:${TO:-}" in
-      call:codex|delegate:codex) codex_account_explicit=1 ;;
+      call:codex) [ "${OMS_ACCOUNT_IMPLICIT_TARGET:-0}" = 1 ] || codex_account_explicit=1 ;;
+      delegate:codex) codex_account_explicit=1 ;;
+    esac
+    case "${MA_KIND:-}:${PROVIDERS_EXPLICIT:-0}" in
+      ask:1|review:1) codex_account_explicit=1 ;;
     esac
     codex_account_file="$(agent_memory_mktemp)" || return 2
   fi

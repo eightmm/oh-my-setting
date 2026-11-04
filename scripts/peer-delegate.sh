@@ -565,6 +565,10 @@ plan_publish_review() {
 
 [ -n "$TO" ] || fail "--to is required"
 TO="$(oms_provider_normalize "$TO")" || exit $?
+if [ "$TO" = codex ] && [ "$WORKER_ACCESS" = write ] && oms_provider_codex_sandbox_blocked; then
+  echo "error: this host restricts unprivileged user namespaces, so Codex's workspace-write sandbox (bwrap) cannot start; route to another provider or run oms doctor for the remedy" >&2
+  exit 2
+fi
 if [ "$INTERACTIVE" = 1 ]; then
   case "$TO" in claude|antigravity) ;; *) fail "--interactive supports claude and antigravity" ;; esac
   [ "$WORKER_ACCESS" = write ] && [ "$REPAIR" = 0 ] && [ "$APPLY" = 0 ] &&

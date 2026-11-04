@@ -21,6 +21,7 @@ fail() {
 REPO="$PWD"
 ARTIFACT_DIR=""
 TO="${OMS_ADVISOR_PROVIDER:-}"
+AUTO_TARGET=0
 PROMPT=""
 PROMPT_FILE=""
 INCLUDE_FAILURES=1
@@ -223,6 +224,7 @@ pick_advisor() {
 }
 
 if [ -z "$TO" ]; then
+  AUTO_TARGET=1
   TO="$(pick_advisor)" || fail "no registered advisor CLI is installed"
 else
   TO="$(oms_provider_normalize "$TO" 2>/dev/null)" ||
@@ -312,12 +314,23 @@ summary="$PROMPT"
 # Not exec: the EXIT trap must outlive the call so the composed prompt file
 # exists while agent-call reads it and the tmpdir is still cleaned up after.
 status=0
-ma_call_read_peer "" "$PREVIEW" \
-  --to "$TO" \
+call_advisor() {
+OMS_ACCOUNT_IMPLICIT_TARGET="$AUTO_TARGET" ma_call_read_peer "" "$PREVIEW" \
+  --to "$1" \
   --repo "$REPO" \
   --artifact-dir "${ARTIFACT_DIR:-$REPO/.oms/artifacts/advise}" \
   --prompt-file "$advisor_prompt" \
-  ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} &
+  ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
+}
+call_advisor "$TO" &
 wait "$!" || status=$?
+if [ "$AUTO_TARGET" = 1 ] && [ "$status" -ne 0 ] && [ "$status" -ne 3 ] && [ "$status" -ne 4 ]; then
+  next="$(oms_provider_peer_candidates "$(oms_peer_caller)" | awk -v first="$TO" '$0 != first { print; exit }')"
+  if [ -n "$next" ]; then
+    status=0
+    call_advisor "$next" &
+    wait "$!" || status=$?
+  fi
+fi
 ma_read_guard_assert || status=2
 exit "$status"

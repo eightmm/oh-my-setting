@@ -312,6 +312,43 @@ def exercise_codex_sandbox_host_gate():
                 assert ("route_reason" in write) == blocked and (not blocked or "user namespaces" in write["route_reason"])
                 assert "route_reason" not in allocate("codex", access="read", installed=both, check_visibility=False)
                 if blocked:
+                    import panel_routing as routing
+                    for used in (0, 89, 90, 99, None, "", "malformed"):
+                        readings = {"claude": {"weekly_used": used}}
+                        try:
+                            limited = allocate("codex", access="write", installed=both,
+                                               provider_status=readings, check_visibility=False,
+                                               resolve_accounts=False)
+                        except ValueError as error:
+                            assert used in (90, 99) and "weekly quota" in str(error), (used, error)
+                        else:
+                            assert used not in (90, 99) and limited["provider"] == "claude", (used, limited)
+                    peer = dict(provider="codex", binary="codex", installed=True, exact_model_override=True,
+                                access=["read", "write"], models=["gpt-6.1-sol"])
+                    with patch("terminal_panel.provider_catalog", return_value=[peer]):
+                        try:
+                            dispatch.selected_route("claude", "builder", None, "write", None,
+                                                    target="codex", model="gpt-6.1-sol")
+                        except ValueError as error:
+                            assert "oms doctor" in str(error) and len(str(error).splitlines()) == 1
+                        else:
+                            raise AssertionError("explicit blocked Codex write accepted")
+                    other = dict(peer, provider="claude", binary="claude", models=["claude-opus-5-5"])
+                    with patch("terminal_panel.provider_catalog", return_value=[other]):
+                        explicit = dispatch.selected_route("claude", "builder", None, "write", None,
+                                                           target="claude", model="claude-opus-5-5")
+                    assert "route_reason" not in explicit, explicit
+                    previous = dict(provider="pi", workload="routine", access="write", role="worker")
+                    assert routing.alternate_route(previous, {"codex"}, resolve_accounts=False) is None
+                    assert routing.alternate_route(previous, {"codex", "claude"}, resolve_accounts=False)["provider"] == "claude"
+                    environment = dict(os.environ, OMS_DELEGATE_WORKTREE_ROOT=os.path.join(tmp, "worktrees"))
+                    result = subprocess.run(["bash", str(panel.ENTRY.parent / "peer-delegate.sh"),
+                                             "--repo", str(project), "--to", "codex", "--prompt", "test",
+                                             "--no-verify", "--repair", "2"], env=environment,
+                                            capture_output=True, text=True, timeout=60)
+                    assert result.returncode != 0 and "oms doctor" in result.stderr, result.stderr
+                    assert len(result.stderr.splitlines()) == 1, result.stderr
+                    assert not os.path.exists(environment["OMS_DELEGATE_WORKTREE_ROOT"])
                     try:
                         allocate("claude", access="write", installed={"codex"}, check_visibility=False)
                     except ValueError as error:
@@ -651,6 +688,10 @@ def exercise_antigravity_read_tiers():
         for missing in (None, {}, {"antigravity": []}, {"antigravity": ["gemini-5-argon-low"]}):
             assert choose(tier, catalogs=missing)["provider"] == "codex"
             refused(lambda: choose(tier, installed={"antigravity"}, catalogs=missing))
+            for used in (0, 89, 90, 100, None, "malformed"):
+                route = choose(tier, installed={"claude", "antigravity"}, catalogs=missing,
+                               provider_status={"claude": {"weekly_used": used}})
+                assert route["provider"] == "claude"
         for role in routing.WRITERS:
             assert choose(tier, role=role, access="write")["provider"] != "antigravity"
             refused(lambda: choose(tier, role=role, access="write", installed={"antigravity"}))
@@ -2058,6 +2099,10 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_ca
                                 repo=project, room_id="quota-room")["provider"] == "claude"
 with patch.object(panel, "provider_catalog", return_value=[seven_row, dict(claude_candidate, installed=True)]):
     assert panel.selected_route("claude", "worker", None, "read", None)["model"] == "claude-sonnet-5-5"
+# BEGIN family exclusion quota
+seven_row = dict(provider="codex", binary="codex", installed=True, exact_model_override=True,
+                 access=["read", "write"], models=["gpt-6-sol"],
+                 catalog_models=["gpt-7-astra", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6-astra"])
 # Family exclusion is candidate filtering, not reselection: the provider it leaves still passes the
 # quota guard, so a Claude at or past 90% weekly use is refused with the usual exhaustion error.
 for used, expected in ((89, "claude-sonnet-5-5"), (90, None), (99, None)):
@@ -2071,6 +2116,7 @@ for used, expected in ((89, "claude-sonnet-5-5"), (90, None), (99, None)):
             assert expected is None and "all installed providers in the routine tier have <=10% weekly quota left" in str(error), (used, error)
         else:
             assert selected["model"] == expected, (used, selected)
+# END family exclusion quota
 with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, installed=False)]):
     try:
         panel.selected_route("codex", "worker", None, "read", None)

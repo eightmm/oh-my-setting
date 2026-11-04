@@ -881,10 +881,13 @@ and display behavior is unchanged; the implicit default home is `CODEX_HOME` or
 
 Headless Codex calls through peer review, peer ask, consult/advise, agent-call,
 delegation and autonomy workers share this account policy at the common runner.
-Explicit Codex targets (`--to codex` on direct calls/delegation, or `--model`)
+Explicit Codex targets (`--to codex` on direct calls/delegation, `--providers`
+on peer ask/review, or `--model`)
 follow the panel's rule: use the first eligible account in configuration order,
 falling back to the caller's home if none qualifies. Implicit/tier routes keep
 the configured ordered/spread policy and require an eligible account.
+Automatic consult and advise selections use that implicit policy and may try
+the next peer after a failed call; explicit provider choices retain caller-home fallback.
 A direct `--resume-session ID` without a panel account decision keeps the caller's
 home and selects nothing. A malformed account registry emits one warning with
 the configuration error and runs under the caller's home; panel dispatch still

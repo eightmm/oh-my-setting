@@ -412,6 +412,29 @@ mv "$account_root/selected" "$account_root/offline"
 OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
   invoke --to codex --prompt "explicit provider account fallback" || fail 'explicit provider target did not fall back'
 [ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'explicit provider target changed fallback home'
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+  HOME="$TMP/home" PATH="$TMP/bin:$PATH" CODEX_ARGV_OUT="$TMP/codex.argv" \
+  OMS_TEST_CALL_LOG="$TMP/provider.calls" OMS_CAPABILITY_DIR="$TMP/cap" \
+  bash "$ROOT/scripts/peer-ask.sh" --repo "$TMP/invoke-repo" --providers codex \
+    --require-complete --prompt 'explicit council account fallback' >"$TMP/ask-account.out" 2>&1 ||
+  fail 'explicit council account did not fall back'
+[ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'explicit council changed fallback home'
+for peer_command in consult advise; do
+  rm -f "$TMP/codex.argv" "$TMP/claude.argv" "$TMP/agy.argv"
+  caller=antigravity
+  expected_argv="$TMP/claude.argv"
+  if [ "$peer_command" = advise ]; then
+    caller=claude
+    expected_argv="$TMP/agy.argv"
+  fi
+  OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+    HOME="$TMP/home" PATH="$TMP/bin:$PATH" CODEX_ARGV_OUT="$TMP/codex.argv" CLAUDE_ARGV_OUT="$TMP/claude.argv" AGY_ARGV_OUT="$TMP/agy.argv" \
+    OMS_TEST_CALL_LOG="$TMP/provider.calls" OMS_CAPABILITY_DIR="$TMP/cap" OMS_AGENT="$caller" \
+    OMS_CONSULT_PROVIDER=codex bash "$ROOT/scripts/$peer_command.sh" --repo "$TMP/invoke-repo" \
+      --prompt 'automatic account failover' >"$TMP/auto-account.out" 2>&1 ||
+    fail "$peer_command did not fail over"
+  [ ! -f "$TMP/codex.argv" ] && [ -f "$expected_argv" ] || fail "$peer_command did not skip exhausted Codex"
+done
 mv "$account_root/offline" "$account_root/selected"
 OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
   OMS_RESUME_SESSION=account-main-session invoke --to codex --model model-a --prompt "main home resume" || fail 'main home resume failed'

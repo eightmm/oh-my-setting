@@ -246,7 +246,9 @@ call_one() {
   fi
   args+=(${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"})
 
-  OMS_THREAD_RECORD_QUESTION_FILE="$original_question" \
+  local implicit_target=0
+  [ "${#TARGETS_EXPLICIT[@]}" -ne 0 ] || implicit_target=1
+  OMS_ACCOUNT_IMPLICIT_TARGET="$implicit_target" OMS_THREAD_RECORD_QUESTION_FILE="$original_question" \
     ma_call_read_peer "$artifact_out" "$DRY_RUN" "${args[@]}" || rc=$?
   # Present only this call's answer, never a replay of unrelated thread turns.
   if [ "$rc" -eq 0 ] && [ "$QUIET" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] &&

@@ -16,6 +16,7 @@ REPO="$PWD"
 PROMPT=""
 THREAD_ID=""
 PROVIDERS="codex,claude,antigravity"
+PROVIDERS_EXPLICIT=0
 ARTIFACT_DIR=""
 INCLUDE_STATUS=0
 INCLUDE_DIFF=0
@@ -181,6 +182,7 @@ while [ "$#" -gt 0 ]; do
     --providers)
       [ "$#" -ge 2 ] || fail "--providers requires list"
       PROVIDERS="$2"
+      PROVIDERS_EXPLICIT=1
       shift 2
       ;;
     --artifact-dir)
