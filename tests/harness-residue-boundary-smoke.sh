@@ -696,6 +696,25 @@ kept_with mismatch "not settled: preserved patch .oms/artifacts/delegate/claude-
 delegate_run working task-working "working"
 kept_with working "is working, not finished" "an unfinished run must keep its worktree"
 
+# Clean report-only delegates retain their measurements until settled or aged.
+clean_scratch_run() {
+  delegate_run "$@"
+  local dir="$TMPDIR/oh-my-setting-delegate.$1"
+  git -C "$dir/wt-$1" reset --hard -q HEAD
+  rm "$dir/wt-$1/new-$1.txt"
+  : > "$repo/.oms/artifacts/delegate/claude-$1-20261018T000000Z-$run_pid.patch"
+  mkdir "$dir/tmp"
+  printf 'measurement\n' > "$dir/tmp/measurement"
+}
+clean_scratch_run scratchfailed task-scratchfailed failed
+kept_with scratchfailed "is failed with no owner decision and younger than 7 days" "recent clean investigation scratch must be retained"
+clean_scratch_run scratchdecided task-scratchdecided failed rejected
+cleanup_out 0 | grep >/dev/null -Fx "removed: $TMPDIR/oh-my-setting-delegate.scratchdecided (dead harness temp dir)" ||
+  fail "decided clean investigation scratch must be removed"
+clean_scratch_run scratchaged task-scratchaged timed_out
+OMS_HARNESS_RESIDUE_AGED_DAYS=0 cleanup_out 0 | grep >/dev/null -Fx "removed: $TMPDIR/oh-my-setting-delegate.scratchaged (dead harness temp dir)" ||
+  fail "aged clean investigation scratch must be removed"
+
 delegate_run failed task-failed "failed"
 kept_with failed "is failed with no owner decision and younger than 7 days" "a recent failed run stays the salvage source"
 

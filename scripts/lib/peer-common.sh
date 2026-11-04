@@ -1956,6 +1956,10 @@ row = {
     "provider": provider,
     "exit": int(exit_code),
 }
+scratch_path = os.environ.get("OMS_INDEX_SCRATCH_PATH", "")
+if kind == "delegate" and scratch_path:
+    row["scratch_path"] = scratch_path
+    row["scratch_note"] = "owner can inspect"
 if run_id:
     row["run_id"] = run_id
 base_sha = os.environ.get("OMS_INDEX_BASE_SHA", "")

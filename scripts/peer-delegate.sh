@@ -41,7 +41,7 @@ context_pack_targets=""
 # index annotations when context compilation is disabled or fails early.
 unset OMS_INDEX_CONTEXT_MANIFEST_DIGEST OMS_INDEX_CONTEXT_BUNDLE_SHA256 \
   OMS_INDEX_CONTEXT_SELECTED_BYTES OMS_INDEX_CONTEXT_DEBT OMS_INDEX_REPAIR_REPLAY_JSON \
-  OMS_INDEX_PROVIDER_USAGE_JSON \
+  OMS_INDEX_PROVIDER_USAGE_JSON OMS_INDEX_SCRATCH_PATH \
   OMS_INDEX_CONTEXT_MODE OMS_INDEX_CONTEXT_PREPARE_SECONDS OMS_INDEX_CONTEXT_ORIENTATION_BYTES \
   OMS_INDEX_CONTEXT_TASK_SHA256 OMS_INDEX_CONTEXT_VERIFICATION
 BRIEF_FILE=""
@@ -905,6 +905,7 @@ worktree_parent="$(mktemp -d "$delegate_worktree_root/oh-my-setting-delegate.XXX
 worktree="$worktree_parent/wt-${worktree_parent##*.}"
 worktree_parent_physical="$(cd "$worktree_parent" && pwd -P)" || fail "delegate worktree parent could not be resolved"
 worktree_created=0
+keep_investigation_scratch=""
 cleanup_done=0
 worker_identity_physical=""
 worker_identity_git_dir=""
@@ -919,9 +920,9 @@ oms_harness_mark_tmpdir "$worktree_parent" "$delegate_worktree_repo" "$worktree"
 cleanup_delegated_worktree() {
   local cleanup_identity_detail=""
 
-  # Worker temporaries never outlive the run, even when the checkout is kept for salvage;
-  # a parent the worker replaced (for example with a symlink) is left untouched.
-  if [ -n "$worktree_parent" ] && [ ! -L "$worktree_parent" ] &&
+  # Leave stopped investigation measurements alongside the managed worktree.
+  # A replaced parent pathname is never followed.
+  if [ "${keep_investigation_scratch:-0}" != 1 ] && [ -n "$worktree_parent" ] && [ ! -L "$worktree_parent" ] &&
     [ "$(cd "$worktree_parent" 2>/dev/null && pwd -P)" = "$worktree_parent_physical" ]; then
     rm -rf -- "$worktree_parent/tmp"
   fi
@@ -1153,7 +1154,7 @@ fi
   fi
   write_minimal_change_doctrine
   if [ "$REPORT_ONLY" = 1 ]; then
-    printf 'Return findings and measurement evidence. Never edit repository files; use temporary scratch under TMPDIR (removed after the run). A repository patch fails this report-only investigation.\n'
+    printf 'Return findings and measurement evidence. Never edit repository files; use temporary scratch under TMPDIR (kept for owner inspection after a guard stop or timeout; otherwise removed after the run). A repository patch fails this report-only investigation.\n'
   fi
   printf '\n'
   if [ "$APPLY" = 1 ]; then
@@ -2844,6 +2845,10 @@ if [ -n "$worker_guard_dir" ]; then
     delegate_attempt_fail_if_live worker_authority_violation \
       delegate-worker-authority-violation || worker_status=2
     KEEP_WORKTREE=1
+    if [ "$REPORT_ONLY" = 1 ]; then
+      keep_investigation_scratch=1
+      echo "scratch kept for owner inspection: $worktree_parent/tmp" >&2
+    fi
     if [ -s "$worker_guard_dir/current-operation-detail" ]; then
       # Repair the operation's own authority before the failure transition so
       # release acts on the restored row, not the worker's
@@ -2870,6 +2875,9 @@ if [ -n "$worker_guard_dir" ]; then
           "$(tr '\n' ';' < "$worker_guard_dir/worktree-identity-detail")"
       # Recovery must bind the retained path to the indexed artifact digest.
       printf -- '- worktree: %s\n' "$worktree"
+      if [ "${keep_investigation_scratch:-0}" = 1 ]; then
+        printf -- '- scratch kept for owner inspection: %s/tmp\n' "$worktree_parent"
+      fi
     } >> "$artifact"
     echo "error: $TO changed protected state outside its worktree: $worker_guard_changed" >&2
     if [ -s "$worker_guard_dir/state-detail" ]; then
@@ -3025,6 +3033,7 @@ if len(details) > 12:
     # Output above was never closed. Paths stay in the local bullets above.
     printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs by snapshot (up to 12 sanitized lines):\n%s\nExecution-state details:\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
       "$worker_guard_changed" "$guard_metadata_details" "$guard_execution_details" "$guard_failure_hint" >> "$artifact"
+    OMS_INDEX_SCRATCH_PATH="${keep_investigation_scratch:+$worktree_parent/tmp}" \
     OMS_INDEX_PROVIDER_USAGE_JSON="$guard_provider_usage_payload" \
       OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
@@ -3112,11 +3121,21 @@ if [ "$route_captured" = 1 ]; then
   export OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 fi
 
+if [ "$REPORT_ONLY" = 1 ] && { [ "$worker_status" -eq 124 ] ||
+  [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; }; then
+  KEEP_WORKTREE=1
+  keep_investigation_scratch=1
+  echo "scratch kept for owner inspection: $worktree_parent/tmp" >&2
+fi
+
 result_exit="$worker_status"
 if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
   result_exit=6
 fi
 printf '\n\n## Exit\n\n%s\n' "$result_exit" >> "$artifact"
+if [ "${keep_investigation_scratch:-0}" = 1 ]; then
+  printf "\n- scratch kept for owner inspection: %s/tmp\n" "$worktree_parent" >> "$artifact"
+fi
 
 index_exit=0
 if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; then
@@ -3125,6 +3144,7 @@ fi
 if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
   index_exit=6
 fi
+OMS_INDEX_SCRATCH_PATH="${keep_investigation_scratch:+$worktree_parent/tmp}" \
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
   OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" || true
 

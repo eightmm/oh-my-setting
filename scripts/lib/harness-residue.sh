@@ -624,7 +624,7 @@ try:
     except BaseException:
         print("no preserved patch %s" % rel)
         raise SystemExit(0)
-    if not patch.strip():
+    if not patch.strip() and mode != "settled-clean":
         print("preserved patch %s is empty while the worktree has changes" % rel)
         raise SystemExit(0)
     for row in rows_of(repo):
@@ -645,7 +645,7 @@ try:
             shutil.rmtree(scratch, ignore_errors=True)
         return tree, tree_entries(tree)
 
-    expected_tree, expected = expected_entries()
+    expected_tree, expected = expected_entries() if patch.strip() else (head_tree, head)
     if any(m == b"160000" for m, _ in expected.values()):
         print("the preserved patch involves a submodule, which is not compared")
         raise SystemExit(0)
@@ -731,7 +731,16 @@ oms_harness_worktree_keep_reason() {  # WORKTREE [REPO KIND PID]
   OMS_HARNESS_RESIDUE_PROOF=""
   status="$(oms_harness_residue_evidence status "" "$wt" "")"
   case "$status" in
-    clean) ;;
+    clean)
+      if [ "$kind" = delegate ] && [ -d "$(dirname "$wt")/tmp" ] && [ ! -L "$(dirname "$wt")/tmp" ]; then
+        OMS_HARNESS_RESIDUE_KEEP_REASON="holds investigation scratch"
+        [ -n "$repo" ] && [ -n "$pid" ] && oms_harness_owner_survives "$repo" "$wt" || return 0
+        proof="$(oms_harness_residue_evidence settled-clean "$repo" "$wt" "$pid")"
+        case "$proof" in
+          "ok "*) OMS_HARNESS_RESIDUE_PROOF="${proof#ok }"; OMS_HARNESS_RESIDUE_KEEP_REASON="" ;;
+          *) OMS_HARNESS_RESIDUE_KEEP_REASON="$OMS_HARNESS_RESIDUE_KEEP_REASON; not settled: $proof"; return 0 ;;
+        esac
+      fi ;;
     dirty)
       OMS_HARNESS_RESIDUE_KEEP_REASON="has uncommitted or untracked files"
       # Only a delegate run preserves a patch an owner can have decided on; a
@@ -906,6 +915,10 @@ oms_harness_keep_unverifiable_residue() {  # DIR [VALIDATED_WORKTREE]
     leaf="${child##*/}"
     case "$leaf" in
       .oh-my-setting-tmp|worker-guard|.oms-panel-fixtures.*|continuation.patch|continuation-base|graph-context.json|graph-context.log|worker-guard-snapshot.error) continue ;;
+      tmp)
+        if [ -n "${2:-}" ] && [ -d "$child" ] && [ ! -L "$child" ]; then
+          case "${1##*/}" in oh-my-setting-delegate.*) continue ;; esac
+        fi ;;
       *) ;;
     esac
     if [ -n "${2:-}" ] && [ "$leaf" = "${2##*/}" ]; then
@@ -1061,6 +1074,9 @@ oms_harness_cleanup_temp_dirs() {
         cd "$dir" 2>/dev/null || exit 1
         [ "$(pwd -P)" = "$physical_dir" ] || exit 1
         rm -rf ./worker-guard 2>/dev/null || true
+        if [ "$safe" = 1 ] && [ -d ./tmp ] && [ ! -L ./tmp ]; then
+          rm -rf ./tmp || exit 1
+        fi
         for fixture in ./.oms-panel-fixtures.*; do
           [ -e "$fixture" ] || [ -L "$fixture" ] || continue
           rm -rf "$fixture" 2>/dev/null || true

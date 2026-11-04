@@ -21758,6 +21758,86 @@ EOF
     fi
   done
 
+  # Stopped investigations preserve measurements for the owner.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo fixture; exit 0 ;; esac
+cat >/dev/null
+printf 'measurement\n' > "$TMPDIR/measurement"
+printf 'partial finding\nserved model\nfixture-served\ntokens used\n42\n'
+if [ "$REPORT_STOP" = guard ]; then
+  printf 'changed\n' > "$REPORT_SOURCE/file.txt"
+  exit 0
+fi
+if [ "$REPORT_STOP" = authority ]; then
+  printf '{}\n' >> "$REPORT_SOURCE/.oms/failures.jsonl"
+  exit 0
+fi
+exit 124
+EOF
+  chmod +x "$bin_dir/codex"
+  for report_stop in timeout guard authority; do
+    rc=0
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker OMS_PANEL_PURPOSE=investigate \
+      REPORT_STOP="$report_stop" REPORT_SOURCE="$project" OMS_WORKER_GUARD_STRICT=1 OMS_WORKER_AUTHORITY_EXCLUSIVE=1 \
+      "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+      --artifact-dir "$project/.oms/artifacts/delegate" --role analysis-worker --model fixture-model \
+      --allow-no-change --prompt 'Measure stopped investigation' \
+      > "$project/stopped-$report_stop.out" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "stopped investigation succeeded: $report_stop"
+    kept="$(sed -n 's/^scratch kept for owner inspection: //p' "$project/stopped-$report_stop.out" | sed -n '1p')"
+    [ -f "$kept/measurement" ] || fail "stopped investigation lost scratch: $(cat "$project/stopped-$report_stop.out")"
+    artifact="$(sed -n 's/^artifact: //p' "$project/stopped-$report_stop.out" | sed -n '1p')"
+    if [ -z "$artifact" ]; then
+      artifact="$(grep -l -F "scratch kept for owner inspection: $kept" "$project/.oms/artifacts/delegate/"*.md | tail -n 1)"
+    fi
+    assert_file_contains "$artifact" "scratch kept for owner inspection: $kept"
+    assert_file_contains "$artifact" 'partial finding'
+    python3 - "$ROOT/scripts/lib" "$artifact" "$report_stop" "$kept" "$project" <<'PYTEST' || fail "stopped investigation output contract failed"
+import sys
+sys.path.insert(0, sys.argv[1])
+from peer_artifacts import artifact_sections
+from pathlib import Path
+body, _ = artifact_sections(Path(sys.argv[2]))
+raw = Path(sys.argv[2]).read_text()
+if sys.argv[3] == "guard":
+    assert body.startswith("The worker guard stopped this run:"), body
+    assert sys.argv[4] not in body and sys.argv[5] not in body, body
+    local = raw.split("## Worker authority violation", 1)[1].split("## Output", 1)[0]
+    assert "- scratch kept for owner inspection: " + sys.argv[4] in local, local
+else:
+    assert "partial finding" in body, body
+    assert raw.count("## Output\n") == 1
+    if "tokens used" in body:
+        assert "fixture-served" in body and "42" in body, body
+PYTEST
+    python3 - "$project/.oms/artifacts/index.jsonl" "$kept" "$report_stop" <<'PYTEST' || fail "stopped investigation index lost scratch or telemetry"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+row = rows[-1]
+assert row.get("scratch_path") == sys.argv[2], row
+assert row.get("scratch_note") == "owner can inspect", row
+if sys.argv[3] == "timeout":
+    assert row.get("tokens") == 42 and row.get("served_model") == "fixture-served", row
+PYTEST
+    git -C "$project" checkout -- file.txt
+  done
+
+  # Refusal before a worker launches must not inherit another operation's path.
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_INDEX_SCRATCH_PATH="$TMP/inherited-scratch" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$project/.oms/artifacts/delegate" --model fixture-model \
+    --prompt "Inspect /hom""e/researcher/private" > "$project/refused.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "outbound refusal must exit 3, got $rc"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PYTEST' || fail "refusal inherited a scratch path"
+import json, sys
+row = json.loads(open(sys.argv[1]).readlines()[-1])
+assert row.get("exit") == 3 and "scratch_path" not in row, row
+PYTEST
+
   # A patch-capture failure keeps the worker's only copy of its work.
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
