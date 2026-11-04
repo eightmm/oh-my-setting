@@ -18754,6 +18754,41 @@ PY
     fail "update downgraded the recorded apply mode: $(cat "$marker")"
 }
 
+test_check_parallel_fail_fast() {
+  local probe="$TMP/check-parallel-fail-fast"
+  mkdir -p "$probe"
+  cat > "$probe/check.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1:${3:-}" in
+  --focused-only:1/8)
+    touch "$PROBE/started"
+    trap 'exit 143' TERM
+    while :; do sleep 1; done ;;
+  --focused-only:2/8)
+    while [ ! -e "$PROBE/started" ]; do sleep 0.1; done
+    echo 'focused failure evidence'
+    exit 1 ;;
+  *) touch "$PROBE/unexpected" ;;
+esac
+SH
+  python3 - "$ROOT" "$probe" <<'PYTEST' || fail "parallel gate did not stop after the failed lane"
+import os, pathlib, subprocess, sys
+root, probe = sys.argv[1:]
+env = dict(os.environ, PROBE=probe, OMS_CHECK_JOBS="2")
+command = '. "$1/scripts/lib/check-parallel.sh"; oms_check_parallel "$2/check.sh" "$2/logs" 1'
+try:
+    result = subprocess.run(["bash", "-c", command, "bash", root, probe], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "120")))
+except subprocess.TimeoutExpired:
+    raise AssertionError("gate waited for a running lane after failure")
+assert result.returncode != 0, result.stdout
+assert "focused failure evidence" in result.stdout, result.stdout
+assert "check: parallel gate stopped after focused-2 failed; not run: focused-1, focused-3, focused-4, focused-5, focused-6, focused-7, focused-8, smoke" in result.stdout, result.stdout
+assert not (pathlib.Path(probe) / "unexpected").exists(), result.stdout
+PYTEST
+}
+
 test_check_affected_selects_python_test_files() {
   local repo="$TMP/affected-python" base selected out rc
   make_committed_repo "$repo"

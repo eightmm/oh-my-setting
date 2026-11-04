@@ -29,7 +29,10 @@ oms_check_parallel_run() {
   set -euo pipefail
   local check="$1" logs="$2" skip_lint="${3:-0}" queued="${4:-}"
   local lane rc=0 next=0 total=0 running=0 budget="${OMS_CHECK_JOBS:-10}"
-  local pids=() names=()
+  local pids=() names=() planned=()
+  if [ "$skip_lint" != 1 ] && [ -z "$queued" ]; then planned+=(lint); fi
+  for lane in 1 2 3 4 5 6 7 8; do planned+=("focused-$lane"); done
+  planned+=(smoke)
   mkdir -p "$logs"
   cleanup_parallel() {
     local pid
@@ -55,13 +58,26 @@ oms_check_parallel_run() {
   # Reclaim whichever lane finished first so one slow lane cannot idle free
   # slots (Bash 3.2 has no wait -n); logs still print in launch order.
   reap_parallel_slot() {
-    local k alive found=0
+    local k j alive found=0 omitted separator
     while :; do
       alive=" $(jobs -pr 2>/dev/null | tr '\n' ' ')"
       for ((k=next; k<total; k++)); do
         [ -n "${pids[$k]}" ] || continue
         case "$alive" in *" ${pids[$k]} "*) continue ;; esac
-        wait "${pids[$k]}" || rc=1
+        if ! wait "${pids[$k]}"; then
+          pids[$k]=""
+          oms_parallel_terminate_running ${pids[@]+"${pids[@]}"}
+          cat "$logs/${names[$k]}.log"
+          omitted=""; separator=""
+          for ((j=0; j<${#planned[@]}; j++)); do
+            if [ "$j" -ge "$total" ] || [ -n "${pids[$j]:-}" ]; then
+              omitted="$omitted$separator${planned[$j]}"
+              separator=", "
+            fi
+          done
+          echo "check: parallel gate stopped after ${names[$k]} failed; not run: $omitted"
+          exit 1
+        fi
         pids[$k]=""
         running=$((running - 1))
         found=1
