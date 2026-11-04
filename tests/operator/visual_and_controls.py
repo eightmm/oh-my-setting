@@ -1758,6 +1758,14 @@ served, selected, mixed = groups
 assert (served["name"], served["tokens"], served["token_reports"], served["records"]) == ("Sol 6", 14400, 1, 2), groups
 assert selected["attribution"] == "selected" and selected["tokens"] == 0 and selected["token_reports"] == 1
 assert mixed["name"] == "Mixed models" and mixed["tokens"] == 34 and abs(mixed["cost"] - .6) < .000001
+from panel_view import _usage_label, provider_usage_tokens
+agy_usage = {"provider": "antigravity", "input_tokens": 308128, "cache_read_tokens": 10827428,
+             "cache_write_tokens": 0, "output_tokens": 79854, "cache_in_input": False}
+assert provider_usage_tokens(agy_usage) == 11215410
+assert _usage_label(agy_usage, 11215410) == "11.1m in / 79.9k out · 97% cached (cached 10.8m, new 308.1k)", _usage_label(agy_usage, 11215410)
+assert provider_usage_tokens(dict(agy_usage, cache_write_tokens=None)) is None
+from peer_artifacts import usage_footer
+assert '"cache_write_tokens": 0' in usage_footer("antigravity", [{"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 1}])[-1]
 labels = " | ".join(usage_labels(usage_view, costs=True))
 assert "12.3k+? in / 2.1k+? out" in labels and "$0.25+?" in labels and "Sol 6(sel) 0 in / 0 out" in labels, labels
 assert "Mixed models 18 in / 16 out" in labels, labels

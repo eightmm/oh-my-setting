@@ -11601,9 +11601,9 @@ test_agent_call_outbound_scrubber_blocks_private_path() {
   local sample operator root pattern
   for root in /ho""me /Us""ers /scra""tch; do
     case "$root" in
-      */home) pattern=home-path ;;
-      */Users) pattern=user-path ;;
-      *) pattern=scratch-path ;;
+      */home) pattern='home-path' ;;
+      */Users) pattern='user-path' ;;
+      *) pattern='scratch-path' ;;
     esac
     for operator in '-' ':-' '=' ':=' '+' ':+'; do
       sample='test -f "${CONFIG'"$operator$root"'/user/file}"'

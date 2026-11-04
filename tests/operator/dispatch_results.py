@@ -6636,7 +6636,7 @@ def exercise_provider_account_routing():
             reading = metrics.collect({}, now=now, repo=base)["antigravity"]
         assert reading["weekly_used"] is None and reading["source"] == "OMS artifacts", reading
         assert (reading["calls"], reading["input_tokens"], reading["cache_read_tokens"], reading["output_tokens"]) == (1, 100, 40, 10), reading
-        assert "agy 7d" in metrics.usage_line({"provider_status": {"antigravity": reading}})
+        assert "agy 7d in 100 · cached 40 · out 10 / 1 calls" in metrics.usage_line({"provider_status": {"antigravity": reading}})
         with patch("panel_chats.current_models", return_value={}), patch("panel_chats.windows", return_value={}):
             stale = metrics.collect({}, now=now + 8 * 86400, repo=base)["antigravity"]
         assert stale["calls"] == 0, stale

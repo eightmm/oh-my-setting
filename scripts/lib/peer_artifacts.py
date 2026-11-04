@@ -263,7 +263,9 @@ def usage_footer(provider: str, usages: list[dict], cost=None, tool_calls=None,
     row = {"provider": provider, "input_tokens": total("input_tokens"),
            "output_tokens": total("output_tokens"),
            "cache_read_tokens": total("cached_input_tokens" if provider == "codex" else "cache_read_input_tokens"),
-           "cache_write_tokens": total("cache_creation_input_tokens") if provider == "claude" else None,
+           # agy bills no cache writes: its write count is zero, not unknown.
+           "cache_write_tokens": (total("cache_creation_input_tokens") if provider == "claude"
+                                  else 0 if provider == "antigravity" else None),
            "cache_in_input": provider == "codex", "reported_cost_usd": None,
            "tool_calls": tool_calls if type(tool_calls) is int and tool_calls >= 0 else None}
     if session_cumulative:

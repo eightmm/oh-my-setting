@@ -63,7 +63,6 @@ AMEND_OTHER_OPTION=0
 ACCEPT=""
 REUSE_PASS_RUN=""
 ROLE=""
-ROLE_SET=0
 ROLE_SUGGESTION=""
 ASSIGNMENT="{}"
 STATE_FILTER=""
@@ -349,7 +348,7 @@ while [ "$#" -gt 0 ]; do
     --assignment) [ "$#" -ge 2 ] || fail "--assignment requires JSON"; ASSIGNMENT="$2"; shift 2 ;;
     --depends) [ "$#" -ge 2 ] || fail "--depends requires list"; [ "$DEPENDS_SET" = 0 ] || fail "--depends given twice; pass one comma-separated list \"p1,p2\""; DEPENDS="$2"; DEPENDS_SET=1; shift 2 ;;
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires list"; [ "$ALLOWED_SET" = 0 ] || fail "--allowed given twice; pass one comma-separated list \"p1,p2\""; ALLOWED="$2"; ALLOWED_SET=1; shift 2 ;;
-    --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; ROLE_SET=1; shift 2 ;;
+    --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; [ "$FORBIDDEN_SET" = 0 ] || fail "--forbidden given twice; pass one comma-separated list \"p1,p2\""; FORBIDDEN="$2"; FORBIDDEN_SET=1; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; VERIFY_SET=1; shift 2 ;;
     --reuse-pass) [ "$#" -ge 2 ] || fail "--reuse-pass requires a run id"; REUSE_PASS_RUN="$2"; shift 2 ;;

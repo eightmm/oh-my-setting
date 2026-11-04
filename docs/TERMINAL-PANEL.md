@@ -1696,7 +1696,7 @@ patch. Outside tmux the board shows the path.
 
 The board is an overview above and a detail area below. Cards keep only the
 rows their content needs (an unrecorded location stays in the detail), and a
-provider without a reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where model-use data exists). Antigravity shows rolling seven-day token and call totals from the most recent 1000 artifact index rows when available; these are recorded usage, not a quota percentage. On a
+provider without a reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where model-use data exists). Antigravity shows rolling seven-day input, cached and output tokens and calls (`agy 7d in … · cached … · out … / N calls`) from the most recent 1000 artifact index rows when available; these are recorded usage, not a quota percentage. On a
 board of 24 rows or more, the bottom dock is reserved before the upper
 layout is sized and then grows to the rows left under the tree. When the main preview is
 automatic, it is marked `auto` and does not replace a chosen preview. Esc

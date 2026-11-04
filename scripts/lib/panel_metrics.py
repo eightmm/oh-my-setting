@@ -1195,9 +1195,10 @@ def usage_line(report, width=100, unicode=True):
             mark(context), " used" if context is not None else ""))
     agy = mapping(mapping(report.get("provider_status")).get("antigravity"))
     if agy.get("source") == "OMS artifacts":
-        total = agy["input_tokens"] + agy["cache_read_tokens"] + agy["output_tokens"]
-        amount = ("%.1fM" % (total / 1000000)) if total >= 1000000 else ("%.1fk" % (total / 1000) if total >= 1000 else str(total))
-        parts.append("agy 7d %s tok / %d calls" % (amount, agy["calls"]))
+        def amount(total):
+            return ("%.1fM" % (total / 1000000)) if total >= 1000000 else ("%.1fk" % (total / 1000) if total >= 1000 else str(total))
+        parts.append("agy 7d in %s · cached %s · out %s / %d calls" % (
+            amount(agy["input_tokens"]), amount(agy["cache_read_tokens"]), amount(agy["output_tokens"]), agy["calls"]))
     line = (" │ " if unicode else " | ").join(parts)
     if len(line) > width:
         line = (" │ " if unicode else " | ").join(
