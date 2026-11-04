@@ -511,6 +511,15 @@ run_gate() (
 )
 
 run_job() {
+  remote_retry() {
+    local attempt=1
+    while ! "$@"; do
+      [ "$attempt" -lt 3 ] || return 1
+      printf 'land: remote fetch failed (attempt %s/3); retrying\n' "$attempt" >&2
+      if [ "$attempt" -eq 1 ]; then sleep 2; else sleep 5; fi
+      attempt=$((attempt + 1))
+    done
+  }
   cd "$REPO"
   mkdir -p "$LAND_DIR"
   RECEIPT="$LAND_DIR/$STAMP.json" LOG="$LOG_DIR/$STAMP.log"
@@ -529,7 +538,7 @@ run_job() {
       after_land
       return $?
     fi
-    remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
+    remote_sha="$(remote_retry git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
     remote_sha="${remote_sha%%[[:space:]]*}"
     if ! clean_tree; then
       note "error: cannot resume: tracked tree changed during remote-tip lookup"
@@ -636,7 +645,7 @@ run_job() {
       rset push.rc=-1
       finish failed "HEAD, destination or tree changed before push; nothing pushed"; return 1
     fi
-    remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || {
+    remote_sha="$(remote_retry git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || {
       rset push.rc=-1
       finish failed "cannot read destination tip before push; nothing pushed"; return 1
     }
@@ -1005,7 +1014,13 @@ if [ -z "$GATE" ]; then
 fi
 # FETCH_HEAD lives in .git/worktrees/<id> for linked callers; only the remote
 # tracking refs are needed here, so leave that protected registry untouched.
-git -C "$REPO" fetch -q --no-write-fetch-head "$REMOTE" || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }
+attempt=1
+while ! git -C "$REPO" fetch -q --no-write-fetch-head "$REMOTE"; do
+  [ "$attempt" -lt 3 ] || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }
+  printf 'land: remote fetch failed (attempt %s/3); retrying\n' "$attempt" >&2
+  if [ "$attempt" -eq 1 ]; then sleep 2; else sleep 5; fi
+  attempt=$((attempt + 1))
+done
 SHA="$(git -C "$REPO" rev-parse HEAD)"
 # Retries/worktrees share a receipt; different destinations/gates never share proof.
 STAMP="$(request_stamp "$SHA")"

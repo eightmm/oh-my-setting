@@ -7867,6 +7867,70 @@ def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payl
 PY
 }
 
+# Remote retries must preserve Git output and stop before a failed push.
+test_land_remote_fetch_retry() {
+  local d="$TMP/land-retry" repo="$TMP/land-retry/repo" bin="$TMP/land-retry/bin" rc=0
+  mkdir -p "$d" "$bin"
+  git init -q --bare -b main "$d/remote.git"
+  git clone -q "$d/remote.git" "$repo" 2>/dev/null
+  printf 'base\n' > "$repo/base"
+  git -C "$repo" add base
+  git -C "$repo" commit -qm base
+  git -C "$repo" push -q origin HEAD:main
+  printf 'change\n' >> "$repo/base"
+  git -C "$repo" commit -qam change
+  local real_git
+  real_git="$(command -v git)"
+  cat > "$bin/git" <<'GIT'
+#!/usr/bin/env bash
+case " $* " in
+  *' fetch -q --no-write-fetch-head '*) kind=fetch ;;
+  *' ls-remote --exit-code '*) kind=lookup ;;
+  *' push --no-verify '*) kind=push ;;
+  *) exec "$REAL_GIT" "$@" ;;
+esac
+count=0
+[ ! -f "$RETRY_DIR/$kind" ] || read -r count < "$RETRY_DIR/$kind"
+count=$((count + 1))
+printf '%s\n' "$count" > "$RETRY_DIR/$kind"
+case "$kind:$count" in fetch:1|lookup:1|lookup:2) exit 1 ;; esac
+[ "${FAIL_FETCH:-0}:$kind" != 1:fetch ] || exit 1
+[ "${FAIL_LOOKUP:-0}:$kind" != 1:lookup ] || exit 1
+[ "${FAIL_PUSH:-0}:$kind" != 1:push ] || exit 1
+exec "$REAL_GIT" "$@"
+GIT
+  cat > "$bin/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$RETRY_DIR/sleeps"
+SLEEP
+  chmod +x "$bin/git" "$bin/sleep"
+  export REAL_GIT="$real_git" RETRY_DIR="$d"
+  PATH="$bin:$PATH" "$ROOT/scripts/land.sh" --repo "$repo" --wait --no-update --gate true --ci-wait 0 >"$d/out" 2>&1 ||
+    fail "transient remote errors should recover: $(cat "$d/out")"
+  [ "$(cat "$d/fetch")" = 2 ] && [ "$(cat "$d/lookup")" = 3 ] || fail "incorrect retry count"
+  [ "$(cat "$d/sleeps")" = "$(printf '2\n2\n5')" ] || fail "incorrect retry delays"
+  assert_file_contains "$d/out" 'land: remote fetch failed (attempt 1/3); retrying'
+  assert_file_contains "$d/out" 'land: remote fetch failed (attempt 2/3); retrying'
+  rm -f "$d/fetch" "$d/lookup" "$d/sleeps"
+  PATH="$bin:$PATH" "$ROOT/scripts/land.sh" --repo "$repo" --wait --no-update --gate true --ci-wait 0 >"$d/resume" 2>&1 ||
+    fail "transient resume lookup should recover: $(cat "$d/resume")"
+  [ "$(cat "$d/lookup")" = 3 ] || fail "resume lookup did not retry"
+  rm -f "$d/fetch" "$d/sleeps"
+  FAIL_FETCH=1 PATH="$bin:$PATH" "$ROOT/scripts/land.sh" --repo "$repo" --wait --no-update --gate true --ci-wait 0 >"$d/fail" 2>&1 || rc=$?
+  [ "$rc" = 2 ] && [ "$(cat "$d/fetch")" = 3 ] || fail "exhausted fetch must exit 2 after three attempts"
+  [ "$(cat "$d/sleeps")" = "$(printf '2\n5')" ] || fail "exhausted fetch delay mismatch"
+  rm -f "$d/fetch" "$d/lookup" "$d/sleeps"
+  rc=0
+  FAIL_LOOKUP=1 PATH="$bin:$PATH" "$ROOT/scripts/land.sh" --repo "$repo" --wait --no-update --gate true --ci-wait 0 >"$d/lookup-fail" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && [ "$(cat "$d/lookup")" = 3 ] || fail "exhausted lookup must fail after three attempts"
+  printf 'another\n' >> "$repo/base"
+  git -C "$repo" commit -qam another
+  rm -f "$d/fetch" "$d/lookup" "$d/push" "$d/sleeps"
+  rc=0
+  FAIL_PUSH=1 PATH="$bin:$PATH" "$ROOT/scripts/land.sh" --repo "$repo" --wait --no-update --gate true --ci-wait 0 >"$d/push-fail" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && [ "$(cat "$d/push")" = 1 ] || fail "failed push must not be retried"
+}
+
 # smoke-weight: 50
 test_agent_plan_lifecycle_landing_and_main_research() {
   local d="$TMP/agent-plan-life"
