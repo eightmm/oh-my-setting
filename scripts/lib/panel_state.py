@@ -147,13 +147,21 @@ def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
     return {who: row for who, row in candidates.items() if row.get("provider") == owner}
 
 
-def session_stored(provider, session):
-    """Whether the provider still has this native session on disk."""
+def session_stored(provider, session, account=None):
+    """Whether this native session exists, optionally under its recorded account."""
     if provider == "claude":
         base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
         return any(base.glob("*/%s.jsonl" % session))
     if provider == "codex":
-        base = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        if account is not None:
+            from provider_accounts import route_account_home
+            from panel_chats import _codex_rollouts
+            if not isinstance(account, str) or not account:
+                raise ValueError("invalid recorded Codex account")
+            home = route_account_home({"provider": "codex", "account": account})
+            return any(session in path.name for path in _codex_rollouts(home))
+        base = home / "sessions"
         return any(base.rglob("*%s*.jsonl" % session))
     return False
 

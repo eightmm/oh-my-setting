@@ -868,12 +868,6 @@ there is no reservation store, so same-instant decisions can select the same
 account before either worker appears in the records. Other projects share the
 configuration but their workers are outside this repository's count.
 
-An explicit `--to codex --model MODEL` keeps its existing quota bypass: account
-selection uses the first eligible account, falling back to the current default
-home if all configured accounts are unavailable, exhausted or omit that model.
-It never refuses an explicit model target because account selection found no
-eligible account.
-
 Runtime routes carry `account` and `account_reason`. The route line includes
 `codex account=credits (runs under its own home) / MODEL / EFFORT / ACCESS`.
 The private dispatch launch anchor retains that decision under `route` without
@@ -882,6 +876,27 @@ when applying the home to the child's environment. With no configuration file
 (or no Codex entry), existing routing
 and display behavior is unchanged; the implicit default home is `CODEX_HOME` or
 `~/.codex`. Account fields remain invalid in `config/panel-routing.json`.
+
+Headless Codex calls through peer review, peer ask, consult/advise, agent-call,
+delegation and autonomy workers share this account policy at the common runner.
+Explicit Codex targets (`--to codex` on direct calls/delegation, or `--model`)
+follow the panel's rule: use the first eligible account in configuration order,
+falling back to the caller's home if none qualifies. Implicit/tier routes keep
+the configured ordered/spread policy and require an eligible account.
+A direct `--resume-session ID` without a panel account decision keeps the caller's
+home and selects nothing. A malformed account registry emits one warning with
+the configuration error and runs under the caller's home; panel dispatch still
+validates its own registry and refuses invalid configuration.
+An explicit `CODEX_HOME` differing from the main `~/.codex` home takes precedence.
+Panel dispatch marks its route with internal `OMS_CODEX_ACCOUNT_ROUTE` so the
+runner preserves that decision, including unbound legacy continuations, without
+selecting again. The marker is removed from the provider child's environment.
+Without registered accounts, the runner leaves the environment and attempt
+record unchanged. Other providers and native panel mains are unaffected.
+Applied accounts appear as `account` and `account_applied: true` in the existing
+`.attempts.json` record; session lookup can resolve that recorded id rather than
+the caller's current home. Provider-default calls have no model pin, so model
+cache filtering applies only when a model is specified.
 
 At launch, the selected id is resolved again and its directory is rechecked. Only
 the Codex child's `CODEX_HOME` changes; the caller and independently routed calls

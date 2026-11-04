@@ -6714,6 +6714,94 @@ def exercise_provider_account_routing():
             assert json.loads(stream.getvalue())["route"]["account"] == "credits"
             assert dispatch.route_label(dict(provider="codex", account="credits")) == "codex account=credits (runs under its own home)"
             assert dispatch.route_label({"provider": "codex"}) == "codex"
+            # The common runner selects once; panel decisions and explicit homes win.
+            configure()
+            from panel_state import session_stored
+            main_home = base / "main" / ".codex"
+            main_home.mkdir(parents=True)
+            with patch.object(accounts.Path, "home", return_value=main_home.parent), \
+                    patch.dict(os.environ, {"CODEX_HOME": str(main_home), "OMS_CODEX_ACCOUNT_ROUTE": "", "OMS_RESUME_SESSION": ""}):
+                assert accounts.headless_codex_account("gpt-6.1-sol") == (homes[0], "credits")
+                assert accounts.headless_codex_account("provider-default") == (homes[0], "credits")
+                with patch.dict(os.environ, {"CODEX_HOME": str(homes[1])}), \
+                        patch.object(accounts, "select_account", side_effect=AssertionError("reselected")):
+                    assert accounts.headless_codex_account("gpt-6.1-sol") == (None, None)
+                with patch.object(accounts, "select_account", side_effect=AssertionError("reselected")):
+                    for applied, expected in (({}, None), ({"account": "credits", "account_applied": True}, "credits"),
+                                              ({"account": "credits"}, None)):
+                        with patch.dict(os.environ, {"OMS_CODEX_ACCOUNT_ROUTE": json.dumps(applied)}):
+                            assert accounts.headless_codex_account("gpt-6.1-sol") == (None, expected)
+                for malformed in ("{", "0", "[]", '{"account":0,"account_applied":true}'):
+                    with patch.dict(os.environ, {"OMS_CODEX_ACCOUNT_ROUTE": malformed}):
+                        try:
+                            accounts.headless_codex_account("gpt-6.1-sol")
+                            raise AssertionError("malformed applied route accepted")
+                        except ValueError:
+                            pass
+                with patch.object(accounts, "route_account_home", side_effect=ValueError("changed home")):
+                    try:
+                        accounts.headless_codex_account("gpt-6.1-sol")
+                        raise AssertionError("launch recheck bypassed")
+                    except ValueError as error:
+                        assert "changed home" in str(error)
+                with patch.object(accounts, "select_account", return_value=(None, "all exhausted")):
+                    try:
+                        accounts.headless_codex_account("gpt-6.1-sol")
+                        raise AssertionError("ineligible account launched")
+                    except ValueError as error:
+                        assert "all exhausted" in str(error)
+                # Explicit targets preserve list order and fall back without binding an account.
+                with patch.object(metrics, "account_readings", return_value={
+                        "credits": {"weekly_used": 80}, "pro": {"weekly_used": 0}}):
+                    configure(dict(value, policy="spread"))
+                    assert accounts.headless_codex_account("gpt-6.1-sol", explicit=True) == (homes[0], "credits")
+                    assert accounts.headless_codex_account("gpt-6.1-sol") == (homes[1], "pro")
+                with patch.object(metrics, "account_readings", return_value={
+                        "credits": {"weekly_used": 90}, "pro": {"weekly_used": 100}}):
+                    assert accounts.headless_codex_account("gpt-6.1-sol", explicit=True) == (None, None)
+                    try:
+                        accounts.headless_codex_account("gpt-6.1-sol")
+                        raise AssertionError("implicit exhausted route accepted")
+                    except ValueError as error:
+                        assert "no eligible" in str(error)
+                with patch.object(accounts, "model_slugs", return_value={"gpt-6.1-sol"}):
+                    assert accounts.headless_codex_account("uncached-model", explicit=True) == (None, None)
+                with patch.dict(os.environ, {"OMS_RESUME_SESSION": "main-session"}), \
+                        patch.object(accounts, "select_account", side_effect=AssertionError("resume reselected")):
+                    assert accounts.headless_codex_account("gpt-6.1-sol", explicit=True) == (None, None)
+                    with patch.dict(os.environ, {"OMS_CODEX_ACCOUNT_ROUTE": json.dumps(
+                            {"account": "credits", "account_applied": True})}):
+                        assert accounts.headless_codex_account("gpt-6.1-sol") == (None, "credits")
+                configure()
+                for ident in ("x" * 64, "x" * 65, "", "../bad"):
+                    with patch.dict(os.environ, {"OMS_CODEX_ACCOUNT_ROUTE": json.dumps(
+                            {"account": ident, "account_applied": True})}):
+                        try:
+                            result = accounts.headless_codex_account("gpt-6.1-sol")
+                            assert ident == "x" * 64 and result == (None, ident)
+                        except ValueError:
+                            assert ident != "x" * 64
+                for root in ({"schema": 1, "providers": {}}, None):
+                    if root is None:
+                        config_path.unlink()
+                    else:
+                        configure(root=root)
+                    with patch.object(accounts, "select_account", side_effect=AssertionError("unconfigured selection")):
+                        assert accounts.headless_codex_account("gpt-6.1-sol") == (None, None)
+                configure()
+                session = str(uuid.uuid4())
+                stored = homes[1] / "sessions" / ("rollout-" + session + ".jsonl")
+                stored.parent.mkdir(parents=True, exist_ok=True)
+                stored.write_text("{}\n")
+                assert not session_stored("codex", session)
+                assert session_stored("codex", session, account="pro")
+                assert not session_stored("codex", str(uuid.uuid4()), account="pro")
+                for ident in ("", 0, "missing"):
+                    try:
+                        session_stored("codex", session, account=ident)
+                        raise AssertionError("invalid recorded account accepted")
+                    except ValueError:
+                        pass
             configure(dict(value, policy="spread"))
             selected, _ = choose(status={"credits": {"weekly_used": 0}, "pro": {"weekly_used": None}})
             assert selected["id"] == "credits"

@@ -2,7 +2,7 @@
 set -euo pipefail
 # These fixtures set role inputs per case below. Do not inherit a caller's
 # operation or opt-out switch into generic provider-default assertions.
-unset OMS_MODEL_OPERATION OMS_MODEL_WORKLOAD OMS_MODEL_ROLE OMS_ROLE_ROUTING || true
+unset OMS_MODEL_OPERATION OMS_MODEL_WORKLOAD OMS_MODEL_ROLE OMS_ROLE_ROUTING OMS_RESUME_SESSION OMS_CODEX_ACCOUNT_ROUTE || true
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
@@ -260,6 +260,7 @@ cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in --version) echo 'codex 1.0'; exit 0 ;; esac
 printf '%s\n' "$@" > "$CODEX_ARGV_OUT"
+[ -z "${OMS_ACCOUNT_SEEN:-}" ] || printf '%s\n' "${CODEX_HOME:-unset}" > "$OMS_ACCOUNT_SEEN"
 prompt="$(cat)"
 count=0
 [ ! -f "$OMS_TEST_CALL_LOG" ] || count="$(wc -l < "$OMS_TEST_CALL_LOG" | tr -d ' ')"
@@ -319,6 +320,7 @@ cat > "$TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in --version) echo 'claude 1.0'; exit 0 ;; esac
 printf '%s\n' "$@" > "$CLAUDE_ARGV_OUT"
+[ -z "${OMS_ACCOUNT_SEEN:-}" ] || printf '%s\n' "${CODEX_HOME:-unset}" > "$OMS_ACCOUNT_SEEN"
 cat >/dev/null
 echo stub answer with enough substance to count
 EOF
@@ -382,6 +384,94 @@ agy_invoke() {  # agy_invoke ARGS...
     OMS_CAPABILITY_DIR="$TMP/cap" OMS_LOCK_DIR="$TMP/locks" OMS_LOCK_FORCE_MKDIR=1 \
     bash "$ROOT/scripts/agent-call.sh" --repo "$TMP/invoke-repo" "$@" >/dev/null 2>&1
 }
+
+# BEGIN shared-account-runner
+account_root="$TMP/accounts"
+mkdir -p "$account_root/config/oh-my-setting" "$account_root/selected" "$TMP/home/.codex"
+chmod 700 "$account_root/selected"
+python3 - "$account_root" <<'PYACCOUNT'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+(root / "config/oh-my-setting/provider-accounts.json").write_text(json.dumps({
+    "schema": 1, "providers": {"codex": {"accounts": [
+        {"id": "selected", "home": str(root / "selected")}]}}}))
+PYACCOUNT
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+  invoke --to codex --model model-a --prompt "shared account route" || fail 'non-panel account call failed'
+[ "$(cat "$account_root/seen")" = "$account_root/selected" ] || fail 'shared runner did not apply selected home'
+python3 - "$TMP/invoke-repo/.oms/artifacts" <<'PYACCOUNT' || fail 'attempt omitted applied account'
+import json, sys
+from pathlib import Path
+records = list(Path(sys.argv[1]).rglob("*.attempts.json"))
+assert records
+row = json.loads(max(records, key=lambda path: path.stat().st_mtime).read_text())["attempts"][-1]
+assert row["account"] == "selected" and row["account_applied"] is True, row
+PYACCOUNT
+mv "$account_root/selected" "$account_root/offline"
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+  invoke --to codex --prompt "explicit provider account fallback" || fail 'explicit provider target did not fall back'
+[ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'explicit provider target changed fallback home'
+mv "$account_root/offline" "$account_root/selected"
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+  OMS_RESUME_SESSION=account-main-session invoke --to codex --model model-a --prompt "main home resume" || fail 'main home resume failed'
+[ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'direct resume selected another account'
+grep -Fx resume "$TMP/codex.argv" >/dev/null || fail 'resume command omitted'
+grep -Fx account-main-session "$TMP/codex.argv" >/dev/null || fail 'resume id omitted'
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$account_root/explicit" \
+  invoke --to codex --model model-a --prompt "explicit account route" || fail 'explicit home call failed'
+[ "$(cat "$account_root/seen")" = "$account_root/explicit" ] || fail 'explicit non-main home replaced'
+# A pre-applied panel account must stay pinned even at the main home.
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+  OMS_CODEX_ACCOUNT_ROUTE='{"account":"pinned","account_applied":true}' \
+  invoke --to codex --model model-a --prompt "panel account route" || fail 'pinned panel call failed'
+[ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'panel decision applied twice'
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+  invoke --to claude --prompt "other provider account route" || fail 'non-Codex call changed'
+[ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'non-Codex home changed'
+for malformed_registry in '' '{' '0' '[]'; do
+  printf '%s' "$malformed_registry" > "$account_root/config/oh-my-setting/provider-accounts.json"
+  OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+    invoke --to codex --model model-a --prompt "invalid account registry" || fail 'malformed registry blocked the caller home'
+  [ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'malformed registry changed home'
+  python3 - "$TMP/invoke-repo/.oms/artifacts/call" <<'PYACCOUNT' || fail 'registry error did not warn exactly once'
+import sys
+from pathlib import Path
+records = list(Path(sys.argv[1]).glob("*.attempt-1.out"))
+body = max(records, key=lambda path: path.stat().st_mtime).read_text()
+assert body.count("warning: Codex account selection skipped:") == 1, body
+assert "provider accounts" in body and "caller home" in body, body
+PYACCOUNT
+done
+# An early prompt-copy failure must not attribute a previous account to this attempt.
+ACCOUNT_FAILURE_ROOT="$account_root" bash -c '
+  . "$1/scripts/lib/peer-common.sh"
+  printf -- "-leading prompt\n" > "$ACCOUNT_FAILURE_ROOT/prompt"
+  agent_memory_mktemp() { return 1; }
+  OMS_PROVIDER_ACCOUNT=previous
+  if ma_provider_attempt codex read "$ACCOUNT_FAILURE_ROOT/prompt" "$ACCOUNT_FAILURE_ROOT/failed"; then exit 1; fi
+  [ -z "$OMS_PROVIDER_ACCOUNT" ] || exit 1
+  ma_record_attempt "$ACCOUNT_FAILURE_ROOT/early.md" codex model-a medium 2 failure "$ACCOUNT_FAILURE_ROOT/failed"
+' _ "$ROOT" || fail 'early attempt retained a stale account'
+python3 - "$account_root/early.attempts.json" <<'PYACCOUNT' || fail 'early failure recorded the previous account'
+import json, sys
+row = json.load(open(sys.argv[1]))["attempts"][-1]
+assert "account" not in row and "account_applied" not in row, row
+PYACCOUNT
+rm "$account_root/config/oh-my-setting/provider-accounts.json"
+: > "$TMP/provider.calls"
+OMS_ACCOUNT_SEEN="$account_root/seen" XDG_CONFIG_HOME="$account_root/config" CODEX_HOME="$TMP/home/.codex" \
+  invoke --to codex --model model-a --prompt "unregistered account route" || fail 'no-accounts call failed'
+[ "$(cat "$account_root/seen")" = "$TMP/home/.codex" ] || fail 'no-accounts home changed'
+[ "$(wc -l < "$TMP/provider.calls" | tr -d ' ')" = 1 ] || fail 'account lookup made another provider call'
+python3 - "$TMP/invoke-repo/.oms/artifacts" <<'PYACCOUNT' || fail 'unregistered account changed attempt schema'
+import json, sys
+from pathlib import Path
+records = list(Path(sys.argv[1]).rglob("*.attempts.json"))
+row = json.loads(max(records, key=lambda path: path.stat().st_mtime).read_text())["attempts"][-1]
+assert "account" not in row and "account_applied" not in row, row
+PYACCOUNT
+# END shared-account-runner
 
 invoke --to codex --prompt "argv probe" || fail 'auto-effort codex call failed'
 [ -s "$TMP/codex.argv" ] || fail 'codex recorder stub was not invoked'

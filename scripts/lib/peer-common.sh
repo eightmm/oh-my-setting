@@ -1171,6 +1171,28 @@ ma_export_child_env() {
   local access="${5:-read}"
   local parent_agent="${OMS_AGENT:-unknown}"
 
+  if [ "$provider" = codex ] && [ -n "${codex_account_file:-}" ]; then
+    local account_home
+    account_home="$(python3 - "$(ma_scripts_dir)/lib" "$codex_account_model" "$codex_account_file" "$codex_account_explicit" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from provider_accounts import headless_codex_account
+try:
+    home, ident = headless_codex_account(sys.argv[2], explicit=sys.argv[4] == "1")
+    with open(sys.argv[3], "w", encoding="utf-8") as stream:
+        stream.write((ident or "") + "\n")
+    if home is not None:
+        print(home)
+except (OSError, ValueError, RuntimeError) as error:
+    print("error: " + str(error), file=sys.stderr)
+    raise SystemExit(2)
+PY
+)" || exit 2
+    account_home="${account_home//$'\r'/}"
+    [ -z "$account_home" ] || export CODEX_HOME="$account_home"
+  fi
+  unset OMS_CODEX_ACCOUNT_ROUTE OMS_PROVIDER_ACCOUNT
+
   # Provider children receive context, never the owner's capabilities. A write
   # worker can derive the primary checkout from Git metadata even when the
   # prompt omits its path, so removing these variables is not an OS sandbox;
@@ -3251,6 +3273,7 @@ oms_panel_provider_error_classify() { # PROVIDER EXIT OUTPUT_FILE
 }
 
 ma_provider_attempt() {
+  OMS_PROVIDER_ACCOUNT=""
   local prompt_first=""
   local prompt_copy=""
   local rc=0
@@ -3315,6 +3338,9 @@ ma_provider_attempt_run() {
   local panel_worker_parent=""
   local seat_plans="" seat_plans_real="" workdir_real=""
   local room_relay_dir="" room_relay_pid="" room_relay_ready=0 room_relay_attempt=0
+  # Dynamically scoped into the child environment helper, including conversation turns.
+  local codex_account_file="" codex_account_model="$model" codex_account_explicit=0
+  OMS_PROVIDER_ACCOUNT=""
   local -a cmd
 
   provider="$(oms_provider_normalize "$provider")" || {
@@ -3893,6 +3919,13 @@ ma_provider_attempt_run() {
     fi
   fi
 
+  if [ "$provider" = codex ]; then
+    [ "${OMS_MODEL_RESOLVED_CLASS:-}" != explicit ] || codex_account_explicit=1
+    case "${MA_KIND:-}:${TO:-}" in
+      call:codex|delegate:codex) codex_account_explicit=1 ;;
+    esac
+    codex_account_file="$(agent_memory_mktemp)" || return 2
+  fi
   if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
     ma_conversation_run "$provider" "$access" "$prompt_file" "$output_file" "$workdir" \
       "$origin" "$state_repo" "$call_id" "$authority_before" "$authority_after" \
@@ -3979,6 +4012,11 @@ PY
       unset OMS_ROOM_RELAY_QUEUE
     fi
     [ -z "$room_relay_dir" ] || rm -rf "$room_relay_dir"
+  fi
+  if [ -n "$codex_account_file" ]; then
+    IFS= read -r OMS_PROVIDER_ACCOUNT < "$codex_account_file" || OMS_PROVIDER_ACCOUNT=""
+    OMS_PROVIDER_ACCOUNT="${OMS_PROVIDER_ACCOUNT//$'\r'/}"
+    rm -f "$codex_account_file"
   fi
   if [ "$provider" = pi ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
     ma_pi_jsonl_to_text "$output_file" || { [ "$status" -ne 0 ] || status=1; }
@@ -4191,9 +4229,9 @@ ma_default_read_effort() {  # ma_default_read_effort PROVIDER ACCESS
 # after the attempt and before the next one reuses ATTEMPT_FILE. The stop
 # reason is the line this controller's transform emitted, not answer text.
 ma_record_attempt() { # ARTIFACT PROVIDER MODEL EFFORT EXIT CLASSIFICATION ATTEMPT_FILE
-  python3 - "${1%.md}" "$2" "$3" "$4" "$5" "$6" "$7" <<'PY' 2>/dev/null ||
+  python3 - "${1%.md}" "$2" "$3" "$4" "$5" "$6" "$7" "${OMS_PROVIDER_ACCOUNT:-}" <<'PY' 2>/dev/null ||
 import json, os, shutil, sys
-base, provider, model, effort, status, classification, source = sys.argv[1:]
+base, provider, model, effort, status, classification, source, account = sys.argv[1:]
 sidecar = base + ".attempts.json"
 attempts = []
 if os.path.exists(sidecar):
@@ -4216,6 +4254,8 @@ shutil.copyfile(source, os.path.join(os.path.dirname(base) or ".", name))
 attempts.append({"provider": provider, "model": model, "effort": effort,
                  "exit": int(status), "stop_reason": stop[len("stop-reason: "):],
                  "classification": classification, "output": name})
+if provider == "codex" and account:
+    attempts[-1].update(account=account, account_applied=True)
 with open(sidecar + ".tmp", "w", encoding="utf-8") as handle:
     json.dump({"attempts": attempts}, handle, indent=1)
     handle.write("\n")

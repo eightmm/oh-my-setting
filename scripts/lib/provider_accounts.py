@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import time
 
 
@@ -78,6 +79,41 @@ def route_account_home(route):
     if error:
         raise ValueError(error)
     return Path(entry["home"])
+
+
+def headless_codex_account(model, explicit=False):
+    """Select for a shared-runner child; an applied panel route is already pinned."""
+    applied = os.environ.get("OMS_CODEX_ACCOUNT_ROUTE")
+    if applied:
+        try:
+            route = json.loads(applied)
+        except ValueError as error:
+            raise ValueError("invalid applied Codex account route") from error
+        if not isinstance(route, dict):
+            raise ValueError("invalid applied Codex account route")
+        ident = route.get("account") if route.get("account_applied") is True else None
+        if ident is not None and (not isinstance(ident, str)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", ident)):
+            raise ValueError("invalid applied Codex account id")
+        return None, ident
+    if os.environ.get("OMS_RESUME_SESSION"):
+        return None, None
+    current = os.environ.get("CODEX_HOME")
+    if current and os.path.normcase(str(Path(current).expanduser().resolve())) != os.path.normcase(
+            str((Path.home() / ".codex").resolve())):
+        return None, None
+    try:
+        config = load_accounts()
+    except (OSError, ValueError, RuntimeError) as error:
+        print("warning: Codex account selection skipped: %s; using caller home" % error, file=sys.stderr)
+        return None, None
+    if not config["configured"] or "codex" not in config["providers"]:
+        return None, None
+    selected, reason = select_account("codex", model, config=config, explicit=explicit)
+    if selected is None:
+        raise ValueError("no eligible Codex account: " + reason)
+    home = route_account_home({"provider": "codex", "account": selected["id"], "account_reason": reason})
+    return (home, selected["id"]) if home is not None else (None, None)
 
 
 def next_account_route(route, readings=None):
@@ -230,7 +266,7 @@ def select_account(provider, model, readings=None, running=None, config=None, no
             skipped.append(ident + ": <=10% weekly quota left")
             continue
         models = model_slugs(entry["home"]) if provider == "codex" else None
-        if models is not None and model not in models:
+        if model != "provider-default" and models is not None and model not in models:
             skipped.append(ident + ": cached model list lacks " + model)
             continue
         eligible.append((entry, used))

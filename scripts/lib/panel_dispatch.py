@@ -678,17 +678,13 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     # the provider that actually ran.
     ran = last.get("refs", {}).get("panel_provider") or last.get("provider")
     if session and ran == route["provider"] == "codex" and recorded_account:
-        from provider_accounts import route_account_home
-        from panel_chats import _codex_rollouts
-        pinned = dict(route, account=recorded_account, account_reason="continued account")
         try:
-            account_home = route_account_home(pinned)
+            stored = session_stored("codex", session, account=recorded_account)
         except ValueError as error:
             raise ValueError("cannot resume Codex account %s: %s; re-register the account, or continue on a "
                              "non-Codex provider (--to PROVIDER --model MODEL or --workload TIER routed to "
                              "another provider) for a fresh worker"
                              % (recorded_account, error)) from error
-        stored = any(session in path.name for path in _codex_rollouts(account_home))
         if stored:
             route.update(account=recorded_account, account_reason="continued account")
     else:
@@ -2736,6 +2732,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             if account_home is not None:
                 env[PROVIDER_HOMES[route["provider"]][0]] = str(account_home)
             applied_route = dict(route, account_applied=True) if account_home is not None else route
+            if route["provider"] == "codex":
+                # Even an unbound legacy continuation must keep its original home.
+                env["OMS_CODEX_ACCOUNT_ROUTE"] = json.dumps(applied_route)
             launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
                                              task_id=task_id, route_provenance=route_provenance,
                                              **({"route": applied_route} if route.get("account") else {}))
