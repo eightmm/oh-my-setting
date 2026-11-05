@@ -56,7 +56,7 @@ are in [docs/INSTALL.md](docs/INSTALL.md).
 
 Ask your agent to run `oms update` or `oms uninstall`. Uninstall restores
 replaced files and leaves agent CLIs in place. See the
-[migration notes](docs/MIGRATION-0.7.md) for release changes.
+[migration notes](docs/MIGRATION.md#07) for release changes.
 
 ## How it works
 

@@ -24,16 +24,10 @@ for path in \
   [ ! -e "$ROOT/$path" ] || fail "obsolete GitHub Release surface remains: $path"
 done
 
-# Naming the notes froze this guard at 0.5: the 0.6 and 0.7 notes were added
-# afterwards and never reached it. Enumerate whatever exists instead, so a
-# release cannot add a note that goes unscanned.
-migration_notes=()
-for note in "$ROOT"/docs/MIGRATION-*.md; do
-  [ -e "$note" ] || continue
-  migration_notes+=("docs/${note##*/}")
-done
-[ "${#migration_notes[@]}" -gt 0 ] ||
+# Every release's migration steps live in one note, so the guard scans it whole.
+[ -f "$ROOT/docs/MIGRATION.md" ] ||
   fail "no migration note found to scan for Release-surface references"
+migration_notes=(docs/MIGRATION.md)
 
 for file in README.md README.ko.md docs/COMPONENTS.md "${migration_notes[@]}" \
     .github/workflows/test.yml scripts/check.sh; do

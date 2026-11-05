@@ -22,7 +22,4 @@ Use this map to choose an OMS guide by task. Each entry names its subject and in
 
 ## Migration notes
 
-- [MIGRATION-0.4.md](MIGRATION-0.4.md) — 0.4 upgrade and removed compatibility surfaces; for operators upgrading older installs.
-- [MIGRATION-0.5.md](MIGRATION-0.5.md) — 0.5 capability profiles and runtime changes; for operators and integrators.
-- [MIGRATION-0.6.md](MIGRATION-0.6.md) — 0.6 default, transport and state changes; for operators upgrading.
-- [MIGRATION-0.7.md](MIGRATION-0.7.md) — 0.7 breaking spelling change and new entry points; for operators and project-skill authors.
+- [MIGRATION.md](MIGRATION.md) — upgrade notes for 0.7 through 0.4, newest first.

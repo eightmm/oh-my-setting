@@ -622,7 +622,7 @@ property.
 ## Migrating an existing install to capability profiles
 
 Existing installs change nothing until opted in; see
-[MIGRATION-0.5.md](MIGRATION-0.5.md#capability-profiles).
+[MIGRATION.md](MIGRATION.md#capability-profiles).
 
 ## Portable continuity capsule
 

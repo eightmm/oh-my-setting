@@ -55,7 +55,7 @@ Python 요구 사항은 상한 없는 3.11 이상이다. 관리형 런타임은 
 
 agent에게 `oms update` 또는 `oms uninstall` 실행을 요청한다. 제거하면 교체했던
 파일이 복원되고 agent CLI는 남는다. 릴리스별 변경은
-[마이그레이션 노트](docs/MIGRATION-0.7.md)를 참고한다.
+[마이그레이션 노트](docs/MIGRATION.md#07)를 참고한다.
 
 ## 동작 방식
 

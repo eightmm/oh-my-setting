@@ -69,7 +69,7 @@ bash scripts/uninstall.sh
 그대로 쓰고, 요청한 프로필을 비공개 receipt에 기록해 업데이트 때 그 도구
 묶음만 다시 적용한다. capability receipt가 없는 기존 설치는 agent가 명시적으로
 옮기기 전까지 예전의 전체 도구 업데이트 경로를 유지한다.
-[MIGRATION-0.5.md](MIGRATION-0.5.md#capability-profiles)를 참고한다.
+[MIGRATION.md](MIGRATION.md#capability-profiles)를 참고한다.
 `oms install-profile --apply --add --profile github`은 기존 프로필, provider,
 누락 허용 정책을 유지하며 capability를 추가한다. `--add` 없는 `--profile`은
 기록된 선택을 대체하고, `--reapply`는 그대로 다시 적용한다. `--plan`으로
@@ -152,7 +152,7 @@ OMS가 기본으로 켜지 않는다.
 
 매일 도는 업데이트는 수정 없는 체크아웃만 fast-forward하고, 수정됐거나 갈라진
 체크아웃은 건너뛴다. 기존 설치의 업그레이드는 `oms update` 한 번이고, 릴리스마다
-바뀌는 것은 마이그레이션 노트(현재 [MIGRATION-0.7.md](MIGRATION-0.7.md))에
+바뀌는 것은 마이그레이션 노트(현재 [MIGRATION.md](MIGRATION.md#07))에
 있다.
 
 provider 도구 갱신 뒤에는 시간 제한이 있는 연동 점검으로 Claude hooks,

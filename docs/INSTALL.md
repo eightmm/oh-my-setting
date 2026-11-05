@@ -132,7 +132,7 @@ existing locked download transactions, records the exact requested profile in a
 private receipt, and reapplies only that tool set during updates. Existing
 installs without a capability receipt retain the legacy full-tool update path
 until an agent explicitly migrates them. See
-[MIGRATION-0.5.md](MIGRATION-0.5.md#capability-profiles). `oms install-profile --apply --add --profile github`
+[MIGRATION.md](MIGRATION.md#capability-profiles). `oms install-profile --apply --add --profile github`
 adds a capability while retaining the recorded profiles, provider, and degraded
 policy. Without `--add`, `--profile` replaces the recorded selection; `--reapply`
 reuses it exactly. `--plan` previews either operation without changing it.
@@ -199,7 +199,7 @@ Notion data-source selection — live in
 [COMPONENTS.md](COMPONENTS.md) and
 [WORK-JOURNAL.md](WORK-JOURNAL.md). Upgrading an existing install
 is one `oms update`; what each release changes underfoot is stated in its
-migration note, currently [MIGRATION-0.7.md](MIGRATION-0.7.md).
+migration note, currently [MIGRATION.md](MIGRATION.md#07).
 
 Scripts live in `~/.oh-my-setting/scripts/` and are reachable as `oms <tool>`.
 They are documented for transparency and recovery, not for manual use.
