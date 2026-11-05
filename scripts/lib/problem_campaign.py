@@ -176,37 +176,28 @@ def validate(repo, manifest, _saved_providers=None):
 def locked(directory):
     path = directory / 'events.lock'
     dir_info = os.lstat(directory)
-    if not stat.S_ISDIR(dir_info.st_mode) or _durable.is_reparse(dir_info):
+    if not stat.S_ISDIR(dir_info.st_mode):
         error('campaign state must be a real directory')
-    dir_fd = None
-    if os.name != 'nt':
-        dir_fd = os.open(str(directory), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
-        if not _durable.same_file(dir_info, os.fstat(dir_fd)):
-            os.close(dir_fd)
-            error('campaign state directory changed')
+    dir_fd = os.open(str(directory), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    if not _durable.same_file(dir_info, os.fstat(dir_fd)):
+        os.close(dir_fd)
+        error('campaign state directory changed')
     flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
     try:
         fd = os.open(str(path), flags, 0o600)
     except BaseException:
         if dir_fd is not None: os.close(dir_fd)
         raise
-    acquired = False
     try:
         info = os.fstat(fd)
         named = os.lstat(path)
         if not _durable.safe_regular(info) or not _durable.safe_regular(named) or not _durable.same_file(info, named):
             error('campaign lock must be a regular non-symlink, non-hard-linked file')
-        if os.name == 'nt':
-            import msvcrt
-            if info.st_size == 0: os.write(fd,b'0')
-            os.lseek(fd,0,0); msvcrt.locking(fd,msvcrt.LK_LOCK,1)
-        else:
-            import fcntl
-            fcntl.flock(fd,fcntl.LOCK_EX)
-        acquired = True
+        import fcntl
+        fcntl.flock(fd,fcntl.LOCK_EX)
         named_dir = os.lstat(directory)
         named_lock = os.lstat(path)
-        if (not stat.S_ISDIR(named_dir.st_mode) or _durable.is_reparse(named_dir) or
+        if (not stat.S_ISDIR(named_dir.st_mode) or
                 not _durable.same_file(dir_info, named_dir) or
                 (dir_fd is not None and not _durable.same_file(os.fstat(dir_fd), named_dir)) or
                 not _durable.safe_regular(named_lock) or
@@ -214,8 +205,6 @@ def locked(directory):
             error('campaign lock or state directory changed while acquiring lock')
         yield
     finally:
-        if os.name == 'nt' and acquired:
-            os.lseek(fd,0,0); msvcrt.locking(fd,msvcrt.LK_UNLCK,1)
         os.close(fd)
         if dir_fd is not None: os.close(dir_fd)
 
@@ -421,12 +410,8 @@ def running(directory):
     fd = os.open(str(directory / 'controller.lock'), os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
         try:
-            if os.name == 'nt':
-                import msvcrt
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             error('campaign is already running')
         yield
@@ -640,7 +625,7 @@ class Controller:
         protected = {os.path.normpath(x['file' if 'file' in x else 'path']).casefold() for x in pinned}
         if protected & set(touched): return {'verdict': 'error', 'reason': 'verifier-tamper'}
         scripts = ROOT / 'scripts/scratch-worktree.sh'
-        scratch = subprocess.check_output(['bash', str(scripts), 'add', '--repo', str(self.repo), '--base', self.manifest['base'], '--owner-pid', str(os.getpid())], text=True).strip().replace('\r', '')
+        scratch = subprocess.check_output(['bash', str(scripts), 'add', '--repo', str(self.repo), '--base', self.manifest['base'], '--owner-pid', str(os.getpid())], text=True).strip()
         try:
             for step in (['--check'], []):
                 done = subprocess.run(['git', '-C', scratch, 'apply'] + step + ['-'], input=data, capture_output=True)
@@ -663,10 +648,8 @@ class Controller:
                 proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 verdict = 'timeout'
-            if os.name != 'nt':
-                try: os.killpg(proc.pid, signal.SIGKILL)
-                except OSError: pass
-            elif verdict: proc.kill()
+            try: os.killpg(proc.pid, signal.SIGKILL)
+            except OSError: pass
             proc.wait()
             size = sink.seek(0, 2)
             sink.seek(max(0, size - TAIL_CAP))

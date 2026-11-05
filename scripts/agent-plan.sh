@@ -526,9 +526,6 @@ if [ -n "$PROVIDER" ]; then
     fail "unknown provider: inspect 'oms models' for registered transports"
 fi
 
-# Git Bash paths are valid for the shell but environment variables are not
-# rewritten when it launches native Windows Python. Resolve shell aliases
-# first, then use the mixed drive spelling understood by both runtimes.
 python_path_for_host() {  # PATH
   local value="$1" parent base physical_parent
   parent="$(dirname "$value")"
@@ -536,21 +533,13 @@ python_path_for_host() {  # PATH
   if physical_parent="$(cd "$parent" 2>/dev/null && pwd -P)"; then
     value="$physical_parent/$base"
   fi
-  [ -n "${PLAN_KERNEL_NAME:-}" ] || PLAN_KERNEL_NAME="$(uname -s 2>/dev/null || true)"
-  case "$PLAN_KERNEL_NAME" in
-    MINGW*|MSYS*|CYGWIN*)
-      command -v cygpath >/dev/null 2>&1 || return 2
-      value="$(cygpath -m "$value" | tr -d '\r')" || return $?
-      ;;
-  esac
   printf '%s\n' "$value"
 }
 
 PY_REPO="$(python_path_for_host "$REPO")" || fail "cannot normalize repository path for Python"
 PY_STATE_REPO="$(python_path_for_host "$STATE_REPO")" || fail "cannot normalize repository path for Python"
 if [ -n "$LANDED_COMMIT" ] || [ "$ACTION" = satisfy ]; then
-  # Match land.sh's shared-worktree state directory using shell path spelling;
-  # native Windows Python paths must not change the cksum repository identity.
+  # Match land.sh's shared-worktree state directory.
   LAND_RECEIPTS_DIR="$(oms_land_state_dir "$REPO")" || fail "cannot resolve land state directory"
   LAND_RECEIPTS_DIR="$(python_path_for_host "$LAND_RECEIPTS_DIR")" || fail "cannot normalize land state path for Python"
 fi
@@ -736,7 +725,6 @@ plan_run_with_plan_lock() {
     base="$(basename "$PLAN_FILE")"
     physical_parent="$(cd "$parent" 2>/dev/null && pwd -P)" ||
       fail "cannot resolve the physical plan lock parent"
-    physical_parent="$(printf '%s' "$physical_parent" | tr -d '\r')"
     PLAN_LOCK_FILE="$physical_parent/$base"
   fi
   local default_plan="$STATE_REPO/.oms/plan/tasks.json"
@@ -766,7 +754,7 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
   if { [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ]; } &&
      { [ -n "$MAIN_REVIEW_APPROVAL" ] || [ "$ACTION" = approve-main-research ] || [ -z "$completion_room_id" ]; }; then
     completion_room_id="$(python3 "$ROOT/scripts/lib/plan-completion.py" --main-review-room \
-      "$PY_STATE_REPO" "$COMPLETION_BUNDLE" "$EXPECTED_COMPLETION_BUNDLE_SHA256" | tr -d '\r')" ||
+      "$PY_STATE_REPO" "$COMPLETION_BUNDLE" "$EXPECTED_COMPLETION_BUNDLE_SHA256")" ||
       fail "cannot resolve the declared main review room"
     export OMS_ROOM_ID="$completion_room_id"
   fi
@@ -777,7 +765,6 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
   fi
   completion_thread_parent="$(cd "$STATE_REPO/.oms/threads" && pwd -P)" ||
     fail "cannot resolve completion room parent"
-  completion_thread_parent="$(printf '%s' "$completion_thread_parent" | tr -d '\r')"
   [ "$completion_thread_parent" = "$STATE_REPO/.oms/threads" ] ||
     fail "completion room parent must be canonical"
   [ "$PLAN_FILE" = "$STATE_REPO/.oms/plan/tasks.json" ] ||
@@ -796,7 +783,7 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
   export OMS_COMPLETION_PHASE
   completion_snapshot_file="$(mktemp)" || fail "cannot create completion snapshot"
   trap 'rm -f "$completion_snapshot_file"' EXIT
-  OMS_COMPLETION_PIN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)' | tr -d '\r')" ||
+  OMS_COMPLETION_PIN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" ||
     fail "cannot create completion transaction identity"
   export OMS_COMPLETION_PIN_ID
   completion_published=0
@@ -816,7 +803,7 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
     fail "cannot normalize completion snapshot path"
   export OMS_COMPLETION_SNAPSHOT_FILE
   completion_run_locked > "$completion_snapshot_file" || exit $?
-  completion_resume="$(python3 "$ROOT/scripts/lib/plan-completion.py" --resume | tr -d '\r')" ||
+  completion_resume="$(python3 "$ROOT/scripts/lib/plan-completion.py" --resume)" ||
     fail "invalid completion preflight"
   OMS_COMPLETION_VERIFICATION='{}'
   if [ "$completion_resume" != 1 ]; then
@@ -856,7 +843,7 @@ elif isinstance(value, bool):
     print("1" if value else "0")
 elif value is not None:
     print(value)
-' "$1" | tr -d '\r'
+' "$1"
   }
   retire_status="$(retire_field status)" || fail "retirement preflight returned invalid JSON"
   if [ "$retire_status" = already-retired ]; then
@@ -967,7 +954,7 @@ print(d.get("accept", "") or "")
   # project_contract and therefore use the empty manifest, but still receive
   # the repository and plan mutation fences below.
   acceptance_manifest() {
-    python3 - "$REPO" "$PLAN_FILE" <<'PY' | tr -d '\r'
+    python3 - "$REPO" "$PLAN_FILE" <<'PY'
 import hashlib, json, os, stat, sys
 
 repo = os.path.realpath(sys.argv[1])
@@ -997,7 +984,7 @@ for index, rel in enumerate(files):
     target = os.path.join(repo, *rel.split("/"))
     if os.path.realpath(target) != target:
         raise SystemExit(3)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(target, flags)
     except OSError:
@@ -1035,7 +1022,7 @@ PY
   # an already-pathological dirty checkout from turning this fence into an
   # unbounded read; goal-drive normally supplies a clean dedicated worktree.
   acceptance_repo_snapshot() {
-    python3 - "$REPO" <<'PY' | tr -d '\r'
+    python3 - "$REPO" <<'PY'
 import hashlib, os, stat, subprocess, sys
 
 repo = os.path.realpath(sys.argv[1])
@@ -1174,7 +1161,6 @@ PY
   reuse_context=""
   if [ -n "${OMS_GOAL_RUN_ID:-}$REUSE_PASS_RUN" ]; then
     reuse_context="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" 2>/dev/null || true)"
-    reuse_context="${reuse_context//$'\r'/}"
   fi
   if [ -n "$REUSE_PASS_RUN" ] && [ -z "$retire_proof" ] && [ -n "$reuse_context" ]; then
     reuse_result="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" check "$progress" \
@@ -1184,14 +1170,14 @@ PY
         [ "$(acceptance_repo_snapshot)" = "$repo_before" ] &&
         [ "$(oms_sha256_file "$PLAN_FILE")" = "$plan_before" ] &&
         [ "$(acceptance_manifest)" = "$manifest_before" ] &&
-        [ "$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" | tr -d '\r')" = "$reuse_context" ]; then
-      printf '%s\n' "${reuse_result//$'\r'/}"
+        [ "$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0")" = "$reuse_context" ]; then
+      printf '%s\n' "$reuse_result"
       exit 0
     fi
   fi
 
   timeout_value="${OMS_PLAN_ACCEPT_TIMEOUT:-10m}"
-  timeout_seconds="$(python3 - "$timeout_value" <<'PY' | tr -d '\r'
+  timeout_seconds="$(python3 - "$timeout_value" <<'PY'
 import re, sys
 match = re.fullmatch(r"([1-9][0-9]*)([smh]?)", sys.argv[1])
 if not match:
@@ -1243,7 +1229,7 @@ PY
   accept_supervisor_pid=""
   trap - HUP INT TERM
   set -e
-  meta="$(python3 - "$meta_tmp" <<'PY' | tr -d '\r'
+  meta="$(python3 - "$meta_tmp" <<'PY'
 import json, sys
 try:
     value = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -1320,7 +1306,6 @@ PY
   [ -n "$git_ref" ] || git_ref="DETACHED@$base_sha"
   if [ -n "$reuse_context" ]; then
     reuse_after="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" 2>/dev/null || true)"
-    reuse_after="${reuse_after//$'\r'/}"
     [ "$reuse_context" = "$reuse_after" ] || reuse_context=""
   fi
   OMS_PA_REUSE="$reuse_context" OMS_PA_MANIFEST="$manifest_before" \

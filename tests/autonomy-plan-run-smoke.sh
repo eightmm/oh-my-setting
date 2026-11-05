@@ -91,33 +91,23 @@ chmod +x "$bin/codex"
 PLAN="$ROOT/scripts/agent-plan.sh"
 RUN="$ROOT/scripts/plan-run.sh"
 
-test_direct_id_and_release_accept_crlf_python_output() {
-  local crlf_repo="$TMP/crlf-repo" shim_dir="$TMP/crlf-bin" real_python
-  real_python="$(command -v python3)"
-  git clone -q "$repo" "$crlf_repo"
-  "$PLAN" --repo "$crlf_repo" init --goal crlf >/dev/null
-  "$PLAN" --repo "$crlf_repo" add --id crlf --title crlf \
+test_direct_id_releases_after_verifier_base_failure() {
+  local direct_repo="$TMP/direct-repo"
+  git clone -q "$repo" "$direct_repo"
+  "$PLAN" --repo "$direct_repo" init --goal direct >/dev/null
+  "$PLAN" --repo "$direct_repo" add --id direct --title direct \
     --allowed scripts --verify 'bash scripts/not-at-base.sh' >/dev/null
-
-  mkdir -p "$shim_dir"
-  python3 - "$shim_dir/python3" "$real_python" <<'PYSHIM'
-import pathlib, shlex, sys
-script = "#!/usr/bin/env bash\n" + shlex.quote(sys.argv[2])
-script += """ "$@" | awk '{printf "%s\\r\\n", $0}'
-exit "${PIPESTATUS[0]}"
-"""
-pathlib.Path(sys.argv[1]).write_bytes(script.encode("utf-8"))
-PYSHIM
-  chmod +x "$shim_dir/python3"
-
-  if HOME="$home" PATH="$shim_dir:$bin:/usr/bin:/bin" \
-    "$RUN" --repo "$crlf_repo" --to codex --id crlf >"$TMP/crlf.out" 2>&1; then
+  if HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    "$RUN" --repo "$direct_repo" --to codex --id direct >"$TMP/direct.out" 2>&1; then
     fail "direct-id run unexpectedly passed a verifier-base check"
   fi
-  grep -Fq 'scripts/not-at-base.sh, which does not exist at the base commit' "$TMP/crlf.out" ||
-    fail "CRLF direct-id state was not accepted before the post-claim check"
-  "$PLAN" --repo "$crlf_repo" show --id crlf | grep -F '"state": "ready"' >/dev/null ||
-    fail "claim release did not restore the task to ready under CRLF Python output"
+  grep -Fq 'scripts/not-at-base.sh, which does not exist at the base commit' "$TMP/direct.out" ||
+    fail "direct-id state was not accepted before the post-claim check"
+  "$PLAN" --repo "$direct_repo" show --id direct | grep -F '"state": "ready"' >/dev/null ||
+    fail "claim release did not restore the task to ready"
+  if sed -n '/^release_claim()/,/^}/p' "$RUN" | grep -Fq "tr -d"; then
+    fail "release must read the internal state without CR normalization"
+  fi
 }
 
 test_plan_lifecycle() {
@@ -1202,7 +1192,7 @@ grep -Fq 'ORIENTATION-FILE-BODY' "$TMP/cp-manifest-prompt.txt" ||
 }
 
 # SMOKE_TEST_CALLS_BEGIN
-test_direct_id_and_release_accept_crlf_python_output
+test_direct_id_releases_after_verifier_base_failure
 test_plan_lifecycle
 test_floor_consent_landing
 test_context_pack

@@ -14,19 +14,11 @@ script_dir="${BASH_SOURCE[0]%/*}"
 ROOT="$(cd "$script_dir/.." && pwd -P)"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
-OMS_PP_KERNEL="$(uname -s 2>/dev/null || true)"
-OMS_PLATFORM_KERNEL="$OMS_PP_KERNEL"
 
 MODE=check
 PROFILE=consult
 SETTINGS="${OMS_ANTIGRAVITY_SETTINGS:-$HOME/.gemini/antigravity-cli/settings.json}"
 
-# Every path or rule list that crosses to python travels base64-encoded:
-# Git Bash's MSYS runtime rewrites environment values that look like POSIX
-# paths when it spawns a native binary, and that rewrite sent these values
-# to ghost locations under the Git installation root (drive-letter hybrids,
-# observed on CI). Base64 crosses every runtime untouched; python decodes
-# the exact bytes bash produced.
 oms_pp_b64() {
   printf '%s' "$1" | base64 | tr -d '\r\n'
 }
@@ -170,8 +162,7 @@ if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
   esac
 fi
 
-# WORKTREE_PARENT lands inside write_file(...). Normalize it as a POSIX path
-# even under Windows Python (Git Bash passes POSIX paths to Antigravity), and
+# WORKTREE_PARENT lands inside write_file(...). Normalize it as a POSIX path and
 # reject every character that can terminate or widen the rule. NUL cannot be
 # present in an argv value; all other control characters are rejected below.
 # With no settings file and no ownership sidecar there is nothing to revoke, so
@@ -184,22 +175,6 @@ if [ "$MODE" = remove ] && [ ! -e "$SETTINGS" ] && [ ! -L "$SETTINGS" ] &&
 fi
 command -v python3 >/dev/null 2>&1 ||
   fail "python3 is required to validate provider permission paths"
-# On a Windows host, HOME/XDG/TMPDIR-derived defaults arrive in the native or
-# mixed spelling (C:/...), which the absolute-path check below rightly
-# rejects — so every --apply and --check died before touching the settings.
-# Convert to the POSIX spelling the rule text wants before validating.
-case "$OMS_PP_KERNEL" in
-  MINGW*|MSYS*|CYGWIN*)
-    if command -v cygpath >/dev/null 2>&1; then
-      WORKTREE_PARENT="$(cygpath -u "$WORKTREE_PARENT" | tr -d '\r')"
-    fi
-    ;;
-esac
-# The value crosses to a possibly native Windows Python. Git-for-Windows
-# converts environment values that look like POSIX paths when spawning
-# native binaries, so /tmp/... arrives as C:\... and the absolute-path check
-# below rejected every default on Windows. Base64 does not look like a path,
-# so it crosses untouched; python's stdout crosses back unconverted.
 worktree_parent_b64="$(printf '%s' "$WORKTREE_PARENT" | base64 | tr -d '\r\n')"
 if normalized_worktree_parent="$(OMS_PP_WORKTREE_PARENT_B64="$worktree_parent_b64" python3 - <<'PY'
 import base64
@@ -229,14 +204,13 @@ if not normalized.startswith("/"):
 print(normalized)
 PY
 )"; then
-  WORKTREE_PARENT="${normalized_worktree_parent//$'\r'/}"
+  WORKTREE_PARENT="$normalized_worktree_parent"
 else
   exit $?
 fi
 
 # Canonical aliases of the same settings file must share both one transaction
-# lock and one ownership sidecar. Resolve with POSIX paths and pwd -P rather
-# than returning a native-Windows path from Python to Git Bash. Missing suffixes
+# lock and one ownership sidecar. Resolve with POSIX paths and pwd -P. Missing suffixes
 # stay lexical below the nearest physical existing parent.
 oms_pp_canonical_settings_path() {
   local raw="$1"
@@ -263,8 +237,7 @@ raw = base64.b64decode(os.environ["OMS_PP_PATH_B64"].encode("ascii")).decode("ut
 print(posixpath.normpath("/" + raw.lstrip("/")))
 PY
 )" || return $?
-    normalized="${normalized//$'\r'/}"
-    cursor="${normalized%/*}"
+      cursor="${normalized%/*}"
     [ -n "$cursor" ] || cursor=/
     leaf="${normalized##*/}"
     suffix=""
@@ -285,8 +258,7 @@ raw = base64.b64decode(os.environ["OMS_PP_PATH_B64"].encode("ascii")).decode("ut
 print(posixpath.normpath("/" + raw.lstrip("/")))
 PY
 )" || return $?
-    candidate="${candidate//$'\r'/}"
-    if [ ! -L "$candidate" ]; then
+      if [ ! -L "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -310,21 +282,6 @@ if canonical_settings="$(oms_pp_canonical_settings_path "$SETTINGS")"; then
 else
   fail "could not canonicalize Antigravity settings path: $SETTINGS"
 fi
-# The canonical path is POSIX (/c/...) under Git Bash, and it reaches a
-# possibly native Windows Python through the environment — where Git Bash
-# converts argv but not env values. Unconverted, python resolves /c/...
-# against the current drive and reads and writes a ghost settings file while
-# the real one stays untouched. The mixed form (C:/...) names the same file
-# to bash, MSYS python, and native python alike. After canonicalization on
-# purpose: the canonicalizer's cd/pwd walk expects the POSIX spelling.
-case "$OMS_PP_KERNEL" in
-  MINGW*|MSYS*|CYGWIN*)
-    if command -v cygpath >/dev/null 2>&1; then
-      SETTINGS="$(cygpath -m "$SETTINGS" | tr -d '\r')"
-    fi
-    ;;
-esac
-
 # Keep ownership state beside the canonical settings path being widened. This is
 # intentionally separate from the install receipt: provider-permissions can be
 # used standalone, and uninstall must never restore a whole stale backup over
@@ -544,8 +501,6 @@ PY
     return "$status"
   fi
 
-  # Windows Python may return CRLF through command substitution.
-  removed="${removed//$'\r'/}"
   while IFS= read -r rule; do
     [ -n "$rule" ] || continue
     echo "removed: $rule"
@@ -629,8 +584,6 @@ for rule in required.split("\n"):
         print(rule)
 PY
 )"
-# Windows Python may return CRLF through command substitution.
-missing="${missing//$'\r'/}"
 
 if [ "$missing" = "UNREADABLE" ]; then
   echo "warn: antigravity settings $SETTINGS is not readable JSON"
@@ -877,8 +830,6 @@ PY
     return "$status"
   fi
 
-  # Windows Python may return CRLF through command substitution.
-  added="${added//$'\r'/}"
   printf '%s\n' "$added" | while IFS= read -r rule; do
     [ -n "$rule" ] || continue
     echo "granted: $rule"

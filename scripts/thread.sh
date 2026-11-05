@@ -194,7 +194,7 @@ read_current() {
   # One rule for the active thread, shared with the hooks' in-process check.
   local id
   id="$(python3 "$HELPER" current --repo "$STATE_ROOT")" || return 1
-  printf '%s\n' "${id//$'\r'/}"
+  printf '%s\n' "$id"
 }
 
 # The pointer records which task it belongs to: a thread is continuity for the
@@ -750,7 +750,6 @@ cmd_close_stale() {
     fail "summary looks sensitive; rephrase it"
   fi
   candidates="$(AS_JSON=1 thread_view list | python3 -c 'import json,re,sys; print("\n".join(t["id"] for t in json.load(sys.stdin)["threads"] if not t["id"].startswith("room-") and re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", t["id"])))')" || { rm -f "$tmp"; return 1; }
-  candidates="${candidates//$'\r'/}"
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     oms_with_file_lock "$(thread_file "$id")" close_stale_locked "$id" "$tmp" || {

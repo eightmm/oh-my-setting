@@ -131,7 +131,7 @@ packet bytes; a conflicting note is refused. Each packet holds at most 256
 keys: existing keys remain replayable at capacity, and a new key requires task
 rotation. Hook routing commits its dedupe state only after prompt publication.
 Its existing command timeout includes stdin delivery; owned helper process
-groups or Windows Job Objects contain background writers on exit or timeout.
+groups contain background writers on exit or timeout.
 Interrupted reference operations remain unresolved until their outcome is
 proved, rather than becoming successful completion evidence.
 

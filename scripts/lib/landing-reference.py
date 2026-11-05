@@ -48,30 +48,6 @@ def owner_identity(pid):
     """Positive native-process proof; uncertainty is never an alive result."""
     if type(pid) is not int or pid <= 0:
         raise ValueError('invalid reference owner')
-    if os.name == 'nt':
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-        kernel.WaitForSingleObject.restype = wintypes.DWORD
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.OpenProcess(0x100000 | 0x1000, False, pid)
-        if not handle:
-            if ctypes.get_last_error() == 87:
-                raise OwnerExited('reference owner exited')
-            raise ValueError('reference owner unavailable')
-        try:
-            birth = E['process_start_token'](pid)
-            waited = kernel.WaitForSingleObject(handle, 0)
-            if waited == 0:
-                raise OwnerExited('reference owner exited')
-            if not birth or waited != 258:
-                raise ValueError('reference owner unproven')
-            return {'pid': pid, 'birth': birth, 'uid': None}
-        finally:
-            kernel.CloseHandle(handle)
     if sys.platform.startswith('linux'):
         try:
             fields = E['process_helpers']['proc_stat_fields'](pid)
@@ -114,13 +90,6 @@ def owner_identity(pid):
 
 
 def caller_owner(binding):
-    # MSYS can interpose a transient native launcher. The Bash side reads its
-    # own /proc/self/stat with a builtin, then uses the existing winpid bridge.
-    # POSIX has no such intermediate launcher or supplied PID authority.
-    if os.name == 'nt':
-        if binding.get('owner_source') != 'msys-proc-v1':
-            raise ValueError('reference owner mapping unavailable')
-        return owner_identity(binding['owner']['pid'])
     return owner_identity(os.getppid())
 
 
@@ -136,33 +105,23 @@ def scope_read(repo, channel, expected):
     directory = os.lstat(Path(channel).parent)
     if (C['identity'](info) != scope['binding'].get('channel') or
             C['identity'](directory) != scope['binding'].get('directory') or
-            not stat.S_ISDIR(directory.st_mode) or C['D']['is_reparse'](directory) or
+            not stat.S_ISDIR(directory.st_mode) or
             os.path.realpath(channel) != os.path.abspath(channel) or
             (hasattr(os, 'getuid') and (directory.st_uid != os.getuid() or directory.st_mode & 0o077))):
         raise ValueError('reference scope directory or file replaced')
     return scope, info
 
 
-def begin_owned(repo, tool, reference_input, channel, native_owner="", owner_source=""):
-    # This command runs in the foreground, not a $(...) subshell. Its actual
-    # native parent identifies the POSIX owner; Git Bash uses its existing
-    # /proc native-PID bridge instead of a transient MSYS launcher.
+def begin_owned(repo, tool, reference_input, channel):
     raw, info = C['regular'](channel, maximum=0)
     if raw or os.path.realpath(channel) != os.path.abspath(channel):
         raise ValueError('unsafe reference return channel')
-    if os.name == 'nt':
-        if owner_source != 'msys-proc-v1' or not native_owner.isdigit():
-            raise ValueError('reference owner lacks the MSYS native PID bridge')
-        owner = owner_identity(int(native_owner))
-    else:
-        if native_owner or owner_source:
-            raise ValueError('unexpected reference owner override')
-        owner = owner_identity(os.getppid())
+    owner = owner_identity(os.getppid())
     # The fence precedes both monitor and waiter startup; its inode is bound
     # into the immutable scope before either child can observe publication.
     with open(channel + '.ready.pending', 'xb') as pending:
         pending_identity = C['identity'](os.fstat(pending.fileno()))
-    binding = {'owner': owner, 'owner_source': owner_source or 'foreground-parent-v1', 'nonce': secrets.token_hex(32), 'tool': tool,
+    binding = {'owner': owner, 'owner_source': 'foreground-parent-v1', 'nonce': secrets.token_hex(32), 'tool': tool,
                'input': C['digest'](os.path.abspath(reference_input).encode()),
                'repo': C['digest'](os.path.realpath(repo).encode()),
                'channel': C['identity'](info), 'ready_pending': pending_identity,
@@ -179,7 +138,7 @@ def begin_owned(repo, tool, reference_input, channel, native_owner="", owner_sou
     if owner_identity(owner['pid']) != owner:
         raise ValueError('reference owner changed during registration')
     payload = C['encoded']({'binding': binding, 'attempt': attempt})
-    flags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    flags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)
     fd = os.open(channel, flags)
     try:
         opened = os.fstat(fd)
@@ -232,12 +191,12 @@ def monitor(repo, channel, expected):
     scope, _ = scope_read(repo, channel, expected)
     ready = channel + '.ready'
     pending = ready + '.pending'
-    flags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    flags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)
     fd = os.open(pending, flags)
     try:
         info = os.fstat(fd)
         if (C['identity'](info) != scope['binding']['ready_pending'] or
-                not stat.S_ISREG(info.st_mode) or C['D']['is_reparse'](info) or
+                not stat.S_ISREG(info.st_mode) or
                 info.st_nlink != 1 or info.st_size):
             raise ValueError('reference publication fence changed')
         with os.fdopen(fd, 'wb', closefd=False) as output:
@@ -298,7 +257,7 @@ def await_monitor(repo, channel, expected, native_monitor):
             pass
         else:
             if (C['identity'](pending) != scope['binding']['ready_pending'] or
-                    not stat.S_ISREG(pending.st_mode) or C['D']['is_reparse'](pending) or
+                    not stat.S_ISREG(pending.st_mode) or
                     pending.st_nlink not in (1, 2) or pending.st_size > 512 or
                     (hasattr(os, 'getuid') and pending.st_uid != os.getuid())):
                 raise ValueError('reference publication fence changed while waiting')
@@ -371,13 +330,13 @@ def close_scope_locked(repo, channel, expected):
         auxiliary.append((channel + '.ready', ready_info))
     result_path = str(Path(channel).parent / 'result')
     raw, result_info = C['regular'](result_path, maximum=256)
-    if raw.replace(b'\r\n', b'\n') != (scope['attempt'] + ' ' + expected + '\n').encode():
+    if raw != (scope['attempt'] + ' ' + expected + '\n').encode():
         raise ValueError('reference return file changed before close')
     auxiliary.append((result_path, result_info))
     proof_path = str(Path(channel).parent / 'proof')
     proof, proof_info = C['regular'](proof_path, maximum=66)
     expected_proof = (C['digest'](ready_raw) + '\n').encode() if ready_raw is not None else b''
-    if proof.replace(b'\r\n', b'\n') != expected_proof:
+    if proof != expected_proof:
         raise ValueError('reference readiness proof changed before close')
     auxiliary.append((proof_path, proof_info))
     for name, before in auxiliary:
@@ -408,25 +367,6 @@ def terminate_monitor(identity):
             return True
         finally:
             os.close(fd)
-    if os.name == 'nt':
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
-        kernel.TerminateProcess.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.OpenProcess(0x100000 | 0x1000 | 1, False, pid)
-        if not handle:
-            return False
-        try:
-            if owner_identity(pid) != identity:
-                return False
-            return bool(kernel.TerminateProcess(handle, 1))
-        finally:
-            kernel.CloseHandle(handle)
-
     return False
 
 
@@ -598,7 +538,7 @@ def append_deduplicated(repo, attempt, target, section, agent, note, key):
                 (info.st_dev, info.st_ino) != (current_info.st_dev, current_info.st_ino)):
             raise ValueError('task packet changed during append')
         _, temp_info = C['regular'](temporary)
-        flags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+        flags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
         with os.fdopen(os.open(temporary, flags), 'wb') as handle:
             if C['identity'](os.fstat(handle.fileno())) != C['identity'](temp_info):
                 raise ValueError('task append scratch changed')

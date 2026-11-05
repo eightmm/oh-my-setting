@@ -245,17 +245,9 @@ def _delivery_lock(deadline: float):
     lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(fd, "r+b") as handle:
-        if os.name == "nt":
-            import msvcrt
-            handle.write(b"\0")
-            handle.flush()
-            handle.seek(0)
-            acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            release = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            acquire = lambda: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            release = lambda: fcntl.flock(handle, fcntl.LOCK_UN)
+        import fcntl
+        acquire = lambda: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        release = lambda: fcntl.flock(handle, fcntl.LOCK_UN)
         while True:
             try:
                 acquire()

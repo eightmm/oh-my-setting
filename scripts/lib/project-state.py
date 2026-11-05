@@ -13,12 +13,6 @@ import sys
 MAX_PROJECT_BYTES = 1024 * 1024
 
 
-def _is_reparse(info):
-    attributes = getattr(info, "st_file_attributes", 0)
-    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(attributes & marker)
-
-
 def _unhealthy(present, error):
     return {
         "schema": 1,
@@ -45,11 +39,11 @@ def snapshot(path):
         }
     except OSError:
         return _unhealthy(True, "project-unreadable")
-    if (not stat.S_ISREG(before.st_mode) or _is_reparse(before) or
+    if (not stat.S_ISREG(before.st_mode) or
             before.st_nlink != 1 or before.st_size > MAX_PROJECT_BYTES):
         return _unhealthy(True, "project-unsafe-file")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags = os.O_RDONLY
     flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
@@ -57,7 +51,7 @@ def snapshot(path):
         return _unhealthy(True, "project-unreadable")
     try:
         opened = os.fstat(descriptor)
-        if (not stat.S_ISREG(opened.st_mode) or _is_reparse(opened) or
+        if (not stat.S_ISREG(opened.st_mode) or
                 opened.st_nlink != 1 or
                 (opened.st_dev, opened.st_ino) !=
                 (before.st_dev, before.st_ino)):

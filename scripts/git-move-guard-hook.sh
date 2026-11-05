@@ -209,7 +209,7 @@ while IFS= read -r target; do
   state_root="$(oms_state_root "$top" 2>/dev/null)" || continue
   state_root="$(cd "${state_root//$'\r'/}" 2>/dev/null && pwd -P)" || continue
   [ "$state_root" = "$top" ] || continue
-  live="$(oms_canonical_sync_live_entries "$top" 2>/dev/null | tr -d '\r' | grep -c . || true)"
+  live="$(oms_canonical_sync_live_entries "$top" 2>/dev/null | grep -c . || true)"
   case "$live" in ""|*[!0-9]*|0) continue ;; esac
   echo "canonical checkout has $live live OMS call(s); moving its index or refs stops them. Use oms sync-shared (defers until they finish) or commit in a linked worktree." >&2
   exit 2

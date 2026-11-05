@@ -259,8 +259,7 @@ override per invocation.
 The installer validates access and the property schema. It persists only the
 target, property names, and `ntn` transport choice in
 `$XDG_CONFIG_HOME/oh-my-setting/work-journal.json` (normally
-`~/.config/oh-my-setting/work-journal.json`; `%LOCALAPPDATA%` is used by native
-Windows Python). `ntn` keeps workspace credentials in the operating system's
+`~/.config/oh-my-setting/work-journal.json`). `ntn` keeps workspace credentials in the operating system's
 credential store; the harness invokes `ntn api` and never extracts them. A
 legacy unattended path may still provide `OMS_WORK_JOURNAL_NOTION_TOKEN` to the
 agent process, but that value is never written to config, a project, or an

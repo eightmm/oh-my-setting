@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 def load_events_module() -> Any:
@@ -35,8 +35,6 @@ ae = load_events_module()
 DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024
 MIN_MAX_LOG_BYTES = 1024
 MAX_MAX_LOG_BYTES = 100 * 1024 * 1024
-WINDOWS_CREATE_SUSPENDED = 0x00000004
-WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 ORPHAN_JOB_GRACE_SECONDS = 10
 
 
@@ -47,267 +45,16 @@ def log_truncation_marker(dropped_bytes: int) -> bytes:
     ).encode("ascii")
 
 
-class _CtypesWindowsJobApi:
-    """Small, injectable Win32 surface for an owned process Job Object."""
-
-    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-
-    def __init__(self) -> None:
-        try:
-            import ctypes
-            from ctypes import wintypes
-        except (ImportError, AttributeError) as exc:
-            raise ae.OpsError("Windows Job Object APIs are unavailable") from exc
-
-        class JobObjectBasicLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class IoCounters(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_ulonglong),
-                ("WriteOperationCount", ctypes.c_ulonglong),
-                ("OtherOperationCount", ctypes.c_ulonglong),
-                ("ReadTransferCount", ctypes.c_ulonglong),
-                ("WriteTransferCount", ctypes.c_ulonglong),
-                ("OtherTransferCount", ctypes.c_ulonglong),
-            ]
-
-        class JobObjectExtendedLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JobObjectBasicLimitInformation),
-                ("IoInfo", IoCounters),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        self.ctypes = ctypes
-        self.wintypes = wintypes
-        self.info_type = JobObjectExtendedLimitInformation
-        try:
-            self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            self.ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
-        except (AttributeError, OSError) as exc:
-            raise ae.OpsError("Windows Job Object APIs are unavailable") from exc
-
-        self.kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        self.kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        self.kernel32.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-        ]
-        self.kernel32.SetInformationJobObject.restype = wintypes.BOOL
-        self.kernel32.AssignProcessToJobObject.argtypes = [
-            wintypes.HANDLE,
-            wintypes.HANDLE,
-        ]
-        self.kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-        self.kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-        self.kernel32.TerminateJobObject.restype = wintypes.BOOL
-        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        self.kernel32.CloseHandle.restype = wintypes.BOOL
-        self.ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
-        self.ntdll.NtResumeProcess.restype = wintypes.LONG
-
-    def _error(self, operation: str) -> OSError:
-        code = int(self.ctypes.get_last_error())
-        return OSError(code, "%s failed: %s" % (operation, self.ctypes.FormatError(code)))
-
-    def create_job(self) -> Any:
-        handle = self.kernel32.CreateJobObjectW(None, None)
-        if not handle:
-            raise self._error("CreateJobObjectW")
-        return handle
-
-    def set_kill_on_close(self, handle: Any) -> None:
-        info = self.info_type()
-        info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not self.kernel32.SetInformationJobObject(
-            handle,
-            self.JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            self.ctypes.byref(info),
-            self.ctypes.sizeof(info),
-        ):
-            raise self._error("SetInformationJobObject")
-
-    def assign_process(self, handle: Any, process_handle: int) -> None:
-        if not self.kernel32.AssignProcessToJobObject(
-            handle, self.wintypes.HANDLE(process_handle)
-        ):
-            raise self._error("AssignProcessToJobObject")
-
-    def resume_process(self, process_handle: int) -> None:
-        status = int(self.ntdll.NtResumeProcess(self.wintypes.HANDLE(process_handle)))
-        if status != 0:
-            raise OSError(status & 0xFFFFFFFF, "NtResumeProcess failed")
-
-    def terminate_job(self, handle: Any, exit_code: int) -> None:
-        if not self.kernel32.TerminateJobObject(handle, exit_code):
-            raise self._error("TerminateJobObject")
-
-    def close_handle(self, handle: Any) -> None:
-        if not self.kernel32.CloseHandle(handle):
-            raise self._error("CloseHandle")
-
-
-class WindowsJobObject:
-    """Own one suspended Windows process tree until explicit close."""
-
-    def __init__(self, api: Any, handle: Any) -> None:
-        self.api = api
-        self.handle: Any = handle
-        self.assigned = False
-
-    @classmethod
-    def create(cls, api: Optional[Any] = None) -> "WindowsJobObject":
-        try:
-            backend = api if api is not None else _CtypesWindowsJobApi()
-            handle = backend.create_job()
-        except (AttributeError, OSError, ValueError, ae.OpsError) as exc:
-            raise ae.OpsError("could not create Windows supervision Job Object") from exc
-        try:
-            backend.set_kill_on_close(handle)
-        except (AttributeError, OSError, ValueError, ae.OpsError) as exc:
-            try:
-                backend.close_handle(handle)
-            except (AttributeError, OSError, ValueError):
-                pass
-            raise ae.OpsError(
-                "could not enable kill-on-close for Windows supervision"
-            ) from exc
-        return cls(backend, handle)
-
-    def assign(self, process: subprocess.Popen[Any]) -> None:
-        if self.handle is None:
-            raise ae.OpsError("Windows supervision Job Object is closed")
-        process_handle = getattr(process, "_handle", None)
-        if process_handle is None:
-            raise ae.OpsError("Windows child process handle is unavailable")
-        try:
-            self.api.assign_process(self.handle, int(process_handle))
-        except (AttributeError, OSError, ValueError) as exc:
-            raise ae.OpsError("could not assign child to Windows supervision") from exc
-        self.assigned = True
-
-    def resume(self, process: subprocess.Popen[Any]) -> None:
-        if not self.assigned or self.handle is None:
-            raise ae.OpsError("cannot resume an unowned Windows child")
-        process_handle = getattr(process, "_handle", None)
-        if process_handle is None:
-            raise ae.OpsError("Windows child process handle is unavailable")
-        try:
-            self.api.resume_process(int(process_handle))
-        except (AttributeError, OSError, ValueError) as exc:
-            raise ae.OpsError("could not resume Windows supervised child") from exc
-
-    def terminate(self, exit_code: int = 1) -> None:
-        if self.handle is None:
-            return
-        try:
-            self.api.terminate_job(self.handle, exit_code)
-        except (AttributeError, OSError, ValueError) as exc:
-            raise ae.OpsError("could not terminate Windows supervision Job Object") from exc
-
-    def close(self) -> None:
-        if self.handle is None:
-            return
-        handle = self.handle
-        try:
-            self.api.close_handle(handle)
-        except (AttributeError, OSError, ValueError) as exc:
-            raise ae.OpsError("could not close Windows supervision Job Object") from exc
-        self.handle = None
-
-
-def _cleanup_failed_process_launch(
-    process: Optional[subprocess.Popen[Any]], windows_job: Optional[WindowsJobObject]
-) -> None:
-    cleanup_error: Optional[BaseException] = None
-    if windows_job is not None:
-        try:
-            windows_job.terminate()
-        except (OSError, ae.OpsError) as exc:
-            cleanup_error = exc
-        try:
-            windows_job.close()
-        except (OSError, ae.OpsError) as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-    if process is not None:
-        try:
-            if process.poll() is None:
-                process.kill()
-        except (OSError, subprocess.SubprocessError) as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-        try:
-            process.wait(timeout=3)
-        except (OSError, subprocess.SubprocessError) as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-    if cleanup_error is not None:
-        raise ae.OpsError("failed Windows launch could not be contained") from cleanup_error
-
-
-def launch_supervised_process(
-    argv: Sequence[str],
-    cwd: str,
-    env: Dict[str, str],
-    *,
-    windows: Optional[bool] = None,
-    job_factory: Optional[Callable[[], WindowsJobObject]] = None,
-) -> Tuple[subprocess.Popen[Any], Optional[WindowsJobObject]]:
-    """Launch suspended on Windows, assign an owned Job Object, then resume."""
-    use_windows = os.name == "nt" if windows is None else windows
-    windows_job: Optional[WindowsJobObject] = None
-    process: Optional[subprocess.Popen[Any]] = None
-    try:
-        if use_windows:
-            factory = job_factory if job_factory is not None else WindowsJobObject.create
-            windows_job = factory()
-        process = subprocess.Popen(
-            list(argv),
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=not use_windows,
-            creationflags=(
-                WINDOWS_CREATE_NEW_PROCESS_GROUP | WINDOWS_CREATE_SUSPENDED
-                if use_windows
-                else 0
-            ),
-        )
-        if windows_job is not None:
-            windows_job.assign(process)
-            windows_job.resume(process)
-        return process, windows_job
-    except BaseException:
-        _cleanup_failed_process_launch(process, windows_job)
-        raise
+def launch_supervised_process(argv: Sequence[str], cwd: str, env: Dict[str, str]) -> subprocess.Popen[Any]:
+    return subprocess.Popen(list(argv), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            start_new_session=True)
 
 
 def runtime_root(repo: Path) -> Path:
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home:
         base = Path(state_home).expanduser()
-    elif os.name == "nt" and os.environ.get("LOCALAPPDATA"):
-        base = Path(os.environ["LOCALAPPDATA"])
     else:
         base = Path.home() / ".local" / "state"
     digest = ae.hashlib.sha256(str(repo.resolve()).encode("utf-8")).hexdigest()
@@ -417,21 +164,15 @@ class BoundedLogCapture:
             while True:
                 if self.stop_requested.is_set():
                     break
-                if os.name != "nt":
-                    try:
-                        ready, _, _ = select.select([self.stream.fileno()], [], [], 0.1)
-                    except (OSError, ValueError) as exc:
-                        if self.stop_requested.is_set():
-                            break
-                        raise exc
-                    if not ready:
-                        continue
-                    chunk = os.read(self.stream.fileno(), 65536)
-                else:
-                    # Windows anonymous pipes are not selectable. Tree cleanup
-                    # normally closes this read, and ``wait`` is deliberately
-                    # bounded if an escaped descendant retains the write end.
-                    chunk = self.stream.read(65536)
+                try:
+                    ready, _, _ = select.select([self.stream.fileno()], [], [], 0.1)
+                except (OSError, ValueError) as exc:
+                    if self.stop_requested.is_set():
+                        break
+                    raise exc
+                if not ready:
+                    continue
+                chunk = os.read(self.stream.fileno(), 65536)
                 if not chunk:
                     break
                 self.total_bytes += len(chunk)
@@ -699,15 +440,12 @@ def public_job(repo: Path, row: Dict[str, Any]) -> Dict[str, Any]:
         "parent_attempt_id": projected.get("parent_attempt_id", ""),
         # These are explicit machine-readable limits, not inferred promises.
         # Resume always creates a new child attempt. The local runner owns one
-        # POSIX process group or a Windows kill-on-close Job Object. Neither
-        # mode is a filesystem or network sandbox.
+        # POSIX process group; this is not a filesystem or network sandbox.
         "resume_mode": "child_attempt",
         "input_resume_supported": False,
         "approval_scope": "patch_land_only",
         "sandbox": False,
-        "supervision_scope": (
-            "job_object" if os.name == "nt" else "process_group"
-        ),
+        "supervision_scope": "process_group",
     }
 
 
@@ -799,25 +537,6 @@ def terminate_process_group(
     """Signal a recorded tree only while its leader identity still matches."""
     if not recorded_tree_matches(pid, expected_identity):
         return False
-    if os.name == "nt":
-        command = ["taskkill", "/PID", str(pid), "/T"]
-        if force:
-            command.append("/F")
-        try:
-            subprocess.run(
-                command,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-        return True
     try:
         os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
     except ProcessLookupError:
@@ -831,56 +550,6 @@ def process_identity(pid: int) -> str:
     """Return a start identity so stale PID records never target a reuse."""
     if pid <= 0:
         return ""
-    if os.name == "nt":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class FileTime(ctypes.Structure):
-                _fields_ = [
-                    ("low", wintypes.DWORD),
-                    ("high", wintypes.DWORD),
-                ]
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.argtypes = [
-                wintypes.DWORD,
-                wintypes.BOOL,
-                wintypes.DWORD,
-            ]
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            kernel32.GetProcessTimes.argtypes = [
-                wintypes.HANDLE,
-                ctypes.POINTER(FileTime),
-                ctypes.POINTER(FileTime),
-                ctypes.POINTER(FileTime),
-                ctypes.POINTER(FileTime),
-            ]
-            kernel32.GetProcessTimes.restype = wintypes.BOOL
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            handle = kernel32.OpenProcess(0x1000, False, pid)
-            if handle:
-                creation = FileTime()
-                exit_time = FileTime()
-                kernel = FileTime()
-                user = FileTime()
-                try:
-                    if kernel32.GetProcessTimes(
-                        handle,
-                        ctypes.byref(creation),
-                        ctypes.byref(exit_time),
-                        ctypes.byref(kernel),
-                        ctypes.byref(user),
-                    ):
-                        ticks = (int(creation.high) << 32) | int(creation.low)
-                        return ae.hashlib.sha256(
-                            (str(pid) + ":" + str(ticks)).encode("ascii")
-                        ).hexdigest()
-                finally:
-                    kernel32.CloseHandle(handle)
-        except (AttributeError, OSError, ValueError):
-            pass
     try:
         tail = ae.proc_stat_fields(pid)
         start_ticks = tail[19]
@@ -917,7 +586,7 @@ def process_matches(pid: int, expected: str) -> bool:
 
 def pid_is_zombie(pid: int) -> bool:
     """A zombie keeps its identity for kill fencing but can never run again."""
-    if pid <= 0 or os.name == "nt":
+    if pid <= 0:
         return False
     try:
         tail = ae.proc_stat_fields(pid)
@@ -944,8 +613,6 @@ def recorded_tree_matches(pid: int, expected: str) -> bool:
     """Validate both leader start identity and the group-leader contract."""
     if not process_matches(pid, expected):
         return False
-    if os.name == "nt":
-        return True
     try:
         return os.getpgid(pid) == pid
     except (OSError, AttributeError):
@@ -956,8 +623,6 @@ def leader_exited_unreaped(process: subprocess.Popen[Any], expected: str) -> boo
     """Observe POSIX leader exit without reaping away its identity token."""
     if process.returncode is not None:
         return True
-    if os.name == "nt":
-        return process.poll() is not None
     try:
         tail = ae.proc_stat_fields(process.pid)
         if tail:
@@ -1026,8 +691,6 @@ def _group_has_runnable_member(pgid: int) -> Optional[bool]:
 def process_group_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
-        return ae.pid_alive(pid)
     try:
         os.killpg(pid, 0)
     except ProcessLookupError:
@@ -1072,38 +735,8 @@ def stop_recorded_tree(pid: int, expected_identity: str) -> bool:
 def stop_process_tree(
     process: subprocess.Popen[Any],
     expected_identity: str,
-    *,
-    windows_job: Optional[WindowsJobObject] = None,
 ) -> int:
     """Terminate and reap the leader, then kill surviving process-group members."""
-    if windows_job is not None:
-        # poll() records the leader's returncode on Windows, but descendants can
-        # still be alive in the owned job. Terminate/close before honoring that
-        # return code so normal exit has the same containment as cancel/timeout.
-        leader_exit = process.returncode
-        cleanup_error: Optional[BaseException] = None
-        try:
-            windows_job.terminate()
-        except (OSError, ae.OpsError) as exc:
-            cleanup_error = exc
-        try:
-            windows_job.close()
-        except (OSError, ae.OpsError) as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-        try:
-            exit_code = process.wait(timeout=3)
-        except (OSError, subprocess.SubprocessError) as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-            exit_code = process.returncode
-        if cleanup_error is not None:
-            raise ae.OpsError("Windows supervised process tree did not terminate") from cleanup_error
-        if leader_exit is not None:
-            return int(leader_exit)
-        if exit_code is None:
-            raise ae.OpsError("Windows supervised process leader was not reaped")
-        return int(exit_code)
     if process.returncode is not None:
         return int(process.returncode)
     if process_group_alive(process.pid):
@@ -1187,7 +820,6 @@ def runner(repo: Path, attempt_id: str) -> int:
     started = time.monotonic()
     process: Optional[subprocess.Popen[Any]] = None
     process_identity_value = ""
-    windows_job: Optional[WindowsJobObject] = None
     try:
         env = os.environ.copy()
         env.update({
@@ -1199,7 +831,7 @@ def runner(repo: Path, attempt_id: str) -> int:
             "OMS_ATTEMPT_SUPERVISED": "1",
             "OMS_EXECUTION_PROFILE": job.get("profile", "trusted-local"),
         })
-        process, windows_job = launch_supervised_process(
+        process = launch_supervised_process(
             job["argv"], job["cwd"], env
         )
     except (OSError, ValueError, ae.OpsError) as exc:
@@ -1257,7 +889,7 @@ def runner(repo: Path, attempt_id: str) -> int:
         identity_failed = False
         if cancelled:
             exit_code = stop_process_tree(
-                process, process_identity_value, windows_job=windows_job
+                process, process_identity_value
             )
         else:
             while not leader_exited_unreaped(process, process_identity_value):
@@ -1283,7 +915,7 @@ def runner(repo: Path, attempt_id: str) -> int:
             # the attempt. A process that deliberately starts a new session is
             # outside trusted-local supervision and requires OS containment.
             exit_code = stop_process_tree(
-                process, process_identity_value, windows_job=windows_job
+                process, process_identity_value
             )
         capture.wait()
 
@@ -1371,7 +1003,7 @@ def runner(repo: Path, attempt_id: str) -> int:
     except BaseException:
         cleanup_ok = False
         try:
-            stop_process_tree(process, process_identity_value, windows_job=windows_job)
+            stop_process_tree(process, process_identity_value)
             cleanup_ok = True
         except (OSError, subprocess.SubprocessError, ae.OpsError):
             pass
@@ -1498,10 +1130,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=(os.name != "nt"),
-                creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-                ),
+                start_new_session=True,
             )
         except (OSError, ValueError):
             with ae.file_lock(queue_lock_path(repo)):

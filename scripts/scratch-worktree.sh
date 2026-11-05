@@ -81,7 +81,7 @@ if [ -n "$REPO" ] || [ "$ACTION" = add ]; then
   REPO_PHYSICAL="$(repo_root "${REPO:-$PWD}")" || fail "not a git repository: ${REPO:-$PWD}"
 fi
 
-# One process-table step, portable across procps/BSD ps and Cygwin/MSYS /proc.
+# One process-table step, portable across procps/BSD ps.
 parent_and_name() {  # PID -> "PPID NAME"
   local pid="$1" line="" ppid="" name=""
   line="$(ps -o ppid= -o comm= -p "$pid" 2>/dev/null | sed -n '1p')" || line=""
@@ -92,9 +92,6 @@ parent_and_name() {  # PID -> "PPID NAME"
     ppid="${1:-}"
     shift || true
     name="$*"
-  elif [ -r "/proc/$pid/ppid" ]; then
-    ppid="$(tr -d ' \r\n' < "/proc/$pid/ppid")"
-    name="$(sed -n '1p' "/proc/$pid/exename" 2>/dev/null || true)"
   fi
   case "$ppid" in ""|*[!0-9]*) return 1 ;; esac
   name="${name##*/}"
@@ -113,7 +110,7 @@ default_owner_pid() {
     ppid="${step%% *}"
     name="${step#* }"
     case "$name" in
-      bash|sh|zsh|dash|ksh|mksh|fish|env|timeout|nohup|bash.exe|sh.exe|env.exe) last="$pid" ;;
+      bash|sh|zsh|dash|ksh|mksh|fish|env|timeout|nohup) last="$pid" ;;
       *) printf '%s\n' "$pid"; return 0 ;;
     esac
     pid="$ppid"

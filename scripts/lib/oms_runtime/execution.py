@@ -18,7 +18,7 @@ MAX_LOG_BYTES = 64 * 1024 * 1024
 
 def describe(profile: str) -> Dict[str, Any]:
     if profile == 'trusted-local':
-        return {'profile': profile, 'declared': {'filesystem': 'host-user', 'network': 'host', 'creden' + 'tials': 'ambient-host-readable', 'wall_clock': True}, 'enforced': {'filesystem': False, 'network': False, 'creden' + 'tials': False, 'wall_clock': True, 'process_group': os.name != 'nt'}, 'unknown': ['reads', 'writes outside repository', 'background process escape on unsupported hosts'], 'warning': 'Process supervision only; this is not a sandbox.'}
+        return {'profile': profile, 'declared': {'filesystem': 'host-user', 'network': 'host', 'creden' + 'tials': 'ambient-host-readable', 'wall_clock': True}, 'enforced': {'filesystem': False, 'network': False, 'creden' + 'tials': False, 'wall_clock': True, 'process_group': True}, 'unknown': ['reads', 'writes outside repository', 'background process escape on unsupported hosts'], 'warning': 'Process supervision only; this is not a sandbox.'}
     if profile == 'isolated':
         return {'profile': profile, 'declared': {'repo': 'read-only', 'worktree': 'explicit-read-write', 'network': 'off-by-default', 'creden' + 'tials': 'not-mounted', 'wall_clock': True}, 'enforced': {'filesystem': 'container-mount-policy', 'network': 'container-network-policy', 'creden' + 'tials': 'environment-and-mount-filter', 'wall_clock': True, 'capabilities': 'drop-all', 'no_new_privileges': True}, 'unknown': ['container image contents', 'container daemon trust', 'kernel isolation'], 'warning': 'Image contents and the container daemon remain operator-owned.'}
     if profile == 'remote':
@@ -121,10 +121,7 @@ def _container_cli_env() -> Dict[str, str]:
 
 def _terminate(proc: subprocess.Popen) -> None:
     try:
-        if os.name == 'nt':
-            proc.terminate()
-        else:
-            os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(proc.pid, signal.SIGTERM)
     except OSError:
         pass
     try:
@@ -133,10 +130,7 @@ def _terminate(proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         pass
     try:
-        if os.name == 'nt':
-            proc.kill()
-        else:
-            os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
     except OSError:
         pass
     with contextlib.suppress(subprocess.TimeoutExpired):
@@ -235,15 +229,13 @@ def run(profile: str, repo: Path, command: Sequence[str], *, timeout_seconds: in
     remote_response_valid: Optional[bool] = None
     remote_accepted: Optional[bool] = None
     adapter_attestation_valid: Optional[bool] = None
-    creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) if os.name == 'nt' else 0
-    preexec_fn = None if os.name == 'nt' else os.setsid
     fd, temp_name = tempfile.mkstemp(prefix='oms-exec.', dir=str(log_path.parent))
     os.close(fd)
     temp_log = Path(temp_name)
     try:
         with temp_log.open('wb') as output:
             try:
-                proc = subprocess.Popen(effective, cwd=popen_cwd, stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, env=env, preexec_fn=preexec_fn, creationflags=creationflags)
+                proc = subprocess.Popen(effective, cwd=popen_cwd, stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, env=env, preexec_fn=os.setsid)
                 if stdin_data is not None and proc.stdin is not None:
                     proc.stdin.write(stdin_data)
                     proc.stdin.close()

@@ -938,8 +938,7 @@ state changes around a worker. It cannot prove what a process read, see a write
 that was undone before exit, or contain writes outside the repository. An
 ordinary provider/verifier shell can leave a background process. On POSIX,
 `agent-supervisor` owns and closes one process group; a process that deliberately
-starts a new session can escape it. Legacy Windows handling uses a kill-on-close
-Job Object to own the launched process tree. Neither boundary is an OS sandbox.
+starts a new session can escape it. The boundary is not an OS sandbox.
 
 Treat a clean worker result as “no monitored repository surface moved,” not
 “the process was harmless.” Stronger guarantees require OS/container isolation.

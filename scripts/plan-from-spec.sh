@@ -777,7 +777,6 @@ print(data.get("id_prefix") or "")
 print(",".join(str(item) for item in (data.get("acceptance_files") or [])))
 PY
 )"
-  proposal_meta="${proposal_meta//$'\r'/}"
   proposal_spec_sha="$(printf '%s\n' "$proposal_meta" | sed -n 1p)"
   proposal_plan_sha="$(printf '%s\n' "$proposal_meta" | sed -n 2p)"
   proposal_allowed="$(printf '%s\n' "$proposal_meta" | sed -n 3p)"
@@ -792,7 +791,6 @@ PY
     *[!A-Za-z0-9._-]*) fail "proposal id_prefix is invalid" ;;
   esac
   out="$(validate_proposal "$APPLY_FILE" 1)" || exit 3
-  out="${out//$'\r'/}"
   count="${out#ok }"
   [ -f "$SPEC" ] || fail "PROJECT.md is required to bind a proposal apply"
   goal="$(spec_field Goal)"
@@ -885,7 +883,6 @@ for task in data.get("tasks", {}).values():
         ",".join(task.get("allowed_paths") or [])))
 PY
 )"
-  plan_context="${plan_context//$'\r'/}"
 else
   plan_sha=absent
   plan_context="- (no plan yet)"
@@ -1473,7 +1470,6 @@ out="$(validate_proposal "$proposal_output")" || {
   echo "error: proposal failed validation; inspect $proposal" >&2
   exit 3
 }
-out="${out//$'\r'/}"
 count="${out#ok }"
 if [ "$DISCOVER" -eq 1 ]; then
   mv "$proposal_output" "$proposal"

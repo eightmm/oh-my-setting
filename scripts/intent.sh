@@ -112,14 +112,7 @@ outer_receipt_blocks() {
   metadata="${metadata//$'\r'/}"
   bound="${metadata#*$'\t'*$'\t'*$'\t'}"
   [ "$bound" != "$metadata" ] || return 0
-  # The receipt spells its repo natively (C:\work\project on Windows). An
-  # empty bound or conversion never reaches cd, which would succeed in the cwd.
   [ -n "$bound" ] || return 0
-  if oms_platform_is_windows && command -v cygpath >/dev/null 2>&1; then
-    bound="$(cygpath -u "$bound" 2>/dev/null)" || return 0
-    bound="${bound//$'\r'/}"
-    [ -n "$bound" ] || return 0
-  fi
   bound="$(cd "$bound" 2>/dev/null && pwd -P)" || return 0
   [ "$bound" != "$REPO" ] || return 0
   return 1
@@ -158,15 +151,12 @@ def die(message):
 
 
 def is_link(path):
-    if os.path.islink(path):
-        return True
-    isjunction = getattr(os.path, "isjunction", None)
-    return bool(isjunction and isjunction(path))
+    return os.path.islink(path)
 
 
 if is_link(source):
-    die("candidate must be a regular file, not a link or junction")
-flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    die("candidate must be a regular file, not a link")
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 try:
     descriptor = os.open(source, flags)
 except OSError as exc:
@@ -216,7 +206,7 @@ identity = ("st_dev", "st_ino")
 if any(getattr(live, name, None) != getattr(after, name, None) for name in identity):
     die("candidate pathname changed while it was being read")
 
-out_flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+out_flags = os.O_WRONLY | os.O_TRUNC
 out_flags |= getattr(os, "O_NOFOLLOW", 0)
 try:
     output = os.open(destination, out_flags)
@@ -272,7 +262,7 @@ index = matches[0]
 ending = lines[index][len(lines[index].rstrip("\r\n")):]
 lines[index] = "- State: confirmed" + ending
 result = "".join(lines).encode("utf-8")
-flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+flags = os.O_WRONLY | os.O_TRUNC
 flags |= getattr(os, "O_NOFOLLOW", 0)
 try:
     descriptor = os.open(destination, flags)
@@ -306,7 +296,7 @@ except OSError as exc:
     raise SystemExit(3)
 
 # The hard link is the no-clobber publication point. Sync the directory where
-# the platform permits it; native Windows does not expose directory fsync.
+# the platform permits it.
 try:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     directory = os.open(os.path.dirname(target) or ".", flags)
@@ -315,8 +305,8 @@ try:
     finally:
         os.close(directory)
 except OSError:
-    # Publication already happened atomically. Some filesystems and native
-    # Windows reject directory fsync; treating that as a failed publication
+    # Publication already happened atomically. Some filesystems reject directory
+    # fsync; treating that as a failed publication
     # would lie to the caller while PROJECT.md is already visible.
     pass
 PY
@@ -548,11 +538,9 @@ if [ "$ACTION" = draft ]; then
       *)
         fallback_provider="$(oms_provider_normalize "$FALLBACK_PROVIDER" 2>/dev/null)" ||
           fail "--fallback-to requires a supported provider or 'none'"
-        fallback_provider="${fallback_provider//$'\r'/}"
         primary_provider="${PROVIDER%%:*}"
         primary_provider="$(oms_provider_normalize "$primary_provider" 2>/dev/null)" ||
           primary_provider="${PROVIDER%%:*}"
-        primary_provider="${primary_provider//$'\r'/}"
         [ "$fallback_provider" != "$primary_provider" ] ||
           fail "--fallback-to must name a provider different from --to"
         ;;
@@ -692,7 +680,6 @@ $existing_spec
     if ! fallback_timeout="$(intent_doubled_timeout "$PROVIDER_TIMEOUT")"; then
       fallback_timeout="$PROVIDER_TIMEOUT"
     fi
-    fallback_timeout="${fallback_timeout//$'\r'/}"
     intent_fallback_raw="$(agent_memory_mktemp)" || fail "mktemp failed"
     # A model route is provider-family-specific. The fallback gets its normal
     # route while the generic reasoning effort remains intact.
@@ -829,7 +816,6 @@ if [ "$ACTION" = adopt ]; then
   trap intent_adopt_cleanup EXIT
 
   candidate_sha="$(snapshot_intent_file "$INTENT_FILE" "$intent_snapshot")" || exit 3
-  candidate_sha="${candidate_sha//$'\r'/}"
   [ -n "$candidate_sha" ] || fail "could not digest the intent candidate snapshot"
 
   scope="$(awk '{ sub(/\r$/, "") } /^- Scope:/ { sub(/^- Scope:[ \t]*/, ""); print; exit }' "$intent_snapshot")"
@@ -930,7 +916,6 @@ PY
     live_sha="$(snapshot_intent_file "$INTENT_FILE" "$live")" || {
       fail "candidate changed during adopt; the edited draft was preserved and PROJECT.md was not published"
     }
-    live_sha="${live_sha//$'\r'/}"
     if [ "$live_sha" != "$expected_sha" ] || ! cmp -s "$frozen" "$live"; then
       fail "candidate changed during adopt; the edited draft was preserved and PROJECT.md was not published"
     fi

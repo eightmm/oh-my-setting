@@ -283,7 +283,6 @@ cmd_enqueue() {
   job_id="${job_id//$'\r'/}"
   require_id "$job_id"
   record="$(project_metadata "$label" "" "${TS_SOCKET-${TMPDIR-/tmp}/socket-ts.$(id -u 2>/dev/null)}" "$@")"
-  record="${record//$'\r'/}"
   write_meta "$STATE_DIR/$job_id" "$note" "$record" "$@"
   printf '%s\n' "$job_id" > "$STATE_DIR/last"
   printf '%s\n' "$job_id"
@@ -399,7 +398,6 @@ fallback_enqueue() {
   status_file="$FALLBACK_DIR/$tag.status"
   child_file="$FALLBACK_DIR/$tag.child"
   record="$(project_metadata "$label" "$status_file")"
-  record="${record//$'\r'/}"
   (
     set +e
     nohup "$@" > "$log_file" 2>&1 &

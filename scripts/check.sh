@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Core repository gate shared with CI, which additionally runs the real install
-# lifecycle on Linux (symlink and copy ownership), macOS, and Windows Git Bash,
+# lifecycle on Linux (symlink and copy ownership) and macOS,
 # and parses every script with macOS's stock Bash 3.2. A missing tool is a HARD
 # FAILURE, never a silent skip. Wire this as a pre-push hook with
 # scripts/install-hooks.sh.
@@ -413,7 +413,7 @@ fi
 # exclusions live in the library so they can be tested directly.
 oms_state_fingerprint() {
   [ -d "$ROOT/.oms" ] || return 0
-  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$ROOT/.oms" | tr -d '\r'
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$ROOT/.oms"
 }
 
 STATE_BEFORE="$CHECK_RUNTIME/oms-state.before"
@@ -477,11 +477,6 @@ def tree(snapshot):
     return {pid: snapshot[pid] for pid in owned if pid in snapshot}
 
 def stop():
-    if os.name != 'posix':
-        # Windows Python sees native PIDs; taskkill /T covers Git Bash children.
-        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], check=False, timeout=10)
-        process.wait(timeout=10)
-        return
     try:
         owned = tree(records())
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -562,7 +557,7 @@ for sig in forwarded:
 # Handled signals become default on exec, undoing Bash's ignored INT for the
 # stage while keeping the supervisor protected throughout detached launch.
 process = subprocess.Popen([bash, '-c', '"$@"', 'oms-check-stage', *command],
-                           stdin=subprocess.DEVNULL, start_new_session=os.name == 'posix')
+                           stdin=subprocess.DEVNULL, start_new_session=True)
 if pending_signal is not None:
     interrupted(pending_signal, None)
 try:
@@ -681,8 +676,7 @@ stage() {  # stage NAME COMMAND...
 # OpenCode spellings) plus custom oms-agent-adapter-* executables, so a
 # provider the registry would discover stays hidden. Each PATH directory
 # holding one is replaced by a shadow of symlinks to its other entries;
-# dropping the directory would also drop oms, python3 and the rest. Git Bash
-# copies instead of linking, so Windows hosts skip with a reason.
+# dropping the directory would also drop oms, python3 and the rest.
 is_provider_cli() {  # is_provider_cli BASENAME
   case " $CHECK_PROVIDER_CLIS " in *" $1 "*) return 0 ;; esac
   case "$1" in oms-agent-adapter-?*) return 0 ;; esac
@@ -690,12 +684,6 @@ is_provider_cli() {  # is_provider_cli BASENAME
 }
 hide_provider_clis() {
   local rest="$PATH:" dir entry base hit shadow count=0 filtered=""
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*)
-      echo "skip: provider-less PATH (no native symlinks on this host)"
-      return 0
-      ;;
-  esac
   CHECK_PROVIDER_CLIS="opencode opencode2 $(
     # shellcheck source=scripts/lib/provider-registry.sh
     . "$ROOT/scripts/lib/provider-registry.sh"
@@ -963,7 +951,7 @@ prepare_affected_gate() {
     AFFECTED_REASONS=graph-error
     echo "affected: Project Graph failed; running the complete test gate" >&2
     tail -20 "$graph_err" >&2 || true
-  elif ! compile_affected_plan "$plan_json" | tr -d '\r' > "$plan_rows"; then
+  elif ! compile_affected_plan "$plan_json" > "$plan_rows"; then
     AFFECTED_MODE=full
     AFFECTED_REASONS=invalid-plan
     echo "affected: invalid Project Graph plan; running the complete test gate" >&2
@@ -1055,7 +1043,6 @@ print(",".join(name for name, filename in sections
                  if filename is not None and "tests/operator/" + filename in files))
 PY
 )" || affected_operator_sections=""
-    affected_operator_sections="${affected_operator_sections//$'\r'/}"
   fi
   affected_operator_value=""
   if [ -n "$affected_operator_sections" ]; then

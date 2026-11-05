@@ -189,7 +189,7 @@ def split_list(s):
     return [x.strip() for x in re.split(r"[,\s]+", s) if x.strip()]
 
 def read_regular_bytes(filename, label, maximum):
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags = os.O_RDONLY
     flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(filename, flags)
@@ -244,7 +244,7 @@ def read_receipt(path):
     if not stat.S_ISREG(os.lstat(path).st_mode):
         die("oms land receipt must be a regular file")
     absolute = os.path.abspath(path)
-    root = os.path.splitdrive(absolute)[0] + os.path.sep
+    root = os.path.sep
     return _load(os.path.join(os.path.dirname(__file__), "durable-jsonl.py"))["read_no_follow"](
         root, os.path.relpath(absolute, root), "oms land receipt", max_bytes=1024 * 1024)
 
@@ -539,10 +539,6 @@ def panel_claimant():
 def same_absolute_path(left, right):
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
-def is_reparse(info):
-    attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(getattr(info, "st_file_attributes", 0) & attribute)
-
 def reject_marker_constant(value):
     raise ValueError("non-finite JSON value: %s" % value)
 
@@ -675,7 +671,7 @@ def load_worker_markers():
         marker_dir_info = os.lstat(marker_dir)
     except OSError as exc:
         die("cannot inspect worker marker directory: %s" % exc)
-    if (not stat.S_ISDIR(marker_dir_info.st_mode) or is_reparse(marker_dir_info) or
+    if (not stat.S_ISDIR(marker_dir_info.st_mode) or
             not same_absolute_path(os.path.realpath(marker_dir), expected)):
         die("worker marker directory must be a real repo-local directory")
     entries = []
@@ -688,17 +684,13 @@ def load_worker_markers():
         if not entry.name.endswith(".json"):
             continue
         try:
-            # Windows scandir metadata can carry a directory-enumeration inode
-            # that is not comparable with the file-id returned by fstat().
-            # A pathname lstat and the opened handle share the stable identity
-            # contract used by the other bounded readers.
             before = os.lstat(entry.path)
         except OSError as exc:
             die("cannot inspect worker marker %s: %s" % (entry.name, exc))
-        if (not stat.S_ISREG(before.st_mode) or is_reparse(before) or
+        if (not stat.S_ISREG(before.st_mode) or
                 before.st_size > 64 * 1024):
             die("worker marker %s is not a bounded regular file" % entry.name)
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags = os.O_RDONLY
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
             descriptor = os.open(entry.path, flags)
@@ -706,7 +698,7 @@ def load_worker_markers():
             die("cannot open worker marker %s safely: %s" % (entry.name, exc))
         try:
             opened = os.fstat(descriptor)
-            if (not stat.S_ISREG(opened.st_mode) or is_reparse(opened) or
+            if (not stat.S_ISREG(opened.st_mode) or
                     (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
                 die("worker marker %s changed while opening" % entry.name)
             payload = os.read(descriptor, 64 * 1024 + 1)

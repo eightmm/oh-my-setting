@@ -711,16 +711,6 @@ sys.exit(result if result >= 0 else 128 - result)
 '''
 
 
-def _agent_task_windows_job() -> tuple[Any, Any]:
-    runner_path = Path(__file__).with_name("attempt-runner.py")
-    spec = importlib.util.spec_from_file_location("oms_hook_attempt_runner", str(runner_path))
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Windows agent-task process supervision is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module, module.WindowsJobObject.create()
-
-
 def _agent_task_group_has_live_members(pgid: int) -> bool:
     probe = subprocess.run(
         ["ps", "-A", "-o", "pgrp=", "-o", "stat="],
@@ -765,33 +755,7 @@ def _terminate_agent_task_group(pgid: int, grace: float = 0.25) -> None:
     raise RuntimeError("owned agent-task process group still has live members")
 
 
-def _stop_agent_task_process(proc: subprocess.Popen[Any], windows_job: Any = None) -> None:
-    if windows_job is not None:
-        cleanup_error = None
-        try:
-            windows_job.terminate()
-        except Exception as exc:
-            cleanup_error = exc
-        try:
-            windows_job.close()
-        except Exception as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-            try:
-                proc.kill()
-                proc.wait(timeout=3)
-            except Exception as kill_error:
-                if cleanup_error is None:
-                    cleanup_error = kill_error
-        if cleanup_error is not None:
-            raise RuntimeError("owned Windows agent-task process tree did not terminate") from cleanup_error
-        return
-
+def _stop_agent_task_process(proc: subprocess.Popen[Any]) -> None:
     cleanup_error = None
     try:
         # Do not poll/wait before the final signal: communicate(timeout) leaves
@@ -814,96 +778,44 @@ def run_agent_task(repo: Path, args: list[str], stdin_text: str | None = None) -
     script = agent_task_script()
     if not script.exists():
         return 127
+    if os.name != "posix":
+        return 1
     timeout = env_int("OMS_AUTO_TASK_TIMEOUT", 2, minimum=1, maximum=10)
-    windows_job = None
-    windows_runner = None
     proc = None
     try:
-        creationflags = 0
-        if os.name == "nt":
-            # The existing OMS Job Object supervisor provides an owned tree;
-            # fail closed if that native boundary cannot be established.
-            windows_runner, windows_job = _agent_task_windows_job()
-            creationflags = (
-                windows_runner.WINDOWS_CREATE_NEW_PROCESS_GROUP
-                | windows_runner.WINDOWS_CREATE_SUSPENDED
-            )
-        elif os.name != "posix":
-            return 1
-        argv = [str(script), "--repo", str(repo), *args]
-        if os.name == "nt":
-            bash = shutil.which("bash")
-            if not bash:
-                return 1
-            argv = [bash, *argv]
-        elif os.name == "posix":
-            argv = [
-                sys.executable,
-                "-c",
-                _POSIX_AGENT_TASK_SUPERVISOR,
-                str(script),
-                "--repo",
-                str(repo),
-                *args,
-            ]
+        argv = [
+            sys.executable,
+            "-c",
+            _POSIX_AGENT_TASK_SUPERVISOR,
+            str(script),
+            "--repo",
+            str(repo),
+            *args,
+        ]
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            start_new_session=(os.name == "posix"),
-            creationflags=creationflags,
+            start_new_session=True,
         )
-        if windows_job is not None:
-            windows_job.assign(proc)
-            windows_job.resume(proc)
         try:
             proc.communicate(input=stdin_text, timeout=timeout)
         except subprocess.TimeoutExpired:
-            _stop_agent_task_process(proc, windows_job)
-            windows_job = None
+            _stop_agent_task_process(proc)
             return 124
-        rc = int(proc.returncode)
-        if windows_job is not None:
-            # Closing a kill-on-close job also contains any helper descendants.
-            windows_job.close()
-            windows_job = None
-        return rc
+        return int(proc.returncode)
     except subprocess.TimeoutExpired:
         return 124
     except Exception:
         return 1
     finally:
-        cleanup_error = None
-        if windows_job is not None:
-            try:
-                windows_job.terminate()
-            except Exception as exc:
-                cleanup_error = exc
-            try:
-                windows_job.close()
-            except Exception as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
         if proc is not None and proc.returncode is None:
-            if os.name == "nt":
-                # Launch failures before Job Object assignment can leave only
-                # the suspended direct child outside the owned job.
-                try:
-                    proc.kill()
-                    proc.wait(timeout=3)
-                except Exception as exc:
-                    if cleanup_error is None:
-                        cleanup_error = exc
-            else:
-                try:
-                    _stop_agent_task_process(proc, windows_job)
-                except Exception as exc:
-                    if cleanup_error is None:
-                        cleanup_error = exc
-        if cleanup_error is not None:
-            raise RuntimeError("could not contain the agent-task process") from cleanup_error
+            try:
+                _stop_agent_task_process(proc)
+            except Exception as exc:
+                raise RuntimeError("could not contain the agent-task process") from exc
 
 
 def should_auto_task(prompt: str) -> bool:

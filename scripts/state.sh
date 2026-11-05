@@ -236,9 +236,6 @@ then
     IFS= read -r validated_plan &&
     ! IFS= read -r _
   } < "$RS_TMP/projection-health" || projection_parse_ok=0
-  validated_failure="${validated_failure//$'\r'/}"
-  validated_task="${validated_task//$'\r'/}"
-  validated_plan="${validated_plan//$'\r'/}"
   if [ "$projection_parse_ok" = 1 ] &&
     { [ "$validated_failure" = 0 ] || [ "$validated_failure" = 1 ]; } &&
     { [ "$validated_task" = 0 ] || [ "$validated_task" = 1 ]; } &&

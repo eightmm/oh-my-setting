@@ -21,11 +21,6 @@ work_journal_config_path() {
   if [ -z "$path" ] && [ -n "${XDG_CONFIG_HOME:-}" ]; then
     path="$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
   fi
-  if [ -z "$path" ] && [ -n "${LOCALAPPDATA:-}" ] &&
-    command -v cygpath >/dev/null 2>&1; then
-    path="$LOCALAPPDATA/oh-my-setting/work-journal.json"
-    path="$(cygpath -u "$path")"
-  fi
   printf '%s\n' "${path:-$HOME/.config/oh-my-setting/work-journal.json}"
 }
 

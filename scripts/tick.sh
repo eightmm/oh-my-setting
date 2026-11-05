@@ -326,7 +326,7 @@ except (OSError, ValueError, KeyError, TypeError):
   plan_file="$root/.oms/plan/tasks.json"
   if [ "$RETIRE" != 0 ] && [ -s "$plan_file" ] && plan_tasks_are_idle "$plan_file"; then
     if plan_check="$(bounded "$oms" agent-plan --repo "$root" retire --check 2>/dev/null)"; then
-      if plan_sha="$(printf '%s\n' "$plan_check" | plan_retire_check_sha | tr -d '\r')"; then
+      if plan_sha="$(printf '%s\n' "$plan_check" | plan_retire_check_sha)"; then
         if bounded "$oms" agent-plan --repo "$root" retire --apply \
           --expected-plan-sha256 "$plan_sha" --disposition superseded \
           --reason "retired by oms tick: all tasks done and idle over ${PLAN_IDLE_DAYS}d" >/dev/null 2>&1; then
@@ -347,7 +347,7 @@ except (OSError, ValueError, KeyError, TypeError):
     fi
   fi
   if artifact_supersede_out="$(bounded "$oms" artifact-index --repo "$root" resolve-superseded 2>/dev/null)"; then
-    if artifacts_superseded="$(printf '%s\n' "$artifact_supersede_out" | artifact_superseded_count | tr -d '\r')"; then
+    if artifacts_superseded="$(printf '%s\n' "$artifact_supersede_out" | artifact_superseded_count)"; then
       artifact_supersede_rc=0
     else
       artifacts_superseded=0
@@ -357,7 +357,7 @@ except (OSError, ValueError, KeyError, TypeError):
     artifact_supersede_rc=$?
   fi
   if artifact_resolve_out="$(bounded "$oms" artifact-index --repo "$root" resolve-recovered 2>/dev/null)"; then
-    if artifacts_resolved="$(printf '%s\n' "$artifact_resolve_out" | artifact_recovered_count | tr -d '\r')"; then
+    if artifacts_resolved="$(printf '%s\n' "$artifact_resolve_out" | artifact_recovered_count)"; then
       artifact_resolve_rc=0
     else
       artifacts_resolved=0
@@ -368,7 +368,7 @@ except (OSError, ValueError, KeyError, TypeError):
   fi
   if [ "$RETIRE" != 0 ] &&
     failure_list="$(bounded "$oms" fail-ledger --repo "$root" list --unresolved --json 2>/dev/null)" &&
-    failure_candidates="$(printf '%s\n' "$failure_list" | stale_failure_fingerprints | tr -d '\r')"; then
+    failure_candidates="$(printf '%s\n' "$failure_list" | stale_failure_fingerprints)"; then
     while IFS= read -r failure_fingerprint; do
       [ -n "$failure_fingerprint" ] || continue
       if bounded "$oms" fail-ledger --repo "$root" resolve --fingerprint "$failure_fingerprint" \

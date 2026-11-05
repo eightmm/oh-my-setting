@@ -55,42 +55,18 @@ PYROOT
 # 3.2 subshells where $$ still names an outer shell. No native caller identity
 # is replaced; the monitor is a directly owned child reaped before return.
 oms_reference_start() {
-  local repo="$1" tool="$2" input="$3" owner_native="" owner_source="" owner_logical="" rest="" monitor_native="" ready_wait=0
+  local repo="$1" tool="$2" input="$3" monitor_native=""
   reference_scope_dir="$(mktemp -d "${TMPDIR:-/tmp}/oms-reference.XXXXXX")" || return 1
   reference_scope_dir="$(cd "$reference_scope_dir" && pwd -P)" || return 1
-  reference_scope_dir="${reference_scope_dir//$'\r'/}"
   reference_channel="$reference_scope_dir/scope"
   : > "$reference_channel"
-  oms_lock_kernel
-  case "$OMS_LOCK_KERNEL" in
-    MINGW*|MSYS*|CYGWIN*)
-      IFS=' ' read -r owner_logical rest < /proc/self/stat || return 1
-      owner_native="$(oms_process_native_pid "$owner_logical")" || return 1
-      owner_native="${owner_native//$'\r'/}"
-      owner_source=msys-proc-v1
-      ;;
-  esac
-  python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$repo" "$tool" "$input" "$reference_channel" "$owner_native" "$owner_source" > "$reference_scope_dir/result" || return 1
+  python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$repo" "$tool" "$input" "$reference_channel" > "$reference_scope_dir/result" || return 1
   IFS=' ' read -r reference_operation reference_scope_digest < "$reference_scope_dir/result" || return 1
-  reference_operation="${reference_operation//$'\r'/}"
-  reference_scope_digest="${reference_scope_digest//$'\r'/}"
   python3 "$_OMS_TASK_REFERENCE_HELPER" monitor "$repo" "$reference_channel" "$reference_scope_digest" </dev/null >/dev/null 2>&1 &
   reference_monitor=$!
-  case "$OMS_LOCK_KERNEL" in
-    MINGW*|MSYS*|CYGWIN*)
-      # Wait for native Python to publish readiness before reading winpid;
-      # a still-executing MSYS launch bridge is not the monitor generation.
-      while [ ! -e "$reference_channel.ready" ] && [ "$ready_wait" -lt 75 ]; do
-        sleep 0.02
-        ready_wait=$((ready_wait + 1))
-      done
-      ;;
-  esac
   monitor_native="$(oms_process_native_pid "$reference_monitor")" || return 1
-  monitor_native="${monitor_native//$'\r'/}"
   python3 "$_OMS_TASK_REFERENCE_HELPER" await-monitor "$repo" "$reference_channel" "$reference_scope_digest" "$monitor_native" > "$reference_scope_dir/proof" || return 1
   IFS= read -r reference_ready_digest < "$reference_scope_dir/proof" || return 1
-  reference_ready_digest="${reference_ready_digest//$'\r'/}"
 }
 
 oms_reference_stop() {
@@ -611,7 +587,7 @@ agent_task_append_bullet_unlocked() {
   line="- $(date -u +%Y-%m-%dT%H:%M:%SZ) [$agent] $line"
 
   # Pass the bullet through a file: awk -v mangles backslash escapes
-  # (e.g. Windows paths or \n inside notes).
+  # (e.g. escaped newlines inside notes).
   local line_file
   line_file="$(agent_memory_mktemp)" || return 1
   printf '%s\n' "$line" > "$line_file"

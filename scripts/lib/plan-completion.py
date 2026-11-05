@@ -351,31 +351,22 @@ def checked_completion_paths(repo, objects, parents):
         for path in sorted(objects):
             target = Path(DURABLE['canonical_repo_path'](repo, path, 'completion collection ' + path))
             parent = path.rsplit('/', 1)[0]
-            if os.name == 'nt':
-                if not DURABLE['same_file'](target.parent.stat(), parents[parent]):
+            if parent not in descriptors:
+                fd = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+                             getattr(os, 'O_NOFOLLOW', 0))
+                stack.callback(os.close, fd)
+                if not DURABLE['same_file'](os.fstat(fd), parents[parent]):
                     fail('completion collection namespace changed: ' + path)
-                named = target.lstat()
-                fd = None
-            else:
-                if parent not in descriptors:
-                    fd = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
-                                 getattr(os, 'O_NOFOLLOW', 0))
-                    stack.callback(os.close, fd)
-                    if not DURABLE['same_file'](os.fstat(fd), parents[parent]):
-                        fail('completion collection namespace changed: ' + path)
-                    descriptors[parent] = fd
-                fd = descriptors[parent]
-                named = os.stat(target.name, dir_fd=fd, follow_symlinks=False)
+                descriptors[parent] = fd
+            fd = descriptors[parent]
+            named = os.stat(target.name, dir_fd=fd, follow_symlinks=False)
             if not DURABLE['_snapshot_matches'](objects[path], named):
                 fail('completion collection object changed: ' + path)
             checked.append((fd, target))
         def remove(published=False):
             for fd, target in checked:
                 try:
-                    if fd is None:
-                        os.unlink(target)
-                    else:
-                        os.unlink(target.name, dir_fd=fd)
+                    os.unlink(target.name, dir_fd=fd)
                 except FileNotFoundError:
                     pass
                 except OSError as exc:
@@ -1133,20 +1124,6 @@ def file_identity(repo, rel):
 
 
 def file_mode(repo, rel, info):
-    if os.name == 'nt':
-        # Windows has no POSIX executable bit; Git's tracked mode is the
-        # product contract. Untracked inputs have the ordinary file mode.
-        listing = git(repo, 'ls-files', '--stage', '-z', '--', rel)
-        if listing:
-            entries = listing.split(b'\0')
-            if len(entries) != 2:
-                fail('ambiguous Windows source mode')
-            metadata, path = entries[0].split(b'\t', 1)
-            mode, _, stage = metadata.decode('ascii').split()
-            if stage != '0' or path.decode('utf-8') != rel or mode not in ('100644', '100755'):
-                fail('unsupported Windows source mode')
-            return mode
-        return '100644'
     return '100755' if info.st_mode & stat.S_IXUSR else '100644'
 
 
@@ -1654,11 +1631,10 @@ def satisfaction(repo, bundle, tasks, plan_id):
 
 
 def canonical_land_directory(repo):
-    # Match the existing shell land-state resolver, including Git Bash's
-    # physical path spelling used by cksum and native Python conversion.
+    # Match the existing shell land-state resolver.
     script = r'''set -eu
 common_dir="$(git -C "$1" rev-parse --git-common-dir | tr -d '\r')"
-case "$common_dir" in /*|[A-Za-z]:/*) ;; *) common_dir="$1/$common_dir" ;; esac
+case "$common_dir" in /*) ;; *) common_dir="$1/$common_dir" ;; esac
 common_dir="$(cd "$common_dir" && pwd -P)"
 common_root="$(cd "$common_dir/.." && pwd -P)"
 name="$(basename "$common_root")"
@@ -1668,7 +1644,6 @@ case "$name" in ''|.|..) name=repo ;; esac
 checksum="$(printf '%s' "$common_root" | cksum | awk '{print $1 "-" $2}')"
 case "$checksum" in ''|*[!0-9-]*) exit 2 ;; esac
 value="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land/$name-$checksum"
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) value="$(cygpath -m "$value")" ;; esac
 printf '%s\n' "$value"
 '''
     result = subprocess.run(['bash', '-c', script, 'completion-land-state', repo],
@@ -1676,7 +1651,7 @@ printf '%s\n' "$value"
                             timeout=30, check=False)
     if result.returncode or len(result.stdout) > 4096:
         fail('canonical land receipt directory unavailable')
-    return result.stdout.decode('utf-8').strip().replace('\r', '')
+    return result.stdout.decode('utf-8').strip()
 
 
 def commit_product(repo, bundle, task):
@@ -1692,7 +1667,7 @@ def commit_product(repo, bundle, task):
     declared = os.environ.get('OMS_LAND_RECEIPTS_DIR')
     if declared and os.path.normcase(os.path.abspath(declared)) != os.path.normcase(os.path.abspath(directory)):
         fail('foreign canonical land receipt namespace')
-    root = os.path.splitdrive(os.path.abspath(directory))[0] + os.path.sep
+    root = os.path.sep
     DURABLE['canonical_repo_path'](root, os.path.join(os.path.relpath(directory, root), 'probe'),
                                    'canonical commit receipts')
     # commit-finish's receipt lookup is the one authority: it searches this
@@ -2069,15 +2044,12 @@ def capture_verifier(repo, command, snapshot):
     execution_env = git_environment() if command == 'git diff --check' else dict(os.environ, GIT_OPTIONAL_LOCKS='0')
     proc = subprocess.Popen(['bash', '-c', command], cwd=repo, env=execution_env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            start_new_session=os.name != 'nt')
+                            start_new_session=True)
     count, output, errors = [0], hashlib.sha256(), []
     def stop():
         try:
-            if os.name != 'nt':
-                import signal
-                os.killpg(proc.pid, signal.SIGKILL)
-            elif proc.poll() is None:
-                proc.kill()
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
     def drain():

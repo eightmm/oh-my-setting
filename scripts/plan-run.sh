@@ -148,7 +148,7 @@ if [ -n "$CONTEXT_PACK" ]; then
     "$ROOT/scripts/lib/oms_runtime/context_pack.py" --repo "$REPO" "$CONTEXT_PACK" 2>&1)" ||
     fail "context-pack: $context_pack_summary"
   context_pack_values="$(printf '%s' "$context_pack_summary" |
-    python3 -c 'import json,sys; d=json.load(sys.stdin); print("\t".join([str(d["file_count"]), d["sha256"]]))' | tr -d '\r')" ||
+    python3 -c 'import json,sys; d=json.load(sys.stdin); print("\t".join([str(d["file_count"]), d["sha256"]]))')" ||
     fail "context-pack: could not decode the validated summary"
   CONTEXT_PACK_FILES="$(printf '%s' "$context_pack_values" | cut -f1)"
   CONTEXT_PACK_SHA="$(printf '%s' "$context_pack_values" | cut -f2)"
@@ -161,8 +161,8 @@ release_claim() {
   [ "$KEEP_CLAIM" -eq 0 ] || return 0
   task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$TASK_ID" 2>/dev/null || true)"
   [ -n "$task_json" ] || return 0
-  state="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' 2>/dev/null | tr -d '\r' || true)"
-  current_lease="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' 2>/dev/null | tr -d '\r' || true)"
+  state="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' 2>/dev/null || true)"
+  current_lease="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' 2>/dev/null || true)"
   case "$state" in claimed|running) ;; *) return 0 ;; esac
   [ "$current_lease" = "$LEASE_ID" ] || return 0
   "$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$TASK_ID" --lease-id "$LEASE_ID" >/dev/null 2>&1 || true
@@ -181,7 +181,7 @@ import json,sys
 d=json.load(sys.stdin)
 print("\t".join([d.get("state", ""), d.get("lease_id", ""),
                   d.get("review_lease_id", ""), str(d.get("repair_count", 0))]))
-' | tr -d '\r')" || {
+')" || {
     echo "error: cannot decode failed resumed repair task $TASK_ID" >&2
     return 1
   }
@@ -299,20 +299,20 @@ if [ "$USE_NEXT" -eq 1 ]; then
     task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" next --claim --provider "$TO" --json)" || exit $?
     CLAIMED=1
   fi
-  TASK_ID="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' | tr -d '\r')"
-  LEASE_ID="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' | tr -d '\r')"
+  TASK_ID="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  LEASE_ID="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))')"
   hydrate_assignment
 else
   task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$TASK_ID")" || exit $?
   hydrate_assignment
-  state="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' | tr -d '\r')"
+  state="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')"
   if [ "$state" = claimed ] && [ "$LAND" -eq 1 ] && [ "$AUTO_REPAIR" -eq 1 ]; then
     POSSIBLE_REPAIR_RESUME="$(printf '%s' "$task_json" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 count=d.get("repair_count",0)
 print(1 if count == 1 and not isinstance(count,bool) and d.get("lease_id") and d.get("review_lease_id") == d.get("lease_id") else 0)
-' | tr -d '\r')"
+')"
   fi
   if [ -n "$RESERVED_LEASE" ]; then
     printf '%s' "$task_json" | python3 -c '
@@ -332,12 +332,12 @@ if (t.get("state") != "claimed" or t.get("lease_id") != sys.argv[1]
     [ "$state" = ready ] || fail "task $TASK_ID is $state, not ready; the audited exits: oms agent-plan release --id $TASK_ID requeues it (review evidence kept) for a fresh drive, review+--land continues from the stored patch, and --auto-repair owns the in-drive repair loop"
   fi
   if [ "$CONTINUE_REVIEW" -eq 1 ]; then
-    task_provider="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))' | tr -d '\r')"
+    task_provider="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))')"
     [ "$task_provider" = "$TO" ] ||
       fail "reviewed task $TASK_ID provider is $task_provider, not $TO"
   fi
   if [ "$POSSIBLE_REPAIR_RESUME" -eq 1 ]; then
-    task_provider="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))' | tr -d '\r')"
+    task_provider="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))')"
     [ "$task_provider" = "$TO" ] ||
       fail "interrupted repair task $TASK_ID provider is $task_provider, not $TO"
   fi
@@ -349,7 +349,7 @@ if (t.get("state") != "claimed" or t.get("lease_id") != sys.argv[1]
   fi
 fi
 
-task_values="$(printf '%s' "$task_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\t".join([d.get("state", ""), d.get("lease_id", ""), d.get("verify", ""), ",".join(d.get("allowed_paths", [])), d.get("title", ""), d.get("artifact", ""), d.get("patch", ""), d.get("executor_id", ""), d.get("executor_soul_sha256", ""), str(d.get("repair_count", 0)), d.get("review_lease_id", ""), d.get("repair_artifact", "")]))' | tr -d '\r')"
+task_values="$(printf '%s' "$task_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\t".join([d.get("state", ""), d.get("lease_id", ""), d.get("verify", ""), ",".join(d.get("allowed_paths", [])), d.get("title", ""), d.get("artifact", ""), d.get("patch", ""), d.get("executor_id", ""), d.get("executor_soul_sha256", ""), str(d.get("repair_count", 0)), d.get("review_lease_id", ""), d.get("repair_artifact", "")]))')"
 state="$(printf '%s' "$task_values" | cut -f1)"
 LEASE_ID="$(printf '%s' "$task_values" | cut -f2)"
 VERIFY="$(printf '%s' "$task_values" | cut -f3)"
@@ -369,7 +369,7 @@ repair_artifact="$(printf '%s' "$task_values" | cut -f12)"
 # a file only this task creates therefore cannot be admitted at all: the floor
 # deletes the very command it then runs. That verdict costs a full worker run to
 # reach, and the precondition is knowable here, before the provider is called.
-verify_missing="$(python3 "$ROOT/scripts/lib/verify-base-precondition.py" "$REPO" "$VERIFY" "$ALLOWED" | tr -d '\r')"
+verify_missing="$(python3 "$ROOT/scripts/lib/verify-base-precondition.py" "$REPO" "$VERIFY" "$ALLOWED")"
 [ -z "$verify_missing" ] ||
   fail "task $TASK_ID verify names $verify_missing, which does not exist at the base commit; admission restores the verification surface from base, so this task can never be admitted — name a check that exists at base (a committed suite arm) instead"
 if [ "$state" = claimed ] && [ "$repair_count" = 1 ] &&
@@ -400,8 +400,8 @@ stable={k:d.get(k) for k in keys}
 if d.get("assignment"):
     stable["assignment"]=d["assignment"]
 print(hashlib.sha256(json.dumps(stable,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()[:16])
-' | tr -d '\r')"
-task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))' | tr -d '\r')"
+')"
+task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))')"
 # Match peer-delegate's default; ambient routine hints must not give this
 # same task a different failure identity than the worker actually uses.
 export OMS_MODEL_WORKLOAD="$WORKLOAD"
@@ -567,7 +567,7 @@ if [ "$LAND" -eq 1 ]; then
       --summary "landing failed for task $TASK_ID after bounded repair" \
       --next "get an outside read: oms advise, then decide land vs abandon") || true
     parked_state="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$TASK_ID" 2>/dev/null |
-      python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", "unknown"))' 2>/dev/null | tr -d '\r' || echo unknown)"
+      python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", "unknown"))' 2>/dev/null || echo unknown)"
     echo "plan-run: parked task=$TASK_ID state=$parked_state next=advise" >&2
     exit "$land_status"
   fi

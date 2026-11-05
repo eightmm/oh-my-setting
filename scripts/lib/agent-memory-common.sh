@@ -847,7 +847,6 @@ sys.stdout.write(hashlib.sha256(rows[line - 1]).hexdigest())
     echo "error: citation line $source_line does not exist in HEAD:$source_path" >&2
     return 2
   }
-  line_hash="$(printf '%s' "$line_hash" | tr -d '\r')"
   {
     printf 'source_path: %s\n' "$source_path"
     printf 'source_line: %s\n' "$source_line"

@@ -12509,21 +12509,6 @@ PY
   [ "$rc" = 2 ] || fail "a receipt bound through a symlink to this checkout must refuse adopt, got $rc"
   assert_file_contains "$project/live-link-out" "abandon"
   rm -f "$project/.oms/plan/autopilot-run.json"
-  # a failed or empty Windows path conversion cannot prove the receipt is elsewhere
-  mkdir -p "$TMP/cygpath-fail" "$TMP/cygpath-empty" "$TMP/elsewhere-scratch"
-  printf '#!/bin/sh\nexit 1\n' > "$TMP/cygpath-fail/cygpath"
-  printf '#!/bin/sh\nexit 0\n' > "$TMP/cygpath-empty/cygpath"
-  chmod +x "$TMP/cygpath-fail/cygpath" "$TMP/cygpath-empty/cygpath"
-  for stub in cygpath-fail cygpath-empty; do
-    write_bound_receipt "$TMP/elsewhere-scratch"
-    rc=0
-    (cd "$TMP" && env PATH="$TMP/$stub:$PATH" OMS_PLATFORM_OVERRIDE=windows \
-      "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-good \
-      > "$project/live-$stub-out" 2>&1) || rc=$?
-    [ "$rc" = 2 ] || fail "a $stub conversion must refuse adopt, got $rc"
-    assert_file_contains "$project/live-$stub-out" "abandon"
-    rm -f "$project/.oms/plan/autopilot-run.json"
-  done
   mkdir -p "$TMP/elsewhere-scratch"
   write_bound_receipt "$TMP/elsewhere-scratch"
 
@@ -12588,7 +12573,10 @@ PY
   "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-link \
     > "$project/link-out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "a linked intent candidate must exit 3, got $rc"
-  assert_file_contains "$project/link-out" "not a link or junction"
+  assert_file_contains "$project/link-out" "not a link"
+  if grep -Fq "not a link or junction" "$project/link-out"; then
+    fail "linked candidate diagnostic must use supported-host terminology"
+  fi
   [ ! -e "$project/PROJECT.md" ] || fail "a linked candidate must not publish PROJECT.md"
 }
 
@@ -26687,25 +26675,16 @@ PY
   "$sh" --repo "$project" show --id markerless | grep -F '"state": "running"' > /dev/null ||
     fail "state-CAS recovery changed a task after its observed transition"
 
-  # Simulate native Windows Git Bash without depending on a Windows runner:
-  # /c/... is translated by cygpath and its CRLF output must be stripped before
-  # the embedded native Python compares the physical marker directory.
-  local windows_bin="$project/windows-bin"
-  mkdir -p "$windows_bin"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "MINGW64_NT-10.0\\n"' > "$windows_bin/uname"
-  cat > "$windows_bin/cygpath" <<'EOF'
-#!/usr/bin/env bash
-if [ "${1:-}" = -m ] && [ "${2:-}" = /c/oms-owner-fixture/.oms/delegations ]; then
-  printf '%s\r\n' "$OMS_T_WINDOWS_MARKERS"
-else
-  printf '%s\r\n' "${2:-}"
-fi
-EOF
-  chmod +x "$windows_bin/uname" "$windows_bin/cygpath"
-  PATH="$windows_bin:$PATH" OMS_T_WINDOWS_MARKERS="$markers" \
-    "$sh" --repo "$project" recover-owner --owner-id "$owner" \
-      --markers-dir /c/oms-owner-fixture/.oms/delegations --json >/dev/null ||
-    fail "Git Bash /c marker path did not reach native Python canonically"
+  # The supported-host path must not invoke the retired path converter.
+  if sed -n '/^python_path_for_host()/,/^}/p' "$sh" | grep -q cygpath; then
+    fail "plan path normalization must not invoke the retired converter"
+  fi
+  if grep -Eq "taskkill|start_new_session=os.name" "$ROOT/scripts/check.sh"; then
+    fail "check supervisor must use the supported POSIX process path"
+  fi
+  if grep -Eq 'bash[.]exe|sh[.]exe|env[.]exe' "$ROOT/scripts/scratch-worktree.sh"; then
+    fail "scratch owner selection must use supported shell names"
+  fi
 }
 
 test_gc_keeps_orphan_artifacts_unless_asked() {
@@ -29467,7 +29446,7 @@ reference_scope_dir="$(mktemp -d "$2/scope.XXXXXX")"
 reference_scope_dir="$(cd "$reference_scope_dir" && pwd -P)"
 reference_channel="$reference_scope_dir/scope"
 : > "$reference_channel"
-python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$2" agent-task "$2/packet" "$reference_channel" '' '' > "$reference_scope_dir/result"
+python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$2" agent-task "$2/packet" "$reference_channel" > "$reference_scope_dir/result"
 IFS=' ' read -r reference_operation reference_scope_digest < "$reference_scope_dir/result"
 pending_supported="$(python3 -c 'import json,sys; print(int("ready_pending" in json.load(open(sys.argv[1]))["binding"]))' "$reference_channel")"
 pending_supported="${pending_supported//$'\r'/}"
