@@ -103,8 +103,12 @@ postpones the swap if the main does not provide a handoff; at 100% it may use
 the recorded-state digest. It checks for an active land again before exit;
 neither a postponed handoff nor an active land starts the cooldown.
 
-Delegated workers also defer installation: `oms update` exits 76 while a worker
-marker proves its owner is live. `oms land` keeps successful push and CI evidence,
+Delegated workers and other panel calls also defer installation: `oms update`
+exits 76 while a worker marker proves its owner is live, or while a call is
+registered in the install checkout, the current checkout, or a checkout that
+`oms land` names (its repository, state root, receipt handoff and sync target).
+A symlinked or unreadable call registry also defers, and a malformed entry is
+named with how to clear it. `oms land` keeps successful push and CI evidence,
 records `update.reason: deferred-live-workers`, and prints a retry command. Under `--wait`, `oms land` rechecks the deferred installation every 15 seconds until the workers finish or `--sibling-wait` (default 1800 seconds) expires, so no manual retry is needed. Without `--wait`, the run does not recheck; rerun the printed retry command (which includes `--wait`) to resume installation. Auto-update records the deferral as skipped. This
 check does not detect a worker that starts after installation begins.
 

@@ -102,6 +102,35 @@ oms_canonical_sync_live_entries() {  # REPO (read-only; malformed entries stay l
   done
 }
 
+oms_canonical_call_is_ancestor() {  # ENTRY [CALLER_PID]; 0=self, 1=other, 2=unproven
+  local entry="$1" child="${2:-$$}" pid="" saved="" current="" seen=" " hops=0
+  [ -d "$entry" ] && [ ! -L "$entry" ] &&
+    [ -f "$entry/pid" ] && [ ! -L "$entry/pid" ] && [ -r "$entry/pid" ] &&
+    [ -f "$entry/process-start" ] && [ ! -L "$entry/process-start" ] &&
+    [ -r "$entry/process-start" ] || return 2
+  IFS= read -r pid < "$entry/pid" || true
+  IFS= read -r saved < "$entry/process-start" || true
+  pid="${pid//$'\r'/}" saved="${saved//$'\r'/}"
+  case "$pid" in ""|0|*[!0-9]*) return 2 ;; esac
+  [ -n "$saved" ] || return 2
+  current="$(
+    oms_file_lock_process_start_token "$pid" 2>/dev/null || true
+  )"
+  current="${current//$'\r'/}"
+  [ -n "$current" ] && [ "$current" = "$saved" ] || return 2
+  # Uncertain ancestry must keep the call live, including a walk past 64 parents.
+  while [ "$hops" -le 64 ]; do
+    case "$child" in ""|0|*[!0-9]*) break ;; esac
+    case "$seen" in *" $child "*) break ;; esac
+    seen="$seen$child "
+    [ "$child" != "$pid" ] || return 0
+    [ "$child" != 1 ] || break
+    child="$(ps -p "$child" -o ppid= 2>/dev/null | tr -d '[:space:]' || true)"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
 oms_canonical_sync_live_review_entries() {  # REPO [EXECUTION_CHECKOUT] (uncertainty stays live)
   local repo="$1" name entry pid command execution="" source
   if [ "$#" -gt 1 ] && [ -n "$2" ]; then

@@ -5,6 +5,7 @@ unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID OMS_TASK_ID OMS_ATTEMPT_ID
 unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID
 # An admission or gate verify budget set by the caller is not the fixtures' own.
 unset OMS_PEER_VERIFY_TIMEOUT
+unset OMS_UPDATE_CALL_REPOS
 # Runtime seat-wall and worker-guard knobs of an accepting caller are not the fixtures' own.
 unset OMS_PEER_TIMEOUT OMS_PEER_PRINT_TIMEOUT OMS_WORKER_GUARD_STRICT OMS_WORKER_GUARD_OFF
 unset NVM_BIN NVM_DIR
@@ -97,7 +98,7 @@ oms_smoke_make_update_source_fixture() {
   local file
   mkdir -p "$source/scripts/lib"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
-  for file in install-contract.sh install-lifecycle-lock.sh file-lock.sh poll.sh; do
+  for file in install-contract.sh install-lifecycle-lock.sh canonical-sync.sh file-lock.sh poll.sh; do
     cp "$ROOT/scripts/lib/$file" "$source/scripts/lib/$file"
   done
 }

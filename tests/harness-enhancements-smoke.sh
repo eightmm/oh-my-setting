@@ -1871,6 +1871,7 @@ test_install_owner_guards_and_stale_status() {
   cp "$ROOT/scripts/update.sh" "$foreign/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$foreign/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$foreign/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/canonical-sync.sh" "$foreign/scripts/lib/canonical-sync.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$foreign/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$foreign/scripts/lib/poll.sh"
   cat > "$foreign/scripts/link.sh" <<'EOF'

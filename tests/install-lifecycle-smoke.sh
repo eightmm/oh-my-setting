@@ -102,11 +102,227 @@ SH_CODEX
   [ ! -e "$OMS_PYTHON_RUNTIME_ROOT" ] || fail "legacy cleanup provisioned a runtime"
   echo 'legacy-python-uninstall: ok'
 )
+test_update_defers_live_panel_calls() (
+  local fixture="$TMP/panel-update" file
+  mkdir -p "$fixture/install/scripts/lib" "$fixture/home" "$fixture/project" "$fixture/shared checkout"
+  cp "$ROOT/scripts/update.sh" "$fixture/install/scripts/update.sh"
+  cp "$ROOT/scripts/auto-update.sh" "$fixture/install/scripts/auto-update.sh"
+  for file in install-contract.sh install-lifecycle-lock.sh file-lock.sh canonical-sync.sh; do
+    cp "$ROOT/scripts/lib/$file" "$fixture/install/scripts/lib/$file"
+  done
+  git -C "$fixture/project" init -q
+  git -C "$fixture/shared checkout" init -q
+  "$PYTHON" - "$fixture" "${OMS_TEST_CALL_TIMEOUT:-120}" <<'PY_PANEL'
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import subprocess
+import sys
+
+fixture = Path(sys.argv[1])
+timeout = float(sys.argv[2])
+project, shared = fixture / 'project', fixture / 'shared checkout'
+library = fixture / 'install/scripts/lib/canonical-sync.sh'
+env = dict(os.environ, HOME=str(fixture / 'home'),
+           XDG_CONFIG_HOME=str(fixture / 'home/config'),
+           OMS_INSTALL_RECEIPT=str(fixture / 'home/missing-receipt'),
+           OMS_INSTALL_LIFECYCLE_LOCK=str(fixture / 'locks/install-lifecycle.lock.d'),
+           OMS_DELEGATE_WORKTREE_ROOT=str(fixture / 'no-workers'))
+env.pop('OMS_UPDATE_CALL_REPOS', None)
+env.pop('OMS_AUTO_UPDATE_MANAGED', None)
+
+def update(label, expected, repos=None, cwd=project, args=(), self_call=False, blocked_path=None):
+    current = dict(env)
+    if repos is not None:
+        current['OMS_UPDATE_CALL_REPOS'] = repos
+    command = ['bash', str(fixture / 'install/scripts/update.sh'), '--no-tools', *args]
+    if self_call:
+        command = ['bash', '-c', '. "$1"; oms_canonical_call_acquire "$2" self || exit; '
+                   'shift 2; "$@"; rc=$?; oms_canonical_call_release; exit "$rc"',
+                   'self-update', str(library), str(project), *command]
+    result = subprocess.run(command, cwd=cwd, env=current, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    assert result.returncode == expected, (label, result.returncode, result.stdout)
+    if expected == 76:
+        if blocked_path is None:
+            assert 'installation deferred: 1 live panel call(s):' in result.stdout, (label, result.stdout)
+        else:
+            assert 'installation deferred:' in result.stdout and str(blocked_path) in result.stdout, (label, result.stdout)
+        assert 'retry:' in result.stdout, (label, result.stdout)
+    else:
+        # The intentionally non-Git install stops immediately after admission.
+        assert 'is not a git checkout' in result.stdout, (label, result.stdout)
+        assert 'installation deferred:' not in result.stdout, (label, result.stdout)
+    assert not (fixture / 'locks/install-lifecycle.lock.d').exists(), label
+    return result.stdout
+
+def start_holder(repo):
+    holder = subprocess.Popen(['bash', '-c', '. "$1"; oms_canonical_call_acquire "$2" live || exit; '
+                               'printf "ready\\n"; read -r done; oms_canonical_call_release',
+                               'panel-holder', str(library), str(repo)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
+    try:
+        assert select.select([holder.stdout], [], [], timeout)[0], 'call registration timed out'
+        assert holder.stdout.readline() == 'ready\n', 'call registration failed'
+    except BaseException:
+        holder.terminate()
+        holder.communicate(timeout=timeout)
+        raise
+    return holder
+
+holder = start_holder(shared)
+try:
+    repos = f'{project}\n{shared}\n{shared}\n'
+    output = update('shared live call', 76, repos=repos)
+    assert 'live panel call(s): live' in output, output
+    update('own call with unrelated shared call', 76, repos=repos, self_call=True)
+    update('plain update in call checkout', 76, cwd=shared)
+    update('read-only check', 1, repos=repos, args=('--check',))
+    update('empty repository list', 1, repos='')
+    update('invalid repository path', 1, repos=str(fixture / 'missing'))
+    alias = fixture / 'shared alias'
+    alias.symlink_to(shared, target_is_directory=True)
+    update('physical repository deduplication', 76, repos=f'{shared}\n{alias}')
+    saved_library = library.with_suffix('.saved')
+    library.rename(saved_library)
+    try:
+        update('minimal tree without a registry or read helper', 1, cwd=fixture)
+        update('registry without its read helper', 76, repos=str(shared), blocked_path=library)
+    finally:
+        saved_library.rename(library)
+    root_live = fixture / 'install/.oms/locks/canonical-sync.d/live'
+    shutil.copytree(shared / '.oms/locks/canonical-sync.d/live', root_live)
+    update('install ROOT only, unrelated working directory', 76, cwd=fixture)
+    shutil.rmtree(root_live)
+    update('CRLF repository path', 76, repos=str(shared) + '\r\n')
+    env['CDPATH'] = str(fixture)
+    update('CDPATH with relative repository', 76, repos=shared.name, cwd=fixture)
+    env.pop('CDPATH')
+    (fixture / '-P').symlink_to(shared, target_is_directory=True)
+    update('leading dash repository path', 76, repos='-P', cwd=fixture)
+finally:
+    holder.communicate('done\n', timeout=timeout)
+assert holder.returncode == 0, holder.returncode
+
+registry = project / '.oms/locks/canonical-sync.d'
+registry.mkdir(parents=True, exist_ok=True)
+entry = registry / 'fixture'
+entry.mkdir()
+for pid, start in [('2147483647', 'proc:dead'), ('0', 'generation'),
+                   ('malformed', 'generation'), ('', 'generation')]:
+    (entry / 'pid').write_text(pid + '\n')
+    (entry / 'process-start').write_text(start + '\n')
+    output = update('registry identity ' + repr(pid), 1 if pid == '2147483647' else 76)
+    if pid != '2147483647':
+        assert str(entry) in output and 'remove' in output and 'confirm' in output, output
+(entry / 'pid').write_text(str(os.getpid()) + '\n')
+(entry / 'process-start').write_text('')
+update('ancestor with missing generation', 76)
+(entry / 'process-start').write_text('reused-generation\n')
+update('reused pid generation', 1)
+(entry / 'pid').unlink()
+update('incomplete registration', 76)
+(entry / 'process-start').unlink()
+entry.rmdir()
+update('zero live calls', 1)
+update('own ancestor entry', 1, self_call=True)
+assert not (registry / 'self').exists(), 'self registration leaked'
+
+for relative in ('.oms', '.oms/locks', '.oms/locks/canonical-sync.d'):
+    checkout = fixture / ('unsafe-' + relative.replace('/', '-'))
+    checkout.mkdir()
+    path = checkout / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(fixture / 'missing-registry', target_is_directory=True)
+    update('symlinked registry component ' + relative, 76, repos=str(checkout), blocked_path=path)
+    path.unlink()
+    path.mkdir()
+    for mode in (0, 0o400, 0o100):
+        path.chmod(mode)
+        try:
+            if not os.access(path, os.R_OK | os.X_OK):
+                update('unreadable registry component ' + relative, 76, repos=str(checkout), blocked_path=path)
+            else:
+                print('skip permission denial probe: current user bypasses mode bits')
+        finally:
+            path.chmod(0o700)
+    path.rmdir()
+    path.write_text('unexpected file\n')
+    update('non-directory registry component ' + relative, 76, repos=str(checkout), blocked_path=path)
+
+probe_entry = fixture / 'ancestry-entry'
+probe_entry.mkdir()
+(probe_entry / 'process-start').write_text('generation\n')
+ancestry_probe = (
+    '. "$1"; '
+    'oms_file_lock_process_start_token() { printf "generation\\n"; }; '
+    'ps() { case "$OMS_TEST_PARENT_MODE" in '
+    'empty) return ;; zero) printf "0\\n" ;; malformed) printf "invalid\\n" ;; '
+    'cycle) printf "%s\\n" "$2" ;; *) printf "%s\\n" "$(($2 + 1))" ;; esac; }; '
+    'oms_canonical_call_is_ancestor "$2" "$3"'
+)
+for pid, mode, expected in [(100, 'next', 0), (164, 'next', 0), (165, 'next', 1),
+                            (164, 'empty', 1), (164, 'zero', 1),
+                            (164, 'malformed', 1), (164, 'cycle', 1)]:
+    (probe_entry / 'pid').write_text(str(pid) + '\n')
+    result = subprocess.run(['bash', '-c', ancestry_probe, 'ancestry-probe', str(library),
+                             str(probe_entry), '100'], env=dict(env, OMS_TEST_PARENT_MODE=mode),
+                            timeout=timeout)
+    assert result.returncode == expected, (pid, mode, result.returncode)
+
+# Exercise the real unattended apply route from outside the install checkout.
+install = fixture / 'install'
+(install / '.gitignore').write_text('.oms/\nlocal/\n')
+(install / 'scripts/lib/ci-query.py').write_text('print("1 success")\n')
+(install / 'value').write_text('base\n')
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(install), *args], env=env, text=True).strip()
+git('init', '-q')
+git('add', '.')
+git('commit', '-qm', 'panel auto-update base')
+base = git('rev-parse', 'HEAD')
+(install / 'value').write_text('next\n')
+git('commit', '-qam', 'panel auto-update target')
+git('tag', 'panel-target')
+git('reset', '-q', '--hard', base)
+git('remote', 'add', 'origin', str(install))
+receipt = fixture / 'home/install.json'
+receipt.write_text(json.dumps({'schema': 2, 'source_root': str(install), 'ref': 'panel-target',
+                               'commit': base, 'channel': 'main', 'version': 'fixture',
+                               'installed_at': '2026-11-05T00:00:00Z', 'previous_commit': '',
+                               'profile': 'minimal', 'managed_targets': [],
+                               'plugin': {'name': 'fixture', 'version': '1', 'sha256': 'fixture'},
+                               'components': {name: False for name in ('tools', 'claude_hooks', 'codex_plugin',
+                                                                      'auto_update', 'machine_snapshot', 'slurm_snapshot')}}))
+scheduled_env = dict(env, OMS_INSTALL_RECEIPT=str(receipt),
+                     OH_MY_SETTING_AUTO_UPDATE_STATE=str(fixture / 'home/auto.status'),
+                     OH_MY_SETTING_AUTO_UPDATE_LOG=str(fixture / 'home/auto.log'))
+holder = start_holder(install)
+try:
+    result = subprocess.run(['bash', str(install / 'scripts/auto-update.sh'), 'apply'], cwd=fixture,
+                            env=scheduled_env, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=timeout)
+    assert result.returncode == 0, result.stdout
+    assert 'installation deferred: 1 live panel call(s): live' in result.stdout, result.stdout
+    assert 'status=skipped' in (fixture / 'home/auto.status').read_text(), result.stdout
+    assert git('rev-parse', 'HEAD') == base, 'scheduled deferral changed install HEAD'
+finally:
+    holder.communicate('done\n', timeout=timeout)
+print('panel-update-deferral: ok')
+PY_PANEL
+)
+if [ "${1:-}" = --panel-update-only ]; then
+  test_update_defers_live_panel_calls
+  exit
+fi
 if [ "${1:-}" = --legacy-python-only ]; then
   test_uninstall_with_old_python
   exit
 fi
 test_uninstall_with_old_python
+test_update_defers_live_panel_calls
 
 # Count external path tools across the lifecycle. Each shim appends one short
 # line, including when independent children run at the same time.

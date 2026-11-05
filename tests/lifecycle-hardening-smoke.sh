@@ -6,6 +6,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-lifecycle-hardening.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+cd "$TMP"
+# Each transaction chooses its own HOME; inherited provider paths bypass it.
+unset CODEX_HOME OMS_CODEX_CONFIG OMS_CLAUDE_SETTINGS CLAUDE_CONFIG_DIR
 export XDG_CACHE_HOME="$TMP/cache"
 mkdir -p "$XDG_CACHE_HOME"
 

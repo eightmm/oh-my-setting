@@ -774,7 +774,8 @@ run_job() {
     local deferred_at="" poll_left poll_step
     while :; do
       rc=0
-      OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
+      OMS_UPDATE_CALL_REPOS="$(printf '%s\n' "$REPO" "$HANDOFF_TO" "$install" "$(oms_state_root "$REPO")" "${SYNC_TO:-}")" \
+        OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
       [ "$rc" -eq 76 ] && [ "$WAIT" -eq 1 ] || break
       [ -n "$deferred_at" ] || deferred_at="$(date +%s)"
       poll_left=$(( SIBLING_WAIT - ($(date +%s) - deferred_at) ))

@@ -61,8 +61,11 @@ Usage: update.sh [--check] [--rollback] [--ref REF] [--fallback-to-edge] [--tool
 
 Update transactionally, preserving the installed component profile. Link or
 doctor failure restores the previous commit, links, and install receipt.
-Exit 76 defers installation while delegated workers are live; retry the same command.
-A worker that starts during the update is not detected.
+Exit 76 defers installation while delegated workers or other panel calls are live;
+retry the same command. Calls are checked in the install, current Git checkout,
+and physical checkout paths passed by land in newline-separated OMS_UPDATE_CALL_REPOS.
+Unsafe registry paths and unproven call identities defer until inspected.
+A worker or call that starts during the update is not detected.
 
 Options:
   --check       Fetch and report whether the configured ref has changed.
@@ -173,6 +176,61 @@ if [ "$CHECK_ONLY" != 1 ]; then
   done
   if [ "$worker_count" -gt 0 ]; then
     echo "installation deferred: $worker_count live worker(s):$worker_ids" >&2
+    echo "retry: $retry_command" >&2
+    exit 76
+  fi
+  # A partial tree may lack the reader; any registry below must then defer.
+  if [ -f "$ROOT/scripts/lib/canonical-sync.sh" ]; then
+    # shellcheck source=scripts/lib/canonical-sync.sh
+    . "$ROOT/scripts/lib/canonical-sync.sh"
+  fi
+  panel_repos="$ROOT
+${OMS_UPDATE_CALL_REPOS:-}"
+  panel_cwd="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  panel_repos="$panel_repos
+$panel_cwd"
+  panel_count=0 panel_ids="" panel_seen=$'\n'
+  while IFS= read -r panel_repo; do
+    panel_repo="${panel_repo//$'\r'/}"
+    [ -n "$panel_repo" ] || continue
+    panel_repo="$(CDPATH='' cd -P -- "$panel_repo" >/dev/null 2>&1 && pwd -P)" || continue
+    case "$panel_seen" in *$'\n'"$panel_repo"$'\n'*) continue ;; esac
+    panel_seen="$panel_seen$panel_repo"$'\n'
+    for panel_path in "$panel_repo/.oms" "$panel_repo/.oms/locks" "$panel_repo/.oms/locks/canonical-sync.d"; do
+      if [ -L "$panel_path" ] ||
+          { [ -e "$panel_path" ] && { [ ! -d "$panel_path" ] || [ ! -r "$panel_path" ] || [ ! -x "$panel_path" ]; }; }; then
+        echo "installation deferred: unsafe or unreadable panel registry path: $panel_path" >&2
+        echo "retry: $retry_command" >&2
+        exit 76
+      fi
+    done
+    [ -d "$panel_repo/.oms/locks/canonical-sync.d" ] || continue
+    if ! declare -F oms_canonical_sync_live_entries >/dev/null; then
+      echo "installation deferred: panel registry inspection requires $ROOT/scripts/lib/canonical-sync.sh" >&2
+      echo "retry: $retry_command" >&2
+      exit 76
+    fi
+    while IFS= read -r panel_id; do
+      [ -n "$panel_id" ] || continue
+      # A nested update must not wait for the call that invoked it. Exclude
+      # only a proven PID generation in this updater's process ancestry.
+      panel_entry="$panel_repo/.oms/locks/canonical-sync.d/$panel_id"
+      panel_identity=0
+      oms_canonical_call_is_ancestor "$panel_entry" "$$" || panel_identity=$?
+      case "$panel_identity" in
+        0) continue ;;
+        2) echo "warning: unproven panel call identity: $panel_entry; confirm no call owns it, then remove this registry entry and retry" >&2 ;;
+      esac
+      panel_count=$((panel_count + 1))
+      panel_ids="$panel_ids $panel_id"
+    done <<EOF
+$(oms_canonical_sync_live_entries "$panel_repo")
+EOF
+  done <<EOF
+$panel_repos
+EOF
+  if [ "$panel_count" -gt 0 ]; then
+    echo "installation deferred: $panel_count live panel call(s):$panel_ids" >&2
     echo "retry: $retry_command" >&2
     exit 76
   fi

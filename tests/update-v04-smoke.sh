@@ -6,6 +6,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-v04-update.XXXXXX")"
 trap '[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMP"' EXIT
+cd "$TMP"
+# Each transaction chooses its own HOME; inherited provider paths bypass it.
+unset CODEX_HOME OMS_CODEX_CONFIG OMS_CLAUDE_SETTINGS CLAUDE_CONFIG_DIR
 export OMS_DELEGATE_WORKTREE_ROOT="$TMP/empty-worker-cache"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
@@ -31,6 +34,7 @@ test_harness_child_cannot_mutate_install() {
   cp "$ROOT/scripts/lib/install-contract.sh" "$fixture/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" \
     "$fixture/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/canonical-sync.sh" "$fixture/scripts/lib/canonical-sync.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$fixture/scripts/lib/file-lock.sh"
   chmod +x "$fixture/scripts/update.sh"
 
@@ -202,6 +206,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   cp "$ROOT/scripts/oms-mcp-server.py" "$source/scripts/oms-mcp-server.py"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/canonical-sync.sh" "$source/scripts/lib/canonical-sync.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/python-runtime.sh" "$ROOT/scripts/lib/python-entry.sh" "$source/scripts/lib/"
@@ -649,7 +654,7 @@ test_schema1_update_preserves_channel_pin_and_cron() {
     scripts/install-mcp.sh scripts/install-agy-plugin.sh \
     scripts/oms-mcp-server.py \
     tools.lock.json scripts/lib/tool-lock.py \
-    scripts/lib/install-contract.sh scripts/lib/install-lifecycle-lock.sh \
+    scripts/lib/install-contract.sh scripts/lib/install-lifecycle-lock.sh scripts/lib/canonical-sync.sh \
     scripts/lib/file-lock.sh scripts/lib/poll.sh scripts/lib/platform.sh \
     scripts/lib/managed-target.py scripts/lib/agent-install-state.sh; do
     cp "$ROOT/$file" "$source/$file"
@@ -1449,6 +1454,7 @@ test_missing_codex_degrades_and_dead_ref_is_fail_closed() {
   cp "$ROOT/scripts/oms-mcp-server.py" "$source/scripts/oms-mcp-server.py"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/canonical-sync.sh" "$source/scripts/lib/canonical-sync.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/python-runtime.sh" "$ROOT/scripts/lib/python-entry.sh" "$source/scripts/lib/"
