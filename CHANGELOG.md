@@ -98,6 +98,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms patch-admit` runs ShellCheck (warning severity) on changed shell files
+  when it is installed and records a skip otherwise; source-context codes
+  (SC1090, SC1091, SC2034, SC2148, SC2154) are excluded.
 - OMS requires Python 3.11 at every entry point and in the managed runtime.
   Interpreter selection ignores exported `python`/`python3` shell functions,
   runs its probes without PYTHONHOME or PYTHONPATH, and validates the launcher

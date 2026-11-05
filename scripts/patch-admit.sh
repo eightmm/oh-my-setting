@@ -106,7 +106,8 @@ Options:
   -h, --help     Show this help.
 
 Ladder: patch applies cleanly (not stale) -> changed files stay in scope ->
-changed shell files parse (bash -n) -> patch does not weaken the tests ->
+changed shell files parse (bash -n) and pass ShellCheck when installed ->
+patch does not weaken the tests ->
 candidate verification passes -> unchanged baseline checks also pass with
 verification surfaces restored from HEAD. Newly invoked tests run on the
 candidate; an available HEAD project suite supplies their baseline floor.
@@ -478,6 +479,8 @@ PY
     # --- Gate 3: changed syntax-checked files parse -------------------------
     syntax_ok=1
     syntax_checked=0
+    shellcheck_bin="${OMS_SHELLCHECK_BIN:-shellcheck}"
+    shellcheck_skipped=0
     syntax_detail="no syntax-checked files changed"
     while IFS= read -r f; do
       [ -n "$f" ] || continue
@@ -490,6 +493,20 @@ PY
               break
             fi
             syntax_checked=1
+            if command -v "$shellcheck_bin" >/dev/null 2>&1; then
+              # Bash parsing supplies the dialect; omit source-context codes without following sources.
+              if ! (cd "$worktree" && ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$shellcheck_bin" \
+                -S warning -e SC1090,SC1091,SC2034,SC2148,SC2154 "$worktree/$f") \
+                > "$worktree_parent/shellcheck.out" 2>&1; then
+                syntax_ok=0
+                shellcheck_detail="$(sed '/^[[:space:]]*$/d' "$worktree_parent/shellcheck.out" | sed -n '1,3p' | cut -c 1-200 | tr '\n' ' ')"
+                syntax_detail="shellcheck failed: $f${shellcheck_detail:+ — $shellcheck_detail}"
+                break
+              fi
+            elif [ "$shellcheck_skipped" = 0 ]; then
+              record "shellcheck" "SKIP" "ShellCheck not installed"
+              shellcheck_skipped=1
+            fi
           fi
           ;;
         *.py)

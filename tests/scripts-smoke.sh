@@ -21003,6 +21003,74 @@ test_patch_admit_rejects_invalid_source_syntax() {
   [ -n "$r" ] || fail "no admission report written"
   assert_file_contains "$r" "syntax: FAIL"
   assert_file_contains "$r" "json parse failed: bad.json"
+
+  repo="$TMP/admit-shellcheck"
+  local lint_bin="$TMP/admit lint" lint_command mode rc
+  make_committed_repo "$repo"
+  mkdir -p "$repo/sub dir"
+  printf 'printf ok\n' > "$repo/sub dir/run.sh"
+  printf '#!/usr/bin/env bash\nprintf unchanged\n' > "$repo/unchanged.sh"
+  git -C "$repo" add .
+  git -C "$repo" commit -qm shellcheck-base
+  printf 'printf changed\n' >> "$repo/sub dir/run.sh"
+  git -C "$repo" diff > "$repo/lint.patch"
+  git -C "$repo" checkout -q -- "sub dir/run.sh"
+  if command -v shellcheck >/dev/null 2>&1; then
+    OMS_SHELLCHECK_BIN="$(command -v shellcheck)" \
+      "$SH" --patch "$repo/lint.patch" --repo "$repo" --verify true --report "$repo/headerless.md" \
+      > "$repo/headerless.out" 2>&1 || fail "a Bash-parseable shell file needs no shebang: $(cat "$repo/headerless.out")"
+    assert_file_contains "$repo/headerless.md" "syntax: PASS"
+  fi
+  cat > "$lint_bin" <<'EOF'
+#!/usr/bin/env bash
+[ "$#" = 5 ] && [ "$1" = -S ] && [ "$2" = warning ] && [ "$3" = -e ] &&
+  [ "$4" = SC1090,SC1091,SC2034,SC2148,SC2154 ] || exit 2
+case "$5" in *'/sub dir/run.sh') ;; *) exit 2 ;; esac
+case "$OMS_TEST_LINT_MODE" in
+  clean) exit 0 ;;
+  empty) exit 1 ;;
+  blank) printf '\n \t\n'; exit 1 ;;
+  warning)
+    printf '\n \t\nIn %s line 1:\n' "$5"
+    printf '%s%0187d%s\n' 'echo $value #' 0 'unshown-column'
+    printf '%s\n' '^-- SC2086 (warning): Double quote to prevent globbing and word splitting.' 'unshown diagnostic'
+    exit 1 ;;
+esac
+exit 2
+EOF
+  chmod +x "$lint_bin"
+  for mode in warning empty blank clean missing; do
+    r="$repo/$mode.md"
+    rc=0
+    lint_command="$lint_bin"
+    [ "$mode" != missing ] || lint_command="$lint_bin.missing"
+    OMS_TEST_LINT_MODE="$mode" OMS_SHELLCHECK_BIN="$lint_command" \
+      "$SH" --patch "$repo/lint.patch" --repo "$repo" --verify true --report "$r" \
+      > "$repo/$mode.out" 2>&1 || rc=$?
+    case "$mode" in
+      warning|empty|blank)
+        [ "$rc" -ne 0 ] || fail "ShellCheck finding must reject admission ($mode)"
+        assert_file_contains "$r" "syntax: FAIL"
+        assert_file_contains "$r" "shellcheck failed: sub dir/run.sh"
+        if [ "$mode" = warning ]; then
+          grep -Eq 'syntax: FAIL.*SC2086 \(warning\): Double quote' "$r" ||
+            fail "syntax detail must retain the ShellCheck code and message"
+          assert_file_contains "$r" "$(printf '%s%0187d' 'echo $value #' 0)"
+          if grep -Eq 'unshown diagnostic|unshown-column' "$r"; then
+            fail "ShellCheck report must keep only the first diagnostics"
+          fi
+        fi
+        ;;
+      clean|missing)
+        [ "$rc" = 0 ] || fail "ShellCheck $mode case should admit: $(cat "$repo/$mode.out")"
+        assert_file_contains "$r" "syntax: PASS"
+        if [ "$mode" = missing ]; then
+          assert_file_contains "$r" "shellcheck: SKIP — ShellCheck not installed"
+          [ "$(grep -c 'ShellCheck not installed' "$r")" = 1 ] || fail "report ShellCheck skip once"
+        fi
+        ;;
+    esac
+  done
 }
 
 test_agent_task_context_preserves_tail_sections() {
@@ -22980,11 +23048,11 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
   mkdir -p "$project/tests" "$project/scripts"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
   chmod +x "$project/scripts/check.sh"
-  printf 'assert_ok 1\nassert_ok 2\necho done\n' > "$project/tests/thing_test.sh"
+  printf 'assert_ok 1\nassert_ok 2\necho "done"\n' > "$project/tests/thing_test.sh"
   git -C "$project" add scripts/check.sh tests/thing_test.sh
   git -C "$project" commit -q -m "add check and a test"
 
-  printf 'assert_ok 1\necho done\n' > "$project/tests/thing_test.sh"
+  printf 'assert_ok 1\necho "done"\n' > "$project/tests/thing_test.sh"
   git -C "$project" diff > "$project/weaken.patch"
   git -C "$project" checkout -q tests/thing_test.sh
 
@@ -23003,11 +23071,24 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
     fail "--allow-test-reduction should admit the same patch"
 
   # Adding coverage must not trip it, or the gate becomes noise people disable.
-  printf 'assert_ok 1\nassert_ok 2\nassert_ok 3\necho done\n' > "$project/tests/thing_test.sh"
+  printf 'assert_ok 1\nassert_ok 2\nassert_ok 3\necho "done"\n' > "$project/tests/thing_test.sh"
   git -C "$project" diff > "$project/strengthen.patch"
   git -C "$project" checkout -q tests/thing_test.sh
   ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/strengthen.patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ) ||
     fail "a patch that adds assertions must still be ADMITTED"
+
+  if command -v shellcheck >/dev/null 2>&1; then
+    printf 'echo done\n' >> "$project/tests/thing_test.sh"
+    git -C "$project" diff > "$project/warning.patch"
+    git -C "$project" checkout -q tests/thing_test.sh
+    if OMS_SHELLCHECK_BIN="$(command -v shellcheck)" "$ROOT/scripts/patch-admit.sh" \
+      --repo "$project" --patch "$project/warning.patch" --verify 'bash scripts/check.sh' \
+      --report "$project/warning.md" >/dev/null 2>&1; then
+      fail "a real ShellCheck warning must still reject an assertion-preserving patch"
+    fi
+    assert_file_contains "$project/warning.md" "syntax: FAIL"
+    assert_file_contains "$project/warning.md" "SC1010"
+  fi
 }
 
 # smoke-weight: 10

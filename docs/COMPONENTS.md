@@ -699,8 +699,13 @@ base/verifier/model cohort starts without transferable evidence.
 
 The worker does not see the caller's uncommitted changes. `patch-admit` checks
 applicability, path scope, sensitive content, syntax, and the stored test
-contract in another temporary worktree. If a patch changes its verifier,
-tests, or common verification config, admission also runs the same command in
+contract in another temporary worktree. Changed shell files also run ShellCheck
+at warning severity without following sources, excluding cross-file codes
+`SC1090`, `SC1091`, `SC2034`, and `SC2154`, plus the missing-dialect diagnostic
+`SC2148` because `bash -n` already checks their syntax. `OMS_SHELLCHECK_BIN`
+(default `shellcheck`) selects the binary and the existing per-call verification
+timeout applies; a missing binary is reported as skipped and does not block admission. If a patch changes
+its verifier, tests, or common verification config, admission also runs the same command in
 a second projection with that verification surface restored from HEAD.
 Conventional repo-owned check/test/verify/lint helpers are included even when
 the top-level command does not name them directly. A failed pre-verification
