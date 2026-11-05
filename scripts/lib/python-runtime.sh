@@ -31,10 +31,11 @@ oms_python_runtime_version_valid() {
 }
 
 oms_python_runtime_root_owned() {
-  local root="$1" marker="$1/.oh-my-setting-python-runtime"
+  local root="$1" marker="$1/.oh-my-setting-python-runtime" first second
   [ -d "$root" ] && [ ! -L "$root" ] && [ -f "$marker" ] &&
-    [ ! -L "$marker" ] && [ "$(sed -n '1p' "$marker" 2>/dev/null)" = schema=1 ] &&
-    [ "$(sed -n '2p' "$marker" 2>/dev/null)" = owner=oh-my-setting ]
+    [ ! -L "$marker" ] &&
+    { IFS= read -r first && { IFS= read -r second || [ -n "$second" ]; }; } < "$marker" &&
+    [ "$first" = schema=1 ] && [ "$second" = owner=oh-my-setting ]
 }
 
 oms_python_runtime_prepare_root() {
@@ -68,10 +69,11 @@ oms_python_runtime_prepare_root() {
 }
 
 oms_python_runtime_env_owned() {
-  local env_dir="$1" version="$2" marker="$1/.oh-my-setting-python-env"
+  local env_dir="$1" version="$2" marker="$1/.oh-my-setting-python-env" first second
   [ -d "$env_dir" ] && [ ! -L "$env_dir" ] && [ -f "$marker" ] &&
-    [ ! -L "$marker" ] && [ "$(sed -n '1p' "$marker" 2>/dev/null)" = schema=1 ] &&
-    [ "$(sed -n '2p' "$marker" 2>/dev/null)" = "version=$version" ]
+    [ ! -L "$marker" ] &&
+    { IFS= read -r first && { IFS= read -r second || [ -n "$second" ]; }; } < "$marker" &&
+    [ "$first" = schema=1 ] && [ "$second" = "version=$version" ]
 }
 
 # uv's venv interpreter links must resolve inside the owned managed tree.
@@ -80,16 +82,16 @@ oms_python_runtime_candidate_valid() {
   [ ! -L "${candidate%/*}" ] && [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
   [ -L "$candidate" ] || return 0
   [ ! -L "$root/managed" ] && [ -d "$root/managed" ] || return 1
-  managed="$(cd "$root/managed" && pwd -P)" || return 1
+  managed="$(CDPATH='' cd -P -- "$root/managed" && pwd -P)" || return 1
   path="$candidate"
   while [ -L "$path" ]; do
     count=$((count + 1))
     [ "$count" -le 32 ] || return 1
-    parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
-    target="$(readlink "$path")" || return 1
+    parent="${path%/*}"; parent="$(CDPATH='' cd -P -- "${parent:-/}" && pwd -P)" || return 1
+    target="$(PATH=/usr/bin:/bin readlink "$path")" || return 1
     case "$target" in /*) path="$target" ;; *) path="$parent/$target" ;; esac
   done
-  parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
+  parent="${path%/*}"; parent="$(CDPATH='' cd -P -- "${parent:-/}" && pwd -P)" || return 1
   path="$parent/${path##*/}"
   case "$path" in "$managed"/*) [ -f "$path" ] && [ -x "$path" ] ;; *) return 1 ;; esac
 }
@@ -145,26 +147,23 @@ oms_python_runtime_locked_python() {
 }
 
 oms_python_runtime_write_launcher() {  # ROOT VERSION NAME [DIR]
-  local root="$1" version="$2" name="$3" dir="${4:-launchers/$2}" up target stage
+  local root="$1" version="$2" name="$3" dir="${4:-launchers/$2}" target stage
   oms_python_runtime_version_valid "$version" || return 1
   case "$name" in python|python3) ;; *) return 1 ;; esac
   case "$dir" in bin|"launchers/$version") ;; *) return 1 ;; esac
-  # bin/ holds the one version-free path a managed python3 shim can name.
-  case "$dir" in bin) up=.. ;; *) up=../.. ;; esac
+  [ ! -L "$root" ] || return 1
+  root="$(CDPATH='' cd -P -- "$root" && pwd -P)" || return 1
   target="$root/$dir/$name"
-  [ ! -L "$root/$dir" ] || return 1
-  mkdir -p "$root/$dir"
+  [ ! -L "$root/bin" ] && [ ! -L "$root/launchers" ] && [ ! -L "$root/launchers/$version" ] && [ ! -L "$root/$dir" ] || return 1
+  mkdir -p "$root/$dir" || return 1
   stage="$(mktemp "$root/$dir/.$name.XXXXXX")" || return
   {
-    printf '#!/usr/bin/env bash\nversion=%s\nup=%s\n' "$version" "$up"
+    printf '#!/bin/bash\nunset CDPATH PYTHONHOME\nunset -f cd pwd read readlink test \047[\047 echo exec exit true 2>/dev/null || :\nroot=%q\nversion=%q\n' "$root" "$version"
     declare -f oms_python_runtime_root_owned oms_python_runtime_env_owned oms_python_runtime_candidate_valid
     cat <<'EOF_LAUNCHER'
 set -euo pipefail
-# Every managed python3 call runs this: no dirname process per interpreter start.
-case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
-root="$(cd "$here/$up" && pwd -P)"
-unset PYTHONHOME
 oms_python_runtime_root_owned "$root" && [ ! -L "$root/envs" ] &&
+  [ ! -L "$root/bin" ] && [ ! -L "$root/launchers" ] && [ ! -L "$root/launchers/$version" ] &&
   oms_python_runtime_env_owned "$root/envs/$version" "$version" || exit 1
 for candidate in "$root/envs/$version/bin/python3" \
     "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do
@@ -173,9 +172,10 @@ done
 echo "error: OMS Python runtime is incomplete: $root/envs/$version" >&2
 exit 1
 EOF_LAUNCHER
-  } > "$stage"
-  chmod 0755 "$stage"
-  mv "$stage" "$target"
+  } > "$stage" && chmod 0755 "$stage" && mv -f "$stage" "$target" || {
+    rm -f "$stage"
+    return 1
+  }
 }
 
 # The private runtime is always a uv-managed download into its own root. A
@@ -205,13 +205,12 @@ oms_python_runtime_ensure_locked() {
   if oms_python_runtime_env_owned "$env_dir" "$version"; then
     python="$(oms_python_runtime_env_python "$env_dir" 2>/dev/null || true)"
     if [ -n "$python" ] && oms_python_runtime_python_matches "$python" "$version"; then
+      oms_python_runtime_write_launcher "$root" "$version" python3 || return 1
+      oms_python_runtime_write_launcher "$root" "$version" python || return 1
+      oms_python_runtime_write_launcher "$root" "$version" python3 bin || return 1
       current_stage="$root/current.tmp.$$"
-      printf '%s\n' "$version" > "$current_stage"
-      mv "$current_stage" "$root/current"
-      oms_python_runtime_write_launcher "$root" "$version" python3
-      oms_python_runtime_write_launcher "$root" "$version" python
-      oms_python_runtime_write_launcher "$root" "$version" python3 bin
-      return 0
+      printf '%s\n' "$version" > "$current_stage" && mv "$current_stage" "$root/current"
+      return $?
     fi
     oms_python_runtime_fail "existing environment is invalid; preserved for repair: $env_dir" || return
   elif [ -e "$env_dir" ] || [ -L "$env_dir" ]; then
@@ -241,12 +240,11 @@ oms_python_runtime_ensure_locked() {
     printf 'version=%s\n' "$version"
   } > "$stage/.oh-my-setting-python-env"
   mv "$stage" "$env_dir"
+  oms_python_runtime_write_launcher "$root" "$version" python3 || return 1
+  oms_python_runtime_write_launcher "$root" "$version" python || return 1
+  oms_python_runtime_write_launcher "$root" "$version" python3 bin || return 1
   current_stage="$root/current.tmp.$$"
-  printf '%s\n' "$version" > "$current_stage"
-  mv "$current_stage" "$root/current"
-  oms_python_runtime_write_launcher "$root" "$version" python3
-  oms_python_runtime_write_launcher "$root" "$version" python
-  oms_python_runtime_write_launcher "$root" "$version" python3 bin
+  printf '%s\n' "$version" > "$current_stage" && mv "$current_stage" "$root/current"
 }
 
 oms_python_runtime_ensure() {

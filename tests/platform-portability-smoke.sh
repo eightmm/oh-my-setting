@@ -22,6 +22,24 @@ fail() {
   exit 1
 }
 
+copyable_python() (
+  local candidate probe
+  probe="$(mktemp -d "$TMP/python-probe.XXXXXX")" || return 1
+  trap 'rm -rf "$probe"' EXIT
+  candidate="$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.executable))' 2>/dev/null)" || candidate=''
+  for candidate in "$candidate" /usr/bin/python3; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    cp "$candidate" "$probe/python3" 2>/dev/null || continue
+    printf 'home = %s\n' "${candidate%/*}" > "$probe/pyvenv.cfg"
+    if "$probe/python3" -I -c 'import sys; assert sys.version_info >= (3, 11)' >/dev/null 2>&1 &&
+       "$probe/python3" -I -c '' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  fail "no copyable Python 3.11 or newer found for portability fixtures"
+)
+
 assert_regular_copy() {
   local source="$1"
   local target="$2"
@@ -120,8 +138,8 @@ test_native_windows_refusal
 
 test_python_security() (
   local d="$TMP/python-security" real_python version candidate
-  real_python="$(command -v python3)"
-  version="$($real_python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+  real_python="$(copyable_python)"
+  version="$("$real_python" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
   export OMS_PYTHON_RUNTIME_ROOT="$d/runtime"
   . "$ROOT/scripts/lib/python-runtime.sh"
   oms_python_runtime_prepare_root "$OMS_PYTHON_RUNTIME_ROOT"
@@ -129,7 +147,9 @@ test_python_security() (
   printf 'schema=1\nversion=%s\n' "$version" > "$OMS_PYTHON_RUNTIME_ROOT/envs/$version/.oh-my-setting-python-env"
   printf '%s\n' "$version" > "$OMS_PYTHON_RUNTIME_ROOT/current"
   cp "$real_python" "$OMS_PYTHON_RUNTIME_ROOT/envs/$version/bin/python3"
+  printf 'home = %s\n' "${real_python%/*}" > "$OMS_PYTHON_RUNTIME_ROOT/envs/$version/pyvenv.cfg"
   oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" "$version" python3 bin
+  oms_python_runtime_write_launcher "$OMS_PYTHON_RUNTIME_ROOT" "$version" python3
   export PYTHONHOME="$d/foreign-home" PYTHONPATH="$d/foreign-modules"
   cat > "$d/probe-python" <<'EOF_PROBE'
 #!/usr/bin/env bash
@@ -147,9 +167,64 @@ EOF_PROBE
   OMS_TEST_INJECTED="$d/injected" PYTHONPATH="$d/inject" \
     "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' || fail "valid launcher failed"
   [ -e "$d/injected" ] || fail "launcher stripped caller Python path"
+  mkdir -p "$d/links" "$d/shadow"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$d/shadow/bash"
+  chmod +x "$d/shadow/bash"
+  PATH="$d/shadow:$PATH" "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' ||
+    fail "launcher used bash from PATH"
+  printf '%s\n' '#!/bin/sh' 'exit 91' > "$d/shadow/readlink"
+  cp "$d/shadow/readlink" "$d/shadow/sed"
+  chmod +x "$d/shadow/readlink" "$d/shadow/sed"
+  PATH="$d/shadow:$PATH" "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' ||
+    fail "launcher used a shadowed utility"
+  cp "$real_python" "$OMS_PYTHON_RUNTIME_ROOT/managed/python3"
+  ln -s "$OMS_PYTHON_RUNTIME_ROOT/managed/python3" "$d/managed-link"
+  PATH="$d/shadow:$PATH" oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$d/managed-link" ||
+    fail "shadowed readlink broke a managed interpreter link"
+  ln -s "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" "$d/links/link-1"
+  ln -s link-1 "$d/links/link-2"
+  "$d/links/link-1" -c 'pass' || fail "absolute launcher link failed"
+  "$d/links/link-2" -c 'pass' || fail "launcher link chain failed"
+  ln -s "../runtime/launchers/$version/python3" "$d/links/versioned"
+  "$d/links/versioned" -c 'pass' || fail "relative versioned launcher link failed"
+  ln -s missing "$d/links/broken"
+  ! "$d/links/broken" -c 'pass' >/dev/null 2>&1 || fail "broken launcher link accepted"
+  mkdir -p "$d/fake/envs/$version/bin"
+  printf 'schema=1\nowner=oh-my-setting\n' > "$d/fake/.oh-my-setting-python-runtime"
+  printf 'schema=1\nversion=%s\n' "$version" > "$d/fake/envs/$version/.oh-my-setting-python-env"
+  printf '%s\n' '#!/bin/sh' ': > "$OMS_TEST_FOREIGN"' > "$d/fake/envs/$version/bin/python3"
+  chmod +x "$d/fake/envs/$version/bin/python3"
+  ln -s "$OMS_PYTHON_RUNTIME_ROOT/bin" "$d/fake/bin"
+  ln -s "$d/fake/bin/python3" "$d/links/planted"
+  OMS_TEST_FOREIGN="$d/foreign-ran" "$d/links/planted" -c 'pass' || fail "planted launcher link failed"
+  [ ! -e "$d/foreign-ran" ] || fail "planted launcher link ran foreign interpreter"
+  printf '0.0.0\n' > "$OMS_PYTHON_RUNTIME_ROOT/current"
+  local fail_at
+  for fail_at in 1 2 3; do
+    (
+      local calls=0
+      oms_python_runtime_write_launcher() { calls=$((calls + 1)); [ "$calls" -ne "$fail_at" ]; }
+      if oms_python_runtime_ensure_locked /bin/true "$version"; then
+        fail "ensure ignored launcher write failure $fail_at"
+      fi
+    )
+    [ "$(cat "$OMS_PYTHON_RUNTIME_ROOT/current")" = 0.0.0 ] || fail "ensure advanced current after launcher failure $fail_at"
+  done
+  printf '%s\n' "$version" > "$OMS_PYTHON_RUNTIME_ROOT/current"
+  local child check_launcher
+  for child in bin launchers "launchers/$version"; do
+    check_launcher="$OMS_PYTHON_RUNTIME_ROOT/bin/python3"
+    [ "$child" != bin ] || check_launcher="$OMS_PYTHON_RUNTIME_ROOT/launchers/$version/python3"
+    mv "$OMS_PYTHON_RUNTIME_ROOT/$child" "$d/displaced-child"
+    ln -s "$d/displaced-child" "$OMS_PYTHON_RUNTIME_ROOT/$child"
+    ! "$check_launcher" -c 'pass' >/dev/null 2>&1 || fail "launcher accepted symlinked $child"
+    rm "$OMS_PYTHON_RUNTIME_ROOT/$child"
+    mv "$d/displaced-child" "$OMS_PYTHON_RUNTIME_ROOT/$child"
+  done
   mv "$OMS_PYTHON_RUNTIME_ROOT/envs/$version" "$d/displaced-env"
   ln -s "$d/displaced-env" "$OMS_PYTHON_RUNTIME_ROOT/envs/$version"
   ! "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' >/dev/null 2>&1 || fail "launcher accepted symlinked environment"
+  ! "$d/links/link-1" -c 'pass' >/dev/null 2>&1 || fail "linked launcher accepted symlinked environment"
   ! oms_python_runtime_activate_fallback || fail "fallback accepted symlinked environment"
   rm "$OMS_PYTHON_RUNTIME_ROOT/envs/$version"
   mv "$d/displaced-env" "$OMS_PYTHON_RUNTIME_ROOT/envs/$version"
@@ -159,6 +234,8 @@ EOF_PROBE
   ! oms_python_runtime_is_active || fail "active runtime accepted foreign interpreter"
   ! oms_python_runtime_activate_fallback || fail "foreign interpreter link accepted"
   ! "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" -c 'pass' >/dev/null 2>&1 || fail "launcher ran foreign interpreter"
+  ! "$d/links/link-1" -c 'pass' >/dev/null 2>&1 || fail "linked launcher ran foreign interpreter"
+  ! PATH="$d/shadow:$PATH" "$d/links/link-1" -c 'pass' >/dev/null 2>&1 || fail "shadowed utility allowed foreign interpreter"
   ! oms_python_runtime_candidate_valid "$OMS_PYTHON_RUNTIME_ROOT" "$OMS_PYTHON_RUNTIME_ROOT/envs" || fail "directory interpreter accepted"
   mkdir -p "$d/altbin" "$OMS_PYTHON_RUNTIME_ROOT/launchers/$version"
   cp "$real_python" "$d/altbin/python3"
@@ -228,7 +305,7 @@ test_python_security
 # Focused floor coverage also runs as part of the complete portability suite.
 test_python_floor() (
   local d="$TMP/python-floor" real_python version out hook_command
-  real_python="$(command -v python3)"
+  real_python="$(copyable_python)"
   mkdir -p "$d/bin" "$d/repo/scripts/lib"
   sed -n '/^ensure_python3() {$/,/^}$/p' "$ROOT/install.sh" > "$d/ensure.sh"
   : > "$d/repo/scripts/lib/file-lock.sh"
@@ -943,7 +1020,7 @@ grep -Fq 'status=failed' "$runtime_state" &&
 # breaks paths and state words. Simulated with a python3 that emits CRLF, so the
 # regression is reachable on every platform, not only on a Windows runner.
 crlf_bin="$TMP/crlf-bin"
-real_python="$(command -v python3)"
+real_python="$(copyable_python)"
 mkdir -p "$crlf_bin"
 {
   printf '%s\n' '#!/usr/bin/env bash'
