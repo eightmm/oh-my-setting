@@ -497,6 +497,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `oms update` and the install step of `oms land` defer (exit 76) while panel
+  calls are registered in the install checkout, the current checkout or a
+  checkout the land names (its repository, state root, receipt handoff and
+  sync target), so an install no longer swaps code under live workers. A
+  symlinked or unreadable call registry also defers; a malformed entry is
+  named with how to clear it.
+- The managed Python launcher bakes its physical runtime root, runs through
+  `/bin/bash` and reads its markers with shell builtins, so a symlinked
+  launcher, `CDPATH` or a shadowed `sed` on PATH can no longer break or
+  redirect it.
+- Tests that copy or link the host interpreter resolve the real executable
+  when a managed-runtime launcher leads PATH, so land gates pass under the
+  dispatcher's runtime activation.
 - Landing capture gc no longer stalls on `.oms/plan` siblings that are not
   task plans (proposals, discovery and candidate reports, autopilot run
   records); task-shaped or explicitly named plans still pin captures.
