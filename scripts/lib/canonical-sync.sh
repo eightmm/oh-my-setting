@@ -45,7 +45,6 @@ oms_canonical_call_acquire() {  # REPO CALL_ID
   esac
   oms_canonical_sync_prepare "$repo" || return $?
   start="$(oms_file_lock_process_start_token "$$")" || return 2
-  start="${start//$'\r'/}"
   [ -n "$start" ] || return 2
   OMS_CANONICAL_CALL_ENTRY="$repo/.oms/locks/canonical-sync.d/$id"
   OMS_CANONICAL_CALL_OWNER="$$.$start.${RANDOM:-0}"
@@ -89,7 +88,6 @@ oms_canonical_sync_live_entries() {  # REPO (read-only; malformed entries stay l
         *)
           if [ -n "$saved" ]; then
             current="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
-            current="${current//$'\r'/}"
             if ! oms_file_lock_pid_alive "$pid" ||
               { [ -n "$current" ] && [ "$current" != "$saved" ]; }; then
               continue
@@ -116,7 +114,6 @@ oms_canonical_call_is_ancestor() {  # ENTRY [CALLER_PID]; 0=self, 1=other, 2=unp
   current="$(
     oms_file_lock_process_start_token "$pid" 2>/dev/null || true
   )"
-  current="${current//$'\r'/}"
   [ -n "$current" ] && [ "$current" = "$saved" ] || return 2
   # Uncertain ancestry must keep the call live, including a walk past 64 parents.
   while [ "$hops" -le 64 ]; do
@@ -190,7 +187,6 @@ oms_canonical_sync_if_idle() {  # REPO COMMAND ARGS... (under gate)
         *)
           if [ -n "$saved" ]; then
             current="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
-            current="${current//$'\r'/}"
             if ! oms_file_lock_pid_alive "$pid" ||
                 { [ -n "$current" ] && [ "$current" != "$saved" ]; }; then
               rm -rf -- "$entry" || return 2

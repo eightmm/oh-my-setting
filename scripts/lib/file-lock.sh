@@ -164,11 +164,7 @@ oms_file_lock_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
-# Return the native process id corresponding to one shell-process id. Git
-# Bash/MSYS exposes $$ in its own pid namespace, while Win32 OpenProcess needs
-# the backing Windows pid. Native children are not an identity bridge here:
-# MSYS may launch them through a short-lived process, so os.getppid() can name
-# a parent that is already gone before a marker is read.
+# Return the process id used by persisted owner records.
 oms_process_native_pid() {  # LOGICAL_PID
   local logical_pid="${1:-}"
   local native_pid=""
@@ -178,15 +174,7 @@ oms_process_native_pid() {  # LOGICAL_PID
   esac
   [ "$logical_pid" -gt 0 ] || return 75
 
-  oms_lock_kernel
-  case "$OMS_LOCK_KERNEL" in
-    MINGW*|MSYS*|CYGWIN*)
-      [ -r "/proc/$logical_pid/winpid" ] || return 75
-      IFS= read -r native_pid < "/proc/$logical_pid/winpid" || return 75
-      native_pid="${native_pid//$'\r'/}"
-      ;;
-    *) native_pid="$logical_pid" ;;
-  esac
+  native_pid="$logical_pid"
   case "$native_pid" in
     *[!0-9]*|"") return 75 ;;
   esac
@@ -195,23 +183,16 @@ oms_process_native_pid() {  # LOGICAL_PID
   printf '%s\n' "$native_pid"
 }
 
-# Persist how the native pid was derived. Readers require this exact source on
-# native Windows before a stored pid may prove that an owner is dead. POSIX has
-# one pid namespace, but records its derivation too so newly written markers
-# stay self-describing without changing legacy-reader behavior.
+# Record the derivation while preserving legacy owner-record compatibility.
 oms_process_native_pid_source() {
-  oms_lock_kernel
-  case "$OMS_LOCK_KERNEL" in
-    MINGW*|MSYS*|CYGWIN*) printf 'msys-proc-v1\n' ;;
-    *) printf 'logical-pid-v1\n' ;;
-  esac
+  printf 'logical-pid-v1\n'
 }
 
 # A PID alone is not an identity: after a crash the OS may reuse it while the
 # mkdir lock remains. Record a process-start token where the host exposes one,
 # and compare it before treating a live PID as the original holder. Linux's
 # /proc token is numeric and boot-relative; the portable fallback is the
-# locale-stable ps start time used by macOS/BSD and Git Bash when available.
+# locale-stable ps start time used by macOS/BSD when available.
 oms_file_lock_process_start_token() {
   local pid="$1"
   local line=""
@@ -266,7 +247,6 @@ oms_file_lock_set_current_identity() {
     pid="$BASHPID"
   else
     pid="$(exec sh -c 'printf "%s\n" "$PPID"' 2>/dev/null)" || pid=""
-    pid="${pid//$'\r'/}"
     [ -n "$pid" ] || return 75
   fi
   case "$pid" in
@@ -276,7 +256,6 @@ oms_file_lock_set_current_identity() {
   OMS_FILE_LOCK_CURRENT_START="$(
     oms_file_lock_process_start_token "$OMS_FILE_LOCK_CURRENT_PID" 2>/dev/null || true
   )"
-  OMS_FILE_LOCK_CURRENT_START="${OMS_FILE_LOCK_CURRENT_START//$'\r'/}"
 }
 
 oms_file_lock_mkdir_write_identity() {
@@ -316,7 +295,6 @@ oms_file_lock_mkdir_directory_generation() {
 
   signature="$(stat -c '%d:%i:%y' "$lock_dir" 2>/dev/null)" ||
     signature="$(stat -f '%d:%i:%m' "$lock_dir" 2>/dev/null)" || return 1
-  signature="${signature//$'\r'/}"
   [ -n "$signature" ] || return 1
   printf '%s\n' "$signature"
 }
@@ -346,7 +324,6 @@ oms_file_lock_mkdir_stale() {
         current_process_start="$(
           oms_file_lock_process_start_token "$pid" 2>/dev/null || true
         )"
-        current_process_start="${current_process_start//$'\r'/}"
         if [ -n "$current_process_start" ] &&
             [ "$current_process_start" != "$saved_process_start" ]; then
           return 0
@@ -424,7 +401,6 @@ oms_file_lock_reclaim_claim_live() {
 
   if [ "$saved_start_sum" != none ]; then
     current_start="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
-    current_start="${current_start//$'\r'/}"
     if [ -n "$current_start" ]; then
       current_start_sum="$(printf '%s' "$current_start" | cksum |
         awk '{print $1 "-" $2}')"

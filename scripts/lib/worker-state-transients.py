@@ -23,11 +23,8 @@ def is_internal_atomic_temp(root, rel):
             path = os.path.join(root, *rel.split("/"))
             try:
                 info = os.lstat(path)
-                reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-                attributes = getattr(info, "st_file_attributes", 0)
                 return (
                     stat.S_ISREG(info.st_mode) and
-                    not (attributes & reparse_attribute) and
                     info.st_size == 0
                 )
             except OSError:
@@ -97,11 +94,6 @@ def is_internal_atomic_temp(root, rel):
     path = os.path.join(root, *rel.split("/"))
     try:
         info = os.lstat(path)
-        reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        attributes = getattr(info, "st_file_attributes", 0)
-        return (
-            stat.S_ISREG(info.st_mode) and
-            not (attributes & reparse_attribute)
-        )
+        return stat.S_ISREG(info.st_mode)
     except OSError:
         return False

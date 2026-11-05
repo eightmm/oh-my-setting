@@ -9,15 +9,6 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Union
 
 
-SYNCHRONIZE = 0x00100000
-WAIT_OBJECT_0 = 0x00000000
-WAIT_TIMEOUT = 0x00000102
-WAIT_FAILED = 0xFFFFFFFF
-ERROR_ACCESS_DENIED = 5
-ERROR_INVALID_PARAMETER = 87
-MSYS_PROC_NATIVE_PID_SOURCE = "msys-proc-v1"
-
-
 def proc_stat_fields(pid: Union[int, str]) -> List[str]:
     """Read fields starting at state; comm may contain spaces and parentheses."""
     raw = (Path("/proc") / str(pid) / "stat").read_text(
@@ -31,71 +22,8 @@ def persisted_native_pid_is_proven(
     source: Any,
     os_name: Optional[str] = None,
 ) -> bool:
-    """Require provenance before a persisted Win32 pid can prove death."""
-    platform = os.name if os_name is None else os_name
-    if platform != "nt":
-        # POSIX persisted logical/native pids have always shared one namespace;
-        # legacy rows therefore remain authoritative there without a source.
-        return True
-    return (
-        isinstance(native_pid, int)
-        and not isinstance(native_pid, bool)
-        and 0 < native_pid <= 0xFFFFFFFF
-        and source == MSYS_PROC_NATIVE_PID_SOURCE
-    )
-
-
-def _configure_kernel32(kernel32: Any) -> None:
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-
-
-def _windows_pid_alive(
-    pid: int,
-    *,
-    kernel32: Optional[Any] = None,
-    get_last_error: Optional[Callable[[], int]] = None,
-) -> bool:
-    """Probe with wait rights only; ambiguous Win32 errors preserve work."""
-    try:
-        import ctypes
-
-        if kernel32 is None:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        if get_last_error is None:
-            get_last_error = ctypes.get_last_error
-        _configure_kernel32(kernel32)
-        try:
-            handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-        except OSError as exc:
-            error = int(getattr(exc, "winerror", 0) or get_last_error())
-            return error != ERROR_INVALID_PARAMETER
-        if not handle:
-            return int(get_last_error()) != ERROR_INVALID_PARAMETER
-        try:
-            try:
-                result = int(kernel32.WaitForSingleObject(handle, 0))
-            except (OSError, ValueError):
-                return True
-            if result == WAIT_OBJECT_0:
-                return False
-            # WAIT_TIMEOUT is alive. WAIT_FAILED and unknown results are
-            # ambiguous, so fail closed by preserving the worker.
-            return True
-        finally:
-            try:
-                kernel32.CloseHandle(handle)
-            except (OSError, ValueError):
-                pass
-    except Exception:
-        return True
+    """POSIX persisted logical/native pids share one namespace."""
+    return True
 
 
 def pid_alive(
@@ -107,25 +35,7 @@ def pid_alive(
     get_last_error: Optional[Callable[[], int]] = None,
     posix_kill: Optional[Callable[[int, int], Any]] = None,
 ) -> bool:
-    """Return liveness without ever signaling a process on Windows."""
-    platform = os.name if os_name is None else os_name
-    if platform == "nt":
-        # Git Bash exposes an MSYS pid through $$, but OpenProcess consumes a
-        # Win32 pid. Never guess or fall back across those namespaces: a
-        # legacy/malformed marker is unproven and therefore preserved.
-        if (
-            isinstance(native_pid, bool)
-            or not isinstance(native_pid, int)
-            or native_pid <= 0
-            or native_pid > 0xFFFFFFFF
-        ):
-            return True
-        if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
-                or pid > 0x7FFFFFFF):
-            return True
-        return _windows_pid_alive(
-            native_pid, kernel32=kernel32, get_last_error=get_last_error
-        )
+    """Probe process existence without sending a signal."""
     if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
             or pid > 0x7FFFFFFF):
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:

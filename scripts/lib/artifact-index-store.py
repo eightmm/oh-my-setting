@@ -278,7 +278,7 @@ def _verify_quarantine(repo: str, target: str, raw: bytes) -> None:
         fail("cannot verify quarantine mode: %s" % exc)
     if not DURABLE["safe_regular"](info):
         fail("quarantine must be a regular non-symlink, non-hard-linked file")
-    if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+    if stat.S_IMODE(info.st_mode) != 0o600:
         fail("quarantine must have mode 0600")
 
 
@@ -351,9 +351,6 @@ def salvage_index(repo: str, index: str, *, apply: bool = False) -> dict:
     """Plan or repair structural JSONL corruption under the caller's lock."""
     root = DURABLE["physical_root"](repo, "artifact index")
     # Keep the caller's spelling paired with the index until canonicalization.
-    # On Windows, realpath may expand an 8.3/junction repo spelling; comparing
-    # that physical root with the still-logical absolute index would reject a
-    # benign repo-contained path before the suffix can be safely rebased.
     target = canonical_index(repo, index, False, False)
     raw = read_raw_index(root, target)
     recovered, source_rows, dropped = _salvage_rows(raw)
@@ -648,7 +645,7 @@ def delete_orphans(
     # remains the sole ownership and traversal boundary below.
     target = canonical_index(repo, index, False, False)
     artifacts_root = os.path.join(root, ".oms", "artifacts")
-    # Re-validates every intermediate component without resolving a junction.
+    # Re-validates every intermediate component without following links.
     DURABLE["canonical_repo_path"](
         root, os.path.join(artifacts_root, ".boundary"), "artifact root", False
     )
@@ -662,7 +659,6 @@ def delete_orphans(
     except OSError as exc:
         fail("cannot inspect artifact root: %s" % exc)
     if (stat.S_ISLNK(artifacts_info.st_mode) or
-            DURABLE["is_reparse"](artifacts_info) or
             not stat.S_ISDIR(artifacts_info.st_mode)):
         fail("artifact root must be a real directory")
     root_snapshot = DURABLE["component_snapshot"](
@@ -718,8 +714,7 @@ def delete_orphans(
                 info = os.lstat(path)
             except OSError:
                 continue
-            if (stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and
-                    not DURABLE["is_reparse"](info)):
+            if (stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)):
                 safe_dirs.append(name)
         dirnames[:] = safe_dirs
         for name in filenames:
@@ -732,7 +727,7 @@ def delete_orphans(
                 continue
             if not DURABLE["safe_regular"](info):
                 # Cleanup owns only single-link regular artifact bodies.
-                # Symlinks, reparse points, hard links, devices, and sockets
+                # Symlinks, hard links, devices, and sockets
                 # are preserved without letting one planted entry abort safe
                 # cleanup elsewhere in the tree.
                 continue
@@ -761,26 +756,23 @@ def delete_orphans(
             if (not DURABLE["safe_regular"](after) or
                     not DURABLE["same_file"](before, after)):
                 fail("orphan changed before delete: %s" % relative)
-            if os.name == "nt":
-                os.unlink(path)
-            else:
-                parent = os.path.dirname(path)
-                parent_before = os.lstat(parent)
-                descriptor = os.open(
-                    parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                )
-                try:
-                    if not DURABLE["same_file"](parent_before, os.fstat(descriptor)):
-                        fail("orphan parent changed before delete: %s" % relative)
-                    anchored = os.stat(
-                        os.path.basename(path), dir_fd=descriptor,
-                        follow_symlinks=False)
-                    if (not DURABLE["safe_regular"](anchored) or
-                            not DURABLE["same_file"](before, anchored)):
-                        fail("orphan changed before anchored delete: %s" % relative)
-                    os.unlink(os.path.basename(path), dir_fd=descriptor)
-                finally:
-                    os.close(descriptor)
+            parent = os.path.dirname(path)
+            parent_before = os.lstat(parent)
+            descriptor = os.open(
+                parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                if not DURABLE["same_file"](parent_before, os.fstat(descriptor)):
+                    fail("orphan parent changed before delete: %s" % relative)
+                anchored = os.stat(
+                    os.path.basename(path), dir_fd=descriptor,
+                    follow_symlinks=False)
+                if (not DURABLE["safe_regular"](anchored) or
+                        not DURABLE["same_file"](before, anchored)):
+                    fail("orphan changed before anchored delete: %s" % relative)
+                os.unlink(os.path.basename(path), dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
         changed.append(relative)
     return changed, fresh
 

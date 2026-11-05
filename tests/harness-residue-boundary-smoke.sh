@@ -516,7 +516,7 @@ done
 python3 - "$ROOT/scripts/lib/harness-residue.sh" <<'PY'
 import ast, os, stat, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
-    source = handle.read().split("<<'PY' 2>/dev/null | tr -d '\\r'\n", 1)[1].split("\nPY\n", 1)[0]
+    source = handle.read().split("<<'PY' 2>/dev/null\n", 1)[1].split("\nPY\n", 1)[0]
 functions = [node for node in ast.walk(ast.parse(source))
              if isinstance(node, ast.FunctionDef) and node.name in ("regenerable", "bytecode")]
 scope = dict(os=os, stat=stat, has_type=lambda *args: True,
@@ -534,16 +534,15 @@ assert not accepted, accepted
 from contextlib import contextmanager
 from types import SimpleNamespace
 import hashlib
-fixture = dict(count=0, mode=stat.S_IFREG, size=0, mtime=0, attributes=0,
-               root_mode=stat.S_IFDIR, root_attributes=0)
+fixture = dict(count=0, mode=stat.S_IFREG, size=0, mtime=0,
+               root_mode=stat.S_IFDIR)
 @contextmanager
 def entries(path):
     yield (SimpleNamespace(name="entry%06d" % i) for i in range(fixture["count"]))
 def entry_info(where):
     return SimpleNamespace(st_mode=fixture["root_mode"] if where[2] == b"." else fixture["mode"],
                            st_size=0 if where[2] == b"." else fixture["size"],
-                           st_mtime_ns=0 if where[2] == b"." else fixture["mtime"],
-                           st_file_attributes=fixture["root_attributes"] if where[2] == b"." else fixture["attributes"])
+                           st_mtime_ns=0 if where[2] == b"." else fixture["mtime"])
 nodes = [node for node in ast.walk(ast.parse(source))
          if (isinstance(node, ast.FunctionDef) and node.name == "regenerable_tree")
          or (isinstance(node, ast.ClassDef) and node.name == "Unproven")]
@@ -579,25 +578,13 @@ for field in ("size", "mtime", "mode"):
     else:
         assert scan(b".venv") != before, field
     fixture[field] = original
-fixture["attributes"] = 0x400
-for mode in (stat.S_IFREG, stat.S_IFDIR):
-    fixture["mode"] = mode
-    try:
-        scan(b".venv")
-    except scan_scope["Unproven"] as error:
-        assert "regenerable tree holds unsafe entry" in str(error), error
-    else:
-        raise AssertionError("non-symlink reparse entry was accepted")
-fixture["attributes"] = 0
 fixture["mode"] = stat.S_IFLNK
-for attributes in (0, 0x400):
-    fixture["attributes"] = attributes
-    fixture["target"] = b"a"
-    before = scan(b".venv")
-    # Identical metadata and target length: only readlink bytes distinguish them.
-    for target in (b"b", b"../outside", os.fsencode(os.path.abspath("outside")), b"absent", b"\xff"):
-        fixture["target"] = target
-        assert scan(b".venv") != before, target
+fixture["target"] = b"a"
+before = scan(b".venv")
+# Identical metadata and target length: only readlink bytes distinguish them.
+for target in (b"b", b"../outside", os.fsencode(os.path.abspath("outside")), b"absent", b"\xff"):
+    fixture["target"] = target
+    assert scan(b".venv") != before, target
 def unreadable_link(*args, **kwargs):
     raise OSError("link changed while reading")
 scan_scope["os"].readlink = unreadable_link
@@ -607,7 +594,7 @@ except OSError:
     pass  # The evidence entry point converts read errors to an unproven result.
 else:
     raise AssertionError("unreadable link produced a proof")
-fixture["mode"], fixture["attributes"] = stat.S_IFREG, 0
+fixture["mode"] = stat.S_IFREG
 for mode in (stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK):
     fixture["mode"] = mode
     try:
@@ -617,7 +604,7 @@ for mode in (stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK):
     else:
         raise AssertionError("special entry was accepted")
 fixture["mode"] = stat.S_IFREG
-for field, value in (("root_mode", stat.S_IFREG), ("root_mode", stat.S_IFLNK), ("root_attributes", 0x400)):
+for field, value in (("root_mode", stat.S_IFREG), ("root_mode", stat.S_IFLNK)):
     original = fixture[field]
     fixture[field] = value
     try:

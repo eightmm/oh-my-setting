@@ -24,13 +24,13 @@ def same_file(left, right):
 
 
 def is_reparse(info):
-    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    return bool(flag and getattr(info, "st_file_attributes", 0) & flag)
+    """Compatibility predicate for callers sharing the POSIX writer helpers."""
+    return False
 
 
 def safe_regular(info):
     return (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode) and
-            not is_reparse(info) and info.st_nlink == 1)
+            info.st_nlink == 1)
 
 
 def physical_root(root, label="artifact index"):
@@ -39,8 +39,7 @@ def physical_root(root, label="artifact index"):
         info = os.lstat(candidate)
     except OSError as exc:
         fail("cannot inspect %s repository: %s" % (label, exc))
-    if (stat.S_ISLNK(info.st_mode) or is_reparse(info) or
-            not stat.S_ISDIR(info.st_mode)):
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)):
         fail("%s repository must be a real directory" % label)
     return candidate
 
@@ -54,8 +53,6 @@ def _inside(path, root):
 
 def _fsync_directory_path(path, label):
     """Persist a newly created child name where directory fsync exists."""
-    if os.name == "nt":
-        return
     descriptor = None
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
@@ -119,8 +116,7 @@ def canonical_repo_path(root, path, label="artifact index", create_parent=False)
                     fail("cannot inspect created %s parent: %s" % (label, exc))
             except OSError as exc:
                 fail("cannot inspect %s parent: %s" % (label, exc))
-            if (stat.S_ISLNK(info.st_mode) or is_reparse(info) or
-                    not stat.S_ISDIR(info.st_mode)):
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)):
                 fail("%s parent components must be real directories" % label)
             if created:
                 # The child directory itself will be fsynced when a leaf is
@@ -156,8 +152,7 @@ def component_snapshot(root, target, label="artifact index"):
             info = os.lstat(path)
         except OSError as exc:
             fail("cannot inspect %s component: %s" % (label, exc))
-        if (stat.S_ISLNK(info.st_mode) or is_reparse(info) or
-                not stat.S_ISDIR(info.st_mode)):
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)):
             fail("%s parent components must be real directories" % label)
         snapshot.append((path, info))
     return snapshot
@@ -169,8 +164,8 @@ def components_unchanged(snapshot, label="artifact index"):
             after = os.lstat(path)
         except OSError as exc:
             fail("%s parent changed: %s" % (label, exc))
-        if (stat.S_ISLNK(after.st_mode) or is_reparse(after) or
-                not stat.S_ISDIR(after.st_mode) or not same_file(before, after)):
+        if (stat.S_ISLNK(after.st_mode) or not stat.S_ISDIR(after.st_mode) or
+                not same_file(before, after)):
             fail("%s parent changed during mutation" % label)
 
 
@@ -190,29 +185,10 @@ def _read_descriptor(descriptor, limit, label):
 
 
 def _snapshot_matches(before, after, mixed_sources=False):
-    # CPython's native-Windows fstat reports metadata change time in st_ctime,
-    # while pathname stat preserves the legacy birth-time meaning there.  A
-    # direct ctime comparison therefore rejects the same NTFS inode.  Python
-    # 3.12+ exposes birth time explicitly on both results. Older supported
-    # Windows Pythons use birth time for ctime on both sources, so keep that
-    # fence; a one-sided birth-time field is an ambiguous snapshot and fails.
-    if os.name == "nt" and mixed_sources:
-        birth_before = getattr(before, "st_birthtime_ns", None)
-        birth_after = getattr(after, "st_birthtime_ns", None)
-        if birth_before is not None and birth_after is not None:
-            time_identity_matches = birth_before == birth_after
-        elif birth_before is None and birth_after is None:
-            time_identity_matches = (
-                getattr(before, "st_ctime_ns", None) ==
-                getattr(after, "st_ctime_ns", None)
-            )
-        else:
-            time_identity_matches = False
-    else:
-        time_identity_matches = (
-            getattr(before, "st_ctime_ns", None) ==
-            getattr(after, "st_ctime_ns", None)
-        )
+    time_identity_matches = (
+        getattr(before, "st_ctime_ns", None) ==
+        getattr(after, "st_ctime_ns", None)
+    )
     return (same_file(before, after) and before.st_size == after.st_size and
             getattr(before, "st_mtime_ns", None) == getattr(after, "st_mtime_ns", None) and
             time_identity_matches and after.st_nlink == 1)
@@ -231,65 +207,54 @@ def read_no_follow(root, path, label="artifact index", missing_ok=False,
         fail("%s does not exist" % label)
     except OSError as exc:
         fail("cannot inspect %s parent: %s" % (label, exc))
-    if (stat.S_ISLNK(parent_before.st_mode) or is_reparse(parent_before) or
+    if (stat.S_ISLNK(parent_before.st_mode) or
             not stat.S_ISDIR(parent_before.st_mode)):
         fail("%s parent must be a real directory" % label)
     ancestry = component_snapshot(root, target, label)
 
-    # POSIX anchors the leaf open to an already-open, no-follow parent. Native
-    # Windows has no dir_fd support, so it uses the pathname plus the same
-    # ancestry snapshot and named/opened-inode comparisons on both sides.
-    directory = None
-    if os.name != "nt":
-        parent_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                        getattr(os, "O_CLOEXEC", 0) |
-                        getattr(os, "O_NOFOLLOW", 0))
-        try:
-            directory = os.open(parent, parent_flags)
-        except OSError as exc:
-            fail("cannot anchor %s parent: %s" % (label, exc))
-        try:
-            anchored = os.fstat(directory)
-            if (not stat.S_ISDIR(anchored.st_mode) or is_reparse(anchored) or
-                    not same_file(parent_before, anchored)):
-                fail("%s parent changed before read" % label)
-        except BaseException:
-            os.close(directory)
-            raise
+    # Anchor the leaf open to an already-open, no-follow parent.
+    parent_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                    getattr(os, "O_CLOEXEC", 0) |
+                    getattr(os, "O_NOFOLLOW", 0))
+    try:
+        directory = os.open(parent, parent_flags)
+    except OSError as exc:
+        fail("cannot anchor %s parent: %s" % (label, exc))
+    try:
+        anchored = os.fstat(directory)
+        if (not stat.S_ISDIR(anchored.st_mode) or
+                not same_file(parent_before, anchored)):
+            fail("%s parent changed before read" % label)
+    except BaseException:
+        os.close(directory)
+        raise
     try:
         components_unchanged(ancestry, label)
     except BaseException:
-        if directory is not None:
-            os.close(directory)
+        os.close(directory)
         raise
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     # A FIFO swapped in after the caller's check would block this open; fstat
     # below rejects it, and regular-file reads ignore O_NONBLOCK.
     flags |= getattr(os, "O_NONBLOCK", 0)
     try:
-        if directory is None:
-            descriptor = os.open(target, flags)
-        else:
-            descriptor = os.open(name, flags, dir_fd=directory)
+        descriptor = os.open(name, flags, dir_fd=directory)
     except FileNotFoundError:
-        if directory is not None:
-            os.close(directory)
+        os.close(directory)
         if missing_ok:
             return b""
         fail("%s does not exist" % label)
     except OSError as exc:
-        if directory is not None:
-            os.close(directory)
+        os.close(directory)
         fail("cannot open %s safely: %s" % (label, exc))
     try:
         opened = os.fstat(descriptor)
         if not safe_regular(opened):
             fail("%s must be a regular non-symlink, non-hard-linked file" % label)
         try:
-            named = (os.lstat(target) if directory is None else
-                     os.stat(name, dir_fd=directory, follow_symlinks=False))
+            named = os.stat(name, dir_fd=directory, follow_symlinks=False)
         except OSError as exc:
             fail("%s pathname changed before read: %s" % (label, exc))
         if not safe_regular(named) or not same_file(opened, named):
@@ -297,8 +262,7 @@ def read_no_follow(root, path, label="artifact index", missing_ok=False,
         body = _read_descriptor(descriptor, max_bytes, label)
         after = os.fstat(descriptor)
         try:
-            named_after = (os.lstat(target) if directory is None else
-                           os.stat(name, dir_fd=directory, follow_symlinks=False))
+            named_after = os.stat(name, dir_fd=directory, follow_symlinks=False)
         except OSError as exc:
             fail("%s pathname changed during read: %s" % (label, exc))
         if (not safe_regular(named_after) or not same_file(after, named_after) or
@@ -308,8 +272,7 @@ def read_no_follow(root, path, label="artifact index", missing_ok=False,
         return body
     finally:
         os.close(descriptor)
-        if directory is not None:
-            os.close(directory)
+        os.close(directory)
 
 
 def _write_all(descriptor, data, label):
@@ -331,37 +294,28 @@ def atomic_mutate(path, transform, root, missing_ok=False, create_parent=False,
     name = os.path.basename(target)
     ancestry = component_snapshot(root, target, label)
 
-    # Native Windows Python cannot open or fsync directory descriptors. Its
-    # pathname branch retains the same component/leaf/CAS checks and uses a
-    # same-directory temp plus os.replace; POSIX additionally anchors every
-    # leaf operation to the already-open physical parent.
-    directory = None
-    if os.name != "nt":
-        try:
-            parent_before = os.lstat(parent)
-            directory = os.open(parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
-        except OSError as exc:
-            fail("cannot anchor %s parent: %s" % (label, exc))
-        anchored = os.fstat(directory)
-        if (stat.S_ISLNK(parent_before.st_mode) or is_reparse(parent_before) or
-                not same_file(parent_before, anchored)):
-            os.close(directory)
-            fail("%s parent changed before mutation" % label)
+    # Anchor every leaf operation to the already-open physical parent.
+    try:
+        parent_before = os.lstat(parent)
+        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        fail("cannot anchor %s parent: %s" % (label, exc))
+    anchored = os.fstat(directory)
+    if (stat.S_ISLNK(parent_before.st_mode) or
+            not same_file(parent_before, anchored)):
+        os.close(directory)
+        fail("%s parent changed before mutation" % label)
 
     temp_name = ""
-    temp_path = ""
     temp_exists = False
     try:
         before = None
         descriptor = None
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
             try:
-                if directory is None:
-                    descriptor = os.open(target, flags)
-                else:
-                    descriptor = os.open(name, flags, dir_fd=directory)
+                descriptor = os.open(name, flags, dir_fd=directory)
             except FileNotFoundError:
                 if not missing_ok:
                     fail("%s does not exist" % label)
@@ -402,14 +356,11 @@ def atomic_mutate(path, transform, root, missing_ok=False, create_parent=False,
         if before is not None:
             if (stat.S_IMODE(before.st_mode) & 0o222) == 0:
                 fail("%s is not writable" % label)
-            probe_flags = (os.O_WRONLY | getattr(os, "O_BINARY", 0) |
+            probe_flags = (os.O_WRONLY |
                            getattr(os, "O_CLOEXEC", 0) |
                            getattr(os, "O_NOFOLLOW", 0))
             try:
-                if directory is None:
-                    probe = os.open(target, probe_flags)
-                else:
-                    probe = os.open(name, probe_flags, dir_fd=directory)
+                probe = os.open(name, probe_flags, dir_fd=directory)
             except OSError as exc:
                 fail("cannot open %s for a non-truncating write probe: %s" %
                      (label, exc))
@@ -422,14 +373,10 @@ def atomic_mutate(path, transform, root, missing_ok=False, create_parent=False,
 
         components_unchanged(ancestry, label)
         temp_name = ".%s.tmp.%d.%s" % (name, os.getpid(), uuid.uuid4().hex)
-        temp_path = os.path.join(parent, temp_name)
-        write_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        write_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         write_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            if directory is None:
-                temp_descriptor = os.open(temp_path, write_flags, 0o600)
-            else:
-                temp_descriptor = os.open(temp_name, write_flags, 0o600, dir_fd=directory)
+            temp_descriptor = os.open(temp_name, write_flags, 0o600, dir_fd=directory)
             temp_exists = True
         except OSError as exc:
             fail("cannot create %s temp safely: %s" % (label, exc))
@@ -447,8 +394,7 @@ def atomic_mutate(path, transform, root, missing_ok=False, create_parent=False,
         components_unchanged(ancestry, label)
         # Compare the named leaf to the snapshot immediately before replace.
         try:
-            named = (os.lstat(target) if directory is None else
-                     os.stat(name, dir_fd=directory, follow_symlinks=False))
+            named = os.stat(name, dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError:
             named = None
         except OSError as exc:
@@ -460,29 +406,21 @@ def atomic_mutate(path, transform, root, missing_ok=False, create_parent=False,
               not _snapshot_matches(before, named, mixed_sources=True)):
             fail("%s pathname changed before replace" % label)
 
-        if directory is None:
-            os.replace(temp_path, target)
-        else:
-            os.replace(temp_name, name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.replace(temp_name, name, src_dir_fd=directory, dst_dir_fd=directory)
         temp_exists = False
-        if directory is not None:
-            try:
-                os.fsync(directory)
-            except OSError as exc:
-                if exc.errno not in (errno.EBADF, errno.EINVAL, errno.ENOTSUP):
-                    raise
+        try:
+            os.fsync(directory)
+        except OSError as exc:
+            if exc.errno not in (errno.EBADF, errno.EINVAL, errno.ENOTSUP):
+                raise
         return new
     finally:
         if temp_exists:
             try:
-                if directory is None:
-                    os.unlink(temp_path)
-                else:
-                    os.unlink(temp_name, dir_fd=directory)
+                os.unlink(temp_name, dir_fd=directory)
             except OSError:
                 pass
-        if directory is not None:
-            os.close(directory)
+        os.close(directory)
 
 
 def checked_parent(path, label=None):
@@ -516,61 +454,6 @@ def check_existing(path, missing_ok, label="progress.jsonl"):
         fail("%s must be a regular non-symlink file" % label)
 
 
-def _append_windows(target, parent, data, label, capture):
-    """Pathname implementation for native Windows (no directory handles)."""
-    try:
-        parent_before = os.lstat(parent)
-    except OSError as exc:
-        fail("cannot inspect %s parent: %s" % (label, exc))
-    if (stat.S_ISLNK(parent_before.st_mode) or is_reparse(parent_before) or
-            not stat.S_ISDIR(parent_before.st_mode)):
-        fail("%s parent must be a real directory" % label)
-    check_existing(target, True, label)
-    access = os.O_RDWR if capture else os.O_WRONLY
-    flags = access | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(target, flags, 0o600)
-    except OSError as exc:
-        fail("cannot open %s safely: %s" % (label, exc))
-    contents = None
-    try:
-        opened = os.fstat(descriptor)
-        if not safe_regular(opened):
-            fail("%s must be a regular non-symlink, non-hard-linked file" % label)
-        if opened.st_size > MAX_FILE_BYTES - len(data):
-            fail("%s exceeds the %d-byte durable evidence limit" %
-                 (label, MAX_FILE_BYTES))
-        try:
-            parent_named = os.lstat(parent)
-            named_before = os.lstat(target)
-        except OSError as exc:
-            fail("%s pathname changed before append: %s" % (label, exc))
-        if (stat.S_ISLNK(parent_named.st_mode) or is_reparse(parent_named) or
-                not same_file(parent_before, parent_named) or
-                not safe_regular(named_before) or not same_file(opened, named_before)):
-            fail("%s pathname changed before append" % label)
-        written = os.write(descriptor, data)
-        if written != len(data):
-            fail("%s append was short" % label)
-        os.fsync(descriptor)
-        try:
-            parent_after = os.lstat(parent)
-            named_after = os.lstat(target)
-        except OSError as exc:
-            fail("%s pathname changed during append: %s" % (label, exc))
-        if (stat.S_ISLNK(parent_after.st_mode) or is_reparse(parent_after) or
-                not same_file(parent_before, parent_after) or
-                not safe_regular(named_after) or not same_file(opened, named_after)):
-            fail("%s pathname changed during append" % label)
-        if capture:
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            contents = _read_descriptor(descriptor, MAX_FILE_BYTES, label)
-    finally:
-        os.close(descriptor)
-    return contents
-
-
 def append(path, data, label="progress.jsonl", capture=False):
     if (not label or len(label) > 80 or
             any(char in label for char in "\r\n\t")):
@@ -582,8 +465,6 @@ def append(path, data, label="progress.jsonl", capture=False):
 
     target, parent = checked_parent(path, label)
     basename = os.path.basename(target)
-    if os.name == "nt":
-        return _append_windows(target, parent, data, label, capture)
     try:
         parent_before = os.lstat(parent)
     except OSError as exc:
@@ -613,7 +494,7 @@ def append(path, data, label="progress.jsonl", capture=False):
     # the write cannot escape to a replacement pathname or symlink target.
     check_existing(target, True, label)
     access = os.O_RDWR if capture else os.O_WRONLY
-    flags = access | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    flags = access | os.O_APPEND | os.O_CREAT
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(basename, flags, 0o600)
@@ -703,42 +584,6 @@ def write(path, data, label=None, max_bytes=MAX_ROW_BYTES):
         if label:
             fail("%s must be 1..%d bytes" % (label, max_bytes))
         fail("durable body must be 1..%d bytes" % max_bytes)
-    if os.name == "nt":
-        try:
-            parent_before = os.lstat(parent)
-        except OSError as exc:
-            fail("cannot inspect %s parent: %s" % (display, exc))
-        if (stat.S_ISLNK(parent_before.st_mode) or is_reparse(parent_before) or
-                not stat.S_ISDIR(parent_before.st_mode)):
-            fail("%s parent must be a real directory" % display)
-        tmp_name = ".%s.tmp.%d.%s" % (name, os.getpid(), uuid.uuid4().hex)
-        tmp_path = os.path.join(parent, tmp_name)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(tmp_path, flags, 0o600)
-        except OSError as exc:
-            fail("cannot create %s temp safely: %s" % (display, exc))
-        try:
-            try:
-                _write_all(descriptor, data, display)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            parent_after = os.lstat(parent)
-            if (stat.S_ISLNK(parent_after.st_mode) or is_reparse(parent_after) or
-                    not same_file(parent_before, parent_after)):
-                fail("%s parent changed before write" % display)
-            os.replace(tmp_path, target)
-            tmp_path = ""
-        except BaseException:
-            try:
-                if tmp_path:
-                    os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-        return
     try:
         parent_before = os.lstat(parent)
     except OSError as exc:
@@ -754,7 +599,7 @@ def write(path, data, label=None, max_bytes=MAX_ROW_BYTES):
         os.close(directory)
         fail("%s parent changed before write" % display)
     tmp_name = ".%s.tmp.%d" % (name, os.getpid())
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(tmp_name, flags, 0o600)
@@ -769,9 +614,6 @@ def write(path, data, label=None, max_bytes=MAX_ROW_BYTES):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        # os.replace, not os.rename: POSIX rename already overwrites, but on
-        # Windows os.rename refuses an existing destination — and this path's
-        # whole job is replacing a ledger that exists.
         os.replace(tmp_name, name)
     except BaseException:
         try:

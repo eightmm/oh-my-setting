@@ -169,7 +169,7 @@ def refuse(reason):
 if mode not in ("strict", "diff-read"):
     refuse("unknown inspection mode")
 
-# Keep the trusted runtime environment (including Windows DLL lookup), but no
+# Keep the trusted runtime environment, but no
 # inherited Git configuration, tracing, discovery redirects or command hooks.
 git = shutil.which("git")
 if not git:
@@ -456,9 +456,9 @@ oms_git_execution_state_snapshot() {  # REPO OUT [config-only]
   worktree_dir="${worktree_dir//$'\r'/}"
   index_path="${index_path//$'\r'/}"
   [ -n "$common_dir" ] && [ -n "$worktree_dir" ] && [ -n "$index_path" ] || return 2
-  case "$common_dir" in /*|[A-Za-z]:/*) ;; *) common_dir="$root/$common_dir" ;; esac
-  case "$worktree_dir" in /*|[A-Za-z]:/*) ;; *) worktree_dir="$root/$worktree_dir" ;; esac
-  case "$index_path" in /*|[A-Za-z]:/*) ;; *) index_path="$root/$index_path" ;; esac
+  case "$common_dir" in /*) ;; *) common_dir="$root/$common_dir" ;; esac
+  case "$worktree_dir" in /*) ;; *) worktree_dir="$root/$worktree_dir" ;; esac
+  case "$index_path" in /*) ;; *) index_path="$root/$index_path" ;; esac
   common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || return 2
   worktree_dir="$(cd "$worktree_dir" 2>/dev/null && pwd -P)" || return 2
   paths="$common_dir/config
@@ -1505,7 +1505,6 @@ oms_worker_gitmeta_receipts_assert_unchanged() {  # BEFORE_DIR EXPECTED_SHA
     return 2
   fi
   actual="$(oms_worker_gitmeta_receipts_fingerprint "$1")" || actual=""
-  actual="${actual//$'\r'/}"
   if [ "$actual" != "$expected" ]; then
     echo 'error: gitmeta receipt inventory changed or invalid' >&2
     return 2
@@ -2988,7 +2987,7 @@ oms_worker_worktree_identity_capture() {  # REPO WORKTREE
       ;;
   esac
   case "$gitfile_target" in
-    /*|[A-Za-z]:/*) ;;
+    /*) ;;
     *) gitfile_target="$worker_tree/$gitfile_target" ;;
   esac
   gitfile_target_physical="$(
@@ -3038,7 +3037,7 @@ oms_worker_worktree_identity_capture() {  # REPO WORKTREE
       ;;
   esac
   case "$backpointer_parent" in
-    /*|[A-Za-z]:/*) ;;
+    /*) ;;
     *) backpointer_parent="$git_dir/$backpointer_parent" ;;
   esac
   backpointer_physical="$(
@@ -3072,10 +3071,6 @@ PY
     OMS_WORKER_IDENTITY_DETAIL="delegated worktree inode identity could not be read"
     return 1
   fi
-  # Native Windows Python writes CRLF, and the same worktree can have more than
-  # one path spelling. Paths were canonicalized above; strip CR only from this
-  # compact device/inode receipt before comparing it across provider phases.
-  identity_stats="${identity_stats//$'\r'/}"
   identity_tab="$(printf '\t')"
   case "$identity_stats" in
     *"$identity_tab"*) ;;
@@ -3607,12 +3602,11 @@ oms_worker_surface_boundary_fingerprint() {  # REPO
   common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)" || return 1
   common="${common//$'\r'/}"
   case "$common" in
-    /*|[A-Za-z]:/*) ;;
+    /*) ;;
     *) common="$repo/$common" ;;
   esac
   [ -d "$common" ] || return 1
   common="$(cd "$common" && pwd -P)" || return 1
-  common="${common//$'\r'/}"
   OMS_WG_REPO="$repo" OMS_WG_COMMON="$common" \
     python3 -I -B - "$OMS_GIT_INDEX_SIGNATURE_PY" <<'PY'
 import hashlib, os, stat, subprocess, sys
@@ -3993,7 +3987,6 @@ oms_worker_surface_snapshot() {
       OMS_WG_SNAPSHOT_ERROR="could not fingerprint refs and worktree registrations"
       return 1
     }
-    before="${before//$'\r'/}"
     if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" = 1 ] && [ -n "${OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT:-}" ]; then
       printf 'capture\n' >> "$OMS_TEST_WG_SNAPSHOT_CAPTURE_COUNT" || {
         OMS_WG_SNAPSHOT_ERROR="could not record worker guard test capture count"
@@ -4022,7 +4015,6 @@ oms_worker_surface_snapshot() {
       OMS_WG_SNAPSHOT_ERROR="could not fingerprint refs and worktree registrations"
       return 1
     }
-    after="${after//$'\r'/}"
     if [ "$before" = "$after" ]; then
       OMS_WG_SNAPSHOT_ERROR=""
       return 0

@@ -43,7 +43,6 @@ oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
 
   [ -d "$dir" ] || return 0
   process_start="$(oms_file_lock_process_start_token "$owner_pid" 2>/dev/null || true)"
-  process_start="${process_start//$'\r'/}"
   {
     printf 'kind=oh-my-setting-temp\n'
     printf 'pid=%s\n' "$owner_pid"
@@ -65,7 +64,6 @@ oms_harness_marker_owner_alive() {  # MARKER
   marker_start="${marker_start//$'\r'/}"
   [ -n "$marker_start" ] || return 0
   current_start="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
-  current_start="${current_start//$'\r'/}"
   [ -z "$current_start" ] || [ "$current_start" = "$marker_start" ]
 }
 
@@ -78,7 +76,7 @@ oms_harness_physical_dir() {
 
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   physical="$(cd "$dir" && pwd -P)" || return 1
-  printf '%s\n' "${physical//$'\r'/}"
+  printf '%s\n' "$physical"
 }
 
 oms_harness_residue_parent() {  # WORKTREE -> residue parent
@@ -110,12 +108,12 @@ oms_harness_git_path_physical() {
   raw="${raw//$'\r'/}"
   [ -n "$raw" ] || return 1
   case "$raw" in
-    /*|[A-Za-z]:/*) candidate="$raw" ;;
+    /*) candidate="$raw" ;;
     *) candidate="$repo/$raw" ;;
   esac
   [ -d "$candidate" ] || return 1
   physical="$(cd "$candidate" && pwd -P)" || return 1
-  printf '%s\n' "${physical//$'\r'/}"
+  printf '%s\n' "$physical"
 }
 
 OMS_HARNESS_SAFE_RESIDUE_REPO=""
@@ -212,7 +210,7 @@ OMS_HARNESS_RESIDUE_LISTING_DIR=""
 # tree, and the worktree is read directly, never through a link.
 oms_harness_residue_evidence() {  # MODE REPO WORKTREE PID
   OMS_HARNESS_RESIDUE_LISTING_DIR="$OMS_HARNESS_RESIDUE_LISTING_DIR" \
-    python3 -B - "$OMS_HARNESS_RESIDUE_LIB_DIR" "$@" <<'PY' 2>/dev/null | tr -d '\r'
+    python3 -B - "$OMS_HARNESS_RESIDUE_LIB_DIR" "$@" <<'PY' 2>/dev/null
 import hashlib, json, os, re, runpy, shutil, stat, subprocess, sys, tempfile
 lib, mode, repo, wt, pid = sys.argv[1:6]
 aged_days = os.environ.get("OMS_HARNESS_RESIDUE_AGED_DAYS") or "7"
@@ -269,8 +267,7 @@ try:
         # the previous directory descriptor with O_NOFOLLOW, so a parent swapped
         # for a link mid-walk cannot redirect the read. Returns (fd, dir, name),
         # None when a parent is absent, or OTHER when a link or file stands where
-        # a directory belongs. Without descriptor support (Windows) the parents
-        # are lstat-checked instead, rejecting links and reparse points.
+        # a directory belongs.
         parts = path.split(b"/")
         if anchored:
             fd = os.open(wtb, os.O_RDONLY | os.O_DIRECTORY | nofollow)
@@ -296,8 +293,7 @@ try:
                 info = os.lstat(cur)
             except FileNotFoundError:
                 return None
-            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                    or getattr(info, "st_file_attributes", 0) & 0x400):
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                 return OTHER
         return (None, cur, parts[-1])
 
@@ -316,14 +312,12 @@ try:
                 st = entry_stat(where)
             except FileNotFoundError:
                 return None
-            if getattr(st, "st_file_attributes", 0) & 0x400 and not stat.S_ISLNK(st.st_mode):
-                return OTHER
             if stat.S_ISLNK(st.st_mode):
                 target = os.readlink(name, dir_fd=fd) if fd is not None else os.readlink(os.path.join(cur, name))
                 return blob(b"120000", os.fsencode(target))
             if not stat.S_ISREG(st.st_mode):
                 return OTHER
-            flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
+            flags = os.O_RDONLY | nofollow
             handle = os.open(name, flags, dir_fd=fd) if fd is not None else os.open(os.path.join(cur, name), flags)
             try:
                 if not stat.S_ISREG(os.fstat(handle).st_mode):
@@ -368,7 +362,7 @@ try:
         try:
             try:
                 info = entry_stat(where)
-                return predicate(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400
+                return predicate(info.st_mode)
             except OSError:
                 return False
         finally:
@@ -415,7 +409,7 @@ try:
             fd, cur, name = where
             try:
                 info = entry_stat(where)
-                if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                if not stat.S_ISDIR(info.st_mode):
                     raise Unproven("regenerable tree holds unsafe entry %s" % os.fsdecode(directory))
                 if directory == root:
                     entries.append((root, (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)))
@@ -433,8 +427,7 @@ try:
                         info = entry_stat((fd, parent, leaf))
                         is_dir = stat.S_ISDIR(info.st_mode)
                         is_link = stat.S_ISLNK(info.st_mode)
-                        if (not (is_dir or is_link or stat.S_ISREG(info.st_mode))
-                                or getattr(info, "st_file_attributes", 0) & 0x400 and not is_link):
+                        if not (is_dir or is_link or stat.S_ISREG(info.st_mode)):
                             raise Unproven("regenerable tree holds unsafe entry %s" % os.fsdecode(path))
                         fields = (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)
                         if is_link:
@@ -1024,7 +1017,7 @@ native_proven = liveness["persisted_native_pid_is_proven"]
 marker_dir = os.path.join(repo, ".oms", "delegations")
 safe_name = re.compile(r"^[A-Za-z0-9._-]+\.json$")
 limit = 64 * 1024
-flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+flags = os.O_RDONLY
 flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
 info = os.lstat(marker_dir)

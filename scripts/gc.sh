@@ -548,7 +548,6 @@ delegation_marker_gc() {  # MARKER
   snapshot_rc=0
   snapshot="$(oms_with_file_lock "$delegation_set_lock" \
     delegation_marker_snapshot "$marker")" || snapshot_rc=$?
-  snapshot="${snapshot//$'\r'/}"
   if [ "$snapshot_rc" -ne 0 ]; then
     echo "warning: gc: unproven delegation marker kept after parser failure: $marker" >&2
     return 0
@@ -583,11 +582,10 @@ EOF
     # message only while the plan store itself is readable.
     if [ "$plan_show_rc" -ne 0 ] && [ -n "$plan_show_err" ] &&
         [ -r "$STATE_ROOT/.oms/plan/tasks.json" ] &&
-        [ "$(tr -d '\r' < "$plan_show_err")" = "error: no such task: $task_id" ]; then
+        [ "$(cat "$plan_show_err")" = "error: no such task: $task_id" ]; then
       plan_task_absent=1
     fi
     [ -z "$plan_show_err" ] || rm -f "$plan_show_err"
-    task_info="${task_info//$'\r'/}"
     task_state="$(printf '%s' "$task_info" | cut -f1)"
     task_lease="$(printf '%s' "$task_info" | cut -f2)"
     if [ "$plan_task_absent" -eq 1 ]; then
@@ -610,7 +608,6 @@ EOF
             plan_recovery_rc=0
             plan_recovery_out="$(OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-plan.sh" \
               "${recovery_args[@]}" 2>&1)" || plan_recovery_rc=$?
-            plan_recovery_out="${plan_recovery_out//$'\r'/}"
             if [ "$plan_recovery_rc" -eq 0 ]; then
               printf -- '- orphan-delegation-plan: task %s (%s) -> ready\n' "$task_id" "$task_state"
             else
@@ -652,7 +649,6 @@ delegation_dir="$OMS/delegations"
 delegation_dir_rc=0
 delegation_names="$(oms_with_file_lock "$delegation_set_lock" \
   delegation_marker_names_locked "$delegation_dir")" || delegation_dir_rc=$?
-delegation_names="${delegation_names//$'\r'/}"
 case "$delegation_dir_rc" in
   0)
     while IFS= read -r delegation_name; do
@@ -762,7 +758,6 @@ delegations_quiescent() {
 
   marker_names_rc=0
   marker_names="$(delegation_marker_names_locked "$delegation_dir" strict)" || marker_names_rc=$?
-  marker_names="${marker_names//$'\r'/}"
   case "$marker_names_rc" in
     0) ;;
     1) marker_names="" ;;
@@ -772,7 +767,6 @@ delegations_quiescent() {
     [ -n "$marker_name" ] || continue
     marker_rc=0
     marker_snapshot="$(delegation_marker_snapshot "$delegation_dir/$marker_name")" || marker_rc=$?
-    marker_snapshot="${marker_snapshot//$'\r'/}"
     [ "$marker_rc" -eq 0 ] || return 21
     marker_state="${marker_snapshot%%$'\t'*}"
     [ "$marker_state" = dead ] || return 22
@@ -788,7 +782,6 @@ hook_state_cleanup_locked() {
   removed_before="$removed"
   if [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; then
     hook_counts="$(compact_hook_events "$hook_events" "$cutoff_epoch" "$((1 - DRY_RUN))")" || return 30
-    hook_counts="${hook_counts//$'\r'/}"
     hook_before="$(printf '%s' "$hook_counts" | cut -f1)"
     hook_after="$(printf '%s' "$hook_counts" | cut -f2)"
     case "$hook_before" in *[!0-9]*|"") return 31 ;; esac
@@ -806,7 +799,6 @@ hook_state_cleanup_locked() {
       fi
       hook_mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' \
         "$hook_session" 2>/dev/null || true)"
-      hook_mtime="${hook_mtime//$'\r'/}"
       case "$hook_mtime" in *[!0-9]*|"") continue ;; esac
       [ "$hook_mtime" -lt "$cutoff_epoch" ] || continue
       note_remove "hook-session" "$hook_session"
@@ -1004,7 +996,6 @@ dispatch_logs_gc_plan_lock() {
 if [ -d "$OMS/panel-state/dispatch-logs" ]; then
   dispatch_gc_status=0
   dispatch_gc_out="$(oms_try_file_lock "$delegation_set_lock" dispatch_logs_gc_plan_lock)" || dispatch_gc_status=$?
-  dispatch_gc_out="${dispatch_gc_out//$'\r'/}"
   case "$dispatch_gc_status" in
     0)
       if [ -n "$dispatch_gc_out" ]; then

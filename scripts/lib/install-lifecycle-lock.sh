@@ -4,7 +4,7 @@
 # One user-wide mutation lock for the canonical install lifecycle. It is a
 # mkdir lock even where flock exists: install.sh must carry ownership across an
 # exec into a freshly cloned checkout, and a file descriptor is not a portable
-# cross-exec contract on Bash 3.2 and Windows Git Bash.
+# cross-exec contract on Bash 3.2.
 
 case "${BASH_SOURCE[0]}" in
   */*) OMS_INSTALL_LIFECYCLE_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)" ;;
@@ -58,32 +58,24 @@ oms_install_lifecycle_lock_current_identity() {
     # macOS e2e leak). Modern Bash happens to exec substitutions anyway,
     # which is why only real 3.2 hosts saw it.
     pid="$(exec sh -c 'printf "%s\n" "$PPID"' 2>/dev/null)" || pid=""
-    pid="${pid//$'\r'/}"
     [ -n "$pid" ] || return 75
   fi
   case "$pid" in
     *[!0-9]*|"") return 75 ;;
   esac
   process_start="$(oms_install_lifecycle_lock_process_start "$pid")"
-  process_start="${process_start//$'\r'/}"
   OMS_INSTALL_LIFECYCLE_CURRENT_PID="$pid"
   OMS_INSTALL_LIFECYCLE_CURRENT_PID_START="$process_start"
 }
 
 # A live PID can be reused after a crash. Record a start token when the host
 # exposes one; otherwise the random owner token and live-PID rule remain the
-# portable fallback. /proc covers Linux and ps covers BSD/macOS. Git Bash
-# emulates exec across Windows processes, so PID alone is its stable contract.
+# portable fallback. /proc covers Linux and ps covers BSD/macOS.
 oms_install_lifecycle_lock_process_start() {
   local pid="$1"
   local line=""
   local rest=""
   local value=""
-
-  oms_lock_kernel
-  case "$OMS_LOCK_KERNEL" in
-    MINGW*|MSYS*|CYGWIN*) return 0 ;;
-  esac
 
   if [ -r "/proc/$pid/stat" ]; then
     IFS= read -r line < "/proc/$pid/stat" || line=""
@@ -171,7 +163,6 @@ oms_install_lifecycle_recovery_claim_stale() {  # CLAIM TIMEOUT NOW
       fi
       if [ -n "$pid_start" ]; then
         actual_start="$(oms_install_lifecycle_lock_process_start "$pid")"
-        actual_start="${actual_start//$'\r'/}"
         [ -n "$actual_start" ] && [ "$actual_start" != "$pid_start" ]
         return $?
       fi
@@ -296,7 +287,6 @@ oms_install_lifecycle_lock_borrow_from_parent() {
   kill -0 "$recorded_pid" 2>/dev/null || return 1
   if [ -n "$recorded_pid_start" ]; then
     actual_pid_start="$(oms_install_lifecycle_lock_process_start "$recorded_pid")"
-    actual_pid_start="${actual_pid_start//$'\r'/}"
     [ -n "$actual_pid_start" ] || return 1
     [ "$recorded_pid_start" = "$actual_pid_start" ] || return 1
   fi
@@ -395,7 +385,6 @@ oms_install_lifecycle_lock_mkdir_acquire() {
         else
           if [ -n "$recorded_pid_start" ]; then
             actual_pid_start="$(oms_install_lifecycle_lock_process_start "$recorded_pid")"
-            actual_pid_start="${actual_pid_start//$'\r'/}"
             if [ -n "$actual_pid_start" ] &&
                [ "$recorded_pid_start" != "$actual_pid_start" ]; then
               stale=1

@@ -24153,7 +24153,7 @@ test_delegation_liveness_in_state() {
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
   local gc_err="$project/gc.err"
-  local room_kind hook_project hook_case before after rc lock_mode lock_force_mkdir lock_target holder_pid python_real python_crlf_dir
+  local room_kind hook_project hook_case before after rc lock_mode lock_force_mkdir lock_target holder_pid python_real
 
   gc_hook_digest() {
     python3 -c 'import hashlib,sys
@@ -24177,31 +24177,6 @@ os.utime(sys.argv[1], (1, 1))
 PY
   }
 
-  python_real="$(command -v python3)"
-  python_crlf_dir="$TMP/gc-python-crlf"
-  mkdir -p "$python_crlf_dir"
-  cat > "$python_crlf_dir/python3" <<'PYTHON'
-#!/usr/bin/env bash
-if [ "$#" -ge 3 ] && [ "$1" = "-c" ] && [ "$3" = "$CRLF_SESSION" ]; then
-  case "$2" in
-    *getmtime*)
-      value="$("$REAL_PYTHON" "$@")" || exit $?
-      printf '%s\r\n' "$value"
-      exit 0
-      ;;
-  esac
-fi
-exec "$REAL_PYTHON" "$@"
-PYTHON
-  chmod +x "$python_crlf_dir/python3"
-  gc_run_crlf() {
-    local gc_project="$1"
-    shift
-    ( cd "$gc_project" && REAL_PYTHON="$python_real" \
-      CRLF_SESSION="$gc_project/.oms/hooks/sessions/old.json" \
-      PATH="$python_crlf_dir:$PATH" "$ROOT/scripts/gc.sh" "$@" )
-  }
-
   make_committed_repo "$project"
   mkdir -p "$project/.oms/delegations" "$project/.oms/task/archive" "$project/.oms/runs/oldrun"
   printf '{"schema":1,"id":"d1","pid":999999,"state":"running"}\n' > "$project/.oms/delegations/d1.json"
@@ -24222,13 +24197,13 @@ PY
 
   # Dry-run changes nothing.
   before="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
-  gc_run_crlf "$project" --days 30 >/dev/null 2>&1
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 ) >/dev/null 2>&1
   after="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
   [ "$before" = "$after" ] || fail "gc dry-run must preserve hook bytes"
   [ -f "$project/.oms/delegations/d1.json" ] || fail "dry-run must not delete anything"
   # Apply reclaims the orphan/old, keeps the live delegation.
   before="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
-  gc_run_crlf "$project" --days 0 --apply >/dev/null 2>"$gc_err"
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 0 --apply ) >/dev/null 2>"$gc_err"
   after="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
   [ "$before" = "$after" ] || fail "verified live PID marker must preserve hook bytes"
   grep -Fq 'hook cleanup skipped' "$gc_err" || fail "live marker should defer hook cleanup: $(cat "$gc_err")"
@@ -25086,7 +25061,8 @@ PYPINS
       esac
     fi
     before="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
-    gc_run_crlf "$hook_project" --days 0 --apply >"$hook_project/gc.out" 2>"$hook_project/gc.err" ||
+    ( cd "$hook_project" && "$ROOT/scripts/gc.sh" --days 0 --apply ) \
+      >"$hook_project/gc.out" 2>"$hook_project/gc.err" ||
       fail "hook cleanup fixture failed for $hook_case: $(cat "$hook_project/gc.err")"
     if [ "$hook_case" = no-marker ] || [ "$hook_case" = dead ]; then
       [ ! -e "$hook_project/.oms/hooks/sessions/old.json" ] || fail "$hook_case marker case should remove old session"
@@ -25536,8 +25512,7 @@ test_gc_dead_marker_cannot_release_live_same_lease() {
     fail "gc removed the live retry marker"
 }
 
-test_process_liveness_uses_non_destructive_windows_probe() {
-  local project native_pid rc=0 plan lease
+test_process_liveness_uses_non_destructive_posix_probe() {
   for producer in "$ROOT/scripts/autopilot.sh" "$ROOT/scripts/peer-delegate.sh"; do
     grep -Fq 'oms_process_native_pid "$$"' "$producer" ||
       fail "$(basename "$producer") bypassed the shared native pid resolver"
@@ -25548,8 +25523,6 @@ test_process_liveness_uses_non_destructive_windows_probe() {
   if ! python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
 import importlib.util
 import errno
-import os
-import subprocess
 import sys
 
 path = sys.argv[1]
@@ -25574,53 +25547,6 @@ with patch.object(module.Path, "read_text", side_effect=PermissionError):
     else:
         raise AssertionError("unreadable stat must reach the caller's fallback")
 
-class Function:
-    def __init__(self, result):
-        self.result = result
-        self.calls = []
-    def __call__(self, *args):
-        self.calls.append(args)
-        return self.result
-
-class Kernel:
-    def __init__(self, handle, wait):
-        self.OpenProcess = Function(handle)
-        self.WaitForSingleObject = Function(wait)
-        self.CloseHandle = Function(1)
-
-def probe(handle, wait, error, native_pid=654):
-    kernel = Kernel(handle, wait)
-    def forbidden_kill(_pid, _signal):
-        raise AssertionError("Windows liveness must never call os.kill(pid, 0)")
-    alive = module.pid_alive(
-        321, native_pid=native_pid, os_name="nt", kernel32=kernel,
-        get_last_error=lambda: error, posix_kill=forbidden_kill,
-    )
-    valid_native = (isinstance(native_pid, int)
-                    and not isinstance(native_pid, bool)
-                    and 0 < native_pid <= 0xffffffff)
-    if valid_native:
-        assert kernel.OpenProcess.calls == [(module.SYNCHRONIZE, False, native_pid)]
-    else:
-        assert kernel.OpenProcess.calls == []
-    if handle and valid_native:
-        assert kernel.WaitForSingleObject.calls == [(handle, 0)]
-        assert kernel.CloseHandle.calls == [(handle,)]
-    else:
-        assert kernel.WaitForSingleObject.calls == []
-        assert kernel.CloseHandle.calls == []
-    return alive
-
-assert probe(41, module.WAIT_TIMEOUT, 0) is True
-assert probe(42, module.WAIT_OBJECT_0, 0) is False
-assert probe(43, module.WAIT_FAILED, 0) is True
-assert probe(0, module.WAIT_FAILED, module.ERROR_INVALID_PARAMETER) is False
-assert probe(0, module.WAIT_FAILED, module.ERROR_ACCESS_DENIED) is True
-# A Git Bash/MSYS pid is not a Win32 pid. Legacy, missing, or untyped native
-# identity can never prove death on Windows and must not reach OpenProcess.
-for missing in (None, 0, -1, True, "654", 0x100000000):
-    assert probe(0, module.WAIT_FAILED, module.ERROR_INVALID_PARAMETER, missing) is True
-
 posix_calls = []
 assert module.pid_alive(
     321, native_pid=654, os_name="posix",
@@ -25631,98 +25557,10 @@ assert module.pid_alive(1 << 100, os_name="posix") is True
 def ambiguous_kill(_pid, _signal):
     raise OSError(errno.EINVAL, "ambiguous")
 assert module.pid_alive(321, os_name="posix", posix_kill=ambiguous_kill) is True
-
-if os.name == "nt":
-    assert module.pid_alive(123, native_pid=os.getpid()) is True
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
-    dead_pid = child.pid
-    child.wait(timeout=10)
-    assert module.pid_alive(123, native_pid=dead_pid) is False
 PY
   then
-    fail "Windows process liveness probe contract failed"
+    fail "POSIX process liveness probe contract failed"
   fi
-
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      project="$TMP/windows-native-pid-recovery"
-      make_committed_repo "$project"
-      python3 -c 'import os; assert os.name == "nt", os.name' ||
-        fail "Git Bash test did not use native Windows Python"
-      [ -r "/proc/$$/winpid" ] || fail "Git Bash did not expose /proc/$$/winpid"
-      proc_winpid=""
-      IFS= read -r proc_winpid < "/proc/$$/winpid"
-      proc_winpid="${proc_winpid//$'\r'/}"
-      native_pid="$(
-        # shellcheck source=scripts/lib/file-lock.sh
-        . "$ROOT/scripts/lib/file-lock.sh"
-        oms_process_native_pid "$$"
-      )" || fail "shared native pid resolver rejected the owning Git Bash"
-      native_pid="${native_pid//$'\r'/}"
-      case "$native_pid" in *[!0-9]*|"") fail "native Git Bash pid capture is invalid" ;; esac
-      [ "$native_pid" = "$proc_winpid" ] ||
-        fail "resolved native pid $native_pid differs from /proc/$$/winpid $proc_winpid"
-      mkdir -p "$project/.oms/executors/native" "$project/.oms/delegations"
-      printf '{"schema":1,"executor_id":"native","state":"running"}\n' \
-        > "$project/.oms/executors/native/meta.json"
-      # A marker from the pre-provenance producer can carry a well-typed but
-      # already-dead launcher pid. That number cannot prove that the still-live
-      # logical owner is dead.
-      printf '{"schema":4,"id":"native","pid":%d,"native_pid":999999,"executor_id":"native"}\n' \
-        "$$" > "$project/.oms/delegations/native.json"
-      plan="$ROOT/scripts/agent-plan.sh"
-      "$plan" --repo "$project" init --goal "native marker recovery" >/dev/null
-      "$plan" --repo "$project" add --id native-task --title native >/dev/null
-      "$plan" --repo "$project" claim --id native-task --provider codex >/dev/null
-      lease="$("$plan" --repo "$project" show --id native-task |
-        python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
-      lease="${lease//$'\r'/}"
-      "$plan" --repo "$project" start --id native-task --lease-id "$lease" >/dev/null
-      printf '{"schema":4,"id":"native-plan","pid":%d,"native_pid":999999,"task_id":"native-task","lease_id":"%s"}\n' \
-        "$$" "$lease" > "$project/.oms/delegations/native-plan.json"
-      rc=0
-      "$plan" --repo "$project" recover-lease --id native-task --lease-id "$lease" \
-        --expected-state running --markers-dir "$project/.oms/delegations" --check \
-        > "$project/plan-unproven.out" 2>&1 || rc=$?
-      [ "$rc" = 3 ] ||
-        fail "legacy Windows plan marker became dead proof, got $rc: $(cat "$project/plan-unproven.out")"
-      grep -Fq 'unproven' "$project/plan-unproven.out" ||
-        fail "legacy Windows plan marker was not labeled unproven"
-      state_out="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
-        fail "state could not read a native Git Bash marker"
-      OMS_T_NATIVE_STATE="$state_out" python3 - <<'PY' ||
-        fail "state labeled a live native Git Bash marker as orphaned"
-import json, os
-row = json.loads(os.environ["OMS_T_NATIVE_STATE"])
-delegations = row.get("delegations") or []
-assert any(item.get("id") == "native" and item.get("live") is True
-           for item in delegations), delegations
-PY
-      verify_out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>/dev/null || true)"
-      OMS_T_NATIVE_VERIFY="$verify_out" python3 - <<'PY' ||
-        fail "state-verify labeled a live native Git Bash marker as orphaned"
-import json, os
-row = json.loads(os.environ["OMS_T_NATIVE_VERIFY"])
-findings = row.get("findings") or []
-assert not any(item.get("family") == "delegations" for item in findings), findings
-PY
-      printf '{"schema":4,"id":"native","pid":%d,"native_pid":%d,"native_pid_source":"msys-proc-v1","executor_id":"native"}\n' \
-        "$$" "$native_pid" > "$project/.oms/delegations/native.json"
-      python3 - "$ROOT/scripts/lib/agent-events.py" "$project/lock-owner" <<'PY' ||
-        fail "agent-events could not preserve its live native lock owner"
-import importlib.util, json, os, sys
-spec = importlib.util.spec_from_file_location("agent_events", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-with module.file_lock(module.Path(sys.argv[2])):
-    owner = json.loads((module.runtime_lock_dir(module.Path(sys.argv[2])) /
-                        "owner.json").read_text(encoding="utf-8"))
-    assert owner["pid"] == os.getpid()
-    assert module.pid_alive(owner["pid"]) is True
-PY
-      kill -0 "$$" 2>/dev/null || fail "the Windows recovery probe harmed its owning Git Bash"
-      ;;
-  esac
 }
 
 test_autopilot_windows_reenter_launch_keeps_parent_anchor() {
@@ -26513,36 +26351,6 @@ test_gc_preserves_unknown_exact_marker_schema() {
   for marker in "$markers"/*.json; do
     [ -f "$marker" ] || fail "gc deleted unproven marker evidence: $marker"
   done
-}
-
-test_gc_strips_native_python_crlf_for_plan_recovery() {
-  local project="$TMP/gc-native-python-crlf"
-  local sh="$ROOT/scripts/agent-plan.sh"
-  local lease python_bin crlf_bin
-
-  make_committed_repo "$project"
-  "$sh" --repo "$project" init --goal "CRLF recovery" >/dev/null
-  "$sh" --repo "$project" add --id t1 --title "one" >/dev/null
-  "$sh" --repo "$project" claim --id t1 --provider codex >/dev/null
-  lease="$("$sh" --repo "$project" show --id t1 |
-    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
-  mkdir -p "$project/.oms/delegations"
-  printf '{"schema":3,"id":"dead","pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
-    "$lease" > "$project/.oms/delegations/dead.json"
-
-  python_bin="$(command -v python3)"
-  crlf_bin="$project/crlf-bin"
-  mkdir -p "$crlf_bin"
-  {
-    printf '%s\n' '#!/usr/bin/env bash' 'set -o pipefail'
-    printf '%s\n' "\"$python_bin\" \"\$@\" | sed 's/\$/\\r/'"
-  } > "$crlf_bin/python3"
-  chmod +x "$crlf_bin/python3"
-
-  (cd "$project" && PATH="$crlf_bin:$PATH" \
-    "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null)
-  "$sh" --repo "$project" show --id t1 | grep -F '"state": "ready"' > /dev/null ||
-    fail "native Python CRLF prevented exact dead-lease recovery"
 }
 
 # smoke-weight: 5
