@@ -120,10 +120,41 @@ printf '*\n' > "$peer/.oms/.gitignore"
 peer_oms_before="$(find "$peer/.oms" -mindepth 1 -print | sort)"
 echo one > "$peer/one"; git -C "$peer" add one; git -C "$peer" commit -q -m one
 head="$(git -C "$peer" rev-parse HEAD)"
+touch -t 200001010000 "$repo/.github/workflows/test.yml" "$peer/one"
+git -C "$repo" config fetch.writeCommitGraph true
+[ ! -e "$repo/.git/objects/info/commit-graph" ] && [ ! -e "$repo/.git/objects/info/commit-graphs" ] ||
+  fail "commit-graph existed before linked land"
+git -C "$TMP/remote.git" tag remote-only-tag main
+git -C "$TMP/remote.git" branch remote-only-branch main
+peer_index="$(git -C "$peer" rev-parse --git-path index)"
+indices_before="$(python3 -c 'import os,sys; print([(os.stat(p).st_ino, os.stat(p).st_mtime_ns) for p in sys.argv[1:]])' "$repo/.git/index" "$peer_index")"
+"$ROOT/scripts/sync-shared.sh" --repo "$repo" > "$TMP/sync-probe.out" 2>&1 ||
+  fail "clean shared sync probe failed: $(cat "$TMP/sync-probe.out")"
+"$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/noop-probe.out" 2>&1 ||
+  fail "up-to-date shared land probe failed: $(cat "$TMP/noop-probe.out")"
 OMS_LAND_SMOKE_REPO="$(cd "$repo" && pwd -P)"
 OMS_LAND_SMOKE_SHA="$head" OMS_LAND_SMOKE_BASE="$(remote_tip)"
 registry_snapshot "$repo" > "$OMS_LAND_SMOKE_REGISTRY"
+remote_advance="$(git -C "$TMP/remote.git" commit-tree 'main^{tree}' -p main -m "remote advance")"
+git -C "$TMP/remote.git" update-ref refs/heads/main "$remote_advance"
+if "$LAND" --repo "$peer" --wait --ci-wait 0 > "$TMP/pack-probe.out" 2>&1; then
+  fail "land must refuse when remote target advanced ahead of HEAD"
+fi
+[ "$(git -C "$peer" rev-parse refs/remotes/origin/main)" = "$remote_advance" ] ||
+  fail "intake fetch did not download the new remote target commit"
+git -C "$TMP/remote.git" update-ref refs/heads/main "$OMS_LAND_SMOKE_BASE"
 "$LAND" --repo "$peer" --wait --ci-wait 0 > "$TMP/pass.out" || fail "green gate must land: $(cat "$TMP/pass.out")"
+[ "$indices_before" = "$(python3 -c 'import os,sys; print([(os.stat(p).st_ino, os.stat(p).st_mtime_ns) for p in sys.argv[1:]])' "$repo/.git/index" "$peer_index")" ] ||
+  fail "linked land or sync probes changed index mtime/inode"
+[ ! -e "$repo/.git/objects/info/commit-graph" ] && [ ! -e "$repo/.git/objects/info/commit-graphs" ] ||
+  fail "linked land or sync wrote commit-graph files"
+git -C "$repo" config --unset fetch.writeCommitGraph
+! git -C "$peer" rev-parse -q --verify refs/tags/remote-only-tag >/dev/null ||
+  fail "linked land fetched remote tags"
+! git -C "$peer" rev-parse -q --verify refs/remotes/origin/remote-only-branch >/dev/null ||
+  fail "linked land fetched non-target remote branch"
+git -C "$TMP/remote.git" tag -d remote-only-tag >/dev/null
+git -C "$TMP/remote.git" branch -D remote-only-branch >/dev/null
 registry_snapshot "$repo" | cmp - "$OMS_LAND_SMOKE_REGISTRY" || fail "linked land changed the source worktree registry"
 gate_tree_left && fail "linked land left a gate clone"
 grep -Fq 'land: this push changes tests +0 / code +1 lines' "$TMP/pass.out" ||
@@ -1343,9 +1374,13 @@ OMS_TEST_CI_RC=4 OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
 receipt="$("$LAND" status --repo "$repo" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["log"])')"
 [ "$(grep -c '^update failure probe$' "$receipt")" = 1 ] || fail "resume repeated the gate"
 : > "$TMP/events"
+touch -t 200001010000 "$install/scripts/check.sh"
+install_index_before="$(python3 -c 'import os,sys; st=os.stat(sys.argv[1]); print(st.st_ino, st.st_mtime_ns)' "$install/.git/index")"
 OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/resume-complete.out" 2>&1 ||
   fail "completed landing retry failed"
+[ "$install_index_before" = "$(python3 -c 'import os,sys; st=os.stat(sys.argv[1]); print(st.st_ino, st.st_mtime_ns)' "$install/.git/index")" ] ||
+  fail "completed landing retry changed install index mtime/inode"
 [ ! -s "$TMP/events" ] || fail "completed landing repeated CI/install"
 
 # A receipt cannot hide a later rollback of the installed checkout.

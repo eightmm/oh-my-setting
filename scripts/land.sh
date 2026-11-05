@@ -197,7 +197,7 @@ except (AttributeError, OSError):
     cpus = ""
 print("%s:%s" % (load, cpus))' 2>/dev/null | tr -d '\r'
 }
-clean_tree() { git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; }
+clean_tree() { local s; s="$(git --no-optional-locks -C "$REPO" status --porcelain --untracked-files=no)" && [ -z "$s" ]; }
 
 SIBLING_LIVE="" SIBLING_FIRST_PATH="" SIBLING_FIRST_STAGE=""
 SIBLING_INVALID_NOTED=""
@@ -766,7 +766,7 @@ run_job() {
     if [ "$resume" -eq 1 ] && [ "$(receipt_value update.rc)" = 0 ] &&
         [ "$(oms_strip_cr "$(receipt_value update.root)")" = "$install" ] &&
         [ "$(git -C "$install" rev-parse HEAD 2>/dev/null)" = "$SHA" ] &&
-        installed_tree="$(git -C "$install" status --porcelain)" && [ -z "$installed_tree" ]; then
+        installed_tree="$(git --no-optional-locks -C "$install" status --porcelain)" && [ -z "$installed_tree" ]; then
       finish passed "already pushed and installed $SHORT; ci $conclusion"
       return $?
     fi
@@ -997,10 +997,10 @@ if [ -z "$GATE" ]; then
     GATE="$GATE --affected --ci-parity --changed-from $gate_destination --changed-to HEAD"
   fi
 fi
-# FETCH_HEAD lives in .git/worktrees/<id> for linked callers; only the remote
-# tracking refs are needed here, so leave that protected registry untouched.
+# FETCH_HEAD lives in .git/worktrees/<id> for linked callers; only the target
+# remote-tracking ref is needed here, so leave that protected registry untouched.
 attempt=1
-while ! git -C "$REPO" fetch -q --no-write-fetch-head "$REMOTE"; do
+while ! git -C "$REPO" -c maintenance.auto=false -c gc.auto=0 -c fetch.writeCommitGraph=false fetch -q --no-write-fetch-head --no-tags --no-recurse-submodules -- "$REMOTE" "+refs/heads/$TARGET:refs/remotes/$REMOTE/$TARGET"; do
   [ "$attempt" -lt 3 ] || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }
   printf 'land: remote fetch failed (attempt %s/3); retrying\n' "$attempt" >&2
   if [ "$attempt" -eq 1 ]; then sleep 2; else sleep 5; fi

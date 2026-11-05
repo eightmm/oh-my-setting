@@ -40,7 +40,7 @@ REPO="$(cd "$REPO" && pwd -P)" || fail 'cannot resolve physical shared checkout'
 
 sync_clean() {
   local status
-  status="$(git -C "$REPO" status --porcelain --untracked-files=all)" || return 2
+  status="$(git --no-optional-locks -C "$REPO" status --porcelain --untracked-files=all)" || return 2
   [ -z "$status" ] || {
     printf 'next: git --no-optional-locks -C %q status --short\n' "$REPO" >&2
     echo 'error: dirty shared checkout; sync refused' >&2
@@ -59,7 +59,7 @@ sync_checkout() {
     return 2
   }
   sync_clean || return $?
-  git -C "$REPO" fetch --no-tags -- "$REMOTE" "+refs/heads/$TARGET:$ref" || return $?
+  git -C "$REPO" -c maintenance.auto=false -c gc.auto=0 -c fetch.writeCommitGraph=false fetch --no-tags -- "$REMOTE" "+refs/heads/$TARGET:$ref" || return $?
   git -C "$REPO" merge-base --is-ancestor HEAD "$ref" || {
     printf 'next: git -C %q log --oneline --left-right %q...HEAD\n' "$REPO" "$ref" >&2
     echo 'error: shared checkout is ahead or diverged; sync refused' >&2
