@@ -18,10 +18,6 @@ def unique_object(pairs):
     return result
 
 
-def decode(raw):
-    return json.loads(raw, object_pairs_hook=unique_object)
-
-
 def control():
     # No buffered read-ahead: the next process must receive the next line.
     raw = bytearray()
@@ -34,7 +30,7 @@ def control():
         raw.extend(char)
     else:
         raise ValueError("control message exceeds 32768 bytes")
-    message = decode(raw.decode("utf-8"))
+    message = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
     if not isinstance(message, dict):
         raise ValueError("expected a JSON object")
     if set(message) == {"finish"} and message["finish"] is True:
@@ -58,15 +54,13 @@ def native_lines(path):
     return raw.decode("utf-8").splitlines()
 
 
-def result(provider, path, expected, include_usage=False, lines=None):
-    if lines is None:
-        lines = native_lines(path)
+def result(provider, lines, expected, include_usage=False):
     envelopes = []
     for line in lines:
         if not line.lstrip().startswith("{"):
             continue
         try:
-            doc = decode(line)
+            doc = json.loads(line, object_pairs_hook=unique_object)
         except ValueError:
             if include_usage:
                 continue
@@ -113,7 +107,7 @@ def result(provider, path, expected, include_usage=False, lines=None):
 def agy_text(path):
     from peer_artifacts import usage_footer
     lines = native_lines(path)
-    parsed = result("antigravity", path, "", include_usage=True, lines=lines)
+    parsed = result("antigravity", lines, "", include_usage=True)
     usage = dict(parsed["usage"])
     usage.update({"cache_read_input_tokens": usage.get("cache_read_tokens")})
     footer = usage_footer("antigravity", [usage])
@@ -137,7 +131,7 @@ def agy_text(path):
 
 
 def prepare(provider, path, expected, turn, workdir, scratch):
-    doc = result(provider, path, expected)
+    doc = result(provider, native_lines(path), expected)
     answer = doc["response"]
     text = answer + "\n"
     if doc["permission_denials"]:
@@ -176,8 +170,6 @@ def main():
             timer.cancel()
     if mode == "agy-text":
         agy_text(sys.argv[2])
-    elif mode == "result":
-        print(json.dumps(result(*sys.argv[2:]), ensure_ascii=True))
     elif mode == "prepare":
         prepare(*sys.argv[2:])
     else:

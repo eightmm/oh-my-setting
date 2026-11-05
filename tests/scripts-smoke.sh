@@ -22339,7 +22339,7 @@ test_oms_run_current_pointer_joins_and_expires() {
 test_oms_dispatcher_lists_and_dispatches() {
   local bin="$TMP/oms-dispatch-bin"
   local d="$TMP/oms-dispatch-repo"
-  local out
+  local out frontdoors help_text review_help primary duplicate description rc
 
   mkdir -p "$bin" "$d"
   ln -sfn "$ROOT/scripts/oms" "$bin/oms"
@@ -22347,6 +22347,7 @@ test_oms_dispatcher_lists_and_dispatches() {
   # Capture first: grep -q on a live pipe SIGPIPEs the dispatcher under
   # pipefail as soon as the match is found.
   out="$("$bin/oms" list)" || fail "oms list should succeed"
+  frontdoors="$out"
   [ "$out" = "$("$bin/oms" list)" ] || fail "default catalog must be compact"
   printf '%s' "$out" | grep >/dev/null -E '^inbox ' || fail "compact catalog needs inbox"
   if printf '%s' "$out" | grep >/dev/null -E '^agent-run |^herdr-adapter '; then
@@ -22408,17 +22409,7 @@ test_oms_dispatcher_lists_and_dispatches() {
     "$bin/oms" "$hidden" --help >/dev/null 2>&1 || rc=$?
     [ "$rc" = 2 ] || fail "oms should reject hidden tool $hidden with exit 2, got $rc"
   done
-}
 
-test_oms_frontdoor_routes_primary_subsystems() {
-  local bin="$TMP/oms-frontdoor-bin"
-  local frontdoors all_tools help_text review_help primary duplicate
-
-  mkdir -p "$bin"
-  ln -sfn "$ROOT/scripts/oms" "$bin/oms"
-
-  frontdoors="$("$bin/oms" list)" || fail "oms list should succeed"
-  all_tools="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   help_text="$("$bin/oms" --help)" || fail "oms --help should succeed"
   review_help="$("$bin/oms" peer-review --help)" || fail "peer-review --help should succeed"
   printf '%s\n' "$help_text" | grep >/dev/null -F 'reveals core primitives' ||
@@ -22437,7 +22428,7 @@ test_oms_frontdoor_routes_primary_subsystems() {
   if printf '%s\n' "$frontdoors" | grep >/dev/null -E '^agent-call '; then
     fail "read primitive should stay behind list --all: agent-call"
   fi
-  printf '%s\n' "$all_tools" | grep >/dev/null -E '^agent-call ' ||
+  printf '%s\n' "$out" | grep >/dev/null -E '^agent-call ' ||
     fail "list --all should retain the read primitive: agent-call"
 
   printf '%s\n' "$frontdoors" | awk '
@@ -22452,6 +22443,27 @@ test_oms_frontdoor_routes_primary_subsystems() {
   [ -z "$duplicate" ] || fail "frontdoor catalog contains duplicate tools: $duplicate"
   printf '%s\n' "$frontdoors" | grep >/dev/null -E '^peer-review .*diff' ||
     fail "peer-review catalog description should distinguish diff review from peer-ask"
+
+  # Header comments span lines; the catalog must show the whole first
+  # sentence, not the first physical comment line.
+  printf '%s\n' "$out" | grep >/dev/null -E '^advise .*agent-call\.sh\.$' ||
+    fail "advise description should join its full first sentence"
+  # Usage-fallback descriptions get the same sentence join + cut.
+  printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*read-only independent pass\.$' ||
+    fail "agent-call description should end at its first sentence"
+  if printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*write tasks'; then
+    fail "agent-call description should not leak the second sentence"
+  fi
+  sed -n '/^describe() {$/,/^}$/p' "$ROOT/scripts/oms" > "$bin/describe.sh"
+  printf '#!/usr/bin/env bash\n\n# Explain e.g. choices, i.e. defaults. Another sentence.\ntrue\n' > "$bin/header"
+  printf '#!/usr/bin/env bash\n\nusage() {\nUsage: fixture\n\nExplain e.g. choices, i.e. defaults. Another sentence.\n  options\nEOF\n}\n' > "$bin/usage"
+  for description in header usage; do
+    out="$(bash -c '. "$1"; describe "$2"' _ "$bin/describe.sh" "$bin/$description")"
+    [ "$out" = 'Explain e.g. choices, i.e. defaults.' ] || fail "abbreviation cut the description: $out"
+  done
+  printf '#!/usr/bin/env bash\n\ntrue\n' > "$bin/empty"
+  out="$(bash -c '. "$1"; describe "$2"' _ "$bin/describe.sh" "$bin/empty")"
+  [ -z "$out" ] || fail "empty description gained text: $out"
 }
 
 # smoke-weight: 23
@@ -29089,14 +29101,6 @@ EOF
   done
 }
 
-test_codex_plugin_has_no_vague_default_prompt() {
-  python3 - "$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-assert "defaultPrompt" not in data.get("interface", {}), data.get("interface", {})
-PY
-}
-
 test_install_codex_plugin_skips_current_cache() {
   local d="$TMP/codex-plugin-current"
   local home="$d/home"
@@ -30035,34 +30039,6 @@ test_smoke_suite_does_not_mutate_source_oms() {
   fail "smoke suite mutated the source checkout .oms state (paths above)"
 }
 
-test_oms_list_joins_full_first_sentence() {
-  local bin="$TMP/oms-desc-bin"
-  local out
-
-  mkdir -p "$bin"
-  ln -sfn "$ROOT/scripts/oms" "$bin/oms"
-  out="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
-  # Header comments span lines; the catalog must show the whole first
-  # sentence, not the first physical comment line.
-  printf '%s\n' "$out" | grep >/dev/null -E '^advise .*agent-call\.sh\.$' ||
-    fail "advise description should join its full first sentence"
-  # Usage-fallback descriptions get the same sentence join + cut.
-  printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*read-only independent pass\.$' ||
-    fail "agent-call description should end at its first sentence"
-  if printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*write tasks'; then
-    fail "agent-call description should not leak the second sentence"
-  fi
-  sed -n '/^describe() {$/,/^}$/p' "$ROOT/scripts/oms" > "$bin/describe.sh"
-  printf '#!/usr/bin/env bash\n\n# Explain e.g. choices, i.e. defaults. Another sentence.\ntrue\n' > "$bin/header"
-  printf '#!/usr/bin/env bash\n\nusage() {\nUsage: fixture\n\nExplain e.g. choices, i.e. defaults. Another sentence.\n  options\nEOF\n}\n' > "$bin/usage"
-  for description in header usage; do
-    out="$(bash -c '. "$1"; describe "$2"' _ "$bin/describe.sh" "$bin/$description")"
-    [ "$out" = 'Explain e.g. choices, i.e. defaults.' ] || fail "abbreviation cut the description: $out"
-  done
-  printf '#!/usr/bin/env bash\n\ntrue\n' > "$bin/empty"
-  out="$(bash -c '. "$1"; describe "$2"' _ "$bin/describe.sh" "$bin/empty")"
-  [ -z "$out" ] || fail "empty description gained text: $out"
-}
 
 test_oms_dispatcher_hints_help_on_misuse() {
   local bin="$TMP/oms-hint-bin"
@@ -40195,9 +40171,6 @@ for provider in ("claude", "antigravity"):
     prepared.mkdir()
     for index, (raw, expected) in enumerate(cases):
         native.write_text(raw + "\n", encoding="utf-8")
-        rejected = subprocess.run([sys.executable, helper, "result", provider, str(native), expected],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
-        assert rejected.returncode == 2 and not rejected.stdout, (provider, index, rejected)
         rejected = subprocess.run([sys.executable, helper, "prepare", provider, str(native), expected,
                                    "2", str(prepared), str(prepared)],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
@@ -44868,9 +44841,10 @@ test_codex_plugin_hooks_dispatch_only_allowlisted_scripts() {
   local dispatcher="$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh"
   local allow tool
 
-  python3 - "$manifest" <<'PY' || fail "the Codex plugin manifest must expose its hooks.json"
+  python3 - "$manifest" <<'PY' || fail "the Codex plugin manifest contract failed"
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert "defaultPrompt" not in doc.get("interface", {}), doc.get("interface", {})
 assert doc.get("hooks") == "./hooks.json", doc.get("hooks")
 PY
   allow="$(sed -n 's/^case "\$tool" in \(.*\)) ;; \*) exit 0 ;; esac$/\1/p' "$dispatcher")"
